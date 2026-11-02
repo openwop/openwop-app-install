@@ -1,32 +1,34 @@
 /**
  * UX_UPGRADE-model-router MR-G1 — a failed config read must disable the writes,
- * not merely report itself.
+ * not merely report itself. ADR 1016 D2 — a caller without the write authority
+ * gets a read-only page, not writes the server will refuse.
  *
  * Every mutating control on this page sends the WHOLE config:
  * `persist(rules, fallback)` / `persist([...rules, rule], …)`. When
  * `getRouterConfig` failed, the page kept its initial `rules = []` and showed an
- * error — but "Add rule", "Save routing" and per-rule "Remove" all stayed
- * enabled. Clicking any of them wrote the empty list back, **silently replacing
- * every stored routing rule** and re-pointing live traffic at whatever fallback
- * happened to be on screen.
+ * error — but "Add rule", "Save" and per-rule "Remove" all stayed enabled.
+ * Clicking any of them wrote the empty list back, **silently replacing every
+ * stored routing rule**.
  *
- * The `enabled` toggle was ALREADY gated on `hasConfig`, so the not-configured
- * case had been considered — the destructive controls were the ones left open.
+ * (The pre-1016 case "Remove is disabled when a second org's read fails with the
+ * first org's rows on screen" is gone with the org picker: the config is the
+ * workspace's, read once, and a failed read never leaves rows on screen.)
  *
- * Breaks if any of the three writes (Add rule, Save routing, Remove rule) is
- * enabled while the read has failed, or if the guard over-fires and disables a
- * page whose read succeeded (or found no config).
+ * Breaks if any write (Add rule, Save) is enabled while the read has failed, if
+ * the guard over-fires and disables a page whose read succeeded (or found no
+ * config), if a non-admin is offered Add/Remove/Save, or if a read-only page
+ * stops saying why.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
 import type { StoredRouterConfig } from '../modelRouterClient.js';
 
-const { getRouterConfig, setRouterConfig, listOrgs } = vi.hoisted(() => ({
-  getRouterConfig: vi.fn(), setRouterConfig: vi.fn(), listOrgs: vi.fn(),
+const { getRouterConfig, setRouterConfig } = vi.hoisted(() => ({
+  getRouterConfig: vi.fn(), setRouterConfig: vi.fn(),
 }));
 vi.mock('../modelRouterClient.js', async (orig) => ({
   ...(await orig<typeof import('../modelRouterClient.js')>()),
-  getRouterConfig, setRouterConfig, listOrgs,
+  getRouterConfig, setRouterConfig,
 }));
 
 import { ModelRouterPage } from '../ModelRouterPage.js';
@@ -34,110 +36,122 @@ import { ModelRouterPage } from '../ModelRouterPage.js';
 const STORED: StoredRouterConfig = {
   enabled: true,
   config: {
-    // The real RoutingRule shape — `when: RuleCondition` (a tagged union with
-    // `kind`), not a `match` object. A wrong fixture throws in render and every
-    // assertion below fails for the wrong reason.
-    rules: [{ when: { kind: 'always' }, target: { provider: 'anthropic', model: 'claude-3' } }],
-    fallback: { provider: 'openai', model: 'gpt-4o' },
+    rules: [{ when: { kind: 'always' }, target: { provider: 'anthropic', model: 'claude-opus-5-5' } }],
+    fallback: { provider: 'openai', model: 'gpt-5.5' },
   },
 };
 
 const GUARD = 'saving now would replace every stored rule';
-const RULE_CHIP = 'anthropic/claude-3';
+/** The catalog label the rule chip renders for `claude-opus-5-5`. */
+const RULE_CHIP = /Claude Opus 5\.5/;
 
-/** Render and wait until the config READ has been issued and settled — never a
- *  single fixed flush, so a positive case cannot pass on the pre-load state
- *  (which also has every control enabled and no warning). */
+/** Render and wait until the config READ has been issued and settled. */
 const mount = async (): Promise<void> => {
   render(<ModelRouterPage />);
-  await vi.waitFor(() => expect(getRouterConfig).toHaveBeenCalledWith('o1'));
+  await vi.waitFor(() => expect(getRouterConfig).toHaveBeenCalled());
   await act(async () => {});
 };
 
-/** A button by accessible name — `getByRole` also asserts it is present. */
 const btn = (name: RegExp | string): HTMLButtonElement => screen.getByRole<HTMLButtonElement>('button', { name });
 
 afterEach(cleanup);
 beforeEach(() => {
   vi.clearAllMocks();
-  listOrgs.mockResolvedValue([{ orgId: 'o1', name: 'Acme' }]);
-  getRouterConfig.mockResolvedValue(STORED);
+  getRouterConfig.mockResolvedValue({ stored: STORED, canManage: true });
   setRouterConfig.mockResolvedValue(STORED);
 });
 
 describe('MR-G1 — a failed read disables the writes', () => {
-  it('disables Add rule and Save routing, and says why', async () => {
+  it('offers no write at all, and says why', async () => {
     getRouterConfig.mockRejectedValue(new Error('503 upstream'));
     await mount();
     expect(await screen.findByText(new RegExp(GUARD))).toBeTruthy();
-    expect(btn(/Add rule/).disabled).toBe(true);
-    expect(btn(/Save routing/).disabled).toBe(true);
-  });
-
-  it('no write reaches the server even if a control is driven directly', async () => {
-    getRouterConfig.mockRejectedValue(new Error('503'));
-    await mount();
-    expect(await screen.findByText(new RegExp(GUARD))).toBeTruthy();
-    // Fill a VALID fallback first: with the empty on-screen fallback, `persist()`
-    // returns at its own fallback check before any write, so the click proved
-    // nothing about the guard (this case passed with the guard removed).
-    fireEvent.change(document.querySelector('#mr-fb-provider')!, { target: { value: 'openai' } });
-    fireEvent.change(document.querySelector('#mr-fb-model')!, { target: { value: 'gpt-4o' } });
-    await act(async () => { fireEvent.click(btn(/Save routing/)); });
-    // The whole point: the empty in-memory rule list must never be persisted over
-    // the real one.
-    expect(setRouterConfig).not.toHaveBeenCalled();
-  });
-
-  it('the per-rule Remove is disabled when the read fails after rules are on screen', async () => {
-    // Remove is only rendered when rules are listed, so reach it the one way a
-    // failed read can coexist with rows: org o1 reads fine, then org o2's read fails
-    // (the page keeps o1's rows on screen — see the APPLIED note in the verdicts).
-    listOrgs.mockResolvedValue([{ orgId: 'o1', name: 'Acme' }, { orgId: 'o2', name: 'Beta' }]);
-    getRouterConfig.mockImplementation(async (org: string) => {
-      if (org === 'o2') throw new Error('503 upstream');
-      return STORED;
-    });
-    await mount();
-    expect(await screen.findByText(RULE_CHIP)).toBeTruthy();
-    expect(btn('Remove rule').disabled).toBe(false); // positive control: enabled on a good read
-    fireEvent.change(screen.getByLabelText('Organization'), { target: { value: 'o2' } });
-    await vi.waitFor(() => expect(getRouterConfig).toHaveBeenCalledWith('o2'));
-    expect(await screen.findByText(new RegExp(GUARD))).toBeTruthy();
-    expect(btn('Remove rule').disabled).toBe(true);
-    await act(async () => { fireEvent.click(btn('Remove rule')); });
+    // A failed read cannot know the caller's authority, so the editor is not offered.
+    expect(screen.queryByRole('button', { name: /Add rule/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Save$/ })).toBeNull();
     expect(setRouterConfig).not.toHaveBeenCalled();
   });
 
   it('a SUCCESSFUL read leaves the editor fully usable', async () => {
-    // The failure mode of this fix is bricking the page for everyone.
     await mount();
-    expect(await screen.findByText(RULE_CHIP)).toBeTruthy(); // the read LANDED
+    expect((await screen.findAllByText(RULE_CHIP)).length).toBeGreaterThan(0); // the read LANDED
     expect(document.body.textContent).not.toContain(GUARD);
     expect(btn(/Add rule/).disabled).toBe(false);
-    expect(btn(/Save routing/).disabled).toBe(false);
-    expect(btn('Remove rule').disabled).toBe(false);
+    expect(btn('Remove rule 1').disabled).toBe(false);
+    // The fallback's Save is enabled only once there is something to save (MR66UX-6).
+    expect(btn(/^Save$/).disabled).toBe(true);
+    fireEvent.click(screen.getByRole('checkbox', { name: /Send these messages to a fallback model/ }));
+    expect(btn(/^Save$/).disabled).toBe(false);
+    expect(screen.getByText('unsaved')).toBeTruthy();
   });
 
-  it('a tenant with NO config yet can still be edited', async () => {
-    // `null` means "read fine, nothing stored" — writing there creates the
-    // config and destroys nothing. It must not be confused with a failed read.
-    getRouterConfig.mockResolvedValue(null);
+  it('an unsaved fallback edit survives a rule save (MR66UX-6)', async () => {
+    // A FRESH object per save, as the network gives: the defect keyed on identity.
+    setRouterConfig.mockImplementation(async () => structuredClone(STORED));
+    await mount();
+    fireEvent.click(screen.getByRole('checkbox', { name: /Send these messages to a fallback model/ })); // untick: unsaved
+    await act(async () => { fireEvent.click(btn(/Add rule/)); });
+    expect(setRouterConfig).toHaveBeenCalledTimes(1);
+    // The rule save handed back a NEW fallback object with the same values; the
+    // unsaved untick must still be on screen.
+    expect(screen.getByRole<HTMLInputElement>('checkbox', { name: /Send these messages to a fallback model/ }).checked).toBe(false);
+    expect(screen.getByText('unsaved')).toBeTruthy();
+  });
+
+  it('Add rule writes the stored rules PLUS the new one (never a partial list)', async () => {
+    await mount();
+    await act(async () => { fireEvent.click(btn(/Add rule/)); });
+    expect(setRouterConfig).toHaveBeenCalledTimes(1);
+    const sent = setRouterConfig.mock.calls[0]![0] as StoredRouterConfig['config'];
+    expect(sent.rules).toHaveLength(2);
+    expect(sent.rules[0]).toEqual(STORED.config.rules[0]);
+    expect(sent.fallback).toEqual(STORED.config.fallback);
+  });
+
+  it('a workspace with NO config yet can still be edited', async () => {
+    getRouterConfig.mockResolvedValue({ stored: null, canManage: true });
     await mount();
     expect(screen.getByText('not configured')).toBeTruthy(); // the null read landed
     expect(document.body.textContent).not.toContain(GUARD);
     expect(btn(/Add rule/).disabled).toBe(false);
-    expect(btn(/Save routing/).disabled).toBe(false);
   });
 
   it('the retry re-reads and restores editing', async () => {
-    getRouterConfig.mockRejectedValueOnce(new Error('503')).mockResolvedValueOnce(STORED);
+    getRouterConfig.mockRejectedValueOnce(new Error('503')).mockResolvedValueOnce({ stored: STORED, canManage: true });
     await mount();
     expect(await screen.findByText(new RegExp(GUARD))).toBeTruthy();
     await act(async () => { fireEvent.click(btn(/Try again/)); });
-    expect(await screen.findByText(RULE_CHIP)).toBeTruthy(); // the RE-read landed
+    expect((await screen.findAllByText(RULE_CHIP)).length).toBeGreaterThan(0); // the RE-read landed
     expect(getRouterConfig).toHaveBeenCalledTimes(2);
     expect(document.body.textContent).not.toContain(GUARD);
     expect(btn(/Add rule/).disabled).toBe(false);
+  });
+});
+
+describe('ADR 1016 D2 — a caller who cannot manage keys sees routing read-only', () => {
+  it('no Add / Remove / Save, the rules and fallback still shown, and the reason given', async () => {
+    getRouterConfig.mockResolvedValue({ stored: STORED, canManage: false });
+    await mount();
+    expect((await screen.findAllByText(RULE_CHIP)).length).toBeGreaterThan(0);
+    expect(screen.getByText(/Only people who manage this workspace.s API keys can change routing/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Add rule/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Remove rule/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Save$/ })).toBeNull();
+    expect(screen.getByText(/Use OpenAI/)).toBeTruthy(); // the fallback, read-only
+    // The on/off switch is disabled, not hidden: members can see whether it is on.
+    expect(screen.getByRole<HTMLInputElement>('checkbox', { name: /Use routing in this workspace/ }).disabled).toBe(true);
+  });
+});
+
+describe('MR66UX-1 — a preview answer never outlives the question it answered', () => {
+  it('changing the provider after Test clears the answer instead of relabelling it', async () => {
+    const spy = vi.spyOn(await import('../modelRouterClient.js'), 'previewRoute');
+    spy.mockResolvedValue({ enabled: true, why: 'routed', decision: { reason: 'rule', ruleIndex: 0, target: { provider: 'anthropic', model: 'claude-opus-5-5' } } });
+    await mount();
+    await act(async () => { fireEvent.click(btn(/^Test$/)); });
+    expect(await screen.findByText(/Rule 1 sends it to/)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText(/The conversation.s key is for/), { target: { value: 'openai' } });
+    expect(screen.queryByText(/Rule 1 sends it to/)).toBeNull();
+    spy.mockRestore();
   });
 });

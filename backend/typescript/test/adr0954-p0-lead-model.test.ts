@@ -12,14 +12,25 @@
  *    `truncated`.
  * The end-to-end route parity with paid orders is `funnel-d-adjacent.test.ts`.
  *
- * Sabotage-witnessed (P0): removing the `cdp:collected-event` delete hook reds
- * "a deleted event leaves the index"; skipping the backfill reds "rows written
- * before the index"; dropping the `points` branch in `computePriority` reds the
- * parity case; dropping the CAS reds "a stale editor".
+ * Sabotage-witnessed (grade-tests w73, TST-DRB): removing the
+ * `cdp:collected-event` delete hook reds "a deleted event leaves the index" (its
+ * forward row must become a tombstone); skipping the backfill reds the parity
+ * case; dropping the `points` cap / branch reds the `points` case; dropping the
+ * unknown-signal or monotone-band check reds the 422 case; dropping BOTH the
+ * version precheck and the CAS reds "a stale editor"; dropping the `expected`
+ * pointer check reds the same case.
+ *
+ * DOUBLE GUARDS (recorded):
+ *  - Delete: the score read (`eventsForVisitors`) also drops a forward row whose
+ *    primary is gone, so the score alone cannot show the hook; the case reads
+ *    the forward row itself.
+ *  - Stale editor: `saveModelVersion` refuses `latest !== expectedVersion`
+ *    before the version `compareAndSwap(null, …)`, and either alone answers the
+ *    same 409 `model_version_conflict`. Each single-guard sabotage is an
+ *    equivalent mutant; one edit that drops both is witnessed.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { randomBytes } from 'node:crypto';
-import type http from 'node:http';
 import { createApp } from '../src/index.js';
 import { DurableCollection } from '../src/host/hostExtPersistence.js';
 import { collectEvent, listCollectedEvents } from '../src/features/cdp/collectService.js';
@@ -28,11 +39,13 @@ import { linkSession, sessionsForContact } from '../src/features/analytics/ident
 import { computeLeadScore } from '../src/features/crm/leadScoreService.js';
 import { computePriority } from '../src/host/weightedScoring.js';
 import { evaluateLeadScore, validateModelContent, V0_CONTENT } from '../src/features/crm/leadIntel/model.js';
-import { activateModel, resolveActiveModel, saveModelVersion } from '../src/features/crm/leadIntel/modelStore.js';
+import { activateModel, getModelVersion, listModelVersions, resolveActiveModel, saveModelVersion } from '../src/features/crm/leadIntel/modelStore.js';
 
-let server: http.Server;
 const T = (): string => `t-0954-${randomBytes(4).toString('hex')}`;
 
+const forwards = new DurableCollection<{ key: string; tenantId: string; eventId: string; deleted?: true }>(
+  'cdp:visitor-event', (r) => r.key, undefined, (r) => r.tenantId,
+);
 const raw = new DurableCollection<{ eventId: string; tenantId: string; eventType: string; payload: Record<string, unknown>; piiFields: string[]; at: string }>(
   'cdp:collected-event', (e) => e.eventId, undefined, (e) => e.tenantId,
 );
@@ -45,7 +58,7 @@ async function oracle(tenantId: string, contactId: string): Promise<{ views: num
   if (sessions.size > 0) {
     for (const evt of await listCollectedEvents(tenantId, 50_000)) {
       if (evt.eventType !== 'funnel.step_viewed' && evt.eventType !== 'funnel.step_completed') continue;
-      const visitor = (evt.payload as { visitor?: unknown }).visitor;
+      const visitor = evt.payload.visitor;
       if (typeof visitor !== 'string' || !sessions.has(visitor)) continue;
       if (evt.eventType === 'funnel.step_viewed') views += 1; else completions += 1;
     }
@@ -55,10 +68,9 @@ async function oracle(tenantId: string, contactId: string): Promise<{ views: num
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
-  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => res()); });
-});
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+  // Boots for persistence + the CDP/identity registrations only; no route is called.
+  await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+}, 120_000);
 
 describe('ADR 0954 P0 — v0 parity through the per-visitor index', () => {
   it('equals the old tenant-scan score, including rows written before the index', async () => {
@@ -89,10 +101,15 @@ describe('ADR 0954 P0 — v0 parity through the per-visitor index', () => {
     const tenantId = T();
     await linkSession(tenantId, 'sess-x', 'contact-x', 'form-submit');
     const { eventId } = await collectEvent(tenantId, 'funnel.step_viewed', { visitor: 'sess-x' });
-    await collectEvent(tenantId, 'funnel.step_viewed', { visitor: 'sess-x' });
+    const { eventId: kept } = await collectEvent(tenantId, 'funnel.step_viewed', { visitor: 'sess-x' });
     expect((await computeLeadScore(tenantId, 'contact-x')).parts.funnelViews).toBe(2);
     await raw.delete(eventId); // what the purger and the CONS-6 eraser do
     expect((await computeLeadScore(tenantId, 'contact-x')).parts.funnelViews).toBe(1);
+    // The index itself follows the delete: the deleted event's forward row is a
+    // tombstone, the surviving one stays live.
+    const rows = await forwards.listByPrefix(`${tenantId}::`);
+    expect(rows.filter((r) => r.eventId === eventId).map((r) => r.deleted)).toEqual([true]);
+    expect(rows.filter((r) => r.eventId === kept).map((r) => r.deleted)).toEqual([undefined]);
   });
 
   it('a capped visitor read says truncated, never a silent lower count', async () => {
@@ -142,8 +159,13 @@ describe('ADR 0954 D1 — the engine and the model', () => {
     expect(v1.version).toBe(1);
     await expect(saveModelVersion({ tenantId, orgId, modelId: 'standard', expectedVersion: 0, content, actor: 'u2' }))
       .rejects.toMatchObject({ httpStatus: 409, details: { reason: 'model_version_conflict' } });
+    // The refused save left v1 exactly as it was.
+    expect((await getModelVersion(tenantId, orgId, 'standard', 1))?.contentHash).toBe(v1.contentHash);
     const v2 = await saveModelVersion({ tenantId, orgId, modelId: 'standard', expectedVersion: 1, content: { ...content, signals: [{ signalId: 'funnel.completion', weight: 12 }] }, actor: 'u1' });
     expect(v2.contentHash).not.toBe(v1.contentHash);
+    await expect(saveModelVersion({ tenantId, orgId, modelId: 'standard', expectedVersion: 1, content, actor: 'u2' }))
+      .rejects.toMatchObject({ httpStatus: 409, details: { reason: 'model_version_conflict' } });
+    expect((await listModelVersions(tenantId, orgId, 'standard')).map((m) => [m.version, m.contentHash])).toEqual([[2, v2.contentHash], [1, v1.contentHash]]);
 
     await activateModel({ tenantId, orgId, modelId: 'standard', version: 1, actor: 'u1', expected: null });
     await expect(activateModel({ tenantId, orgId, modelId: 'standard', version: 2, actor: 'u2', expected: null }))

@@ -77,7 +77,7 @@ function run(runId: string): RunRecord {
  *  its attempt cap — not by writing the row by hand, which would prove nothing
  *  about the state the surface actually sees. */
 async function deadIntent(runId: string): Promise<void> {
-  await insertRunWithStartContext(storage, run(runId), { enqueueDispatch: true });
+  await insertRunWithStartContext(storage, run(runId), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true });
   await storage.rescheduleDispatchOutbox(runId, Date.now(), true, 'workflow not found: wf-ops');
   expect((await storage.getDispatchOutbox(runId))?.status).toBe('dead');
 }
@@ -168,7 +168,7 @@ describe('ADR 0551 P2 — redrive', () => {
   });
 
   it('cannot redrive a live pending intent', async () => {
-    await insertRunWithStartContext(storage, run('still-pending'), { enqueueDispatch: true });
+    await insertRunWithStartContext(storage, run('still-pending'), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true });
     const c = await login(SUPER_TENANT);
     const r = await c.post(`${OPS}/dispatch-outbox/still-pending/redrive`, { reason: 'impatient' });
     expect(r.status).toBe(404);

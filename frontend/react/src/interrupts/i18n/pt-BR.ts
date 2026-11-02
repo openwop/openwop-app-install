@@ -30,6 +30,14 @@ export const messages = {
   answerLabel: 'Sua resposta',
   submitting: 'Enviando…',
   submitAnswer: 'Enviar resposta',
+  // ADR 1001 D8 — an agent's multi-question clarification
+  clarifyAgentNeedsAnswer: '{{name}} precisa de uma resposta',
+  clarifyNeedsAnswer: 'O agente precisa de uma resposta',
+  clarifySafety: 'Nunca cole aqui senhas, chaves ou dados de pagamento.',
+  clarifyYes: 'Sim',
+  clarifyNo: 'Não',
+  clarifySkip: 'Pular e continuar sem responder',
+  clarifySkipHelp: 'O agente vai terminar com o que tem e dizer o que está faltando.',
 
   // Refinement form
   refinementRequested: 'Refinamento solicitado',

@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.campaign-brief",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "kind": "workflow-chain",
   "description": "Campaign-brief messaging-kernel + market-intel workflows, migrated from the deprecated builtins (ADR 0472 P4). chainIds keep the original ids; outputRoles restored at registration.",
   "keywords": [
@@ -12,7 +12,7 @@
   "chains": [
     {
       "chainId": "campaign-studio.messaging-kernel",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "label": "Messaging kernel",
       "description": "Generate the campaign messaging kernel, then approve it — the foundation every channel echoes.",
       "parameters": {
@@ -40,7 +40,10 @@
         "nodes": [
           {
             "id": "generate_kernel",
-            "typeId": "feature.campaign-brief.nodes.generate-kernel@1.0.0",
+            "typeId": "feature.campaign-brief.nodes.generate-kernel@1.1.0",
+            "config": {
+              "stageKernel": true
+            },
             "inputs": {
               "briefId": "{{params.briefId}}",
               "provider": "{{params.provider}}",
@@ -51,7 +54,15 @@
             "id": "approve",
             "typeId": "core.approvalGate@1.0.0",
             "config": {
-              "prompt": "Review the generated messaging kernel — the headline, supporting statement, proof points, CTAs, and tone every channel will echo. Approve it before generating channel assets, or ask the Strategist to regenerate."
+              "prompt": "Review the generated messaging kernel: the headline, supporting statement, proof points, CTAs and tone every channel will echo. It is saved to the brief only if you approve it; reject it and ask the Strategist to regenerate."
+            }
+          },
+          {
+            "id": "promote",
+            "typeId": "feature.campaign-brief.nodes.promote-kernel@1.0.0",
+            "name": "Save the approved kernel",
+            "inputs": {
+              "briefId": "{{params.briefId}}"
             }
           }
         ],
@@ -59,13 +70,29 @@
           {
             "from": "generate_kernel",
             "to": "approve"
+          },
+          {
+            "from": "approve",
+            "to": "promote"
+          },
+          {
+            "from": "generate_kernel.kernel",
+            "to": "promote.kernel"
+          },
+          {
+            "from": "generate_kernel.briefVersion",
+            "to": "promote.briefVersion"
+          },
+          {
+            "from": "generate_kernel.priorKernelAt",
+            "to": "promote.priorKernelAt"
           }
         ]
       }
     },
     {
       "chainId": "campaign-studio.market-intel",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "label": "Market intelligence",
       "description": "Extract voice-of-customer → angles → targeting, then approve the intel.",
       "parameters": {
@@ -82,7 +109,13 @@
           },
           "platform": {
             "type": "string",
-            "description": "Targeting platform: meta | google | linkedin | tiktok."
+            "description": "Targeting platform: meta | google | linkedin | tiktok.",
+            "enum": [
+              "meta",
+              "google",
+              "linkedin",
+              "tiktok"
+            ]
           },
           "provider": {
             "type": "string",
@@ -98,7 +131,7 @@
         "nodes": [
           {
             "id": "extract_voc",
-            "typeId": "feature.campaign-brief.nodes.extract-voc@1.0.0",
+            "typeId": "feature.campaign-brief.nodes.extract-voc@1.1.0",
             "inputs": {
               "briefId": "{{params.briefId}}",
               "provider": "{{params.provider}}",
@@ -107,7 +140,7 @@
           },
           {
             "id": "generate_angles",
-            "typeId": "feature.campaign-brief.nodes.generate-angles@1.0.0",
+            "typeId": "feature.campaign-brief.nodes.generate-angles@1.1.0",
             "inputs": {
               "briefId": "{{params.briefId}}",
               "provider": "{{params.provider}}",
@@ -116,7 +149,7 @@
           },
           {
             "id": "build_targeting",
-            "typeId": "feature.campaign-brief.nodes.build-targeting@1.0.0",
+            "typeId": "feature.campaign-brief.nodes.build-targeting@1.1.0",
             "inputs": {
               "briefId": "{{params.briefId}}",
               "platform": "{{params.platform}}",
@@ -128,7 +161,7 @@
             "id": "approve",
             "typeId": "core.approvalGate@1.0.0",
             "config": {
-              "prompt": "Review the extracted evidence, angles, and targeting pack — every item cites its source. Curate in the brief's Intel tab before generating channel assets."
+              "prompt": "Review the research: the evidence, angles and targeting pack are saved to the brief's Intel tab as they are found, and every item cites its source. Curate them there (delete what you don't want) before generating channel assets. Approving finishes this research run; rejecting removes nothing."
             }
           }
         ],

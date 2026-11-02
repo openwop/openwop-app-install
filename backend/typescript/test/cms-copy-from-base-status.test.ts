@@ -11,8 +11,14 @@
  * side is pinned on each writer that reaches it: the editor PATCH, page create,
  * the node/agent lane (`updatePage`), and the shared-section writers.
  *
- * Sabotage: deleting the `copiesBase` arm in `stampSourceDigests` reds every
- * `unknown` assertion below.
+ * TST-CFB-2. Red when: the `copiesBase` arm in `stampSourceDigests` is deleted
+ * (every `unknown` assertion); a confirm stops re-stamping (Mark up to date, the
+ * unit confirm leg); `copiesBase` tests SOME key instead of EVERY key.
+ *
+ * Honest double path (named): "an unrelated later save carries the absence over"
+ * cannot tell the carry branch (an unchanged overlay keeps its absent stamp) from
+ * the copy branch (a copy gets no stamp) — both correctly say `unknown`. It is kept
+ * as the regression line for the editor's whole-page re-save, not as a probe target.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -53,20 +59,30 @@ interface Body {
   sharedSectionId: string;
   sections: Array<{ sectionId: string; data: Record<string, unknown>; localizations?: Record<string, Record<string, unknown>> }>;
 }
-interface Res<T = Body> { status: number; body: T }
+interface StatusBody { sections: Record<string, Record<string, string>> }
+interface Res { status: number; body: Body }
 function client() {
   let cookie = '';
-  const call = async <T = Body>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
+  const send = async (method: string, path: string, body?: unknown): Promise<Response> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    return { status: res.status, body: (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as T };
+    return res;
+  };
+  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+    const res = await send(method, path, body);
+    const parsed = (await res.json().catch(() => ({}))) as Body;
+    return { status: res.status, body: parsed };
   };
   return {
-    get: <T = Body>(p: string) => call<T>('GET', p),
+    status: async (p: string): Promise<{ status: number; body: StatusBody }> => {
+      const res = await send('GET', p);
+      const parsed = (await res.json().catch(() => ({ sections: {} }))) as StatusBody;
+      return { status: res.status, body: parsed };
+    },
     post: (p: string, b?: unknown) => call('POST', p, b),
     patch: (p: string, b?: unknown) => call('PATCH', p, b),
     put: (p: string, b?: unknown) => call('PUT', p, b),
@@ -86,7 +102,7 @@ async function owner(): Promise<{ c: Client; orgId: string; tenantId: string }> 
 }
 const u = (orgId: string, s = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
 const esStatus = async (c: Client, orgId: string, pageId: string, sid: string): Promise<string | undefined> => {
-  const r = await c.get<{ sections: Record<string, Record<string, string>> }>(u(orgId, `/pages/${pageId}/translation-status`));
+  const r = await c.status(u(orgId, `/pages/${pageId}/translation-status`));
   expect(r.status, JSON.stringify(r.body)).toBe(200);
   return r.body.sections[sid]?.es;
 };
@@ -106,7 +122,7 @@ describe('ADR 0861 D6 addendum — a copy of the base is not a translation', () 
     expect(copied.status, JSON.stringify(copied.body)).toBe(200);
     expect(await esStatus(c, orgId, pageId, sid), 'a copy must never read as translated').toBe('unknown');
 
-    // An unrelated later save carries the absence over — still unknown.
+    // An unrelated later save carries the absence over — still unknown (double path, see header).
     const p2 = (await getPage(tenantId, orgId, pageId))!;
     await c.patch(u(orgId, `/pages/${pageId}`), { title: 'Copy 2', sections: p2.sections });
     expect(await esStatus(c, orgId, pageId, sid)).toBe('unknown');

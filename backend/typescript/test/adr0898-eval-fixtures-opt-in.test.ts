@@ -41,7 +41,7 @@ import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 import { getNodeRegistry } from '../src/executor/nodeRegistry.js';
 import { resolveAgentForTenant } from '../src/host/agentVisibility.js';
 import { conformanceNodesEnabled } from '../src/bootstrap/conformanceMockAgent.js';
-import { CONFORMANCE_SUITE_PREFIX, SCRIPTED_AGENT_ID, UNLISTED_FIXTURE_SUITES, listFixtureSuiteIds } from '../src/host/evals/fixtureSuites.js';
+import { CONFORMANCE_SUITE_PREFIX, SCRIPTED_AGENT_ID, unlistedFixtureSuites, listFixtureSuiteIds } from '../src/host/evals/fixtureSuites.js';
 
 let server: Server;
 let base = '';
@@ -99,9 +99,10 @@ describe('ADR 0898 — eval-suite fixtures under the opt-in, conformance nodes o
     const vendored = readdirSync(join(import.meta.dirname, '..', '..', '..', 'conformance-fixtures', 'eval-suites'))
       .filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -'.json'.length)).sort();
     expect(vendored.length).toBeGreaterThanOrEqual(6);
-    for (const id of UNLISTED_FIXTURE_SUITES.keys()) expect(vendored, `exclusion ${id} names no vendored file`).toContain(id);
-    expect(listFixtureSuiteIds()).toEqual(vendored.filter((id) => !UNLISTED_FIXTURE_SUITES.has(id)));
-    for (const id of UNLISTED_FIXTURE_SUITES.keys()) expect(fixtures, id).not.toContain(id);
+    const unlisted = unlistedFixtureSuites();
+    for (const id of unlisted.keys()) expect(vendored, `exclusion ${id} names no vendored file`).toContain(id);
+    expect(listFixtureSuiteIds()).toEqual(vendored.filter((id) => !unlisted.has(id)));
+    for (const id of unlisted.keys()) expect(fixtures, id).not.toContain(id);
   });
 
   it('runs a fixture suite against the scripted agent, graded task by task', async () => {

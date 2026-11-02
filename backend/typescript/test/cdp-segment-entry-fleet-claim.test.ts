@@ -12,8 +12,13 @@
  * the same slot. Membership resolution yields before returning, so both sweeps
  * read the prior snapshot before either writes it. That is the real race; a
  * sequential pair would pass without the fix, because the second diff is empty.
+ *
+ * grade-tests w67 (TST-CBM-3): red when the gate tests the always-truthy
+ * `claim` instead of `claim.claimed`, or when the lease key drops the slot.
+ * Each case opens its OWN storage, so neither depends on the other's snapshot
+ * (shuffle-safe). `SLOT_MS` mirrors the daemon's private `DEFAULT_INTERVAL_MS`.
  */
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 let members: string[] = [];
 const resolveSegmentMembers = vi.fn(async () => {
@@ -38,14 +43,20 @@ vi.mock('../src/host/hostEventDispatcher.js', async (orig) => ({
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
 import { __resetHostExtPersistence, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { SEGMENT_ENTERED_EVENT, sweepSegmentEntries } from '../src/features/cdp/segmentEntryDaemon.js';
+import type { Storage } from '../src/storage/storage.js';
 
-const storage = openSqliteStorage(':memory:');
+let storage: Storage;
 const T0 = Date.UTC(2026, 9, 13, 9, 0, 0);
 const SLOT_MS = 60_000;
 
-beforeAll(() => { initHostExtPersistence(storage); });
-afterAll(async () => { __resetHostExtPersistence(); await storage.close(); });
-beforeEach(() => { emitted.length = 0; resolveSegmentMembers.mockClear(); });
+beforeEach(() => {
+  storage = openSqliteStorage(':memory:');
+  initHostExtPersistence(storage);
+  emitted.length = 0;
+  members = [];
+  resolveSegmentMembers.mockClear();
+});
+afterEach(async () => { __resetHostExtPersistence(); await storage.close(); });
 
 describe('W35-CDP-CLAIM-1 — two instances, one slot', () => {
   it('emits segment.entered ONCE per entrant and resolves membership once', async () => {
@@ -65,8 +76,15 @@ describe('W35-CDP-CLAIM-1 — two instances, one slot', () => {
   });
 
   it('a NEW slot is claimable again (the lease is per slot, not forever)', async () => {
+    members = ['c1', 'c2'];
+    await sweepSegmentEntries(storage, T0 + 2 * SLOT_MS); // seed this case's own prior
+    expect(emitted).toEqual([]);
+    // The same slot again is already leased: nothing runs.
     members = ['c1', 'c2', 'c3'];
-    const n = await sweepSegmentEntries(storage, T0 + 2 * SLOT_MS);
+    expect(await sweepSegmentEntries(storage, T0 + 2 * SLOT_MS)).toBe(0);
+    expect(emitted).toEqual([]);
+    // The next slot is a new lease.
+    const n = await sweepSegmentEntries(storage, T0 + 3 * SLOT_MS);
     expect(n).toBe(1);
     expect(emitted.map((e) => (e.payload as { contactId: string }).contactId)).toEqual(['c3']);
   });

@@ -14,8 +14,12 @@ import { provisionWidget } from '../src/features/chat-widget/widgetService.js';
 let server: http.Server;
 let BASE: string;
 let TOKEN = '';
+// ADR 1018 D8 — a widget answers on the platform's managed key only for a listed
+// superadmin tenant; these cases are about the gates in front of that dispatch.
+const PRIOR_SUPERADMINS = process.env.OPENWOP_SUPERADMIN_TENANTS;
 
 beforeAll(async () => {
+  process.env.OPENWOP_SUPERADMIN_TENANTS = 't-widget';
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
@@ -23,7 +27,10 @@ beforeAll(async () => {
   const w = await provisionWidget('t-widget', 'org-w', 'admin', { agentId: 'vendor.openwop-app.code-exec.agents.default', allowedDomains: ['acme.com'] });
   TOKEN = w.token;
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+afterAll(async () => {
+  if (PRIOR_SUPERADMINS === undefined) delete process.env.OPENWOP_SUPERADMIN_TENANTS; else process.env.OPENWOP_SUPERADMIN_TENANTS = PRIOR_SUPERADMINS;
+  await new Promise<void>((res) => server.close(() => res()));
+});
 
 const get = (path: string, headers: Record<string, string> = {}): Promise<Response> => fetch(`${BASE}${path}`, { headers });
 const post = (path: string, body: unknown, headers: Record<string, string> = {}): Promise<Response> =>

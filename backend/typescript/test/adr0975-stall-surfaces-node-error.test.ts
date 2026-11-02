@@ -13,11 +13,24 @@
  * stays pending and the loop finds nothing to run.
  *
  * Pins: the run fails; `run.failed` carries the failing node's code, message and
- * `failedNodeId`; the dead-letter row names it. A stall with NO node error keeps
- * the generic engine error (not exercised here: it needs a broken graph).
+ * `failedNodeId`; the dead-letter row names it.
  *
- * Red when (sabotage-witnessed): the stall branch goes straight to the generic
- * `internal_error` again, or picks a node that did not fail.
+ * CORRECTED 2026-11-01 (grade-tests w74, TST-DUJ1): this shape NO LONGER STALLS.
+ * Traced from the diff: `4390e8518` (ADR 0954 P3) made `evaluateTrigger`
+ * treat a skip caused by an upstream failure as an unrecovered failure, so the
+ * `none_failed` join is skipped at once instead of waiting. The run now ends through the ordinary
+ * `inspectDisposition` failure branch (`scheduler.ts`, "no terminal completed"
+ * → the first failed node), never the stall branch in `executor.ts`. Measured:
+ * disabling the stall branch or making it pick a non-failed node both left this
+ * case green (w74 probes stall-branch / stall-pick, vacuous). What this file
+ * still witnesses is the incident's OUTCOME for the Factory shape: the
+ * creator's run fails with the node's own typed error. The stall branch itself
+ * has no reaching test (grade-code row; a stall now needs a graph the scheduler
+ * cannot resolve). A stall with NO node error keeps the generic engine error
+ * (not exercised here either).
+ *
+ * Red when (sabotage, w74 r2): the "no terminal completed" branch of
+ * `inspectDisposition` stops naming the first failed node.
  */
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -54,7 +67,7 @@ async function newRun(workflowId: string): Promise<RunRecord> {
     runId: `run-0975-${Math.random().toString(36).slice(2)}`,
     workflowId, tenantId: 'demo', status: 'pending', inputs: {}, metadata: {}, configurable: {},
     createdAt: now, updatedAt: now,
-  } as RunRecord;
+  };
   await storage.insertRun(run);
   return run;
 }

@@ -1381,6 +1381,13 @@ Copy `apiKey`, `authDomain`, `projectId` into
 
 **Critical**: `VITE_FIREBASE_AUTH_DOMAIN` must be the SAME custom domain that
 serves the SPA (`app.openwop.dev`), NOT the default `*.firebaseapp.com`.
+It is also what lets the app CSP's `frame-src` stay at `'self'` plus two Google
+hosts: ADR 1021 removed the `https://*.firebaseapp.com` wildcard, so a deploy
+whose auth domain IS the default must list that exact origin in `frame-src`
+(`npm run build` fails otherwise, via `scripts/check-auth-frame-src.mjs`).
+**Post-deploy, after any change to the app CSP:** do a real Google sign-in on
+the deployed site (app.openwop.dev for the demo); a headless check cannot drive
+the OAuth popup (`check-csp-runtime.mjs` says the same).
 Reason: redirect-based sign-in persists in-flight auth state into the
 auth-domain origin's storage. If `authDomain ≠ SPA origin`, the embedded
 auth iframe on the SPA is third-party and modern browsers (Safari ITP / Brave
@@ -1581,6 +1588,12 @@ Full steps (also in README § "Microsoft sign-in"):
 1. Firebase console → *Authentication → Sign-in method → Add new provider →
    **Microsoft*** → Enable. Copy the callback URL Firebase displays
    (`https://<project>.firebaseapp.com/__/auth/handler`); keep the tab open.
+   > **CSP (ADR 1021):** the app `frame-src` in `firebase.json` has no
+   > `https://*.firebaseapp.com` wildcard (it admitted every Firebase project). If
+   > your auth domain is the default `<project>.firebaseapp.com`, add that EXACT
+   > origin to `frame-src`, never a wildcard; a custom auth domain on this
+   > Hosting site is covered by `'self'`. `npm run build` enforces both
+   > (`scripts/check-auth-frame-src.mjs`).
 2. [Entra admin center](https://entra.microsoft.com) → *App registrations →
    New registration*: pick the supported account types ("any organizational
    directory + personal Microsoft accounts" for the broadest sign-in) and add
@@ -1823,8 +1836,19 @@ change: two backends must never write one certificate map.
 - Apex: an `A` record to the LB IP (never a `CNAME` at `@`).
 
 **Serving.** Requests on a verified hostname reach ONLY that org's public
-pages, funnels and storefront, with a per-domain budget
-(`OPENWOP_CUSTOM_DOMAIN_REQS_PER_MIN`, default 600). The re-check sweep
+pages, funnels and storefront. Budgets per minute, all fixed-window:
+- **Page share per client IP:** `OPENWOP_CUSTOM_DOMAIN_IP_REQS_PER_MIN`, default 120.
+- **Page ceiling per host:** `OPENWOP_CUSTOM_DOMAIN_REQS_PER_MIN`, default 600.
+- **Visitor-runtime lanes (ADR 1015), per IP and per host:**
+  `OPENWOP_CUSTOM_DOMAIN_BEACON_IP_REQS_PER_MIN` (default 240) and
+  `OPENWOP_CUSTOM_DOMAIN_BEACON_REQS_PER_MIN` (default 1200).
+- **Unserved paths:** a path the host doesn't serve (a scanner's `.env` probes)
+  is charged only to that IP's own budget, `OPENWOP_CUSTOM_DOMAIN_MISS_IP_REQS_PER_MIN`
+  (default 60). It never touches a page budget.
+
+The client IP is the trusted-proxy walk (`host/clientIp.ts`), which treats
+`OPENWOP_CUSTOM_DOMAIN_LB_IP` as our own proxy hop. Leave that variable unset
+and every visitor behind the load balancer counts as one client. The re-check sweep
 (`OPENWOP_CUSTOM_DOMAIN_RECHECK_MS`, default 6 h) demotes a domain whose TXT
 record disappears to `failed`; the row is disabled, never deleted.
 

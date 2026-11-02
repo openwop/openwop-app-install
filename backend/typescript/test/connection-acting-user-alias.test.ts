@@ -5,6 +5,11 @@
  * both assistant loops resolved no credential, fetched Google with NO token, and
  * notified a 403 every tick. The broker now treats the two halves of the durable
  * User join as one person, in that user's own tenant only.
+ *
+ * Tracker TST-CJB-1 (grade-tests w68). Red when: either alias direction is dropped
+ * (principal → User, User → principal); an alias outranks the exact id; or the
+ * User → principal alias is granted outside the user's HOME tenant (the ADR 0780
+ * D2 revert — `u.tenantId === tenantId` in `actingUserIds`).
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
@@ -53,6 +58,11 @@ describe('the broker resolves a legacy-principal actor to its User (and back)', 
     // Same principal string, OTHER tenant: that tenant has no User for it, so no alias.
     await createSecretConnection({ tenantId: 't-alias-other', provider: 'runway', kind: 'api_key', secret: 'X', scope: 'user', userId });
     expect(await resolveConnectionCredential({ tenantId: 't-alias-other', provider: 'runway', actingUserId: PRINCIPAL })).toBeNull();
+    // The reverse direction: a row under the principal string in ANOTHER tenant is
+    // never reached by the User id. This is the user: branch's home-tenant fence —
+    // the same shape inside the home tenant DOES resolve (the zoom case above).
+    await createSecretConnection({ tenantId: 't-alias-other', provider: 'heygen', kind: 'api_key', secret: 'FOREIGN', scope: 'user', userId: PRINCIPAL });
+    expect(await resolveConnectionCredential({ tenantId: 't-alias-other', provider: 'heygen', actingUserId: userId })).toBeNull();
     // A different principal in the SAME tenant is not this user.
     await createSecretConnection({ tenantId: TENANT, provider: 'runway', kind: 'api_key', secret: 'MINE', scope: 'user', userId });
     expect(await resolveConnectionCredential({ tenantId: TENANT, provider: 'runway', actingUserId: 'oidc:someone-else' })).toBeNull();

@@ -5,20 +5,20 @@ import { PROFILE, PROFILE_COMPONENTS, A2UI_V09_CATALOG_IDS, parseV09Payload, A2U
 
 /**
  * The hand-written render-side profile (`v09/profile.ts`) MUST equal the
- * vendored wire schema's `payloadV2` — the same closed component set, the same
+ * vendored wire schema's `formV2` — the same closed component set, the same
  * properties per component, the same required set and enums, the same pinned
  * catalog. A renderer that admits more than the host admits is a second,
  * looser gate; one that admits less refuses surfaces the host recorded.
  */
 type Def = { properties?: Record<string, { enum?: string[]; $ref?: string }>; required?: string[]; anyOf?: Array<{ $ref: string }> ; enum?: string[] };
-const schema = JSON.parse(readFileSync(join(process.cwd(), '..', '..', 'schemas', 'v2', 'envelopes', 'ui.a2ui-surface.schema.json'), 'utf8')) as { $defs: Record<string, Def> };
+const schema = JSON.parse(readFileSync(join(process.cwd(), '..', '..', 'schemas', 'v2', 'interrupt-form.schema.json'), 'utf8')) as { $defs: Record<string, Def> };
 const defs = schema.$defs;
 const refName = (r: string) => r.replace('#/$defs/', '');
 const sid = 's';
 const wrap = (c: unknown) => ({ version: 'v0.9', catalogId: A2UI_V09_CATALOG_ID, surfaceId: sid, messages: [{ version: 'v0.9', updateComponents: { surfaceId: sid, components: [c] } }] });
 const SHAPE = /has a property or value the A2UI v0\.9 profile does not allow/;
 
-describe('A2UI v0.9 render profile ⇔ schemas/v2 payloadV2', () => {
+describe('A2UI v0.9 render profile ⇔ schemas/v2 formV2', () => {
   it('the component set is exactly the schema\'s', () => {
     const fromSchema = (defs.component!.anyOf ?? []).map((b) => refName(b.$ref)).sort();
     expect([...PROFILE_COMPONENTS].sort()).toEqual(fromSchema);
@@ -44,9 +44,10 @@ describe('A2UI v0.9 render profile ⇔ schemas/v2 payloadV2', () => {
   });
   it('the action event names are the schema\'s', () => {
     const ev = (defs.action!.properties!.event as unknown as { properties: { name: { enum: string[] } } }).properties.name.enum;
-    expect(ev.sort()).toEqual(['exchange', 'resume']);
+    expect(ev.sort()).toEqual(['resume']);
     // …and the profile admits exactly those on a Button.
     for (const n of ev) expect(parseV09Payload(wrap({ id: 'b', component: 'Button', child: 'b', action: { event: { name: n } } })).ok, n).toBe(true);
+    expect(parseV09Payload(wrap({ id: 'b', component: 'Button', child: 'b', action: { event: { name: 'exchange' } } })).ok).toBe(false);
   });
 });
 
@@ -62,7 +63,7 @@ describe('the profile refuses what upstream A2UI admits', () => {
   });
   it.each([
     ['functionCall openUrl', { id: 'b', component: 'Button', child: 'l', action: { functionCall: { call: 'openUrl', args: { url: 'https://evil.example/' } } } }, SHAPE],
-    ['event outside resume/exchange', { id: 'b', component: 'Button', child: 'l', action: { event: { name: 'deleteAll' } } }, SHAPE],
+    ['event other than resume', { id: 'b', component: 'Button', child: 'l', action: { event: { name: 'deleteAll' } } }, SHAPE],
     ['obscured text field', { id: 't', component: 'TextField', label: 'Password', variant: 'obscured' }, SHAPE],
     ['Image', { id: 'i', component: 'Image', url: 'https://evil.example/x.png' }, /the component "Image" is not in the A2UI v0\.9 profile/],
     ['formatString text', { id: 't', component: 'Text', text: { call: 'formatString', args: {} } }, SHAPE],

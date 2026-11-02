@@ -105,7 +105,11 @@ export async function claimJoin(input: {
   });
 }
 
-export interface DefaultWorkspaceTarget { featureId: string; orgId: string; tenantId: string; name: string }
+export interface DefaultWorkspaceTarget {
+  featureId: string; orgId: string; tenantId: string; name: string;
+  /** ADR 0975 D12 — the agent a new chat in this workspace opens scoped to. */
+  chatAgent?: string;
+}
 
 /**
  * The declared targets, recorded at boot.

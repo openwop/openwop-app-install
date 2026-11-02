@@ -291,7 +291,7 @@ export function AppearancePanel(): JSX.Element {
       <div className="u-grid u-gap-3">
         <PageHeader eyebrow={t('eyebrow')} title={t('title')} lede={t('ledeShort')} />
         <Notice variant="warning">
-          <Trans i18nKey="deniedNotice" ns="appearance" components={{ 1: <strong />, 3: <code /> }} />
+          <Trans i18nKey="deniedNotice" ns="appearance" components={[<></>, <strong />, <></>, <code />]} />
         </Notice>
       </div>
     );
@@ -451,7 +451,7 @@ export function AppearancePanel(): JSX.Element {
           <details className="surface-card u-p-4">
             <summary className="u-fs-16 u-fw-600 appearance-summary">{t('advancedSummary')}</summary>
             <div className="u-grid u-gap-2 u-mt-3">
-              <p className="u-m-0 u-fs-13 muted"><Trans i18nKey="advancedHint" ns="appearance" components={{ 1: <code />, 3: <code /> }} /></p>
+              <p className="u-m-0 u-fs-13 muted"><Trans i18nKey="advancedHint" ns="appearance" components={[<></>, <code />, <></>, <code />]} /></p>
               <div className="action-bar">
                 <Button variant="secondary" onClick={() => setJsonDraft(JSON.stringify(id.theme ?? {}, null, 2))}>{t('exportCurrent')}</Button>
                 <Button variant="secondary" disabled={!jsonDraft.trim()} onClick={applyJson}>{t('applyJsonBtn')}</Button>
@@ -530,9 +530,9 @@ function PreviewContent({ wm, name, logo }: { wm: { pre: string; emphasis: strin
       </div>
       <div className="u-grid u-gap-1 u-p-2 appearance-preview-surface">
         <span className="u-fs-12 appearance-preview-muted">{t('previewSurfaceEyebrow')}</span>
-        <span className="u-fs-13"><Trans i18nKey="previewCardLine" ns="appearance" components={{ 1: <code />, 3: <code /> }} /></span>
+        <span className="u-fs-13"><Trans i18nKey="previewCardLine" ns="appearance" components={[<></>, <code />, <></>, <code />]} /></span>
       </div>
-      <p className="u-m-0 u-fs-13"><Trans i18nKey="previewBody" ns="appearance" components={{ 1: <span style={{ color: 'var(--clay-text)' }} /> }} /></p>
+      <p className="u-m-0 u-fs-13"><Trans i18nKey="previewBody" ns="appearance" components={[<></>, <span style={{ color: 'var(--clay-text)' }} />]} /></p>
     </div>
   );
 }

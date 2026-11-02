@@ -93,7 +93,7 @@ async function until<T>(read: () => Promise<T>, ok: (v: T) => boolean, ms = 15_0
   }
 }
 
-interface OpenInterrupt { token: string; nodeId: string; kind: string; data?: { question?: string } }
+interface OpenInterrupt { token: string; nodeId: string; kind: string; data?: { questions?: Array<{ question?: string }> } }
 const openInterrupts = async (runId: string): Promise<OpenInterrupt[]> =>
   (await call<{ interrupts: OpenInterrupt[] }>('GET', `/host/openwop-app/runs/${encodeURIComponent(bareRunId(runId))}/interrupts`)).body?.interrupts ?? [];
 
@@ -111,7 +111,7 @@ async function launchToCard(c: MarketingCampaign): Promise<{ runId: string; card
 const stageOf = (runId: string) => storage.getRun(stageRunId(TENANT, bareRunId(runId), 'drafts'));
 
 async function checkAgain(token: string): Promise<void> {
-  const res = await call('POST', `/interrupts/${token}`, { resumeValue: {} });
+  const res = await call('POST', `/interrupts/${token}`, { resumeValue: { answers: [] } });
   expect([200, 202, 204], JSON.stringify(res.body)).toContain(res.status);
 }
 
@@ -144,7 +144,7 @@ describe('ADR 0961 P1 — the preflight checklist card', () => {
     expect(pf.body.preflight.items.find((i) => i.id === 'ad-account')).toMatchObject({ status: 'missing' });
     const { runId, card } = await launchToCard(c);
     expect(card.kind).toBe('clarification');
-    expect(card.data?.question ?? '').toContain("The client's ad account is connected");
+    expect(card.data?.questions?.[0]?.question ?? '').toContain("The client's ad account is connected");
     expect(await stageOf(runId)).toBeNull();
   });
 

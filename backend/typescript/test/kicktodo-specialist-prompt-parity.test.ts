@@ -10,6 +10,13 @@
  *
  * Sabotage: dropping `openwop:kicktodo.today` from the safety reviewer's
  * allowlist reds the SPEC-2 case and the parity case for it.
+ *
+ * TST-DKA-2 (grade-tests wave 72). Both describes loop over the pack, so the
+ * floor case pins what they iterate: an emptied pack, or a SPEC-2 filter that
+ * stops matching, would otherwise leave zero cases and a green file. w72 probes
+ * spec-today (allowlist) and spec-phantom (a prompt naming an unlisted tool).
+ * The challenge-author row overlaps kicktodo-challenge-author-prompt-parity
+ * (both protected; recorded dedupe-needs-human-ask, not cut).
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -22,6 +29,15 @@ const pack = JSON.parse(readFileSync(join(PACK, 'pack.json'), 'utf8')) as {
 const ID_RE = /openwop:[A-Za-z0-9._-]+/g;
 
 describe('KickTodo agents: prompt ↔ allowlist parity (XCH-SPEC-3)', () => {
+  it('iterates all nine agents, and SPEC-2 covers the five progress readers (floor)', () => {
+    expect(pack.agents.map((a) => a.agentId.split('.').pop()).sort()).toEqual([
+      'accountability-steward', 'challenge-author', 'plan-builder', 'progress-verifier', 'replan-composer',
+      'safety-reviewer', 'sim-newcomer', 'sim-skeptic', 'sim-time-poor',
+    ]);
+    expect(pack.agents.filter((x) => (x.toolAllowlist ?? []).includes('openwop:kicktodo.progress')).map((a) => a.agentId.split('.').pop()).sort())
+      .toEqual(['accountability-steward', 'plan-builder', 'progress-verifier', 'replan-composer', 'safety-reviewer']);
+  });
+
   for (const a of pack.agents) {
     it(`${a.agentId.split('.').pop()} names exactly its allowlisted tools`, () => {
       expect(typeof a.systemPromptRef).toBe('string');

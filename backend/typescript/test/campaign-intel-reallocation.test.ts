@@ -101,6 +101,9 @@ describe('ADR 0952 P3 — propose', () => {
     expect(out.plan.dropped).toEqual([{ platform: 'meta', adAccountId: 'act_1', campaignId: '12', reason: 'budget_unreadable:http_500' }]);
     const approval = await getApproval(out.plan.approvalId ?? '');
     expect(approval).toMatchObject({ kind: 'campaign-spend', spendKind: 'reallocation', status: 'pending', dailyBudgetMinor: 1000 });
+    // ADR 1022 (CP71WF-23) — approvers come from the client org, and the
+    // proposer is a submitter, so they cannot approve their own plan.
+    expect(approval).toMatchObject({ orgId: org, submitters: ['user:a'] });
     expect(approval?.proposal).toMatch(/decreases apply first/);
     // A retry of the same run returns the same plan and the same approval.
     const again = await proposeReallocation(p.adapter, T, org, { recommendation: REC, runId: 'run-1' }, NOW);

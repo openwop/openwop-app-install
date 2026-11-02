@@ -9,6 +9,7 @@ import { createContext, useContext, useEffect, useId, useRef, useState, type Rea
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { ConfirmRoot } from '../ui/confirm.js';
+import { ReauthRoot } from '../auth/ReauthRoot.js';
 import { Toaster } from '../ui/toast.js';
 import { GlobalLiveRegion } from '../ui/announce.js';
 import { Link, useLocation } from 'react-router-dom';
@@ -271,6 +272,7 @@ export function PublicShell({ children }: { children: ReactNode }): JSX.Element 
               back to native window.confirm (off-brand, unlocalized button) on the
               booking cancel, and public toasts went nowhere. */}
           <ConfirmRoot />
+          <ReauthRoot />
           <Toaster />
           {/* FRMUX-1 / ADR 0648 — the ONE live region. It was mounted only in the
               authed tree (`App.tsx`, below the `showPublic` early return), so on every

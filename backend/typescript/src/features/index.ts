@@ -16,7 +16,7 @@ import { createLogger } from '../observability/logger.js';
 import { registerFeatureDependencies, registerFeaturePacks, registerFeatureRecommends, registerToggleDefault } from '../host/featureToggles/registry.js';
 import { retireToggleOverrides } from '../host/featureToggles/service.js';
 import { registerFeatureSurface } from '../host/featureSurfaces.js';
-import { registerChainBackedWorkflow, validateChainBackedSubChainBinds } from '../host/chainBackedWorkflows.js';
+import { registerChainBackedWorkflow, validateChainBackedSubChainBinds, type ChainBackedRoleMap } from '../host/chainBackedWorkflows.js';
 import { registerWorkflowTemplateChains } from '../host/workflowTemplates.js';
 import type { RouteDeps } from '../routes/registerAllRoutes.js';
 import type { BackendFeature, PackRef } from './types.js';
@@ -108,6 +108,7 @@ import { marketplaceFeature } from './marketplace/feature.js';
 import { agentKnowledgeFeature } from './agent-knowledge/feature.js';
 import { advisoryBoardFeature } from './advisory-board/feature.js';
 import { proposalsFeature } from './proposals/feature.js';
+import { agentDeploymentsFeature } from './agent-deployments/feature.js';
 import { goalsFeature } from './goals/feature.js';
 import { walkthroughsFeature } from './walkthroughs/feature.js';
 import { tutorialsFeature } from './tutorials/feature.js';
@@ -128,6 +129,7 @@ import { campaignAutopilotFeature } from './campaign-autopilot/feature.js';
 import { campaignOpsFeature } from './campaign-ops/feature.js';
 import { socialPublishingFeature } from './social-publishing/feature.js';
 import { campaignPlaybooksFeature } from './campaign-playbooks/feature.js';
+import { agentClarificationFeature } from './agent-clarification/feature.js';
 import { campaignConnectorsFeature } from './campaign-connectors/feature.js';
 import { campaignIntelFeature } from './campaign-intel/feature.js';
 import { campaignJourneysFeature } from './campaign-journeys/feature.js';
@@ -228,7 +230,7 @@ const RETIRED_TOGGLE_IDS = [
 ] as const;
 
 /** Every backend feature the app composes. Append a new feature here. */
-export const BACKEND_FEATURES: BackendFeature[] = [crmFeature, cdpFeature, destinationSyncFeature, developerKeysFeature, csmFeature, usersFeature, orgsFeature, profilesFeature, profileMemoryFeature, mediaFeature, cmsFeature, notificationsFeature, kbFeature, publishingFeature, sharingFeature, formsFeature, consentFeature, analyticsFeature, assistantFeature, connectionsFeature, emailFeature, commentsFeature, marketplaceFeature, agentKnowledgeFeature, advisoryBoardFeature, proposalsFeature, goalsFeature, portabilityFeature, twinRecallFeature, projectsFeature, documentsFeature, priorityMatrixFeature, strategyFeature, brandFeature, campaignBriefFeature, creativeBriefsFeature, campaignChannelsFeature, campaignOrchestrationFeature, campaignAutopilotFeature, campaignOpsFeature, campaignPlaybooksFeature, socialPublishingFeature, campaignConnectorsFeature, campaignIntelFeature, campaignJourneysFeature, campaignsFeature, workflowAuthorFeature, builderPairFeature, agentAuthorFeature, insightsSuiteFeature, toolOutputCompactionFeature, notebooksFeature, podcastsFeature, knowledgeSyncFeature, conversationSearchFeature, codeExecFeature, promptsFeature, memoryAutoExtractFeature, scheduledAgentChatsFeature, channelsFeature, chatWidgetFeature, interactiveArtifactsFeature, slidesFeature, appBuilderFeature, campaignStudioFeature, drawingsFeature, cadFeature, documentEditorFeature, modelRouterFeature, conversationToolsFeature, taskDeckFeature, capabilityFirewallFeature, intentLedgerFeature, ambientWorkGraphFeature, chatExportFeature, evalsFeature, usageAnalyticsFeature, voiceFeature, navigationSettingsFeature, chatDeploymentFeature, multiTabChatFeature, chatAutotitleFeature, productionFeature, accessibilityFeature, billingFeature, commerceFeature, recommendationsFeature, promotionsFeature, discoveryFeature, funnelsFeature, experimentsFeature, customDomainsFeature, manualTestsFeature, developerToolsFeature, territoriesFeature, salesCommissionsFeature, dealersFeature, salesMapsFeature, uiPluginsFeature, canvasPacksFeature, heartbeatAdminFeature, managedTierAdminFeature, runtimePostureFeature, collaborationFeature, workflowCollabFeature, walkthroughsFeature, tutorialsFeature, dashboardFeature, commerceConnectFeature, docsFeature, entitiesFeature, environmentsFeature, whatsappFeature, webinarsFeature, creativeVideoFeature, operationsFeature, settingsFeature, kicktodoCoreFeature, kicktodoCreatorFeature, biFeature, computerUseFeature, kicktodoCommerceFeature, kicktodoAccountabilityFeature, kicktodoIntegrationsFeature, kicktodoEngagementFeature, kicktodoCommunityFeature, kicktodoOrganizationsFeature, serviceDeskFeature, kicktodoMetricsFeature, workSelectionFeature, jobSearchFeature, claudeCodeFeature, structuredHandoffsFeature, teamIntentLedgerFeature, accessHubFeature];
+export const BACKEND_FEATURES: BackendFeature[] = [crmFeature, cdpFeature, destinationSyncFeature, developerKeysFeature, csmFeature, usersFeature, orgsFeature, profilesFeature, profileMemoryFeature, mediaFeature, cmsFeature, notificationsFeature, kbFeature, publishingFeature, sharingFeature, formsFeature, consentFeature, analyticsFeature, assistantFeature, connectionsFeature, emailFeature, commentsFeature, marketplaceFeature, agentKnowledgeFeature, advisoryBoardFeature, proposalsFeature, agentDeploymentsFeature, goalsFeature, portabilityFeature, twinRecallFeature, projectsFeature, documentsFeature, priorityMatrixFeature, strategyFeature, brandFeature, campaignBriefFeature, creativeBriefsFeature, campaignChannelsFeature, campaignOrchestrationFeature, campaignAutopilotFeature, campaignOpsFeature, campaignPlaybooksFeature, socialPublishingFeature, campaignConnectorsFeature, campaignIntelFeature, campaignJourneysFeature, campaignsFeature, workflowAuthorFeature, builderPairFeature, agentAuthorFeature, insightsSuiteFeature, toolOutputCompactionFeature, notebooksFeature, podcastsFeature, knowledgeSyncFeature, conversationSearchFeature, codeExecFeature, promptsFeature, memoryAutoExtractFeature, scheduledAgentChatsFeature, channelsFeature, chatWidgetFeature, interactiveArtifactsFeature, slidesFeature, appBuilderFeature, campaignStudioFeature, drawingsFeature, cadFeature, documentEditorFeature, modelRouterFeature, conversationToolsFeature, taskDeckFeature, capabilityFirewallFeature, intentLedgerFeature, ambientWorkGraphFeature, chatExportFeature, evalsFeature, usageAnalyticsFeature, voiceFeature, navigationSettingsFeature, chatDeploymentFeature, multiTabChatFeature, chatAutotitleFeature, productionFeature, accessibilityFeature, billingFeature, commerceFeature, recommendationsFeature, promotionsFeature, discoveryFeature, funnelsFeature, experimentsFeature, customDomainsFeature, manualTestsFeature, developerToolsFeature, territoriesFeature, salesCommissionsFeature, dealersFeature, salesMapsFeature, uiPluginsFeature, canvasPacksFeature, heartbeatAdminFeature, managedTierAdminFeature, runtimePostureFeature, collaborationFeature, workflowCollabFeature, walkthroughsFeature, tutorialsFeature, dashboardFeature, commerceConnectFeature, docsFeature, entitiesFeature, environmentsFeature, whatsappFeature, webinarsFeature, creativeVideoFeature, operationsFeature, settingsFeature, kicktodoCoreFeature, kicktodoCreatorFeature, biFeature, computerUseFeature, kicktodoCommerceFeature, kicktodoAccountabilityFeature, kicktodoIntegrationsFeature, kicktodoEngagementFeature, kicktodoCommunityFeature, kicktodoOrganizationsFeature, serviceDeskFeature, kicktodoMetricsFeature, workSelectionFeature, jobSearchFeature, claudeCodeFeature, structuredHandoffsFeature, teamIntentLedgerFeature, accessHubFeature, agentClarificationFeature];
 
 /**
  * ADR 0472 Phase 4 — DRAINED QUARANTINE (terminal state). This array held the builtin
@@ -286,7 +288,7 @@ export function registerNotebooksWorkflows(): void {
 /** ADR 0472 P4 — register a set of migrated defs CHAIN-BACKED under their stable ids,
  *  restoring each node's `outputRole` verbatim from the source (the fragment can't carry
  *  it). The source array stays the readable SSoT (no longer a builtin). */
-export function registerLegacyDefsChainBacked(defs: readonly { workflowId: string; nodes: ReadonlyArray<{ nodeId: string; outputRole?: 'primary' | 'secondary' }> }[]): void {
+export function registerLegacyDefsChainBacked(defs: readonly ChainBackedRoleMap[]): void {
   for (const src of defs) {
     const roles = new Map(src.nodes.filter((n) => n.outputRole).map((n) => [n.nodeId, n.outputRole] as const));
     registerChainBackedWorkflow(src.workflowId, {
@@ -346,12 +348,15 @@ export function registerMcpProjectionWorkflows(): void {
  * Mirrors `featurePackRefs()`: the feature declares, boot consumes, core never
  * learns a product name.
  */
-export function featureDefaultOrgs(): { featureId: string; orgId: string; tenantId: string; name: string }[] {
+export function featureDefaultOrgs(): { featureId: string; orgId: string; tenantId: string; name: string; chatAgent?: string }[] {
   // orgId AND tenantId both come from the single declared `id`: a workspace
   // root is an org whose id equals its tenant, so there is nothing to choose
   // between and no way to declare them apart (ADR 0684 correction).
   return BACKEND_FEATURES.flatMap((f) =>
-    f.defaultOrg ? [{ featureId: f.id, orgId: f.defaultOrg.id, tenantId: f.defaultOrg.id, name: f.defaultOrg.name }] : []);
+    f.defaultOrg ? [{
+      featureId: f.id, orgId: f.defaultOrg.id, tenantId: f.defaultOrg.id, name: f.defaultOrg.name,
+      ...(f.defaultOrg.chatAgent ? { chatAgent: f.defaultOrg.chatAgent } : {}),
+    }] : []);
 }
 
 export function registerBackendFeatures(deps: RouteDeps): void {
@@ -384,7 +389,7 @@ export function registerBackendFeatures(deps: RouteDeps): void {
   registerLegacyDefsChainBacked(kicktodoBuiltinWorkflows); // ADR 0472 P4 (replan; falsy edge rides RFC 0134)
   registerLegacyDefsChainBacked(ONWARD_SYNC_WORKFLOWS); // ADR 0472 P4 (cdp-sync; peerIngestUrl resolves via config template at runtime)
   registerLegacyDefsChainBacked(CHANNEL_WORKFLOWS); // ADR 0472 P4 (5 campaign channels; static channel + itemsFrom preserved)
-  registerLegacyDefsChainBacked([campaignOrchestrationParallel]); // ADR 0472 P4 (parallel channel fan-out shape; sequential kill-switch retired)
+  registerLegacyDefsChainBacked([campaignOrchestrationParallel]); // ADR 0472 P4 (parallel channel fan-out; ADR 1020 D7: id + role map only)
   registerLegacyDefsChainBacked(kicktodoCreatorBuiltinWorkflows); // ADR 0472 P4 TERMINAL (challenge-factory + lesson-batch; RFC 0133 sub-chain host-default binds subChainRef→same-id child)
   registerLegacyDefsChainBacked(kicktodoIntegrationsBuiltinWorkflows); // ADR 0472 P4
   registerLegacyDefsChainBacked(kicktodoAccountabilityBuiltinWorkflows); // ADR 0472 P4

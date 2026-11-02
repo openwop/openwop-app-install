@@ -66,3 +66,16 @@ SELECT count(*) AS js_probe_4_special_category
 FROM host_ext_kv
 WHERE k LIKE 'hostext:job-search:answer:%'
   AND lower(v::text) ~ '(disabilit|veteran|ethnicit)';
+
+-- JS-PROBE-DGSEC1 — cross-subject apply grants (DG-SEC-1). A grant one member
+-- minted over another member's applications (`grantedBy` ≠ `subjectId`), which
+-- the grants route accepted until DG-SEC-1. Since the fix these rows authorise
+-- nothing (`consultApplyGrant` requires self-consent), but each one is a
+-- consent record nobody gave. Count only; never print the ids.
+-- EXPECTED 0. A non-zero count goes to the user (revoke or erase, their call).
+SELECT count(*) AS js_probe_dgsec1_cross_subject_grants,
+       count(*) FILTER (WHERE (v::jsonb ->> 'revokedAt') IS NULL
+                          AND (v::jsonb ->> 'expiresAt')::timestamptz > now()) AS still_live_before_fix
+FROM host_ext_kv
+WHERE k LIKE 'hostext:job-search:apply-grant:%'
+  AND (v::jsonb ->> 'grantedBy') IS DISTINCT FROM (v::jsonb ->> 'subjectId');

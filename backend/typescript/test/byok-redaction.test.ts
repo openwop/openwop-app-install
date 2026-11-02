@@ -8,6 +8,12 @@
  *   - nonEnumerableSecretsView() allows by-name lookup but throws on any
  *     attempt to enumerate the keyring (Object.keys / entries /
  *     JSON.stringify / spread / for…in).
+ *
+ * TST-BBY-4 (w66 g4, sabotage-witnessed). Red when: Tier 1 stops labelling a
+ * registered value; the walk skips arrays; only one run's secrets are collected;
+ * the Bearer / sk- / ghp_ shapes leave the Tier-2 pattern; BOTH proxy traps
+ * (`ownKeys` + `getOwnPropertyDescriptor`) stop throwing — they are a double
+ * guard, so each alone stays green.
  */
 
 import { afterEach, describe, expect, it } from 'vitest';
@@ -64,7 +70,7 @@ describe('stripSecretsFromPersisted (Tier 2: credential-shaped scrub)', () => {
       auth: 'Bearer abcdefghijklmnopqrstuvwxyz0123',
     });
     expect(out.gh).toBe('<<redacted:credential-shape>>');
-    expect(out.auth).toContain('<<redacted:credential-shape>>');
+    expect(out.auth).toBe('<<redacted:credential-shape>>'); // the whole `Bearer <token>` match
   });
 });
 

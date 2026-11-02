@@ -43,7 +43,7 @@ export function ProfileMemoryTab(): JSX.Element {
   return (
     <div className="u-flex u-flex-col u-gap-3">
       <p className="muted u-fs-13 u-m-0">
-        <Trans i18nKey="memoryIntro" ns="profile-memory" components={{ 0: <strong /> }} />
+        <Trans i18nKey="memoryIntro" ns="profile-memory" components={[<strong />]} />
       </p>
       <ConsentToggle />
       <MemoryBrowser

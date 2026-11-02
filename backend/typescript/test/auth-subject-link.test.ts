@@ -25,6 +25,13 @@
  * Drives the `sample`-spelled seams with OPENWOP_TEST_SEAM_ENABLED UNSET, so the
  * explicit both-spellings alias registration (not the testSeam namespace rewrite)
  * is what serves them.
+ *
+ * Tracker TST-BEC-3 (w66). Red when: either arm of
+ * `combinedSubjectLinkingActive` is dropped ((i)/(ii)); the deny lookup always
+ * misses (deactivation); the trust-root mismatch branch or evaluation is
+ * removed (collision); the `unbound` refusal is removed (iv) or loses its
+ * combined-deployment gate (v); a mutable link key is accepted; the
+ * advertised `subjectLinkKey` changes.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -147,11 +154,11 @@ afterAll(async () => {
 describe('RFC 0159/0163 subject linking — advertisement', () => {
   it('claims subjectLinking + a closed-enum subjectLinkKey only alongside BOTH profiles', async () => {
     const auth = v2Auth();
-    expect(auth?.lanes).toContain('saml');
-    expect(auth?.lanes).toContain('scim');
+    expect(auth.lanes).toContain('saml');
+    expect(auth.lanes).toContain('scim');
     // RFC 0163 §A — a member of the closed safe-class enum; openwop-app is opaque-idp.
-    expect(auth?.subjectLinkKey).toBe('opaque-idp');
-    expect(['opaque-idp', 'configured-immutable']).toContain(auth?.subjectLinkKey);
+    expect(auth.subjectLinkKey).toBe('opaque-idp');
+    expect(['opaque-idp', 'configured-immutable']).toContain(auth.subjectLinkKey);
   });
 });
 
@@ -188,8 +195,10 @@ describe('RFC 0159 subject linking — link-key hygiene (§A.2)', () => {
     const link = await post('/host/sample/auth/scim/provision', {
       scimUrl: 'x', op: 'link', linkKey: 'email', email: 'r.smith@example.test',
     });
-    expect(link.status).toBeGreaterThanOrEqual(400);
-    expect(link.status).toBeLessThan(500);
+    expect(link.status).toBe(400);
+    const linkBody = (await link.json()) as { error?: string; details?: { linkKey?: string | null } };
+    expect(linkBody.error).toBe('validation_error');
+    expect(linkBody.details?.linkKey).toBe('email');
 
     // An unrelated opaque subject (no SCIM record) must NOT be denied — no link, so it authenticates.
     const other = await post('/host/sample/auth/saml/validate', { idpUrl: IDP_A_URL, variant: 'valid', nameId: 'idp-op-DIFFERENT' });

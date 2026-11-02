@@ -12,6 +12,17 @@
  *    and leaves a PUBLISHED one alone. Breaks if the `unpublished-draft` death
  *    subscriber is removed (draft stays `draft`) or switched to the unconditional
  *    `retireChallenge` (the published version is retired).
+ *
+ * TST-DJE-2 (grade-tests wave 71):
+ *  - The parallel-issued replay in case 1 is NOT a forced race (two calls on one
+ *    in-memory store run back to back); the CAS half is what case 3 witnesses.
+ *  - DOUBLE GUARD (two files): "leaves a PUBLISHED version alone" is held by the
+ *    subscriber's `status !== 'draft'` skip (candidateDeathSubscribers.ts) AND by
+ *    `retireDraft`'s own `row.status !== 'draft'` refusal (challengeService.ts), so
+ *    removing either alone stays green (measured). Only a switch to the unconditional
+ *    `retireChallenge` reds it.
+ * Red when (re-probed): the surface stops passing the run key, the key drops the node
+ * id, the keyed create is a blind put, or the subscriber stops retiring the draft.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -41,6 +52,13 @@ const PLAN: ChallengePlan = {
   ],
 };
 
+/** The candidate id a surface `createCandidate` call returned (fails loudly on another shape). */
+function candidateIdOf(v: Record<string, unknown>): string {
+  const c = v.candidate;
+  if (typeof c !== 'object' || c === null || !('id' in c) || typeof c.id !== 'string') throw new Error(`no candidate id in ${JSON.stringify(v)}`);
+  return c.id;
+}
+
 const intake = { createdBy: AUTHOR, topic: 'focus practice', audience: 'busy pros', transformation: 'a habit', durationDaysTarget: 7, dailyMinutesTarget: 15 };
 
 beforeEach(async () => {
@@ -50,15 +68,15 @@ beforeEach(async () => {
 });
 
 describe('KTFAC-1 — a retried create-candidate node makes ONE candidate', () => {
-  it('same run + node: a sequential AND a concurrent replay converge on one candidate', async () => {
+  it('same run + node: sequential and parallel-issued replays converge on one candidate', async () => {
     const surface = buildKicktodoCreatorSurface({ tenantId: T, runId: 'run-kt4b-a' });
     const args = { ...intake, nodeId: 'create-candidate' };
-    const first = (await surface.createCandidate!(args)) as { candidate: { id: string } };
-    const [a, b] = (await Promise.all([surface.createCandidate!(args), surface.createCandidate!(args)])) as Array<{ candidate: { id: string } }>;
-    expect(a!.candidate.id).toBe(first.candidate.id);
-    expect(b!.candidate.id).toBe(first.candidate.id);
+    const first = candidateIdOf(await surface.createCandidate!(args));
+    const [a, b] = await Promise.all([surface.createCandidate!(args), surface.createCandidate!(args)]);
+    expect(candidateIdOf(a)).toBe(first);
+    expect(candidateIdOf(b)).toBe(first);
     expect(await listCandidates(T)).toHaveLength(1);
-    expect(first.candidate.id).toMatch(/^cand:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    expect(first).toMatch(/^cand:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
   });
 
   it('a different run, a different node, or different intake is a different candidate; runless keeps fresh ids', async () => {

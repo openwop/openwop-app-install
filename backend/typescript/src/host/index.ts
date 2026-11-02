@@ -10,6 +10,7 @@
  * identity), swap the impl here. Route handlers stay unchanged.
  */
 
+import { agentChannelsServed } from './agentChannelPin.js';
 import { oauthAdvertisementSnapshot } from '../features/connections/oauthAdvertisement.js';
 import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -281,6 +282,11 @@ function childFixtureIds(def: WorkflowDefinition): string[] {
     .filter((id): id is string => typeof id === 'string' && conformanceFixtures.has(id));
 }
 
+/** True when some node of the fixture binds its agent by deployment `channel` (RFC 0082 §A). */
+export function fixtureBindsChannel(def: WorkflowDefinition): boolean {
+  return (def.nodes ?? []).some((n) => typeof n.agent?.channel === 'string' && n.agent.channel.length > 0);
+}
+
 /**
  * WS0 (2026-09-24) — the STRUCTURAL advert rule: a fixture is offered only if
  * the executor would find a module for EVERY node typeId in its graph, and
@@ -319,6 +325,10 @@ function fixtureIsAdvertisable(
   if (!enabled && fixtureNeedsConformanceNodes(def)) return false;
   if (fixtureNeedsUnimplementedMemoryAction(def)) return false;
   if (fixtureGraphRefused(def)) return false;
+  // ADR 1005 D5 — a node binding a deployment channel runs only where the
+  // channel resolves (`conformance-agent-channel-dispatch`: "only a host
+  // advertising agents.deployment can seed this fixture").
+  if (fixtureBindsChannel(def) && !agentChannelsServed()) return false;
   if (!(def.nodes ?? []).every((n) => isResolvable(n.typeId))) return false;
   return childFixtureIds(def).every((child) => fixtureIsAdvertisable(child, enabled, isResolvable, seen));
 }
@@ -386,6 +396,13 @@ export function listLoadedConformanceFixtures(supervisorCallsLiveModel: boolean 
 const reportedWithheld = new Set<string>();
 function reportWithheldFixture(id: string, isResolvable: (typeId: string) => boolean): void {
   const def = conformanceFixtures.get(id);
+  if (def && fixtureBindsChannel(def) && !agentChannelsServed()) {
+    const key = `${id}|channel`;
+    if (reportedWithheld.has(key)) return;
+    reportedWithheld.add(key);
+    log.info('conformance_fixture_withheld', { fixtureId: id, reason: 'binds_a_deployment_channel_and_agents_deployment_is_not_advertised' });
+    return;
+  }
   if (def && fixtureGraphRefused(def)) {
     const key = `${id}|graph`;
     if (reportedWithheld.has(key)) return;

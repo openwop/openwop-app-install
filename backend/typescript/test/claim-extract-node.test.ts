@@ -6,6 +6,13 @@
  * *claims* to be evidence-led is worse than no plan, so "no readable content" and
  * "nothing supported" must both REFUSE rather than pass an empty dossier through
  * to `plan-generate` — which is precisely what the pipeline did before.
+ *
+ * Tracker TST-CEE-1. Hashes are distinctive (`src-7f3a9c`), never a 2-char
+ * token that could match anywhere in a serialized request.
+ * Red when (w67g3, witnessed): zero readable sources stop refusing; a source
+ * with no fetched page stays citable; an unknown cited hash is not a defect;
+ * zero claims pass; temperature leaves 0; a cut source is not marked; the
+ * repair turn stops restating the legal hashes.
  */
 import { describe, it, expect, vi } from 'vitest';
 
@@ -15,7 +22,7 @@ const packUrl = new URL('../../../packs/feature.kicktodo.nodes/index.mjs', impor
 const mod = (await import(packUrl)) as { claimExtract: (ctx: unknown) => Promise<Record<string, unknown>> };
 const claimExtract = mod.claimExtract;
 
-const SOURCE = { hash: 'h1', title: 'Walking study', url: 'https://a.example/walk' };
+const SOURCE = { hash: 'src-7f3a9c', title: 'Walking study', url: 'https://a.example/walk' };
 const PAGE = { url: 'https://a.example/walk', extractedText: 'A 20-minute daily walk improved mood in the cohort.', status: 200 };
 
 /** A ctx with the creator surface + a scripted `callAI`. */
@@ -63,14 +70,16 @@ describe('claim-extract — fail-closed guarantees', () => {
     expect(out.status).toBe('failed');
     expect((out.error as { code: string }).code).toBe('claims_invalid');
     expect(calls.length, 'exactly one bounded repair').toBe(2);
-    // The repair must name the real defect and restate the legal hashes.
-    const repair = JSON.stringify(calls[1]);
-    expect(repair).toContain('NOT-A-REAL-HASH');
-    expect(repair).toContain('h1');
+    // The repair TURN itself (not the whole request, whose base turn already
+    // shows the source) must name the real defect and restate the legal hashes.
+    const repairTurn = (calls[1] as { messages: Array<{ role: string; content: string }> }).messages[2]!;
+    expect(repairTurn.role).toBe('user');
+    expect(repairTurn.content).toContain('cites unknown source hash "NOT-A-REAL-HASH"');
+    expect(repairTurn.content).toContain('Cite ONLY these hashes: src-7f3a9c.');
   });
 
   it('a valid extraction succeeds and reports what it read', async () => {
-    const good = { claims: [{ claimId: 'c-1', text: 'A 20-minute walk improved mood.', sourceHashes: ['h1'] }] };
+    const good = { claims: [{ claimId: 'c-1', text: 'A 20-minute walk improved mood.', sourceHashes: ['src-7f3a9c'] }] };
     const { ctx, calls } = ctxWith([good], { sources: [SOURCE], pages: [PAGE], questions: ['does walking help mood?'] });
     const out = await claimExtract(ctx);
     expect(out.status).toBe('success');
@@ -80,11 +89,11 @@ describe('claim-extract — fail-closed guarantees', () => {
   });
 
   it('the prompt carries the source HASH and CONTENT, and the research questions', async () => {
-    const good = { claims: [{ claimId: 'c-1', text: 't', sourceHashes: ['h1'] }] };
+    const good = { claims: [{ claimId: 'c-1', text: 't', sourceHashes: ['src-7f3a9c'] }] };
     const { ctx, calls } = ctxWith([good], { sources: [SOURCE], pages: [PAGE], questions: ['does walking help mood?'] });
     await claimExtract(ctx);
     const sent = JSON.stringify(calls[0]);
-    expect(sent).toContain('h1');                       // cite-by-hash is only possible if the hash is shown
+    expect(sent).toContain('src-7f3a9c');                       // cite-by-hash is only possible if the hash is shown
     expect(sent).toContain('improved mood in the cohort'); // the CONTENT, not just the title
     expect(sent).toContain('does walking help mood?');
     // Determinism: extraction is evidence, not creativity.
@@ -94,13 +103,13 @@ describe('claim-extract — fail-closed guarantees', () => {
   it('a source with no fetched page is EXCLUDED from what the model may cite', async () => {
     // Two sources, one page. The unreadable source must not be offered as citable,
     // or the model could "support" a claim from a page nobody read.
-    const other = { hash: 'h2', title: 'Unread', url: 'https://b.example/none' };
-    const good = { claims: [{ claimId: 'c-1', text: 't', sourceHashes: ['h1'] }] };
+    const other = { hash: 'src-2b8e41', title: 'Unread', url: 'https://b.example/none' };
+    const good = { claims: [{ claimId: 'c-1', text: 't', sourceHashes: ['src-7f3a9c'] }] };
     const { ctx, calls } = ctxWith([good], { sources: [SOURCE, other], pages: [PAGE] });
     const out = await claimExtract(ctx);
     expect(out.status).toBe('success');
     expect((out.outputs as { sourcesRead: number }).sourcesRead).toBe(1);
-    expect(JSON.stringify(calls[0])).not.toContain('h2');
+    expect(JSON.stringify(calls[0])).not.toContain('src-2b8e41');
   });
 
   it('no ctx.callAI ⇒ typed capability error, never a silent empty', async () => {
@@ -117,15 +126,15 @@ describe('claim-extract — fail-closed guarantees', () => {
 // prompt, and to the dossier as `truncatedSourceHashes`.
 describe('claim-extract — truncation is disclosed, never silent', () => {
   it('marks a cut source in the prompt and reports its hash', async () => {
-    const SHORT = { hash: 'h2', title: 'Short note', url: 'https://b.example/short' };
+    const SHORT = { hash: 'src-2b8e41', title: 'Short note', url: 'https://b.example/short' };
     const longPage = { ...PAGE, extractedText: `${PAGE.extractedText} ${'filler '.repeat(2000)}` };
     const shortPage = { url: SHORT.url, extractedText: 'Short and complete.', status: 200 };
-    const ok = { claims: [{ claimId: 'c-1', text: 'A daily walk improved mood.', sourceHashes: ['h1'] }] };
+    const ok = { claims: [{ claimId: 'c-1', text: 'A daily walk improved mood.', sourceHashes: ['src-7f3a9c'] }] };
     const { ctx, calls } = ctxWith([ok], { sources: [SOURCE, SHORT], pages: [longPage, shortPage] });
     const out = await claimExtract(ctx);
     expect(out.status).toBe('success');
     const prompt = JSON.stringify(calls[0]);
     expect(prompt).toContain('CONTENT (TRUNCATED — the first 6000 of');
-    expect((out.outputs as { truncatedSourceHashes: string[] }).truncatedSourceHashes).toEqual(['h1']);
+    expect((out.outputs as { truncatedSourceHashes: string[] }).truncatedSourceHashes).toEqual(['src-7f3a9c']);
   });
 });

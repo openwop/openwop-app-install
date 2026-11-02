@@ -8,6 +8,10 @@
  * package the operator never chose). In that state the old message said the two
  * Azure packages "are not installed" and advised installing them — which npm treats
  * as already satisfied. The advice did nothing and named the wrong problem.
+ *
+ * Tracker TST-BED-1 (w66). Red when: the transitive branch is dropped; it also
+ * claims a missing `@azure/keyvault-keys` or `@azure/identity` is "ARE
+ * installed" (each package is checked); the underlying error is dropped.
  */
 import { describe, it, expect } from 'vitest';
 import { azureLoadFailureMessage } from '../src/byok/kmsBackends.js';
@@ -31,12 +35,14 @@ describe('Azure KMS load failure diagnostics', () => {
   });
 
   it('still gives the plain advice when the Azure packages themselves are absent', () => {
-    const err = new Error(`Cannot find package '${KEYS}' imported from /app/src/byok/kmsBackends.js`);
+    for (const pkg of [KEYS, ID]) {
+      const err = new Error(`Cannot find package '${pkg}' imported from /app/src/byok/kmsBackends.js`);
 
-    const msg = azureLoadFailureMessage(err, KEYS, ID);
+      const msg = azureLoadFailureMessage(err, KEYS, ID);
 
-    expect(msg).toContain(`npm install ${KEYS} ${ID}`);
-    expect(msg).not.toContain('ARE installed');
+      expect(msg, pkg).toContain(`npm install ${KEYS} ${ID}`);
+      expect(msg, pkg).not.toContain('ARE installed');
+    }
   });
 
   it('falls back to the plain advice for an unrecognised failure', () => {

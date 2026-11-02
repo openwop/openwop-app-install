@@ -9,8 +9,14 @@
  *
  * The board call is injected, so every assertion below is about the REAL
  * ordering rather than a mocked pipeline.
+ *
+ * TST-DGE-4. Red when a replay consults the grant, when the submission claim is
+ * a blind write or a read-then-write (the concurrent case FORCES the race: a
+ * barrier holds all three applies at the grant read until every one has
+ * arrived), when a board rejection keeps its claim or spends a unit, and when
+ * an unanswerable required question does not park (sabotage-witnessed, wave 71).
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   applyToListing, prepareAnswers, type PipelineInput, type PreparedSubmission,
 } from '../src/features/job-search/autopilot/pipeline.js';
@@ -84,6 +90,26 @@ const input = (over: Partial<PipelineInput> = {}): PipelineInput => ({
 });
 
 beforeEach(() => { __resetHostExtPersistence(); initHostExtPersistence(openSqliteStorage(':memory:')); });
+afterEach(() => { vi.restoreAllMocks(); });
+
+/**
+ * Hold every caller of `applyGrants.listByPrefix` (the grant read, BEFORE the
+ * submission claim) until `n` have arrived, so the claims genuinely race.
+ * Falls through after 2 s so a sabotage cannot hang the case.
+ */
+function barrierOnGrantRead(n: number): { arrivals: () => number } {
+  let arrived = 0;
+  let open!: () => void;
+  const gate = new Promise<void>((res) => { open = res; });
+  const real = applyGrants.listByPrefix.bind(applyGrants);
+  vi.spyOn(applyGrants, 'listByPrefix').mockImplementation(async (prefix: string) => {
+    arrived += 1;
+    if (arrived >= n) open();
+    await Promise.race([gate, new Promise<void>((res) => setTimeout(res, 2_000))]);
+    return real(prefix);
+  });
+  return { arrivals: () => arrived };
+}
 
 describe('ADR 0545 P3 — the happy path', () => {
   it('applies once, answering from the bank', async () => {
@@ -157,6 +183,7 @@ describe('ADR 0545 P3 — idempotency, three mechanisms', () => {
     await seedAnswers();
     const g = await seedGrant();
     const submit = vi.fn(async (_p: PreparedSubmission) => ({ ok: true }));
+    const barrier = barrierOnGrantRead(3);
 
     const results = await Promise.all([
       applyToListing(input(), submit),
@@ -164,6 +191,7 @@ describe('ADR 0545 P3 — idempotency, three mechanisms', () => {
       applyToListing(input(), submit),
     ]);
 
+    expect(barrier.arrivals(), 'all three reached the grant read before any claimed').toBe(3);
     expect(results.filter((r) => r.kind === 'applied')).toHaveLength(1);
     expect(results.filter((r) => r.kind === 'already-applied')).toHaveLength(2);
     expect(submit).toHaveBeenCalledTimes(1);

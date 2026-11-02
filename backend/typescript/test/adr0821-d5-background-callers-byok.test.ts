@@ -40,6 +40,10 @@ import { getClassDefault } from '../src/providers/catalog.js';
 import { generateTitle } from '../src/features/chat-autotitle/titleGenerator.js';
 import { llmExtractFacts } from '../src/features/memory-auto-extract/memoryExtractor.js';
 
+/** ADR 1019 D3 — a conversation the managed tier served (the title rides its ladder). */
+const managedConv = (tenantId: string) => ({ tenantId, credentialRef: 'managed:openwop-free', served: { provider: 'openwop-free', model: 'openwop-free', managed: true as const } });
+
+
 const NOW = '2026-10-05T00:00:00.000Z';
 const PREV_EPHEMERAL = process.env.OPENWOP_BYOK_EPHEMERAL;
 const T = 'tnt:d5-background';
@@ -89,7 +93,7 @@ const googleCalls = () => urls.filter((u) => u.includes('generativelanguage.goog
 describe('ADR 0821 D5 — chat auto-title honours the BYOK text opt-in', () => {
   it('opt-in OFF (default): stays on managed, attributed to chat-autotitle', async () => {
     await bind();
-    expect(await generateTitle(T, 'plan a trip', 'sure')).toBe('Managed Title');
+    expect(await generateTitle(managedConv(T), 'plan a trip', 'sure')).toBe('Managed Title');
     expect(vi.mocked(dispatchManagedChat)).toHaveBeenCalledTimes(1);
     const req = vi.mocked(dispatchManagedChat).mock.calls[0]![0];
     expect(req).toMatchObject({ tenantId: T, featureId: 'chat-autotitle' });
@@ -98,7 +102,7 @@ describe('ADR 0821 D5 — chat auto-title honours the BYOK text opt-in', () => {
   });
 
   it('no BYOK binding at all: managed, attributed (the common tenant)', async () => {
-    expect(await generateTitle(T, 'plan a trip', 'sure')).toBe('Managed Title');
+    expect(await generateTitle(managedConv(T), 'plan a trip', 'sure')).toBe('Managed Title');
     expect(vi.mocked(dispatchManagedChat)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(dispatchManagedChat).mock.calls[0]![0]).toMatchObject({ featureId: 'chat-autotitle' });
     expect(googleCalls()).toEqual([]);
@@ -106,7 +110,7 @@ describe('ADR 0821 D5 — chat auto-title honours the BYOK text opt-in', () => {
 
   it('opt-in ON + usable key: the tenant key is called on its quick model, managed is never reached', async () => {
     await bind(true);
-    expect(await generateTitle(T, 'plan a trip', 'sure')).toBe('Trip Planning');
+    expect(await generateTitle(managedConv(T), 'plan a trip', 'sure')).toBe('Trip Planning');
     expect(vi.mocked(dispatchManagedChat), 'a managed dispatch = a managed draw + usage increment on a tenant that opted out of it').not.toHaveBeenCalled();
     const quick = getClassDefault('google', 'quick');
     expect(quick, 'providers.json must declare a google `quick` class default').toBeTruthy();
@@ -118,7 +122,7 @@ describe('ADR 0821 D5 — chat auto-title honours the BYOK text opt-in', () => {
   it('opt-in ON but the key no longer resolves: falls back to managed, metered', async () => {
     await bind(true);
     await removeSecret('gem', { tenantId: T });
-    expect(await generateTitle(T, 'plan a trip', 'sure')).toBe('Managed Title');
+    expect(await generateTitle(managedConv(T), 'plan a trip', 'sure')).toBe('Managed Title');
     expect(vi.mocked(dispatchManagedChat).mock.calls[0]![0]).toMatchObject({ featureId: 'chat-autotitle' });
     expect(googleCalls()).toEqual([]);
   });
@@ -126,7 +130,7 @@ describe('ADR 0821 D5 — chat auto-title honours the BYOK text opt-in', () => {
   it('opt-in ON and the tenant provider errors: no title (placeholder), never throws, managed NOT tried', async () => {
     await bind(true);
     googleStatus = 401;
-    await expect(generateTitle(T, 'plan a trip', 'sure')).resolves.toBeNull();
+    await expect(generateTitle(managedConv(T), 'plan a trip', 'sure')).resolves.toBeNull();
     expect(googleCalls(), 'the tenant key was tried exactly once').toHaveLength(1);
     expect(vi.mocked(dispatchManagedChat)).not.toHaveBeenCalled();
   });

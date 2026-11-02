@@ -1,21 +1,26 @@
 /**
- * End-to-end DAG executor tests. Drives executeRun() directly against the
- * in-memory storage + node registry — no HTTP harness — so each scenario
- * stays under 50ms.
+ * End-to-end DAG executor tests (TST-CUA-3). Drives executeRun() directly against
+ * the in-memory storage + node registry — no HTTP harness. The trigger-rule and
+ * condition ARITHMETIC is unit-tested in `scheduler.test.ts`; this file owns the
+ * executor WIRING: events emitted, run status mapped, nodes skipped or run.
  *
- * Covers:
+ * Covers (each red under the named sabotage):
  *   - Fan-out: 1 → {2, 3} parallel branches both run + emit completed events
- *   - Fan-in (all_success): converging node waits for every upstream
- *   - Fan-in (any_success): converging node fires on the first upstream
- *   - Error routing (any_failed): downstream fires only when an upstream fails
- *   - Suspend-on-branch: one branch suspends; the other completes; the run
- *     reaches `waiting-*` and pausedNodeIds contains the suspended id
- *   - Concurrency cap: with OPENWOP_MAX_CONCURRENT_NODES=1, ten parallel
- *     branches still drain (deterministically serializes)
- *   - Cycle rejection: a cyclic definition fails with cycle_detected
+ *   - Fan-in (all_success): the converging node waits for a SLOW upstream
+ *     (red when all_success fires on the first completion)
+ *   - Error routing (any_failed): downstream fires when an upstream fails and is
+ *     skipped when none does (red when any_failed stops firing, or always fires)
+ *   - Suspend-on-branch: the run reaches `waiting-approval` and pausedNodeIds
+ *     contains the suspended id (red when approval maps to another waiting kind)
+ *   - Edge condition: the truthy branch runs and the falsy branch is skipped
+ *     (red when the condition is ignored)
+ *   - Concurrency cap: with OPENWOP_MAX_CONCURRENT_NODES=1 at most one node is
+ *     in flight and the fan-out still drains (red when the knob is ignored)
+ *   - Cycle rejection: fails with cycle_detected before any node.* event
+ *   - Linear back-compat: no edges ⇒ an implicit chain in array order
  */
 
-import { describe, expect, it, beforeAll, beforeEach } from 'vitest';
+import { describe, expect, it, beforeAll } from 'vitest';
 import { executeRun } from '../src/executor/executor.js';
 import { getNodeRegistry } from '../src/executor/nodeRegistry.js';
 // eventLog backend is set via setEventLogBackend below; the executor reads
@@ -35,6 +40,10 @@ const storage: Storage = await openStorage('memory://');
 setEventLogBackend(storage);
 setSuspendBackend(storage);
 initInMemorySurfaces({ dataDir: mkdtempSync(join(tmpdir(), 'openwop-dag-')) });
+
+/** Concurrency witness for `test.delayed-passthrough` (reset by the case that reads it). */
+let inFlight = 0;
+let maxInFlight = 0;
 
 beforeAll(() => {
   const registry = getNodeRegistry();
@@ -66,12 +75,15 @@ beforeAll(() => {
       };
     },
   });
-  // Records its id for ordering checks.
+  // Records its id for ordering checks, and how many run at once.
   registry.register({
     typeId: 'test.delayed-passthrough',
     version: '1.0.0',
     async execute(ctx) {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
       await new Promise((r) => setTimeout(r, 5));
+      inFlight -= 1;
       const inputs = ctx.inputs as Record<string, unknown> | undefined;
       return {
         status: 'success',
@@ -124,11 +136,12 @@ describe('DAG: fan-out', () => {
 describe('DAG: fan-in', () => {
   it('all_success waits for every upstream', async () => {
     const run = await newRun('wf.fan-in-all');
+    // `b` is SLOW, so `a` completes first: only all_success holds `c` back for `b`.
     const def: WorkflowDefinition = {
       workflowId: 'wf.fan-in-all',
       nodes: [
         { nodeId: 'a', typeId: 'test.passthrough' },
-        { nodeId: 'b', typeId: 'test.passthrough' },
+        { nodeId: 'b', typeId: 'test.delayed-passthrough' },
         { nodeId: 'c', typeId: 'test.passthrough' },
       ],
       edges: [
@@ -173,15 +186,29 @@ describe('DAG: error routing with any_failed', () => {
     const events = await storage.listEvents(run.runId);
     expect(events.some((e) => e.type === 'node.failed' && e.nodeId === 'a')).toBe(true);
     expect(events.some((e) => e.type === 'node.completed' && e.nodeId === 'recover')).toBe(true);
+
+    // …and ONLY then: with every upstream succeeding, the error branch is skipped.
+    const ok = await newRun('wf.error-route-ok');
+    const okDef: WorkflowDefinition = {
+      workflowId: 'wf.error-route-ok',
+      nodes: [
+        { nodeId: 'a', typeId: 'test.passthrough' },
+        { nodeId: 'b', typeId: 'test.passthrough' },
+        { nodeId: 'recover', typeId: 'test.passthrough' },
+      ],
+      edges: [
+        { edgeId: 'e1', sourceNodeId: 'a', targetNodeId: 'recover', triggerRule: 'any_failed' },
+        { edgeId: 'e2', sourceNodeId: 'b', targetNodeId: 'recover', triggerRule: 'any_failed' },
+      ],
+    };
+    await executeRun(storage, ok, okDef);
+    const okEvents = await storage.listEvents(ok.runId);
+    expect(okEvents.filter((e) => e.type === 'node.completed').map((e) => e.nodeId).sort()).toEqual(['a', 'b']);
+    expect(okEvents.some((e) => e.nodeId === 'recover' && e.type === 'node.started')).toBe(false);
   });
 });
 
 describe('DAG: suspend on one branch', () => {
-  beforeEach(() => {
-    // Reset suspend manager state between tests so stale interrupts don't
-    // bleed across runs.
-  });
-
   it('one branch suspends, other completes; run reaches waiting-approval', async () => {
     // test.always-suspends emits kind=approval; finalize maps that to
     // 'waiting-approval' (regression guard from code-review #1).
@@ -218,6 +245,7 @@ describe('DAG: edge condition predicate (end-to-end)', () => {
       nodes: [
         { nodeId: 'a', typeId: 'test.passthrough' },
         { nodeId: 'pass', typeId: 'test.passthrough' },
+        { nodeId: 'blocked', typeId: 'test.passthrough' },
       ],
       edges: [
         {
@@ -226,18 +254,28 @@ describe('DAG: edge condition predicate (end-to-end)', () => {
           targetNodeId: 'pass',
           condition: { path: 'output', op: 'truthy' },
         },
+        {
+          edgeId: 'e2',
+          sourceNodeId: 'a',
+          targetNodeId: 'blocked',
+          condition: { path: 'output', op: 'falsy' },
+        },
       ],
     };
     const result = await executeRun(storage, run, def);
     expect(result.status).toBe('completed');
     const events = await storage.listEvents(run.runId);
     expect(events.some((e) => e.type === 'node.completed' && e.nodeId === 'pass')).toBe(true);
+    // a's output ({ hello: 'world' }) is truthy, so the falsy edge contributes nothing.
+    expect(events.some((e) => e.nodeId === 'blocked' && e.type === 'node.started')).toBe(false);
   });
 });
 
 describe('DAG: concurrency cap', () => {
   it('OPENWOP_MAX_CONCURRENT_NODES=1 still drains a fan-out of 5', async () => {
     process.env.OPENWOP_MAX_CONCURRENT_NODES = '1';
+    inFlight = 0;
+    maxInFlight = 0;
     try {
       const run = await newRun('wf.concurrency-cap');
       const def: WorkflowDefinition = {
@@ -264,6 +302,8 @@ describe('DAG: concurrency cap', () => {
         .filter((e) => e.type === 'node.completed')
         .map((e) => e.nodeId);
       expect(new Set(completed)).toEqual(new Set(['a', 'b1', 'b2', 'b3', 'b4', 'b5']));
+      // …serialized: the cap held every delayed sibling to one at a time.
+      expect(maxInFlight).toBe(1);
     } finally {
       delete process.env.OPENWOP_MAX_CONCURRENT_NODES;
     }

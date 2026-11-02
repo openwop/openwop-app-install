@@ -47,6 +47,8 @@ export interface BackendNode {
   compensation?: Record<string, unknown>;
   /** RFC 0151 §B UQ4 — "this effect has no inverse", forwarded verbatim. */
   irreversibleEffect?: boolean;
+  /** RFC 0082 §B (ADR 1005) — the node's agent binding, forwarded verbatim. */
+  agent?: Record<string, unknown>;
 }
 
 export interface BackendEdge {
@@ -334,6 +336,8 @@ function serializeExecutable(wf: SavedWorkflow): SerializeResult {
       // RFC 0151 §B UQ4 — emit "no inverse" back. Boolean, so the emptiness test
       // used above would be wrong here: `false` is a value the author wrote.
       ...(n.irreversibleEffect !== undefined ? { irreversibleEffect: n.irreversibleEffect } : {}),
+      // RFC 0082 §B (ADR 1005) — emit the agent binding back; the host keeps it.
+      ...(n.agent && Object.keys(n.agent).length > 0 ? { agent: n.agent } : {}),
     };
   });
 

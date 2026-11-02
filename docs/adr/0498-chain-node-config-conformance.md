@@ -148,6 +148,24 @@ Authored-conformant and expanded-broken are different states, and only the secon
 one runs. Measuring the first is what produced the dishonest 6 (see Correction
 record 2). Every count below is the expanded form.
 
+> **CORRECTED 2026-10-29 (grade-tests w67, TST-CCX-5) — the two ceilings below are
+> stale; the tables are kept as the 2026-07-28 record.** The live ceilings in
+> `backend/typescript/test/chain-config-conformance.test.ts`, as they stand at HEAD
+> (each is held two-sided by that file's "not stale" case, so the number IS the
+> measured count):
+>
+> - `MISSING_CONFIG_CEILING` = **50** (was 42; raised by ADR 0955 P5 for the
+>   campaign-journeys blueprints' required `eventName` / `from` params);
+> - `REQUIRED_INPUT_CEILING` = **7** (was 72; the 55 `notification-push` nodes were
+>   retargeted and the 10 `email-send` nodes bound — the residue is market-intel ×5,
+>   `storage.blob-put` and `http.webhook-verify`, re-measured 2026-10-29);
+> - `UNFILLABLE_INPUT_CEILING` = **5** (the GRD-5 rule over the expanded blank copy).
+>
+> That test's "ADR 0498 §Open quotes the live ceilings" case used to match the
+> literals `ceiling 42` / `ceiling 72`, so it passed while the ceilings moved. It now
+> reads the three constants and requires each to appear in this note in the form
+> above, so a ceiling that moves without this ADR following goes red.
+
 ### Missing required CONFIG — ceiling 42
 
 | Node type | Count | Nature |

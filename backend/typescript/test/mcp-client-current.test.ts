@@ -41,6 +41,7 @@ import {
   MCP_META_PROTOCOL_VERSION,
 } from '../src/host/mcpProfile.js';
 import type { Storage } from '../src/storage/storage.js';
+import { openStorage } from '../src/storage/index.js';
 
 interface Recorded {
   method: string;
@@ -141,7 +142,9 @@ class FakePeer {
   }
 }
 
-const storage = {} as Storage;
+/** A real memory store, not `{} as Storage`: the client only touches it to stamp a
+ *  run's connection use, and an untyped stand-in would hide any new read. */
+let storage: Storage;
 let peer: FakePeer;
 
 beforeAll(async () => {
@@ -151,6 +154,7 @@ beforeAll(async () => {
   // The peer is on loopback; the RFC 0093 egress guard refuses private targets
   // unless this is set, exactly as it does for the conformance boot.
   process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true';
+  storage = await openStorage('memory://');
   peer = new FakePeer();
   await peer.start();
 });
@@ -331,8 +335,15 @@ describe('RFC 0153 §C.1 — MRTR, host as client', () => {
         signal: controller.signal,
         elicitationResolver: async () => { controller.abort(); return { action: 'accept', content: { name: 'Ada' } }; },
       }).invokeTool(SERVER_ID, 'needs_input', {}),
-    ).rejects.toMatchObject({ code: 'mcp_cancelled' });
+    ).rejects.toMatchObject({
+      code: 'mcp_cancelled',
+      // WHICH guard fired. Without the post-gather check the retry is still sent
+      // into the aborted signal and reclassified `mcp_cancelled` by the transport
+      // (same code, same call count) — only the message tells them apart.
+      message: 'run cancelled while gathering MRTR input',
+    });
     expect(peer.calls.filter((c) => c.method === 'tools/call')).toHaveLength(1);
+    expect(peer.calls.some((c) => c.method === 'notifications/cancelled'), '§C.1: nothing further is sent').toBe(false);
   });
 
   it('the round bound stops a peer spinning one invocation forever', async () => {
@@ -340,8 +351,7 @@ describe('RFC 0153 §C.1 — MRTR, host as client', () => {
       client({ elicitationResolver: async () => ({ action: 'accept', content: {} }) }).invokeTool(SERVER_ID, 'never_satisfied', {}),
     ).rejects.toMatchObject({ code: 'mcp_mrtr_rounds_exceeded' });
     const calls = peer.calls.filter((c) => c.method === 'tools/call');
-    expect(calls.length).toBeLessThanOrEqual(4); // initial + MAX_MRTR_ROUNDS
-    expect(calls.length).toBeGreaterThan(1);
+    expect(calls).toHaveLength(4); // the initial call + MAX_MRTR_ROUNDS (3) retries
   });
 });
 

@@ -7,6 +7,10 @@
  * (vendored tarball) is itself degraded: six 1.106.0 always-on scenarios
  * ENOENT on prose the tarball omits. So on a mismatch the runner exports the
  * sibling at the pinned version's TAG. See conformance/conformanceRoot.ts.
+ *
+ * Tracker TST-CJA-9 (grade-tests w68). Red when: a version mismatch is treated as a
+ * match; an unreadable sibling version reads as matching; an explicit root stops
+ * winning; the tag naming changes; or a missing sibling stops reporting no-sibling.
  */
 import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';

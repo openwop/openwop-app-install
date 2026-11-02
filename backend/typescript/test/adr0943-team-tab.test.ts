@@ -13,14 +13,26 @@
  *     evals on, the latest COMPLETED run of the role's suite is its score;
  *   - a reader of another client gets the uniform 404.
  *
- * Sabotage notes (2026-10-20): read bindings tenant-wide instead of the
- * per-client prefix in `listAgentBindings` → red (B's binding shows on A).
- * Dropping only the in-memory org filter stays green, correctly: the prefix read
- * already scopes to the client, so the filter is a second guard; compute `canEdit` from the read predicate → red;
- * read evals without the access predicate → red (scores with evals off).
+ * DOUBLE GUARD (client isolation of bindings, `agentBindingService.ts`
+ * `listAgentBindings`): guard 1 is the per-client prefix read
+ * `listByPrefix(\`${tenantId}::${orgId}::\`)`, guard 2 the in-memory
+ * `.filter((b) => b.tenantId === tenantId && b.orgId === orgId)`. Dropping guard 2
+ * alone stays green (w73 probe `team-bindings-filteronly`, measured vacuous): the
+ * prefix already scopes the read. The one-edit probe that breaks BOTH (a
+ * tenant-wide prefix and a tenant-only filter, `team-bindings-tenantwide`) reds
+ * "shows a client's own binding" (measured witnessed, w73).
+ *
+ * Sabotages measured red (w73, `/grade-tests`): both binding guards in one edit;
+ * `canEdit` from the read predicate; the reader gate replaced by a bare user id;
+ * evals read without the access predicate (scores with evals off); the non-team
+ * pin row dropped; the suite filter dropped from the team list; and (round 2,
+ * asymmetric fixture) the `status !== 'completed'` filter in `latestEval` (a NEWER
+ * failed run then wins) and newest-first order (the OLDER completed run wins).
+ *
+ * Order-independent: case 1 reads a client of its own; the evals toggle is
+ * restored in `finally`.
  */
 import http from 'node:http';
-import type { AddressInfo } from 'node:net';
 import { randomBytes } from 'node:crypto';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -55,7 +67,7 @@ function cookieFor(userId: string, personalTenant: string): string {
   const now = Math.floor(Date.now() / 1000);
   return `__session=${signSession({ sid: randomBytes(12).toString('hex'), tenantId: TENANT, tier: 'user', userId, personalTenant, iat: now, exp: now + COOKIE_TTL_SECONDS })}`;
 }
-async function call<T = Record<string, unknown>>(cookie: string, method: string, path: string, body?: unknown): Promise<{ status: number; body: T; raw: string }> {
+async function call(cookie: string, method: string, path: string, body?: unknown): Promise<{ status: number; body: unknown; raw: string }> {
   const res = await fetch(`${BASE}/host/openwop-app/campaign-ops${path}`, {
     method, headers: { cookie, ...(body !== undefined ? { 'content-type': 'application/json' } : {}) },
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
@@ -63,11 +75,39 @@ async function call<T = Record<string, unknown>>(cookie: string, method: string,
   const raw = res.status === 204 ? '' : await res.text();
   let parsed: unknown;
   try { parsed = raw ? JSON.parse(raw) : undefined; } catch { parsed = undefined; }
-  return { status: res.status, body: parsed as T, raw };
+  return { status: res.status, body: parsed, raw };
+}
+type TeamRead = TeamView & { canEdit?: boolean };
+/** Narrows a parsed body to the Team view (a type guard, not a cast). */
+function isTeam(v: unknown): v is TeamRead {
+  return typeof v === 'object' && v !== null && 'members' in v && Array.isArray(v.members)
+    && 'evals' in v && typeof v.evals === 'object';
+}
+function team(r: { body: unknown; raw: string }): TeamRead {
+  if (!isTeam(r.body)) throw new Error(`not a Team view: ${r.raw}`);
+  return r.body;
+}
+function isErr(v: unknown): v is { error: string; message: string } {
+  return typeof v === 'object' && v !== null && 'error' in v && typeof v.error === 'string' && 'message' in v && typeof v.message === 'string';
+}
+function errOf(r: { body: unknown; raw: string }): { error: string; message: string } {
+  if (!isErr(r.body)) throw new Error(`not an error envelope: ${r.raw}`);
+  return { error: r.body.error, message: r.body.message };
 }
 async function setToggle(id: string, on: boolean): Promise<void> {
   const d = getToggleDefault(id);
   if (d) await saveConfig({ ...d, status: on ? 'on' : 'off' }, 'test');
+}
+async function restoreToggle(id: string): Promise<void> {
+  const d = getToggleDefault(id);
+  if (d) await saveConfig({ ...d }, 'test');
+}
+/** A client of the case's own (so no other case's binding can reach it). */
+async function freshClient(name: string): Promise<string> {
+  const orgId = (await createOrg({ tenantId: TENANT, createdBy: 'seed', name })).orgId;
+  const r = await call(adminCookie, 'POST', '/clients', { name, orgId });
+  if (r.status !== 201) throw new Error(`client create failed: ${r.status} ${r.raw}`);
+  return orgId;
 }
 
 /** The team per the packs: suite-carrying agents of the team packs. */
@@ -81,7 +121,10 @@ beforeAll(async () => {
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   storage = app.locals.storage;
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => res()); });
+  const addr = server.address();
+  if (addr === null || typeof addr === 'string') throw new Error('server has no TCP address');
+  BASE = `http://127.0.0.1:${addr.port}`;
   for (const id of ['cms', 'campaign-ops']) await setToggle(id, true);
   for (const pack of TEAM_PACKS) loadAgentsFromManifest(join(PACKS, pack));
   const base = { modelClass: 'general', systemPrompt: 'x', packName: 'test', packVersion: '0' } as const;
@@ -105,13 +148,15 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 
 describe('ADR 0943 P4 — the Team read', () => {
   it('lists every suite-carrying agent of the team packs, with no binding yet', async () => {
-    const r = await call<TeamView & { canEdit: boolean }>(adminCookie, 'GET', `/clients/${orgA}/team`);
+    const orgC = await freshClient(`Client C ${randomBytes(3).toString('hex')}`);
+    const r = await call(adminCookie, 'GET', `/clients/${orgC}/team`);
     expect(r.status, r.raw).toBe(200);
-    const team = teamFromPacks();
-    expect(team.length).toBe(10);
-    expect(r.body.members.filter((m) => m.role.teamRole).map((m) => m.role.agentId).sort()).toEqual(team);
-    expect(r.body.members.every((m) => m.binding === null)).toBe(true);
-    expect(r.body.canEdit).toBe(true);
+    const view = team(r);
+    const roles = teamFromPacks();
+    expect(roles.length).toBe(10);
+    expect(view.members.filter((m) => m.role.teamRole).map((m) => m.role.agentId).sort()).toEqual(roles);
+    expect(view.members.every((m) => m.binding === null)).toBe(true);
+    expect(view.canEdit).toBe(true);
   });
 
   it("shows a client's own binding on the role it overrides, never another client's", async () => {
@@ -122,27 +167,35 @@ describe('ADR 0943 P4 — the Team read', () => {
     getAgentRegistry().register({ modelClass: 'general', systemPrompt: 'x', packName: 'test', packVersion: '0', agentId: 'test.cs.b-writer', persona: 'B writer', toolAllowlist: [...pinTools] });
     const put = await call(adminCookie, 'PUT', `/clients/${orgB}/agent-bindings`, { pinnedAgentId: pin, agentId: 'test.cs.b-writer' });
     expect(put.status, put.raw).toBe(200);
-    const a = await call<TeamView>(adminCookie, 'GET', `/clients/${orgA}/team`);
-    expect(a.body.members.find((m) => m.role.agentId === pin)?.binding).toBeNull();
-    const b = await call<TeamView>(adminCookie, 'GET', `/clients/${orgB}/team`);
-    expect(b.body.members.find((m) => m.role.agentId === pin)?.binding).toMatchObject({ agent: { agentId: 'test.cs.b-writer', label: 'B writer' } });
+    const a = team(await call(adminCookie, 'GET', `/clients/${orgA}/team`));
+    expect(a.members.find((m) => m.role.agentId === pin)?.binding).toBeNull();
+    const b = team(await call(adminCookie, 'GET', `/clients/${orgB}/team`));
+    expect(b.members.find((m) => m.role.agentId === pin)?.binding).toMatchObject({ agent: { agentId: 'test.cs.b-writer', label: 'B writer' } });
   });
 
   it('a bound pin that is not a team role still gets a row', async () => {
     getAgentRegistry().register({ modelClass: 'general', systemPrompt: 'x', packName: 'test', packVersion: '0', agentId: 'test.cs.custom-replacement', persona: 'Custom replacement', toolAllowlist: [] });
     expect((await call(adminCookie, 'PUT', `/clients/${orgA}/agent-bindings`, { pinnedAgentId: CUSTOM_PIN, agentId: 'test.cs.custom-replacement' })).status).toBe(200);
-    const a = await call<TeamView>(adminCookie, 'GET', `/clients/${orgA}/team`);
-    const row = a.body.members.find((m) => m.role.agentId === CUSTOM_PIN);
+    const a = team(await call(adminCookie, 'GET', `/clients/${orgA}/team`));
+    const row = a.members.find((m) => m.role.agentId === CUSTOM_PIN);
     expect(row).toMatchObject({ role: { teamRole: false, label: 'Custom pin' }, binding: { agent: { agentId: 'test.cs.custom-replacement' } } });
   });
 
   it('canEdit follows the write predicate: a client-org reader sees the team but cannot edit', async () => {
-    const r = await call<TeamView & { canEdit: boolean }>(readerCookie, 'GET', `/clients/${orgA}/team`);
+    const r = await call(readerCookie, 'GET', `/clients/${orgA}/team`);
     expect(r.status, r.raw).toBe(200);
-    expect(r.body.canEdit).toBe(false);
+    expect(team(r).canEdit).toBe(false);
+    // A reader of the client is told it lacks the write scope (it can read the client).
     const put = await call(readerCookie, 'PUT', `/clients/${orgA}/agent-bindings`, { pinnedAgentId: CUSTOM_PIN, agentId: CUSTOM_PIN });
-    expect([403, 404]).toContain(put.status);
-    expect((await call(readerCookie, 'GET', `/clients/${orgB}/team`)).status).toBe(404);
+    expect(put.status, put.raw).toBe(403);
+    expect(errOf(put).error).toBe('forbidden_scope');
+    // Another client is the uniform 404: the same refusal as a client that does not exist.
+    const other = await call(readerCookie, 'GET', `/clients/${orgB}/team`);
+    const missing = await call(readerCookie, 'GET', `/clients/org-${randomBytes(4).toString('hex')}/team`);
+    expect(other.status, other.raw).toBe(404);
+    expect(missing.status, missing.raw).toBe(404);
+    expect(errOf(other)).toEqual({ error: 'not_found', message: 'Client not found.' });
+    expect(errOf(other)).toEqual(errOf(missing));
   });
 
   it('eval scores ride the evals access predicate: off ⇒ unavailable and null, on ⇒ the latest completed run', async () => {
@@ -151,21 +204,35 @@ describe('ADR 0943 P4 — the Team read', () => {
     const suite = manifest ? packSuiteFor(manifest) : null;
     if (!role || !suite) throw new Error('no team role with a suite loaded');
     const ref = suiteRef(suite);
-    const now = new Date().toISOString();
-    await storage.insertRun({
-      runId: `run-team-eval-${randomBytes(6).toString('hex')}`, workflowId: evalWorkflowId(ref), tenantId: TENANT, status: 'completed',
-      inputs: {}, configurable: {}, createdAt: now, updatedAt: now, completedAt: now,
-      metadata: { eval: { kind: 'agent-suite', suiteRef: ref, agentId: role }, evalSummary: { aggregateScore: 0.9, passed: true, passedCount: 9, taskCount: 10 } },
-    } as RunRecord);
+    // Asymmetric on purpose: an OLDER completed run (0.4), the LATEST completed run
+    // (0.9), and a NEWER failed run (0.1). `listRuns` reads newest-first
+    // (created_at DESC), so only "the latest COMPLETED" answers 0.9.
+    const base = Date.now();
+    const evalRun = (offsetMs: number, status: RunRecord['status'], score: number, passedCount: number): RunRecord => {
+      const at = new Date(base + offsetMs).toISOString();
+      return {
+        runId: `run-team-eval-${randomBytes(6).toString('hex')}`, workflowId: evalWorkflowId(ref), tenantId: TENANT, status,
+        inputs: {}, configurable: {}, createdAt: at, updatedAt: at, ...(status === 'completed' ? { completedAt: at } : {}),
+        metadata: { eval: { kind: 'agent-suite', suiteRef: ref, agentId: role }, evalSummary: { aggregateScore: score, passed: score >= 0.5, passedCount, taskCount: 10 } },
+      };
+    };
+    await storage.insertRun(evalRun(-2000, 'completed', 0.4, 4));
+    const latest = evalRun(-1000, 'completed', 0.9, 9);
+    await storage.insertRun(latest);
+    await storage.insertRun(evalRun(0, 'failed', 0.1, 1));
 
-    await setToggle('evals', false);
-    const off = await call<TeamView>(adminCookie, 'GET', `/clients/${orgA}/team`);
-    expect(off.body.evals).toMatchObject({ available: false });
-    expect(off.body.members.every((m) => m.role.eval === null)).toBe(true);
+    try {
+      await setToggle('evals', false);
+      const off = team(await call(adminCookie, 'GET', `/clients/${orgA}/team`));
+      expect(off.evals).toMatchObject({ available: false });
+      expect(off.members.every((m) => m.role.eval === null)).toBe(true);
 
-    await setToggle('evals', true);
-    const on = await call<TeamView>(adminCookie, 'GET', `/clients/${orgA}/team`);
-    expect(on.body.evals).toEqual({ available: true });
-    expect(on.body.members.find((m) => m.role.agentId === role)?.role.eval).toMatchObject({ suiteRef: ref, aggregateScore: 0.9, passed: true, passedCount: 9, taskCount: 10 });
+      await setToggle('evals', true);
+      const on = team(await call(adminCookie, 'GET', `/clients/${orgA}/team`));
+      expect(on.evals).toEqual({ available: true });
+      expect(on.members.find((m) => m.role.agentId === role)?.role.eval).toMatchObject({ suiteRef: ref, runId: latest.runId, aggregateScore: 0.9, passed: true, passedCount: 9, taskCount: 10 });
+    } finally {
+      await restoreToggle('evals');
+    }
   });
 });

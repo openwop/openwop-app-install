@@ -4,26 +4,26 @@
  * input; otherwise a new run starts. The actual resolve+resume rides the already-tested
  * host `resolveAndResume`, so this unit-tests the routing decision with a fake run store.
  */
-import http from 'node:http';
-import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createApp } from '../src/index.js';
+import { beforeAll, describe, expect, it } from 'vitest';
+import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { openStorage } from '../src/storage/index.js';
 import { pickResumeInterrupt, __setInboundSessionForTest, __resetInboundStore } from '../src/features/connections/inboundWebhooks.js';
 import { pairConnection, getPairing, sendOutbound, setMessagingTransport, __resetMessagingOutbound, type OutboundMessage } from '../src/features/connections/messagingOutbound.js';
+import type { RunStatus } from '../src/types.js';
 import type { Storage } from '../src/storage/storage.js';
 
-let server: http.Server;
+// The inbound-session and pairing stores are host-ext DurableCollections, so the
+// host-ext persistence is all this needs — not a full createApp boot (w72).
 beforeAll(async () => {
-  process.env.OPENWOP_STORAGE_DSN = 'memory://';
-  process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
-  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { void (server.address() as AddressInfo); res(); }); });
+  initHostExtPersistence(await openStorage('memory://'));
   await __resetInboundStore();
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-/** A fake Storage exposing just the two reads `pickResumeInterrupt` uses. */
-function fakeStorage(run: { status: string } | null, interrupts: { interruptId: string }[]): Storage {
+/** A fake Storage exposing just the two reads `pickResumeInterrupt` uses.
+ *  FIXTURE-HONESTY LIMIT (w72, recorded B†): `pickResumeInterrupt` takes the whole
+ *  `Storage`, so a two-method fake needs this one cast; the statuses it returns
+ *  are typed as the real `RunStatus`. */
+function fakeStorage(run: { status: RunStatus } | null, interrupts: { interruptId: string }[]): Storage {
   return {
     getRun: async () => run,
     listOpenInterrupts: async () => interrupts,
@@ -41,9 +41,12 @@ describe('pickResumeInterrupt (Phase 3)', () => {
     expect(res).toEqual({ runId: 'run:a', interruptId: 'int:1' });
   });
 
-  it('does NOT resume a terminal run (starts a new run instead)', async () => {
-    await __setInboundSessionForTest('conn:b', 'run:b');
-    expect(await pickResumeInterrupt(fakeStorage({ status: 'succeeded' }, [{ interruptId: 'int:x' }]), 'conn:b')).toBeNull();
+  // The app's REAL terminal statuses — the old fixture used 'succeeded', which
+  // this host never writes, so dropping 'completed' from the terminal set stayed
+  // green (w72 probe mgr-completed).
+  it.each(['completed', 'failed', 'cancelled'] as const)('does NOT resume a terminal run (%s) — starts a new run instead', async (status) => {
+    await __setInboundSessionForTest(`conn:b-${status}`, `run:b-${status}`);
+    expect(await pickResumeInterrupt(fakeStorage({ status }, [{ interruptId: 'int:x' }]), `conn:b-${status}`)).toBeNull();
   });
 
   it('does NOT resume when the run has no open interrupt', async () => {

@@ -95,6 +95,15 @@ describe('campaign-intel — nodes + agent', () => {
     expect(plain.outputs?.narrative).toBeUndefined();
     const narrated = await nodePack['feature.campaign-intel.nodes.budget-optimize']({ features, callAI: async () => ({ content: 'Shift Meta to Google.' }), inputs: { orgId: 'o1', narrate: true } });
     expect(narrated.outputs?.narrative).toBe('Shift Meta to Google.');
+    expect(narrated.outputs?.narrativeError).toBeUndefined();
+    // ADR 1022 (CP71WF-26) — a narrative that was asked for and failed is said;
+    // the deterministic recommendation still stands.
+    const failed = await nodePack['feature.campaign-intel.nodes.budget-optimize']({ features, callAI: async () => { throw Object.assign(new Error('provider down'), { code: 'provider_unavailable' }); }, inputs: { orgId: 'o1', narrate: true } });
+    expect(failed.status).toBe('success');
+    expect(failed.outputs).toMatchObject({ narrativeError: 'provider_unavailable', recommendation: { totalSpend: 2000 } });
+    expect(failed.outputs?.narrative).toBeUndefined();
+    const empty = await nodePack['feature.campaign-intel.nodes.budget-optimize']({ features, callAI: async () => ({ content: '  ' }), inputs: { orgId: 'o1', narrate: true } });
+    expect(empty.outputs?.narrativeError).toBe('empty_response');
   });
 
   it('plan-budget narrates from the host callAI `content` field (XCH-CI-1 regression)', async () => {

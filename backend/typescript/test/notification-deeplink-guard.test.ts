@@ -9,6 +9,11 @@ import { fileURLToPath } from 'node:url';
  * never a bare multi-entity parent tab (which drops the id and dumps the user on
  * a list to re-scan). This scans every emit site so a NEW entity notification
  * that regresses to `actionUrl: '/commerce'` fails the build.
+ *
+ * Non-vacuity (w73 g4): a regex or walker change that extracts NOTHING used to
+ * pass. The case now floors what it scanned — MEASURED at 9f4cca7d4: 47
+ * literal actionUrls in 39 src files — and requires one known entity-specific
+ * literal to be among them.
  */
 
 const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src');
@@ -54,10 +59,15 @@ function extractActionUrls(src: string): string[] {
 describe('notification deep-link guard (ADR 0336)', () => {
   it('no notification actionUrl is a bare multi-entity parent tab', () => {
     const offenders: string[] = [];
+    const scanned: string[] = [];
+    let filesWithUrls = 0;
     for (const file of walk(SRC)) {
       const src = readFileSync(file, 'utf8');
       if (!src.includes('actionUrl:')) continue;
-      for (const url of extractActionUrls(src)) {
+      const urls = extractActionUrls(src);
+      if (urls.length > 0) filesWithUrls++;
+      scanned.push(...urls);
+      for (const url of urls) {
         // An interpolated id (`${`) or a query string (`?`) is entity-specific.
         if (url.includes('${') || url.includes('?')) continue;
         if (!PARENT_TABS.has(url)) continue;
@@ -70,5 +80,8 @@ describe('notification deep-link guard (ADR 0336)', () => {
       `Bare parent-tab actionUrl(s) drop the entity id — point at the specific entity `
         + `(a ?param=<id> or /<entity>/<id>), per ADR 0336 §2:\n  ${offenders.join('\n  ')}`,
     ).toEqual([]);
+    expect(scanned.length).toBeGreaterThanOrEqual(47);
+    expect(filesWithUrls).toBeGreaterThanOrEqual(39);
+    expect(scanned).toContain('/campaign-brief?brief=${encodeURIComponent(brief.id)}');
   });
 });

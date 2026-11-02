@@ -27,7 +27,7 @@
  * `features/`; features push their chain-backed workflows here at boot.
  */
 
-import { getChain, expandChain } from './workflowChainPackLoader.js';
+import { getChain, expandChain, restoreBareParamNames } from './workflowChainPackLoader.js';
 import { recordOwnership } from './workflowOwnership.js';
 import { recordRevision, HOST_REVISION_TENANT } from './workflowRevisions.js';
 import { createLogger } from '../observability/logger.js';
@@ -45,6 +45,15 @@ const registry = new Map<string, WorkflowDefinition>();
  *  cannot be checked eagerly — `validateChainBackedSubChainBinds` sweeps them once boot
  *  registration completes. */
 const subChainBinds = new Map<string, ReadonlyArray<{ nodeId: string; childId: string }>>();
+
+/** What `registerLegacyDefsChainBacked` reads from a feature's in-tree source: the
+ *  stable id and each node's output role (restored onto the expansion-prefixed
+ *  node, every other role cleared). A full `WorkflowDefinition` satisfies it; a
+ *  feature whose chain pack is the whole definition ships only this (ADR 1020 D7). */
+export interface ChainBackedRoleMap {
+  workflowId: string;
+  nodes: ReadonlyArray<{ nodeId: string; outputRole?: 'primary' | 'secondary' }>;
+}
 
 export interface ChainBackedWorkflowOptions {
   /** Optional per-feature post-processor applied to the expanded definition before
@@ -80,62 +89,10 @@ export function buildChainBackedDefinition(
   const def = expandChain(entry.chain, { deferred: true });
   def.workflowId = chainId;
 
-  // Restore launch-contract param names (un-prefix the deferred-materialized names).
-  // Grade-trio fix: a bare `endsWith('_<param>')` collides when one param is a
-  // suffix of another (`count` also matches `<pfx>_retry_count`, renaming BOTH to
-  // `count`). Match params LONGEST-FIRST and consume each materialized variable
-  // exactly once, so `retry_count` claims its variable before `count` looks.
-  const props = (entry.chain.parameters as { properties?: Record<string, unknown> }).properties ?? {};
-  const required = new Set((entry.chain.parameters as { required?: string[] }).required ?? []);
-  const consumed = new Set<string>();
-  /** Every variable this loop MOVED: materialized name → the restored bare name. */
-  const renamed = new Map<string, string>();
-  for (const param of Object.keys(props).sort((a, b) => b.length - a.length)) {
-    for (const v of def.variables ?? []) {
-      if (consumed.has(v.name) || !v.name.endsWith(`_${param}`)) continue;
-      const materialized = v.name;
-      v.name = param;
-      consumed.add(param);
-      renamed.set(materialized, param);
-      if (required.has(param)) v.required = true;
-      for (const node of def.nodes) {
-        for (const [port, pv] of Object.entries(node.inputs ?? {})) {
-          const val = pv as { type?: unknown; variableName?: unknown };
-          if (val && val.type === 'variable' && val.variableName === materialized) {
-            (node.inputs as Record<string, unknown>)[port] = { type: 'variable', variableName: param };
-          }
-        }
-      }
-    }
-  }
-
-  // PODWF-1 (ADR 0603 §2) — the rename above moved `variables[]` and every node
-  // input, and left `metadata.deferredParameterAliases` (RFC 0124 G1 — bare param
-  // name → materialized variable name) pointing at the PRE-rename names. That map is
-  // what `deferredConfigurableInputs` translates a run's `configurable` overlay
-  // through, so `POST /v1/runs { configurable: { episodeId: 'ep_A' } }` wrote the key
-  // `podcasts_generate_<hash>_episodeId` — which NO declaration carries — and
-  // `seedRunVariables` dropped it. FAIL-OPEN, not fail-closed: `configurableSchema`
-  // is keyed by the BARE name so validation passes (no 400), the run starts, every
-  // node reads `undefined`, and the failure surfaces deep inside a node with an error
-  // that never names the parameter. MEASURED at 138/138 loaded chains carrying
-  // deferred params — the loader's own output was correct in all 138; this lane
-  // broke every one.
-  //
-  // MERGE the moved values through the rename map. NEVER replace the map: a
-  // `metadata = { ...src.metadata }` copy (the shape ten lines away in
-  // `registerMcpProjectionWorkflows`) DELETES the aliases for params this loop did
-  // not move, trading one silent no-op for another. An entry whose value was not
-  // renamed is left exactly as it was — this loop does not invent a mapping it did
-  // not make.
-  const aliases = def.metadata?.deferredParameterAliases;
-  if (renamed.size > 0 && aliases && typeof aliases === 'object' && !Array.isArray(aliases)) {
-    const map = aliases as Record<string, string>;
-    for (const [bare, varName] of Object.entries(map)) {
-      const moved = renamed.get(varName);
-      if (moved !== undefined) map[bare] = moved;
-    }
-  }
+  // Restore launch-contract param names (un-prefix the deferred-materialized
+  // names). ADR 1023 D2 — the ONE implementation, shared with the sub-chain child
+  // lane (`coRegisterSubChains`).
+  restoreBareParamNames(def, entry.chain);
 
   // RFC 0133 §1.2 — host-default sub-chain binding. A portable chain references a
   // child via `config.subChainRef` (the manifest FORBIDS a pinned `config.workflowId`

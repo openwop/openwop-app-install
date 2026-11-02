@@ -64,7 +64,6 @@ const DEFAULTS: Readonly<Record<string, boolean>> = {
   // the aiEnvelope acceptor (this whole codebase), so the honest
   // default is `true` — only conformance tests that exercise the
   // refusal path toggle it off via the capability-toggle seam.
-  'host.aiEnvelope.supported': true,
 };
 
 /** Resolve a capability flag, consulting the overlay first then the

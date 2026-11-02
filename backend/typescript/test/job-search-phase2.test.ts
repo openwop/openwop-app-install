@@ -9,12 +9,24 @@
  *  - JS-LANE-1 — `candidateGrantIds` hoists ONLY the discovery scan: consult
  *    re-reads rows fresh (a revocation AFTER prefetch is still seen), and a
  *    wrong-subject id cannot cross subjects.
+ *
+ * Tracker TST-DHC-5 (wave 71). Red when: an appended stage is capped onto
+ * `offer` (`w71g3-p2-beyond`); `pipelineFound` stops tracking the pipeline
+ * (`p2-found`); consult stops re-filtering by subject (`p2-subject`) or misses a
+ * revocation after prefetch (`p2-revoked`); a wrong grant frees a claim
+ * (`p2-release`); `runCampaign`'s discovery memo stops keying per subject
+ * (`p2-memo-r2` — the case now drives the REAL `runCampaign`).
+ * DOUBLE GUARD (recorded): the stage-rename case is held by both the write-time
+ * `toStagePosition` snapshot and the stable-`toStageId` index; no single edit
+ * reaches it.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { buildFunnelReport } from '../src/features/job-search/lifecycle/funnel.js';
 import { createApplication, advanceApplication, ensureApplicationPipeline, APPLICATION_PIPELINE_NAME } from '../src/features/job-search/domain/applications.js';
 import { listPipelines, updatePipeline } from '../src/features/crm/crmEntitiesService.js';
 import { createApplyGrant, consultApplyGrant, revokeApplyGrant, claimSubmission, releaseSubmission } from '../src/host/applyGrant.js';
+import { runCampaign, type CampaignItem } from '../src/features/job-search/autopilot/campaign.js';
+import type { JobDigest } from '../src/features/job-search/domain/digest.js';
 import { __resetHostExtPersistence, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
 
@@ -103,7 +115,8 @@ describe('JS-LIFE-2 — stage position, not stage name', () => {
 
 describe('JS-LANE-1 — the hoisted discovery scan reads rows FRESH', () => {
   const grantInput = (subjectId: string) => ({
-    tenantId: T, orgId: ORG, subjectId, grantedBy: 'user-auth',
+    tenantId: T, orgId: ORG, subjectId, grantedBy: subjectId, // DG-SEC-1: self-consent
+   
     campaignId: 'camp-1', maxSubmits: 5, maxPrepared: 5, ratePerHour: 4,
     origins: ['boards.example.com'], resumePolicy: 'default' as const,
     expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
@@ -134,7 +147,8 @@ describe('JS-LANE-1 — the hoisted discovery scan reads rows FRESH', () => {
 });
 
 const mkGrant = (subjectId: string) => ({
-  tenantId: T, orgId: ORG, subjectId, grantedBy: 'user-auth',
+  tenantId: T, orgId: ORG, subjectId, grantedBy: subjectId, // DG-SEC-1: self-consent
+   
   campaignId: 'camp-1', maxSubmits: 5, maxPrepared: 5, ratePerHour: 4,
   origins: ['boards.example.com'], resumePolicy: 'default' as const,
   expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
@@ -143,7 +157,7 @@ const mkGrant = (subjectId: string) => ({
 describe('grade-trio finding 1 — a claim never released is a job never retried', () => {
   it('releaseSubmission frees a claim so a later pass can retry; a wrong grantId cannot free it', async () => {
     const g = await createApplyGrant({
-      tenantId: T, orgId: ORG, subjectId: 'subj-1', grantedBy: 'user-auth',
+      tenantId: T, orgId: ORG, subjectId: 'subj-1', grantedBy: 'subj-1',
       campaignId: 'camp-1', maxSubmits: 5, maxPrepared: 5, ratePerHour: 4,
       origins: ['boards.example.com'], resumePolicy: 'default',
       expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
@@ -174,5 +188,20 @@ describe('grade-trio finding 2 — the discovery memo is per (tenant, subject, c
     });
     expect(a.allowed).toBe(true);
     expect(b.allowed).toBe(true);
+
+    // …and through the REAL memo: one runCampaign over a mixed-subject batch. A
+    // memo keyed on anything coarser than the triple hands subj-B subj-A's ids,
+    // which consult re-filters to nothing ⇒ `refused: no-grant` for subj-B.
+    const jobDigest = (id: string): JobDigest => ({ ...digest(id), dealId: `deal:${id}`, tenantId: T, version: 1 });
+    const item = (id: string, subjectId: string): CampaignItem => ({
+      listingId: id,
+      input: {
+        tenantId: T, orgId: ORG, subjectId, digest: jobDigest(id), profile: PROFILE, applicant: APPLICANT,
+        questions: [], minMatchScore: 0, campaignId: 'camp-1', origin: 'boards.example.com', isReplay: false, now: Date.now(),
+      },
+    });
+    const run = await runCampaign([item('mix-a', 'subj-A'), item('mix-b', 'subj-B')], async () => ({ ok: true }), Date.now());
+    expect(run.skipped).toEqual([]);
+    expect(run.applied).toEqual(['deal:mix-a', 'deal:mix-b']);
   });
 });

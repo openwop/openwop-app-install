@@ -10,6 +10,15 @@
  *  S3  a notification went to the resource owner / parent author without asking
  *      whether THEY can still see the resource, so a person removed from the
  *      organization was told the title of a page they can no longer open.
+ *
+ * TST-CFD-2. Red when: the chat_message resolver drops `isVisibleToAsync` (S1); the
+ * owning-feature entitlement check is dropped (S2); notification delivery stops
+ * checking membership AND target visibility (S3).
+ *
+ * DOUBLE GUARD (named, `deliverable()` in commentsService.ts): S3's removed member
+ * is refused by `members.has(userId)` AND by `resolveCommentTarget` for that person;
+ * the case reds with both removed (probe `r2-s3-deliverable`) and with the
+ * membership check alone removed (probe `r2-s3-members-only`).
  */
 
 import http from 'node:http';
@@ -50,8 +59,10 @@ function client() {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     const h = res.headers as { getSetCookie?: () => string[] };
     for (const c of (typeof h.getSetCookie === 'function' ? h.getSetCookie() : [])) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    const out: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out as T };
+    // Each call site names the shape it reads (`post<Posted>`, `get<ErrBody>`, …):
+    // the JSON is ASSIGNED to that type, not cast through `unknown`.
+    const out = (await res.json().catch(() => undefined)) as T; // a 204's empty body lands as undefined
+    return { status: res.status, body: out };
   };
   return {
     get: <T>(p: string) => call<T>('GET', p),
@@ -102,11 +113,14 @@ describe('S1 — a chat_message thread follows the conversation’s visibility',
 
     const peek = await other.get<ErrBody>(`${base}?resourceType=chat_message&resourceId=${encodeURIComponent(resourceId)}`);
     expect(peek.status, JSON.stringify(peek.body)).toBe(404);
+    expect(peek.body.error).toBe('not_found');
     const write = await other.post<ErrBody>(base, { resourceType: 'chat_message', resourceId, body: 'I was not invited' });
     expect(write.status, JSON.stringify(write.body)).toBe(404);
+    expect(write.body.error).toBe('not_found');
     // By id, too: resolve on someone else's private thread is the same 404.
     const resolve = await other.patch<ErrBody>(`${base}/${mine.body.commentId}`, { status: 'resolved' });
     expect(resolve.status).toBe(404);
+    expect(resolve.body.error).toBe('not_found');
   });
 });
 
@@ -127,8 +141,10 @@ describe('S2 — the OWNING feature’s entitlement gates its resources’ threa
       expect(getToggleDefault('creative-briefs'), 'the witness toggle must exist').toBeTruthy();
       const r = await owner.get<ErrBody>(read);
       expect(r.status, JSON.stringify(r.body)).toBe(404);
+      expect(r.body.error).toBe('not_found');
       const w = await owner.post<ErrBody>(base, { resourceType: 'creative_brief', resourceId: brief.briefId, body: 'x' });
       expect(w.status, JSON.stringify(w.body)).toBe(404);
+      expect(w.body.error).toBe('not_found');
     } finally { await setToggle('creative-briefs', 'off'); }
   });
 });

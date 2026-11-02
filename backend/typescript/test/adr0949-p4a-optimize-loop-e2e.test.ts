@@ -19,6 +19,16 @@
  * epoch and reds the fork assertions. Without the clock move it did not: a fork
  * inside the same epoch window is `too_soon` either way, which is why the clock
  * moves.
+ *
+ * DOUBLE GUARDS (w73 measured). (1) The fork's frozen instant is held twice: the
+ * experiments contributor returns nothing on a derived run (`runFreeze.ts`
+ * `derivedFromRun`) AND the run-start merge never overwrites a fork-copied key
+ * (`runStartContext.ts stampRunStartContext`, "fork-copied values win"). Dropping
+ * either alone stays green (probe oe-derived was vacuous); probe oe-derived-both
+ * breaks both in the merge. (2) "allocates nothing" is held by the early
+ * `epochs.some(epoch === n)` return AND the same check inside the row CAS
+ * (`experimentsService.ts optimizeEpoch`): oe-existing alone was vacuous,
+ * oe-existing-both (one edit over both) reds this case.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -30,7 +40,7 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { registerExperimentSurface } from '../src/host/experiments/adapters.js';
 import { getExperimentRow, mutateExperimentRow, putExperimentRow } from '../src/host/experiments/store.js';
 import { createDraft, launch } from '../src/features/experiments/experimentsService.js';
-import { EXPERIMENTS_RUN_KEY } from '../src/host/experiments/runFreeze.js';
+import { readExperimentsRunStamp } from '../src/host/experiments/runFreeze.js';
 import type { Storage } from '../src/storage/storage.js';
 import { bareRunId } from './support/bareRunId.js';
 
@@ -63,7 +73,7 @@ beforeAll(async () => {
     stop: async (e) => e,
     observe: async () => ({ units, coverage: 'complete', sourceRetainedSince: null }),
   });
-});
+}, 120_000);
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 interface JsonResponse<T> { status: number; body: T }
@@ -78,6 +88,15 @@ function client(): TestClient {
       return { status: res.status, body: decoded as T };
     },
   };
+}
+
+/** The optimize node's `outputs.outcome`, read without a cast. */
+function outcomeOf(payload: unknown): unknown {
+  if (payload && typeof payload === 'object' && 'outputs' in payload) {
+    const out = payload.outputs;
+    if (out && typeof out === 'object' && 'outcome' in out) return out.outcome;
+  }
+  return undefined;
 }
 
 /** Honest ceiling: a bounded poll on the real condition, not a fixed sleep. */
@@ -118,7 +137,7 @@ describe('ADR 0949 P4a — WF-EXP-1: optimize-loop through the real executor, th
     const runId: string = started.body.runId;
     expect(await waitTerminal(runId)).toBe('completed');
     const source = (await storage.getRun(bareRunId(runId)))!;
-    const asOf = (source.metadata as Record<string, { asOf?: string }>)[EXPERIMENTS_RUN_KEY]?.asOf;
+    const asOf = readExperimentsRunStamp(source.metadata)?.asOf;
     expect(asOf).toMatch(/^\d{4}-/);
     const afterRun = (await getExperimentRow(tenantId, orgId, d.experimentId))!;
     expect(afterRun.epochs).toHaveLength(2);
@@ -145,11 +164,10 @@ describe('ADR 0949 P4a — WF-EXP-1: optimize-loop through the real executor, th
     // The fork RE-EXECUTED the node (branch mode, from the start): its output is
     // the surface's `existing` at the source's frozen instant, not a copy of the
     // source's `appended`.
-    const forkEvents = JSON.stringify(await storage.listEvents(bareRunId(forkId!), { fromSeq: -1, limit: 10_000 }));
-    expect(forkEvents).toContain('"outcome":"existing"');
-    expect(forkEvents).not.toContain('"outcome":"appended"');
+    const forkEvents = await storage.listEvents(bareRunId(forkId!), { fromSeq: -1, limit: 10_000 });
+    expect(forkEvents.filter((e) => e.type === 'node.completed').map((e) => outcomeOf(e.payload)).filter((o) => o !== undefined)).toEqual(['existing']);
     // The fork carries the source's frozen instant verbatim…
-    expect((fork.metadata as Record<string, { asOf?: string }>)[EXPERIMENTS_RUN_KEY]?.asOf).toBe(asOf);
+    expect(readExperimentsRunStamp(fork.metadata)?.asOf).toBe(asOf);
     // …so it finds the epoch already appended: zero new allocations.
     const afterFork = (await getExperimentRow(tenantId, orgId, d.experimentId))!;
     expect(afterFork.epochs).toEqual(afterRun.epochs);

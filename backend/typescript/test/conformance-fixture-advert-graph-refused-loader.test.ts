@@ -3,7 +3,17 @@
  * (suite 2.43.1): the loader in `host/index.ts` loads
  * `conformance-approval-reject-loopback`, and `fixtures[]` must not offer it,
  * because the executor refuses its graph (`cycle_detected`). Its DAG siblings
- * from the same scenario stay advertised.
+ * from the same scenario stay advertised. Corpus: suite 2.43.1, openwop#1697.
+ *
+ * Tracker: TST-CGK-4. Red when `fixtureIsAdvertisable` (host/index.ts) stops
+ * withholding a graph `fixtureGraphRefused` rejects, or when the withholding
+ * spreads to the DAG siblings (the two positive controls).
+ *
+ * DEDUPE-NEEDS-HUMAN-ASK (TST-CGK-4b): the negative half is also asserted by
+ * conformance-fixture-advert-graph-refused.test.ts case 3 ("over every vendored
+ * fixture, the predicate withholds exactly the graphs the executor refuses"), which
+ * reds under the same sabotage. The sibling positive controls are unique to this
+ * file. Both files are protected advert tests; kept by ruling.
  */
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';

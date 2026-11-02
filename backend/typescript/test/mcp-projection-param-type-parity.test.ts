@@ -40,6 +40,14 @@
  * SIGNAL: the counts in the fixture guard. A drop in `pairsChecked` or
  * `chainsScanned` is this file going quiet, which is indistinguishable from it
  * passing unless the guard asserts the floor.
+ *
+ * CORRECTED 2026-10-31 (grade-tests w72): the "real values at ADR 0602" quoted
+ * below are stale. MEASURED at 85fba5fa8: 30 projections (campaign-studio x7 and
+ * claude-code x4 landed since), 54 param/inputSchema pairs, 10 non-string pairs,
+ * 19 generator workflows (notebooks 8, docs 2, ucp 2, app-builder 7), all 19
+ * matched. The floors (>15, >25, >6, >15) are left as they are — a baseline
+ * change is a human decision (TST-DLH-4 floor-slack row). The 11 newer
+ * projections have no in-tree generator in the deep-compare describe.
  */
 import { describe, expect, it } from 'vitest';
 import { existsSync, readdirSync } from 'node:fs';

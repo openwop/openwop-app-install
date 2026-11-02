@@ -109,6 +109,16 @@ describe('ADR 0840 §B — the frame document', () => {
     expect(sandbox).not.toContain('allow-same-origin');
     expect(csp.get('default-src')).toEqual(["'none'"]);
     expect(csp.has('connect-src')).toBe(false);
+    expect(csp.get('form-action')).toEqual(["'none'"]);
+  });
+
+  it('the vendor entry route sandboxes too: plugin HTML never runs as the host origin (ADR 1021)', async () => {
+    const r = await fetch(`${base}/host/openwop-app/ui-plugin/packs/${encodeURIComponent(PACK)}/plugins/${PLUGIN}/entry`, { headers: asProtocol });
+    expect(r.status).toBe(200);
+    expect(await r.text()).toContain('narrow-plugin-body');
+    const csp = parseCsp(r.headers.get('content-security-policy'));
+    expect(csp.get('sandbox')).toEqual(['allow-scripts']);
+    expect(csp.get('default-src')).toEqual(["'none'"]);
   });
 
   it('an unknown plugin is 404', async () => {

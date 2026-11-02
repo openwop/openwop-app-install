@@ -22,12 +22,18 @@
  *
  * So this pins the PRODUCTION path specifically: with the package unresolvable,
  * the image stamp must still produce a provenance.
+ *
+ * TST-CKA-7. Red when: the stamp reader accepts a non-version string (case 3) or
+ * invents a version for an absent stamp (case 2), the OPENWOP_BUILD_META_DIR seam is
+ * ignored (case 4), the image-stamp fallback is dropped (case 5), or the package
+ * stamp stops winning (case 7).
  */
 import { describe, expect, it, afterEach } from 'vitest';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readImageCorpusSuite, contractProvenanceSuiteVersion } from '../src/host/buildInfo.js';
+import { chooseProvenance } from '../src/host/contractProvenance.js';
 
 const dirs: string[] = [];
 const stampDir = (contents: string | null): string => {
@@ -69,21 +75,18 @@ describe('RFC 0146 — the image stamp carries provenance past `npm ci --omit=de
     expect(contractProvenanceSuiteVersion()).toBe('1.106.0');
   });
 
-  it('THE PRODUCTION CASE — package unresolvable, image stamp still yields provenance', async () => {
+  it('THE PRODUCTION CASE — package unresolvable, image stamp still yields provenance', () => {
     // Asserted through the PURE choice, because the inline version could not
     // fail: in a dev tree the package resolves, so the fallback never ran and
     // deleting it left the test green. This drives the branch directly.
-    const { chooseProvenance } = await import('../src/host/contractProvenance.js');
     expect(chooseProvenance(undefined, '1.106.0')).toEqual({ suiteVersion: '1.106.0' });
   });
 
-  it('neither source ⇒ OMIT, never a guess', async () => {
-    const { chooseProvenance } = await import('../src/host/contractProvenance.js');
+  it('neither source ⇒ OMIT, never a guess', () => {
     expect(chooseProvenance(undefined, null)).toBeUndefined();
   });
 
-  it('the package stamp WINS when present — it carries corpusCommit too', async () => {
-    const { chooseProvenance } = await import('../src/host/contractProvenance.js');
+  it('the package stamp WINS when present — it carries corpusCommit too', () => {
     const full = { suiteVersion: '1.106.0', corpusCommit: 'a'.repeat(40) };
     expect(chooseProvenance(full, '9.9.9')).toEqual(full);
   });

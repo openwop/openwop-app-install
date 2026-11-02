@@ -32,6 +32,10 @@
  * IF THIS GOES RED, the fix is NOT to widen the allowlist. Either stop routing
  * that type through the non-emitting path, or stop advertising `store: true` for
  * it — the advert is a wire promise, and a red here means the promise became false.
+ *
+ * TST-BZD-25 (grade-tests w66). Red when `store: true` is advertised for a type that
+ * reaches the non-emitting envelope path, or the documents pack stops being the one
+ * emitter. Non-vacuity floor `routed.length > 5`; measured 8 at w66 (left as is).
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, dirname, relative } from 'node:path';

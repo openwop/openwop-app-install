@@ -5,6 +5,9 @@
  * worked). Pins: fall back ONLY on model-availability codes, only when a
  * distinct fallback exists, exactly one extra attempt, and success/other
  * errors pass straight through.
+ *
+ * TST-CKC-2. Red when: a same-model "fallback" retries, a non-availability code
+ * falls back, or the fallback result is attributed to the primary model.
  */
 import { describe, it, expect, vi } from 'vitest';
 import { runLoopWithBumpFallback, MODEL_FALLBACK_ERROR_CODES } from '../src/host/conversationToolLoop.js';
@@ -39,9 +42,11 @@ describe('runLoopWithBumpFallback', () => {
 
   it('never falls back without a distinct fallback model', async () => {
     const runOnce = vi.fn(async () => err('provider_rate_limited'));
-    await runLoopWithBumpFallback(runOnce, 'pro', null);
-    await runLoopWithBumpFallback(runOnce, 'pro', 'pro');
+    const none = await runLoopWithBumpFallback(runOnce, 'pro', null);
+    const same = await runLoopWithBumpFallback(runOnce, 'pro', 'pro');
     expect(runOnce).toHaveBeenCalledTimes(2); // one attempt each, no retries
+    expect(none).toEqual({ result: err('provider_rate_limited'), modelUsed: 'pro' });
+    expect(same).toEqual({ result: err('provider_rate_limited'), modelUsed: 'pro' });
   });
 
   it('never falls back on non-availability failures', async () => {

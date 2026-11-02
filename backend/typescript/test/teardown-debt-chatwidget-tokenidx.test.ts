@@ -35,6 +35,7 @@ import {
   registerTenantPurgeHook,
 } from '../src/host/hostExtPersistence.js';
 import { provisionWidget, purgeTenantWidgetTokens } from '../src/features/chat-widget/widgetService.js';
+import { stripComments } from './helpers/stripComments.js';
 
 // B is a proper prefix-extension of A (`org:cw` vs `org:cw2`): the `${tenantId}:`
 // trailing colon is the only thing that stops A's purge from eating B's widgets.
@@ -78,11 +79,7 @@ describe('teardown-debt chat-widget token index — reachable via the tenant pur
   });
 
   it('feature.ts wires the purge hook (comment-stripped match)', () => {
-    const featureSrc = readFileSync(join(__dirname, '..', 'src', 'features', 'chat-widget', 'feature.ts'), 'utf8')
-      .replace(/\/\*[\s\S]*?\*\//g, '')
-      .split('\n')
-      .map((line) => line.replace(/\/\/.*$/, ''))
-      .join('\n');
+    const featureSrc = stripComments(readFileSync(join(__dirname, '..', 'src', 'features', 'chat-widget', 'feature.ts'), 'utf8'));
     expect(featureSrc).toMatch(/registerTenantPurgeHook\(\s*['"]chat-widget['"]\s*,\s*purgeTenantWidgetTokens\s*\)/);
   });
 });

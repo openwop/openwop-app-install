@@ -7,6 +7,19 @@
  * 0289 onward-sync WORKFLOW (with `claimIgnition` dedup) and the GOVERNED ADR
  * 0292 `warehouseLoad` whose `approval-required` gate stays intact. Boots the
  * REAL app (the registration seam is what's under test).
+ *
+ * TST-CVC-8. Red when: `list` returns syncs without an acting user or with the
+ * feature off (each case seeds a sync FIRST and shows it listed for an acting
+ * user with the toggle on, so an empty list is the guard's doing, not an empty
+ * store — `runListTool`'s two early returns are the only guards on that path),
+ * `ignitable` is set for a non-chat destination, dry-run or run skip the acting-
+ * user / toggle refusals, dry-run stops field-mapping (exact payload, the
+ * unmapped field dropped), run stops refusing an unsupported kind, the ignition
+ * dedup is skipped, or a warehouse load stops minting a PENDING approval (read
+ * back from the approval store).
+ *
+ * The `destination-sync` toggle is GLOBAL (`saveConfig` is not tenant-scoped):
+ * every case sets it in `beforeEach`, and an "off" case restores it in `finally`.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -21,6 +34,7 @@ import {
 import { createDestinationSync } from '../src/features/destination-sync/destinationSyncService.js';
 import { __resetIgnitionClaims } from '../src/host/ignitionGuard.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
+import { getApproval } from '../src/host/approvalService.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 
 const TENANT = 'default';
@@ -35,7 +49,7 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-beforeEach(async () => { await __resetIgnitionClaims(); });
+beforeEach(async () => { await __resetIgnitionClaims(); await setToggle('on'); });
 
 const setToggle = async (status: 'on' | 'off'): Promise<void> => {
   const d = getToggleDefault('destination-sync');
@@ -55,23 +69,35 @@ describe('destination-sync agent tools — registration + gating', () => {
     }
   });
 
+  /** Seed a sync and prove an acting user with the toggle on SEES it — the
+   *  positive control that makes an empty list below the guard's doing. */
+  async function seedVisibleSync(name: string): Promise<void> {
+    await createDestinationSync({ tenantId: TENANT, name, destinationKind: 'webhook', sourceObject: 'contact', fieldMap: [{ from: 'email', to: 'Email' }] });
+    const control = await provider({ actingUserId: USER }).executeTool({ name: DESTINATION_SYNC_LIST_TOOL_ID, input: {} });
+    const listed = parse(control.content) as { syncs: Array<{ name: string }> };
+    expect(listed.syncs.map((s) => s.name)).toContain(name);
+  }
+
   it('list fails EMPTY without an acting user (no leak)', async () => {
-    await setToggle('on');
+    await seedVisibleSync('Leak probe (anon)');
     const out = await provider().executeTool({ name: DESTINATION_SYNC_LIST_TOOL_ID, input: {} });
     expect(out.isError).toBeFalsy();
     expect(parse(out.content)).toEqual({ syncs: [] });
   });
 
   it('list fails EMPTY when the feature is disabled', async () => {
+    await seedVisibleSync('Leak probe (toggle off)');
     await setToggle('off');
-    const out = await provider({ actingUserId: USER }).executeTool({ name: DESTINATION_SYNC_LIST_TOOL_ID, input: {} });
-    expect(out.isError).toBeFalsy();
-    expect(parse(out.content)).toEqual({ syncs: [] });
-    await setToggle('on');
+    try {
+      const out = await provider({ actingUserId: USER }).executeTool({ name: DESTINATION_SYNC_LIST_TOOL_ID, input: {} });
+      expect(out.isError).toBeFalsy();
+      expect(parse(out.content)).toEqual({ syncs: [] });
+    } finally {
+      await setToggle('on');
+    }
   });
 
   it('list returns configured syncs for an acting user', async () => {
-    await setToggle('on');
     await createDestinationSync({ tenantId: TENANT, name: 'Webhook out', destinationKind: 'webhook', sourceObject: 'contact', fieldMap: [{ from: 'email', to: 'Email' }] });
     const out = await provider({ actingUserId: USER }).executeTool({ name: DESTINATION_SYNC_LIST_TOOL_ID, input: {} });
     const parsed = parse(out.content) as { syncs: Array<{ name: string; fieldCount: number; ignitable: boolean }> };
@@ -88,14 +114,14 @@ describe('destination-sync agent tools — registration + gating', () => {
   });
 
   it('dry-run previews the field-mapped payload', async () => {
-    await setToggle('on');
     const sync = await createDestinationSync({ tenantId: TENANT, name: 'Map', destinationKind: 'webhook', sourceObject: 'contact', fieldMap: [{ from: 'email', to: 'Email' }, { from: 'name', to: 'Name' }] });
     const out = await provider({ actingUserId: USER }).executeTool({
       name: DESTINATION_SYNC_DRY_RUN_TOOL_ID,
       input: { syncId: sync.syncId, sample: { email: 'a@b.c', name: 'Ada', extra: 'dropped' } },
     });
     expect(out.isError).toBeFalsy();
-    expect(parse(out.content)).toMatchObject({ syncId: sync.syncId, mapped: { Email: 'a@b.c', Name: 'Ada' } });
+    // Exact: the unmapped `extra` field is dropped, nothing else is added.
+    expect(parse(out.content)).toEqual({ syncId: sync.syncId, mapped: { Email: 'a@b.c', Name: 'Ada' } });
   });
 });
 
@@ -108,14 +134,16 @@ describe('destination-sync agent tools — run ignition', () => {
 
   it('run fails TYPED when the feature is disabled', async () => {
     await setToggle('off');
-    const out = await provider({ actingUserId: USER }).executeTool({ name: DESTINATION_SYNC_RUN_TOOL_ID, input: { syncId: 'x' } });
-    expect(out.isError).toBe(true);
-    expect(parse(out.content)).toMatchObject({ error: 'feature_disabled' });
-    await setToggle('on');
+    try {
+      const out = await provider({ actingUserId: USER }).executeTool({ name: DESTINATION_SYNC_RUN_TOOL_ID, input: { syncId: 'x' } });
+      expect(out.isError).toBe(true);
+      expect(parse(out.content)).toMatchObject({ error: 'feature_disabled' });
+    } finally {
+      await setToggle('on');
+    }
   });
 
   it('run refuses a non-ignitable destination kind (typed)', async () => {
-    await setToggle('on');
     const sync = await createDestinationSync({ tenantId: TENANT, name: 'ESP', destinationKind: 'esp', sourceObject: 'contact', fieldMap: [{ from: 'email', to: 'Email' }] });
     const out = await provider({ actingUserId: USER }).executeTool({ name: DESTINATION_SYNC_RUN_TOOL_ID, input: { syncId: sync.syncId } });
     expect(out.isError).toBe(true);
@@ -123,7 +151,6 @@ describe('destination-sync agent tools — run ignition', () => {
   });
 
   it('run ignites the onward-sync workflow for an openwop-host sync; a duplicate call reuses the run', async () => {
-    await setToggle('on');
     // Loopback peer URL — the background http.fetch egress is SSRF-blocked, so no
     // real network is touched; only the ignition path is under test.
     const sync = await createDestinationSync({
@@ -144,7 +171,6 @@ describe('destination-sync agent tools — run ignition', () => {
   });
 
   it('run on a warehouse sync flows through the approval gate (no silent write)', async () => {
-    await setToggle('on');
     const sync = await createDestinationSync({
       tenantId: TENANT, name: 'BQ', destinationKind: 'warehouse', sourceObject: 'contact',
       fieldMap: [{ from: 'email', to: 'email' }], connectionId: 'conn-bq', project: 'p', dataset: 'd', table: 't',
@@ -159,5 +185,9 @@ describe('destination-sync agent tools — run ignition', () => {
     // load returns a pending approval, it does NOT insert.
     expect(parsed.status).toBe('requires_approval');
     expect(typeof parsed.approvalId).toBe('string');
+    // The gate minted a real PENDING approval in this tenant — read it back.
+    const approval = await getApproval(parsed.approvalId!);
+    expect(approval?.tenantId).toBe(TENANT);
+    expect(approval?.status).toBe('pending');
   });
 });

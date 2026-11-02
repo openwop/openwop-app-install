@@ -26,6 +26,10 @@
  *
  * None of the seven reaches `ctx.callAI`, so all seven are fast-path SERVED, not
  * held back as invocation-log nodes.
+ *
+ * TST-DJE-5 (grade-tests wave 71). Red when (wave 71): a writer is declared
+ * `action`, a writer drops out of MANIFEST_FAST_PATH_SERVED, the packPins pin lags
+ * the manifest version, or the remind-today input schema loses `ownerSubject`.
  */
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -70,8 +74,8 @@ describe('KT-PACK-REPLAY-1 — KickTodo node replay classification', () => {
     for (const f of ['accountability', 'commerce', 'community', 'core', 'creator', 'engagement', 'integrations', 'metrics', 'organizations']) {
       const src = readFileSync(join(REPO, 'backend', 'typescript', 'src', 'features', `kicktodo-${f}`, 'feature.ts'), 'utf8');
       expect(src, `kicktodo-${f} pin lags the manifest`).toContain(`'feature.kicktodo.nodes'`);
-      expect(pinnedPackRef('feature.kicktodo.nodes').version, 'the pin (features/packPins.ts, ADR 0919) must match the manifest').toBe(PACK.version);
     }
+    expect(pinnedPackRef('feature.kicktodo.nodes').version, 'the pin (features/packPins.ts, ADR 0919) must match the manifest').toBe(PACK.version);
   });
 
   it('leg 4: remind-today schemas describe the node it documents (input ownerSubject, output reminded/reason)', () => {

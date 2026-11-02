@@ -25,7 +25,7 @@
  * expects a NON-empty result and would fail rather than pass vacuously.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { bareRunId } from './support/bareRunId.js';
 import type { AddressInfo } from 'node:net';
 import type { Express } from 'express';
@@ -40,7 +40,7 @@ import {
   labelViolations,
   type MetricEmission,
 } from '../src/observability/metrics.js';
-import { _resetRunStartsForTest } from '../src/observability/metricSeams.js';
+import { _resetRunStartsForTest, recordRunStarted, recordRunTerminal } from '../src/observability/metricSeams.js';
 import { canonicalRequestDigest } from '../src/host/idempotentResponse.js';
 import type { Storage } from '../src/storage/storage.js';
 
@@ -136,13 +136,13 @@ async function api<T = Record<string, unknown>>(
   return { status: res.status, body: (text ? JSON.parse(text) : {}) as T };
 }
 
+/** Wait for a terminal (or suspended) status — a condition, not a fixed sleep. */
 async function settle(runId: string): Promise<string> {
   let status = 'pending';
-  for (let i = 0; i < 160; i++) {
-    await new Promise((r) => setTimeout(r, 25));
+  await vi.waitFor(async () => {
     status = (await api<{ status: string }>(`/runs/${runId}`)).body.status;
-    if (['completed', 'failed', 'cancelled', 'awaiting-input'].includes(status)) break;
-  }
+    expect(['completed', 'failed', 'cancelled', 'awaiting-input']).toContain(status);
+  }, { timeout: 10_000, interval: 25 });
   return status;
 }
 
@@ -189,6 +189,14 @@ describe('ADR 0556 P1 — SUCCESS: a run that completes', () => {
     expect(durations[0]!.value).toBeLessThan(60);
 
     expect(attrsOf('openwop.node.duration')).toEqual([{ status: 'success', replayed: false }]);
+
+    // SECONDS, pinned exactly at the seam with an injected clock: the `< 60`
+    // bound above is also satisfied by a millisecond value for any run under
+    // 60 ms (w72 probe mgt-seconds was vacuous). 1 500 ms of wall time ⇒ 1.5.
+    _resetMetricsForTest();
+    recordRunStarted({ runId: 'golden-seconds-probe', kind: 'builtin', trigger: 'api', nowMs: 1_000_000 });
+    recordRunTerminal('golden-seconds-probe', 'completed', 1_001_500);
+    expect(emissionsOf('openwop.run.duration').map((e) => e.value)).toEqual([1.5]);
   });
 
   it('records HTTP latency by ROUTE TEMPLATE, never the resolved path', async () => {

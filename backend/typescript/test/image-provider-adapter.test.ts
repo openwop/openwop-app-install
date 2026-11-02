@@ -1,11 +1,20 @@
 /**
  * ADR 0115 Phase 3 — external image-provider adapter (SSRF-guarded, §D-scrubbed).
+ *
+ * TST-DGC-7. Red when an endpoint alone (no operator opt-in) counts as
+ * configured, when per-provider endpoint or key routing is dropped, when the
+ * prompt is not forwarded, and when the deny-host SSRF check is removed. The
+ * SSRF leg uses an HTTPS metadata URL so the separate `http:` →
+ * `image_provider_insecure` guard cannot satisfy it; that second guard has its
+ * own leg (sabotage-witnessed, wave 71).
  */
 import { describe, it, expect, afterEach, beforeAll, afterAll } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { dispatchImageGeneration, imageProviderConfigured } from '../src/host/imageProviderAdapter.js';
 
+/** The loopback provider's path (one literal, reused). */
+const IMAGES_PATH = '/v1/images';
 let server: http.Server;
 let PORT = 0;
 let lastBody: unknown = null;
@@ -36,6 +45,10 @@ afterEach(() => {
 describe('imageProviderConfigured', () => {
   it('is false unless opted-in AND an endpoint is wired', () => {
     expect(imageProviderConfigured()).toBe(false);
+    // An endpoint WITHOUT the opt-in is not configured.
+    process.env.OPENWOP_IMAGE_PROVIDER_ENDPOINT = 'https://images.example';
+    expect(imageProviderConfigured()).toBe(false);
+    delete process.env.OPENWOP_IMAGE_PROVIDER_ENDPOINT;
     process.env.OPENWOP_IMAGE_PROVIDER_ENABLED = 'true';
     expect(imageProviderConfigured()).toBe(false); // no endpoint
     process.env.OPENWOP_IMAGE_PROVIDER_ENDPOINT = 'https://images.example';
@@ -45,12 +58,13 @@ describe('imageProviderConfigured', () => {
 
 describe('dispatchImageGeneration', () => {
   it('POSTs the prompt + returns the base64 image (loopback, allow-private)', async () => {
-    process.env.OPENWOP_IMAGE_PROVIDER_ENDPOINT = `http://127.0.0.1:${PORT}/v1/images`;
+    process.env.OPENWOP_IMAGE_PROVIDER_ENDPOINT = `http://127.0.0.1:${PORT}${IMAGES_PATH}`;
     process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true';
     const out = await dispatchImageGeneration({ prompt: 'a cat', n: 1, model: 'gpt-image' });
     expect(out).toHaveLength(1);
     expect(out[0]!.base64).toBe('aGVsbG8=');
-    expect((lastBody as { prompt: string }).prompt).toBe('a cat');
+    expect(lastUrl).toBe(IMAGES_PATH);
+    expect(lastBody).toMatchObject({ prompt: 'a cat', model: 'gpt-image', n: 1 });
   });
 
   it('throws image_provider_not_configured with no endpoint', async () => {
@@ -84,14 +98,14 @@ describe('dispatchImageGeneration', () => {
   });
 
   it('SSRF: blocks a private endpoint without allow-private + never echoes it (§D)', async () => {
-    process.env.OPENWOP_IMAGE_PROVIDER_ENDPOINT = 'http://169.254.169.254/latest/meta-data';
-    try {
-      await dispatchImageGeneration({ prompt: 'x', n: 1 });
-      throw new Error('should have thrown');
-    } catch (e) {
-      const msg = (e as Error).message;
-      expect(msg).toMatch(/image_provider_(blocked|insecure)/);
-      expect(msg).not.toContain('169.254'); // §D — endpoint never leaks
-    }
+    // HTTPS, so only the deny-host check can refuse it.
+    process.env.OPENWOP_IMAGE_PROVIDER_ENDPOINT = 'https://169.254.169.254/latest/meta-data';
+    const blocked: unknown = await dispatchImageGeneration({ prompt: 'x', n: 1 }).then(() => null, (e: unknown) => e);
+    const msg = blocked instanceof Error ? blocked.message : '';
+    expect(msg).toBe('image_provider_blocked');
+    expect(msg).not.toContain('169.254'); // §D — endpoint never leaks
+    // The second guard, on its own: a public host over plain http is refused as insecure.
+    process.env.OPENWOP_IMAGE_PROVIDER_ENDPOINT = 'http://images.example.invalid/gen';
+    await expect(dispatchImageGeneration({ prompt: 'x', n: 1 })).rejects.toThrow('image_provider_insecure');
   });
 });

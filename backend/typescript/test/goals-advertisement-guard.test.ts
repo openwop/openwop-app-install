@@ -13,9 +13,14 @@
  *    `judge: verifier` (a registered verifier judges an immutable snapshot) and
  *    `continuation: ['schedule','manual']` — `commitment` stays OUT until a
  *    commitment seam actually arms it; `heartbeat` stays honest-omitted.
+ *
+ * TST-DEE-1 — red when: the block is advertised with the flag unset, the
+ * continuation set gains an unhonoured mode, or an advertised verifier
+ * evaluation stops reaching `satisfied` with the verifier's own verdict. Each
+ * case sets and restores the flag in `finally`, so they pass alone and shuffled.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
@@ -51,6 +56,11 @@ afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
 });
 
+afterEach(() => {
+  delete process.env.OPENWOP_GOALS_ENABLED;
+  __clearGoalVerifiers();
+});
+
 async function advertisement(): Promise<{ agents?: Record<string, unknown> }> {
   const res = await fetch(`${BASE}/.well-known/openwop`);
   expect(res.status).toBe(200);
@@ -66,37 +76,43 @@ describe('ADR 0412 P5 — advertisement ↔ behavior parity', () => {
 
   it('flag on → EXACTLY the honored set: judge verifier + schedule/manual (commitment stays out)', async () => {
     process.env.OPENWOP_GOALS_ENABLED = 'true';
-    const doc = await advertisement();
-    const goals = doc.agents?.goals as { judge?: string; continuation?: string[] } | undefined;
-    expect(goals?.judge).toBe('verifier');
-    expect(goals?.continuation).toEqual(['schedule', 'manual']);
-    delete process.env.OPENWOP_GOALS_ENABLED;
+    try {
+      const doc = await advertisement();
+      expect(doc.agents?.goals).toEqual({ judge: 'verifier', continuation: ['schedule', 'manual'], requiresBounds: true });
+    } finally {
+      delete process.env.OPENWOP_GOALS_ENABLED;
+    }
   });
 
   it('the judge claim is non-vacuous: an advertised evaluation round-trips through a registered verifier', async () => {
     process.env.OPENWOP_GOALS_ENABLED = 'true';
-    registerGoalVerifier('guard:judge', async () => ({ satisfied: true, confidence: 1, runId: 'run-guard' }));
-    const headers = { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` };
-    const created = await fetch(`${BASE}/host/openwop-app/goals`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        objective: 'Advertisement honesty probe',
-        completion: { check: 'verifier', verifierRef: 'guard:judge' },
-        continuation: { mode: 'manual' },
-        bounds: { maxLoopIterations: 3 },
-      }),
-    });
-    expect(created.status).toBe(200);
-    const goal = (await created.json()) as { id: string };
-    const evaluated = await fetch(`${BASE}/host/openwop-app/goals/${goal.id}/evaluate`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ snapshotRef: 'guard:ref', snapshotHash: 'guard-hash' }),
-    });
-    expect(evaluated.status).toBe(200);
-    const result = (await evaluated.json()) as { goal: { state: string } };
-    expect(result.goal.state).toBe('satisfied');
-    delete process.env.OPENWOP_GOALS_ENABLED;
+    try {
+      registerGoalVerifier('guard:judge', async () => ({ satisfied: true, confidence: 1, runId: 'run-guard' }));
+      const headers = { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` };
+      const created = await fetch(`${BASE}/host/openwop-app/goals`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          objective: 'Advertisement honesty probe',
+          completion: { check: 'verifier', verifierRef: 'guard:judge' },
+          continuation: { mode: 'manual' },
+          bounds: { maxLoopIterations: 3 },
+        }),
+      });
+      expect(created.status).toBe(200);
+      const goal = (await created.json()) as { id: string };
+      const evaluated = await fetch(`${BASE}/host/openwop-app/goals/${goal.id}/evaluate`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ snapshotRef: 'guard:ref', snapshotHash: 'guard-hash' }),
+      });
+      expect(evaluated.status).toBe(200);
+      const result = (await evaluated.json()) as { goal: { state: string }; verdict: unknown; replayed: boolean };
+      expect(result.goal.state).toBe('satisfied');
+      expect(result.verdict).toEqual({ satisfied: true, confidence: 1, runId: 'run-guard' });
+      expect(result.replayed).toBe(false);
+    } finally {
+      delete process.env.OPENWOP_GOALS_ENABLED;
+    }
   });
 });

@@ -1,9 +1,21 @@
 /**
- * ADR 0411 P1 — the Replicate VIDEO dispatcher: Prefer-wait create, bounded
- * polling under the abort signal (slower cadence than images), terminal-failure
- * typed errors, and the same SSRF posture — output URLs are host-allowlist-pinned
- * and fetched UNCREDENTIALED. Reuses the ADR 0401 primitives so this test mirrors
- * dispatch-images-replicate.test.ts.
+ * ADR 0411 P1 — the Replicate VIDEO dispatcher (TST-CWA-2): Prefer-wait create,
+ * bounded polling under the abort signal (slower cadence than images),
+ * terminal-failure typed errors, and the same SSRF posture — output URLs are
+ * host-allowlist-pinned and fetched UNCREDENTIALED. Reuses the ADR 0401
+ * primitives, so this test mirrors dispatch-images-replicate.test.ts.
+ *
+ * Red when (sabotage-witnessed, wave 69):
+ *  - the output allowlist is bypassed → "REJECTS an output URL off the allowlist";
+ *  - the output fetch carries the key → "creates against the Veo-3 default";
+ *  - an input is renamed / dropped → "forwards negative_prompt / duration …";
+ *  - `generate_audio:false` is dropped, or forwarded to a non-Veo model, or the
+ *    audio predicate widens past `google/veo-3*` → the three audio cases;
+ *  - the DECLARED content-length cap is removed → "rejects a declared-oversized
+ *    content-length up front" (the body is under the cap and only DECLARES 64
+ *    bytes, so the running-total cap cannot answer for it);
+ *  - the reader is not cancelled on the running-total cap → "aborts the streamed read";
+ *  - the reason is dropped or the key is echoed → "a failed prediction is a typed plain-Error".
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { dispatchVideoReplicate, DEFAULT_REPLICATE_VIDEO_MODEL, isAudioCapableVideoModel } from '../src/providers/dispatchVideo.js';
@@ -23,7 +35,7 @@ function fakeFetch(handler: (url: string, init?: RequestInit) => Response | Prom
 
 const json = (body: unknown, status = 200): Response => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 
-afterEach(() => { vi.unstubAllGlobals(); });
+afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe('dispatchVideoReplicate', () => {
   it('creates against the Veo-3 default with Prefer: wait, fetches allowlisted output uncredentialed, returns base64', async () => {
@@ -40,12 +52,11 @@ describe('dispatchVideoReplicate', () => {
     expect(video).toEqual({ base64: MP4_BYTES.toString('base64'), mimeType: 'video/mp4', sizeBytes: MP4_BYTES.byteLength });
 
     const create = calls[0]!;
-    expect(create.url).toBe(`https://api.replicate.com/v1/models/${DEFAULT_REPLICATE_VIDEO_MODEL}/predictions`);
+    expect(create.url).toBe('https://api.replicate.com/v1/models/google/veo-3-fast/predictions');
     expect((create.init?.headers as Record<string, string>).prefer).toBe('wait=60');
-    // The output fetch never carries the key.
+    // The output fetch never carries the key — it carries no headers at all.
     const output = calls.find((c) => c.url.startsWith('https://replicate.delivery/'))!;
-    const outHeaders = (output.init?.headers ?? {}) as Record<string, string>;
-    expect(JSON.stringify(outHeaders)).not.toContain('r8_test_key');
+    expect(output.init?.headers).toBeUndefined();
   });
 
   it('forwards negative_prompt / duration / aspect_ratio / seed into the model input', async () => {
@@ -55,7 +66,7 @@ describe('dispatchVideoReplicate', () => {
     });
     await dispatchVideoReplicate({ apiKey: 'k', prompt: 'city', negativePrompt: 'blurry', durationSeconds: 8, aspectRatio: '9:16', seed: 42 });
     const body = JSON.parse(String((calls[0]!.init as RequestInit).body));
-    expect(body.input).toMatchObject({ prompt: 'city', negative_prompt: 'blurry', duration: 8, aspect_ratio: '9:16', seed: 42 });
+    expect(body.input).toEqual({ prompt: 'city', negative_prompt: 'blurry', duration: 8, aspect_ratio: '9:16', seed: 42 });
   });
 
   // ADR 0411 P2 — `generate_audio` forwarded ONLY for the audio-capable family.
@@ -73,6 +84,8 @@ describe('dispatchVideoReplicate', () => {
     expect(isAudioCapableVideoModel('google/veo-3.1')).toBe(true);
     expect(isAudioCapableVideoModel('kwaivgi/kling-v2')).toBe(false);
     expect(isAudioCapableVideoModel('luma/ray')).toBe(false);
+    // Same owner, not the Veo-3 family: a predicate widened to `google/*` fails here.
+    expect(isAudioCapableVideoModel('google/veo-2')).toBe(false);
   });
 
   it('forwards generate_audio for a Veo model (both true and the load-bearing false)', async () => {
@@ -86,6 +99,7 @@ describe('dispatchVideoReplicate', () => {
   });
 
   it('polls a non-terminal prediction to success (api.replicate.com only)', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout'] });
     let polls = 0;
     fakeFetch((url) => {
       if (url.endsWith('/predictions')) {
@@ -99,15 +113,26 @@ describe('dispatchVideoReplicate', () => {
       }
       return new Response(MP4_BYTES, { status: 200, headers: { 'content-type': 'video/mp4' } });
     });
-    const video = await dispatchVideoReplicate({ apiKey: 'k', prompt: 'x' });
+    let settled = false;
+    const pending = dispatchVideoReplicate({ apiKey: 'k', prompt: 'x' }).finally(() => { settled = true; });
+    // The product waits 2 s between polls; advance the fake clock instead of waiting.
+    for (let i = 0; i < 5 && !settled; i++) await vi.advanceTimersByTimeAsync(2_000);
+    const video = await pending;
     expect(polls).toBe(2);
     expect(video.mimeType).toBe('video/mp4');
-  }, 15_000);
+
+    const { calls } = fakeFetch(() => json({ id: 'v5', status: 'processing', urls: { get: 'https://replicate.delivery/v5' } }));
+    await expect(dispatchVideoReplicate({ apiKey: 'k', prompt: 'x' }))
+      .rejects.toThrow('replicate_poll_host_denied: poll URL must be api.replicate.com');
+    expect(calls).toHaveLength(1);
+  });
 
   it('a failed prediction is a typed plain-Error (reason surfaced, key never echoed)', async () => {
     fakeFetch(() => json({ id: 'v3', status: 'failed', error: 'content policy' }));
-    await expect(dispatchVideoReplicate({ apiKey: 'r8_secret', prompt: 'x' }))
-      .rejects.toThrow(/replicate_failed: content policy/);
+    const err = await dispatchVideoReplicate({ apiKey: 'r8_secret', prompt: 'x' }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toBe('replicate_failed: content policy');
+    expect((err as Error).message).not.toContain('r8_secret');
   });
 
   it('REJECTS an output URL off the allowlist (SSRF pin) without fetching it', async () => {
@@ -157,11 +182,13 @@ describe('dispatchVideoReplicate', () => {
 
     it('rejects a declared-oversized content-length up front (no full buffer)', async () => {
       process.env.OPENWOP_VIDEO_MAX_BYTES = '8';
+      // The body is only 4 bytes — UNDER the cap — but declares 64. Only the
+      // declared-length check can refuse it: the running-total cap would accept it.
       fakeFetch((url) => {
         if (url.includes('/models/')) return json({ status: 'succeeded', output: 'https://replicate.delivery/x/big.mp4' });
-        return new Response(Buffer.alloc(64), { status: 200, headers: { 'content-type': 'video/mp4' } }); // Response sets content-length: 64 > 8
+        return new Response(Buffer.alloc(4), { status: 200, headers: { 'content-type': 'video/mp4', 'content-length': '64' } });
       });
-      await expect(dispatchVideoReplicate({ apiKey: 'k', prompt: 'x' })).rejects.toThrow(/replicate_output_too_large/);
+      await expect(dispatchVideoReplicate({ apiKey: 'k', prompt: 'x' })).rejects.toThrow('replicate_output_too_large: video exceeds the configured cap');
     });
 
     it('aborts the streamed read the instant the running total crosses the cap (no content-length)', async () => {

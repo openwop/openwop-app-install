@@ -5,6 +5,12 @@
  * connected email-calendar provider via ctx.connectors.resolveForCapability, dispatches
  * to the RIGHT vendor endpoint (Google Calendar vs MS Graph), normalizes the response,
  * and fails SAFE (no connection / a non-calendar provider / a connector error).
+ *
+ * Tracker TST-CBC-1. Red when: the provider pick takes the first candidate instead of
+ * the first calendar-capable one; Google `timeMin` is sent unencoded or Graph's
+ * `$filter` uses another operator; the no-connection branch reports connected:true;
+ * the missing-surface guard or the egress-error branch is dropped; the Google title or
+ * Graph location mapping is lost (w67g1-cal-* probes, wave 67).
  */
 import { describe, expect, it, beforeAll } from 'vitest';
 import { ensureNodesRegistered } from '../src/bootstrap/nodes.js';
@@ -56,8 +62,7 @@ describe('ADR 0186 — calendar-list-events capability node', () => {
     const c = connectors('google', { items: [{ summary: 'Standup', start: { dateTime: '2026-07-03T09:00:00Z' }, end: { dateTime: '2026-07-03T09:15:00Z' }, location: 'Zoom', attendees: [{ email: 'a@x.com' }] }] });
     const res = await getNode().execute(makeCtx({ config: { maxResults: 5 }, connectors: c.surface }));
     expect(res.status).toBe('success');
-    expect(c.calls[0].connectorId).toBe('google');
-    expect(c.calls[0].url).toContain('www.googleapis.com/calendar/v3');
+    expect(c.calls[0]).toEqual({ connectorId: 'google', method: 'GET', url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events?singleEvents=true&orderBy=startTime&maxResults=5' });
     expect(outputsOf(res)).toMatchObject({ connected: true, provider: 'google', eventCount: 1 });
     expect((outputsOf(res).events as Array<Record<string, unknown>>)[0]).toEqual({ title: 'Standup', start: '2026-07-03T09:00:00Z', end: '2026-07-03T09:15:00Z', location: 'Zoom', attendees: ['a@x.com'] });
   });
@@ -66,21 +71,20 @@ describe('ADR 0186 — calendar-list-events capability node', () => {
     const c = connectors('microsoft-graph', { value: [{ subject: 'Review', start: { dateTime: '2026-07-03T10:00:00' }, end: { dateTime: '2026-07-03T11:00:00' }, location: { displayName: 'Room 4' }, attendees: [{ emailAddress: { address: 'b@y.com' } }] }] });
     const res = await getNode().execute(makeCtx({ connectors: c.surface }));
     expect(res.status).toBe('success');
-    expect(c.calls[0].url).toContain('graph.microsoft.com/v1.0/me/events');
+    expect(c.calls[0]).toEqual({ connectorId: 'microsoft-graph', method: 'GET', url: 'https://graph.microsoft.com/v1.0/me/events?$top=10&$orderby=start/dateTime&$select=subject,start,end,location,attendees' });
     expect((outputsOf(res).events as Array<Record<string, unknown>>)[0]).toEqual({ title: 'Review', start: '2026-07-03T10:00:00', end: '2026-07-03T11:00:00', location: 'Room 4', attendees: ['b@y.com'] });
   });
 
   it('anchors Google to timeMin when a window is supplied (replay-safe "upcoming")', async () => {
     const c = connectors('google', { items: [] });
     await getNode().execute(makeCtx({ config: { timeMin: '2026-07-02T00:00:00Z' }, connectors: c.surface }));
-    expect(c.calls[0].url).toContain('timeMin=2026-07-02T00%3A00%3A00Z');
+    expect(c.calls[0].url).toBe('https://www.googleapis.com/calendar/v3/calendars/primary/events?singleEvents=true&orderBy=startTime&maxResults=10&timeMin=2026-07-02T00%3A00%3A00Z');
   });
 
   it('anchors Microsoft Graph to a $filter when a window is supplied', async () => {
     const c = connectors('microsoft-graph', { value: [] });
     await getNode().execute(makeCtx({ inputs: { timeMin: '2026-07-02T00:00:00Z' }, connectors: c.surface }));
-    expect(c.calls[0].url).toContain('$filter=');
-    expect(decodeURIComponent(c.calls[0].url)).toContain("start/dateTime ge '2026-07-02T00:00:00Z'");
+    expect(c.calls[0].url).toBe("https://graph.microsoft.com/v1.0/me/events?$top=10&$orderby=start/dateTime&$select=subject,start,end,location,attendees&$filter=start%2FdateTime%20ge%20'2026-07-02T00%3A00%3A00Z'");
   });
 
   it('picks a calendar-capable provider when an email-only one sorts first', async () => {
@@ -110,7 +114,9 @@ describe('ADR 0186 — calendar-list-events capability node', () => {
   it('fails when the connector egress errors', async () => {
     const c = connectors('google', null, false);
     const res = await getNode().execute(makeCtx({ connectors: c.surface }));
-    expect(res.status).toBe('failure');
+    if (res.status !== 'failure') throw new Error(`expected failure, got ${res.status}`);
+    expect(res.error?.code).toBe('bad_gateway');
+    expect(res.error?.message).toContain('Calendar read failed');
   });
 
   it('fails closed when the host connectors surface is absent', async () => {

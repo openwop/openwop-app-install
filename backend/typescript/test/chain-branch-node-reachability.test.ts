@@ -22,6 +22,11 @@
  * ADR 0498 §Open items had already fixed these nodes' EMPTY `config` (a hard
  * TypeError). That fix made them run — it did not make them branch. A crash is
  * loud; this is not. Hence a ratchet rather than a one-time audit.
+ *
+ * TST-CCC-3. Red when: a shipped `core.flow.if` loses its `.value` in-edge (lands on
+ * the default `input` port) or its `config.predicate`; or the scan stops reaching the
+ * corpus (floors sit just under the measured 75 chain packs / 7 branch nodes,
+ * 2026-10-29).
  */
 import { readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -76,8 +81,8 @@ const BRANCH_NODES = PACKS.flatMap(({ file, chains }) =>
 
 describe('the scan reaches a real corpus (a vacuous scan would pass forever)', () => {
   it('finds chain packs and at least one core.flow.if node', () => {
-    expect(PACKS.length, 'no chain packs found — the ratchet is scanning nothing').toBeGreaterThan(5);
-    expect(BRANCH_NODES.length, 'no core.flow.if nodes found — the ratchet is vacuous').toBeGreaterThan(0);
+    expect(PACKS.length, 'no chain packs found — the ratchet is scanning nothing').toBeGreaterThan(71); // measured 75
+    expect(BRANCH_NODES.length, 'no core.flow.if nodes found — the ratchet is vacuous').toBeGreaterThanOrEqual(7); // measured 7
   });
 });
 

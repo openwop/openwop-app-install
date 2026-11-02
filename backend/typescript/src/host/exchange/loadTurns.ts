@@ -9,6 +9,7 @@
 
 import type { Storage } from '../../storage/storage.js';
 import type { ConversationTurn } from '../conversation.js';
+import { CLARIFICATION_ANSWERED_EVENT, CLARIFICATION_REQUESTED_EVENT, type ChatAnswerRecord, type ChatAskRecord } from '../clarificationChat.js';
 
 /** Reconstruct the conversation's turns from the durable event log (sorted by
  *  turnIndex). The open turn + every exchanged turn for this conversationId. */
@@ -21,7 +22,14 @@ import type { ConversationTurn } from '../conversation.js';
  *  no truncation). The EVENT LOG stays the durable truth: a cache miss on
  *  another instance simply refolds from sequence 0; a fork copies events to a
  *  NEW runId (fresh cache entry), so replay determinism is untouched. */
-interface TurnsCacheEntry { lastSeq: number; byConversation: Map<string, ConversationTurn[]> }
+interface TurnsCacheEntry {
+  lastSeq: number;
+  byConversation: Map<string, ConversationTurn[]>;
+  /** ADR 1001 D7 — the chat clarification asks and answers, folded from the
+   *  same events in the same pass (conversationId → askId → record). */
+  asks: Map<string, Map<string, ChatAskRecord>>;
+  answers: Map<string, Map<string, ChatAnswerRecord>>;
+}
 const turnsCache = new Map<string, TurnsCacheEntry>();
 const TURNS_CACHE_MAX_RUNS = 500; // oldest-entry eviction backstop
 const EVENT_BATCH = 1000;
@@ -43,7 +51,7 @@ export async function loadTurns(storage: Storage, runId: string, conversationId:
     }
     // The cursor is EXCLUSIVE and the first event is sequence 0 (RFC 0171 §A.3),
     // so a fresh entry starts at -1; 0 skipped the run's first turn.
-    entry = { lastSeq: -1, byConversation: new Map() };
+    entry = { lastSeq: -1, byConversation: new Map(), asks: new Map(), answers: new Map() };
     turnsCache.set(runId, entry);
   }
   // Drain new events in batches (fromSeq is EXCLUSIVE in the adapters).
@@ -53,6 +61,20 @@ export async function loadTurns(storage: Storage, runId: string, conversationId:
       if (e.sequence > entry.lastSeq) entry.lastSeq = e.sequence;
       const p = (e.payload ?? {}) as { conversationId?: string; initialTurn?: ConversationTurn; turn?: ConversationTurn };
       if (typeof p.conversationId !== 'string') continue;
+      if (e.type === CLARIFICATION_REQUESTED_EVENT || e.type === CLARIFICATION_ANSWERED_EVENT) {
+        // Host-written events; a shape this host did not write is skipped.
+        const rec = e.payload as ChatAskRecord & ChatAnswerRecord;
+        if (typeof rec.askId !== 'string') continue;
+        if (e.type === CLARIFICATION_REQUESTED_EVENT && (!Array.isArray(rec.questions) || !rec.resumeSchema || typeof rec.resumeSchema !== 'object')) continue;
+        if (e.type === CLARIFICATION_ANSWERED_EVENT && typeof rec.modelText !== 'string') continue;
+        const store = e.type === CLARIFICATION_REQUESTED_EVENT ? entry.asks : entry.answers;
+        const m = store.get(p.conversationId) ?? new Map();
+        // First write wins: an answer is recorded once (the exchange claim
+        // keyed `clarify:<askId>` makes a second one unreachable).
+        if (!m.has(rec.askId)) m.set(rec.askId, rec);
+        store.set(p.conversationId, m);
+        continue;
+      }
       const turn = e.type === 'conversation.opened' ? p.initialTurn : e.type === 'conversation.exchanged' ? p.turn : undefined;
       if (!turn) continue;
       const list = entry.byConversation.get(p.conversationId) ?? [];
@@ -68,4 +90,18 @@ export async function loadTurns(storage: Storage, runId: string, conversationId:
   // so the tiebreak is the write order. Stated explicitly because the ordering of
   // those duplicate rows is user-visible and would otherwise look accidental.
   return [...(entry.byConversation.get(conversationId) ?? [])].sort((a, b) => a.turnIndex - b.turnIndex);
+}
+
+/** ADR 1001 D7 — the conversation's chat clarification asks and answers, read
+ *  from the same event fold as its turns (call after, or instead of, loadTurns:
+ *  it drains first). */
+export async function loadClarificationState(
+  storage: Storage, runId: string, conversationId: string,
+): Promise<{ asks: ReadonlyMap<string, ChatAskRecord>; answers: ReadonlyMap<string, ChatAnswerRecord> }> {
+  await loadTurns(storage, runId, conversationId);
+  const entry = turnsCache.get(runId);
+  return {
+    asks: entry?.asks.get(conversationId) ?? new Map(),
+    answers: entry?.answers.get(conversationId) ?? new Map(),
+  };
 }

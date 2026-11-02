@@ -7,11 +7,16 @@
  * portable field kinds (`chat-card-packs.md:81`, RFC 0071 Phase 2) makes the
  * type real, so a count is stored as a NUMBER a consumer can sum without
  * re-parsing.
+ *
+ * Tracker TST-DCE-5. Red when `number` leaves FIELD_TYPES (SURVIVES and every
+ * later case), when the stored value stays the raw string, or when a non-finite
+ * value is accepted (grade-tests w70 probes `fn-*`). The former "is in the closed
+ * catalog" case was cut in w70: the same sabotage reds SURVIVES below.
  */
 import { describe, expect, it, beforeAll } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
-import { createForm, validateValues, FIELD_TYPES } from '../src/features/forms/formsService.js';
+import { createForm, validateValues } from '../src/features/forms/formsService.js';
 
 const TENANT = 'user:number-test';
 const ORG = 'org-number';
@@ -25,10 +30,6 @@ const mk = (fields: unknown) =>
   createForm({ tenantId: TENANT, orgId: ORG, title: 'T', fields, createdBy: 'user:x' });
 
 describe('ADR 0516 — the `number` field type', () => {
-  it('is in the closed catalog', () => {
-    expect(FIELD_TYPES).toContain('number');
-  });
-
   it('SURVIVES sanitizeFields instead of coercing to text', async () => {
     // The exact regression: before `number` existed, this came back as 'text'.
     const form = await mk([{ key: 'guests', label: 'Guests', type: 'number' }]);
@@ -46,7 +47,7 @@ describe('ADR 0516 — the `number` field type', () => {
     const form = await mk([{ key: 'guests', label: 'Guests', type: 'number' }]);
     // `Number('') === 0` and `Number('abc') === NaN` — coercing either would
     // silently invent a count. A public form must not fabricate data.
-    expect(() => validateValues(form, { guests: 'abc' })).toThrow();
+    expect(() => validateValues(form, { guests: 'abc' })).toThrow('Field `guests` MUST be a number.');
   });
 
   it('does not disturb the other types', async () => {

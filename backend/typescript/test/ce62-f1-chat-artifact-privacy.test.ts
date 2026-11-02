@@ -27,6 +27,7 @@ import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { persistRunArtifact, runArtifactKey } from '../src/host/runArtifactStore.js';
+import { hostExtStorage } from '../src/host/hostExtPersistence.js';
 import { chatArtifactRunId } from '../src/host/chatArtifactScope.js';
 import { createMember } from '../src/host/accessControlService.js';
 import { createAgentToolProvider } from '../src/host/agentToolProvider.js';
@@ -89,10 +90,13 @@ async function openConversation(owner: Member, participants: string[] = []): Pro
 }
 
 async function render(tenantId: string, actingUserId: string, conversationId: string | undefined, source: string): Promise<{ artifactId: string; artifactKey: string }> {
-  const res = await createAgentToolProvider({ tenantId, actingUserId, ...(conversationId ? { conversationId } : {}) })
+  const scope = { tenantId, actingUserId, ...(conversationId ? { conversationId } : {}) };
+  const res = await createAgentToolProvider(scope)
     .executeTool({ name: INTERACTIVE_ARTIFACTS_RENDER_TOOL_ID, input: { kind: 'mermaid', source } });
   expect(res.isError, res.content).toBeFalsy();
-  return JSON.parse(res.content) as { artifactId: string; artifactKey: string };
+  // ADR 1017 D4 — the tool returns only a content handle; the key is derived here.
+  const artifactKey = runArtifactKey(chatArtifactRunId('chat-viz', scope), (JSON.parse(res.content) as { handle: string }).handle);
+  return { artifactKey, artifactId: `run-event:${artifactKey}` };
 }
 
 async function codeArtifact(tenantId: string, scope: { conversationId?: string; actingUserId?: string }, stdout: string): Promise<string> {
@@ -146,6 +150,46 @@ describe('CE62-F1 — chat-tool artifacts follow the conversation', () => {
       .executeTool({ name: INTERACTIVE_ARTIFACTS_GET_TOOL_ID, input: { artifactKey: viz.artifactKey } })).content);
     expect(await getAs(b.userId)).toEqual({ artifact: null });
     expect((await getAs(a.userId)).artifact?.content).toContain('Secret-->Plan');
+  });
+
+  // ADR 1017 D2 — the cards under a chat turn. Red if the filter stops matching the
+  // turn (`turnMessageId`), derives the lanes from caller input instead of the run's
+  // stamps, skips the per-row gate (B, who cannot read the conversation, would see
+  // it), or answers a foreign/missing run differently from an empty one.
+  it('ADR 1017 D2: a chat turn lists what its tools saved, to readers of the conversation only', async () => {
+    const tenantId = `org:ce62-${Date.now()}-${n++}`;
+    const a = await signIn(tenantId);
+    const b = await secondMember(tenantId);
+    const conv = await openConversation(a);
+    const runId = `conv-run-${n++}`;
+    await hostExtStorage().insertRun({ runId, workflowId: 'chat', tenantId, status: 'running', inputs: null, metadata: { chatSessionId: conv, actingUserId: a.userId }, configurable: {}, createdAt: 'x', updatedAt: 'x' });
+    const turn3 = `${runId}:gate:0:3:agent`;
+    const turn5 = `${runId}:gate:0:5:agent`;
+    const renderIn = async (turnMessageId: string, source: string): Promise<string> => {
+      const scope = { tenantId, actingUserId: a.userId, conversationId: conv, turnMessageId };
+      const res = await createAgentToolProvider(scope).executeTool({ name: INTERACTIVE_ARTIFACTS_RENDER_TOOL_ID, input: { kind: 'mermaid', source } });
+      expect(res.isError, res.content).toBeFalsy();
+      return `run-event:${runArtifactKey(chatArtifactRunId('chat-viz', scope), (JSON.parse(res.content) as { handle: string }).handle)}`;
+    };
+    const v3 = await renderIn(turn3, 'graph TD; Three-->3');
+    const v5 = await renderIn(turn5, 'graph TD; Five-->5');
+    // The code tool's lane rides the same filter.
+    const codeRow = await persistRunArtifact({ tenantId, runId: chatArtifactRunId('chat-code', { tenantId, conversationId: conv }), nodeId: `run:${n++}`, role: 'deliverable', output: codeResult('turn five'), now: new Date().toISOString(), turnMessageId: turn5 });
+    const q = (m: Member, conversationRunId: string, turnMessageId: string) =>
+      m.get(`${LIB}?${new URLSearchParams({ conversationRunId, turnMessageId }).toString()}`);
+
+    expect(ids(await q(a, runId, turn3))).toEqual([v3]);
+    expect(ids(await q(a, runId, turn5))).toEqual([v5, codeRow!.artifactId]);
+    // B is a workspace member but not in the conversation.
+    const hidden = await q(b, runId, turn3);
+    expect(hidden.status).toBe(200);
+    expect(ids(hidden)).toEqual([]);
+    // Another workspace, and a run that does not exist: the same empty answer.
+    const outsider = await signIn(`org:ce62-other-${Date.now()}-${n++}`);
+    expect(await q(outsider, runId, turn3)).toEqual({ status: 200, body: { artifacts: [] } });
+    expect(await q(a, 'no-such-run', turn3)).toEqual({ status: 200, body: { artifacts: [] } });
+    // Both halves are required.
+    expect((await a.get(`${LIB}?conversationRunId=${runId}`)).status).toBe(400);
   });
 
   it('the gate IS the conversation rule: a participant sees it', async () => {

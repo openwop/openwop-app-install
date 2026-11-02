@@ -24,23 +24,39 @@
  * "memory" run is NOT independent evidence. Postgres equivalence is covered by
  * the parity suites; pg-mem cannot stand in for the claim race because its
  * `ON CONFLICT DO NOTHING RETURNING` is not faithful.
+ *
+ * TST-DGA-2. Red when the ledger read drops `tenant_id` or `endpoint_id` from its
+ * key, when the digest check stops winning over replay, when expiry never
+ * reclaims, when `complete` loses its claim-token compare-and-set (the stale
+ * holder commits BEFORE the reclaimer, so the `state != 'completed'` guard
+ * cannot hide it), when `release` ignores the token or the completed state,
+ * when either prune reaches the other lane, when the digest stops sorting keys
+ * or binding the endpoint, when the lease is not derived from the request
+ * timeout, when the route's `finally` stops releasing, when the replay header
+ * goes, and when an HTTP Idempotency-Key lands in the daemons' mutex table of
+ * the app's OWN storage (sabotage-witnessed, wave 71).
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
+import { randomUUID } from 'node:crypto';
 import { createApp } from '../src/index.js';
 import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import {
   canonicalRequestDigest,
   idempotencyLeaseMs,
+  RUNS_IDEMPOTENT_ENDPOINT,
   type IdempotentClaim,
 } from '../src/host/idempotentResponse.js';
 import { resolveRequestTimeoutMs } from '../src/middleware/requestTimeout.js';
-import { __budgetReadsForTests } from '../src/host/workflowBudgets.js';
+import { __budgetReadsForTests, type WorkflowBudgetRecord } from '../src/host/workflowBudgets.js';
+import { bareRunId } from './support/bareRunId.js';
 
 let server: http.Server;
+/** The app's OWN storage — the one its routes write. */
+let appStorage: Storage;
 let BASE: string;
 const TOKEN = 'dev-token';
 
@@ -71,6 +87,7 @@ beforeAll(async () => {
     serviceVersion: '0.0.1',
     enableConsoleTracer: false,
   });
+  appStorage = app.locals.storage as Storage;
   await new Promise<void>((res) => {
     server = app.listen(0, '127.0.0.1', () => {
       BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -239,9 +256,11 @@ describe('ADR 0549 P0 — storage-level tenant isolation (SQLite)', () => {
     const old = '2020-01-01T00:00:00.000Z';
     const recent = new Date().toISOString();
 
+    // A ten-year lease, so the claim below cannot be won by RECLAIMING an
+    // expired row: only the prune can make 'stale' claimable again.
     await s.claimIdempotentResponse({
       tenantId: 't', endpoint: ENDPOINT, key: 'stale', requestDigest: digest, createdAt: old,
-      leaseMs: LEASE_MS,
+      leaseMs: 10 * 365 * 86_400_000,
     });
     await s.claimIdempotentResponse({
       tenantId: 't', endpoint: ENDPOINT, key: 'fresh', requestDigest: digest, createdAt: recent,
@@ -305,8 +324,7 @@ describe('ADR 0549 P0 — route-level adversarial cases', () => {
     // its fire-once mutex. Before the lane split, a request carrying that
     // string as its Idempotency-Key took the row first, and the daemon's own
     // claim then reported "already claimed" and SKIPPED the job.
-    const mutexKey = 'schedule-fire:victim-job:1';
-    const storage = await openStorage(':memory:');
+    const mutexKey = `schedule-fire:victim-job-${randomUUID()}:1`;
 
     // ADR 0812 P2b — major 2's Idempotency-Key grammar (`idempotency.md`, no
     // `:`) refuses this exact string on the protocol lane before any claim...
@@ -327,13 +345,14 @@ describe('ADR 0549 P0 — route-level adversarial cases', () => {
 
     // The daemon's mutex must still be free. This asserts the two lanes do not
     // share storage: the HTTP claim above landed in `idempotent_response`,
-    // never in the `idempotency` table the daemons use.
-    const daemonClaim = await storage.claimOnce(mutexKey, new Date().toISOString());
+    // never in the `idempotency` table the daemons use. Read through the APP's
+    // own storage — a fresh database would say "free" whatever the route did.
+    const daemonClaim = await appStorage.claimOnce(mutexKey, new Date().toISOString());
     expect(daemonClaim.claimed).toBe(true);
   });
 
   it('reusing one key across /runs and the agents route returns each route its OWN response', async () => {
-    const key = 'cross-endpoint-probe-adr0549';
+    const key = `cross-endpoint-probe-${randomUUID()}`;
     const run = await post<CreateRunBody>(
       '/runs',
       { workflowId: 'openwop-app.uppercase', tenantId: 'demo', inputs: { text: 'x' } },
@@ -342,9 +361,9 @@ describe('ADR 0549 P0 — route-level adversarial cases', () => {
     expect(run.status).toBe(201);
     expect(typeof run.body.runId).toBe('string');
 
-    // Let the inline dispatch settle so the runs row is `completed`, which is
-    // the state that used to make the cross-endpoint leak observable.
-    await new Promise((r) => setTimeout(r, 100));
+    // H56: the runs ledger row is `completed` inside the run insert, i.e. before
+    // the 201 above — the state that used to make the cross-endpoint leak
+    // observable. No wait needed.
 
     const agent = await post<{ agentId?: string; runId?: string }>(
       '/host/openwop-app/agents',
@@ -360,21 +379,20 @@ describe('ADR 0549 P0 — route-level adversarial cases', () => {
 
   it('same key + same body on one endpoint still replays with the marker header', async () => {
     // The behaviour the fix must NOT break.
-    const key = 'happy-path-replay-adr0549';
+    const key = `happy-path-replay-${randomUUID()}`;
     const body = { workflowId: 'openwop-app.uppercase', tenantId: 'demo', inputs: { text: 'same' } };
     const first = await post<CreateRunBody>('/runs', body, { 'idempotency-key': key });
     expect(first.status).toBe(201);
-    await new Promise((r) => setTimeout(r, 100));
     const second = await post<CreateRunBody>('/runs', body, { 'idempotency-key': key });
     expect(second.status).toBe(201);
     expect(second.headers.get('openwop-Idempotent-Replay')).toBe('true');
     expect(second.body.runId).toBe(first.body.runId);
   });
 
-  it('same key + DIFFERENT body returns 409 replay-mismatch, and survives a restart', async () => {
-    const key = 'mismatch-durable-adr0549';
-    await post('/runs', { workflowId: 'openwop-app.uppercase', tenantId: 'demo', inputs: { text: 'one' } }, { 'idempotency-key': key });
-    await new Promise((r) => setTimeout(r, 100));
+  it('same key + DIFFERENT body returns 409 idempotency_key_mismatch', async () => {
+    const key = `mismatch-durable-${randomUUID()}`;
+    const one = await post('/runs', { workflowId: 'openwop-app.uppercase', tenantId: 'demo', inputs: { text: 'one' } }, { 'idempotency-key': key });
+    expect(one.status).toBe(201);
     const divergent = await post<CreateRunBody>(
       '/runs',
       { workflowId: 'openwop-app.uppercase', tenantId: 'demo', inputs: { text: 'TWO' } },
@@ -383,8 +401,8 @@ describe('ADR 0549 P0 — route-level adversarial cases', () => {
     expect(divergent.status).toBe(409);
     expect(divergent.body.error).toBe('idempotency_key_mismatch');
     // Durability is the P0 gain here: the digest lives in the row, not in a
-    // process-local Map, so this verdict no longer resets on restart. The
-    // restart itself is exercised at the storage layer below.
+    // process-local Map. The restart itself is exercised at the storage layer
+    // below ('a mismatch is still detected against a reopened database').
   });
 });
 
@@ -498,6 +516,15 @@ describe('ADR 0549 P1 — lease, reclaim, CAS and release', () => {
       tenantId: 't', endpoint: ENDPOINT, key: 'cas', requestDigest: digest, createdAt: afterLease, leaseMs: 60_000,
     });
     if (second.outcome !== 'claimed') throw new Error('expected reclaim');
+
+    // The stale holder wakes FIRST, while the row is still pending: only the
+    // claim-token compare can refuse it here (the completed-state guard has
+    // nothing to say yet).
+    const early = await s.completeIdempotentResponse({
+      tenantId: 't', endpoint: ENDPOINT, key: 'cas', responseStatus: 201,
+      responseBody: '{"runId":"STALE-EARLY"}', updatedAt: afterLease, claimToken: first.claimToken,
+    });
+    expect(early).toBe(false);
 
     const winner = await s.completeIdempotentResponse({
       tenantId: 't', endpoint: ENDPOINT, key: 'cas', responseStatus: 201,
@@ -626,11 +653,15 @@ describe('ADR 0549 P1 — the route releases a claim it never committed', () => 
   });
 
   it('a post-claim failure leaves the key retryable, not 409-locked forever', async () => {
-    const key = `release-on-failure-${Math.random().toString(36).slice(2)}`;
+    const key = `release-on-failure-${randomUUID()}`;
     const body = { workflowId: 'openwop-app.uppercase', tenantId: 'demo', inputs: { text: 'x' } };
 
     // Force the budget cap so the handler throws 429 AFTER winning the claim.
-    __budgetReadsForTests.budget = async () => ({ hardCap: true, dailyUsd: 1 }) as never;
+    const cap: WorkflowBudgetRecord = {
+      key: 'demo:openwop-app.uppercase', tenantId: 'demo', workflowId: 'openwop-app.uppercase',
+      dailyUsd: 1, hardCap: true, updatedAt: '2026-01-01T00:00:00.000Z',
+    };
+    __budgetReadsForTests.budget = async () => cap;
     __budgetReadsForTests.spend = async () => 999;
 
     const failed = await post<{ error?: string }>('/runs', body, { 'idempotency-key': key });
@@ -650,11 +681,21 @@ describe('ADR 0549 P1 — the route releases a claim it never committed', () => 
   it('a committed response is still replayed — release must not eat it', async () => {
     // The other side of the same `finally`: once `complete` has run, the token
     // is cleared and the row must survive to be replayed.
-    const key = `commit-then-replay-${Math.random().toString(36).slice(2)}`;
+    // Distinct from the happy-path replay above: this reads the LEDGER ROW the
+    // route's `finally` would have deleted, not just the second response.
+    const key = `commit-then-replay-${randomUUID()}`;
     const body = { workflowId: 'openwop-app.uppercase', tenantId: 'demo', inputs: { text: 'keep' } };
     const first = await post<CreateRunBody>('/runs', body, { 'idempotency-key': key });
     expect(first.status).toBe(201);
-    await new Promise((r) => setTimeout(r, 100));
+    const row = await appStorage.claimIdempotentResponse({
+      tenantId: 'demo', endpoint: RUNS_IDEMPOTENT_ENDPOINT, key,
+      requestDigest: canonicalRequestDigest(body, RUNS_IDEMPOTENT_ENDPOINT),
+      createdAt: new Date().toISOString(), leaseMs: LEASE_MS,
+    });
+    expect(row.outcome, 'the completed ledger row survived the finally').toBe('replay');
+    if (row.outcome !== 'replay') throw new Error('unreachable');
+    // The ledger stores the pre-projection body (a bare run id).
+    expect((JSON.parse(row.responseBody) as { runId?: string }).runId).toBe(bareRunId(first.body.runId ?? ''));
     const second = await post<CreateRunBody>('/runs', body, { 'idempotency-key': key });
     expect(second.status).toBe(201);
     expect(second.headers.get('openwop-Idempotent-Replay')).toBe('true');

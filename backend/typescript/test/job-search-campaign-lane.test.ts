@@ -10,8 +10,21 @@
  *  - the steering `dailyCap` and the grant's `ratePerHour` actually bind;
  *  - a replayed run cannot spend budget or re-submit (ambient, not caller-told);
  *  - queueing is grant-gated (409) and idempotent while a card is waiting.
+ *
+ * Tracker TST-DHA-1 (wave 71). Red when: the no-submit-lane skip is removed
+ * (`w71g3-cl-nolane`); `consumeDaySlot` stops refusing at the cap (`cl-daycap`);
+ * the pass stops reading the ambient replay flag (`cl-replay`); queueing stops
+ * requiring a live grant (`cl-409`) or stops returning the waiting card
+ * (`cl-idem`); `applicantFromBank` manufactures a clearance bar (`cl-bank`);
+ * `digestFromListing` reads a clock or randomness (`cl-pure`).
+ *
+ * BLOCKED-ON-PRODUCT (CAMPAIGN-DAYCAP-MISLABEL-1): inside ONE pass the daily cap
+ * bites in the submit closure (campaignRun.ts:320), which the pipeline reports as
+ * `refused: board-rejected` (pipeline.ts:227) — the board never saw it. The honest
+ * assertion (a `daily-cap` skip row) would fail today, so the dailyCap case pins
+ * only the COUNTS, which are correct.
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runTenantCampaignPass, campaignDayCounts, digestFromListing, applicantFromBank } from '../src/features/job-search/autopilot/campaignRun.js';
 import { queueCampaignCard, CAREER_CAMPAIGN_CARD_WORKFLOW_ID } from '../src/features/job-search/agent/provision.js';
 import { registerBoardAdapter, getBoardAdapter, type BoardAdapter } from '../src/features/job-search/boards/adapters.js';
@@ -81,7 +94,19 @@ const listing = (board: string, n: number) =>
     ext: { skills: [], requirements: [], responsibilities: [], descriptionExcerpt: 'Build things.' },
   });
 
+/** One submit log per test board. Boards register ONCE (the registry is
+ *  module-global); each case clears its board's log in `beforeEach`, so a retry
+ *  never asserts against an array the registered adapter no longer writes. */
+const SUBMITS = new Map<string, Array<{ listingId: string }>>(
+  ['lane-a', 'lane-cap', 'lane-replay'].map((id) => [id, []]),
+);
+
+beforeAll(() => {
+  for (const [id, log] of SUBMITS) if (!getBoardAdapter(id)) registerBoardAdapter(laneBoard(id, log));
+});
+
 beforeEach(() => {
+  for (const log of SUBMITS.values()) log.length = 0;
   __resetHostExtPersistence();
   initHostExtPersistence(openSqliteStorage(':memory:'));
 });
@@ -103,9 +128,7 @@ describe('WF-JS-1 — the pass is honest about what it cannot do', () => {
   });
 
   it('applies END TO END through a board that ships a lane: deal, consumption, audit', async () => {
-    const submits: Array<{ listingId: string }> = [];
-    if (!getBoardAdapter('lane-a')) registerBoardAdapter(laneBoard('lane-a', submits));
-    else submits.length = 0;
+    const submits = SUBMITS.get('lane-a')!;
     await steer();
     await grant();
     const up = await listing('lane-a', 1);
@@ -121,9 +144,7 @@ describe('WF-JS-1 — the pass is honest about what it cannot do', () => {
   });
 
   it('the steering dailyCap binds ACROSS listings in a pass', async () => {
-    const submits: Array<{ listingId: string }> = [];
-    if (!getBoardAdapter('lane-cap')) registerBoardAdapter(laneBoard('lane-cap', submits));
-    else submits.length = 0;
+    const submits = SUBMITS.get('lane-cap')!;
     await steer({ dailyCap: 1 });
     await grant();
     await listing('lane-cap', 1);
@@ -139,9 +160,7 @@ describe('WF-JS-1 — the pass is honest about what it cannot do', () => {
   });
 
   it('a REPLAYED pass spends nothing and submits nothing — ambient, not caller-told', async () => {
-    const submits: Array<{ listingId: string }> = [];
-    if (!getBoardAdapter('lane-replay')) registerBoardAdapter(laneBoard('lane-replay', submits));
-    else submits.length = 0;
+    const submits = SUBMITS.get('lane-replay')!;
     await steer();
     await grant();
     await listing('lane-replay', 1);
@@ -180,7 +199,17 @@ describe('WF-JS-1 — assembly helpers stay deterministic and neutral', () => {
     const up = await listing('greenhouse', 9);
     const { listListings } = await import('../src/features/job-search/boards/listing.js');
     const row = (await listListings(T)).find((r) => r.entityId === up.listingId)!;
-    expect(JSON.stringify(digestFromListing(row))).toBe(JSON.stringify(digestFromListing(row)));
+    // Fake ONLY Date between the two assemblies: a clock read inside the digest
+    // would diverge across the hour, randomness on any call.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(NOW);
+      const first = JSON.stringify(digestFromListing(row));
+      vi.setSystemTime(NOW + 3_600_000);
+      expect(JSON.stringify(digestFromListing(row))).toBe(first);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('an unanswered bank never manufactures a disqualification', () => {

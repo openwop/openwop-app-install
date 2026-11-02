@@ -16,14 +16,17 @@ import { StateCard } from '../../ui/StateCard.js';
 import { Notice } from '../../ui/Notice.js';
 import { KeyFigureBand } from '../../ui/KeyFigure.js';
 import { Button } from '../../ui/Button.js';
+import { confirm } from '../../ui/confirm.js';
 import {
+  abandonEnrollment,
   listChallengesForLocale,
   listEnrollmentsWithProgress,
+  type EnrollmentState,
   type ProgressView,
 } from '../../client/kicktodoClient.js';
 import { formatDate } from '../../i18n/format.js';
 
-interface Row { enrollmentId: string; challengeId: string; title: string; progress: ProgressView | null }
+interface Row { enrollmentId: string; challengeId: string; title: string; state: EnrollmentState; progress: ProgressView | null }
 
 export function ProgressPage() {
   const { t, i18n } = useTranslation('kicktodo');
@@ -52,6 +55,7 @@ export function ProgressPage() {
         setRows(enrollments.map((e): Row => ({
           enrollmentId: e.id,
           challengeId: e.challengeId,
+          state: e.state,
           title: titleOf.get(e.challengeId) ?? e.challengeId,
           progress: progress[e.id] ?? null,
         })));
@@ -96,15 +100,34 @@ export function ProgressPage() {
 
       {rows && rows.length > 0 && (
         <div className="kt-progress-stack">
-          {rows.map((r) => <ProgressCard key={r.enrollmentId} row={r} />)}
+          {rows.map((r) => <ProgressCard key={r.enrollmentId} row={r} onLeft={() => setReloadSequence((n) => n + 1)} />)}
         </div>
       )}
     </div>
   );
 }
 
-function ProgressCard({ row }: { row: Row }) {
+function ProgressCard({ row, onLeft }: { row: Row; onLeft: () => void }) {
   const { t } = useTranslation('kicktodo');
+  const [leaving, setLeaving] = useState(false);
+  const [leaveFailed, setLeaveFailed] = useState(false);
+  // Leave is offered only while the journey can still be left (the route
+  // no-ops on any other state). The card itself stays after leaving: it
+  // renders as an ended journey, so completed work never disappears.
+  const leavable = row.state === 'active' || row.state === 'snoozed';
+  const onLeave = async () => {
+    const ok = await confirm({
+      title: t('leaveConfirmTitle', { title: row.title }),
+      body: t('leaveConfirmBody'),
+      confirmLabel: t('leaveChallenge'),
+      danger: true,
+    });
+    if (!ok) return;
+    setLeaving(true); setLeaveFailed(false);
+    try { await abandonEnrollment(row.enrollmentId); onLeft(); }
+    catch { setLeaveFailed(true); }
+    finally { setLeaving(false); }
+  };
   const p = row.progress;
   const done = p?.completedActivities ?? 0;
   const total = p?.totalRequiredActivities ?? 0;
@@ -225,7 +248,14 @@ function ProgressCard({ row }: { row: Row }) {
             <div className="action-bar">
               <Link className="btn-accent-solid btn-sm" to={completed ? '/journal' : '/today'}>{completed ? t('openJournal') : t('navTodayLabel')}</Link>
               <Link className="btn-ghost btn-sm" to="/?agent=host:kickbot">{t('askKickbot')}</Link>
+              {leavable && !completed && !ended && (
+                <Button variant="quiet" size="sm" disabled={leaving} onClick={() => void onLeave()}
+                  aria-label={t('leaveChallengeNamed', { title: row.title })}>
+                  {t('leaveChallenge')}
+                </Button>
+              )}
             </div>
+            {leaveFailed && <Notice variant="error" announce={t('leaveError')}>{t('leaveError')}</Notice>}
           </div>
         </>
       ) : (

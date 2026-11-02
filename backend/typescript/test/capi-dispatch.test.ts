@@ -8,7 +8,15 @@
  *    (unsupported / no_connection), never throw;
  *  - dispatchQueuedConversions + the transport: queued rows flip `sent` on a
  *    successful platform post; the platform filter keeps google-pixel orgs
- *    from wedging the queue; a transport failure leaves the row queued.
+ *    from wedging the queue; a transport failure leaves the row queued; the relayed
+ *    raw address is hashed before it reaches the wire (asserted on the posted body).
+ *
+ * Tracker TST-CBT-2 (PII: only hashed identifiers leave the host). Red when: the Meta
+ * events path or the dedup event_id changes; the relay stores/sends the raw address
+ * instead of its sha256; linkedin is treated as wired; tiktok/google send while not
+ * sandbox-verified; a missing connection reads as `failed`; the platform filter is
+ * dropped (google pixels wedge the queue); a transport failure is recorded as sent
+ * (w67g1-capi-* probes, wave 67).
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -58,7 +66,7 @@ describe('CAPI delivery transport (ADR 0297 D1 follow-on)', () => {
       id: 'meta-ads', label: 'Meta Ads', kind: 'oauth2', authFlow: 'manual', reach: 'openapi',
       scopes: { read: [] }, refreshable: true, defaultScopes: [], consumerNodes: [], apiHosts: ['127.0.0.1'],
     });
-    await storage.insertRun({ runId: 'capi-run', workflowId: 'w', tenantId: TENANT, status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: 'x', updatedAt: 'x' });
+    await storage.insertRun({ runId: 'capi-run', workflowId: 'w', tenantId: TENANT, status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: '2026-07-06T12:00:00.000Z', updatedAt: '2026-07-06T12:00:00.000Z' });
   });
 
   afterAll(async () => {
@@ -86,7 +94,7 @@ describe('CAPI delivery transport (ADR 0297 D1 follow-on)', () => {
     expect(evt.event_id).toBe('evt-1');
     expect(evt.event_name).toBe('purchase');
     expect((evt.user_data as { em: string[] }).em).toEqual([hashEmail('buyer@x.test')]);
-    expect(JSON.stringify(hits[0].body)).not.toContain('buyer@x.test'); // hashed only, never raw
+    expect(JSON.stringify(hits[0].body)).not.toContain('buyer@x.test'); // the adapter forwards the given hash unchanged
     expect((evt.custom_data as { value: number; currency: string }).value).toBe(120);
   });
 
@@ -113,16 +121,23 @@ describe('CAPI delivery transport (ADR 0297 D1 follow-on)', () => {
       if (out.outcome !== 'sent') throw new Error(out.outcome);
     };
 
+    const platforms: PixelPlatform[] = ['meta', 'tiktok'];
     // a platform failure keeps the row queued
     respondStatus = 500;
-    expect(await dispatchQueuedConversions(TENANT, ORG, transport, { platforms: ['meta', 'tiktok'] as PixelPlatform[] })).toBe(0);
+    expect(await dispatchQueuedConversions(TENANT, ORG, transport, { platforms })).toBe(0);
     expect((await listConversions(TENANT, ORG))[0].status).toBe('queued');
 
     // success delivers exactly once and flips sent
     respondStatus = 200;
     hits = [];
-    expect(await dispatchQueuedConversions(TENANT, ORG, transport, { platforms: ['meta', 'tiktok'] as PixelPlatform[] })).toBe(1);
+    expect(await dispatchQueuedConversions(TENANT, ORG, transport, { platforms })).toBe(1);
     expect((await listConversions(TENANT, ORG))[0].status).toBe('sent');
-    expect(hits.filter((h) => h.path === '/px-9/events')).toHaveLength(1);
+    const posted = hits.filter((h) => h.path === '/px-9/events');
+    expect(posted).toHaveLength(1);
+    // The relay was given the RAW address; only its sha256 (literal: sha256("q@x.test")) is on the wire.
+    const evt = (posted[0].body.data as Array<{ event_id: string; user_data: { em?: string[] } }>)[0];
+    expect(evt.event_id).toBe('evt-q1');
+    expect(evt.user_data.em).toEqual(['7b7b81aab1ac0dd8844877bfebd755fee725eb3d13fd925bcaeb60bb323bbc56']);
+    expect(JSON.stringify(posted[0].body)).not.toContain('q@x.test');
   });
 });

@@ -8,6 +8,9 @@
  * test guards. Every `APPROVAL_KINDS` entry MUST have a registered redactor:
  * built-ins register at `approvalService` module load; a feature-owned kind
  * (kicktodo-plan-proposal) registers at that feature's boot.
+ *
+ * TST-BZB-5 (grade-tests w66). Red when a built-in kind's redactor registration is removed
+ * (`funnel-publish`) or a feature-owned kind registers under a different id (claude-code).
  */
 import { describe, it, expect } from 'vitest';
 import { APPROVAL_KINDS, getRegisteredApprovalRedactorKinds } from '../src/host/approvalService.js';

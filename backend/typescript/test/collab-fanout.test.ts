@@ -5,6 +5,9 @@
  * bearing THIS instance's own origin id is skipped (echo guard). The real
  * transport (storage pub/sub / Postgres LISTEN-NOTIFY) is exercised in-process on
  * memory storage; the two-instance path is simulated via the test hooks.
+ *
+ * TST-CFC-3. Red when: the echo guard is removed; a peer update is not applied or
+ * not relayed to local sockets; the orphan sweep ignores the age bound (either way).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -90,6 +93,12 @@ describe('collab fan-out (ADR 0335 Phase 1b-ii)', () => {
     await __deliverFanout(JSON.stringify({ canvasId, updateId, originId: __collabInstanceId() }));
     await sleep(300);
     expect(a.doc.getText('t').toString()).toBe(''); // own-origin update ignored
+    // Positive control in the same room: a FOREIGN-origin notification IS seen, so the
+    // empty text above is the guard, not a dead delivery path.
+    const foreignId = randomUUID();
+    await __putFanoutUpdate(foreignId, canvasId, peerUpdate('from a peer'));
+    await __deliverFanout(JSON.stringify({ canvasId, updateId: foreignId, originId: 'other-instance' }));
+    expect(await waitFor(() => a.doc.getText('t').toString() === 'from a peer')).toBe(true);
     a.ws.close();
   });
 });

@@ -4,6 +4,11 @@
  * Driven through the real `eraseSubject` fan-out after a real `createApp` boot,
  * so a registration that is never wired (the WF-CONS-2 shape) fails here too,
  * not only in the manifest pin.
+ *
+ * TST-BBC-2 (w66 g4, sabotage-witnessed). Red when: the eraser is not
+ * registered; the visitor match becomes a prefix match; an email key is not
+ * hashed; BOTH tenant guards are removed (the indexed tenant scan and the
+ * per-row tenant check are a double guard — either alone stays green).
  */
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';

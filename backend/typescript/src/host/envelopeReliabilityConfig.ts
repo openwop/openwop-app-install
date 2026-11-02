@@ -24,9 +24,8 @@
  *   - `OPENWOP_ENVELOPE_RELIABILITY_MAX_RETRY_ATTEMPTS` (default `3`,
  *     clamped to `[1, 16]`) — host's retry budget per envelope emission.
  *     Conformance scenarios use this to construct fixtures that exercise
- *     the retry-exhausted path. Independent of
- *     `Capabilities.limits.schemaRounds` (the engine-side per-emission
- *     cap) — `maxRetryAttempts` reports the host's actual configured value.
+ *     the retry-exhausted path. `maxRetryAttempts` reports the host's
+ *     actual configured value.
  *
  * @see RFCS/0032-envelope-reliability-events.md §C
  * @see RFCS/0033-envelope-completion-contract.md §B + §E

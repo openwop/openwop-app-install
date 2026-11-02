@@ -56,6 +56,7 @@ import { listLoadedConformanceFixtures } from '../host/index.js';
 import { getPromptsHostConfig } from '../host/promptHostConfig.js';
 import { workflowChainPacksCapability } from '../host/workflowChainPackLoader.js';
 import { getEnvelopeReasoningConfig } from '../host/envelopeReasoningConfig.js';
+import { getEnvelopeReliabilityConfig } from '../host/envelopeReliabilityConfig.js';
 import { getModelCapabilityGateConfig } from '../host/modelCapabilityGateConfig.js';
 import { authorizationCapability, isAuthorizationEnforced, scopesSupported } from '../host/protocolAuthorization.js';
 import { subWorkflowInputMappingHonoured } from '../host/capabilityOverlay.js';
@@ -65,6 +66,7 @@ import { TRIGGER_DEAD_LETTER_MAX_PAGE_SIZE, TRIGGER_DEAD_LETTER_RETENTION_DAYS }
 import { dataResidencyAdvertised, dataResidencyRegions } from '../features/cdp/dataResidency.js';
 import { anonymousActorAdvertised, anonymousActorCapability } from '../host/anonymousActor.js';
 import { proposalsFacet } from '../features/proposals/capability.js';
+import { agentDeploymentFacet } from '../features/agent-deployments/capability.js';
 import { evalSuiteCapability } from '../host/evals/evalCapability.js';
 import { requiresBounds as goalsRequiresBounds } from '../features/goals/goalsService.js';
 import { uiPluginsCapability, uiPluginOperationsServed } from '../host/uiPluginRpc.js';
@@ -87,7 +89,6 @@ import {
 } from '../host/connectionInjection.js';
 import { FORK_MODES } from '../host/forkModes.js';
 import { WEBHOOK_MAX_ATTEMPTS } from '../host/webhookDeliveryWorker.js';
-import { V2_A2UI_ENVELOPE_CATALOG, a2uiV2AdmissionReachable } from '../host/a2uiSurfaceAdmission.js';
 import { V2_EFFECT_SEAMS_PATH } from './effectSeams.js';
 import {
   advertisedWorkloadSchemes,
@@ -184,6 +185,27 @@ function v2AiProvidersFamily(): Record<string, unknown> {
       // the request's `retry` policy is honoured. Both are unconditional in
       // `aiProvidersHost.ts`, so both flags are unconditionally true.
       callAccounting: { attempts: true, retryPolicy: true },
+      // RFC 0255 §A — moved here from the deleted `envelopes` family, same shapes.
+      reasoning: { promptDirective: getEnvelopeReasoningConfig().promptDirective },
+      tierOneSubsetCompliance: TIER_ONE_SUBSET_COMPLIANCE,
+      ...v2ReliabilityFacet(),
+    },
+  };
+}
+
+/** RFC 0032 §C / RFC 0033 §E. `dispatchStructured` emits all six. The operator's
+ *  circuit-breaker turns the emission off, and the claim with it. */
+function v2ReliabilityFacet(): Record<string, unknown> {
+  const cfg = getEnvelopeReliabilityConfig();
+  if (!cfg.endToEndEnabled) return {};
+  return {
+    reliability: {
+      events: [
+        'envelope.retry-attempted', 'envelope.retry-exhausted', 'envelope.refusal',
+        'envelope.truncated', 'envelope.nl-to-format-engaged', 'envelope.recovery-applied',
+      ],
+      maxRetryAttempts: cfg.maxRetryAttempts,
+      completion: { distinguishesTruncation: true, truncationBudgetMultiplier: cfg.truncationBudgetMultiplier },
     },
   };
 }
@@ -492,52 +514,6 @@ function v2MultiAgentFamily(since: string, until: string): Record<string, unknow
         ...(version >= 5 ? { statefulResume: true } : {}),
       },
     },
-  };
-}
-
-/**
- * ADR 0730 / PHCD-1 — `envelopes` at major 2. `reasoning` comes from
- * `getEnvelopeReasoningConfig()` (the v1 root's own source) and the Tier-1
- * posture from the single `TIER_ONE_SUBSET_COMPLIANCE` constant above.
- *
- * `witness: 'claims-check'` per the declaration — this family is a self-attested
- * posture, and the corpus classifies it as one.
- */
-function v2EnvelopesFamily(): Record<string, unknown> {
-  const reasoning = getEnvelopeReasoningConfig();
-  return {
-    envelopes: {
-      status: 'experimental',
-      since: '2.0',
-      until: '2.1',
-      witness: 'claims-check',
-      reasoning: { promptDirective: reasoning.promptDirective },
-      tierOneSubsetCompliance: TIER_ONE_SUBSET_COMPLIANCE,
-    },
-  };
-}
-
-/**
- * RFC 0209 / ADR 0749 — the major-2 envelope-kind catalog (`events.md`
- * §"The envelope-kind catalog"): `supportedEnvelopes`, `schemaVersions` and
- * `envelopeStrictness`, printed from `V2_A2UI_ENVELOPE_CATALOG` — the SAME
- * constant `host/a2uiSurfaceAdmission.ts` admits against, so the advert cannot
- * claim a kind, a floor or a mode the admission does not enforce.
- *
- * `kinds` lists `ui.a2ui-surface` alone: it is the only non-universal kind with
- * a major-2 admission path. `media.*` is not listed until something at major 2
- * admits it (the v1 root that listed it is deleted, ADR 0812 P4). The floor is
- * 2, so a version-1 surface is below the floor and — under `warn` — validated
- * against version 2. NEVER add `a2uiSurface.deltaTransport` here: RFC 0209 §D.15
- * deprecates the delta frame for major 2 (a v2 host SHOULD NOT advertise it).
- */
-function v2EnvelopeCatalogFamilies(since: string, until: string): Record<string, unknown> {
-  // Advertised only where something admits the kind (see `a2uiV2AdmissionReachable`).
-  if (!a2uiV2AdmissionReachable()) return {};
-  return {
-    supportedEnvelopes: { status: 'experimental', since, until, witness: 'witnessable-gated', kinds: [...V2_A2UI_ENVELOPE_CATALOG.kinds] },
-    schemaVersions: { status: 'experimental', since, until, witness: 'witnessable-gated', kinds: { ...V2_A2UI_ENVELOPE_CATALOG.schemaVersions } },
-    envelopeStrictness: { status: 'experimental', since, until, witness: 'claims-check', mode: V2_A2UI_ENVELOPE_CATALOG.strictness },
   };
 }
 
@@ -909,6 +885,13 @@ export function agentsCapability(): Record<string, unknown> {
     // from the ONE builder (`evalSuiteCapability`), which adds the RFC 0244
     // facets only once the vendored v2 schemas seat them (D7).
     evalSuite: { supported: true, ...evalSuiteCapability() },
+    // RFC 0082 agent deployment lifecycle (ADR 1005). Served by
+    // `features/agent-deployments/` and the executor's channel pin; advertised
+    // only under `OPENWOP_AGENT_DEPLOYMENT=on`, from the ONE builder the routes read.
+    ...((): Record<string, unknown> => {
+      const facet = agentDeploymentFacet();
+      return facet ? { deployment: facet } : {};
+    })(),
     // RFC 0096 reviewable-learning proposals, served at v2 by the RFC 0249
     // operations (`features/proposals/v2Routes.ts`). ADR 0938 D3: advertised only
     // when `OPENWOP_PROPOSALS_ENABLED=true` AND some kind has a registered
@@ -1322,8 +1305,6 @@ export function buildV2Advertisement(config: AppConfig, req?: Request): Record<s
       since: SINCE,
       witness: 'witnessable-gated',
       clarificationRounds: 5,
-      schemaRounds: 3,
-      envelopesPerTurn: 32,
       maxNodeExecutions: 1000,
       maxRunDurationMs: RUN_DURATION_CEILING_MS,
       maxRequestBodyBytes: 1_048_576,
@@ -1436,8 +1417,6 @@ export function buildV2Advertisement(config: AppConfig, req?: Request): Record<s
     ...(v2MemoryFamily() ?? {}),
     ...v2AgentsFamily(),
     ...v2MultiAgentFamily(SINCE, EXPERIMENTAL_UNTIL),
-    ...v2EnvelopesFamily(),
-    ...v2EnvelopeCatalogFamilies(SINCE, EXPERIMENTAL_UNTIL),
     ...v2HostServiceFamilies(SINCE, EXPERIMENTAL_UNTIL),
     // ADR 0858 P4 — `a2a` (major-2-only hosts) and `mcp`, each once its
     // behaviour gaps close (`V2_PROJECT_A2A` / `V2_PROJECT_MCP`).

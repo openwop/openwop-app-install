@@ -23,6 +23,7 @@ import { join } from 'node:path';
 import { BlockList, isIP } from 'node:net';
 import { GOOGLE_FRONT_END_CIDRS, clientIp, isTrustedProxy, normaliseAddress } from '../src/host/clientIp.js';
 import { ipRateLimitMiddleware, _resetRateLimitState } from '../src/middleware/rateLimit.js';
+import { stripComments } from './helpers/stripComments.js';
 
 const CLIENT = '198.51.100.23';
 const HOSTING_EGRESS = '74.125.215.197'; // a measured Firebase-door peer
@@ -194,7 +195,6 @@ describe('ADR 0851 — ONE reader of the client address', () => {
     return out;
   }
   // Comments are stripped first: several files explain WHY they don't read these.
-  const stripComments = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`])\/\/.*$/gm, '$1');
 
   it('no module outside host/clientIp.ts reads X-Forwarded-For, req.ip(s) or the socket peer', () => {
     const offenders: string[] = [];

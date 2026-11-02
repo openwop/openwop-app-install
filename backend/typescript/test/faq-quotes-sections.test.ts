@@ -9,13 +9,26 @@
  * 3. `jsonLdBlocks` — a page holding `faq` sections emits ONE FAQPage block
  *    built from those items (the ADR 0384 deferral trigger, now fired) — and a
  *    page WITHOUT one emits none (never fabricated).
+ *
+ * Runtime registration of the `faq` type is proven by every case that passes a
+ * `{type:'faq'}` section through `validateSection` (an unregistered type throws).
+ * The former compile-time "is a registered section type" case was removed in w70
+ * (tautological: it asserted a literal equals itself).
+ *
+ * Tracker: TST-DBD-3. Red when: the faq item cap or half-empty filter changes,
+ * a non-string field is stringified, an item-less faq/quotes section is
+ * accepted, a byline is invented, the prerender stops escaping or always
+ * prints a figcaption, or JSON-LD emits FAQPage without faq items or from the
+ * wrong field (probes w70g2-faq-* / -quo-*).
  */
 import { describe, expect, it } from 'vitest';
-import { validateSection, type SectionType, type Section } from '../src/features/cms/cmsService.js';
+import { validateSection, type Section } from '../src/features/cms/cmsService.js';
 import { sectionHtml, type SectionHtmlOptions } from '../src/features/publishing/sectionHtml.js';
 import { jsonLdBlocks } from '../src/features/publishing/prerenderService.js';
 
 const data = (raw: object): Record<string, unknown> => validateSection(raw).data;
+/** A JSON-LD block carrying `@type` (jsonLdBlocks returns plain objects). */
+const typeOf = (b: object): unknown => ('@type' in b ? b['@type'] : undefined);
 
 describe('faq section — validation', () => {
   it('keeps bounded Q/A pairs and drops half-empty ones', () => {
@@ -43,12 +56,6 @@ describe('faq section — validation', () => {
     expect(bad.items).toEqual([{ q: 'ok', a: 'fine' }]);
   });
 
-  it('is a registered section type (compile-time union guard; runtime via validateSection not throwing above)', () => {
-    // The union assignment is the real (compile-time) assertion; the runtime
-    // registry membership is covered by every happy-path test in this file.
-    const t: SectionType = 'faq';
-    expect(t).toBe('faq');
-  });
 });
 
 describe('quotes section — validation', () => {
@@ -98,9 +105,9 @@ describe('FAQPage JSON-LD — emitted only from typed faq sections', () => {
   it('a page with a faq section emits one FAQPage block from its items', () => {
     const faq: Section = validateSection({ type: 'faq', data: { items: [{ q: 'Q1', a: 'A1' }, { q: 'Q2', a: 'A2' }] } });
     const blocks = jsonLdBlocks({ ...base, page: { title: 'T', updatedAt: '', slug: 't', sections: [faq] } });
-    const faqBlock = blocks.find((b) => (b as { '@type'?: string })['@type'] === 'FAQPage') as { mainEntity: unknown[] } | undefined;
-    expect(faqBlock).toBeTruthy();
-    expect(faqBlock!.mainEntity).toEqual([
+    const faqBlock = blocks.find((b) => typeOf(b) === 'FAQPage');
+    expect(faqBlock).toBeDefined();
+    expect(faqBlock && 'mainEntity' in faqBlock ? faqBlock.mainEntity : undefined).toEqual([
       { '@type': 'Question', name: 'Q1', acceptedAnswer: { '@type': 'Answer', text: 'A1' } },
       { '@type': 'Question', name: 'Q2', acceptedAnswer: { '@type': 'Answer', text: 'A2' } },
     ]);
@@ -109,6 +116,6 @@ describe('FAQPage JSON-LD — emitted only from typed faq sections', () => {
   it('a page without a faq section emits NO FAQPage block (never fabricated)', () => {
     const hero: Section = validateSection({ type: 'hero', data: { heading: 'H' } });
     const blocks = jsonLdBlocks({ ...base, page: { title: 'T', updatedAt: '', slug: 't', sections: [hero] } });
-    expect(blocks.some((b) => (b as { '@type'?: string })['@type'] === 'FAQPage')).toBe(false);
+    expect(blocks.some((b) => typeOf(b) === 'FAQPage')).toBe(false);
   });
 });

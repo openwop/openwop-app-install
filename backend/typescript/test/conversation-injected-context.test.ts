@@ -19,6 +19,11 @@
  * provenance record that must NOT reach a model. Both halves are asserted, so
  * this still witnesses the original `chatSessionId` link (without the meta, the
  * `boardId` is unknown and no resolve happens at all).
+ *
+ * TST-CKB-6. Red when: the exchange keys meta by the gate id instead of the run's
+ * chatSessionId (every board case), the persisted snapshot reaches the prompt
+ * (case 1), a failed board resolve is not named in a GROUNDING NOTICE (case 2), or
+ * the turn-path likeness gate stops refusing (H1 case).
  */
 import { describe, expect, it, beforeAll, afterAll, beforeEach } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -29,7 +34,8 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 import { markAsBoardGroup } from '../src/host/conversationStore.js';
 import { registerBoardContextResolver } from '../src/host/boardContextResolver.js';
-import { resolveBoardStrategyContext } from '../src/features/advisory-board/service.js';
+import { resolveBoardStrategyContext, createBoard, clearFabricatedLivingAcks, updateBoard } from '../src/features/advisory-board/service.js';
+import { createRosterEntry } from '../src/host/rosterService.js';
 import { programMock, resetMockPrograms, lastReceivedMessages } from '../src/providers/dispatchMock.js';
 
 let server: http.Server;
@@ -233,15 +239,13 @@ describe('H1 / ADR 0588 D5 — the likeness gate on the TURN, not just on room-o
   const OWNER = 'user:h1-owner';
 
   async function seatedUnacknowledgedRoom(slug: string): Promise<{ boardId: string; sessionId: string; agentId: string }> {
-    const { createRosterEntry } = await import('../src/host/rosterService.js');
-    const { createBoard, clearFabricatedLivingAcks } = await import('../src/features/advisory-board/service.js');
     const agentId = `test.advisor.${slug}`;
     getAgentRegistry().register({
       agentId, persona: 'Elon Trask', label: 'Advisor', modelClass: 'general',
       systemPrompt: 'You are a simulated advisor.', packName: 'test', packVersion: '0',
       toolAllowlist: [], confidence: { defaultThreshold: 0.5 },
     });
-    const entry = await createRosterEntry({ tenantId: TENANT, persona: `Elon ${slug}`, agentRef: { kind: 'host' } as never });
+    const entry = await createRosterEntry({ tenantId: TENANT, persona: `Elon ${slug}`, agentRef: { agentId } });
     // The production row: seed-owned, `living`, ack fabricated by the seeder.
     const board = await createBoard(TENANT, BOARD_ORG, SEED_ACTOR, {
       name: `Titans ${slug}`, advisors: [entry.rosterId], personaKind: 'living',
@@ -285,7 +289,6 @@ describe('H1 / ADR 0588 D5 — the likeness gate on the TURN, not just on room-o
     // pass the arm above while removing the feature — and the refusal's own
     // message would be naming an exit that does not work.
     const { boardId, sessionId, agentId } = await seatedUnacknowledgedRoom('exit');
-    const { updateBoard } = await import('../src/features/advisory-board/service.js');
     await updateBoard(TENANT, OWNER, boardId, { livingPersonaAck: true });
     const res = await takeTurn(sessionId, agentId);
     expect(res.status).toBe(200);

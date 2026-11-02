@@ -21,6 +21,7 @@
  * in a polling loop for the running server.
  */
 
+import { sweepExpiredPrompts } from './interruptExpiry.js';
 import { signStandardWebhooks, signWebhookV1 } from './webhookSignature.js';
 import { isStandardWebhooksOptIn } from './webhookStandardWebhooks.js';
 import { runUnderWorkerContract } from '../storage/eventEraAdapter.js';
@@ -602,6 +603,9 @@ export function startWebhookDeliveryWorker(storage: Storage, workerId: string): 
       // checks in routes/interrupts.ts cover the with-traffic case; this
       // covers the quiescent one.
       await sweepExpiredApprovalGates(storage);
+      // ADR 1001 D6 — prompts that expire into a resume value (an agent's
+      // clarification), on the same quiescent-safe cadence. Fail-contained.
+      await sweepExpiredPrompts(storage);
       // ADR 0193/0201 — retention sweep for the email:sent idempotency ledger,
       // on the same quiescent-safe cadence. Bounded + fail-contained internally.
       await sweepExpiredEmailSent();

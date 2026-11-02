@@ -19,9 +19,12 @@
  *
  * Sabotage (run 2026-10-20): reading the old 50,000 window reds 4; dropping the
  * coverage check in the projection reds 5; deleting the mirror-stop convergence
- * reds 3; dropping the step-removal cascade reds 2.
+ * reds 3; dropping the step-removal cascade reds 2. Re-run w73 (p1b-window,
+ * p1b-coverage, p1b-converge, p1b-ref, p1b-cascade, p1b-delete — all witnessed);
+ * the fixtures are typed `Funnel` / `FunnelStep`, no casts.
  */
 import { beforeAll, describe, expect, it, vi } from 'vitest';
+import type { Funnel, FunnelStep } from '../src/features/funnels/funnelsService.js';
 
 type Evt = { eventId: string; tenantId: string; eventType: string; payload: Record<string, unknown>; piiFields: string[]; at: string };
 const synthetic: Evt[] = [];
@@ -47,7 +50,7 @@ let n = 0;
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-});
+}, 120_000);
 
 async function funnelWithSplit(stepIds = ['s1']) {
   const tenantId = `t-p1b-${n++}`;
@@ -65,11 +68,11 @@ const view = (tenantId: string, orgId: string, stepId: string, experimentId: str
 describe('ADR 0949 P1b — 1. assignment witness', () => {
   it('is byte-identical to the pre-engine formula over 100,000 keys', () => {
     const variants = [{ key: 'a', pageId: null, weight: 20 }, { key: 'b', pageId: 'p2', weight: 30 }, { key: 'c', pageId: 'p3', weight: 50 }];
-    const funnel = { funnelId: 'f-w', tenantId: 't', orgId: 'o' } as Parameters<typeof svc.assignStepVariant>[0];
-    const step = { stepId: 's-w', kind: 'landing', pageId: 'p', experiment: { experimentId: 'x-w', status: 'running' as const, salt: 'abcd1234', variants, createdAt: '2026-10-01T00:00:00.000Z' } };
+    const step: FunnelStep = { stepId: 's-w', kind: 'landing', pageId: 'p', experiment: { experimentId: 'x-w', status: 'running', salt: 'abcd1234', variants, createdAt: '2026-10-01T00:00:00.000Z' } };
+    const funnel: Funnel = { funnelId: 'f-w', tenantId: 't', orgId: 'o', name: 'W', slug: 'w', status: 'published', steps: [step], createdBy: 'u', createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z' };
     for (let i = 0; i < 100_000; i++) {
       const vk = `vk-${i}`;
-      expect(svc.assignStepVariant(funnel, step as never, vk)?.key).toBe(assignWeightedVariant(vk, 'funnel:f-w:step:s-w', 'abcd1234', variants));
+      expect(svc.assignStepVariant(funnel, step, vk)?.key).toBe(assignWeightedVariant(vk, 'funnel:f-w:step:s-w', 'abcd1234', variants));
     }
   });
 });

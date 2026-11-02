@@ -1,3 +1,20 @@
+/**
+ * Durable host.kv adapter (`src/host/durable/durableStore.ts` `createKvCore`,
+ * registered by `durableKv.ts` `initDurableSurfaces`; Phase 2) on the
+ * dialect-agnostic sqlite store. TST-CWD-4.
+ *
+ * Red when (sabotage-witnessed, wave 69): the tenant key segment is dropped
+ * (the isolation case); an expired envelope is returned or not lazily evicted;
+ * `delete` reports `existed:true` for a missing key; `list` leaks the storage
+ * prefix; `cas` swaps on a mismatch or loses the legacy `{expected,value}`
+ * aliases; the kv adapter is not registered behind the seam.
+ *
+ * DOUBLE GUARD (recorded): `atomicIncrement` is serialised by BOTH the
+ * in-process `withKeyLock` AND the `kvCompareAndSwap` retry loop, so removing
+ * either one alone stays green by design (w69g3-kv-incr-lock-only). Removing
+ * BOTH in one edit loses updates and reds the concurrency case
+ * (w69g3-kv-incr-both).
+ */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
@@ -78,9 +95,8 @@ describe('durable KV surface (Storage-backed)', () => {
     expect((await kvFor('tenant-a').get({ key: 'shared' })).value).toBe('A');
     expect((await kvFor('tenant-b').get({ key: 'shared' })).value).toBe('B');
     // A tenant's list never sees another tenant's rows.
-    const keys = (await kvFor('tenant-a').list({ prefix: '' })).keys as string[];
-    expect(keys).toContain('shared');
-    expect(keys.every((k) => !k.includes('tenant-b'))).toBe(true);
+    // Exactly tenant-a's one key — a leaked tenant-b row would make it two.
+    expect((await kvFor('tenant-a').list({ prefix: '' })).keys).toEqual(['shared']);
   });
 
   it('atomicIncrement starts at 0 and accumulates; serialized under concurrency', async () => {

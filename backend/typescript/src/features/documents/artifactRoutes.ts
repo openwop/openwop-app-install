@@ -32,7 +32,7 @@
 import type { Request } from 'express';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { OpenwopError } from '../../types.js';
-import { getArtifact, listArtifactsForRun, listArtifactsPage, listArtifactRevisions, getArtifactRevision, diffArtifact } from '../../host/artifactProjection.js';
+import { getArtifact, listArtifactsForRun, listArtifactsForChatTurn, listArtifactsPage, listArtifactRevisions, getArtifactRevision, diffArtifact } from '../../host/artifactProjection.js';
 
 function tenantOf(req: Request): string {
   return (req as { tenantId?: string }).tenantId ?? 'default';
@@ -57,6 +57,17 @@ export function registerArtifactRoutes(deps: RouteDeps): void {
       // (the chat's "open in the Workbench"). A filter, never a wider view: the
       // same per-artifact gate as `/:artifactId`. Host-extension, so no wire
       // change (a list under `/v1/runs/:id/artifacts` would be protocol surface).
+      // ADR 1017 D2 — `?conversationRunId=&turnMessageId=` narrows to what the chat
+      // tools saved during ONE chat turn (the cards under that turn). Same filter
+      // discipline as `?runId=`: never wider than `GET /artifacts/:id`.
+      if (typeof req.query.conversationRunId === 'string' || typeof req.query.turnMessageId === 'string') {
+        const runId = typeof req.query.conversationRunId === 'string' ? req.query.conversationRunId.trim() : '';
+        const turnMessageId = typeof req.query.turnMessageId === 'string' ? req.query.turnMessageId.trim() : '';
+        if (!runId || runId.length > 200) throw new OpenwopError('validation_error', '`conversationRunId` must be a non-empty run id.', 400, { field: 'conversationRunId' });
+        if (!turnMessageId || turnMessageId.length > 400) throw new OpenwopError('validation_error', '`turnMessageId` must be a non-empty turn message id.', 400, { field: 'turnMessageId' });
+        res.status(200).json({ artifacts: await listArtifactsForChatTurn(tenantOf(req), requireSubject(req), runId, turnMessageId) });
+        return;
+      }
       if (typeof req.query.runId === 'string') {
         const runId = req.query.runId.trim();
         if (!runId || runId.length > 200) throw new OpenwopError('validation_error', '`runId` must be a non-empty run id.', 400, { field: 'runId' });

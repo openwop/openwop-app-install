@@ -4,10 +4,21 @@
  * The negative cases are the point. An advertised key a verifier cannot resolve
  * makes every bundle signed under it FAIL the Front door, so a malformed value
  * MUST be withheld rather than guessed at or passed through.
+ *
+ * TST-CVF-15. Red when the reader passes through a non-ed25519 alg, an unknown
+ * `use`, a bad keyId, a non-array, a PEM or a padded base64 key; drops a
+ * retired key's `retiredAt`; or the v2 root publishes `signingKeys` when
+ * unconfigured / omits it when configured. `PUBLISHED_KEYS` is a hand copy of
+ * the deployed env value (not in the repo) — an honest ceiling; the claim on
+ * it is only that each is a real curve point.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { createPublicKey, generateKeyPairSync } from 'node:crypto';
-import { readBundleSigningKeys } from '../src/routes/discovery.js';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
+import Ajv from 'ajv/dist/2020.js';
+import { buildV2Advertisement, readBundleSigningKeys } from '../src/routes/discovery.js';
+import { loadConfigFromEnv } from '../src/index.js';
 
 const VAR = 'OPENWOP_BUNDLE_SIGNING_KEYS';
 const before = process.env[VAR];
@@ -111,13 +122,7 @@ describe('signingKeys[] (RFC 0168 §E.2)', () => {
  * check that refused when the pin was rc.8 — `signingKeys` lands in rc.9.
  */
 describe('the v2 root still validates with signingKeys published', () => {
-  it('validates against the vendored (closed) v2 capabilities schema', async () => {
-    const { readFileSync } = await import('node:fs');
-    const { join } = await import('node:path');
-    const { default: Ajv } = await import('ajv/dist/2020.js');
-    const { buildV2Advertisement } = await import('../src/routes/discovery.js');
-    const { loadConfigFromEnv } = await import('../src/index.js');
-
+  it('validates against the vendored (closed) v2 capabilities schema', () => {
     process.env[VAR] = JSON.stringify([{
       keyId: 'openwop-app-self-2026-09-04', alg: 'ed25519',
       publicKey: 'SFBjFSjHaQSUbIb-FQudyk-DwOagmGyshJBwC-0zvZ4', use: 'certification-bundle',
@@ -129,7 +134,6 @@ describe('the v2 root still validates with signingKeys published', () => {
     // Register every sibling v2 schema so the root's $refs resolve. Loading a
     // hand-picked subset silently fails to compile the moment the corpus adds a
     // ref, which is how a schema check quietly stops checking.
-    const { readdirSync } = await import('node:fs');
     for (const f of readdirSync(root).filter((x) => x.endsWith('.schema.json') && x !== 'capabilities.schema.json')) {
       try { ajv.addSchema(JSON.parse(readFileSync(join(root, f), 'utf8'))); } catch { /* duplicate $id */ }
     }
@@ -158,9 +162,7 @@ describe('the v2 root still validates with signingKeys published', () => {
 // ADR 0812 P4: the v1 root and its builder are deleted, so "both roots" is now
 // the one root this host serves; the v1 halves of these legs went with it.
 describe('the key is published on the root', () => {
-  it('appears in the v2 advertisement', async () => {
-    const { buildV2Advertisement } = await import('../src/routes/discovery.js');
-    const { loadConfigFromEnv } = await import('../src/index.js');
+  it('appears in the v2 advertisement', () => {
     const entry = {
       keyId: 'openwop-app-self-2026-09-04', alg: 'ed25519',
       publicKey: 'SFBjFSjHaQSUbIb-FQudyk-DwOagmGyshJBwC-0zvZ4', use: 'certification-bundle',
@@ -170,9 +172,7 @@ describe('the key is published on the root', () => {
     expect(buildV2Advertisement(cfg)['signingKeys'], 'v2 root').toEqual([entry]);
   });
 
-  it('is absent from the root when unconfigured — no over-claim', async () => {
-    const { buildV2Advertisement } = await import('../src/routes/discovery.js');
-    const { loadConfigFromEnv } = await import('../src/index.js');
+  it('is absent from the root when unconfigured — no over-claim', () => {
     delete process.env[VAR];
     const cfg = loadConfigFromEnv();
     expect(buildV2Advertisement(cfg)['signingKeys']).toBeUndefined();

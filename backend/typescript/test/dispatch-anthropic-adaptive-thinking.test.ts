@@ -10,6 +10,13 @@
  * These pin: the flagged models get NO `thinking` field; the older models keep the
  * manual budget; an UNFLAGGED id that refuses it is retried once without it; any
  * other 400 is still reported.
+ *
+ * TST-CVG-17. Red when: the `adaptiveThinkingOnly` flag stops suppressing
+ * `thinking` (opus-5-5 row), the adaptive models lose the 8192 output floor (both
+ * rows), the manual budget changes, the refusal retry is removed, or any other
+ * 400 is retried. The fable-5-1 row guards the FLOOR only: the manual-thinking
+ * model regex (`opus|sonnet|haiku`) never matches `fable`, so that row cannot
+ * witness the flag.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { dispatchChat } from '../src/providers/dispatch.js';
@@ -46,7 +53,7 @@ function mockAnthropic(answer: (n: number, body: Body) => Response): Body[] {
       bodies.push(body);
       return answer(bodies.length, body);
     }
-    return realFetch(input, init);
+    throw new Error(`unexpected fetch: ${url}`);
   }) as typeof fetch;
   return bodies;
 }

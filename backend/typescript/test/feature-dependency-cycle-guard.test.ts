@@ -18,6 +18,11 @@
  *  2. It never throws. This runs at boot for every feature; one bad declaration must
  *     not take the service down over a lock-STRENGTH concern. Dropping the edge
  *     reproduces exactly today's behaviour (the edge does not exist now either).
+ *
+ * Tracker: TST-DBE-2. Red when: the guard is disabled, it over-drops acyclic
+ * edges, the walk stops at one hop, the self-edge check goes, an all-dropped
+ * feature loses its key, one cyclic edge drops its siblings, or a cycle throws
+ * (probes w70g2-cyc-*).
  */
 
 import { afterEach, describe, expect, it } from 'vitest';

@@ -14,6 +14,11 @@
  * Driven through the real seam (`buildFeatureSurfaces`), not the raw builder.
  * Sabotage-witnessed in the PR: dropping the row-org check, or the argument match,
  * reds this file.
+ *
+ * TST-BBC-1 (w66 g4, sabotage-witnessed). Red when: a named `orgId` stops having
+ * to match the row's org; the run's person stops being checked in the ROW's org;
+ * an org-less list stops filtering to readable orgs; an actorless, causeless run
+ * stops being tenant-trusted; a write stops asking for workspace:write.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -43,17 +48,20 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-// `any`: the JSON wire boundary of a test-only HTTP helper (the adr0832 probe precedent).
-function client(): { post: (p: string, b?: unknown) => Promise<{ status: number; body: any }> } {
+function client(): { post: <T = unknown>(p: string, b?: unknown) => Promise<{ status: number; body: T }> } {
   let cookie = '';
   return {
-    post: async (path, body) => {
+    post: async <T>(path: string, body?: unknown): Promise<{ status: number; body: T }> => {
       const res = await fetch(`${BASE}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
       for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]!; }
-      return { status: res.status, body: await res.json().catch(() => undefined) };
+      const text = await res.text(); // wire JSON
+      const out: T = text ? JSON.parse(text) : {};
+      return { status: res.status, body: out };
     },
   };
 }
+interface LoginBody { user: { userId: string } }
+interface OrgBody { orgId: string }
 
 const H = '/host/openwop-app';
 const SECRET = 'Client B launch: confidential pricing';
@@ -65,21 +73,21 @@ const leaks = (v: unknown): boolean => JSON.stringify(v ?? null).includes(SECRET
 async function fixture() {
   const tenantId = `org:briefscope-${Date.now()}-${n++}`;
   const owner = client();
-  const ownerId: string = (await owner.post(`${H}/test/login`, { email: `bs-o-${n++}@acme.test`, tenantId })).body.user.userId;
+  const ownerId: string = (await owner.post<LoginBody>(`${H}/test/login`, { email: `bs-o-${n++}@acme.test`, tenantId })).body.user.userId;
   const member = client();
-  const memberId: string = (await member.post(`${H}/test/login`, { email: `bs-m-${n++}@acme.test`, tenantId })).body.user.userId;
-  const orgA: string = (await owner.post(`${H}/orgs`, { name: 'Client A' })).body.orgId;
-  const orgB: string = (await owner.post(`${H}/orgs`, { name: 'Client B' })).body.orgId;
+  const memberId: string = (await member.post<LoginBody>(`${H}/test/login`, { email: `bs-m-${n++}@acme.test`, tenantId })).body.user.userId;
+  const orgA: string = (await owner.post<OrgBody>(`${H}/orgs`, { name: 'Client A' })).body.orgId;
+  const orgB: string = (await owner.post<OrgBody>(`${H}/orgs`, { name: 'Client B' })).body.orgId;
   const add = await owner.post(`${H}/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'M', subject: memberId, roles: ['editor'] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   const viewer = client();
-  const viewerId: string = (await viewer.post(`${H}/test/login`, { email: `bs-v-${n++}@acme.test`, tenantId })).body.user.userId;
+  const viewerId: string = (await viewer.post<LoginBody>(`${H}/test/login`, { email: `bs-v-${n++}@acme.test`, tenantId })).body.user.userId;
   const addV = await owner.post(`${H}/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'V', subject: viewerId, roles: ['viewer'] });
   expect(addV.status, JSON.stringify(addV.body)).toBe(201);
-  // `as never`: the service inputs carry many optional fields; only the name matters here.
-  const briefA = await createBrief(tenantId, orgA, ownerId, { name: 'Client A launch', productName: 'Widget' } as never);
-  const briefB = await createBrief(tenantId, orgB, ownerId, { name: SECRET, productName: SECRET } as never);
-  const personaB = await createPersona(tenantId, orgB, ownerId, { name: SECRET } as never);
+  // BriefInput / PersonaInput are all-optional, so no cast is needed.
+  const briefA = await createBrief(tenantId, orgA, ownerId, { name: 'Client A launch', productName: 'Widget' });
+  const briefB = await createBrief(tenantId, orgB, ownerId, { name: SECRET, productName: SECRET });
+  const personaB = await createPersona(tenantId, orgB, ownerId, { name: SECRET });
   return { tenantId, ownerId, memberId, viewerId, orgA, orgB, briefA: briefA.id, briefB: briefB.id, personaB: personaB.id };
 }
 const surface = (scope: BundleScope): FeatureSurface => buildFeatureSurfaces(scope)['campaign-brief']!;
@@ -150,7 +158,7 @@ describe('campaign-brief surface — a client-A run cannot reach client B rows',
     expect((await getBrief(f.tenantId, f.briefA))?.kernel ?? null).toBeNull();
 
     const editor = surface({ tenantId: f.tenantId, runId: 'r1', actingUserId: f.memberId });
-    const kernel = { headline: 'A', supportingStatement: 'B', proofPoints: [], primaryCta: 'Go', secondaryCta: '', tone: 'warm', channelTones: {}, sourceDocIds: [] };
+    const kernel = { headline: 'A', supportingStatement: 'B', proofPoints: ['P'], primaryCta: 'Go', secondaryCta: '', tone: 'warm', channelTones: {}, sourceDocIds: [] };
     const out = await editor.setKernel!({ briefId: f.briefA, kernel });
     expect(out.brief).toMatchObject({ id: f.briefA });
     expect((await getBrief(f.tenantId, f.briefA))?.kernel).toBeTruthy();

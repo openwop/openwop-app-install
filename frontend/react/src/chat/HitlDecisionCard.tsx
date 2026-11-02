@@ -80,7 +80,10 @@ export function HitlDecisionCard({ entry, nodeName }: Props): JSX.Element {
   // Approval card sends `action: 'reject'` for the reject button;
   // we surface that distinctly so the user sees they rejected, not
   // "Approved" (which would be misleading).
-  const effectiveVerb = rejected ? t('hitlVerbRejected') : verb;
+  // ADR 1001 D8 — an agent clarification resolves `{answers[]}` (empty = not answered).
+  // An agent clarification nobody answered (a Skip or the expiry) resolves `{answers: []}`.
+  const skipped = isRecord(entry.resumeValue) && Array.isArray(entry.resumeValue.answers) && entry.resumeValue.answers.length === 0;
+  const effectiveVerb = rejected ? t('hitlVerbRejected') : skipped ? t('hitlVerbClarifySkipped') : verb;
   const effectiveIcon: IconKind = rejected ? 'x' : icon;
   const effectiveColor = rejected ? 'var(--color-danger)' : color;
 
@@ -150,7 +153,14 @@ function parseResumeValue(value: unknown): {
   // raw `content`, which is the nested-key value the FE walked the
   // resumeSchema to find. Clarification / refinement: surface the
   // typed `content` as the label.
-  const decisionLabel = selectedKey ?? content ?? null;
+  // ADR 1001 D8 — an agent clarification's `{answers:[{id, answer}]}`: show the
+  // answers themselves, compactly (free text is the answerer's own words).
+  const answersLabel = Array.isArray(value.answers)
+    ? value.answers
+      .map((a) => (isRecord(a) ? (typeof a.answer === 'boolean' ? i18n.t(a.answer ? 'interrupts:clarifyYes' : 'interrupts:clarifyNo') : typeof a.answer === 'string' ? a.answer : '') : ''))
+      .filter(Boolean).join(' · ').slice(0, 120) || null
+    : null;
+  const decisionLabel = selectedKey ?? content ?? answersLabel ?? null;
 
   return { decisionLabel, comment, rejected };
 }

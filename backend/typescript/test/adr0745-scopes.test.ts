@@ -27,6 +27,7 @@ import { createApp } from '../src/index.js';
 import { toWireRunId } from '../src/host/v2Ids.js';
 import { PROPOSAL_KEY_SCOPES, SCOPES_SUPPORTED } from '../src/host/protocolAuthorization.js';
 import { issueApiKey } from '../src/features/developer-keys/apiKeyService.js';
+import { stripComments } from './helpers/stripComments.js';
 
 const SRC = resolve(import.meta.dirname, '..', 'src');
 
@@ -68,9 +69,6 @@ describe('scopes_supported is derived from the gates, both directions', () => {
   });
 });
 
-function stripComments(src: string): string {
-  return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
-}
 
 let server: http.Server;
 let BASE = '';

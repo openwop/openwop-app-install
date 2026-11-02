@@ -24,6 +24,9 @@
  * that is what this builds — through the production routes only (the ADR 0508
  * precedent), because a shared workspace assembled by hand is exactly the kind
  * of fixture that agrees with whatever the code does.
+ *
+ * TST-DGF-4. Red when `issueAttestation` stops refusing an issuer who is not
+ * the grant's subject (sabotage-witnessed, wave 71).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -50,10 +53,10 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 
 let n = 0;
 
-interface Res { status: number; body: any }
+interface Res<T> { status: number; body: T | undefined }
 function client() {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
@@ -65,18 +68,21 @@ function client() {
       const m = /(__session=[^;]+)/.exec(sc);
       if (m) cookie = m[1]!;
     }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    const parsed: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    return { status: res.status, body: parsed as T | undefined };
   };
   return {
-    get: (p: string) => call('GET', p),
-    post: (p: string, b?: unknown) => call('POST', p, b),
+    get: <T = unknown>(p: string) => call<T>('GET', p),
+    post: <T = unknown>(p: string, b?: unknown) => call<T>('POST', p, b),
   };
 }
 
 async function signIn(c: ReturnType<typeof client>): Promise<string> {
-  const r = await c.post('/host/openwop-app/test/login', { email: `att-${Date.now()}-${n++}@acme.test` });
+  const r = await c.post<{ user?: { userId?: string } }>('/host/openwop-app/test/login', { email: `att-${Date.now()}-${n++}@acme.test` });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return r.body.user.userId as string;
+  const userId = r.body?.user?.userId ?? '';
+  expect(userId).not.toBe('');
+  return userId;
 }
 
 describe('ADR 0544 matrix row 8 — inside a REAL shared workspace', () => {
@@ -84,9 +90,9 @@ describe('ADR 0544 matrix row 8 — inside a REAL shared workspace', () => {
     // ── the applicant: a real ws: workspace, entered through the switch route ──
     const owner = client();
     const ownerUserId = await signIn(owner);
-    const ws = await owner.post('/host/openwop-app/workspaces', { name: `WS ${n++}` });
+    const ws = await owner.post<{ workspaceId?: string }>('/host/openwop-app/workspaces', { name: `WS ${n++}` });
     expect(ws.status, JSON.stringify(ws.body)).toBe(201);
-    const wsId = ws.body.workspaceId as string;
+    const wsId = ws.body?.workspaceId ?? '';
     expect(wsId, 'a personal tenant would make this test vacuous').toMatch(/^ws:/);
     expect((await owner.post(`/host/openwop-app/workspaces/${encodeURIComponent(wsId)}/switch`)).status).toBe(200);
 
@@ -137,8 +143,9 @@ describe('ADR 0544 matrix row 8 — inside a REAL shared workspace', () => {
 
     // …and nothing was written. A refusal that still minted would be worse than
     // no refusal, because the applicant would never see it.
-    const after = await owner.get(`/host/openwop-app/job-search/orgs/${encodeURIComponent(orgId)}/attestations`);
-    expect(after.body.attestations ?? []).toHaveLength(0);
+    const after = await owner.get<{ attestations?: unknown[] }>(`/host/openwop-app/job-search/orgs/${encodeURIComponent(orgId)}/attestations`);
+    expect(after.status).toBe(200);
+    expect(after.body?.attestations).toEqual([]);
 
     // ── and the applicant themselves is NOT locked out by the same rule ──
     const own = await owner.post(`/host/openwop-app/job-search/orgs/${encodeURIComponent(orgId)}/attestations`, {

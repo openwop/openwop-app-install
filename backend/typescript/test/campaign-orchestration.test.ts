@@ -29,6 +29,9 @@ import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { checkMappingCapability } from '../src/host/workflowDefinitionValidation.js';
+import { loadWorkflowChainPacks, defaultWorkflowChainPackRoots, _resetChainRegistryForTest } from '../src/host/workflowChainPackLoader.js';
+import { buildChainBackedDefinition, getChainBackedWorkflow, _resetChainBackedWorkflowsForTest } from '../src/host/chainBackedWorkflows.js';
+import { registerLegacyDefsChainBacked } from '../src/features/index.js';
 import { loadAgentsFromManifest } from '../src/packs/agentLoader.js';
 import { nodes as nodePack } from '../../../packs/feature.campaign-orchestration.nodes/index.mjs';
 import { campaignOrchestrationParallel, ORCHESTRATION_ID } from '../src/features/campaign-orchestration/orchestrationWorkflow.js';
@@ -249,11 +252,71 @@ describe('campaign-studio — nodes', () => {
     expect(r.divergences.map((d) => d.channel)).toEqual(['social_posts']);
   });
 
-  it('consistency-check returns a neutral report with no drafts', async () => {
-    const features = { 'campaign-brief': { getBrief: async () => ({ brief: { kernel: { headline: 'X' } } }) } };
-    const out = await nodePack['feature.campaign-orchestration.nodes.consistency-check']({ features, inputs: { briefId: 'b1' } });
+  // ADR 1020 D2 / CS70WF-2 — the check reads each COMPLETED child's mapped
+  // channelResult; nothing to compare is a typed failure, never a neutral pass.
+  const KERNEL_FEATURES = { 'campaign-brief': { getBrief: async () => ({ brief: { kernel: { headline: 'Pick faster grocery', primaryCta: 'Demo', proofPoints: ['40 percent faster'] } } }) } };
+  const RESULT_VARS = { 'campaign-studio.channel.landing-page': 'channelResult_landing_page', 'campaign-studio.channel.social-posts': 'channelResult_social_posts', 'campaign-studio.channel.email-sequence': 'channelResult_email_sequence' };
+  const bagOf = (entries: Record<string, unknown>) => ({ get: (k: string) => entries[k], set: () => {} });
+  const run = (dispatched: unknown, vars: Record<string, unknown>) => nodePack['feature.campaign-orchestration.nodes.consistency-check']({
+    features: KERNEL_FEATURES, config: { resultVariables: RESULT_VARS }, variables: bagOf(vars), inputs: { briefId: 'b1', dispatched },
+  });
+
+  it('consistency-check scores the drafts the channel children reported, skipping skipped channels', async () => {
+    const out = await run([
+      { childRunId: 'r1', childWorkflowId: 'campaign-studio.channel.landing-page', childStatus: 'completed' },
+      { childRunId: 'r2', childWorkflowId: 'campaign-studio.channel.social-posts', childStatus: 'completed' },
+      { childRunId: 'r3', childWorkflowId: 'campaign-studio.channel.email-sequence', childStatus: 'completed' },
+    ], {
+      channelResult_landing_page: { channel: 'landing_page', draft: { channel: 'landing_page', title: 'Pick faster with FlashPick' } },
+      channelResult_social_posts: { channel: 'social_posts', draft: { channel: 'social_posts', content: 'unrelated text' } },
+      channelResult_email_sequence: { channel: 'email_sequence', skipped: true, reason: 'channel_disabled' },
+    });
     expect(out.status).toBe('success');
-    expect(out.outputs?.report).toMatchObject({ score: 100, divergences: [], passesThreshold: true, note: 'no drafts to compare' });
+    const r = out.outputs?.report as { score: number; divergences: Array<{ channel: string }> };
+    expect(r.score).toBe(50); // 1 of 2 drafts echoes "faster"; the skipped channel is not scored
+    expect(r.divergences.map((d) => d.channel)).toEqual(['social_posts']);
+    expect(out.outputs?.channels).toEqual([
+      { channel: 'landing_page', status: 'drafted' },
+      { channel: 'social_posts', status: 'drafted' },
+      { channel: 'email_sequence', status: 'skipped', reason: 'channel_disabled' },
+    ]);
+  });
+
+  it('consistency-check fails drafts_missing when a completed channel left no result, and ignores a failed child\'s bag value', async () => {
+    const missing = await run([{ childRunId: 'r1', childWorkflowId: 'campaign-studio.channel.landing-page', childStatus: 'completed' }], {});
+    expect(missing).toMatchObject({ status: 'failed', error: { code: 'drafts_missing' } });
+    // A FAILED child's variable is never read, even if one is in the bag (a
+    // declared produced variable can be seeded from run inputs).
+    const out = await run([
+      { childRunId: 'r1', childWorkflowId: 'campaign-studio.channel.landing-page', childStatus: 'completed' },
+      { childRunId: 'r2', childWorkflowId: 'campaign-studio.channel.social-posts', childStatus: 'failed' },
+    ], {
+      channelResult_landing_page: { channel: 'landing_page', draft: { channel: 'landing_page', title: 'Pick faster' } },
+      channelResult_social_posts: { channel: 'social_posts', draft: { channel: 'social_posts', content: 'planted' } },
+    });
+    expect(out.status).toBe('success');
+    // Grade-ux M1 — the failed channel is REPORTED, not silently dropped.
+    expect(out.outputs?.channels).toEqual([{ channel: 'landing_page', status: 'drafted' }, { channel: 'social_posts', status: 'failed' }]);
+  });
+
+  it('consistency-check: an enabled channel that failed while the rest skipped is channels_all_failed naming it, never "enable a channel" (grade-ux H1)', async () => {
+    const out = await run([
+      { childRunId: 'r1', childWorkflowId: 'campaign-studio.channel.landing-page', childStatus: 'failed' },
+      { childRunId: 'r2', childWorkflowId: 'campaign-studio.channel.social-posts', childStatus: 'completed' },
+    ], { channelResult_social_posts: { channel: 'social_posts', skipped: true, reason: 'channel_disabled' } });
+    expect(out).toMatchObject({ status: 'failed', error: { code: 'channels_all_failed' } });
+    expect(out.error?.message).toContain('Landing page');
+    expect(out.error?.message).not.toContain('Enable a channel');
+    expect(out.error?.message).not.toContain('campaign-studio.channel.');
+  });
+
+  it('consistency-check never passes with nothing to compare', async () => {
+    const none = await nodePack['feature.campaign-orchestration.nodes.consistency-check']({ features: KERNEL_FEATURES, inputs: { briefId: 'b1' } });
+    expect(none).toMatchObject({ status: 'failed', error: { code: 'drafts_missing' } });
+    const allSkipped = await run([{ childRunId: 'r1', childWorkflowId: 'campaign-studio.channel.landing-page', childStatus: 'completed' }], {
+      channelResult_landing_page: { channel: 'landing_page', skipped: true, reason: 'channel_disabled' },
+    });
+    expect(allSkipped).toMatchObject({ status: 'failed', error: { code: 'no_channels_enabled' } });
   });
 
   it('finalize creates the campaign via the surface', async () => {
@@ -298,29 +361,57 @@ describe('campaign-studio — nodes', () => {
   });
 });
 
-describe('campaign-studio — orchestration workflow (the registered PARALLEL spine)', () => {
-  it('the PARALLEL spine (RFC 0118) is supervisor → core.dispatch(parallel), same workflowId', () => {
-    expect(campaignOrchestrationParallel.workflowId).toBe(ORCHESTRATION_ID); // same id → clean swap
-    const ids = campaignOrchestrationParallel.nodes.map((nd) => nd.nodeId);
-    expect(ids).toEqual(['validate', 'kernel', 'kernel-approve', 'channel-supervisor', 'channel-dispatch', 'production-plan', 'consistency', 'finalize']); // ADR 0356 P1
-    const supervisor = campaignOrchestrationParallel.nodes.find((nd) => nd.typeId === 'core.orchestrator.supervisor')!;
-    const plan = (supervisor.config as { mockDispatchPlan: Array<{ kind: string; nextWorkerIds?: string[] }> }).mockDispatchPlan;
-    // The supervisor fans out to ALL five channel child workflows, then terminates.
-    expect(plan[0].nextWorkerIds).toEqual([...CHANNEL_WORKFLOW_IDS]);
-    expect(plan[1].kind).toBe('terminate');
-    const dispatch = campaignOrchestrationParallel.nodes.find((nd) => nd.typeId === 'core.dispatch')!;
-    const cfg = dispatch.config as Record<string, unknown>;
+describe('campaign-studio — orchestration workflow (the chain-backed definition that runs)', () => {
+  // ADR 1020 D7 / CS70WF-29 — assert what the registrar builds from the chain pack,
+  // not the in-tree source (now only the id + role map).
+  _resetChainRegistryForTest();
+  const { errors } = loadWorkflowChainPacks({ roots: defaultWorkflowChainPackRoots() });
+  const def = buildChainBackedDefinition(ORCHESTRATION_ID);
+  const bare = (id: string): string => id.replace(/^.*_/, '');
+  const node = (id: string) => def.nodes.find((nd) => bare(nd.nodeId) === id)!;
+
+  it('the spine is supervisor → core.dispatch(parallel) over the five channels, same workflowId', () => {
+    expect(errors).toEqual([]);
+    expect(campaignOrchestrationParallel.workflowId).toBe(ORCHESTRATION_ID);
+    expect(def.nodes.map((nd) => bare(nd.nodeId))).toEqual(['validate', 'kernel', 'kernel-approve', 'promote-kernel', 'channel-supervisor', 'channel-dispatch', 'production-plan', 'consistency', 'finalize']); // ADR 0356 P1
+    const plan = (node('channel-supervisor').config as { mockDispatchPlan: Array<Record<string, unknown>> }).mockDispatchPlan;
+    expect(plan[0]!.nextWorkerIds).toEqual([...CHANNEL_WORKFLOW_IDS]);
+    expect(plan[1]!.kind).toBe('terminate');
+    const cfg = node('channel-dispatch').config as Record<string, unknown>;
     expect(cfg.fanOutPolicy).toBe('parallel'); // RFC 0118
-    expect(cfg.joinPolicy).toEqual({ mode: 'wait-all', onChildFailure: 'collect' }); // §B resolved defaults
-    expect(cfg.inputMapping).toEqual({ briefId: 'briefId' }); // RFC 0022 §B — briefId → each child
-    expect(campaignOrchestrationParallel.metadata?.fanOut).toBe('parallel');
+    expect(cfg.joinPolicy).toEqual({ mode: 'wait-all', onChildFailure: 'collect' });
   });
 
-  // ADR 0158 §P1.5 — end-to-end unblock proof: once the host arm (RFC 0118, #994) lands,
-  // the parallel spine's core.dispatch config is ACCEPTED by the live registration validator
-  // (it would have thrown `capability_not_provided` before #994). Guards the contract.
-  it('the PARALLEL spine REGISTERS against the live host validation (RFC 0118 consumer contract)', () => {
-    const dispatch = campaignOrchestrationParallel.nodes.find((nd) => nd.typeId === 'core.dispatch')!;
+  it('children get briefId/provider/model by inputMapping only — no frozen per-item literal (ADR 1020 D1 / CS70WF-1)', () => {
+    const plan = (node('channel-supervisor').config as { mockDispatchPlan: Array<Record<string, unknown>> }).mockDispatchPlan;
+    // `in`, not JSON.stringify: an undefined value is exactly what hid CS70WF-1.
+    expect('nextWorkerInputs' in plan[0]!).toBe(false);
+    expect((node('channel-dispatch').config as Record<string, unknown>).inputMapping).toEqual({ briefId: 'briefId', provider: 'provider', model: 'model' });
+  });
+
+  it('every channel child maps its channelResult back, and consistency reads exactly those names (ADR 1020 D2)', () => {
+    const om = (node('channel-dispatch').config as { perWorkerOutputMappings: Record<string, Record<string, string>> }).perWorkerOutputMappings;
+    const rv = (node('consistency').config as { resultVariables: Record<string, string> }).resultVariables;
+    expect(Object.keys(om).sort()).toEqual([...CHANNEL_WORKFLOW_IDS].sort());
+    for (const id of CHANNEL_WORKFLOW_IDS) {
+      const [parentVar, childVar] = Object.entries(om[id]!)[0]!;
+      expect(childVar).toBe('channelResult');
+      expect(rv[id]).toBe(parentVar);
+      expect(def.variables?.some((v) => v.name === parentVar)).toBe(true);
+    }
+    expect((def.edges ?? []).some((e) => bare(e.sourceNodeId) === 'channel-dispatch' && bare(e.targetNodeId) === 'consistency' && e.targetInput === 'dispatched')).toBe(true);
+  });
+
+  it('the REGISTERED definition makes finalize (the campaign) the only primary output', () => {
+    _resetChainBackedWorkflowsForTest();
+    registerLegacyDefsChainBacked([campaignOrchestrationParallel]);
+    const registered = getChainBackedWorkflow(ORCHESTRATION_ID)!;
+    expect(registered.nodes.filter((nd) => nd.outputRole).map((nd) => [bare(nd.nodeId), nd.outputRole])).toEqual([['finalize', 'primary']]);
+  });
+
+  // ADR 0158 §P1.5 — the dispatch config is ACCEPTED by the live registration validator.
+  it('the spine REGISTERS against the live host validation (RFC 0118 consumer contract)', () => {
+    const dispatch = node('channel-dispatch');
     expect(() => checkMappingCapability([{ nodeId: dispatch.nodeId, typeId: 'core.dispatch', config: dispatch.config as Record<string, unknown> }])).not.toThrow();
   });
 });

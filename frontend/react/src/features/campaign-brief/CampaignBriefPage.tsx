@@ -27,7 +27,7 @@ import { MegaphoneIcon, PlusIcon, TrashIcon, SparklesIcon, CheckIcon, AlertIcon,
 import {
   listPersonas, createPersona, updatePersona, deletePersona,
   listBriefs, createBrief, updateBrief, deleteBrief, duplicateBrief, validateBriefById,
-  listOrgs, listBrands, findCampaignForBrief, BUYER_STAGES, FeatureDisabledError, BRIEF_STRATEGIST_AGENT,
+  listOrgs, listBrands, findCampaignForBrief, getPendingKernelRun, BUYER_STAGES, FeatureDisabledError, BRIEF_STRATEGIST_AGENT,
   type Persona, type CampaignBrief, type BrandRef, type OrgRef, type ValidationResult, type BuyerStage, type CampaignChannel,
   type GroundingPolicy,
 } from './campaignBriefClient.js';
@@ -328,6 +328,14 @@ function BriefDetail({ t, brief, brands, brandsFailed, personas, personasReadFai
   const [toneOverride, setToneOverride] = useState(brief.messaging.toneOverride ?? '');
   // R2 CB-R2-2 — the handoff chip: which campaign this brief finalized into.
   const [linkedCampaign, setLinkedCampaign] = useState<{ id: string; name: string } | null>(null);
+  // ADR 1020 D8 — a generated kernel saved only on approval: while one waits, say
+  // so and link to its run, instead of inviting a second generation.
+  const [pendingKernelRunId, setPendingKernelRunId] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    void getPendingKernelRun(brief.id).then((id) => { if (live) setPendingKernelRunId(id); }).catch(() => { if (live) setPendingKernelRunId(null); });
+    return () => { live = false; };
+  }, [brief.id, brief.updatedAt]);
   useEffect(() => {
     let live = true;
     void findCampaignForBrief(brief.orgId, brief.id).then((c) => { if (live) setLinkedCampaign(c); }).catch(() => { /* absent chip, never a false claim */ });
@@ -582,9 +590,13 @@ function BriefDetail({ t, brief, brands, brandsFailed, personas, personasReadFai
         </div>
       ) : null}
 
+      {pendingKernelRunId ? (
+        <Notice variant="info">{t('kernelPendingApproval')} <Link to={`/runs/${encodeURIComponent(pendingKernelRunId)}`}>{t('kernelPendingReview')}</Link></Notice>
+      ) : null}
       {brief.kernel ? (
         <section className="surface-card u-mb-4">
           <div className="u-flex u-items-center u-gap-2 u-mb-2"><SparklesIcon size={16} /> <h3 className="u-m-0">{t('kernelTitle')}</h3>{brief.kernelStale ? <span className="chip chip--warning">{t('kernelStale')}</span> : null}</div>
+          {brief.kernelStale && !pendingKernelRunId ? <p className="u-fs-13 muted u-mt-0">{t('kernelStaleExplain')} <Button variant="link" onClick={onOpenStrategist}>{t('generateWithStrategist')}</Button></p> : null}
           <p className="u-fw-600 u-mb-1">{brief.kernel.headline}</p>
           <p className="muted u-mt-0">{brief.kernel.supportingStatement}</p>
           {brief.kernel.proofPoints.length ? <ul>{brief.kernel.proofPoints.map((p, i) => <li key={i}>{p}</li>)}</ul> : null}
@@ -593,7 +605,7 @@ function BriefDetail({ t, brief, brands, brandsFailed, personas, personasReadFai
           <p className="u-fs-13"><strong>{t('kernelCta')}:</strong> {brief.kernel.primaryCta}{brief.kernel.secondaryCta ? ` · ${t('kernelSecondaryCta')}: ${brief.kernel.secondaryCta}` : ''} · <strong>{t('kernelTone')}:</strong> {brief.kernel.tone}{brief.kernel.sourceDocIds.length ? ` · ${t('kernelSources', { count: brief.kernel.sourceDocIds.length })}` : ''}</p>
           {brief.kernel.generatedAt ? <p className="u-fs-13 muted u-m-0">{t('kernelGeneratedAt', { when: formatDateTime(brief.kernel.generatedAt) })}</p> : null}
         </section>
-      ) : (
+      ) : pendingKernelRunId ? null : (
         <Notice variant="info">{t('noKernelYet')} <Button variant="link" onClick={onOpenStrategist}>{t('generateWithStrategist')}</Button></Notice>
       )}
 

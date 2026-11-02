@@ -32,11 +32,19 @@ import {
 import { MARKET_INTEL_WORKFLOW_ID, KERNEL_WORKFLOW_ID } from '../src/features/campaign-brief/intelWorkflows.js';
 import type { StartRunDeps } from '../src/host/runStarter.js';
 import { openStorage } from '../src/storage/index.js';
-import { claimIgnition, ignitionKey } from '../src/host/ignitionGuard.js';
+import { claimIgnition, ignitionKey, recordIgnitionRun } from '../src/host/ignitionGuard.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createOrg, createMember } from '../src/host/accessControlService.js';
-import { createBrief } from '../src/features/campaign-brief/briefService.js';
+import { createBrief, setKernel, updateBrief } from '../src/features/campaign-brief/briefService.js';
+
+/** ADR 1020 — research.run argues an APPROVED, current kernel, so its fixtures carry one. */
+const KERNEL = { headline: 'Pick faster', supportingStatement: 'Save hours', proofPoints: ['40%'], primaryCta: 'Demo', secondaryCta: '', tone: 'direct', channelTones: {}, sourceDocIds: [], generatedAt: '2026-10-31T00:00:00Z' };
+async function briefWithKernel(name: string): Promise<string> {
+  const b = await createBrief(TENANT, orgId, 'u-1', { name, productName: 'Acme' });
+  await setKernel(TENANT, b.id, KERNEL);
+  return b.id;
+}
 
 const TENANT = 'default';
 const ALL_IDS = [
@@ -62,8 +70,7 @@ beforeAll(async () => {
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { void (server.address() as AddressInfo); res(); }); });
   const org = await createOrg({ tenantId: TENANT, createdBy: 'u-1', name: 'Acme', ownerSubject: 'u-1' });
   orgId = org.orgId;
-  const brief = await createBrief(TENANT, orgId, 'u-1', { name: 'Launch Brief', productName: 'Acme' });
-  briefId = brief.id;
+  briefId = await briefWithKernel('Launch Brief');
   // A VIEWER in the brief's org: workspace:read, no workspace:write.
   await createMember({ orgId, tenantId: TENANT, displayName: 'Reader', subject: 'u-reader', roles: ['viewer'] });
   await setToggle('on');
@@ -177,6 +184,38 @@ describe('CFP-1 — actions: typed gating + real ignition', () => {
     expect(parsed.platform).toBe('linkedin');
   });
 
+  it('research.run: an unknown platform is a typed refusal, never a silent meta run (CS70WF-18)', async () => {
+    const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: CAMPAIGN_BRIEF_RESEARCH_RUN_TOOL_ID, input: { briefId, platform: 'myspace' } });
+    expect(out.isError).toBe(true);
+    expect(JSON.parse(out.content)).toMatchObject({ error: 'validation_error', validPlatforms: ['meta', 'google', 'linkedin', 'tiktok'] });
+  });
+
+  it('research.run: a run for ANOTHER platform on the same brief is a new run, not the reused one (CS70WF-18)', async () => {
+    const fresh = { id: await briefWithKernel('Two platforms') };
+    const first = JSON.parse((await provider({ actingUserId: 'u-1' }).executeTool({ name: CAMPAIGN_BRIEF_RESEARCH_RUN_TOOL_ID, input: { briefId: fresh.id, platform: 'meta' } })).content) as { runId: string; platform: string };
+    const second = JSON.parse((await provider({ actingUserId: 'u-1' }).executeTool({ name: CAMPAIGN_BRIEF_RESEARCH_RUN_TOOL_ID, input: { briefId: fresh.id, platform: 'google' } })).content) as { runId: string; platform: string; ignited?: boolean };
+    expect(first.runId).toBeTruthy();
+    expect(second.ignited).not.toBe(false);
+    expect(second.platform).toBe('google');
+    expect(second.runId).not.toBe(first.runId);
+  });
+
+  it('research.run refuses before starting when the brief has no approved kernel, or a stale one (ADR 1020)', async () => {
+    const none = await createBrief(TENANT, orgId, 'u-1', { name: 'No kernel', productName: 'Acme' });
+    const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: CAMPAIGN_BRIEF_RESEARCH_RUN_TOOL_ID, input: { briefId: none.id } });
+    expect(JSON.parse(out.content)).toMatchObject({ error: 'kernel_required' });
+    const stale = await briefWithKernel('Stale kernel');
+    await updateBrief(TENANT, stale, { productName: 'Changed' });
+    const out2 = await provider({ actingUserId: 'u-1' }).executeTool({ name: CAMPAIGN_BRIEF_RESEARCH_RUN_TOOL_ID, input: { briefId: stale } });
+    expect(JSON.parse(out2.content)).toMatchObject({ error: 'kernel_stale' });
+  });
+
+  it('research.run accepts a platform in any case (Meta → meta)', async () => {
+    const id = await briefWithKernel('Case');
+    const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: CAMPAIGN_BRIEF_RESEARCH_RUN_TOOL_ID, input: { briefId: id, platform: 'Meta' } });
+    expect(JSON.parse(out.content)).toMatchObject({ platform: 'meta' });
+  });
+
   it('generate-kernel ignites the messaging-kernel workflow and returns a runId', async () => {
     const out = await provider({ actingUserId: 'u-1', runId: 'run-y' }).executeTool({
       name: CAMPAIGN_BRIEF_GENERATE_KERNEL_TOOL_ID,
@@ -200,7 +239,7 @@ describe('CFP-1 — actions: typed gating + real ignition', () => {
     await setToggle('on');
     // A FRESH brief so its ignition key is un-claimed (the "ignites" test above
     // already latched the shared briefId's key inside the window).
-    const fresh = await createBrief(TENANT, orgId, 'u-1', { name: 'Retry Brief', productName: 'Acme' });
+    const fresh = { id: await briefWithKernel('Retry Brief') };
     const requested: string[] = [];
     const failingDeps: StartRunDeps = {
       storage: await openStorage('memory://'),
@@ -214,7 +253,7 @@ describe('CFP-1 — actions: typed gating + real ignition', () => {
     expect(JSON.parse(out.content)).toMatchObject({ error: 'dispatch_failed' });
     // The claim was released: an honest retry re-claims immediately (would be
     // refused if the failed dispatch had left the latch behind).
-    const key = ignitionKey('campaign-brief.research.run', fresh.id);
+    const key = ignitionKey('campaign-brief.research.run', fresh.id, 'linkedin'); // ADR 1020: the key names the platform
     expect((await claimIgnition(TENANT, key)).claimed).toBe(true);
     // research.run asked the run-starter for the MARKET-INTEL workflow, not another.
     expect(requested).toContain(MARKET_INTEL_WORKFLOW_ID);
@@ -238,11 +277,36 @@ describe('CFP-1 — actions: typed gating + real ignition', () => {
     expect(requested).not.toContain(MARKET_INTEL_WORKFLOW_ID);
   });
 
+  it('generate-kernel after a REJECTED (finished) run starts a new one instead of reusing it (grade-ux H2)', async () => {
+    await setToggle('on');
+    const fresh = await createBrief(TENANT, orgId, 'u-1', { name: 'Regenerate Brief', productName: 'Acme' });
+    const storage = await openStorage('memory://');
+    const now = new Date().toISOString();
+    // The rejected kernel run still holds the 5-minute ignition claim.
+    await storage.insertRun({ runId: 'run-rejected-kernel', workflowId: KERNEL_WORKFLOW_ID, tenantId: TENANT, status: 'failed', inputs: { briefId: fresh.id }, metadata: {}, configurable: {}, createdAt: now, updatedAt: now });
+    const key = ignitionKey('campaign-brief.generate-kernel', fresh.id);
+    expect((await claimIgnition(TENANT, key)).claimed).toBe(true);
+    await recordIgnitionRun(TENANT, key, 'run-rejected-kernel');
+    const requested: string[] = [];
+    const deps: StartRunDeps = {
+      storage,
+      hostSuite: {
+        workflowCatalog: { getWorkflow: async (id: string) => { requested.push(id); return null; } },
+        providerPolicyResolver: { resolveForRun: async () => [] },
+      },
+    };
+    const out = await runGenerateKernelTool(deps, { briefId: fresh.id }, { tenantId: TENANT, actingUserId: 'u-1' });
+    // It tried to start a NEW run (the stand-in catalog then fails it), rather than
+    // answering "reusing it" with the rejected run.
+    expect(JSON.parse(out.content)).not.toMatchObject({ runId: 'run-rejected-kernel' });
+    expect(requested).toContain(KERNEL_WORKFLOW_ID);
+  });
+
   // DATA-4 — the release must also happen when startWorkflowRun THROWS, not only
   // when it returns null. A throwing catalog stands in for a dispatch that blows up.
   it('research.run releases the ignition claim when dispatch THROWS', async () => {
     await setToggle('on');
-    const fresh = await createBrief(TENANT, orgId, 'u-1', { name: 'Throw Brief', productName: 'Acme' });
+    const fresh = { id: await briefWithKernel('Throw Brief') };
     const throwingDeps: StartRunDeps = {
       storage: await openStorage('memory://'),
       hostSuite: {
@@ -253,7 +317,7 @@ describe('CFP-1 — actions: typed gating + real ignition', () => {
     const out = await runResearchRunTool(throwingDeps, { briefId: fresh.id, platform: 'linkedin' }, { tenantId: TENANT, actingUserId: 'u-1' });
     expect(out.isError).toBe(true);
     expect(JSON.parse(out.content)).toMatchObject({ error: 'dispatch_failed' });
-    const key = ignitionKey('campaign-brief.research.run', fresh.id);
+    const key = ignitionKey('campaign-brief.research.run', fresh.id, 'linkedin'); // ADR 1020: the key names the platform
     expect((await claimIgnition(TENANT, key)).claimed).toBe(true);
   });
 });

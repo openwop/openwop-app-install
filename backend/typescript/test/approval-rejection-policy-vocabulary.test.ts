@@ -16,6 +16,12 @@
  *   WRITER (`core.approvalGate`) REFUSES  — a human can still fix it.
  *   READER (resolve-time)        COERCES — it reads an already-persisted
  *   interrupt, and refusing there would strand a live gate with no exit.
+ *
+ * TST-BZA-7 (grade-tests w66). Red when: either writer stops refusing an unrecognized token;
+ * `core.interrupt`'s refusal is gated on `kind`; `single-veto` stops normalizing to `any`; the
+ * resolve-side reader stops coercing to `any`. Recorded ceiling (fixture honesty): the two
+ * `as unknown as NodeContext` casts stay — the node seam takes a full NodeContext and no
+ * shared factory exists in test/support/.
  */
 import { describe, expect, it, beforeAll } from 'vitest';
 import { ensureNodesRegistered } from '../src/bootstrap/nodes.js';

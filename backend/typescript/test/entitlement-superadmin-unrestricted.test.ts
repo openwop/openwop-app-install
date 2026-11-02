@@ -10,6 +10,22 @@
  * as the control: the SAME narrowed plan still 403s an ordinary tenant, and the
  * dev-open switch — which makes every caller a superadmin for admin surfaces —
  * does NOT un-paywall anyone.
+ *
+ * TST-DAB-2. Double guards (recorded; each in a different file, so no single
+ * edit breaks both):
+ *  - the operator ROUTE leg and the SPA entitlement read are held by BOTH the
+ *    tenant branch in `resolveEntitlements` (billingService) AND the person-level
+ *    `isListedSuperadmin(req)` checks (`requireEntitledFeature`, the
+ *    `/billing/entitlements` route). The tenant-only DAEMON leg has only the
+ *    first, and is the leg that witnesses it.
+ *  - "an empty allowlist names nobody" is held by `Boolean(tenantId)` AND the
+ *    `.filter(len > 0)` in `listedSuperadminTenants()`; the leg reds only when
+ *    both go (one edit spanning both, probed).
+ *
+ * Red when (sabotage-witnessed, wave 70): `resolveEntitlements` drops the
+ * operator branch (daemon leg) or misreports the plan; the dev-open switch
+ * starts un-paywalling a tenant; the allowlist parser and the empty-id guard
+ * both stop excluding the empty name.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -36,6 +52,17 @@ async function login(email: string, tenantId: string): Promise<string> {
   throw new Error(`login for ${tenantId} set no session cookie (${res.status})`);
 }
 const get = (cookie: string, path: string) => fetch(`${BASE}${path}`, { headers: { cookie } });
+
+/** The plan refusal itself, not a 403 from another gate. */
+async function expectPlanRefusal(cookie: string): Promise<void> {
+  const made = await fetch(`${BASE}/host/openwop-app/orgs`, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ name: 'Acme' }) });
+  const { orgId } = await made.json() as { orgId: string };
+  const res = await get(cookie, `/host/openwop-app/webinars/orgs/${orgId}/events`);
+  expect(res.status).toBe(403);
+  const body = await res.json() as { error?: string; message?: string };
+  expect(body.error).toBe('forbidden');
+  expect(body.message).toBe('Your plan (free) does not include this feature.');
+}
 
 let operator = '';
 let customer = '';
@@ -75,7 +102,7 @@ const ENTITLEMENTS = '/host/openwop-app/billing/entitlements';
 
 describe('the operator has every feature on their own host', () => {
   it('a paid-bundle route refuses an ordinary tenant and serves the operator, on the same narrowed plan', async () => {
-    expect(await webinars(customer)).toBe(403);
+    await expectPlanRefusal(customer);
     expect(await webinars(operator)).toBe(200);
   });
 
@@ -99,7 +126,7 @@ describe('only the allowlist grants it', () => {
     process.env.OPENWOP_FEATURE_TOGGLES_DEV_OPEN = 'true';
     try {
       expect(isListedSuperadminTenant(CUSTOMER)).toBe(false);
-      expect(await webinars(customer)).toBe(403);
+      await expectPlanRefusal(customer);
       expect((await resolveEntitlements(CUSTOMER, true)).allowedFeatures).not.toBe('*');
     } finally {
       delete process.env.OPENWOP_FEATURE_TOGGLES_DEV_OPEN;

@@ -28,7 +28,7 @@ export function ProfileKnowledgeTab(): JSX.Element {
     <SubjectKnowledgePanel
       client={client}
       copy={{
-        intro: <Trans i18nKey="knowledgeIntro" ns="profile-memory" components={{ 0: <strong /> }} />,
+        intro: <Trans i18nKey="knowledgeIntro" ns="profile-memory" components={[<strong />]} />,
         emptyBody: t('knowledgeEmptyBody'),
         searchTitle: t('knowledgeSearchTitle'),
         searchPlaceholder: t('knowledgeSearchPlaceholder'),

@@ -1,7 +1,7 @@
 {
   "name": "vendor.myndhyve.web-research",
-  "version": "1.0.2",
-  "description": "MyndHyve web-research pack — 4 nodes for the search → fetch → research → synthesize pipeline. webSearch + fetchUrls + researchWeb route through the host's webResearch adapter (search API + scraping policy + rate-limit + cache layer); synthesize composes results into a typed envelope via the AI envelope surface.",
+  "version": "2.0.0",
+  "description": "MyndHyve web-research pack. 3 nodes: webSearch, fetchUrls, researchWeb. Routes through ctx.webResearch.",
   "author": "MyndHyve",
   "license": "Apache-2.0",
   "homepage": "https://myndhyve.ai/packs/web-research",
@@ -11,15 +11,13 @@
     "myndhyve",
     "web-research",
     "search",
-    "scraping",
-    "synthesize"
+    "scraping"
   ],
   "engines": {
     "openwop": ">=1.0.0 <3.0.0"
   },
   "peerDependencies": {
-    "webResearch": "supported",
-    "aiEnvelope": "supported"
+    "webResearch": "supported"
   },
   "nodes": [
     {
@@ -41,7 +39,7 @@
       "typeId": "data.transform.fetchUrls",
       "version": "1.0.0",
       "label": "Fetch URLs",
-      "description": "Fetches a batch of URLs concurrently with research-specific policy (robots.txt respect, content-type filtering, body size caps, readability extraction). Returns per-URL content + status + extracted text. Different from core.openwop.http.fetch — that's a single request with raw response; this is bulk scraping with extraction.",
+      "description": "Fetches a batch of URLs concurrently with research-specific policy (robots.txt respect, content-type filtering, body size caps, readability extraction). Returns per-URL content + status + extracted text. Different from core.openwop.http.fetch \u2014 that's a single request with raw response; this is bulk scraping with extraction.",
       "category": "integration",
       "role": "side-effect",
       "capabilities": [
@@ -56,7 +54,7 @@
       "typeId": "ai.research.web",
       "version": "1.0.0",
       "label": "Research Web",
-      "description": "End-to-end research operation: query → search → fetch top N results → extract → return citation-ready content. Higher-level than webSearch + fetchUrls; useful when workflow authors don't need to inspect intermediate results.",
+      "description": "End-to-end research operation: query \u2192 search \u2192 fetch top N results \u2192 extract \u2192 return citation-ready content. Higher-level than webSearch + fetchUrls; useful when workflow authors don't need to inspect intermediate results.",
       "category": "integration",
       "role": "side-effect",
       "capabilities": [
@@ -66,21 +64,6 @@
       "configSchemaRef": "schemas/researchWeb.config.json",
       "inputSchemaRef": "schemas/researchWeb.input.json",
       "outputSchemaRef": "schemas/researchWeb.output.json"
-    },
-    {
-      "typeId": "ai.process.synthesize",
-      "version": "1.0.0",
-      "label": "Synthesize Research",
-      "description": "AI-synthesis step: takes research results (from webSearch + fetchUrls or researchWeb) and synthesizes a typed envelope (e.g., `research.summary`, `competitor.profile`). Pins citations to the source URLs. Routes through ctx.aiEnvelope.generate.",
-      "category": "data",
-      "role": "side-effect",
-      "capabilities": [
-        "cacheable",
-        "side-effectful"
-      ],
-      "configSchemaRef": "schemas/synthesize.config.json",
-      "inputSchemaRef": "schemas/synthesize.input.json",
-      "outputSchemaRef": "schemas/synthesize.output.json"
     }
   ],
   "runtime": {

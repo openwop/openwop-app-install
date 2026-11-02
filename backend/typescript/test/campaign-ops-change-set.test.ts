@@ -15,15 +15,22 @@
  *  - a duplicate request is stored and not run; an edited request is a new
  *    version whose old change set goes stale.
  *
- * Sabotage, each run 2026-10-19 and each red: dropping the URL-provenance check
- * (invented-link case), the edit-from-intent check (F18 case), the ask-XOR-act
- * check (repair, invented-link and F18 cases), and the stale marking on edit
- * (edit case).
+ * Every case builds its own request (distinct text, so the duplicate window never
+ * matches across cases) and the scripted model queue is reset before each case.
+ *
+ * Tracker: TST-CBA-2 (/grade-tests wave 67). Red when (probe-witnessed,
+ * 2026-10-29): the URL-provenance check is dropped (invented-link case); the
+ * edit-from-intent check is dropped (F18 case); the ask-XOR-act check is dropped,
+ * or the node's one repair is removed (repair case); the stale marking on edit is
+ * dropped (edit case); duplicate detection stops normalizing text (duplicate
+ * case); the asset fence changes its source tag, or a hashed field is dropped
+ * from `changeSetHashOf` (answers case — the expected hash is derived here from
+ * ADR 0923 D6's field list, never through the function under test).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { randomBytes } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { createHash, randomBytes } from 'node:crypto';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AiCallRequest, AiCallResult } from '../src/executor/types.js';
 
 const ai = vi.hoisted(() => ({ calls: [] as AiCallRequest[], queue: [] as unknown[] }));
@@ -54,7 +61,7 @@ import { upsertFromPrincipal } from '../src/features/users/usersService.js';
 import { createPage } from '../src/features/cms/cmsService.js';
 import { createClient } from '../src/features/campaign-ops/clientService.js';
 import { addAsset } from '../src/features/campaign-ops/assetService.js';
-import { changeSetHashOf } from '../src/features/campaign-ops/changeSetService.js';
+import { canonicalJSON } from '../src/host/jcs.js';
 import type { ChangeSet, ChangeRequest } from '../src/features/campaign-ops/types.js';
 
 let BASE: string;
@@ -141,17 +148,47 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-describe('ADR 0923 — change requests become hashed change sets', () => {
-  let firstRequestId: string;
-  let firstChangeSet: ChangeSet;
+beforeEach(() => { ai.calls.length = 0; ai.queue.length = 0; });
 
+/** A request that stopped at `needs_facts` with one question (`q1`). */
+async function askedRequest(text: string): Promise<string> {
+  ai.queue.push({ intents: [], questions: [{ id: 'q1', slot: 'webinar.date', prompt: 'Which Thursday: Nov 5 or Nov 12?', options: ['Nov 5', 'Nov 12'] }] });
+  const r = await call<ReqRes>('POST', '/requests', { text, assetIds: [assetId] });
+  expect(r.status, r.raw).toBe(202);
+  const s = await settle(r.body.request.requestId);
+  expect(s.request.status).toBe('needs_facts');
+  return r.body.request.requestId;
+}
+
+/** A request answered into a proposed change set (its own text, its own change set). */
+async function proposedRequest(text: string, date: string, url: string): Promise<{ requestId: string; changeSet: ChangeSet }> {
+  const requestId = await askedRequest(text);
+  ai.queue.push(intents(date, url));
+  ai.queue.push(edits(date, url));
+  const r = await call('POST', `/requests/${requestId}/answers`, { answers: [{ questionId: 'q1', value: `${date}. New link: ${url}` }] });
+  expect(r.status, r.raw).toBe(202);
+  const s = await settle(requestId);
+  expect(s.request.status, JSON.stringify(s.request)).toBe('proposed');
+  if (!s.changeSet) throw new Error(`no change set: ${JSON.stringify(s)}`);
+  return { requestId, changeSet: s.changeSet };
+}
+
+/** ADR 0923 D6, derived here from the ADR's field list (never through
+ *  `changeSetHashOf`): sha256 over the RFC 8785 JSON of org, request, version and
+ *  the per-asset entries sorted by assetId. */
+function expectedHash(cs: ChangeSet): string {
+  const entries = [...cs.entries]
+    .sort((a, b) => (a.assetId < b.assetId ? -1 : a.assetId > b.assetId ? 1 : 0))
+    .map((e) => ({ assetId: e.assetId, destination: e.destination, sourceVersion: e.sourceVersion, sourceContentHash: e.sourceContentHash, edits: e.edits, targetContentHash: e.targetContentHash }));
+  return `sha256:${createHash('sha256').update(canonicalJSON({ orgId: cs.orgId, requestId: cs.requestId, requestVersion: cs.requestVersion, entries })).digest('hex')}`;
+}
+
+describe('ADR 0923 — change requests become hashed change sets', () => {
   it('an ambiguous request asks instead of guessing, and writes no change set', async () => {
-    ai.calls.length = 0;
     ai.queue.push({ intents: [], questions: [{ id: 'q1', slot: 'webinar.date', prompt: 'Which Thursday: Nov 5 or Nov 12?', options: ['Nov 5', 'Nov 12'] }] });
     const r = await call<ReqRes>('POST', '/requests', { text: 'Move the webinar to Thursday and use the new registration link.', assetIds: [assetId] });
     expect(r.status, r.raw).toBe(202);
-    firstRequestId = r.body.request.requestId;
-    const s = await settle(firstRequestId);
+    const s = await settle(r.body.request.requestId);
     expect(s.request.status).toBe('needs_facts');
     expect(s.request.interpretation?.questions[0]?.id).toBe('q1');
     expect(s.changeSet ?? null).toBeNull();
@@ -159,19 +196,23 @@ describe('ADR 0923 — change requests become hashed change sets', () => {
   });
 
   it('answers re-run it into a change set whose hash and diff are what was proposed', async () => {
+    const requestId = await askedRequest('Move the webinar to a Thursday and switch the registration link.');
     ai.calls.length = 0;
     ai.queue.push(intents('Thursday, Nov 5', 'https://example.test/register-new'));
     ai.queue.push(edits('Thursday, Nov 5', 'https://example.test/register-new'));
-    const r = await call('POST', `/requests/${firstRequestId}/answers`, { answers: [{ questionId: 'q1', value: 'Thursday, Nov 5. New link: https://example.test/register-new' }] });
+    const r = await call('POST', `/requests/${requestId}/answers`, { answers: [{ questionId: 'q1', value: 'Thursday, Nov 5. New link: https://example.test/register-new' }] });
     expect(r.status, r.raw).toBe(202);
-    const s = await settle(firstRequestId);
+    const s = await settle(requestId);
     expect(s.request.status, JSON.stringify(s.request)).toBe('proposed');
-    firstChangeSet = s.changeSet!;
-    expect(firstChangeSet.hash).toBe(changeSetHashOf(firstChangeSet));
-    expect(firstChangeSet.entries).toHaveLength(1);
+    const cs = s.changeSet;
+    if (!cs) throw new Error(`no change set: ${JSON.stringify(s)}`);
+    expect(cs.hash).toBe(expectedHash(cs));
+    // Every hashed field is load-bearing: the same set with one edit changed hashes differently.
+    expect(expectedHash({ ...cs, entries: cs.entries.map((e) => ({ ...e, edits: [] })) })).not.toBe(cs.hash);
+    expect(cs.entries).toHaveLength(1);
     // The asset text was fenced as data in the proposal prompt.
     expect(JSON.stringify(ai.calls[1]?.messages)).toContain('<UNTRUSTED source=\\"campaign-ops.asset\\"');
-    const d = await call<{ diff: Array<{ fields: Array<{ field: string; before: string; after: string }> }> }>('GET', `/change-sets/${firstChangeSet.changeSetId}`);
+    const d = await call<{ diff: Array<{ fields: Array<{ field: string; before: string; after: string }> }> }>('GET', `/change-sets/${cs.changeSetId}`);
     const fields = Object.fromEntries(d.body.diff[0].fields.map((f) => [f.field, f]));
     expect(fields[heading]).toMatchObject({ before: 'Q4 pipeline review — Tuesday, Nov 3', after: 'Q4 pipeline review — Thursday, Nov 5' });
     expect(fields[link]).toMatchObject({ after: 'https://example.test/register-new' });
@@ -179,29 +220,31 @@ describe('ADR 0923 — change requests become hashed change sets', () => {
   });
 
   it('the same request again is a duplicate and is not run', async () => {
+    const first = await proposedRequest('Push the webinar to Thursday and use the fresh registration link.', 'Thursday, Nov 5', 'https://example.test/register-dup');
     ai.calls.length = 0;
-    const r = await call<ReqRes>('POST', '/requests', { text: '  move the webinar to Thursday and use the new   registration link. ', assetIds: [assetId] });
+    const r = await call<ReqRes>('POST', '/requests', { text: '  push the webinar to Thursday and use the FRESH   registration link. ', assetIds: [assetId] });
     expect(r.status, r.raw).toBe(200);
     expect(r.body.duplicate).toBe(true);
-    expect(r.body.request.duplicateOf).toBe(firstRequestId);
+    expect(r.body.request.duplicateOf).toBe(first.requestId);
     expect(ai.calls).toHaveLength(0);
   });
 
   it('editing the request makes a new version and its old change set stale', async () => {
-    ai.queue.push(intents('Thursday, Nov 12', 'https://example.test/register-new'));
-    ai.queue.push(edits('Thursday, Nov 12', 'https://example.test/register-new'));
-    const r = await call<ReqRes>('PATCH', `/requests/${firstRequestId}`, { text: 'Move the webinar to Thursday, Nov 12 and use https://example.test/register-new' });
+    // Its own link, so its interpretation never fingerprints as another case's.
+    const first = await proposedRequest('Shift the webinar to a Thursday and change the registration link.', 'Thursday, Nov 5', 'https://example.test/register-edit');
+    ai.queue.push(intents('Thursday, Nov 12', 'https://example.test/register-edit'));
+    ai.queue.push(edits('Thursday, Nov 12', 'https://example.test/register-edit'));
+    const r = await call<ReqRes>('PATCH', `/requests/${first.requestId}`, { text: 'Move the webinar to Thursday, Nov 12 and use https://example.test/register-edit' });
     expect(r.status, r.raw).toBe(202);
-    const s = await settle(firstRequestId);
+    const s = await settle(first.requestId);
     expect(s.request.version).toBe(2);
-    expect(s.changeSet?.changeSetId).not.toBe(firstChangeSet.changeSetId);
-    expect(s.changeSet?.hash).not.toBe(firstChangeSet.hash);
-    const old = await call<{ changeSet: ChangeSet }>('GET', `/change-sets/${firstChangeSet.changeSetId}`);
+    expect(s.changeSet?.changeSetId).not.toBe(first.changeSet.changeSetId);
+    expect(s.changeSet?.hash).not.toBe(first.changeSet.hash);
+    const old = await call<{ changeSet: ChangeSet }>('GET', `/change-sets/${first.changeSet.changeSetId}`);
     expect(old.body.changeSet).toMatchObject({ status: 'stale', staleReason: 'request_changed' });
   });
 
   it('one refused reply is repaired once with the refusal reasons', async () => {
-    ai.calls.length = 0;
     ai.queue.push({ intents: intents('Friday, Nov 6', 'https://example.test/r2').intents, questions: [{ id: 'q', slot: 's', prompt: 'p?' }] }); // both lists
     ai.queue.push(intents('Friday, Nov 6', 'https://example.test/r2'));
     ai.queue.push({ assets: [] });

@@ -41,13 +41,13 @@ const aliasesOf = (def: { metadata?: Record<string, unknown> }): Record<string, 
 /** The real run-creation path: `configurable` overlay → alias translation → bag. */
 function seedBag(
   runId: string,
-  def: { metadata?: Record<string, unknown>; variables?: ReadonlyArray<{ name: string }> },
+  def: { metadata?: Record<string, unknown>; variables?: ReadonlyArray<{ name: string; defaultValue?: unknown }> },
   configurable: Record<string, unknown>,
 ): Record<string, unknown> | null {
   clearRunVariables(runId);
   seedRunVariables(
     runId,
-    def.variables as never,
+    def.variables,
     deferredConfigurableInputs(def, configurable, undefined),
   );
   return snapshotRunVariables(runId);
@@ -74,9 +74,10 @@ describe('PODWF-1 — the corpus, measured rather than asserted from a table', (
     let built = 0;
     let withAliases = 0;
     const broken: string[] = [];
+    const unbuildable: string[] = [];
     for (const c of listChains()) {
       let def;
-      try { def = buildChainBackedDefinition(c.chain.chainId); } catch { continue; }
+      try { def = buildChainBackedDefinition(c.chain.chainId); } catch (err) { unbuildable.push(`${c.chain.chainId}: ${err instanceof Error ? err.message : String(err)}`); continue; }
       built++;
       const aliases = aliasesOf(def);
       if (Object.keys(aliases).length === 0) continue;
@@ -86,6 +87,10 @@ describe('PODWF-1 — the corpus, measured rather than asserted from a table', (
       if (bad.length) broken.push(`${c.chain.chainId}: ${bad.map(([k, v]) => `${k}->${v}`).join(', ')}`);
     }
     // NON-VACUITY FLOORS — these would FAIL on the regression this test guards.
+    // RE-MEASURED 2026-11-01 (w73 g4, 9f4cca7d4): 272 chains build, 184 carry an
+    // alias map, 0 fail to build. The floors below are left as they were (the
+    // ratchet rule: no floor raise in a grading wave) — slack is a recorded
+    // human-ask, TST-DTC-2.
     // MEASURED on this tree: 179 chains load, 138 carry a deferred-param alias map,
     // and before the fix ALL 138 were broken. A floor of "> 0" would have passed with
     // the fix reverted (there would still be chains and still be alias maps); what
@@ -93,6 +98,8 @@ describe('PODWF-1 — the corpus, measured rather than asserted from a table', (
     expect(built).toBeGreaterThanOrEqual(170);
     expect(withAliases).toBeGreaterThanOrEqual(130);
     expect(broken, `alias→variable mismatches (fail-open configurable drops)`).toEqual([]);
+    // A chain that cannot build is UNCHECKED, so it is a failure, never a skip.
+    expect(unbuildable).toEqual([]);
   });
 
   it('a FULL `configurable` overlay round-trips into the bag for every param-carrying chain', () => {
@@ -103,9 +110,10 @@ describe('PODWF-1 — the corpus, measured rather than asserted from a table', (
     // The previous assertion above proves the aliases RESOLVE; this one proves that
     // resolution survives the whole overlay→bag path for every param at once.
     let checked = 0;
+    const unbuildable: string[] = [];
     for (const id of listChains().map((c) => c.chain.chainId)) {
       let def;
-      try { def = buildChainBackedDefinition(id); } catch { continue; }
+      try { def = buildChainBackedDefinition(id); } catch (err) { unbuildable.push(`${id}: ${err instanceof Error ? err.message : String(err)}`); continue; }
       const aliases = aliasesOf(def);
       const params = Object.keys(aliases);
       if (params.length === 0) continue;
@@ -114,6 +122,7 @@ describe('PODWF-1 — the corpus, measured rather than asserted from a table', (
       checked++;
     }
     expect(checked).toBeGreaterThanOrEqual(130);
+    expect(unbuildable).toEqual([]);
   });
 });
 
@@ -130,9 +139,14 @@ describe('PODWF-1 — the cure MERGES; it never replaces the metadata', () => {
     expect(def.metadata?.expandedFrom).toBeTruthy();
   });
 
-  it('an alias whose variable was NOT renamed is left exactly as it was', () => {
+  it('every alias of a chain with a produced variable resolves, and the produced variable survives the rewrite', () => {
     // RFC 0133 §2 produced variables are used VERBATIM (no prefix) and are never
     // renamed by the restore loop, so nothing about them may be rewritten either.
+    // RETITLED (w73 g4): this used to claim "an alias whose variable was NOT
+    // renamed is left exactly as it was", but MEASURED, every alias of this chain
+    // (8 entries, candidateId…credentialRef) IS renamed bare→bare, so no
+    // un-renamed alias exists here to show untouched. The title now says what the
+    // assertions check.
     const def = buildChainBackedDefinition('kicktodo.plan-generation');
     const declared = new Set((def.variables ?? []).map((v) => v.name));
     for (const [bare, varName] of Object.entries(aliasesOf(def))) {

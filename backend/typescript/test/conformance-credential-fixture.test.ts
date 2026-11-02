@@ -3,6 +3,12 @@
  * only while `oauth` is (with the suite's `synthetic` provider), and when it is,
  * its one node suspends on a `credential` interrupt for a Subject with no
  * credential — the gate acts on `config.auth`, the node itself is a no-op.
+ *
+ * Tracker: TST-CGK-2. Red when: the fixture is advertised without oauth's
+ * `synthetic` provider (host/index.ts), or the run parks on anything but a
+ * `credential` interrupt (the run's `interrupt.requested` event is read, not
+ * inferred from the `waiting-input` status). The settle poll is bounded (80 × 50 ms) — an
+ * honest ceiling: the run has no settle hook this test can await.
  */
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
@@ -48,13 +54,19 @@ describe('conformance-credential', () => {
     process.env.OPENWOP_OAUTH_ADVERTISE = 'true';
     expect(await fixtures()).toContain('conformance-credential');
     const r = await fetch(`${BASE}/runs`, { method: 'POST', headers: H, body: JSON.stringify({ workflowId: 'conformance-credential', inputs: {} }) });
-    expect([200, 201, 202], await r.clone().text()).toContain(r.status);
+    expect(r.status, await r.clone().text()).toBe(201);
     const { runId } = (await r.json()) as { runId: string };
-    let status = '';
-    for (let i = 0; i < 80 && !status.startsWith('waiting') && status !== 'completed' && status !== 'failed'; i++) {
-      status = ((await (await fetch(`${BASE}/runs/${runId}`, { headers: H })).json()) as { status: string }).status;
+    let snap: { status: string } = { status: '' };
+    for (let i = 0; i < 80 && !snap.status.startsWith('waiting') && snap.status !== 'completed' && snap.status !== 'failed'; i++) {
+      snap = (await (await fetch(`${BASE}/runs/${runId}`, { headers: H })).json()) as typeof snap;
+      if (snap.status.startsWith('waiting')) break;
       await new Promise((res) => setTimeout(res, 50));
     }
-    expect(status).toBe('waiting-input');
+    expect(snap.status).toBe('waiting-input');
+    // The CLAIM: a credential interrupt, not merely some input wait — read from
+    // the run's own `interrupt.requested` event.
+    const ev = await fetch(`${BASE}/runs/${runId}/events/poll?timeout=0`, { headers: H });
+    const events = ((await ev.json()) as { events?: Array<{ type: string; payload?: { kind?: string } }> }).events ?? [];
+    expect(events.find((e) => e.type === 'interrupt.requested')?.payload?.kind).toBe('credential');
   });
 });

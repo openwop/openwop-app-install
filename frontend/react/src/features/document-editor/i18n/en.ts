@@ -93,7 +93,7 @@ export const messages = {
   embedHint: 'Insert or edit a sandboxed HTML embed',
   embedTitle: 'Embed',
   embedHtml: 'HTML',
-  embedNote: 'This HTML runs isolated — no network access and no cookies.',
+  embedNote: 'Readers see a static preview. Scripts in this HTML run only for a reader who chooses Run scripts, and running scripts can reach the network.',
   embedInserted: 'Embed inserted',
   focusMode: 'Focus mode',
   focusModeHint: 'Focus mode — dim all but the current block',
@@ -129,5 +129,5 @@ export const messages = {
   importWarningsTitle: "{{count}} part(s) of the .docx could not be converted and are missing:",
   importWarningsMore: "…and {{count}} more.",
   importWarningsDismiss: "Dismiss",
-  embedDefaultHtml: "<h2>Hello from an embed</h2>\n<p>Edit this HTML \u2014 it runs isolated (no network, no cookies).</p>",
+  embedDefaultHtml: "<h2>Hello from an embed</h2>\n<p>Edit this HTML. It shows as a static preview until a reader runs its scripts.</p>",
 };

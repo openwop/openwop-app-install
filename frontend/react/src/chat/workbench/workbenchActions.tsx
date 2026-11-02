@@ -6,6 +6,10 @@
  */
 import { createContext, useContext } from 'react';
 
-export interface WorkbenchActions { openSources: () => void }
+export interface WorkbenchActions {
+  openSources: () => void;
+  /** ADR 1017 D2 — open an artifact a chat tool saved during a turn. */
+  openArtifact?: (a: { artifactId: string }) => void;
+}
 export const WorkbenchActionsContext = createContext<WorkbenchActions | null>(null);
 export const useWorkbenchActions = (): WorkbenchActions | null => useContext(WorkbenchActionsContext);

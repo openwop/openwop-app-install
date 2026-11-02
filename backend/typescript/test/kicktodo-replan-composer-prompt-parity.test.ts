@@ -6,6 +6,9 @@
  * values and the command-count bound match. A schema edit the prose does not
  * follow (or the reverse) turns this red. Sabotage: adding a lane to the schema,
  * or changing `maxItems`, reds it.
+ *
+ * TST-DJD-5 (grade-tests wave 71). Also red (wave 71) when a lane loses its bold
+ * list item or a daypart value disappears from the prompt.
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';

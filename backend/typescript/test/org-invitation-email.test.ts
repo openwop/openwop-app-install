@@ -3,8 +3,16 @@
  * host transactional registry as `org.invitation`, in the four product locales.
  * Delivery is unchanged (the inviter's brokered connection, `orgs-invite-delivery.test.ts`).
  *
- * Sabotage-witnessed: hard-coding the English lead line reds three locale goldens; letting
- * a CRLF in the org name through reds the header case.
+ * Sabotage-witnessed (grade-tests w74): an English `leadBy` in a locale catalog reds that
+ * locale's golden; swapping the subjectBy/subjectAnon selector, dropping `role` or `expiresDay`
+ * reds the goldens and the anon case.
+ *
+ * A CRLF in the org name is held by THREE guards in `host/transactionalEmail.ts`: the
+ * per-variable C0 strip in `fill` (`clean.subject`) and, in `renderTransactional`, the final C0
+ * strip plus the whitespace collapse. Removing all of them reds the header case (probe
+ * `w74g3-oi-crlf-all`); removing one alone is an equivalent mutant (`w74g3-oi-crlf-final`).
+ * The generic seam case is `transactional-email-registry.test.ts` "escaping by construction";
+ * this one is the per-sender witness that `orgName` reaches the subject through `f.subject`.
  */
 import { describe, expect, it } from 'vitest';
 import { renderTransactional, TRANSACTIONAL_LOCALES } from '../src/host/transactionalEmail.js';
@@ -31,10 +39,12 @@ describe('org.invitation — goldens in the four product locales', () => {
     const { inviter: _i, ...anon } = data;
     const r = renderTransactional(ORG_INVITATION_KIND, anon, { locale: 'en' });
     expect(r.subject).toBe("You've been invited to join Acme");
-    expect(r.text.startsWith('You have been invited to join Acme as editor.')).toBe(true);
+    expect(r.text).toBe('You have been invited to join Acme as editor.\n\nAccept your invitation:\nhttps://app.example/invitations/accept?token=t\n\nThis link is single-use and expires on 2026-11-01. If you were not expecting this invitation, you can ignore this email.');
   });
   it('a CRLF in the org name cannot reach a header', () => {
     const r = renderTransactional(ORG_INVITATION_KIND, { ...data, orgName: 'Acme\r\nBcc: x@evil.test' }, { locale: 'en' });
     expect(r.subject).not.toMatch(/[\r\n]/);
+    // The data survives on ONE line; only the line break is gone.
+    expect(r.subject).toBe('Dana invited you to join Acme Bcc: x@evil.test');
   });
 });

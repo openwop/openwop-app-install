@@ -6,8 +6,14 @@
  * than hidden. The second is the integrity of the whole surface — a dashboard
  * that drops empty rows tells the user their approach works, because the
  * failures are precisely the rows that disappeared.
+ *
+ * Tracker TST-DHC-2 (wave 71). Red when: an application counts at its LAST
+ * rather than furthest stage (`w71g3-fu-furthest`); conversion denominators read
+ * "sitting in" (`fu-atleast`); a zero-response source vanishes (`fu-zero`); an
+ * empty median or rate reads 0 (`fu-mediannull`, `fu-ratenull`); time-to-response
+ * is measured to the LAST employer action (`fu-first-r2`).
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildFunnelReport } from '../src/features/job-search/lifecycle/funnel.js';
@@ -15,6 +21,7 @@ import { createApplication, advanceApplication, ensureApplicationPipeline } from
 import type { Deal } from '../src/features/crm/entities/deals.js';
 import { __resetHostExtPersistence, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
+import { stripComments } from './helpers/stripComments.js';
 
 const T = 'user:t-funnel';
 const ORG = 'org-1';
@@ -143,12 +150,26 @@ describe('ADR 0546 P1 — zero is reported as zero, never hidden', () => {
   });
 
   it('measures time to the FIRST employer action', async () => {
-    await apply('a');
-    await advance('a', 'Screening');
-    await advance('a', 'Interviewing');
-    const r = await buildFunnelReport(T, ORG);
-    expect(r.medianHoursToFirstResponse).not.toBeNull();
-    expect(r.medianHoursToFirstResponse!).toBeGreaterThanOrEqual(0);
+    // Moves land hours apart (only Date is faked), so first vs last differs:
+    // a responds at +2 h (then again at +5 h), b at +4 h ⇒ median of 2 and 4 = 3.
+    // Measured to the LAST action the median would be (5 + 4) / 2 = 4.5.
+    const t0 = Date.now();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(t0);
+      await apply('a');
+      await apply('b');
+      vi.setSystemTime(t0 + 2 * 3_600_000);
+      await advance('a', 'Screening');
+      vi.setSystemTime(t0 + 4 * 3_600_000);
+      await advance('b', 'Screening');
+      vi.setSystemTime(t0 + 5 * 3_600_000);
+      await advance('a', 'Interviewing');
+      const r = await buildFunnelReport(T, ORG);
+      expect(r.medianHoursToFirstResponse).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -164,7 +185,7 @@ describe('ADR 0546 P1 — the report does not scan per deal', () => {
     // history and filters, so calling it per deal cost 200 applications ×
     // 600 rows = 120,000 row visits on a page a user refreshes.
     const src = readFileSync(join(process.cwd(), 'src', 'features', 'job-search', 'lifecycle', 'funnel.ts'), 'utf8');
-    const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    const code = stripComments(src);
     expect(code.length).toBeGreaterThan(1000);
     expect(code, 'the per-deal reader scans the whole tenant').not.toMatch(/\bgetStageHistory\s*\(/);
     expect(code).toMatch(/listStageHistoryForPipeline\s*\(/);

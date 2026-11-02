@@ -17,6 +17,23 @@
  *     with NO credential attached.
  *   - `anon-actor-audit-opaque`: the decision principal is the opaque anon id; the
  *     owner witness carries `principalKind:"anonymous"`.
+ *
+ * Overlap, recorded rather than cut (protected security tests are deduped only on
+ * an explicit human ask): "decideAnonToolCall (the seam decision core)" and the
+ * "bounded-write-egress decision table" assert the same decisions case for case;
+ * only "read tier is tenant-agnostic" is unique to the table.
+ * Double guard: a widget tool OUTSIDE the grant is never offered to the model
+ * (the loop compiles only granted tools) and is audited `anon-not-granted` by the
+ * loop's forbidden-tool mirror, so `authorizeAnonTool`'s default-deny line is
+ * not what answers the widget case (w66 an-deny reddened the four pure cases,
+ * not the widget one; an-mirror-r2 probes the mirror).
+ *
+ * TST-BXD-3. Red when: an ungranted tool is allowed (an-deny, an-mirror-r2), an
+ * uncontrolled write is allowed (an-control), SSRF / audience / scheme checks are
+ * dropped (an-ssrf, an-aud, an-scheme), the principal embeds the session key
+ * (an-mint), a grant is not de-duplicated (an-dedupe), a write dispatches or is
+ * not held (an-dispatch, an-interrupt), the actor is advertised or served while
+ * disabled (an-honest), or a cross-tenant read returns data (an-xtenant).
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -241,8 +258,13 @@ describe('RFC 0132 — the sample conformance seam', () => {
   it('honest-off: the seam 404s when disabled', async () => {
     delete process.env.OPENWOP_ANON_ACTOR_ENABLED;
     try {
-      expect((await getJson('/host/sample/anon-surface/tools?surface=sample-public-widget')).status).toBe(404);
-      expect((await postJson('/host/sample/anon-surface/dispatch', { surface: 'sample-public-widget', tool: 'catalog.read' })).status).toBe(404);
+      const tools = await getJson('/host/sample/anon-surface/tools?surface=sample-public-widget');
+      expect(tools.status).toBe(404);
+      expect(tools.body.error).toBe('not_found');
+      const dispatch = await postJson('/host/sample/anon-surface/dispatch', { surface: 'sample-public-widget', tool: 'catalog.read' });
+      expect(dispatch.status).toBe(404);
+      expect(dispatch.body.error).toBe('not_found');
+      expect(dispatch.body.authorizationDecided).toBeUndefined();
     } finally {
       process.env.OPENWOP_ANON_ACTOR_ENABLED = 'true';
     }
@@ -259,8 +281,21 @@ describe('RFC 0132 — the sample conformance seam', () => {
     // The hardened publicGateway precedent: an unknown surface must not 400/leak that
     // it does not exist (vs an existing-but-forbidden one). A missing tool on a KNOWN
     // surface, by contrast, is an honest 400 (the caller already reached the surface).
-    expect((await postJson('/host/sample/anon-surface/dispatch', { surface: 'nope', tool: 'catalog.read' })).status).toBe(404);
-    expect((await postJson('/host/sample/anon-surface/dispatch', { surface: 'sample-public-widget' })).status).toBe(400);
+    const unknown = await postJson('/host/sample/anon-surface/dispatch', { surface: 'nope', tool: 'catalog.read' });
+    expect(unknown.status).toBe(404);
+    // Uniform: byte-identical to the flag-off refusal, so the body tells nothing.
+    delete process.env.OPENWOP_ANON_ACTOR_ENABLED;
+    let off: { status: number; text: string };
+    try {
+      off = await postJson('/host/sample/anon-surface/dispatch', { surface: 'sample-public-widget', tool: 'catalog.read' });
+    } finally {
+      process.env.OPENWOP_ANON_ACTOR_ENABLED = 'true';
+    }
+    expect(off.status).toBe(404);
+    expect(unknown.text).toBe(off.text);
+    const noTool = await postJson('/host/sample/anon-surface/dispatch', { surface: 'sample-public-widget' });
+    expect(noTool.status).toBe(400);
+    expect(noTool.body.error).toBe('validation_error');
   });
 
   it('read tier: catalog.read → allowed anon-granted + owner.principalKind anonymous + result; NO canary', async () => {
@@ -445,3 +480,40 @@ describe('RFC 0132 sample seam — bounded-write-egress decision table', () => {
     expect(d.dispatch).toBe(false);
   });
 });
+
+// ADR 1018 D2 (grade-code CW68C-6) — the TOOL lane carries the visitor thread too.
+// Breaks if `history` is dropped, reordered after the current message, or if the
+// result does not say a failed loop failed (the gateway must not store that turn).
+describe('ADR 1018 D2 — runAnonReadTurn history', () => {
+  it('places the caller\'s prior turns, in order, before the current fenced message', async () => {
+    const storage = await openStorage('memory://');
+    const seen: AiToolCallRequest['messages'][] = [];
+    const callAIWithTools = async (r: AiToolCallRequest): Promise<AiToolCallResult> => { seen.push(r.messages.map((m) => ({ ...m }))); return { content: `answer-${seen.length}`, toolCalls: [] }; };
+    const turn = await runAnonReadTurn({
+      storage, tenantId: 'acme', agent: AGENT,
+      grant: { read: [READ], write: [] },
+      surfaceSessionKey: 'w:hist', callAIWithTools,
+      history: [{ role: 'user', content: '<<fenced earlier question>>' }, { role: 'assistant', content: 'earlier answer' }],
+      fencedUserMessage: '<<fenced current question>>',
+    });
+    expect(seen[0]!.map((m) => [m.role, m.content])).toEqual([
+      ['user', '<<fenced earlier question>>'],
+      ['assistant', 'earlier answer'],
+      ['user', '<<fenced current question>>'],
+    ]);
+    expect(turn.reply).toBe('answer-1');
+    expect(turn.failed).toBe(false);
+  });
+
+  it('reports a failed loop as failed, so the gateway does not store the turn (grade-code N3)', async () => {
+    const storage = await openStorage('memory://');
+    const turn = await runAnonReadTurn({
+      storage, tenantId: 'acme', agent: AGENT,
+      grant: { read: [READ], write: [] },
+      surfaceSessionKey: 'w:fail', fencedUserMessage: 'hi',
+      callAIWithTools: async () => { throw new Error('provider down'); },
+    });
+    expect(turn.failed).toBe(true);
+  });
+});
+

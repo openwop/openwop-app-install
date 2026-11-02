@@ -6,12 +6,19 @@
  *   - GET  /host/openwop-app/agents               (registry-backed inventory)
  *   - POST /host/openwop-app/agents/{id}/dispatch (the dispatch floor)
  * and confirms the host advertises capabilities.agents.manifestRuntime.
+ *
+ * w73 g4: REPO_ROOT used to climb FIVE directories from backend/typescript/test/
+ * (two above the repo root), so `loadAgentsFromManifest` read a nonexistent dir
+ * and silently returned [] — the "guarantee" below was dead, and the supervisor
+ * was present only because boot loaded it. It now climbs three, and the case
+ * asserts the root holds a known repo file AND that the load returned the agent.
  */
 
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { join } from 'node:path';
+import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createApp } from '../src/index.js';
 import { loadAgentsFromManifest } from '../src/packs/agentLoader.js';
@@ -19,23 +26,30 @@ import { loadAgentsFromManifest } from '../src/packs/agentLoader.js';
 let BASE: string;
 const TOKEN = 'dev-token';
 const H = { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json', 'OpenWOP-Version': '2' };
-const REPO_ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..', '..', '..');
+const REPO_ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..');
 const SUPERVISOR = 'core.openwop.agents.supervisor.default';
 
 let server: http.Server;
+let loadedIds: string[] = [];
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   // Guarantee a known agent is installed regardless of local-mount config in CI.
-  loadAgentsFromManifest(join(REPO_ROOT, 'packs', 'core.openwop.agents.supervisor'));
+  loadedIds = loadAgentsFromManifest(join(REPO_ROOT, 'packs', 'core.openwop.agents.supervisor')).map((a) => a.agentId);
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-});
+}, 120_000);
 
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 describe('RFC 0070 — host loads + dispatches a manifest agent over HTTP', () => {
+  it('the test really installs the supervisor from the repo packs tree (positive control)', () => {
+    expect(existsSync(join(REPO_ROOT, 'packs', 'core.openwop.agents.supervisor', 'pack.json'))).toBe(true);
+    expect(existsSync(join(REPO_ROOT, 'backend', 'typescript', 'package.json'))).toBe(true);
+    expect(loadedIds).toContain(SUPERVISOR);
+  });
+
   it('advertises capabilities.agents.manifestRuntime', async () => {
     // ADR 0812 P3c-0 — the v2 document: presence of the facet IS the advert
     // (the v1 `capabilities.agents.manifestRuntime.supported` is retired).
@@ -43,7 +57,8 @@ describe('RFC 0070 — host loads + dispatches a manifest agent over HTTP', () =
       agents?: { status?: string; manifestRuntime?: Record<string, unknown> };
     };
     expect(doc?.agents?.status).toBeTypeOf('string');
-    expect(doc?.agents?.manifestRuntime).toBeDefined();
+    // The v2 facet object itself (MEASURED at 9f4cca7d4): handoff validation on.
+    expect(doc?.agents?.manifestRuntime).toEqual({ handoffValidation: true });
     expect(doc?.agents?.manifestRuntime?.['supported']).toBeUndefined();
   });
 
@@ -59,7 +74,9 @@ describe('RFC 0070 — host loads + dispatches a manifest agent over HTTP', () =
     expect(one.status).toBe(200);
     expect(((await one.json()) as { agentId?: string }).agentId).toBe(SUPERVISOR);
     // 404 for unknown
-    expect((await fetch(`${BASE}/agents/core.nope.absent`, { headers: H })).status).toBe(404);
+    const missing = await fetch(`${BASE}/agents/core.nope.absent`, { headers: H });
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toEqual({ error: 'not_found', message: "agent 'core.nope.absent' is not installed on this host" });
   });
 
   it('serves the registry-backed inventory including the installed agent', async () => {
@@ -85,6 +102,7 @@ describe('RFC 0070 — host loads + dispatches a manifest agent over HTTP', () =
     const res = await fetch(`${BASE}/host/openwop-app/agents/${encodeURIComponent(SUPERVISOR)}/dispatch`, {
       method: 'POST', headers: H, body: JSON.stringify({ task: {}, validateHandoff: false, simulateConfidence: 0.01, confidenceThreshold: 0.99 }),
     });
+    expect(res.status).toBe(200);
     const r = await res.json() as { status?: string; result?: unknown };
     expect(r.status).toBe('escalated');
     expect(r.result).toBeUndefined();
@@ -95,5 +113,6 @@ describe('RFC 0070 — host loads + dispatches a manifest agent over HTTP', () =
       method: 'POST', headers: H, body: JSON.stringify({ task: {} }),
     });
     expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: 'not_found', message: "agent 'core.nope.absent' is not installed on this host" });
   });
 });

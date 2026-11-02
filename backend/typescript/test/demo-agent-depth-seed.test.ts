@@ -6,6 +6,11 @@
  * idempotently and heal-aware. The demo NO LONGER seeds a kickoff AI-chat thread
  * (it polluted each agent's real chat history) — this test asserts none is
  * created (ADR 0321 addendum).
+ *
+ * TST-CUE-1. Expected counts are derived from the seed source
+ * (`seed-data/exampleAgents.json`), never typed in. Red when a re-heal re-adds
+ * memories or re-ingests knowledge docs (summed over EVERY persona), or when
+ * `clearExampleAgents` stops sweeping — or over-sweeps — `demo-kickoff:*` threads.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -19,7 +24,8 @@ import { listRoster } from '../src/host/rosterService.js';
 import { rosterSubject } from '../src/host/subject.js';
 import { countSubjectNotes } from '../src/host/subjectMemory.js';
 import { getAgentKnowledge } from '../src/features/agent-knowledge/service.js';
-import { PREAUTHORIZED_CALLER } from '../src/host/subjectAccess.js'; // ADR 0643 R4 Blocker 2 — `getAgentKnowledge` takes a REQUIRED caller; a test reading its own unbound seed spells the bypass
+import { PREAUTHORIZED_CALLER } from '../src/host/subjectAccess.js';
+import SEED_AGENTS from '../src/host/seed-data/exampleAgents.json'; // ADR 0643 R4 Blocker 2 — `getAgentKnowledge` takes a REQUIRED caller; a test reading its own unbound seed spells the bypass
 
 let storage: Awaited<ReturnType<typeof openStorage>>;
 beforeAll(async () => {
@@ -34,7 +40,10 @@ describe('demo-agent-depth', () => {
     await seedExampleAgents(tenantId, storage, { heal: true, skipWorkforces: true });
 
     const roster = await listRoster(tenantId);
-    expect(roster.length).toBeGreaterThanOrEqual(10);
+    expect(roster.length).toBe(SEED_AGENTS.length);
+    const withMemories = SEED_AGENTS.filter((a) => (a.memories?.length ?? 0) > 0).length;
+    const withKnowledge = SEED_AGENTS.filter((a) => a.knowledge?.collections.some((c) => c.documents.length >= 3)).length;
+    expect(withMemories, 'the seed source must declare memories, or this case proves nothing').toBeGreaterThan(0);
 
     // Every worker persona has memories + a knowledge collection — and NO seeded
     // kickoff chat thread (the demo no longer fabricates sample AI-chat history).
@@ -51,20 +60,25 @@ describe('demo-agent-depth', () => {
       // No kickoff chat session is created for any persona.
       expect(await hostExtStorage().getChatSession(tenantId, `demo-kickoff:${entry.rosterId}`)).toBeNull();
     }
-    expect(personasWithMemories).toBeGreaterThanOrEqual(10);
-    expect(personasWithKnowledge).toBeGreaterThanOrEqual(10);
+    expect(personasWithMemories).toBe(withMemories);
+    expect(personasWithKnowledge).toBe(withKnowledge);
 
-    // Capture depth counts, then heal again — nothing should be duplicated.
-    const sample = roster[0]!;
-    const notesBefore = await countSubjectNotes(tenantId, rosterSubject(sample.rosterId));
-    const knBefore = await getAgentKnowledge(tenantId, sample.rosterId, PREAUTHORIZED_CALLER);
-    const docsBefore = knBefore.collections.reduce((n, c) => n + (c.documents?.length ?? 0), 0);
+    // Capture depth counts over EVERY persona, then heal again — nothing duplicated.
+    const depth = async (): Promise<{ notes: number; docs: number }> => {
+      let notes = 0; let docs = 0;
+      for (const entry of roster) {
+        notes += await countSubjectNotes(tenantId, rosterSubject(entry.rosterId));
+        const kn = await getAgentKnowledge(tenantId, entry.rosterId, PREAUTHORIZED_CALLER);
+        docs += kn.collections.reduce((n, c) => n + (c.documents?.length ?? 0), 0);
+      }
+      return { notes, docs };
+    };
+    const before = await depth();
+    expect(before.notes).toBe(SEED_AGENTS.reduce((n, a) => n + Math.min(a.memories?.length ?? 0, 200), 0));
 
     await seedExampleAgents(tenantId, storage, { heal: true, skipWorkforces: true });
 
-    expect(await countSubjectNotes(tenantId, rosterSubject(sample.rosterId))).toBe(notesBefore);
-    const knAfter = await getAgentKnowledge(tenantId, sample.rosterId, PREAUTHORIZED_CALLER);
-    expect(knAfter.collections.reduce((n, c) => n + (c.documents?.length ?? 0), 0)).toBe(docsBefore);
+    expect(await depth()).toEqual(before);
   });
 
   it('clearExampleAgents sweeps orphaned demo-kickoff chat threads (from older seeds)', async () => {

@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.campaign-sync",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "kind": "workflow-chain",
   "description": "Campaign Studio metrics-sync chain (RFC 0013; campaign gap plan C2 on ADR 0159). Pulls a rolling 7-day look-back of daily ad metrics, with conversions and revenue, for the dispatched campaigns or the whole configured ad account through the acting user's platform connection (ctx.ads; each day's row is replaced on re-pull, so late conversions settle and nothing double-counts) into the unified performance store, then delivers a short sync summary as a notification. Schedule it daily on the ONE scheduler, or run it ad hoc — the 15-minute cooldown makes overlapping fires harmless. Also carries the daily budget-pacing check (ADR 0220). And the hourly conversions delivery (ADR 0907 D7): queued server-side conversions go to the live conversions APIs, consent re-checked per row at send. And the governed budget reallocation (ADR 0952 D3): one approved plan, decreases first. And the product-feed push (ADR 0952 D6): the commerce catalog to Meta Catalog or Google Merchant Center, changed items only.",
   "author": "openwop",
@@ -15,9 +15,9 @@
   "chains": [
     {
       "chainId": "campaign-sync.daily-metrics",
-      "version": "1.1.1",
+      "version": "1.2.0",
       "label": "Daily Ad-Metrics Sync",
-      "description": "Pull the last 7 days of spend/impressions/clicks/conversions/revenue on one ad platform (meta or google) into the performance store — the dispatched campaigns, or every campaign of the configured ad accounts (connector settings, or the syncScope parameter) — per-account best-effort, deduped, cooldown-guarded — and notify with the result. Pair with a daily schedule for hands-off freshness (feeds the KPI cards, budget recommendations, and the attribution join).",
+      "description": "Pull the last 7 days of spend/impressions/clicks/conversions/revenue on one ad platform (meta or google) into the performance store — the dispatched campaigns, or every campaign of the configured ad accounts (connector settings, or the syncScope parameter) — per-account best-effort, deduped, cooldown-guarded — and tell the schedule owner (counts only) how it went; a sync where no account returned data fails the run. Pair with a daily schedule for hands-off freshness (feeds the KPI cards, budget recommendations, and the attribution join).",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -53,7 +53,7 @@
         "nodes": [
           {
             "id": "sync",
-            "typeId": "feature.campaign-connectors.nodes.sync@1.2.0",
+            "typeId": "feature.campaign-connectors.nodes.sync@1.3.0",
             "name": "Pull the 7-day metrics look-back",
             "position": {
               "x": 0,
@@ -75,7 +75,7 @@
               "y": 0
             },
             "config": {
-              "audience": "tenant"
+              "audience": "self"
             },
             "inputs": {
               "title": "Daily Ad-Metrics Sync"
@@ -84,23 +84,23 @@
         ],
         "edges": [
           {
-            "from": "sync",
-            "to": "notify"
+            "from": "sync.summary",
+            "to": "notify.message"
           }
         ]
       },
       "outputs": {
         "outcome": {
           "type": "string",
-          "description": "synced | cooldown | no_dispatches | no_accounts."
+          "description": "synced | cooldown | no_dispatches | no_accounts. A sync where no ad account returned data fails the run (sync_failed) instead."
         }
       }
     },
     {
       "chainId": "campaign-sync.pacing-check",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "label": "Budget Pacing Check + Spend Caps",
-      "description": "Compare every campaign's actual spend (performance store) against its budget plan and notify on band escalations (80% warning / 100% over) — once per escalation, never per run. Then enforce the org's hard spend caps (ADR 0952 D2): a reached cap, or spend unreadable past the cap's staleness limit, pauses the covered campaigns through the run owner's ad connections. Pair with a schedule after the metrics sync; caps act on whatever cadence you choose.",
+      "description": "Compare every campaign's actual spend (performance store) against its budget plan and notify on band escalations (80% warning / 100% over) — once per escalation, never per run. Alongside it (the two nodes run concurrently), enforce the org's hard spend caps (ADR 0952 D2): a reached cap, or spend unreadable past the cap's staleness limit, pauses the covered campaigns through the run owner's ad connections. Pair with a schedule after the metrics sync; caps act on whatever cadence you choose.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -132,7 +132,7 @@
           },
           {
             "id": "pace",
-            "typeId": "feature.campaign-intel.nodes.pacing-check@1.0.0",
+            "typeId": "feature.campaign-intel.nodes.pacing-check@1.1.0",
             "name": "Check budget pacing",
             "position": {
               "x": 0,
@@ -219,7 +219,7 @@
     },
     {
       "chainId": "campaign-intel.reallocate",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "label": "Budget Reallocation (one approved plan)",
       "description": "Recommend a cross-channel budget shift from the performance store, turn it into ONE plan of per-campaign daily-budget changes (live current budgets read from the platforms, decreases first, increases a spend cap would not allow left out) and ask for one approval over the whole plan. The apply step applies the plan only once it is approved; until then the run ends with outcome awaiting_approval, and an approver applies it from Campaign Intelligence after deciding. A plan expires after 7 days. Runs as the person who starts it (their ad connections; workspace:write in the org).",
       "parameters": {
@@ -240,7 +240,7 @@
         "nodes": [
           {
             "id": "optimize",
-            "typeId": "feature.campaign-intel.nodes.budget-optimize@1.0.0",
+            "typeId": "feature.campaign-intel.nodes.budget-optimize@1.1.0",
             "name": "Recommend a budget shift",
             "position": {
               "x": 0,

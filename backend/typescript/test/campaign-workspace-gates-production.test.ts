@@ -29,15 +29,20 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { setKernel } from '../src/features/campaign-brief/briefService.js';
 import type { Profile } from '../src/features/profiles/profilesService.js';
 import { buildProductionContext } from '../src/features/production/productionContext.js';
-import { campaignOrchestrationWorkflow, campaignOrchestrationParallel } from '../src/features/campaign-orchestration/orchestrationWorkflow.js';
+import { ORCHESTRATION_ID } from '../src/features/campaign-orchestration/orchestrationWorkflow.js';
+import { loadWorkflowChainPacks, defaultWorkflowChainPackRoots, _resetChainRegistryForTest } from '../src/host/workflowChainPackLoader.js';
+import { buildChainBackedDefinition } from '../src/host/chainBackedWorkflows.js';
 import { nodes as orchNodes } from '../../../packs/feature.campaign-orchestration.nodes/index.mjs';
 import { nodes as briefNodes } from '../../../packs/feature.campaign-brief.nodes/index.mjs';
 import { nodes as prodNodes } from '../../../packs/feature.production.nodes/index.mjs';
 
 describe('spine slot (P1)', () => {
-  it('production-plan sits post-merge, pre-consistency, in BOTH spines', () => {
-    for (const wf of [campaignOrchestrationWorkflow, campaignOrchestrationParallel]) {
-      const ids = wf.nodes.map((n) => n.nodeId);
+  it('production-plan sits post-merge, pre-consistency, in the chain-backed spine', () => {
+    // ADR 1020 D7 — the sequential spine is gone; assert the definition that runs.
+    _resetChainRegistryForTest();
+    expect(loadWorkflowChainPacks({ roots: defaultWorkflowChainPackRoots() }).errors).toEqual([]);
+    for (const wf of [buildChainBackedDefinition(ORCHESTRATION_ID)]) {
+      const ids = wf.nodes.map((n) => n.nodeId.replace(/^.*_/, ''));
       const plan = ids.indexOf('production-plan');
       const consistency = ids.indexOf('consistency');
       const finalize = ids.indexOf('finalize');

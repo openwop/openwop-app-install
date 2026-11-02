@@ -26,8 +26,15 @@
  *  - drop the `onEnrollmentDeleted` registrations → the KTA-11 test reds;
  *  - drop the `c.ownerSubject === ownerSubject` filter in the circles
  *    subscription → the "handed-over circle is not handed over again" case reds.
+ *
+ * TST-DJC-3 (grade-tests wave 71). The concurrent-handover case FORCES the race: a
+ * read barrier holds both callers' first read of the circle row until both have
+ * read it (2 s fallback; `arrivals` asserted). DOUBLE GUARD (circleService.ts
+ * `handOverCircle`): the heir-grant CAS and the circle-row CAS each stop the second
+ * caller from reporting a second transfer; the re-probe breaks both in one edit and
+ * the case is red on two `transferred` outcomes.
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import { __runKvAgeOutOnce } from '../src/host/kvAgeOut.js';
@@ -88,6 +95,30 @@ async function member(tenantId: string, circleId: string, owner: string, subject
 }
 
 let storage: Storage;
+let restore: Array<() => void> = [];
+afterEach(() => { for (const f of restore) f(); restore = []; });
+
+/** Hold the first `racers` reads of ONE storage key until all have arrived. */
+function lockstep(key: string, racers: number): { arrivals: () => number } {
+  const original = storage.kvGet.bind(storage);
+  let arrivals = 0;
+  let batch: Array<() => void> = [];
+  const release = (): void => { const b = batch; batch = []; for (const f of b) f(); };
+  const spy = vi.spyOn(storage, 'kvGet').mockImplementation(async (k: string) => {
+    if (k === key && arrivals < racers) {
+      arrivals += 1;
+      await new Promise<void>((r) => {
+        batch.push(r);
+        if (batch.length === racers) release();
+        else if (batch.length === 1) setTimeout(release, 2000);
+      });
+    }
+    return original(k);
+  });
+  restore.push(() => spy.mockRestore());
+  return { arrivals: () => arrivals };
+}
+
 beforeEach(async () => {
   storage = await openStorage('memory://');
   initHostExtPersistence(storage);
@@ -161,10 +192,13 @@ describe('KTACC-2 — a circle survives its owner\'s erasure', () => {
     await seedCircle(T, 'circ3', OWNER, 'enrO');
     await member(T, 'circ3', OWNER, B, { acceptedAt: at(9) });
     await member(T, 'circ3', OWNER, C, { acceptedAt: at(8) });
+    const race = lockstep(`hostext:kicktodo-circles:${T}::circ3`, 2);
     const [r1, r2] = await Promise.all([handOverCircle(T, 'circ3', OWNER), handOverCircle(T, 'circ3', OWNER)]);
+    expect(race.arrivals(), 'the race was not forced — both must read the circle before either writes').toBe(2);
     const outcomes = [r1, r2].filter((r) => r !== null);
-    expect(outcomes.length).toBeGreaterThanOrEqual(1);
-    for (const r of outcomes) expect(r).toMatchObject({ outcome: 'transferred', newOwner: C });
+    expect(outcomes, 'exactly one caller performed the transfer').toHaveLength(1);
+    expect(outcomes[0]).toMatchObject({ outcome: 'transferred', newOwner: C });
+    expect((await grantCol().get(`${T}::circ3::${C}`))?.scopes).toEqual([...GRANT_SCOPES]);
     expect((await circleCol().get(`${T}::circ3`))?.ownerSubject).toBe(C);
     expect(await handOverCircle(T, 'circ3', OWNER)).toBeNull(); // no longer theirs
   });

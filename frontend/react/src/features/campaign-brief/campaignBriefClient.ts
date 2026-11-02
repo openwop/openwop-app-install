@@ -89,6 +89,13 @@ export async function listBriefs(orgId?: string): Promise<CampaignBrief[]> {
   const suffix = orgId ? `/briefs?orgId=${encodeURIComponent(orgId)}` : '/briefs';
   return (await asJson<{ briefs: CampaignBrief[] }>(await fetch(`${base}${suffix}`, fetchOpts({ headers: authedHeaders() })), 'listBriefs')).briefs;
 }
+/** ADR 1020 D8 — the run whose generated kernel waits for approval, or null. The
+ *  kernel is saved to the brief only when it is approved, so while it waits the
+ *  brief itself has no (new) kernel to show. */
+export async function getPendingKernelRun(briefId: string): Promise<string | null> {
+  const body = await asJson<{ pendingKernelRunId?: string }>(await fetch(`${base}/briefs/${encodeURIComponent(briefId)}`, fetchOpts({ headers: authedHeaders() })), 'getBrief');
+  return typeof body.pendingKernelRunId === 'string' && body.pendingKernelRunId ? body.pendingKernelRunId : null;
+}
 export async function createBrief(input: BriefInput): Promise<CampaignBrief> {
   return (await asJson<{ brief: CampaignBrief }>(await fetch(`${base}/briefs`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify(input) })), 'createBrief')).brief;
 }

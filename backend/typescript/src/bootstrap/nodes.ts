@@ -16,7 +16,6 @@ import { confidenceEscalationFloor, multiAgentPhaseGates } from '../host/multiAg
 import { declaredRunCredentialRefs } from '../host/runCredentials.js';
 import { createHash } from 'node:crypto';
 import { getNodeRegistry } from '../executor/nodeRegistry.js';
-import { getAgentRegistry } from '../executor/agentRegistry.js';
 import { agentVisibleToTenant } from '../host/agentVisibility.js';
 import type { NodeContext, NodeModule, NodeOutcome } from '../executor/types.js';
 import { emitCost } from '../observability/costEmitter.js';
@@ -77,6 +76,7 @@ import { ALLOWED_UPLOAD_MIME, isAllowedUploadMime } from '../host/allowedUploadM
 import agentRunnerNode from '../host/agentRunnerNode.js';
 import { DurableSearchUnavailableError } from '../host/webResearchSurface.js';
 import { assetTokenFromUrl } from '../host/assetServePath.js';
+import { resolveRunServedAgent, resolveServedAgentDetailed } from '../host/agentServing.js';
 
 /** ADR 0706 — the parent run's registered BYOK refs, handed to every child the
  *  parent spawns so `prepareRunSecrets` resolves the SAME secrets for the child.
@@ -1194,14 +1194,20 @@ const clarificationGateNode: NodeModule = {
   typeId: 'core.clarificationGate',
   version: '1.0.0',
   async execute(ctx) {
+    // ADR 1013 D1 — `config.question` is the one-question spelling stored
+    // workflows and the app-builder chain carry; it raises one `questions` entry.
+    const questions = Array.isArray(ctx.config?.questions)
+      ? ctx.config.questions
+      : [{
+          id: ctx.nodeId,
+          question: ctx.config?.question ?? 'Please clarify.',
+          schema: ctx.config?.schema ?? { type: 'string' },
+        }];
     return {
       status: 'suspended',
       interrupt: {
         kind: 'clarification',
-        data: {
-          question: ctx.config?.question ?? 'Please clarify.',
-          schema: ctx.config?.schema ?? { type: 'string' },
-        },
+        data: { questions, ...(ctx.config?.form !== undefined ? { form: ctx.config.form } : {}) },
       },
     };
   },
@@ -1934,7 +1940,16 @@ export const chatResponderNode: NodeModule = {
       // instance's boot-hydrated registry is read through from durable storage
       // (agentPackResolver miss-path) rather than silently falling through to
       // the default prompt — the chat turn routes correctly on any instance.
-      const agent = await getAgentRegistry().resolve(agentIdInput, ctx.tenantId);
+      // ADR 1014 D4 — what `stable` serves; in a run, the run's recorded version (M6).
+      const served = ctx.pinServedAgent
+        ? await resolveRunServedAgent(agentIdInput, ctx.tenantId, ctx.pinServedAgent)
+        : await resolveServedAgentDetailed(agentIdInput, ctx.tenantId, ctx.runId);
+      // A deployment that serves nothing runnable here refuses the turn; it never
+      // falls through to the default prompt, which would read like the agent's.
+      if (served.refused) {
+        return { status: 'failure', error: { code: 'agent_version_unavailable', message: `${agentIdInput} has no version this host can serve${served.version ? ` (${served.version})` : ''}.` } };
+      }
+      const agent = served.agent;
       // Cross-tenant isolation (CTI-1, agent-memory.md). User-authored
       // agents carry `ownerTenant`; pack-installed agents don't. The
       // request that triggered this node carries `ctx.tenantId` (the
@@ -2753,6 +2768,13 @@ const A2UI_CLARIFY_DEFAULT_SURFACE = {
   ],
 } as const;
 
+function surfaceQuestions(surface: Record<string, unknown>, question: string): Array<{ id: string; question: string }> {
+  const components = Array.isArray(surface.components) ? (surface.components as Array<Record<string, unknown>>) : [];
+  return components
+    .filter((c) => String(c.component).startsWith('field.'))
+    .map((c, i) => ({ id: String(c.id), question: i === 0 ? question : String(c.label) }));
+}
+
 const a2uiClarifyNode: NodeModule = {
   typeId: 'local.openwop-app.a2ui-clarify',
   version: '0.1.0',
@@ -2768,13 +2790,11 @@ const a2uiClarifyNode: NodeModule = {
       interrupt: {
         kind: 'clarification',
         data: {
-          // Free-text fallback for any consumer that doesn't render A2UI
-          // surfaces (the renderer bridge prefers `surface` when present).
-          question: typeof cfg.question === 'string' ? cfg.question : 'A few details, please.',
-          // RFC 0102: the surface + its pinned catalog version. The chat's
-          // `a2uiInterruptCard` bridge keys on these two fields.
-          catalogVersion: typeof cfg.catalogVersion === 'string' ? cfg.catalogVersion : '0.9.1',
-          surface,
+          // ADR 1013 D3 — one question per field, the fallback for a consumer
+          // that doesn't render forms. The chat's `a2uiInterruptCard` bridge
+          // renders `form`.
+          questions: surfaceQuestions(surface, typeof cfg.question === 'string' ? cfg.question : 'A few details, please.'),
+          form: { catalogVersion: typeof cfg.catalogVersion === 'string' ? cfg.catalogVersion : '0.9.1', surface },
         },
       },
     };

@@ -41,6 +41,7 @@ import { createPage, __resetCms } from '../src/features/cms/cmsService.js';
 import { createComment, getComment, listThread, __resetCommentsStore } from '../src/features/comments/commentsService.js';
 import { buildCommentsSurface } from '../src/features/comments/surface.js';
 import { PREAUTHORIZED_CALLER } from '../src/host/subjectAccess.js';
+import { stripComments } from './helpers/stripComments.js';
 
 /** ADR 0659 D1 — `listThread` now answers `null` when the target is absent OR invisible.
  *  Every fixture here creates a real resource and is not testing that gate, so a null is
@@ -175,8 +176,7 @@ describe('CMNT-5 — resolve no longer forges the author-only guard’s own argu
     const { readFileSync } = await import('node:fs');
     const { join, dirname } = await import('node:path');
     const { fileURLToPath } = await import('node:url');
-    const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../src/features/comments/surface.ts'), 'utf8')
-      .replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:'"`\\])\/\/[^\n]*/g, '$1'); // comments are not code
+    const src = stripComments(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../src/features/comments/surface.ts'), 'utf8')); // comments are not code
     expect(/updateComment\s*\(/.test(src), 'the resolve call vanished — this guard is inert, re-point it').toBe(true);
     expect(src).not.toMatch(/existing\.authorId/);
   });

@@ -307,28 +307,60 @@ export interface SourceNodeOutcome {
 export class ExecutionOrdinals {
   private readonly closed = new Map<string, number>();
   private readonly opened = new Map<string, number>();
+  /** ADR 1001 D3.3 / ADR 1002 — the open (or last) execution's VISIT, and how
+   *  the last execution closed. See `visitOf`. */
+  private readonly visits = new Map<string, number>();
+  private readonly lastTerminal = new Map<string, 'completed' | 'failed'>();
 
   /** The ordinal of the execution this `node.started` belongs to. */
   start(nodeId: string): number {
     const open = this.opened.get(nodeId);
     if (open !== undefined) return open;
+    this.visits.set(nodeId, this.visitOf(nodeId));
     const n = (this.closed.get(nodeId) ?? 0) + 1;
     this.opened.set(nodeId, n);
     return n;
   }
 
-  /** Close the open execution; returns its ordinal, or `undefined` for an orphan. */
-  terminal(nodeId: string): number | undefined {
+  /** Close the open execution; returns its ordinal, or `undefined` for an orphan.
+   *  `kind` is how it closed (`node.completed` → 'completed', `node.failed` →
+   *  'failed'); it decides whether the NEXT start is a retry or a new visit. */
+  terminal(nodeId: string, kind: 'completed' | 'failed'): number | undefined {
     const open = this.opened.get(nodeId);
     if (open === undefined) return undefined;
     this.opened.delete(nodeId);
     this.closed.set(nodeId, open);
+    this.lastTerminal.set(nodeId, kind);
     return open;
   }
 
   /** How many executions of `nodeId` this log has STARTED (open or closed). */
   highest(nodeId: string): number {
     return this.opened.get(nodeId) ?? this.closed.get(nodeId) ?? 0;
+  }
+
+  /**
+   * ADR 1001 D3.3 / ADR 1002 — the 0-based VISIT the open execution belongs to,
+   * or the one the next `start` would open. Read-only.
+   *
+   * A visit is NOT an execution: a retry opens a new execution (`n` counts
+   * retries) but must stay in the SAME visit, because RFC 0150 §B requires a
+   * retry's first logical effect to have the same identity as the failed
+   * attempt's first one (the retry-stable read). So: a start after the node's
+   * last execution FAILED is a retry (same visit); a start after it COMPLETED is
+   * a revisit (visit + 1); the first start is visit 0; a re-entry of an open
+   * execution (a suspend/resume, a pause cut, a fork boundary) keeps its visit.
+   *
+   * Known edge, stated: a node re-executed after a failure that was NOT retried
+   * (an error edge looping back to it) reads as a retry, so its effects share
+   * the failed visit's identities, which is the pre-ADR-1001 behaviour for
+   * every revisit. Folded from the log, so live, crash-resume and replay agree.
+   */
+  visitOf(nodeId: string): number {
+    if (this.opened.has(nodeId)) return this.visits.get(nodeId) ?? 0;
+    if (!this.closed.has(nodeId)) return 0;
+    const v = this.visits.get(nodeId) ?? 0;
+    return this.lastTerminal.get(nodeId) === 'failed' ? v : v + 1;
   }
 
   /** Fold a log (oldest first). `onTerminal` sees each non-orphan terminal event. */
@@ -341,7 +373,7 @@ export class ExecutionOrdinals {
       if (!ev.nodeId) continue;
       if (ev.type === 'node.started') ord.start(ev.nodeId);
       else if (ev.type === 'node.completed' || ev.type === 'node.failed') {
-        const n = ord.terminal(ev.nodeId);
+        const n = ord.terminal(ev.nodeId, ev.type === 'node.completed' ? 'completed' : 'failed');
         if (n !== undefined && onTerminal) onTerminal(ev, ev.nodeId, n);
       }
     }

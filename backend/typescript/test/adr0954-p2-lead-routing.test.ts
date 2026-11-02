@@ -14,10 +14,21 @@
  * rules match leads; the real chain grades then routes end to end; the routes
  * are client-scoped (a B-only operator gets 404).
  *
- * Sabotage-witnessed (P2): replacing `takeTurn`'s compareAndSwap with a read +
- * put reds the fairness case; dropping the `eligible` check reds the
- * ineligible and cross-client cases; dropping the ledger lookup reds
- * "a re-execution returns the recorded choice".
+ * Sabotage-witnessed (re-measured w74 round 1): `takeTurn` returning a turn
+ * whose CAS failed reds the fairness case; an `eligible` that always says yes
+ * reds the ineligible, unassigned, territory and late-notice cases; the notice's
+ * own eligibility re-check removed reds the late-notice case; a capacity
+ * regroup sorted most-loaded first reds the capacity case; the per-owner
+ * capacity reservation check removed reds the last-slot case; keeping the
+ * loser's claim reds the release case; no `unassigned` flag reds the queue case.
+ * The fairness and last-slot races are NOT forced (parallel in-process calls),
+ * but both were witnessed.
+ *
+ * The recorded decision is read THREE times (`routeLead`'s first read, the
+ * reconcile on a reservation mismatch, `commitLeadRoutingDecision`'s recorded
+ * row), so dropping one read changes nothing. The break-all probe makes
+ * `getRoutingDecision` return null, which reds the ledger, last-slot replay and
+ * real-chain cases. Every case that counts open leads uses its own owners.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
@@ -153,15 +164,21 @@ describe('ADR 0954 D5 — routing', () => {
   });
 
   it('capacity picks the least-loaded owner under the cap', async () => {
-    await setPolicy(orgA, [{ ruleId: 'cap', strategy: 'capacity', pool: [o2, o3], maxOpenLeads: 100 }]);
-    // o2 and o3 each hold 3 open leads from the round-robin case; give o2 one more.
-    const extra = await newLead(orgA, 'Extra');
-    await setPolicy(orgA, [{ ruleId: 'to-o2', strategy: 'named', named: o2 }]);
-    await routeLead({ tenantId: TENANT, orgId: orgA, contactId: extra, routingEpoch: 1, runId: 'ex' });
-    await setPolicy(orgA, [{ ruleId: 'cap', strategy: 'capacity', pool: [o2, o3], maxOpenLeads: 100 }]);
+    // Own owners, so the loads are exactly what this case seeds: heavy holds 2,
+    // light holds 1. light is LAST in the pool, so "first in pool" differs.
+    const [heavy, light] = await Promise.all(['cap-heavy', 'cap-light'].map(async (suffix) => {
+      const owner = (await upsertFromPrincipal({ tenantId: TENANT, principalId: `oidc:${suffix}`, source: 'oidc' })).userId;
+      await createMember({ tenantId: TENANT, orgId: TENANT, subject: owner, displayName: suffix, roles: ['viewer'] });
+      await createMember({ tenantId: TENANT, orgId: orgA, subject: owner, displayName: suffix, roles: ['editor'] }); return owner;
+    }));
+    await setPolicy(orgA, [{ ruleId: 'cap-seed-heavy', strategy: 'named', named: heavy! }]);
+    for (const n of ['H1', 'H2']) await routeLead({ tenantId: TENANT, orgId: orgA, contactId: await newLead(orgA, `CapHeavy${n}`), routingEpoch: 1, runId: `cap-heavy-${n}` });
+    await setPolicy(orgA, [{ ruleId: 'cap-seed-light', strategy: 'named', named: light! }]);
+    await routeLead({ tenantId: TENANT, orgId: orgA, contactId: await newLead(orgA, 'CapLight1'), routingEpoch: 1, runId: 'cap-light-1' });
+    await setPolicy(orgA, [{ ruleId: 'cap', strategy: 'capacity', pool: [heavy!, light!], maxOpenLeads: 100 }]);
     const contactId = await newLead(orgA, 'Cap');
     const { decision } = await routeLead({ tenantId: TENANT, orgId: orgA, contactId, routingEpoch: 1, runId: 'cp' });
-    expect(decision.chosen).toBe(o3);
+    expect(decision.chosen).toBe(light);
   });
 
   it('a routing round is ledgered: a re-execution returns the recorded choice and does not turn the rotation', async () => {
@@ -228,10 +245,16 @@ describe('ADR 0954 D5 — routing', () => {
     await createMember({ tenantId: TENANT, orgId: TENANT, subject: owner, displayName: 'Recipient', roles: ['viewer'] });
     const membership = await createMember({ tenantId: TENANT, orgId: orgA, subject: owner, displayName: 'Recipient', roles: ['editor'] });
     await setPolicy(orgA, [{ ruleId: 'late-notice', strategy: 'named', named: owner }]);
-    const contactId = await newLead(orgA, 'PrivateLeadName');
     const storage = hostExtStorage(); const cas = storage.kvCompareAndSwap.bind(storage); const insert = storage.insertNotification.bind(storage);
     let removed = false; let notices = 0;
     const insertSpy = vi.spyOn(storage, 'insertNotification').mockImplementation(async (record) => { if (record.type === 'crm.lead.assigned') notices++; return insert(record); });
+    // Positive control: while the owner still has access, the spy counts the notice.
+    try {
+      const control = await routeLead({ tenantId: TENANT, orgId: orgA, contactId: await newLead(orgA, 'NoticeControl'), routingEpoch: 1, runId: 'late-notice-control' });
+      expect(control.decision.chosen).toBe(owner); expect(notices).toBe(1);
+    } catch (err) { insertSpy.mockRestore(); throw err; }
+    notices = 0;
+    const contactId = await newLead(orgA, 'PrivateLeadName');
     const casSpy = vi.spyOn(storage, 'kvCompareAndSwap').mockImplementation(async (key, expected, next) => {
       const applied = await cas(key, expected, next);
       if (!removed && applied && key === `hostext:crm:lead-profile:${TENANT}::${orgA}::${contactId}` && JSON.parse(next).owner === owner) {

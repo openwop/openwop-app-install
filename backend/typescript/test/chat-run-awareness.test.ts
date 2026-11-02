@@ -7,6 +7,13 @@
  * session row pointing at ANOTHER conversation's run must not. The mock provider
  * records the exact messages it was sent, so this asserts what the MODEL saw —
  * not what a helper returned.
+ *
+ * Tracker TST-CEC-9. Red when (w67g3, witnessed): a client-written session row
+ * is admitted without checking the run is bound to THIS conversation (the route
+ * case and CHATCD-2); run-derived text leaves the UNTRUSTED fence; the total
+ * budget stops degrading older runs; admitted runs are ranked oldest-first; an
+ * elided history keeps runs older than the kept window.
+ * Ceiling: the run-settle and interrupt waits poll (no hook to await).
  */
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -18,6 +25,7 @@ import { makeTurn } from '../src/host/conversation.js';
 import { turnsToMessages } from '../src/host/exchange/dispatchTurn.js';
 import { mergeSessionRunTurns, renderRunDigests, RUN_DIGEST_TOTAL_CHARS, type RunDigest } from '../src/host/exchange/runDigests.js';
 import { bareRunId } from './support/bareRunId.js';
+import type { RunRecord } from '../src/types.js';
 
 let server: http.Server;
 let BASE: string;
@@ -41,13 +49,14 @@ afterAll(async () => {
 // A real logged-in user: the exchange is bound to the caller through the chat
 // session's visibility predicate (CS-BE-1), so an anonymous bearer cannot drive it.
 let cookie = '';
-async function api<T = any>(path: string, init: RequestInit = {}): Promise<{ status: number; body: T }> {
+async function api<T>(path: string, init: RequestInit = {}): Promise<{ status: number; body: T }> {
   const res = await fetch(`${BASE}${path}`, { ...init, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}), ...(init.headers ?? {}) } });
   for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]!; }
   const text = await res.text();
   return { status: res.status, body: (text ? JSON.parse(text) : {}) as T };
 }
-const post = (path: string, body: unknown) => api(path, { method: 'POST', body: JSON.stringify(body) });
+interface Posted { runId: string; sessionId: string }
+const post = (path: string, body: unknown) => api<Posted>(path, { method: 'POST', body: JSON.stringify(body) });
 
 async function waitFor(runId: string, pred: (s: string) => boolean): Promise<string> {
   let status = 'pending';
@@ -62,7 +71,7 @@ async function waitFor(runId: string, pred: (s: string) => boolean): Promise<str
 async function slugRun(chatSessionId: string, text: string): Promise<string> {
   const r = await post('/runs', { workflowId: 'openwop-app.uppercase', inputs: { text }, metadata: { chatSessionId } });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const runId = r.body.runId as string;
+  const runId = r.body.runId;
   expect(await waitFor(runId, (s) => s === 'completed')).toBe('completed');
   return runId;
 }
@@ -78,8 +87,8 @@ describe('ADR 0764 — the model sees the runs of its conversation', () => {
   it('a /slug run reaches the next turn as a fenced digest; a forged row for another conversation\'s run does not', async () => {
     const login = await post('/host/openwop-app/test/login', { email: `run-aware-${Date.now()}@acme.test` });
     expect(login.status, JSON.stringify(login.body)).toBe(201);
-    const session = (await post(S, { title: 'Run awareness' })).body.sessionId as string;
-    const other = (await post(S, { title: 'Elsewhere' })).body.sessionId as string;
+    const session = (await post(S, { title: 'Run awareness' })).body.sessionId;
+    const other = (await post(S, { title: 'Elsewhere' })).body.sessionId;
 
     const mine = await slugRun(session, 'hello world');
     const theirs = await slugRun(other, 'secret elsewhere');
@@ -87,7 +96,7 @@ describe('ADR 0764 — the model sees the runs of its conversation', () => {
     await recordBubble(session, theirs); // forged: bound to `other`, not this session
 
     const conv = await post('/runs', { workflowId: 'openwop-app.conversation', inputs: { provider: 'mock', model: 'mock-1' }, metadata: { chatSessionId: session } });
-    const convRunId = conv.body.runId as string;
+    const convRunId = conv.body.runId;
     expect((await waitFor(convRunId, (s) => s.startsWith('waiting'))).startsWith('waiting')).toBe(true);
 
     resetMockPrograms();
@@ -167,11 +176,11 @@ describe('ADR 0764 — digest rendering (pure)', () => {
 
 describe('ADR 0764 — resolveRunDigests against a real store', () => {
   const T = 'tenant-digests';
-  const mkRun = (runId: string, over: Partial<import('../src/types.js').RunRecord> = {}) => ({
+  const mkRun = (runId: string, over: Partial<RunRecord> = {}): RunRecord => ({
     runId, workflowId: 'wf.x', tenantId: T, status: 'failed', inputs: null, metadata: {}, configurable: {},
-    createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    createdAt: '2026-10-29T12:00:00.000Z', updatedAt: '2026-10-29T12:00:00.000Z',
     error: { code: 'boom', message: 'it broke' }, ...over,
-  }) as import('../src/types.js').RunRecord;
+  });
 
   it('CHATCD-1 — a run DELETED after it was digested stops reaching the model on the next turn (no stale cache)', async () => {
     const { openStorage } = await import('../src/storage/index.js');

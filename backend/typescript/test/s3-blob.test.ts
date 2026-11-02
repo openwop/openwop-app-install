@@ -79,6 +79,16 @@ const blobFor = (tenantId: string, fetchFn: typeof fetch): BlobSurface =>
 const S3_ENV = ['OPENWOP_SURFACE_BLOB', 'OPENWOP_BLOB_S3_BUCKET', 'OPENWOP_BLOB_S3_ACCESS_KEY_ID', 'OPENWOP_BLOB_S3_SECRET_ACCESS_KEY'] as const;
 
 describe('S3 blob surface', () => {
+  it('ADR 0951 P2.5: put forwards a caller deadline to the upload request', async () => {
+    const { fetchFn } = makeFakeS3();
+    const signals: unknown[] = [];
+    const blob = blobFor('t1', async (input, init = {}) => { if (init.method === 'PUT') signals.push(init.signal); return fetchFn(input, init); });
+    const deadline = new AbortController().signal;
+    await blob.put({ key: 'f.txt', contentBase64: Buffer.from('x').toString('base64'), signal: deadline });
+    await blob.put({ key: 'g.txt', contentBase64: Buffer.from('y').toString('base64') });
+    expect(signals).toEqual([deadline, undefined]);
+  });
+
   it('put then get round-trips bytes + content-type', async () => {
     const { fetchFn } = makeFakeS3();
     const blob = blobFor('t1', fetchFn);

@@ -282,7 +282,7 @@ export function RosterPage(): JSX.Element {
       <PageHeader
         eyebrow={t('rosterEyebrow')}
         title={t('rosterTitle')}
-        lede={<Trans t={t} i18nKey="rosterLede" components={{ 0: <strong /> }} />}
+        lede={<Trans t={t} i18nKey="rosterLede" components={[<strong />]} />}
         actions={canWrite ? (
           <Link to="/agents/new" className="btn btn-accent-solid u-flex u-items-center u-gap-2">
             <PlusIcon size={14} aria-hidden /> {t('rosterAddAgent')}

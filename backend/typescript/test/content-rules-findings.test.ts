@@ -13,6 +13,12 @@
  *
  * Sabotage: keep-first dedup reds the order case; dropping the sort from the
  * digest input reds the golden case.
+ *
+ * TST-CKA-6. Also red when: span text stops being normalized into the id (case 1),
+ * the merge takes `introduced` or the span from the strictest copy instead of
+ * "any copy introduced" / "earliest span" (case c — the fixture is asymmetric: the
+ * blocking copy has the LATER span and is not introduced), or rulesetVersion
+ * stops sorting its families (case d).
  */
 import { describe, expect, it } from 'vitest';
 import { findingId, normalizeFindings, reportDigest, rulesetVersionOf, toFinding, type ContentFinding } from '../src/host/contentRules/findings.js';
@@ -42,14 +48,18 @@ describe('content-rules finding frame', () => {
   });
 
   it('(c) same-id findings merge order-independently; a block is never dropped', () => {
-    const old = f({ ruleId: 'trust.urgency', introduced: false, action: 'info', severity: 'low', span: { start: 40, end: 52, text: 'limited time' }, message: 'Already on the page.' });
-    const added = f({ ruleId: 'trust.urgency', introduced: true, action: 'block', severity: 'high', span: { start: 4, end: 16, text: 'Limited time' }, message: 'Introduced urgency.' });
+    // Asymmetric on purpose: the STRICTEST copy (`added`, block/high) carries the
+    // LATER span and `introduced:false`; the lenient copy carries the earliest span
+    // and `introduced:true`. So "keep the strictest copy" and the stated merge
+    // (strictest action/severity/text + earliest span + introduced-if-any) differ.
+    const old = f({ ruleId: 'trust.urgency', introduced: true, action: 'info', severity: 'low', span: { start: 4, end: 16, text: 'limited time' }, message: 'Already on the page.' });
+    const added = f({ ruleId: 'trust.urgency', introduced: false, action: 'block', severity: 'high', span: { start: 40, end: 52, text: 'Limited time' }, message: 'Introduced urgency.' });
     expect(old.id).toBe(added.id);
     const a = normalizeFindings([old, added]);
     const b = normalizeFindings([added, old]);
     expect(a).toEqual(b);
     expect(a).toHaveLength(1);
-    expect(a[0]).toMatchObject({ action: 'block', severity: 'high', introduced: true, span: { start: 4 }, message: 'Introduced urgency.' });
+    expect(a[0]).toMatchObject({ action: 'block', severity: 'high', introduced: true, span: { start: 4, end: 16, text: 'limited time' }, message: 'Introduced urgency.' });
   });
 
   it('(d) rulesetVersion names only the families that ran, each versioned', () => {

@@ -6,6 +6,13 @@
  * an employer unconfirmed. Both are here, plus the two properties this phase
  * added on top: subject-keyed authorization (structural, not a check) and the
  * refusal to store special-category disclosures at all.
+ *
+ * TST-DGE-1. Red when an unconfirmed inference is served, when a fuzzy match
+ * auto-answers, when a special-category question is stored, when a confirmed
+ * inference keeps `source: 'inferred'`, when a typed `user` answer is not
+ * confirmed by construction, when erasure reaches another subject or the eraser
+ * is unregistered, when a list crosses subjects, and when usage is not counted
+ * (sabotage-witnessed, wave 71).
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -14,7 +21,9 @@ import {
 } from '../src/features/job-search/autopilot/answerBank.js';
 import { resolveQuestionKey, specialCategoryKeyFor, FUZZY_THRESHOLD } from '../src/features/job-search/autopilot/questionKey.js';
 import { __resetHostExtPersistence, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { registeredSubjectEraserIds } from '../src/host/subjectErasure.js';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
+import { stripComments } from './helpers/stripComments.js';
 
 const T = 'user:t-bank';
 const ME = 'user:me';
@@ -82,15 +91,20 @@ describe('ADR 0545 P1 — one question, one key', () => {
     // an inconvenience the campaign design already absorbs, and a confident
     // wrong answer is not.
     expect(FUZZY_THRESHOLD).toBeGreaterThanOrEqual(0.7);
-    const r = resolveQuestionKey('portfolio url website link', ['links.portfolio']);
-    if (r.match === 'fuzzy') {
-      await putAnswerRow({
-        tenantId: T, subjectId: ME, questionKey: r.key, questionText: 'x', value: 'v',
-        source: 'user', confirmedAt: new Date().toISOString(), usageCount: 0, updatedAt: new Date().toISOString(),
-      });
-      const hit = await answerFor(T, ME, 'portfolio url website link');
-      expect('miss' in hit ? (hit as { miss: string }).miss : 'answered').toBe('low-confidence');
-    }
+    // A fixture that REALLY is fuzzy (the previous one resolved `new`, so the
+    // assertions sat in a branch that never ran). The stored key's tokens
+    // {favourite, programming, language, primary} equal the question's, but the
+    // key is not the question's sorted stem and no curated synonym matches, so
+    // only the token-overlap tier can find it.
+    const KEY = 'favourite-programming-language-primary';
+    const Q = 'Primary favourite programming language';
+    const r = resolveQuestionKey(Q, [KEY]);
+    expect(r).toMatchObject({ key: KEY, match: 'fuzzy' });
+    await putAnswerRow({
+      tenantId: T, subjectId: ME, questionKey: KEY, questionText: 'x', value: 'TypeScript',
+      source: 'user', confirmedAt: '2026-01-01T00:00:00.000Z', usageCount: 0, updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+    expect(await answerFor(T, ME, Q)).toEqual({ miss: 'low-confidence' });
   });
 });
 
@@ -191,7 +205,7 @@ describe('ADR 0545 row 8 — the key IS the authorization', () => {
     const src = (await import('node:fs')).readFileSync(
       (await import('node:path')).join(process.cwd(), 'src', 'features', 'job-search', 'autopilot', 'answerBank.ts'), 'utf8',
     );
-    const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    const code = stripComments(src);
     expect(code.length, 'stripping must not empty the file — that would make this vacuous').toBeGreaterThan(1000);
     expect(code, 'the prose says this too, but the code is what binds').not.toMatch(/isSuperadmin|authorizeOrgScope|orgAdmin/);
     // …and the positive half: the subject really is part of every row key.
@@ -217,10 +231,9 @@ describe('ADR 0464 — erasure of a subject’s answers', () => {
     // feature stores share that position). Coverage therefore rests on THIS
     // assertion — a registration that exists only as an export is a coverage
     // claim nobody checks.
-    const src = (await import('node:fs')).readFileSync(
-      (await import('node:path')).join(process.cwd(), 'src', 'features', 'job-search', 'autopilot', 'answerBank.ts'), 'utf8',
-    );
-    expect(src).toMatch(/registerSubjectEraser\(eraseSubjectAnswers\)/);
+    // Read from the REGISTRY, not the source text: an eraser that only appears
+    // in a comment or behind a dead branch is not registered.
+    expect(registeredSubjectEraserIds()).toContain('eraseSubjectAnswers');
   });
 });
 

@@ -13,6 +13,16 @@
  *   - quorum-met ⇒ the single finalize fires (here the content-publish handler),
  *   - a single-approver / no-policy approval is byte-unchanged (resolves on the
  *     first vote — the 40 existing approval tests are the regression guard).
+ *
+ * TST-BZA-4 (grade-tests w66). Red when: the `requiredApprovals > 1` quorum threshold is
+ * defeated (finalizes on the first vote); the ledger key stops deduplicating a reviewer;
+ * the shared `isEligibleApprover` admits a non-listed subject. DOUBLE GUARD (recorded):
+ * eligibility is refused twice — `evaluateQuorum`'s `!eligible` throw AND
+ * `consumeVoteIdentity`'s final throw (`approverResolution.ts`), with the SAME 403 message —
+ * so dropping either throw alone stays green; the probe that breaks the resolver both read
+ * is the witness. Likewise the unauthenticated-vote refusal is held by the explicit
+ * `!reviewerRef` throw and, behind it, the eligibility refusal; the exact message below
+ * names which one answered.
  */
 
 import { beforeAll, beforeEach, describe, expect, it, afterAll} from 'vitest';
@@ -125,12 +135,16 @@ describe('category: eligibility', () => {
     const appr = await seedQuorumApproval([ALICE, BOB]);
     await expect(claimApproval(deps, { tenantId: TENANT, decidedBy: CAROL }, appr.approvalId)).rejects.toMatchObject({
       httpStatus: 403,
+      message: 'You are not an eligible approver for this gate.',
     });
     expect(published).toHaveLength(0);
   });
 
   it('rejects an unauthenticated vote on a quorum gate (403)', async () => {
     const appr = await seedQuorumApproval([ALICE, BOB]);
-    await expect(claimApproval(deps, { tenantId: TENANT }, appr.approvalId)).rejects.toBeInstanceOf(OpenwopError);
+    const err = await claimApproval(deps, { tenantId: TENANT }, appr.approvalId).then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(OpenwopError);
+    expect(err).toMatchObject({ httpStatus: 403, message: 'A quorum approval requires an authenticated approver.' });
+    expect(published).toHaveLength(0);
   });
 });

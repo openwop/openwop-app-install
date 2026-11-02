@@ -1,6 +1,6 @@
 # ADR 0999 — Compaction: children inherit the frozen decision, write-back reads are exempt, and the workflow-as-tool lane is fenced
 
-Status: Accepted (implemented on `feat/fl2-64-tool-output-compaction`; flips to `implemented` when merged)
+Status: implemented (merged #5356 `81a3cd3d6`, 2026-10-28; live, re-verified 2026-10-29 on rev `01084-bm8` at `f382e70d1`; see § Implementation record)
 Date: 2026-10-28
 Feature loop round 2, row 64 (Tool-output compaction, `tool-output-compaction`)
 Amends: ADR 0099 (tool-output compaction), ADR 0604 (exemption + replay), ADR 0680 (mode parse)
@@ -301,8 +301,25 @@ reds the control (which is also red on the pre-ADR code).
 
 | Phase | Decisions | Commit |
 |---|---|---|
-| P1–P4 | D1–D7 | `8398a1a3f` |
-| Closing review | M1–M4, L5–L7, TOC2UX-4/8–13/15 | the head of this PR |
+| P1–P4 | D1–D7 | `830b5ceba` |
+| Closing review | M1–M4, L5–L7, TOC2UX-4/8–13/15 | `96628f5a6` |
+| D1.3 security, D3.3 writers | the lead's review: admitted linkage, writers refuse the marker | `09c210aae` |
+| Merge | #5356 | `81a3cd3d6` |
+
+**Follow-ups that closed this ADR's residue (all merged):**
+- `TOC2CD-14`, every THROWN tool error fenced before it reaches a model: #5359 `780f82d02`.
+- `TOC2CD-11`, RETURNED tool errors fenced by provenance, not by tool trust: ADR 1000, #5358
+  `38ef13b03`.
+
+**Post-deploy (2026-10-29, read-only).** Live rev `01084-bm8` serves `f382e70d1` (backend and
+frontend), which contains `81a3cd3d6`, `780f82d02` and `38ef13b03`. The `AgentCompactionPanel`
+copy is served (`c-BiqbY8Qs.js`, `200 text/javascript`). On that revision there are 0 ERROR
+entries, 0 `compaction_marker_in_input`, 0 `run_surface_foreign_rows_dropped` and 0
+`RUN_KEYSPACE_VIOLATION`. The 3 WARNING entries are the deploy verifier's own 401/404 probes.
+The prod exposure measured before merge still holds: the toggle is `beta`, 0 runs carry `lossy`,
+and 0 agent profiles set `configParameters.compaction`. **So the lossy lane is not yet witnessed
+in prod: there is nothing to observe until a profile opts in.** This is not a pass. No live
+click-through was run (`TOC-01`, `TOC-06`).
 
 ## Pre-code `/architect` pass (2026-10-28) — fold-in
 

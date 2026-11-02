@@ -96,7 +96,7 @@ describe('ADR 0255 — end-to-end: plan → core.dispatch → per-contact childr
 
     // 2) feed the plan's decisions into the REAL core.dispatch (as the supervisor payload).
     const now = new Date().toISOString();
-    await insertRunWithStartContext(storage, { runId: 'run-wb', workflowId: 'segment-winback', tenantId: 'tenant-wb', status: 'running', inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now });
+    await insertRunWithStartContext(storage, { runId: 'run-wb', workflowId: 'segment-winback', tenantId: 'tenant-wb', status: 'running', inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now }, { admission: { plan: 'exempt:test-fixture' } });
     const vars = new Map<string, unknown>();
     const node = getNodeRegistry().get('core.dispatch')!;
     const res = await node.execute({

@@ -4,6 +4,11 @@
  * `phone` is a read-only projection of the phone IDENTIFIER (the identity-resolution SoT):
  * a `phone` write-input upserts the identifier and NEVER persists a scalar, so identity
  * resolution is unchanged and there is no drift.
+ *
+ * TST-CKA-3 (protected: phone/address are declared PII). Red when: the read stops
+ * deriving `phone` (cases 3–4), a `phone` scalar is persisted (case 3), a non-string
+ * field is accepted (case 2), an updated phone keeps the old identifier (case 4), or
+ * a null/'' patch stops clearing title/address/leadSource (case 4).
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -28,8 +33,10 @@ describe('CRM-2 — contact title/address/leadSource + derived phone', () => {
   });
 
   it('validates fail-closed: a non-string field 400s', async () => {
-    await expect(mk({ title: 42 })).rejects.toMatchObject({ code: 'validation_error' });
-    await expect(mk({ leadSource: { x: 1 } })).rejects.toMatchObject({ code: 'validation_error' });
+    // The field named in the refusal proves THIS validator fired, not a neighbour
+    // that shares the `validation_error` code.
+    await expect(mk({ title: 42 })).rejects.toMatchObject({ code: 'validation_error', httpStatus: 400, details: { field: 'title' } });
+    await expect(mk({ leadSource: { x: 1 } })).rejects.toMatchObject({ code: 'validation_error', httpStatus: 400, details: { field: 'leadSource' } });
   });
 
   it('phone: a write-input upserts the phone IDENTIFIER, is derived on read, and is NEVER stored as a scalar', async () => {
@@ -45,17 +52,19 @@ describe('CRM-2 — contact title/address/leadSource + derived phone', () => {
   });
 
   it('update sets/clears the strings; a phone update re-points the identifier; empty clears it', async () => {
-    const c = await mk({ title: 'SDR', phone: '5551110000' });
+    const c = await mk({ title: 'SDR', address: '2 Elm St', leadSource: 'Referral', phone: '5551110000' });
     await updateContact(c.contactId, { title: 'AE', phone: '5559998888' });
     const got = await getContact(c.contactId);
     expect(got).toMatchObject({ title: 'AE', phone: '5559998888' });
     expect(await resolveContactIdByIdentifier(T, 'phone', '5559998888')).toBe(c.contactId);
     // the OLD phone no longer resolves (identifier re-pointed, not duplicated)
     expect(await resolveContactIdByIdentifier(T, 'phone', '5551110000')).toBeNull();
-    // clear the string + the phone
-    await updateContact(c.contactId, { title: null, phone: '' });
+    // clear the strings (null and '' both clear) + the phone
+    await updateContact(c.contactId, { title: null, address: '', leadSource: null, phone: '' });
     const cleared = await getContact(c.contactId);
     expect(cleared!.title).toBeUndefined();
+    expect(cleared!.address).toBeUndefined();
+    expect(cleared!.leadSource).toBeUndefined();
     expect(cleared!.phone).toBeUndefined();
   });
 });

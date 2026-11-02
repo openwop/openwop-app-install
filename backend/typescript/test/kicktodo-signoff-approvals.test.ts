@@ -16,6 +16,23 @@
  * Each kind also gained a decider-eligibility check: manage authority, and
  * separation of duties from the people the approval concerns. The unchanged
  * dispositions (run-proposal, commerce-spend) are pinned at the bottom.
+ *
+ * TST-DJE-7 (grade-tests wave 71):
+ *  - Refusals are asserted by CODE: a non-manager gets `forbidden_scope` (the manage
+ *    check in kicktodo-core/signoffApprovals.ts); a person the approval concerns gets
+ *    `forbidden` (separation of duties).
+ *  - DOUBLE GUARD: for community-profile/-review, SoD is checked twice — the
+ *    eligibility hook (signoffApprovals.ts) AND each handler (communityService.ts
+ *    `decideCommunityProfileApproval` / `decideCommunityReviewApproval`). Only the
+ *    record-only connect-seller kind has the hook alone, so it carries the SoD probe.
+ *  - The workspace is seeded in `beforeAll` by a dedicated owner, so no case's login
+ *    becomes the tenant's first (owner) login — that made the outsider a manager
+ *    whenever its case ran first (red under shuffle seed 11, wave 71).
+ *  - Each review case publishes its OWN challenge, and approving a flag is checked on
+ *    the stored review (`removed`): a flagged review is already hidden, so a visible
+ *    count alone could not fail.
+ * Red when: the manage or SoD eligibility check is dropped; the profile or review
+ * outcome is not applied; the four sign-off kinds lose their reject side effects.
  */
 import http from 'node:http';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -30,7 +47,8 @@ import { registerGoalVerifier } from '../src/features/goals/goalVerifiers.js';
 import { createDraft, publishChallenge } from '../src/features/kicktodo-core/challengeService.js';
 import { enroll } from '../src/features/kicktodo-core/enrollmentService.js';
 import { todayFor, submitCheckIn } from '../src/features/kicktodo-core/todayService.js';
-import { flagReview, putReview, visibleReviews } from '../src/features/kicktodo-community/communityService.js';
+import { flagReview, putReview, visibleReviews, type ChallengeReview } from '../src/features/kicktodo-community/communityService.js';
+import { DurableCollection } from '../src/host/hostExtPersistence.js';
 
 let BASE: string;
 let server: http.Server;
@@ -81,6 +99,14 @@ function client() {
   };
 }
 
+/** The review store's real namespace (the service exposes no read by reviewer). */
+const reviewRows = new DurableCollection<ChallengeReview>('kicktodo-challenge-reviews', (r) => `${r.tenantId}::${r.challengeId}::${r.reviewerSubject}`);
+
+/** A refusal's status AND code — two different guards both answer 403. */
+async function refusalOf(res: Response): Promise<{ status: number; error: unknown }> {
+  return { status: res.status, error: (await bodyOf(res)).error };
+}
+
 const claim = (c: ReturnType<typeof client>, id: string) => c.post(`${APPROVALS}/${encodeURIComponent(id)}/claim`, {});
 const reject = (c: ReturnType<typeof client>, id: string) => c.post(`${APPROVALS}/${encodeURIComponent(id)}/reject`, {});
 
@@ -106,6 +132,10 @@ beforeAll(async () => {
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
   }
   registerGoalVerifier('kicktodo:progress-evidence', async () => ({ satisfied: false, confidence: 0, runId: 'r' }));
+  // The workspace must exist BEFORE any case logs in: `test/login` makes the first
+  // login into a workspace-less tenant its OWNER, so whichever case ran first (under
+  // shuffle, the outsider's) would otherwise get manage authority.
+  await ensurePersonalWorkspace({ tenantId: TENANT, ownerSubject: 'user:signoff-tenant-seed', name: `Test workspace ${TENANT}` });
 });
 
 afterAll(async () => {
@@ -128,13 +158,12 @@ describe('community-profile on the generic decision lane', () => {
     // A re-submit while the decision is open does not mint a second card (KTY-4).
     expect((await bodyOf(await creator.post(`${COMM}/profile/submit`))).approvalId).toBe(approvalId);
 
-    const self = await claim(creator, approvalId);
-    expect(self.status).toBe(403);
+    expect(await refusalOf(await claim(creator, approvalId))).toEqual({ status: 403, error: 'forbidden' }); // SoD
     expect((await getApproval(approvalId))?.status).toBe('pending');
 
     const outsider = client();
     await outsider.login('user:signoff-outsider', { member: false });
-    expect((await claim(outsider, approvalId)).status).toBe(403);
+    expect(await refusalOf(await claim(outsider, approvalId))).toEqual({ status: 403, error: 'forbidden_scope' }); // no manage authority
     expect((await getApproval(approvalId))?.status).toBe('pending');
 
     const mod = client();
@@ -160,16 +189,14 @@ describe('community-profile on the generic decision lane', () => {
 });
 
 describe('community-review on the generic decision lane', () => {
-  let challengeId = '';
-  async function flaggedReview(buyer: ReturnType<typeof client>, flagger: string) {
-    if (!challengeId) {
-      const draft = await createDraft({
-        tenantId: TENANT, title: 'Signoff reviewable', summary: 's', outcome: 'o', durationDays: 1,
-        activities: [{ stableActivityId: 'a1', day: 1, title: 'Only action', instructions: 'i', evidencePolicy: 'attestation' }],
-      });
-      await publishChallenge(TENANT, draft.id, 1);
-      challengeId = draft.id;
-    }
+  /** Each case publishes its OWN challenge, so no case sees another case's review. */
+  async function flaggedReview(buyer: ReturnType<typeof client>, flagger: string): Promise<{ approvalId: string; challengeId: string }> {
+    const draft = await createDraft({
+      tenantId: TENANT, title: 'Signoff reviewable', summary: 's', outcome: 'o', durationDays: 1,
+      activities: [{ stableActivityId: 'a1', day: 1, title: 'Only action', instructions: 'i', evidencePolicy: 'attestation' }],
+    });
+    await publishChallenge(TENANT, draft.id, 1);
+    const challengeId = draft.id;
     await enroll({ tenantId: TENANT, ownerSubject: buyer.subject(), challengeId, challengeVersion: 1, timezone: 'UTC' });
     const today = await todayFor(TENANT, buyer.subject());
     const card = today.enrollments.find((e) => e.challengeId === challengeId)?.actions[0]?.occurrence.cardId;
@@ -177,30 +204,31 @@ describe('community-review on the generic decision lane', () => {
     await submitCheckIn(TENANT, buyer.subject(), card, {});
     await putReview(TENANT, buyer.subject(), { challengeId, challengeVersion: 1, rating: 2, body: 'meh' });
     const flagged = await flagReview(TENANT, flagger, challengeId, buyer.subject(), 'spam');
-    return strOf(flagged.flagApprovalId, 'flagApprovalId');
+    return { approvalId: strOf(flagged.flagApprovalId, 'flagApprovalId'), challengeId };
   }
 
   it('approving the flag removes the review; the review author is refused', async () => {
     const buyer = client();
     await buyer.login('user:signoff-buyer-1');
-    const approvalId = await flaggedReview(buyer, 'user:signoff-flagger');
-    expect((await claim(buyer, approvalId)).status).toBe(403);
+    const { approvalId, challengeId } = await flaggedReview(buyer, 'user:signoff-flagger');
+    expect(await refusalOf(await claim(buyer, approvalId))).toEqual({ status: 403, error: 'forbidden' }); // SoD
     const mod = client();
     await mod.login('user:signoff-review-mod');
     expect((await claim(mod, approvalId)).status).toBe(200);
     expect((await getApproval(approvalId))?.status).toBe('approved');
+    expect((await reviewRows.get(`${TENANT}::${challengeId}::${buyer.subject()}`))?.state, 'the approved flag never removed the review').toBe('removed');
     expect(await visibleReviews(TENANT, challengeId)).toHaveLength(0);
   });
 
   it('rejecting the flag restores the review', async () => {
     const buyer = client();
     await buyer.login('user:signoff-buyer-2');
-    const approvalId = await flaggedReview(buyer, 'user:signoff-flagger');
-    const before = (await visibleReviews(TENANT, challengeId)).length;
+    const { approvalId, challengeId } = await flaggedReview(buyer, 'user:signoff-flagger');
+    expect(await visibleReviews(TENANT, challengeId)).toHaveLength(0); // flagged ⇒ hidden
     const mod = client();
     await mod.login('user:signoff-review-mod-2');
     expect((await reject(mod, approvalId)).status).toBe(200);
-    expect((await visibleReviews(TENANT, challengeId)).length, 'reject resolved the flag but the review stayed hidden').toBe(before + 1);
+    expect((await visibleReviews(TENANT, challengeId)).length, 'reject resolved the flag but the review stayed hidden').toBe(1);
   });
 });
 
@@ -210,7 +238,7 @@ describe('record-only sign-offs on the generic decision lane', () => {
     await author.login('user:signoff-seller');
     // (The request route needs a product link first; the decision lane is what is under test.)
     const { approvalId } = await createConnectSellerApproval({ tenantId: TENANT, proposal: 'payouts', submittedBy: author.subject() });
-    expect((await claim(author, approvalId)).status).toBe(403);
+    expect(await refusalOf(await claim(author, approvalId))).toEqual({ status: 403, error: 'forbidden' }); // SoD (the hook is the only guard here)
     expect((await getApproval(approvalId))?.status).toBe('pending');
     const op = client();
     await op.login('user:signoff-operator');
@@ -223,7 +251,7 @@ describe('record-only sign-offs on the generic decision lane', () => {
     const sample = await createCommunityApproval({ tenantId: TENANT, kind: 'metrics-verifier-sample', proposal: 'grade', refId: 'enr:signoff', submittedBy: 'system:verifier-sampler' });
     const outsider = client();
     await outsider.login('user:signoff-outsider-2', { member: false });
-    expect((await claim(outsider, sample.approvalId)).status).toBe(403);
+    expect(await refusalOf(await claim(outsider, sample.approvalId))).toEqual({ status: 403, error: 'forbidden_scope' });
     const grader = client();
     await grader.login('user:signoff-grader');
     expect((await claim(grader, sample.approvalId)).status).toBe(200);

@@ -46,7 +46,7 @@ vi.mock('../src/host/accessControlService.js', async (orig) => ({
 
 import { loadOwnedRunForDecision, requireInterruptDecider } from '../src/routes/interrupts.js';
 import { holdsRunApprovalGrant, registerRunApprovalGrant, resetRunApprovalGrantsForTests } from '../src/host/runApprovalGrant.js';
-import { factoryRunApprovalGrant } from '../src/features/kicktodo-creator/routes.js';
+import { factoryRunApprovalGrant, FACTORY_RUN_GRANT } from '../src/features/kicktodo-creator/routes.js';
 import { CHALLENGE_FACTORY_WORKFLOW_ID, LESSON_BATCH_WORKFLOW_ID } from '../src/features/kicktodo-creator/builtinWorkflows.js';
 import type { Storage } from '../src/storage/storage.js';
 
@@ -67,7 +67,7 @@ const scopeRefusal = () => new OpenwopError('forbidden_scope', 'Missing required
 
 beforeEach(() => {
   resetRunApprovalGrantsForTests();
-  registerRunApprovalGrant([CHALLENGE_FACTORY_WORKFLOW_ID, LESSON_BATCH_WORKFLOW_ID], factoryRunApprovalGrant);
+  registerRunApprovalGrant([CHALLENGE_FACTORY_WORKFLOW_ID, LESSON_BATCH_WORKFLOW_ID], FACTORY_RUN_GRANT, factoryRunApprovalGrant);
   authz.holdsFloor.mockResolvedValue(false); // no tenant-wide approvals:respond
   authz.manage.mockImplementation(async (_t, subject) => subject === OPERATOR);
 });
@@ -129,13 +129,22 @@ describe('ADR 0975 D1 — loadOwnedRunForDecision (the node route\'s entry gate)
 describe('ADR 0975 D1 — the grant registry', () => {
   it('a grant that throws is a refusal, never a pass', async () => {
     resetRunApprovalGrantsForTests();
-    registerRunApprovalGrant(['wf.throws'], async () => { throw new Error('boom'); });
+    registerRunApprovalGrant(['wf.throws'], 'throws', async () => { throw new Error('boom'); });
     expect(await holdsRunApprovalGrant(req(OPERATOR), runOf('wf.throws', OPERATOR))).toBe(false);
   });
 
-  it('one owner per workflow id: a second, different predicate is a boot error', () => {
-    expect(() => registerRunApprovalGrant([CHALLENGE_FACTORY_WORKFLOW_ID], async () => true)).toThrow(/already registered/);
+  it('one predicate per (workflow id, grant name): a second, different predicate under the same name is a boot error', () => {
+    expect(() => registerRunApprovalGrant([CHALLENGE_FACTORY_WORKFLOW_ID], FACTORY_RUN_GRANT, async () => true)).toThrow(/already registered/);
     // Re-registering the SAME predicate (a second route registration) is fine.
-    expect(() => registerRunApprovalGrant([CHALLENGE_FACTORY_WORKFLOW_ID], factoryRunApprovalGrant)).not.toThrow();
+    expect(() => registerRunApprovalGrant([CHALLENGE_FACTORY_WORKFLOW_ID], FACTORY_RUN_GRANT, factoryRunApprovalGrant)).not.toThrow();
+  });
+
+  it('ADR 0975 D11 — named grants compose: a throwing grant refuses and the next is still asked; none admitting is a refusal', async () => {
+    resetRunApprovalGrantsForTests();
+    registerRunApprovalGrant(['wf.both'], 'first-throws', async () => { throw new Error('boom'); });
+    registerRunApprovalGrant(['wf.both'], 'second-refuses', async () => false);
+    expect(await holdsRunApprovalGrant(req(OPERATOR), runOf('wf.both', OPERATOR))).toBe(false);
+    registerRunApprovalGrant(['wf.both'], 'third-admits', async () => true);
+    expect(await holdsRunApprovalGrant(req(OPERATOR), runOf('wf.both', OPERATOR))).toBe(true);
   });
 });

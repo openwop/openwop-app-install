@@ -1,6 +1,6 @@
 # ADR 1002 — managed tier and tool round invocation log
 
-Status: Accepted (P1 in PR; `implemented` on merge)
+Status: implemented (merged #5362 `cdd0946e6`, live since rev `01079-gzk` 2026-10-29 06:12Z; the recording is NOT yet witnessed in prod, see § Implementation)
 
 ## Context
 
@@ -251,6 +251,23 @@ source and replay allocate identical ordinals.
 **D5. The `mock` tools round is unchanged.** Its scripted programs are RFC 0041
 §B divergence injections and must keep reaching the mock on replay.
 
+> **CORRECTION 2026-10-29 (XCH-ENV-9) — a third way to miss the digest: run-
+> derived text in a HOST-authored message.** D1's digest covers the request
+> messages, and a replay fork has its own runId. So any message the host adds
+> to the model's context that carries the runId (or anything derived from it)
+> differs between source and fork, the next round's digest misses, and the
+> model is called live. This is the same class as the tool-result rows in the
+> table above, reached without any tool. #5377 shipped one: the
+> `schema.request` answer echoed the host-minted correlationId
+> (`<runId>:<nodeId>:schema:<round>`). MEASURED with
+> `test/xch-env-9-replay-zero-live-calls.test.ts` (BYOK, real executor, real
+> `:fork`): 1 live model call on the replay fork before the fix, 0 after. The
+> answer now names only the round; the minted ids stay on the envelope. The
+> rule for any host message in the loop: no run, node, fork or clock text. The
+> ADR 1001 clarification messages already comply (round and cap only), and
+> `test/xch-env-9-replay-stable-echo.test.ts` pins both lanes byte-identical
+> across two runIds.
+
 ## Alternatives
 
 - **Read on every lane, like BYOK `callAI`.** Rejected. Under B1 a live loop
@@ -329,6 +346,16 @@ source and replay allocate identical ordinals.
 |---|---|---|
 | P1 | D1–D3 in `aiProvidersHost.ts`; corrected the false managed-tier comment | `test/adr1002-managed-and-tools-round-replay.test.ts` |
 | P2 | D4: `host/replayToolResults.ts` (`createReplayToolGuard`, `replayMissFailure`); guard in `agentRunnerNode.ts` (outermost executeTool wrap, model-round guard, miss → node failure); `replaySourceRunId` on the run-effect context (`runEffectContext.ts`, `executor.ts`); tenant stamp, check and scrub on the D1 records | `test/adr1002-managed-and-tools-round-replay.test.ts` (20 cases) and `test/run-effect-context.test.ts` (the executor sets `replaySourceRunId` on a replay fork only). The witnesses: a replay of a 2-round, 3-tool agent (a read whose live answer CHANGED, a guarded effect, an unguarded write) makes 0 model calls AND 0 tool executions on both tiers. Through the real agent-runner with `kanban.add-todo`, a live run files one card and the replay files zero. An unrecorded call FAILS THE NODE with `replay_source_missing` and files nothing. The real `tasks.schedule-followup` and `tasks.schedule-recurring` add zero `scheduler:job` rows on replay. Also witnessed: tenant mismatch on both lanes, `deleteRun` and tenant erasure, the scrub, and the 1 MB cap. |
+
+**Post-deploy (2026-10-29, measured read-only by the lead).** Live since rev `01079-gzk` at
+`cdd0946e6`, deployed 06:12Z. 0 ERROR entries and 0 replay codes; the live lane is healthy.
+**The tool-round invocation-log recording is NOT yet witnessed in prod:** as of 16:20Z there had
+been 0 agent tool loops and 0 real-provider `provider.usage` events since the deploy, so nothing
+has been recorded or served. That is "not yet witnessed", not clean.
+
+The XCH-ENV-9 correction above (the third fork-miss class: host-authored message text carrying a
+runId) was introduced by #5377 and fixed by #5378 `293f5dc71`, which added the general guard
+`test/xch-env-9-model-input-run-independent.test.ts`.
 
 ## Architecture review (2026-10-28, before code)
 

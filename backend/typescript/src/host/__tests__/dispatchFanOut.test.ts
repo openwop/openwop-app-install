@@ -3,6 +3,15 @@
  * the registration cross-field validator, and the advertised capability. The fold is the
  * normative core (joinOutcome × counts × mergeOrder per joinPolicy mode/onChildFailure).
  *
+ * Fixtures are asymmetric on purpose: merge-order ids are NOT in lexical order (a
+ * sorting fold would pass a sorted fixture), `first` is checked with zero completed
+ * children, the coordinator measures how many children are in flight at once, and
+ * "non-positive" is checked with a negative bound (0 is falsy before the `> 0` test).
+ * Sabotage that turns it red (w74 probes): a sorted mergeOrder; `satisfied` for a
+ * failed child; fail-fast ignored; quorum `>` for `>=`; `first`/`race` always (or
+ * never) satisfied; max for min; a negative bound honoured; unbounded lanes; a lane
+ * that dispatches once; each cross-field validator branch; an extra advertised mode.
+ *
  * @see RFCS/0118-parallel-subworkflow-fan-out-and-join.md
  */
 import { describe, it, expect } from 'vitest';
@@ -20,9 +29,9 @@ const t = (id: string, status: ChildTerminal['status'] = 'completed'): ChildTerm
 
 describe('foldJoin — join outcomes (RFC 0118 §D)', () => {
   it('wait-all/collect over all-completed → satisfied + mergeOrder in observed order', () => {
-    const r = foldJoin([t('a'), t('b'), t('c')], { mode: 'wait-all', onChildFailure: 'collect' });
+    const r = foldJoin([t('c'), t('a'), t('b')], { mode: 'wait-all', onChildFailure: 'collect' });
     expect(r).toMatchObject({ joinOutcome: 'satisfied', completedCount: 3, failedCount: 0, cancelledCount: 0 });
-    expect(r.mergeOrder).toEqual(['a', 'b', 'c']);
+    expect(r.mergeOrder).toEqual(['c', 'a', 'b']); // observed, not sorted
   });
 
   it('wait-all/collect with one failed → partial (node succeeds, non-completed recorded)', () => {
@@ -35,13 +44,14 @@ describe('foldJoin — join outcomes (RFC 0118 §D)', () => {
     expect(r.joinOutcome).toBe('failed');
   });
 
-  it("quorum: satisfied at quorum completed, failed when unreachable", () => {
+  it("quorum: partial when met with a failure, failed when unreachable", () => {
     expect(foldJoin([t('a'), t('b'), t('c', 'failed')], { mode: 'quorum', quorum: 2 }).joinOutcome).toBe('partial');
     expect(foldJoin([t('a'), t('b', 'failed'), t('c', 'failed')], { mode: 'quorum', quorum: 2 }).joinOutcome).toBe('failed');
   });
 
   it("first → satisfied at ≥1 completed; race → satisfied at first terminal of any kind", () => {
     expect(foldJoin([t('a')], { mode: 'first' }).joinOutcome).toBe('satisfied');
+    expect(foldJoin([t('a', 'failed')], { mode: 'first' }).joinOutcome).toBe('failed'); // 0 completed
     expect(foldJoin([t('a', 'failed')], { mode: 'race' }).joinOutcome).toBe('partial'); // terminal reached, but non-completed
   });
 });
@@ -52,16 +62,25 @@ describe('effectiveConcurrency — min(maxConcurrency, maxFanOut)', () => {
     expect(effectiveConcurrency(50, 16)).toBe(16);
     expect(effectiveConcurrency(undefined, 16)).toBe(16);
     expect(effectiveConcurrency(0, 16)).toBe(16); // non-positive ignored
+    expect(effectiveConcurrency(-1, 16)).toBe(16); // …negative too (0 is falsy before `> 0`)
   });
 });
 
 describe('runParallelFanOut — coordinator', () => {
   it('dispatches every child (bounded), folds wait-all/collect → satisfied + emits events', async () => {
     const events: string[] = [];
+    let inFlight = 0;
+    let maxInFlight = 0;
     const out = await runParallelFanOut({
       nextWorkerIds: ['w1', 'w2', 'w3'],
       config: { fanOutPolicy: 'parallel', maxConcurrency: 2, joinPolicy: { mode: 'wait-all', onChildFailure: 'collect' } },
-      dispatchChild: async (workerId, i) => ({ childRunId: `r-${i}-${workerId}`, status: 'completed' }),
+      dispatchChild: async (workerId, i) => {
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise((r) => setImmediate(r)); // stay in flight across a turn
+        inFlight--;
+        return { childRunId: `r-${i}-${workerId}`, status: 'completed' };
+      },
       events: {
         fanOut: (e) => events.push(`fanOut:${e.childCount}:${e.maxConcurrency}:${e.joinMode}`),
         join: (e) => events.push(`join:${e.joinOutcome}:${e.mergeOrder.length}`),
@@ -71,6 +90,7 @@ describe('runParallelFanOut — coordinator', () => {
     expect(out.children).toHaveLength(3);
     expect(out.mergeOrder).toHaveLength(3);
     expect(events).toEqual(['fanOut:3:2:wait-all', 'join:satisfied:3']);
+    expect(maxInFlight).toBe(2); // bounded: never 3 at once, and really 2 in parallel
   });
 
   it('does not drop children above the concurrency ceiling', async () => {
@@ -86,13 +106,19 @@ describe('runParallelFanOut — coordinator', () => {
 
 describe('validateDispatchFanOutConfig — registration cross-field MUSTs', () => {
   it('rejects joinPolicy without fanOutPolicy:parallel', () => {
-    expect(validateDispatchFanOutConfig({ joinPolicy: { mode: 'wait-all' } }, true)?.code).toBe('validation_error');
+    expect(validateDispatchFanOutConfig({ joinPolicy: { mode: 'wait-all' } }, true)).toMatchObject({
+      code: 'validation_error', message: "joinPolicy is meaningful only when fanOutPolicy is 'parallel'",
+    });
   });
   it('rejects quorum mode without a quorum field', () => {
-    expect(validateDispatchFanOutConfig({ fanOutPolicy: 'parallel', joinPolicy: { mode: 'quorum' } }, true)?.code).toBe('validation_error');
+    expect(validateDispatchFanOutConfig({ fanOutPolicy: 'parallel', joinPolicy: { mode: 'quorum' } }, true)).toMatchObject({
+      code: 'validation_error', message: "joinPolicy.mode 'quorum' requires an integer quorum >= 1",
+    });
   });
   it("rejects fanOutPolicy:'parallel' on a host advertising fanOutSupported:false", () => {
-    expect(validateDispatchFanOutConfig({ fanOutPolicy: 'parallel' }, false)?.code).toBe('validation_error');
+    expect(validateDispatchFanOutConfig({ fanOutPolicy: 'parallel' }, false)).toMatchObject({
+      code: 'validation_error', message: "fanOutPolicy 'parallel' requires capabilities.dispatch.fanOutSupported: true",
+    });
   });
   it('accepts a well-formed parallel config on a supporting host', () => {
     expect(validateDispatchFanOutConfig({ fanOutPolicy: 'parallel', joinPolicy: { mode: 'wait-all', onChildFailure: 'collect' } }, true)).toBeNull();

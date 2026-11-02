@@ -53,6 +53,7 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { stripComments } from './helpers/stripComments.js';
 
 const FEATURES_DIR = new URL('../src/features/', import.meta.url).pathname;
 
@@ -67,10 +68,8 @@ function walk(dir: string, out: string[] = []): string[] {
 }
 
 /** Remove block + line comments and string literals, so only executable code counts. */
-function stripComments(src: string): string {
-  return src
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/(^|[^:])\/\/[^\n]*/g, '$1')
+function stripCode(src: string): string {
+  return stripComments(src)
     .replace(/`(?:\\.|[^`\\])*`/g, '``')
     .replace(/'(?:\\.|[^'\\])*'/g, "''")
     .replace(/"(?:\\.|[^"\\])*"/g, '""');
@@ -138,7 +137,7 @@ const SEEDED_CALLER = 'user';
 /** The whole matcher, as ONE function, so the anti-vacuity test exercises exactly
  *  what the gate runs rather than a re-typed approximation of it. */
 export function scanForHomeTenantDerivation(rawSource: string): Scan {
-  const code = stripComments(rawSource);
+  const code = stripCode(rawSource);
 
   // CALLER bindings — an identifier holding a `User`. `<name>.tenantId` is the HOME
   // tenant. GC-8: key on the BINDING, not the spelling — reverting `documents/routes.ts`
@@ -215,7 +214,7 @@ function scanRepo(): Map<string, number> {
     // exemption would have hidden a genuinely org-gated handler added
     // later). The gate's own header already declared "COMMENTS ARE
     // STRIPPED BEFORE COUNTING"; now selection honors it too.
-    const code = stripComments(raw);
+    const code = stripCode(raw);
     if (!new RegExp(`\\b(${GATES})\\b`).test(code)) continue;
     if (isExempt(file)) continue;
     const { count } = scanForHomeTenantDerivation(raw);

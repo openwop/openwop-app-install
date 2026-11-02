@@ -20,6 +20,7 @@ import { __putCanvasForTest, getCanvasForTenant } from '../../host/canvasSurface
 import { initHostExtPersistence } from '../../host/hostExtPersistence.js';
 import { openStorage } from '../../storage/index.js';
 import { registerAppBuilderComponents } from '../../features/app-builder/componentCatalog.js';
+import { readFileSync } from 'node:fs';
 
 beforeAll(async () => {
   initHostExtPersistence(await openStorage('memory://'));
@@ -82,18 +83,33 @@ describe('frontend-plugin-isolation (RFC 0117 §6)', () => {
   it('advertises the cross-origin-iframe isolation const (in-process is MUST NOT)', () => {
     expect(uiPluginsCapability().isolation).toBe('cross-origin-iframe');
   });
-  it('sandboxes the plugin without allow-same-origin (unique opaque origin)', () => {
-    expect(pluginSandboxTokens()).toContain('allow-scripts');
-    expect(pluginSandboxTokens()).not.toContain('allow-same-origin');
+  it('sandboxes the plugin with allow-scripts ONLY (ADR 1021 D4)', () => {
+    // Equality, not toContain: allow-same-origin would end the opaque origin, and
+    // allow-top-navigation*, allow-popups or allow-forms would each open a channel
+    // the e2e egress spec measures as closed only because the token is absent.
+    expect(pluginSandboxTokens()).toEqual(['allow-scripts']);
   });
 });
 
 describe('frontend-plugin-egress (RFC 0117 §6)', () => {
-  it('applies a deny-egress CSP — no network channel but the RPC', () => {
+  it('applies a deny-egress CSP: no request API, and form-action/base-uri named (ADR 1021 D2)', () => {
     const csp = pluginIframeCsp();
     expect(csp).toContain("default-src 'none'");
     expect(csp).not.toMatch(/connect-src/);
-    expect(csp).not.toMatch(/form-action/);
+    // form-action and base-uri do NOT fall back to default-src: absent means allowed.
+    expect(csp).toContain("form-action 'none'");
+    expect(csp).toContain("base-uri 'none'");
+  });
+
+  it('uiPluginRpc.ts stays import-free, because the FE egress spec imports it (ADR 1021)', () => {
+    // `frontend/react/e2e/plugin-frame-egress.spec.ts` imports the policy builders so
+    // the browser measures the production policy. The FE type-checks e2e/, so one
+    // backend import here would break the frontend build.
+    const src = readFileSync(new URL('../../host/uiPluginRpc.ts', import.meta.url), 'utf8');
+    expect(src).toContain('export function pluginFrameCsp'); // the file read is the right one
+    expect(src).not.toMatch(/^\s*import\b/m);
+    expect(src).not.toMatch(/^\s*export\b[^;]*\bfrom\s+['"]/m);
+    expect(src).not.toMatch(/\b(require|import)\(/);
   });
 });
 

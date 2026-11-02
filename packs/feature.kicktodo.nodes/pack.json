@@ -1,6 +1,6 @@
 {
   "name": "feature.kicktodo.nodes",
-  "version": "1.38.0",
+  "version": "1.39.0",
   "description": "KickTodo node pack (ADR 0414 P4) — thin adapters over the nine kicktodo-* ctx.features surfaces: the participant loop (enroll, today, check-in, progress evidence, judged completion), the Challenge Factory (research spine, claim extract/verify, plan generate/validate, decompose, lesson batches, simulations, submit-publication), replan, reminders, accountability, commerce, community, integrations, metrics and org reads. Authorization, validation, CAS and storage stay in the host services. Replay classification (v1.32.0, KT-PACK-REPLAY-1): role:\"action\" earns NO replay serving — nothing in the executor reads it. The seven nodes whose re-execution is observable (remind-today, session-reminder, kickbot-coach-turn, create-candidate, propose-plan-change, apply-revision-commands, calendar-sync) declare role:\"side-effect\" + side-effectful so a fork is served the recorded outcome. The remaining writers converge on re-execution (deterministic ids or upserts) and stay action.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",

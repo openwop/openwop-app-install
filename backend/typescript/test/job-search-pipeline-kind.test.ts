@@ -12,10 +12,15 @@
  * The load-bearing choice is `null`, NOT `0`. Zero asserts "this stage holds no
  * money"; null says "summing money here is not a question with an answer". A
  * test that accepted either would not be testing the decision.
+ *
+ * Tracker TST-DHB-6 (wave 71). Red when: an absent kind defaults to
+ * non-revenue (`w71g3-pk-absent`); a non-revenue stage reports 0 instead of null
+ * (`pk-null`); it advertises currencies (`pk-cur`); the suppression reaches a
+ * revenue pipeline (`pk-revenue`).
  */
 import { describe, expect, it, beforeEach } from 'vitest';
 import { computePipelineReport } from '../src/features/crm/reportService.js';
-import { createPipeline, createDeal } from '../src/features/crm/crmEntitiesService.js';
+import { createPipeline, createDeal, listDeals } from '../src/features/crm/crmEntitiesService.js';
 import { __resetHostExtPersistence, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
 
@@ -41,23 +46,23 @@ describe('ADR 0540 D3 — non-revenue pipelines suppress currency rollups', () =
     return computePipelineReport(TENANT, ORG, p.pipelineId, Date.now());
   }
 
-  it('a REVENUE pipeline is completely unchanged — the regression this must not cause', () => {
+  it('a REVENUE pipeline is completely unchanged — the regression this must not cause', async () => {
     // The whole design claim is "a small, honest change to a shipped feature
     // rather than a fork of it". If revenue reports move, that claim is false.
-    return seed('revenue', 100_000).then((r) => {
-      expect(r.kind).toBe('revenue');
-      expect(r.perStage[0]?.count).toBe(1);
-      expect(r.perStage[0]?.sum).toBe(100_000);
-      expect(r.perStage[0]?.weightedSum).toBe(50_000);
-      expect(r.perStage[0]?.sums).toEqual([{ currency: 'USD', sum: 100_000, weightedSum: 50_000 }]);
-      expect(r.currencies).toEqual(['USD']);
-    });
+    const r = await seed('revenue', 100_000);
+    expect(r.kind).toBe('revenue');
+    expect(r.perStage[0]?.count).toBe(1);
+    expect(r.perStage[0]?.sum).toBe(100_000);
+    expect(r.perStage[0]?.weightedSum).toBe(50_000);
+    expect(r.perStage[0]?.sums).toEqual([{ currency: 'USD', sum: 100_000, weightedSum: 50_000 }]);
+    expect(r.currencies).toEqual(['USD']);
   });
 
   it('an ABSENT kind means revenue — every pre-existing pipeline keeps its meaning', async () => {
     const r = await seed(undefined, 80_000);
     expect(r.kind).toBe('revenue');
     expect(r.perStage[0]?.sum).toBe(80_000);
+    expect(r.perStage[0]?.weightedSum).toBe(40_000);
   });
 
   it('a NON-REVENUE pipeline reports counts and NULL money — never zero', async () => {
@@ -82,7 +87,6 @@ describe('ADR 0540 D3 — non-revenue pipelines suppress currency rollups', () =
     // One application's salary is real and useful on the record; it is only the
     // aggregate that is nonsense. A design that dropped the amount would lose
     // information the user entered.
-    const { listDeals } = await import('../src/features/crm/crmEntitiesService.js');
     await seed('non-revenue', 180_000);
     const deals = await listDeals(TENANT, ORG, {});
     expect(deals.at(-1)?.amount).toBe(180_000);

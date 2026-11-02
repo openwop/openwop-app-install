@@ -8,6 +8,12 @@
  * We test against an in-memory sqlite store with a local-AES KMS
  * stub. The stub matches the production Google Cloud KMS shape, so
  * the same encrypt/decrypt round-trip exercises the same code path.
+ *
+ * TST-BBY-6 (w66 g4, sabotage-witnessed). Red when: the AAD stops binding
+ * (tenantId, ref); the IV is fixed; the flat path drops the tenant prefix;
+ * `user:` tenants stop routing to KMS. HONEST CEILING: a fixed DEK is not
+ * observable through the local-AES stub (its wrap has its own random IV), so
+ * "fresh DEK" is witnessed through the IV leg only.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';

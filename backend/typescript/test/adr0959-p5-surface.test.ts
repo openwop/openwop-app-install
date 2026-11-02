@@ -6,6 +6,15 @@
  *  - the run-stamp client check removed from `bindPlaybookRun`        → "a run stamped for client A"
  *  - `bindRunToClient` dropped (no person / scope check)               → "no person behind the run"
  *  - layer 1 left out of `effectiveConfig`                             → "the effective values"
+ *  - the matrix ignoring the playbook id (every installation listed)  → "lists every client"
+ *
+ * Single guard (checked): `bindRunToClient` also refuses `wrong_client`, but it reads the
+ * campaign-ops run stamp, not the playbook stamp, so `bindPlaybookRun`'s check is the only guard
+ * on this path. The matrix fixture carries a SECOND playbook installed on client 0, so the
+ * playbook filter in `listPlaybookInstallations` has a row to exclude.
+ *
+ * Probes (wave 73, all witnessed): w73g3-pb5-wrong-client, -no-person, -effective-layer1,
+ * -matrix-drift; w73g3-pb5-matrix-filter (the second-playbook exclusion).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -20,6 +29,7 @@ import { createMember, createOrg, createWorkspace } from '../src/host/accessCont
 import { upsertFromPrincipal } from '../src/features/users/usersService.js';
 import { createClient } from '../src/features/campaign-ops/clientService.js';
 import { buildCampaignPlaybooksSurface } from '../src/features/campaign-playbooks/surface.js';
+import type { BundleScope } from '../src/host/inMemorySurfaces.js';
 import { bareRunId } from './support/bareRunId.js';
 
 let BASE = '';
@@ -30,10 +40,14 @@ let adminId = '';
 let cookie = '';
 const orgs: string[] = [];
 
-async function call(method: string, path: string, body?: unknown): Promise<{ status: number; body: Record<string, unknown> }> {
+async function call(method: string, path: string, body?: unknown): Promise<{ status: number; body: unknown }> {
   const res = await fetch(`${BASE}${path}`, { method, headers: { cookie, 'content-type': 'application/json' }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-  return { status: res.status, body: (await res.json().catch(() => ({}))) as Record<string, unknown> };
+  const parsed: unknown = await res.json().catch(() => ({}));
+  return { status: res.status, body: parsed };
 }
+/** Walk an untyped JSON body without casts. */
+const get = (b: unknown, ...path: string[]): unknown => path.reduce<unknown>((o, k) => (typeof o === 'object' && o !== null ? Reflect.get(o, k) : undefined), b);
+const rowsOf = (b: unknown, key: string): unknown[] => { const r = get(b, key); if (!Array.isArray(r)) throw new Error(`${key} is not an array: ${JSON.stringify(b)}`); return r; };
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -64,21 +78,29 @@ beforeAll(async () => {
   expect((await call('POST', `${base}/playbooks/method/versions`, { version: '1.0.0' })).status).toBe(201);
   expect((await call('PUT', `${base}/playbooks/method/agency-layer`, { params: { tone: 'bold' } })).status).toBe(200);
   for (const [i, org] of orgs.entries()) expect((await call('POST', `${base}/clients/${org}/installs`, { playbookId: 'method', version: '1.0.0', clientLayer: { params: { region: `R${i}` } } })).status).toBe(201);
-});
+  // A second playbook on client 0 only: the matrix for `method` must not list it.
+  expect((await call('PUT', `${base}/playbooks/other/draft`, {
+    title: 'Other', entryChainId: 'acme.o', defaults: { params: {} }, overridable: { params: [], slots: [] },
+    chains: [{ chainId: 'acme.o', version: '1.0.0', label: 'O', description: 'Synthetic.', parameters: { type: 'object', properties: {} }, dag: { nodes: [{ id: 'n', typeId: 'core.flow.noop@1.0.0', config: {}, inputs: {} }], edges: [] } }],
+  })).status).toBe(200);
+  expect((await call('POST', `${base}/playbooks/other/versions`, { version: '1.0.0' })).status).toBe(201);
+  expect((await call('POST', `${base}/clients/${orgs[0]}/installs`, { playbookId: 'other', version: '1.0.0' })).status).toBe(201);
+}, 120_000);
 afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
 
 describe('ADR 0959 P5 — the installation matrix', () => {
   it('lists every client on a playbook with its drift (agency admin)', async () => {
     const r = await call('GET', '/host/openwop-app/campaign-playbooks/playbooks/method/installations');
     expect(r.status).toBe(200);
-    const rows = r.body.installations as Array<{ orgId: string; drift: string; pinnedVersion: string }>;
-    expect(rows.map((x) => x.orgId).sort()).toEqual([...orgs].sort());
-    expect(rows.every((x) => x.drift === 'none' && x.pinnedVersion === '1.0.0')).toBe(true);
+    const rows = rowsOf(r.body, 'installations');
+    expect(rows.map((x) => get(x, 'orgId')).sort()).toEqual([...orgs].sort());
+    expect(rows.map((x) => get(x, 'playbookId'))).toEqual(['method', 'method']); // `other` (client 0) is not listed
+    expect(rows.every((x) => get(x, 'drift') === 'none' && get(x, 'pinnedVersion') === '1.0.0')).toBe(true);
   });
 });
 
 describe('ADR 0959 P5 — ctx.features[campaign-playbooks]', () => {
-  const scopeFor = (extra: Record<string, unknown>) => ({ tenantId: TENANT, ...extra }) as unknown as Parameters<typeof buildCampaignPlaybooksSurface>[0];
+  const scopeFor = (extra: Omit<BundleScope, 'tenantId'>): BundleScope => ({ tenantId: TENANT, ...extra });
 
   it('the effective values: defaults, then the agency, then the client', async () => {
     const s = buildCampaignPlaybooksSurface(scopeFor({ actingUserId: adminId }));
@@ -92,11 +114,13 @@ describe('ADR 0959 P5 — ctx.features[campaign-playbooks]', () => {
   });
 
   it('a run stamped for client A cannot read client B', async () => {
-    const wf = ((await call('GET', `/host/openwop-app/campaign-playbooks/clients/${orgs[0]}/installs`)).body.installations as Array<{ workflowId: string }>)[0]!.workflowId;
+    const installs = rowsOf((await call('GET', `/host/openwop-app/campaign-playbooks/clients/${orgs[0]}/installs`)).body, 'installations');
+    const wf = get(installs.find((i) => get(i, 'playbookId') === 'method'), 'workflowId');
+    if (typeof wf !== 'string' || !wf) throw new Error('no method install on client 0');
     const run = await call('POST', '/runs', { workflowId: wf, inputs: {} });
     expect(run.status, JSON.stringify(run.body)).toBe(201);
-    const runId = bareRunId(String(run.body.runId));
-    expect(((await storage.getRun(runId))?.metadata as Record<string, unknown>)['openwop-app.playbook']).toMatchObject({ orgId: orgs[0] });
+    const runId = bareRunId(String(get(run.body, 'runId')));
+    expect((await storage.getRun(runId))?.metadata['openwop-app.playbook']).toMatchObject({ orgId: orgs[0] });
     const s = buildCampaignPlaybooksSurface(scopeFor({ actingUserId: adminId, runId }));
     expect(await s.getInstallation!({ orgId: orgs[0], playbookId: 'method' })).toMatchObject({ installed: true });
     await expect(s.getInstallation!({ orgId: orgs[1], playbookId: 'method' })).rejects.toMatchObject({ details: { reason: 'wrong_client' } });

@@ -13,6 +13,11 @@
  * the same read-only key listed and revoked every key in a personal workspace.
  *
  * Route-level: the `api-key` principal only exists after the real auth middleware.
+ *
+ * TST-CVE-12. Single guard: `refuseKeyPrincipal` in `developer-keys/routes.ts`,
+ * called by mint, list and revoke (`keyVendorGate` lists `/developer-keys` as an
+ * OWN-gate prefix, so no middleware answers first). Red when that call is dropped
+ * from any one of the three routes — each refusal is asserted by its exact code.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -88,8 +93,10 @@ describe('ADR 0800 D1 — an API key cannot list or revoke keys, even where demo
     await key(undefined, PERSONAL); // the owner's own key: what a leak would show
     const ro = await key(['workspace:read'], PERSONAL);
     const res = await call(ro.token, 'GET', KEYS);
-    const body = (await res.json()) as { keys?: unknown[] };
+    const body = (await res.json()) as { keys?: unknown[]; error?: string; details?: { code?: string } };
     expect(res.status, JSON.stringify(body)).toBe(403);
+    expect(body.error).toBe('forbidden');
+    expect(body.details?.code).toBe('key_cannot_manage_keys');
     expect(body.keys).toBeUndefined();
   });
 
@@ -97,7 +104,10 @@ describe('ADR 0800 D1 — an API key cannot list or revoke keys, even where demo
     const owners = await key(undefined, PERSONAL);
     const ro = await key(['workspace:read'], PERSONAL);
     const res = await call(ro.token, 'DELETE', `${KEYS}/${encodeURIComponent(owners.keyId)}`);
-    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error?: string; details?: { code?: string } };
+    expect(res.status, JSON.stringify(body)).toBe(403);
+    expect(body.error).toBe('forbidden');
+    expect(body.details?.code).toBe('key_cannot_manage_keys');
     const still = (await listApiKeys(PERSONAL, ALL)).find((k) => k.keyId === owners.keyId);
     expect(still, 'the owner’s key must still exist').toBeDefined();
     expect(still!.revokedAt).toBeUndefined();

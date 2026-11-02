@@ -17,6 +17,10 @@
  *  - call `backfillFoldedEnrollmentSubjects` from any src module → the
  *    no-invocation pin reds;
  *  - drop the `held` conflict check → the conflict case re-owns a duplicate.
+ *
+ * TST-DJD-3 (grade-tests wave 71). Every sabotage above, plus dry-run writing and
+ * check-ins not re-owned, was re-witnessed in wave 71. The no-invocation scan
+ * matches any text mention in src (comments too) — strict on purpose.
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';

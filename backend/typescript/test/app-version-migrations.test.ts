@@ -5,6 +5,11 @@
  * open): a fresh install first-records the version, an upgrade is detected from
  * the prior, and the app-migration runner applies pending migrations in order,
  * forward-only + idempotently, recording its counter.
+ *
+ * TST-BXB-2. Red when: pending migrations stop being sorted (w66 avm-sort), the
+ * recorded version is re-applied (avm-filter), the counter records anything but
+ * the latest (avm-counter), an empty set writes a counter (avm-empty), an upgrade
+ * is not re-stamped (avm-stamp) or not detected (avm-upgrade).
  */
 
 import { afterEach, describe, expect, it } from 'vitest';

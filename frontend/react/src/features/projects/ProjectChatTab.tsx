@@ -59,7 +59,7 @@ export function ProjectChatTab({ project, canWrite, onSaved }: { project: Projec
       <div className="surface-card u-flex u-flex-col u-gap-3">
         <div className="u-flex u-items-center u-gap-2"><MessageSquareIcon size={16} /> <strong className="u-fs-15">{t('projectChatHeading')}</strong></div>
         <p className="muted u-fs-13 u-m-0">
-          <Trans i18nKey="chatIntro" ns="projects" values={{ name: project.name }} components={{ 0: <strong />, 1: <code />, 2: <strong /> }} />
+          <Trans i18nKey="chatIntro" ns="projects" values={{ name: project.name }} components={[<strong />, <code />, <strong />]} />
         </p>
 
         {/* ── The lineup ── */}
@@ -85,7 +85,7 @@ export function ProjectChatTab({ project, canWrite, onSaved }: { project: Projec
             </div>
           </div>
         ) : (
-          <Notice variant="info"><Trans i18nKey="noAgentsNotice" ns="projects" components={{ 0: <strong /> }} /></Notice>
+          <Notice variant="info"><Trans i18nKey="noAgentsNotice" ns="projects" components={[<strong />]} /></Notice>
         )}
 
         {error ? <Notice variant="error" announce={error}>{error}</Notice> : null}

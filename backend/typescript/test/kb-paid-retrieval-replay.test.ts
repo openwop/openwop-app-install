@@ -1,6 +1,15 @@
 /** ADR 0904: real run/fork witness for paid KB retrieval. A fake operator
  * ranker deliberately changes its answer after the live run. Replay must
- * serve identical recorded node outputs without another provider attempt. */
+ * serve identical recorded node outputs without another provider attempt.
+ *
+ * Two layers hold a fork (measured by w74 probes): the served set
+ * (`MANIFEST_FAST_PATH_SERVED` via `isSideEffectingNode`, derived from the pack's
+ * `side-effectful` capability) short-circuits the node, and, if it did not, the
+ * run-effect replay backstop would still refuse the paid reservations, so the call
+ * counters alone cannot see a missing classification. The output equality can: a
+ * re-executed node degrades to the local reranker, whose order differs. The source
+ * output is pinned to the Vertex order (meals before leave; the local reranker puts
+ * leave first for this query), so it proves the recorded output is the paid one. */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { beforeAll, afterAll, expect, it, vi } from 'vitest';
@@ -51,7 +60,7 @@ beforeAll(async () => {
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>(resolve => { server = app.listen(0, '127.0.0.1', () => { base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; resolve(); }); });
-});
+}, 120_000);
 afterAll(async () => {
   __setVertexRerankDepsForTest(null); __setByokTextForTest(null);
   if (server) await new Promise<void>(resolve => server.close(() => resolve()));
@@ -84,7 +93,9 @@ it.each(['search', 'rag'] as const)('%s replay serves the source result without 
   expect(live.status, JSON.stringify(live.body)).toBe(201); const liveId = live.body.runId; if (!liveId) throw new Error('missing live run');
   await settle(liveId); expect(calls).toBe(1); expect(enrichCalls).toBe(2);
   const recorded = await outputs(liveId);
-  expect(JSON.stringify(recorded)).toContain('Meals');
+  const source = JSON.stringify(recorded);
+  expect(source.indexOf(`meals-${node}`), 'the recorded output carries the meals hit').toBeGreaterThanOrEqual(0);
+  expect(source.indexOf(`meals-${node}`), 'recorded in the Vertex order, not the local one').toBeLessThan(source.indexOf(`leave-${node}`));
   enrichModel = 'prefix-changed-after-source'; // a stale cache would require another unlogged BYOK call
   const fork = await call('POST', `/runs/${encodeURIComponent(liveId)}:fork`, { mode: 'replay' });
   expect(fork.status, JSON.stringify(fork.body)).toBe(201); const forkId = fork.body.runId; if (!forkId) throw new Error('missing fork');

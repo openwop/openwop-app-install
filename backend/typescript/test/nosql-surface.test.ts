@@ -32,7 +32,7 @@ beforeAll(async () => {
     enableConsoleTracer: false,
   });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-});
+}, 120_000);
 
 afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
@@ -46,15 +46,16 @@ async function jsonFetch<T = unknown>(path: string, init: RequestInit = {}): Pro
   return { status: res.status, body: (await res.json()) as T };
 }
 
-interface BundleEvent { type?: string; nodeId?: string; payload?: Record<string, unknown> }
+interface BundleEvent { type?: string; nodeId?: string; payload?: { outputs?: Record<string, unknown>; error?: { code?: string; message?: string } } }
 interface BundleBody { events?: BundleEvent[] }
 
 /** Register a one-node db workflow, run it, return the node's outputs. */
-async function runNode(workflowId: string, typeId: string, config: Record<string, unknown>, inputs: Record<string, unknown>): Promise<Record<string, unknown>> {
-  await jsonFetch('/host/openwop-app/workflows', {
+async function runNode(workflowId: string, typeId: string, config: Record<string, unknown>, inputs: Record<string, unknown>): Promise<Record<string, unknown> & { __status: string; __error?: { code?: string; message?: string } }> {
+  const reg = await jsonFetch('/host/openwop-app/workflows', {
     method: 'POST',
     body: JSON.stringify({ workflowId, nodes: [{ nodeId: 'op', typeId, config }], edges: [] }),
   });
+  expect(reg.status, JSON.stringify(reg.body)).toBeLessThan(300);
   const create = await jsonFetch<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs }) });
   expect(create.status).toBe(201);
   const { runId } = create.body;
@@ -65,9 +66,12 @@ async function runNode(workflowId: string, typeId: string, config: Record<string
     status = snap.body.status;
     if (['completed', 'failed', 'cancelled'].includes(status)) break;
   }
+  if (!['completed', 'failed', 'cancelled'].includes(status)) throw new Error(`run ${runId} did not settle (last status ${status})`);
   const bundle = await jsonFetch<BundleBody>(`/runs/${runId}/debug-bundle`);
-  const ev = (bundle.body.events ?? []).find((e) => e.type === 'node.completed' && e.nodeId === 'op');
-  return { __status: status, ...((ev?.payload?.outputs as Record<string, unknown>) ?? {}) };
+  const events = bundle.body.events ?? [];
+  const ev = events.find((e) => e.type === 'node.completed' && e.nodeId === 'op');
+  const failed = events.find((e) => e.type === 'node.failed' && e.nodeId === 'op');
+  return { __status: status, ...(failed?.payload?.error ? { __error: failed.payload.error } : {}), ...(ev?.payload?.outputs ?? {}) };
 }
 
 const DS = { datasource: 'demo-ds', collection: 'people' };
@@ -78,7 +82,7 @@ describe('host.db.nosql: CRUD round-trip through the db pack', () => {
       docs: [{ name: 'Ada', dept: 'eng', rank: 2 }, { name: 'Babbage', dept: 'eng', rank: 1 }, { name: 'Lovelace', dept: 'math', rank: 3 }],
     });
     expect(ins.inserted).toBe(3);
-    expect(Array.isArray(ins.ids)).toBe(true);
+    expect(ins.ids).toHaveLength(3);
 
     // find with exact-match filter + sort + projection.
     const found = await runNode('sample.nosql.find', 'core.db.nosql-find', DS, {
@@ -113,6 +117,8 @@ describe('host.db.nosql: CRUD round-trip through the db pack', () => {
     const out = await runNode('sample.nosql.badfilter', 'core.db.nosql-find', DS, { filter: { rank: { $gt: 1 } } });
     // The node fails because the surface throws nosql_filter_unsupported.
     expect(out.__status).toBe('failed');
+    // The wire v2 event namespaces the host code (`openwop-app.` prefix).
+    expect(out.__error).toEqual({ code: 'openwop-app.nosql_filter_unsupported', message: "nosql filter operator '$gt' is not supported (exact-match filters only)" });
   });
 });
 

@@ -41,7 +41,7 @@ function def(workflowId: string, nodes: number, withInputs: number): WorkflowDef
       ...(i < withInputs ? { inputs: { query: 'x' } } : {}),
     })),
     edges: [],
-  } as unknown as WorkflowDefinition;
+  };
 }
 
 describe('nodesCarryingInputs', () => {
@@ -86,6 +86,10 @@ describe('nodesCarryingInputs', () => {
     ['null', null, false],
     ['undefined', undefined, false],
   ])('PARITY with the guard: %s', (_label, inputs, shouldCount) => {
+    // FIXTURE-HONESTY LIMIT (w72, recorded B†): `inputs` here deliberately takes
+    // values the type forbids ('abc', 5, true, []) — the divergence the table
+    // exists for — and `preserveDroppedFields` accepts only the typed shape, so
+    // this one cast is the price of driving the guard with a malformed row.
     const withValue = {
       workflowId: 'w',
       nodes: [{ nodeId: 'n0', typeId: 't', ...(inputs === undefined ? {} : { inputs }) }],

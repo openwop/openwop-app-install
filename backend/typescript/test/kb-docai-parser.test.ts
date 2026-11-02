@@ -4,12 +4,19 @@
  * Pinned, each sabotage-witnessed (revert → red → restore):
  *  - boot refuses a malformed processor or one without a daily page cap;
  *  - the Layout Parser's own blocks become markdown the chunker understands — headings,
- *    lists, tables — with page offsets;
+ *    lists, tables — with page offsets; an unspecified zero page span keeps its text
+ *    without inventing a citation, and a negative, fractional or > 15 span refuses the
+ *    response (`docai_invalid_page_span`);
  *  - a SCANNED PDF (no text layer) yields text only with Document AI configured, with
  *    real headings and pages;
  *  - the cap is checked BEFORE the call with the real page count (no call over the cap
  *    or the 15-page online limit), and a failed or empty answer falls back to the
  *    in-process parser.
+ * Sabotage-witnessed (w74 probes): an unanchored processor pattern, the boot cap check,
+ * the span bounds, a zero span cited as page 1, a flattened heading level, an unescaped
+ * cell pipe, a shifted page offset, a discarded parsed result or its page offsets, the
+ * reservation's cap compare, the 15-page limit, a removed in-process fallback, an empty
+ * answer accepted as parsed, and a wrong mime in the request body each turn a case red.
  * Not built (owed): batch processing through GCS staging for files over 15 pages.
  */
 import { describe, it, expect, beforeAll, afterEach } from 'vitest';
@@ -114,7 +121,7 @@ describe('Document AI on ingest', () => {
   it('a SCANNED PDF yields text only with Document AI: headings, tables and pages', async () => {
     const scanned = (await pdf([{}, {}])).toString('base64');
     const a = await col();
-    await expect(ingestDocument(a.t, 'o', 'u', a.c, { title: 'scan.pdf', contentBase64: scanned, contentType: 'application/pdf' })).rejects.toMatchObject({ httpStatus: 400 });
+    await expect(ingestDocument(a.t, 'o', 'u', a.c, { title: 'scan.pdf', contentBase64: scanned, contentType: 'application/pdf' })).rejects.toMatchObject({ httpStatus: 400, message: 'No extractable text in the uploaded file.' });
 
     ON();
     const calls: Array<{ url: string; mime: string }> = [];
@@ -135,10 +142,12 @@ describe('Document AI on ingest', () => {
     const calls: Array<{ url: string; mime: string }> = [];
     __setDocAiDepsForTest(fake(200, LAYOUT, calls));
     const a = await col();
-    await ingestDocument(a.t, 'o', 'u', a.c, { title: 'two.pdf', contentBase64: (await pdf([{ text: 'Page one text.' }, { text: 'Page two text.' }])).toString('base64'), contentType: 'application/pdf' });
+    const d1 = await ingestDocument(a.t, 'o', 'u', a.c, { title: 'two.pdf', contentBase64: (await pdf([{ text: 'Page one text.' }, { text: 'Page two text.' }])).toString('base64'), contentType: 'application/pdf' });
     process.env.OPENWOP_KB_DOCAI_PAGES_PER_DAY = '100';
-    await ingestDocument(a.t, 'o', 'u', a.c, { title: 'big.pdf', contentBase64: (await pdf(Array.from({ length: 16 }, (_v, i) => ({ text: `Page ${i}` })))).toString('base64'), contentType: 'application/pdf' });
+    const d2 = await ingestDocument(a.t, 'o', 'u', a.c, { title: 'big.pdf', contentBase64: (await pdf(Array.from({ length: 16 }, (_v, i) => ({ text: `Page ${i}` })))).toString('base64'), contentType: 'application/pdf' });
     expect(calls, 'no call over the cap or the 15-page limit — the in-process parser ran').toHaveLength(0);
+    expect((await getDocument(a.t, 'o', a.c, d1.documentId))?.text).toMatch(/Page one text\./);
+    expect((await getDocument(a.t, 'o', a.c, d2.documentId))?.text).toMatch(/Page 15/);
   });
 
   it('a failed or empty answer falls back to the in-process parser', async () => {

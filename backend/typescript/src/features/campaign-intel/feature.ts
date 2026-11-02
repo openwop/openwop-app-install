@@ -12,11 +12,11 @@
 
 import type { BackendFeature } from '../types.js';
 import { registerCampaignIntelRoutes } from './routes.js';
-import { buildCampaignIntelSurface } from './surface.js';
+import { buildCampaignIntelSurface, CAMPAIGN_INTEL_SURFACE_POLICY } from './surface.js';
 import { registerCampaignIntelAgentTools } from './agentTools.js';
 import { registerCampaignIntelErasure } from './erasure.js';
-import { checkLaunchAgainstCaps } from './spendCaps.js';
-import { setAdsCapChecker } from '../../host/adsAdapter.js';
+import { capBlocksIncrease, checkLaunchAgainstCaps } from './spendCaps.js';
+import { setAdsCapChecker, setAdsCapIncreaseChecker } from '../../host/adsAdapter.js';
 import { MULTI_TOUCH_TOGGLE } from './attributionSettings.js';
 
 export const campaignIntelFeature: BackendFeature = {
@@ -33,9 +33,12 @@ export const campaignIntelFeature: BackendFeature = {
     // (a breached, stale or unenforceable cap refuses `setDeliveryStatus` active),
     // and a cap's creator is tombstoned on erasure.
     setAdsCapChecker((tenantId, target) => checkLaunchAgainstCaps(tenantId, target));
+    // ADR 1022 D5 — and every budget change meets the same caps (the one-click
+    // recommendation apply and the core budget node used to skip them).
+    setAdsCapIncreaseChecker((tenantId, target, toDailyMinor) => capBlocksIncrease(tenantId, target, toDailyMinor));
     registerCampaignIntelErasure();
   },
-  surface: { id: 'campaign-intel', build: buildCampaignIntelSurface },
+  surface: { id: 'campaign-intel', build: buildCampaignIntelSurface, orgPolicy: CAMPAIGN_INTEL_SURFACE_POLICY },
   requiredPacks: [
     'feature.campaign-intel.nodes',
     'vendor.openwop-app.campaign-intel.agents',

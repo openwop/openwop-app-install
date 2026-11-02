@@ -1,7 +1,15 @@
 /** ADR 0954 P1 recovery. Physical SQLite CAS barriers witness late writers,
  * durable binding ownership, exact model pins and monotonic failed starts.
  * Reverting the close-before-cleanup or snapshot-restoration fixes revives data
- * or authority in these interleavings; no sleeps or scheduler luck are involved. */
+ * or authority in these interleavings; no sleeps or scheduler luck are involved.
+ *
+ * Sabotage-witnessed (grade-tests w73, TST-DRC): restoring an older pending
+ * grade, dropping the model pin, the grade fence, the lost reverse / profile
+ * CAS handling, the attribution receipt, the contention throw, the profile-close
+ * throw, either other-client refusal, the CRM delete hook, or the erasure's
+ * profile fence each reds the matching case. The paused-insert case reads the
+ * RAW profile primary, because the closed owner row hides a late profile from
+ * `getLeadProfile` / `listLeadProfiles` (a second guard over the same leak). */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -34,6 +42,11 @@ const ownerKey = () => `hostext:crm:lead-profile-of:${tenantId}::${contactId}`;
 const bind = () => bindLead({ tenantId, orgId, contactId, source: 'manual', boundBy: actor });
 const grade = { modelId: 'v0', modelVersion: 0, modelHash: contentHashOf(V0_CONTENT), score: 7, band: 'E' as const, parts: {}, inputsDigest: 'inputs', truncated: false };
 const pin = async (): Promise<GradeReservationPin> => ({ bindingId: await getLeadBindingId(tenantId, orgId, contactId), modelId: 'v0', modelVersion: 0, modelHash: grade.modelHash, definitionHash: 'd'.repeat(64), requesterHash: 'e'.repeat(64) });
+/** One field of a stored JSON row, narrowed rather than cast (rows are untyped storage). */
+function field(json: string | null, key: string): unknown {
+  const value: unknown = JSON.parse(json ?? 'null');
+  return typeof value === 'object' && value !== null ? Reflect.get(value, key) : undefined;
+}
 async function eraseContact(): Promise<void> {
   const report = await eraseSubject(tenantId, contactId);
   expect(report.failedFeatures.filter((name) => !name.endsWith(' (never registered)'))).toEqual([]);
@@ -64,17 +77,25 @@ describe('lead lifecycle publication fences', () => {
     const cas = storage.kvCompareAndSwap.bind(storage);
     let crossed = false;
     vi.spyOn(storage, 'kvCompareAndSwap').mockImplementation(async (key, expected, next) => {
-      const row = JSON.parse(next) as { closed?: boolean; attributionPending?: unknown };
-      if (!crossed && !row.closed && key === (lane === 'reverse' ? ownerKey() : primary('lead-profile'))) {
+      if (!crossed && !field(next, 'closed') && key === (lane === 'reverse' ? ownerKey() : primary('lead-profile'))) {
         crossed = true;
         await eraseContact();
       }
       return cas(key, expected, next);
     });
-    await expect(bind()).rejects.toMatchObject({ httpStatus: expect.any(Number) });
+    // Reverse lane: the owner row is already closed, so the claim is refused as
+    // another client's. Profile lane: the fenced profile wins the insert CAS.
+    await expect(bind()).rejects.toMatchObject(lane === 'reverse'
+      ? { httpStatus: 409, message: 'This contact is already a lead of another client.', details: { reason: 'lead_bound_to_other_client' } }
+      : { httpStatus: 409, message: 'Lead binding could not be confirmed. Retry.' });
     expect(crossed).toBe(true);
     vi.restoreAllMocks();
     await reopen();
+    // Read the raw primary, not a reader: the owner's `closed` flag hides a late
+    // profile from every reader, so only storage shows whether the fence held.
+    const stored = await storage.kvGet(primary('lead-profile'));
+    if (lane === 'reverse') expect(stored).toBeNull();
+    else expect(JSON.parse(stored ?? 'null')).toMatchObject({ closed: true, status: 'closed', boundBy: ERASED });
     expect(await getLeadProfile(tenantId, orgId, contactId)).toBeNull();
     expect(await listLeadProfiles(tenantId, orgId)).toEqual([]);
     await expect(bind()).rejects.toMatchObject({ httpStatus: 404 });
@@ -88,8 +109,7 @@ describe('lead lifecycle publication fences', () => {
     const cas = storage.kvCompareAndSwap.bind(storage);
     let crossed = false;
     vi.spyOn(storage, 'kvCompareAndSwap').mockImplementation(async (key, expected, next) => {
-      const row = JSON.parse(next) as { closed?: boolean; pendingRunId?: string; runId?: string };
-      if (!crossed && key === primary('lead-grade') && !row.closed && (lane === 'pending' ? row.pendingRunId === 'grade-run' : row.runId === 'grade-run')) {
+      if (!crossed && key === primary('lead-grade') && !field(next, 'closed') && field(next, lane === 'pending' ? 'pendingRunId' : 'runId') === 'grade-run') {
         crossed = true;
         await eraseContact();
       }
@@ -112,8 +132,7 @@ describe('lead lifecycle publication fences', () => {
     const cas = storage.kvCompareAndSwap.bind(storage);
     let crossed = false;
     vi.spyOn(storage, 'kvCompareAndSwap').mockImplementation(async (key, expected, next) => {
-      const row = JSON.parse(next) as { runId?: string; closed?: boolean };
-      if (!crossed && key === primary('lead-grade') && row.runId === 'grade-run' && !row.closed) {
+      if (!crossed && key === primary('lead-grade') && field(next, 'runId') === 'grade-run' && !field(next, 'closed')) {
         crossed = true;
         expect(await deleteContact(contactId, { silent: true })).toBe(true);
         await createContact({ tenantId, contactId, name: 'Restored contact', silent: true });
@@ -132,8 +151,7 @@ describe('lead lifecycle publication fences', () => {
     const cas = storage.kvCompareAndSwap.bind(storage);
     let crossed = false;
     vi.spyOn(storage, 'kvCompareAndSwap').mockImplementation(async (key, expected, next) => {
-      const row = JSON.parse(next) as { boundBy?: string };
-      if (!crossed && key === primary('lead-profile') && row.boundBy === actor) {
+      if (!crossed && key === primary('lead-profile') && field(next, 'boundBy') === actor) {
         crossed = true;
         await storage.kvDelete(`hostextidx:crm:lead-profile:${tenantId}:${tenantId}::${orgId}::${contactId}`);
         const report = await eraseSubject(tenantId, `user:${actor}`);
@@ -172,12 +190,13 @@ describe('lead lifecycle publication fences', () => {
       return cas(key, expected, next);
     });
     await expect(bind()).rejects.toThrow('process stopped');
-    const receipt = JSON.parse((await storage.kvGet(ownerKey()))!) as { bindingId: string };
+    const receiptBinding = field(await storage.kvGet(ownerKey()), 'bindingId');
+    expect(receiptBinding).toEqual(expect.any(String));
     fault.mockRestore();
     await reopen();
     await expect(bindLead({ tenantId, orgId: 'client-b', contactId, source: 'manual', boundBy: actor })).rejects.toMatchObject({ httpStatus: 409 });
     expect((await bind()).created).toBe(true);
-    expect(await getLeadBindingId(tenantId, orgId, contactId)).toBe(receipt.bindingId);
+    expect(await getLeadBindingId(tenantId, orgId, contactId)).toBe(receiptBinding);
   });
 
   it('closing also fences absent companion rows, and survives a second close after restart', async () => {
@@ -216,8 +235,9 @@ describe('lead lifecycle publication fences', () => {
 
   it('a missing legacy reverse marker never permits another client to adopt the primary profile', async () => {
     await bind();
-    const legacy = JSON.parse((await storage.kvGet(primary('lead-profile')))!) as Record<string, unknown>;
-    delete legacy.bindingId;
+    const legacy: unknown = JSON.parse((await storage.kvGet(primary('lead-profile'))) ?? 'null');
+    if (typeof legacy !== 'object' || legacy === null) throw new Error('bind() stored no lead-profile primary');
+    Reflect.deleteProperty(legacy, 'bindingId');
     await storage.kvSet(primary('lead-profile'), JSON.stringify(legacy));
     await storage.kvDelete(ownerKey());
     await expect(bindLead({ tenantId, orgId: 'client-b', contactId, source: 'manual', boundBy: actor })).rejects.toMatchObject({ httpStatus: 409 });

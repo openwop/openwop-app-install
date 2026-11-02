@@ -36,6 +36,7 @@ import { createApp } from '../src/index.js';
 import { getChainBackedWorkflow, buildChainBackedDefinition } from '../src/host/chainBackedWorkflows.js';
 import { getRegisteredWorkflow } from '../src/host/workflowsRegistry.js';
 import { MAX_ITEMS_PER_TICK, ASSISTANT_LOOPS } from '../src/features/assistant/loops.js';
+import { stripComments } from './helpers/stripComments.js';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '../../..');
 const LOOPS = ['assistant.loop.calendar-ingest', 'assistant.loop.drive-ingest', 'assistant.loop.morning-briefing'] as const;
@@ -47,8 +48,6 @@ const nodeBySuffix = (def: Def, id: string): Def['nodes'][number] | undefined =>
   def.nodes.find((n) => n.nodeId === id || n.nodeId.endsWith(`_${id}`));
 /** Comments out — a docblock that MENTIONS `registerWorkflow()` must not read as
  *  a call (the repo's "ratchet gates count comments" lesson, in a test). */
-const stripComments = (src: string): string =>
-  src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:'"`\\])\/\/[^\n]*/g, '$1');
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';

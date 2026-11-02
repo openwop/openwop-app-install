@@ -5,13 +5,21 @@
  * shared matcher), (b) tool NAMES resolve through the same classification the loop uses,
  * (c) an unclassified tool participates as risky under `treat-as-risky`, (d) `modeOverride`
  * previews a deny mode, and (e) the simulator writes NOTHING (no decision-log entry).
+ * (a) is asserted literally on the grade-code #2 case: the simulator and a live hook built
+ * from the same rules return the same decision for the same tool names.
+ *
+ * Red when (w74g4-sim-* probes, wave 74): the knowledge namespace stops classifying as a
+ * read; an unclassified tool stops resolving as risky under treat-as-risky; `modeOverride`
+ * is ignored; the unclassified-skip short-circuit is dropped; the platform floor stops
+ * winning; the simulator writes a decision-log row; the shared matcher's `with` side stops
+ * matching the next tool's classes.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { initHostExtPersistence } from '../../../host/hostExtPersistence.js';
 import { openStorage } from '../../../storage/index.js';
 import { simulateFirewall } from '../simulator.js';
 import { setCapabilityRules, setPlatformRules } from '../ruleStore.js';
-import { recommendedExfilRule } from '../firewallHook.js';
+import { buildFirewallHook, recommendedExfilRule } from '../firewallHook.js';
 import { listGovernanceDecisions } from '../../../host/governanceDecisionLog.js';
 import type { CapabilityRule } from '../types.js';
 
@@ -37,6 +45,7 @@ describe('simulateFirewall (ADR 0397 P2)', () => {
       next: { toolName: 'core.openwop.integration.email-send' },
     });
     expect(r.decision).toBe('require-approval'); // read (knowledge) then host-mediated egress (email)
+    expect(r.matchedRuleId).toBe('read-then-egress');
   });
 
   it('an unclassified tool participates as risky (treat-as-risky) — read+egress in one', async () => {
@@ -44,6 +53,7 @@ describe('simulateFirewall (ADR 0397 P2)', () => {
     // caught by the rule (the seen read + the risky next egress).
     const r = await simulateFirewall(TENANT, { seen: [{ safetyTier: 'read' }], next: { toolName: 'openwop:custom.unknown-tool' } });
     expect(r.decision).toBe('require-approval');
+    expect(r.matchedRuleId).toBe('read-then-egress');
   });
 
   it('modeOverride enforce previews a fall-through deny for an unmatched safe action', async () => {
@@ -68,9 +78,12 @@ describe('simulateFirewall (ADR 0397 P2)', () => {
     const anyReadRule: CapabilityRule = { id: 'seen-read', description: '', verdict: 'deny', reason: 'x', when: { anyOf: [{ safetyTier: 'read' }] } };
     await setCapabilityRules(TENANT, [anyReadRule], 'skip', 'tester');
     try {
-      const r = await simulateFirewall(TENANT, { seen: [{ safetyTier: 'read' }], next: { toolName: 'openwop:custom.unclassified' } });
+      const r = await simulateFirewall(TENANT, { seen: [{ toolName: 'openwop:knowledge.search' }], next: { toolName: 'openwop:custom.unclassified' } });
       expect(r.decision).toBe('allow'); // short-circuit: unclassified-skip next skips rule eval
       expect(r.trace).toHaveLength(0);
+      // Claim (a): the live hook, built from the same rules + policy, decides the same.
+      const live = buildFirewallHook({ rules: [anyReadRule], mode: 'default-allow', unknownToolPolicy: 'skip' });
+      expect(live.evaluate(['openwop:knowledge.search'], 'openwop:custom.unclassified').decision).toBe(r.decision);
     } finally {
       await setCapabilityRules(TENANT, [recommendedExfilRule()], 'treat-as-risky', 'tester'); // restore
     }

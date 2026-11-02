@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import type { RunEventDoc } from '@openwop/openwop';
+import { WopError, type RunEventDoc } from '@openwop/openwop';
 import type { BYOKActiveConfig } from '../../../byok/lib/useBYOKConfig.js';
 
 /**
@@ -214,6 +214,39 @@ describe('useChatSession conversation send lifecycle (integration)', () => {
     await act(async () => { await result.current.send('again', CONFIG); });
     expect(openConversationSessionMock).toHaveBeenCalledOnce();
     expect(sendConversationTurnMock).toHaveBeenCalledTimes(2);
+  });
+
+  // ADR 1001 R12 — the exchange claim answers an in-flight duplicate (a double
+  // send or retry under the same exchangeKey) with 409 `conflict`. The run is
+  // alive, so the binding must survive and the next send reuses the run; only a
+  // run-terminal code (here `interrupt_already_resolved`) drops it.
+  it('a 409 openwop-app.conflict on send KEEPS the conversation run; a dead-run 409 drops it (R12)', async () => {
+    sendConversationTurnMock.mockRejectedValueOnce(new WopError(409, '', { error: 'openwop-app.conflict', message: 'an exchange with this key is already in progress' }, undefined));
+    const { result } = renderHook(() => useChatSession());
+    await act(async () => { await result.current.send('hello', CONFIG); });
+    expect(result.current.session.conversationRunId, 'the live run stays bound').toBe('conv-run-1');
+    await act(async () => { await result.current.send('again', CONFIG); });
+    expect(openConversationSessionMock, 'the next send reuses the run, no re-open').toHaveBeenCalledOnce();
+
+    sendConversationTurnMock.mockRejectedValueOnce(new WopError(409, '', { error: 'interrupt_already_resolved', message: 'conversation run is completed; the gate is closed' }, undefined));
+    await act(async () => { await result.current.send('third', CONFIG); });
+    expect(result.current.session.conversationRunId, 'a dead run is dropped').toBeUndefined();
+  });
+
+  // R12 defense in depth: with no wire code, the message regex is the fallback.
+  // A 409 is a refusal against a live run, so even a codeless 409 whose message
+  // says "resolved" keeps the binding; a codeless non-409 still tears down.
+  it('a CODELESS 409 whose message says "resolved" keeps the conversation run; a codeless 410 drops it (R12)', async () => {
+    // An older server's envelope with a message and no `error` code, as parsed off the wire.
+    const codeless = (message: string) => JSON.parse(JSON.stringify({ message }));
+    sendConversationTurnMock.mockRejectedValueOnce(new WopError(409, '', codeless('interrupt already resolved'), undefined));
+    const { result } = renderHook(() => useChatSession());
+    await act(async () => { await result.current.send('hello', CONFIG); });
+    expect(result.current.session.conversationRunId, 'a codeless 409 never tears down').toBe('conv-run-1');
+
+    sendConversationTurnMock.mockRejectedValueOnce(new WopError(410, '', codeless('interrupt gone'), undefined));
+    await act(async () => { await result.current.send('again', CONFIG); });
+    expect(result.current.session.conversationRunId, 'the codeless fallback still fires off a 409').toBeUndefined();
   });
 
   it('rebuilds the thread from the wire turns the exchange returns', async () => {
@@ -559,6 +592,28 @@ describe('useChatSession conversation send lifecycle (integration)', () => {
     expect(result.current.isSending).toBe(false);
   });
 
+  // ADR 1003 D5 — the window's omitted-turn count, carried by its host event,
+  // is stamped on THIS exchange's reply. Sabotage: dropping the stamp in
+  // `mergeConversationTurns` (or not reading the event) reds it.
+  it('a context-budgeted event stamps meta.contextOmittedTurns on the reply (ADR 1003 D5)', async () => {
+    sendConversationTurnMock.mockResolvedValueOnce({ turns: [], lastSeq: 0 });
+    fetchTurnsMock.mockResolvedValueOnce({
+      turns: [{ messageId: 'c:2:agent', role: 'agent', turnIndex: 2, from: 'assistant', content: 'windowed reply', ts: 0 }],
+      lastSeq: 2,
+    });
+    const { result } = renderHook(() => useChatSession());
+    await act(async () => {
+      const p = result.current.send('hi', CONFIG);
+      for (let i = 0; i < 30 && !captured; i += 1) await Promise.resolve();
+      await captured!.onEvent(evt('openwop-app.conversation.context-budgeted', { conversationId: 'c', omittedTurns: 6 }));
+      await captured!.onEvent(evt('conversation.exchanged', { turn: { role: 'agent' } }));
+      await p;
+    });
+    const reply = result.current.session.messages.find((m) => m.role === 'assistant');
+    expect(reply?.content).toBe('windowed reply');
+    expect(reply?.meta?.contextOmittedTurns).toBe(6);
+  });
+
   it('async exchange whose chunks ALREADY advanced the seq is not mis-read as a dropped sync turn (board-cadence regression)', async () => {
     // Regression for the board-of-advisors persistence bug: under the async
     // exchange path the POST acks before the reply, but transient
@@ -598,6 +653,86 @@ describe('useChatSession conversation send lifecycle (integration)', () => {
     const err = msgs.find((m) => m.role === 'assistant');
     expect(err?.meta?.error?.code).toBe('credential_unavailable');
     expect(result.current.isSending).toBe(false);
+  });
+
+  // ADR 1017 side fix — the tool cards a turn collected while streaming land on the
+  // optimistic "thinking" bubble, which the merge REPLACES with the wire turn. Before,
+  // every settled reply lost every tool card it had shown, for every agent and tool.
+  // Red if the carry-over is dropped, or if the cards go to the wrong agent turn.
+  it('a settled reply keeps the turn\'s tool cards, through later rebuilds too', async () => {
+    let resolveSend: (v: Awaited<ReturnType<Transport['sendConversationTurn']>>) => void = () => undefined;
+    sendConversationTurnMock.mockImplementationOnce(() => new Promise((r) => { resolveSend = r; }));
+    const { result } = renderHook(() => useChatSession());
+    let sending: Promise<void> = Promise.resolve();
+    await act(async () => { sending = result.current.send('draw the flow', CONFIG); await new Promise((r) => setTimeout(r, 0)); });
+    const RENDER = 'openwop:interactive-artifacts.render';
+    const ev = (type: string, sequence: number, payload: unknown): RunEventDoc =>
+      ({ eventId: `t${sequence}`, runId: 'conv-run-1', type, payload, timestamp: '2026-10-31T00:00:00Z', sequence, schemaVersion: 3 });
+    await act(async () => {
+      await captured!.onEvent(ev('agent.toolCalled', 50, { toolName: RENDER, callId: 'call-1', agentId: 'viz' }));
+      await captured!.onEvent(ev('agent.toolReturned', 51, { toolName: RENDER, callId: 'call-1', status: 'ok', agentId: 'viz' }));
+    });
+    const wireReplyId = 'conv-run-1:gate:0:2:agent';
+    const first = [
+      { messageId: 'conv-run-1:gate:0:1:user', role: 'user' as const, turnIndex: 1, from: 'user', content: 'draw the flow', ts: 0 },
+      { messageId: wireReplyId, role: 'agent' as const, turnIndex: 2, from: 'assistant', content: 'Here is the flow.', ts: 0 },
+      // A run the same turn's tool ignited: an AGENT turn too, sorting after the reply.
+      // The tool cards must not land on it.
+      { messageId: 'conv-run-1:gate:0:3:agent', role: 'agent' as const, turnIndex: 3, from: 'assistant', content: { kind: 'workflow_run', runId: 'run-9', agentId: 'viz' }, ts: 0 },
+    ];
+    await act(async () => {
+      resolveSend({ turns: first, lastSeq: 52 });
+      await sending;
+    });
+    const replyOf = () => result.current.session.messages.find((m) => m.role === 'assistant' && m.content === 'Here is the flow.');
+    expect(replyOf()?.agentEvents?.toolCalls.map((c) => [c.toolName, Boolean(c.finishedAt)])).toEqual([[RENDER, true]]);
+    // ADR 1017 D2 — the reply carries its turnRef: the conversation run plus the RAW wire
+    // message id, which is what the server's chat-turn artifact filter matches.
+    expect(replyOf()?.turnRef).toEqual({ conversationRunId: 'conv-run-1', turnMessageId: wireReplyId });
+
+    // The NEXT exchange rebuilds every message from the wire again; the earlier reply
+    // keeps its cards (they used to vanish on every rebuild).
+    sendConversationTurnMock.mockResolvedValueOnce({ turns: [
+      ...first,
+      { messageId: 'conv-run-1:gate:0:4:user', role: 'user', turnIndex: 4, from: 'user', content: 'thanks', ts: 0 },
+      { messageId: 'conv-run-1:gate:0:5:agent', role: 'agent', turnIndex: 5, from: 'assistant', content: 'Any time.', ts: 0 },
+    ], lastSeq: 60 });
+    await act(async () => { await result.current.send('thanks', CONFIG); });
+    expect(replyOf()?.agentEvents?.toolCalls.map((c) => c.toolName)).toEqual([RENDER]);
+    const later = result.current.session.messages.find((m) => m.content === 'Any time.');
+    expect(later?.agentEvents).toBeUndefined();
+  });
+
+  // ADR 1017 side fix — on REOPEN the durable row restores the reply's tool cards (the
+  // store keeps the whole message), and the next exchange's wire rebuild must not drop
+  // them again.
+  it('a reopened chat keeps a reply\'s tool cards through the next wire rebuild', async () => {
+    const RENDER = 'openwop:interactive-artifacts.render';
+    const wireReplyId = 'r:gate:0:2:agent';
+    const { conversationMessageId } = await import('../chatSession/lib.js');
+    const stored = {
+      role: 'assistant', content: 'Here is the flow.', createdAt: '2026-10-31T00:00:00Z',
+      turnRef: { conversationRunId: 'conv-run-1', turnMessageId: wireReplyId },
+      agentEvents: { toolCalls: [{ callId: 'c1', toolName: RENDER, agentId: 'viz', startedAt: '2026-10-31T00:00:00Z', finishedAt: '2026-10-31T00:00:01Z' }], handoffs: [], decisions: [] },
+    };
+    vi.mocked(listChatSessionMessagesPage).mockResolvedValueOnce({
+      messages: [{ sessionId: 'sess-viz', meta: null, messageId: conversationMessageId(wireReplyId), role: 'assistant', content: JSON.stringify(stored), createdAt: '2026-10-31T00:00:00Z' }],
+      nextCursor: null,
+    });
+    const { result } = renderHook(() => useChatSession());
+    await act(async () => { await result.current.loadSessionFromBackend('sess-viz'); });
+    const replyOf = () => result.current.session.messages.find((m) => m.content === 'Here is the flow.');
+    expect(replyOf()?.agentEvents?.toolCalls.map((c) => c.toolName)).toEqual([RENDER]);
+
+    sendConversationTurnMock.mockResolvedValueOnce({ turns: [
+      { messageId: 'r:gate:0:1:user', role: 'user', turnIndex: 1, from: 'user', content: 'draw the flow', ts: 0 },
+      { messageId: wireReplyId, role: 'agent', turnIndex: 2, from: 'assistant', content: 'Here is the flow.', ts: 0 },
+      { messageId: 'r:gate:0:3:user', role: 'user', turnIndex: 3, from: 'user', content: 'thanks', ts: 0 },
+      { messageId: 'r:gate:0:4:agent', role: 'agent', turnIndex: 4, from: 'assistant', content: 'Any time.', ts: 0 },
+    ], lastSeq: 4 });
+    await act(async () => { await result.current.send('thanks', CONFIG); });
+    expect(replyOf()?.agentEvents?.toolCalls.map((c) => c.toolName)).toEqual([RENDER]);
+    expect(replyOf()?.turnRef?.turnMessageId).toBe(wireReplyId); // ADR 1017 D2
   });
 });
 

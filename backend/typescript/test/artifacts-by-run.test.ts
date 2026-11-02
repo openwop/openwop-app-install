@@ -6,6 +6,11 @@
  * something the caller could already fetch via `GET /artifacts/:id`, from ONE run
  * only (a run-id prefix must not bleed into a longer id), and the route must not
  * fall back to the tenant-wide Library scan.
+ *
+ * TST-BZE-27 (grade-tests w66). Red when: rows lose their node id; an empty run id is
+ * accepted. DOUBLE GUARD (recorded): tenant isolation is enforced twice in
+ * `host/artifactProjection.ts` — the row filter (`r.tenantId === tenantId`) and the
+ * per-row `getArtifact(tenantId, …)` gate — so dropping either alone stays green.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -31,12 +36,14 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-async function login(tenantId: string): Promise<(p: string) => Promise<{ status: number; body: any }>> {
+interface ByRunBody { artifacts?: Array<{ artifactId: string; runNodeId: string }>; error?: string; message?: string; user?: unknown }
+async function login(tenantId: string): Promise<(p: string) => Promise<{ status: number; body: ByRunBody }>> {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown) => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]!; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    const parsed = res.status === 204 ? {} : await res.json().catch(() => ({}));
+    return { status: res.status, body: parsed as ByRunBody };
   };
   const r = await call('POST', '/host/openwop-app/test/login', { email: `abr-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
@@ -57,7 +64,7 @@ describe('artifacts ?runId= (ADR 0768 follow-up P2)', () => {
 
     const r = await get(`${A}?runId=run-7`);
     expect(r.status, JSON.stringify(r.body)).toBe(200);
-    const items = r.body.artifacts as Array<{ artifactId: string; runNodeId: string }>;
+    const items = r.body.artifacts ?? [];
     expect(items.map((a) => a.runNodeId).sort()).toEqual(['draft', 'review']);
     expect(items.every((a) => a.artifactId.startsWith('run-event:run-7:'))).toBe(true);
 
@@ -77,6 +84,8 @@ describe('artifacts ?runId= (ADR 0768 follow-up P2)', () => {
 
   it('rejects an empty run id', async () => {
     const get = await login(`org:abr-${Date.now()}-${n++}`);
-    expect((await get(`${A}?runId=`)).status).toBe(400);
+    const r = await get(`${A}?runId=`);
+    expect(r.status).toBe(400);
+    expect(r.body).toMatchObject({ error: 'validation_error', message: '`runId` must be a non-empty run id.' });
   });
 });

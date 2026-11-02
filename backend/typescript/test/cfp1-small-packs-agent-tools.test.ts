@@ -8,6 +8,14 @@
  * (comments.post) FAILS TYPED. No app boot: `registerFeatureAgentTool` mutates
  * the shared builtin map, and `executeTool` runs straight off it — the
  * no-acting-user branch short-circuits before any storage read.
+ *
+ * TST-CCA-1. Red when: the acting-user check is removed from `resolveReadOrgScope`
+ * (forms/comments/analytics), from marketplace's or computer-use's own read gate,
+ * or from `resolveActionOrgScope` (comments.post); or when `registerFeatureAgentTool`
+ * stops writing the builtin map. The read case pins the EXACT note: with the actor
+ * check gone, marketplace and computer-use fall through to their feature-toggle
+ * gate, which also answers "empty + a note" — only the note text tells the two
+ * refusals apart (w67 round 1 caught that wrong-reason pass).
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { builtinAgentToolIds, createAgentToolProvider } from '../src/host/agentToolProvider.js';
@@ -50,7 +58,8 @@ describe('CFP-1 small-pack agent tools are registered + honest', () => {
       const payload = body.summary ?? body.forms ?? body.submissions ?? body.comments ?? body.listings ?? body.sessions;
       // Either an empty collection or a null summary — never populated data.
       expect(Array.isArray(payload) ? payload.length : payload, `${id} must return empty without an acting user`).toBeFalsy();
-      expect(typeof body.note, `${id} should annotate why it is empty`).toBe('string');
+      // The ACTOR refusal, not a later gate's (the feature-toggle gate is also "empty + note").
+      expect(body.note, `${id} must refuse for the missing acting user`).toBe('This tool only reads from a human-initiated turn.');
     }
   });
 

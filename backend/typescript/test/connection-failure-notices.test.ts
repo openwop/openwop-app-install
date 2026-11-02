@@ -9,8 +9,14 @@
  *  2. `errorRecovery` did not know that code, so the notification degraded it to
  *     the generic "Something went wrong";
  *  3. an unattended run re-notified the same failure on every tick.
+ *
+ * Tracker TST-CJB-2 (grade-tests w68). Red when: a 401 / a scope 403 / an
+ * API-disabled 403 / a bare 403 stops mapping to its own code; a non-identifier
+ * provider "reason" is echoed; a connection code loses its actionable message or its
+ * /connections link; the unattended dedup is removed, keyed without the error code,
+ * applied to person-started runs, or held past its 24 h window.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
 import { ensureNotificationEmitterInstalled } from '../src/bootstrap/notifications.js';
 import { emitRunFailureNotification } from '../src/notifications/notify.js';
@@ -34,7 +40,7 @@ const google = (code: number, status: string, reason: string, detailReason?: str
 
 async function rejection(status: number, body: unknown, sourceKind: 'calendar' | 'drive' = 'calendar'): Promise<{ code?: string; message: string }> {
   try {
-    await ingest({ inputs: { status, headers: {}, body }, config: { sourceKind }, features: { assistant: { upsertCommitment: async () => ({}) } } } as never);
+    await ingest({ inputs: { status, headers: {}, body }, config: { sourceKind }, features: { assistant: { upsertCommitment: async () => ({}) } } });
   } catch (err) {
     return { code: (err as { code?: string }).code, message: (err as Error).message };
   }
@@ -74,8 +80,15 @@ describe('1 — the ingest node names WHY Google refused', () => {
   });
 });
 
+/** Exactly what the executor builds from a failed node before classifying it
+ *  (`executor.ts` `new AiProviderError(input.error.code as AiProviderErrorCode, …)`).
+ *  The cast is the PRODUCT's: the connection codes are not members of
+ *  `AiProviderErrorCode` although `errorRecovery` handles them — recorded as a
+ *  grade-code row (TST-CJB-2 / GC-W68-CONNCODE-1), mirrored here, not invented. */
+const nodeError = (code: string): AiProviderError => new AiProviderError(code as AiProviderErrorCode, 'x');
+
 describe('2 — errorRecovery turns each code into an actionable message', () => {
-  const classify = (code: string) => classifyDispatchError(new AiProviderError(code as AiProviderErrorCode, 'x'));
+  const classify = (code: string) => classifyDispatchError(nodeError(code));
 
   it.each([
     ['connection_scope_missing', 'auth', 'reconfigure', /Reconnect it in Connections and grant/],
@@ -107,7 +120,7 @@ describe('3 — the notification is fixable, and an unattended repeat is not re-
       inputs: null, metadata: { workflowName: 'assistant.loop.calendar-ingest', ...metadata }, configurable: {}, createdAt: now, updatedAt: now,
     };
     await storage.insertRun(run);
-    await emitRunFailureNotification(storage, runId, { code, userMessage: classifyDispatchError(new AiProviderError(code as AiProviderErrorCode, 'x')).userMessage });
+    await emitRunFailureNotification(storage, runId, { code, userMessage: classifyDispatchError(nodeError(code)).userMessage });
   }
   const SCHEDULED = { schedule: { jobId: 'assistant:calendar-ingest:user:u1', source: 'schedule' } };
 
@@ -128,6 +141,21 @@ describe('3 — the notification is fixable, and an unattended repeat is not re-
     ensureNotificationEmitterInstalled(storage);
     for (let i = 0; i < 5; i++) await failRun(storage, 't-dedup', 'connection_scope_missing', SCHEDULED);
     expect(await storage.listNotifications({ tenantId: 't-dedup' })).toHaveLength(1);
+    // …and the window is 24 h, not forever: the same failure 25 h later notifies again.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const t0 = Date.UTC(2026, 9, 1, 12, 0, 0);
+      vi.setSystemTime(t0);
+      await failRun(storage, 't-dedup-25h', 'connection_scope_missing', SCHEDULED);
+      vi.setSystemTime(t0 + 23 * 60 * 60 * 1000);
+      await failRun(storage, 't-dedup-25h', 'connection_scope_missing', SCHEDULED);
+      expect(await storage.listNotifications({ tenantId: 't-dedup-25h', includeArchived: true }), 'still inside the window at 23 h').toHaveLength(1);
+      vi.setSystemTime(t0 + 25 * 60 * 60 * 1000);
+      await failRun(storage, 't-dedup-25h', 'connection_scope_missing', SCHEDULED);
+      expect(await storage.listNotifications({ tenantId: 't-dedup-25h', includeArchived: true }), 'past the window at 25 h').toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
     await storage.close();
   });
 

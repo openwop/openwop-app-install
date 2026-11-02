@@ -5,6 +5,14 @@
  * (101 open); a raw upgrade with no cookie is 401; a cross-tenant / wrong-type
  * canvas is a uniform 404; a disallowed Origin is 403 (CSWSH); the toggle OFF is
  * 404 (advertises nothing).
+ *
+ * TST-CFC-1. Red when: the Origin check, the realtime-collab toggle, the type's own
+ * toggle, the collab registry lookup, the session check, the ticket's canvas
+ * binding, expiry or HMAC compare is dropped, or the upgrade matcher stops
+ * accepting the `/api` root.
+ *
+ * DOUBLE GUARD (named): the ticket-mint cross-tenant 404 is held both by
+ * `getCanvasForTenant` (tenant-scoped read) and the `!canvas` check after it.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -141,9 +149,13 @@ describe('collab WS auth boundary (ADR 0335 Phase 1)', () => {
     // must serve it with no type pin.
     const dr = getToggleDefault('drawings');
     if (dr) await saveConfig({ ...dr, status: 'on' }, 'test');
-    const { cookie, tenantId } = await login();
-    const drawing = await createCanvasForTenant(tenantId, { canvasTypeId: 'canvas.drawing', name: 'X', initialState: { title: 'X', shapes: [] } });
-    expect(await connect(drawing.canvasId, { cookie, origin: ORIGIN })).toEqual({ open: true });
+    try {
+      const { cookie, tenantId } = await login();
+      const drawing = await createCanvasForTenant(tenantId, { canvasTypeId: 'canvas.drawing', name: 'X', initialState: { title: 'X', shapes: [] } });
+      expect(await connect(drawing.canvasId, { cookie, origin: ORIGIN })).toEqual({ open: true });
+    } finally {
+      if (dr) await saveConfig(dr, 'test');
+    }
   });
 
   it('rejects when the realtime-collab toggle is OFF (404 — advertises nothing)', async () => {

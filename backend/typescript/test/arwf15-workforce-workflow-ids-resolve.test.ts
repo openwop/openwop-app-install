@@ -20,6 +20,16 @@
  * pins what catalog source A RESOLVES. It cannot see an id that a seed file
  * REFERENCES and nothing resolves, which is this class. These cases are the
  * guard for it.
+ *
+ * Tracker TST-BEA-1 (w66). Red when: the PATCH stops calling
+ * `assertTargetResolves` or drops its resolve check (`refuses a target…`);
+ * `migrationTargets` stops skipping an unresolved catalog id (`offers only…`,
+ * via a probe workforce whose catalog names a dead id); `historyWorkflowId`
+ * stamps a catalog id (`stamps every synthetic run…`); a seed names a dead
+ * catalog id or a live history id (the two seed cases).
+ * Double guard: an EMPTY target id is refused by `!workflowId` AND by
+ * `resolveTenantWorkflow('')` returning null (`routes/workforces.ts`
+ * `assertTargetResolves`); only a probe that breaks both reds `refuses an empty…`.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -27,7 +37,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { createHostAdapterSuite } from '../src/host/index.js';
 import { resolveTenantWorkflow } from '../src/host/resolveLaunchDefinition.js';
-import { seedWorkforceEntities, seedWorkforceHistory } from '../src/host/workforceService.js';
+import { getWorkforce, putWorkforce, seedWorkforceEntities, seedWorkforceHistory } from '../src/host/workforceService.js';
 import { seedZeroConfigWorkflows } from '../src/host/seedWorkflows.js';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
 import workforceSeed from '../src/host/seed-data/workforces.json';
@@ -59,7 +69,7 @@ afterAll(async () => {
 });
 
 type SeedWorkforce = { workforceId: string; workflowCatalog: string[]; historyWorkflowId?: string; historyRunCount?: number };
-const seeds = workforceSeed as SeedWorkforce[];
+const seeds: readonly SeedWorkforce[] = workforceSeed;
 
 describe('workforces.json workflowCatalog', () => {
   it('every catalog id resolves for a tenant', async () => {
@@ -115,10 +125,23 @@ describe('HTTP: the migration target picker + save', () => {
     expect(fromCatalog).toEqual(seeds.find((w) => w.workforceId === WF)!.workflowCatalog);
     expect(fromCatalog).toEqual(['wf.seed.service-desk-sla-escalation']);
     for (const t of r.body.targets) expect(await resolveTenantWorkflow(catalog, 'default', t.workflowId), t.workflowId).not.toBeNull();
+
+    // The filter itself: a workforce whose catalog names a dead id first is
+    // offered only the live one (the seed catalogs above all resolve, so they
+    // cannot show the skip).
+    const base = await getWorkforce('default', WF);
+    expect(base).not.toBeNull();
+    await putWorkforce({ ...base!, workforceId: 'workforce.arwf15-probe', workflowCatalog: ['openwop-app.agents.dead-id', 'wf.seed.service-desk-sla-escalation'] });
+    const probe = await call<{ targets: Array<{ workflowId: string; source: string }> }>('/host/openwop-app/workforces/workforce.arwf15-probe/migration/targets');
+    expect(probe.status).toBe(200);
+    expect(probe.body.targets.filter((t) => t.source === 'workforce').map((t) => t.workflowId)).toEqual(['wf.seed.service-desk-sla-escalation']);
   });
 
   it('404s the targets of an unknown workforce', async () => {
-    expect((await call('/host/openwop-app/workforces/workforce.nope/migration/targets')).status).toBe(404);
+    const r = await call<{ error?: string; details?: { workforceId?: string } }>('/host/openwop-app/workforces/workforce.nope/migration/targets');
+    expect(r.status).toBe(404);
+    expect(r.body.error).toBe('not_found');
+    expect(r.body.details?.workforceId).toBe('workforce.nope');
   });
 
   it('refuses a target that does not resolve with a typed 400, and saves nothing', async () => {
@@ -170,5 +193,7 @@ describe('HTTP: the migration target picker + save', () => {
     const r = await call<{ target: unknown }>(`${wfPath}/migration`, { method: 'PATCH', body: JSON.stringify({ target: null }) });
     expect(r.status).toBe(200);
     expect(r.body.target).toBeNull();
+    const after = await call<{ target: unknown }>(`${wfPath}/migration`);
+    expect(after.body.target).toBeNull();
   });
 });

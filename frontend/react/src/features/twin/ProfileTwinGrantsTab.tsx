@@ -109,7 +109,7 @@ export function ProfileTwinGrantsTab(): JSX.Element {
   return (
     <div className="u-flex u-flex-col u-gap-3">
       <p className="muted u-fs-13 u-m-0">
-        <Trans t={t} i18nKey="grantsIntro" components={{ 0: <strong /> }} />
+        <Trans t={t} i18nKey="grantsIntro" components={[<strong />]} />
       </p>
       {error ? <Notice variant="error">{error}</Notice> : null}
       {notice ? <Notice variant="success" announce={notice}>{notice}</Notice> : null}
@@ -136,11 +136,11 @@ export function ProfileTwinGrantsTab(): JSX.Element {
              prose about a tab. With exactly one agent it deep-links straight to
              that agent's Integrations tab; otherwise to the roster. */
           body={
-            <Trans t={t} i18nKey="noAgentBody" components={{
-              0: <Link to={Object.keys(names).length === 1
+            <Trans t={t} i18nKey="noAgentBody" components={[
+              <Link to={Object.keys(names).length === 1
                 ? `/agents/${encodeURIComponent(Object.keys(names)[0]!)}?tab=integrations`
                 : '/agents'} />,
-            }} />
+            ]} />
           }
         />
       ) : (

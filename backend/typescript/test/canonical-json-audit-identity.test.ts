@@ -10,6 +10,11 @@
  * - the audit chain's `canonicalize` IS the pure module's function;
  * - a real appended entry's stored hash recomputes through the pure module, and
  *   the chain verifies.
+ *
+ * Tracker: TST-CBB-1 (/grade-tests wave 67). Red when (probe-witnessed,
+ * 2026-10-29): `canonicalize` stops sorting keys (golden case); the audit chain's
+ * `computeEntryHash` hashes with plain `JSON.stringify` instead of `canonicalize`
+ * (appended-entry case).
  */
 import { createHash } from 'node:crypto';
 import { beforeAll, describe, expect, it } from 'vitest';

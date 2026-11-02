@@ -9,13 +9,15 @@
  *      is still fresh (within ~5 min of last sign-in) — Firebase
  *      requires "recent login" for destructive operations.
  *
- * If (2) fails with `auth/requires-recent-login`, the caller can ask
- * the user to sign in again and re-trigger only the Firebase step
- * (backend data is already gone).
+ * If (2) fails with `auth/requires-recent-login`, the re-authentication
+ * dialog (`auth/reauth.ts`) confirms the person in place and only the
+ * Firebase step is retried (backend data is already gone). Cancelling it,
+ * or a second refusal, surfaces `RequiresRecentLoginError`.
  */
 
 import { config, authedHeaders, fetchOpts } from '../client/config.js';
 import { deleteCurrentFirebaseUser } from './firebase.js';
+import { isRequiresRecentLogin, ReauthCancelledError, withRecentLogin } from './reauth.js';
 import i18n from '../i18n/index.js';
 
 export interface DeleteAccountResult {
@@ -51,10 +53,9 @@ export async function deleteAccount(): Promise<DeleteAccountResult> {
   // Step 2: Firebase user revocation (no-op if not configured / not signed in).
   // Routed through firebase.ts so the lazily-loaded SDK stays the single import.
   try {
-    await deleteCurrentFirebaseUser();
+    await withRecentLogin(() => deleteCurrentFirebaseUser());
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes('requires-recent-login')) {
+    if (err instanceof ReauthCancelledError || isRequiresRecentLogin(err)) {
       throw new RequiresRecentLoginError();
     }
     throw err;

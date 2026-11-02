@@ -43,6 +43,7 @@ import { runOutputWasFabricated } from '../host/workflowDemoAvailability.js';
 import { getNodeRegistry } from './nodeRegistry.js';
 import { readCompactionDecision } from './compaction.js';
 import { getEventLog, RunLogClosedError } from './eventLog.js';
+import { pinAgentChannel, pinServedAgent, completeAgentInvocation, type ChannelPin } from '../host/agentChannelPin.js';
 import { getSuspendManager } from './suspendManager.js';
 import { ensureForkInterrupts } from './forkInterrupts.js';
 import { hasCapability } from './runtimeCapabilities.js';
@@ -64,7 +65,8 @@ import {
 import { resolveSecret } from '../byok/secretResolver.js';
 import { persistRunArtifact } from '../host/runArtifactStore.js';
 import { buildInterruptRequestedPayload, GATE_PREVIEW_ARTIFACT_TYPE } from './interruptRequestedPayload.js';
-import { deriveRecordedResolutions, isRecordedRejection } from './forkReplayResolutions.js';
+import { unwrapDerived, deriveRecordedResolutions, isRecordedRejection, parentResolutionForKey, derivedResolvedValue } from './forkReplayResolutions.js';
+import { AGENT_CLARIFICATION_PROFILE } from '../host/clarificationLift.js';
 import { ensureApprovalPreview } from './gatePreview.js';
 import { sanitizeFreeTextDeep } from '../byok/textRedaction.js';
 import { OpenwopError } from '../types.js';
@@ -88,6 +90,7 @@ import {
   recordReplayServed,
   recordRunStarted,
 } from '../observability/metricSeams.js';
+import { markRunUntrustedContext } from '../host/approvalTrust.js';
 import { runWithEffectContext, ReplayEffectError, LeaseLostError, markDispatchLeaseLost, hasLostDispatchLease, type EffectKind, type RunEffectContext } from '../host/runEffectContext.js';
 import { isolationMode, resolveIsolationPlan } from '../host/packIsolationPolicy.js';
 import { isPackRevoked } from '../host/packRevocations.js';
@@ -130,7 +133,8 @@ import { hydrateRunChannels } from '../host/channelsRuntime.js';
 import { enforceManifestHandoffContract } from './handoffGate.js';
 import { HANDOFF_KEY, readHandoffRecord } from '../host/handoff/handoffRecord.js';
 import { notifyHandoffRecorded } from '../host/handoff/handoffObservers.js';
-import { SuspendSignal, makeSuspendFn } from './suspendSignal.js';
+import { SuspendSignal, makeSuspendFn, type DurableResolutionLookup } from './suspendSignal.js';
+import { interruptFormDefect } from '../host/interruptFormRules.js';
 import { CredentialGateError, nodeOAuthDeclarationOf, runCredentialGate } from '../host/credentialGate.js';
 import { beginNodeActivity } from '../host/effectIdentity.js';
 import {
@@ -477,14 +481,35 @@ const NON_RETRYABLE_NODE_ERRORS: ReadonlySet<string> = new Set([
   // attempt. Timeouts / request failures / in-flight stay retryable by omission.
   'email_recipient_suppressed', 'email_recipient_erased', 'email_recipient_no_consent',
   'email_provider_unsupported', 'email_egress_guard_missing',
+  'interrupt_form_invalid',
 ]);
 const RETRY_BACKOFF_BASE_MS = 250;
 const RETRY_BACKOFF_CAP_MS = 2000;
 
-async function runOneNode(input: {
+type RunOneNodeInput = Parameters<typeof runOneNodeBody>[0];
+
+/**
+ * ADR 1005 D5 — a node that binds a deployment channel gets the RFC 0077
+ * `agent.invocation.started` (carrying the pin) inside the body and, once the
+ * node ends, the matching `agent.invocation.completed` here.
+ */
+async function runOneNode(input: RunOneNodeInput): ReturnType<typeof runOneNodeBody> {
+  const holder: { pin?: ChannelPin; served?: Map<string, ChannelPin> } = {};
+  const out = await runOneNodeBody(input, holder);
+  if (out.kind === 'success' || out.kind === 'failure') {
+    const outcome = out.kind === 'success' ? 'completed' : 'failed';
+    // ADR 1014 M6 — a served (unpinned) agent's invocation is bracketed the same way.
+    for (const pin of [...(holder.pin ? [holder.pin] : []), ...(holder.served?.values() ?? [])]) {
+      await completeAgentInvocation(input.run.runId, input.nodeRef.nodeId, pin, outcome);
+    }
+  }
+  return out;
+}
+
+async function runOneNodeBody(input: {
   storage: Storage;
   run: RunRecord;
-  nodeRef: { nodeId: string; typeId: string; config?: Record<string, unknown>; inputs?: Record<string, unknown>; agent?: { agentId: string } };
+  nodeRef: { nodeId: string; typeId: string; config?: Record<string, unknown>; inputs?: Record<string, unknown>; agent?: { agentId: string; version?: string; channel?: string } };
   inputsByPort: Record<string, unknown>;
   /** ADR 0326 P3a — the node-level attempt (1-based; >1 on a config.retry
    *  re-run). Keys the invocation-log cache per attempt, rides the node ctx
@@ -511,7 +536,10 @@ async function runOneNode(input: {
   /** On a re-invoke resume (interrupt.md §"key field"), the resolution seeded for
    *  this node so `ctx.suspend`/`ctx.interrupt` returns it instead of suspending. */
   suspendResolution?: { resumeKey: string; value: unknown };
-}): Promise<
+  /** ADR 1001 D3.2 — serves a `durable: true` ctx.suspend from this node's own
+   *  resolved interrupt row when the seeded resolution is for another key. */
+  durableLookup?: DurableResolutionLookup;
+}, pinHolder: { pin?: ChannelPin; served?: Map<string, ChannelPin> } = {}): Promise<
   | {
       kind: 'success';
       outputs: Record<string, unknown>;
@@ -686,7 +714,22 @@ async function runOneNode(input: {
   // the start, so paths that refuse BEFORE `node.started` never consume one.
   const executionOrdinal = input.ordinals?.start(nodeRef.nodeId);
   /** Close the execution the log just recorded a terminal event for. */
-  const closeExecution = (): void => { input.ordinals?.terminal(nodeRef.nodeId); };
+  const closeExecution = (kind: 'completed' | 'failed'): void => { input.ordinals?.terminal(nodeRef.nodeId, kind); };
+
+  // ADR 1005 D5 — resolve (or re-read) the RFC 0082 channel pin before the body
+  // runs. A channel that resolves to nothing fails the node closed.
+  const pinned = await pinAgentChannel({ storage, run, nodeId: nodeRef.nodeId, agent: nodeRef.agent, execution: executionOrdinal ?? input.attempt ?? 1 });
+  if (pinned && !pinned.ok) {
+    await eventLog.append({
+      runId: run.runId,
+      nodeId: nodeRef.nodeId,
+      type: 'node.failed',
+      payload: stripSecretsFromPersisted({ nodeId: nodeRef.nodeId, error: { ...pinned.error, retryable: false } }),
+    });
+    closeExecution('failed');
+    return { kind: 'failure', error: { code: pinned.error.code, message: pinned.error.message } };
+  }
+  if (pinned) pinHolder.pin = pinned.pin;
 
   const rawSecrets = getRunSecrets(run.runId);
   const secretsForCtx = nonEnumerableSecretsView(rawSecrets);
@@ -818,7 +861,7 @@ async function runOneNode(input: {
   // `ctx.suspend` are the SAME primitive: an MRTR ask must be an ordinary
   // interrupt on this node, subject to the same resume, timeout and replay
   // rules, not a second pausing mechanism the run does not know about.
-  const suspendFn = makeSuspendFn(nodeRef.nodeId, input.suspendResolution);
+  const suspendFn = makeSuspendFn(nodeRef.nodeId, input.suspendResolution, input.durableLookup);
   // ADR 0772 D1 — the signal THIS execution was handed, captured once. The
   // deadline classification below asks this object why it aborted; looking the
   // run up again would miss a controller that terminal, a pause or a re-arm has
@@ -848,6 +891,18 @@ async function runOneNode(input: {
       ? interpolateRunInputs(nodeRef.config ?? {}, variableBag)
       : (nodeRef.config ?? {}),
     ...(nodeRef.agent ? { nodeAgent: nodeRef.agent } : {}),
+    // ADR 1014 D3 — the version the pin recorded is the version that runs.
+    ...(pinHolder.pin ? { agentVersion: pinHolder.pin.version } : typeof nodeRef.agent?.version === 'string' ? { agentVersion: nodeRef.agent.version } : {}),
+    // ADR 1014 M6 — an unpinned agent's served version, resolved once per (run, agent).
+    pinServedAgent: async (agentId: string) => {
+      const known = pinHolder.served?.get(agentId);
+      if (known) return { ok: true as const, version: known.version };
+      const r = await pinServedAgent({ storage, run, nodeId: nodeRef.nodeId, agentId, execution: executionOrdinal ?? input.attempt ?? 1 });
+      if (!r.ok) return r;
+      if (!r.pin) return { ok: true as const };
+      (pinHolder.served ??= new Map()).set(agentId, r.pin);
+      return { ok: true as const, version: r.pin.version };
+    },
     configurable: run.configurable ?? {},
     // RFC trigger pack (`core.openwop.triggers`) — run-scoped trigger payload.
     // Captured at run start and identical for every node (replay-safe). A
@@ -924,6 +979,7 @@ async function runOneNode(input: {
     // suspended outcome); on a re-invoke resume the seeded resolution is returned.
     interrupt: suspendFn,
     suspend: suspendFn,
+    markUntrustedContext: () => markRunUntrustedContext(storage, run.runId),
     storage: surfaces.storage,
     db: surfaces.db,
     fs: surfaces.fs,
@@ -1310,6 +1366,12 @@ async function runOneNode(input: {
   } finally {
     span.end();
   }
+  // ADR 1013 D2 — the one form check, past every way a node suspends (a returned
+  // outcome, `ctx.suspend`, a pack worker). A refused form raises no interrupt.
+  if (outcome.status === 'suspended' && outcome.interrupt.kind === 'clarification') {
+    const defect = interruptFormDefect(outcome.interrupt.data);
+    if (defect) outcome = { status: 'failure', error: { code: 'interrupt_form_invalid', message: defect } };
+  }
   // ADR 0556 P1 — step latency. Measured across the guard-wrapped execution
   // only, so the replay-divergence work below (which can issue a storage read)
   // is not charged to the node. `replayed` separates a re-execution from live
@@ -1440,7 +1502,7 @@ async function runOneNode(input: {
           },
         }),
       });
-      closeExecution();
+      closeExecution('failed');
       return {
         kind: 'failure',
         error: {
@@ -1459,7 +1521,7 @@ async function runOneNode(input: {
       // ADR 0936 — a declared data port keeps its text (Tier 1 known-secret scrub only).
       payload: { nodeId: nodeRef.nodeId, outputs: stripSecretsKeepingData(outcome.outputs, module?.dataFields?.outputs) },
     });
-    closeExecution();
+    closeExecution('completed');
     // Normalize outputs to a Record<string, unknown> for the snapshot.
     const outputsObj =
       outcome.outputs && typeof outcome.outputs === 'object' && !Array.isArray(outcome.outputs)
@@ -1510,7 +1572,7 @@ async function runOneNode(input: {
           type: 'node.failed',
           payload: stripSecretsFromPersisted({ nodeId: nodeRef.nodeId, error: overriddenError }),
         });
-        closeExecution();
+        closeExecution('failed');
         return { kind: 'failure', error: overriddenError };
       }
     }
@@ -1528,7 +1590,7 @@ async function runOneNode(input: {
       type: 'node.failed',
       payload: stripSecretsFromPersisted({ nodeId: nodeRef.nodeId, error: outcome.error }),
     });
-    closeExecution();
+    closeExecution('failed');
     return {
       kind: 'failure',
       error: outcome.error,
@@ -2531,7 +2593,7 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
       // handler from the top) would allocate ordinal 1 for the effect it had
       // already performed as ordinal 0, mint a fresh identity, and fire it a
       // second time.
-      beginNodeActivity(run.runId, nodeId, nodeAttempts.get(nodeId) ?? 1);
+      beginNodeActivity(run.runId, nodeId, nodeAttempts.get(nodeId) ?? 1, ordinals?.visitOf(nodeId) ?? 0);
       const inputsByPort = buildNodeInputs(nodeId, graph, snapshot, run.inputs);
       const out = await runOneNode({
         storage,
@@ -2545,6 +2607,21 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
         ...(ordinals ? { ordinals } : {}),
         ...(options.policyResolver ? { policyResolver: options.policyResolver } : {}),
         ...(reinvokeResolutions.has(nodeId) ? { suspendResolution: reinvokeResolutions.get(nodeId)! } : {}),
+        // ADR 1001 D3.2 — this run's own resolved rows only, scrubbed exactly
+        // like a seeded resume (and unwrapped when a replay fork derived them).
+        durableLookup: async (resumeKey) => {
+          const row = await storage.getResolvedInterruptByKey(run.runId, nodeId, resumeKey);
+          // ADR 1001 D3.5 — a replay fork re-executing this node may also be
+          // served an answer its PARENT recorded inside the copied prefix (the
+          // request and resolution are already in the fork's own log). An
+          // answer recorded after the cut is never served inline: the node
+          // suspends and the branch below derives it, so the logs match.
+          const value = row
+            ? row.resolvedValue
+            : await parentResolutionForKey({ storage, run, nodeId, resumeKey }).then((p) => (p?.inPrefix ? p.row.resolvedValue : undefined));
+          if (value === undefined) return null;
+          return { value: scrubResumeValue(unwrapDerived(value), await resumeDataFieldsOf(definition, nodeId)) };
+        },
       });
       if (out.kind === 'success') {
         markCompleted(nodeId, out.outputs, snapshot);
@@ -2686,9 +2763,14 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
           data: interruptData,
           resumeSchema: out.interrupt.resumeSchema,
         });
+        // ADR 1001 — RFC 0021 §Run event log integration: events an accepted
+        // envelope causes carry `causationId = envelope.correlationId`.
+        const envelopeCausation = (interruptData as { __causationId?: unknown } | null | undefined)?.__causationId;
+        const causation = typeof envelopeCausation === 'string' && envelopeCausation ? { causationId: envelopeCausation } : {};
         await eventLog.append({
           runId: run.runId,
           nodeId,
+          ...causation,
           type: 'node.suspended',
           // ADR 0725 — `reason` is a seated field on `nodeSuspended` (RFC 0186):
           // carried from the interrupt data when the node named one (the
@@ -2733,6 +2815,7 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
         await eventLog.append({
           runId: run.runId,
           nodeId,
+          ...causation,
           type: 'interrupt.requested',
           payload: stripSecretsFromPersisted(buildInterruptRequestedPayload({
             runId: run.runId,
@@ -2743,6 +2826,42 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
             ...(preview ? { preview: { artifactId: preview.artifactId, artifactType: GATE_PREVIEW_ARTIFACT_TYPE } } : {}),
           })),
         });
+        // ADR 1001 D3.5 — a REPLAY fork that re-executed this node and reached a
+        // `durable` suspend the source answered AFTER the cut takes the source's
+        // answer (a replay never re-decides, RFC 0223): the fork's own row is
+        // resolved with a DERIVED value, `interrupt.resolved` is recorded as the
+        // source recorded it, and the node re-enters exactly as on a live answer.
+        const sdata = (interruptData ?? {}) as { __durable?: unknown; __resumeKey?: unknown; profile?: unknown };
+        if (run.forkMode === 'replay' && run.parentRunId && sdata.__durable === true && typeof sdata.__resumeKey === 'string') {
+          const resumeKey = sdata.__resumeKey;
+          const p = await parentResolutionForKey({ storage, run, nodeId, resumeKey });
+          if (p && !p.inPrefix) {
+            const recorded = unwrapDerived(p.row.resolvedValue);
+            const won = await storage.resolveInterrupt(interrupt.interruptId, derivedResolvedValue(run.parentRunId, recorded), new Date().toISOString());
+            if (won) {
+              await eventLog.append({ runId: run.runId, nodeId, type: 'interrupt.resolved', payload: { ...(p.resolvedPayload ?? { kind: interrupt.kind }), interruptId: interrupt.interruptId } });
+              reinvokeResolutions.set(nodeId, { resumeKey, value: scrubResumeValue(recorded, await resumeDataFieldsOf(definition, nodeId)) });
+              snapshot.nodeState.set(nodeId, 'ready');
+              log.info('fork_clarification_derived_from_source', { runId: run.runId, parentRunId: run.parentRunId, nodeId, resumeKey });
+              return;
+            }
+          } else if (!p && sdata.profile === AGENT_CLARIFICATION_PROFILE) {
+            // The source has no answer to THIS question: it never asked it (the
+            // replay diverged), or it is still waiting there. Either way a replay
+            // has no recorded decision to take, and a person must not be asked
+            // (nor the expiry sweep answer) on a replay: fail closed.
+            const open = await storage.getInterruptByNode(run.parentRunId, nodeId);
+            const askedInSource = (open?.data as { __resumeKey?: unknown } | undefined)?.__resumeKey === resumeKey;
+            const error = askedInSource
+              ? { code: 'replay_source_unanswered', message: `Replay fork: node '${nodeId}' reached a clarification the source run has not answered yet, so there is no recorded answer to replay.` }
+              : { code: 'replay_diverged_at_clarification', message: `Replay fork: node '${nodeId}' asked a clarification the source never asked, so there is no recorded answer and a replay does not ask a person.` };
+            await storage.resolveInterrupt(interrupt.interruptId, derivedResolvedValue(run.parentRunId, null), new Date().toISOString());
+            markFailed(nodeId, error, snapshot);
+            await eventLog.append({ runId: run.runId, nodeId, type: 'node.failed', payload: { nodeId, error: { ...error, retryable: false } } });
+            releaseDownstream(nodeId, graph, snapshot);
+            return;
+          }
+        }
         suspendedKinds.set(nodeId, out.interrupt.kind);
         markSuspended(nodeId, snapshot);
       }
@@ -3223,10 +3342,22 @@ async function finalizeRun(input: {
   }
   if (disposition.status === 'failed') {
     const failedNodeId = disposition.failedNodeId;
-    const err = (failedNodeId ? snapshot.nodeErrors.get(failedNodeId) : undefined) ?? {
-      code: 'internal_error',
-      message: 'unknown node failure',
-    };
+    const skippedTerminals = disposition.skippedTerminals;
+    const err = (failedNodeId ? snapshot.nodeErrors.get(failedNodeId) : undefined) ?? (skippedTerminals && skippedTerminals.length > 0
+      // CS70WF-38 — every final step was skipped by its conditions, so nothing
+      // ran to completion. A host code (open on the v1 wire; on major 2 the
+      // emitter namespaces it to the registered vendor org,
+      // `openwop-app.all_terminals_skipped`, `middleware/protocolVersion.ts`
+      // `v2EventErrorCode`). It used to be internal_error "unknown node failure".
+      ? {
+        code: 'all_terminals_skipped',
+        message: `Every final step of this workflow was skipped by its conditions, so none of them ran (${skippedTerminals.join(', ')}).`,
+        details: { skippedTerminals },
+      }
+      : {
+        code: 'internal_error',
+        message: 'unknown node failure',
+      });
     // ADR 0554 P2 — the run failed AFTER committing effects, so unwind what it
     // owes BEFORE the terminal event. `observability.md` §"Terminal events"
     // requires `run.failed` to be the LAST event in the stream, and it is also

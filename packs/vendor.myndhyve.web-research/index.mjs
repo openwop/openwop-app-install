@@ -1,21 +1,16 @@
 /**
- * vendor.myndhyve.web-research — search → fetch → research → synthesize pipeline.
+ * vendor.myndhyve.web-research — search → fetch → research pipeline.
  *
- * Four nodes, two host capabilities:
- *   - host.webResearch (search + fetch + research orchestration)
- *   - host.aiEnvelope  (synthesis — reuses the same primitive as
- *                       vendor.myndhyve.ai for envelope generation)
+ * Three nodes on one host capability: host.webResearch (search, fetch and
+ * research orchestration).
  *
  * typeId-preserve: matches in-tree names verbatim per migration plan §4
  *   data.source.webSearch
  *   data.transform.fetchUrls
  *   ai.research.web
- *   ai.process.synthesize
  *
  * @see docs/plans/MYNDHYVE-TO-OPENWOP-PACK-MIGRATION.md
  */
-
-import { createHash } from 'node:crypto';
 
 function ensureWebResearch(ctx) {
   if (!ctx.webResearch || typeof ctx.webResearch.search !== 'function') {
@@ -24,26 +19,6 @@ function ensureWebResearch(ctx) {
       { code: 'host_capability_missing' }
     );
   }
-}
-
-function ensureAiEnvelope(ctx) {
-  if (!ctx.aiEnvelope || typeof ctx.aiEnvelope.generate !== 'function') {
-    throw Object.assign(
-      new Error('host does not expose ctx.aiEnvelope'),
-      { code: 'host_capability_missing' }
-    );
-  }
-}
-
-function deriveIdempotencyKey(parts) {
-  const h = createHash('sha256');
-  for (const p of parts) {
-    if (p === undefined || p === null) h.update('\0');
-    else if (typeof p === 'string') h.update(p, 'utf8');
-    else h.update(JSON.stringify(p), 'utf8');
-    h.update('\x1e');
-  }
-  return 'openwop-' + h.digest('hex').slice(0, 16);
 }
 
 /* ─── core.webResearch.webSearch ─────────────────────────── */
@@ -138,47 +113,10 @@ export async function researchWeb(ctx) {
 
 /* ─── core.webResearch.synthesize ────────────────────────── */
 
-export async function synthesize(ctx) {
-  ensureAiEnvelope(ctx);
-  const { envelopeType, systemPrompt, model, temperature } = ctx.config;
-  const { citations, variables } = ctx.inputs;
-
-  const idempotencyKey = deriveIdempotencyKey([
-    String(ctx.runId), String(ctx.nodeId),
-    envelopeType, systemPrompt, citations, variables ?? null,
-  ]);
-
-  // Pass citations as context to the host's AI envelope adapter.
-  // The host's prompt-rendering layer typically injects citation
-  // content + URLs into the LLM message turn.
-  const result = await ctx.aiEnvelope.generate({
-    systemPrompt,
-    envelopeType,
-    ...(model !== undefined ? { model } : {}),
-    ...(temperature !== undefined ? { temperature } : {}),
-    context: { citations },
-    ...(variables !== undefined ? { variables } : {}),
-    idempotencyKey,
-  });
-
-  return {
-    status: 'success',
-    outputs: {
-      envelopeType: result?.envelopeType ?? envelopeType,
-      payload: result?.payload ?? null,
-      ...(result?.envelopeId ? { envelopeId: result.envelopeId } : {}),
-      sourceUrls: citations.map((c) => c.url),
-      ...(result?.usage ? { usage: result.usage } : {}),
-      ...(result?.model ? { model: result.model } : {}),
-    },
-  };
-}
-
 export const nodes = {
   'data.source.webSearch': webSearch,
   'data.transform.fetchUrls': fetchUrls,
   'ai.research.web': researchWeb,
-  'ai.process.synthesize': synthesize,
 };
 
 export default nodes;

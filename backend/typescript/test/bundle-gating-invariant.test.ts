@@ -47,6 +47,10 @@
  * happened twice (a feature hand-rolling a toggle gate and thereby skipping the
  * entitlement choke). It is not a proof of universal gating, and the route-level
  * cases in `entitlement-central-gate.test.ts` are what actually prove enforcement.
+ *
+ * TST-BBG-1 (w66 g4, sabotage-witnessed). Red when: `parseBundlePriceMap` stops
+ * dropping prices for unknown bundle ids (phantom or core); a core feature is
+ * listed in a bundle.
  */
 
 import { afterEach, describe, expect, it } from 'vitest';

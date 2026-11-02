@@ -4,6 +4,13 @@
  * decisions`) reads `listGovernanceDecisions(tenantId, { kind: 'firewall' })`; this pins
  * that (a) only firewall-kind decisions come back when scoped, and (b) a decision from
  * another tenant never leaks (the audit store is global; the payload tenantId filters).
+ *
+ * The tenant filter is also asserted by `test/cdp-governance-decisions.test.ts` ('records
+ * + queries decisions, tenant-filtered'); both protected, kept. The kind filter is only here.
+ *
+ * Red when (w74g4-gov-* probes, wave 74): the kind is dropped from the action prefix; the
+ * payload tenantId filter is skipped; the decision `detail` or the `reason` is not written
+ * into the payload.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { initHostExtPersistence } from '../hostExtPersistence.js';
@@ -25,10 +32,13 @@ beforeAll(async () => {
 describe('governance decision log — kind filter (ADR 0397 P1)', () => {
   it('kind:firewall returns only firewall decisions for the tenant', async () => {
     const rows = await listGovernanceDecisions(A, { kind: 'firewall' });
-    expect(rows.length).toBe(1);
-    expect(rows[0]?.action).toBe('governance.decision.firewall');
-    expect((rows[0]?.payload as { decision?: string }).decision).toBe('require-approval');
-    expect((rows[0]?.payload as { ruleId?: string }).ruleId).toBe('read-then-egress');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      action: 'governance.decision.firewall',
+      outcome: 'deny',
+      resource: 'conv-1',
+      payload: { tenantId: A, reason: 'read-then-egress', toolName: 'openwop:core.openwop.http.fetch', decision: 'require-approval', ruleId: 'read-then-egress' },
+    });
   });
 
   it('no kind returns all governance decisions for the tenant (unchanged behavior)', async () => {
@@ -38,10 +48,12 @@ describe('governance decision log — kind filter (ADR 0397 P1)', () => {
   });
 
   it('does NOT leak another tenant\'s firewall decisions', async () => {
+    // Exactly A's own firewall row (non-empty, so this cannot pass on an empty list).
     const rows = await listGovernanceDecisions(A, { kind: 'firewall' });
-    expect(rows.every((r) => (r.payload as { tenantId?: string }).tenantId === A)).toBe(true);
+    expect(rows.map((r) => r.payload)).toEqual([expect.objectContaining({ tenantId: A, reason: 'read-then-egress' })]);
+    // Positive control: B's row exists and is B's own.
     const bRows = await listGovernanceDecisions(B, { kind: 'firewall' });
-    expect(bRows.length).toBe(1);
-    expect((bRows[0]?.payload as { reason?: string }).reason).toBe('other tenant');
+    expect(bRows).toHaveLength(1);
+    expect(bRows[0]).toMatchObject({ payload: { tenantId: B, reason: 'other tenant' } });
   });
 });

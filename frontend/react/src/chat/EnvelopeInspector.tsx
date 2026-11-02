@@ -63,10 +63,9 @@ export function EnvelopeInspector({ message }: Props): JSX.Element | null {
 
   const rows: Array<{ kind: string; at?: string; detail: string }> = [];
 
-  // Synthetic agent.message row — every assistant turn emits one. The
-  // backend's envelopeProjection assembles it from streaming deltas;
-  // here we project from final meta so the user sees the wire-shape
-  // anchor even when no exceptional events fired.
+  // Synthetic agent.message row — every assistant turn emits one. Projected
+  // from final meta so the user sees the wire-shape anchor even when no
+  // exceptional events fired.
   if (message.meta) {
     const detail: string[] = [];
     if (message.meta.provider && message.meta.model) {

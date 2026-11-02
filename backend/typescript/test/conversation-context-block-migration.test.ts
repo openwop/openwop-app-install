@@ -6,6 +6,10 @@
  * silently drop the snapshot on board conversations created before the rename.
  * `getConversationMeta` normalizes the legacy key on read; these tests lock that
  * migration safety in.
+ *
+ * TST-CKB-1. Red when: the legacy key is no longer mapped (case 1), or the legacy
+ * key overrides a CURRENT block (case 2 — the record carries both keys, so the
+ * `injectedContextBlock === undefined` precedence guard is exercised).
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
@@ -33,11 +37,14 @@ describe('ConversationMeta injected-context-block migration', () => {
     expect(read?.injectedContextBlock).toBe('STRATEGIC CONTEXT (legacy snapshot)');
   });
 
-  it('reads a current `injectedContextBlock` snapshot unchanged', async () => {
-    const current = new DurableCollection<ConversationMeta>('chat:conversation', key);
+  it('reads a current `injectedContextBlock` snapshot unchanged (it wins over a legacy key)', async () => {
+    // Both keys present (a record re-saved after the rename that still carries the
+    // legacy field): the CURRENT block must win.
+    const current = new DurableCollection<ConversationMeta & { strategyContext?: string }>('chat:conversation', key);
     await current.put({
       conversationId: 'conv-new', tenantId: 't1', type: 'group', boardId: 'host:advisory:founders',
       participants: [], createdAt: TS, updatedAt: TS, injectedContextBlock: 'NEW BLOCK',
+      strategyContext: 'OLD LEGACY SNAPSHOT',
     });
 
     const read = await getConversationMeta('t1', 'conv-new');

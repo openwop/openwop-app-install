@@ -1,7 +1,10 @@
 /**
  * Campaign Intelligence workflow surface (ADR 0160 / ADR 0014) —
- * `ctx.features['campaign-intel']`. Tenant-trusted budget + forecast reads the
- * intel nodes call. Composes the performance store (ADR 0159).
+ * `ctx.features['campaign-intel']`. The budget, forecast, attribution and
+ * pacing reads the intel nodes call, and the writes (pacing alerts, caps,
+ * reallocation). Composes the performance store (ADR 0159). ADR 1022 D3: every
+ * read needs an org (the performance store refuses ''); D4: writes ask
+ * `workspace:write` through the ADR 0832 floor (`CAMPAIGN_INTEL_SURFACE_POLICY`).
  *
  * @see docs/adr/0160-campaign-studio-intelligence.md
  */
@@ -23,6 +26,15 @@ import { resolveOne } from '../../host/featureToggles/service.js';
 import { hostExtStorage } from '../../host/hostExtPersistence.js';
 import { makeAdsAdapter } from '../../host/adsAdapter.js';
 import { assertOrgScope, assertRunScopeOrg } from '../../host/accessControlService.js';
+
+/** ADR 1022 D4 — the floor asks what the routes ask: a pacing check claims the
+ *  alert memo and notifies; the cap and reallocation calls pause or move spend. */
+export const CAMPAIGN_INTEL_SURFACE_POLICY = {
+  methodScopes: {
+    pacingCheck: 'workspace:write', enforceCaps: 'workspace:write',
+    proposeReallocation: 'workspace:write', applyReallocation: 'workspace:write',
+  },
+} as const;
 
 export function buildCampaignIntelSurface(scope: BundleScope): FeatureSurface {
   const tenantId = scope.tenantId;
@@ -50,7 +62,7 @@ export function buildCampaignIntelSurface(scope: BundleScope): FeatureSurface {
         }
         return Math.floor(x);
       };
-      const records = await listRecords(tenantId, String(args.orgId ?? ''));
+      const records = await listRecords(tenantId, str(args.orgId));
       const plan = planBudget(records, {
         totalBudgetMinor: n(args.totalBudgetMinor, 'totalBudgetMinor'),
         targetConversions: n(args.targetConversions, 'targetConversions'),
@@ -62,7 +74,7 @@ export function buildCampaignIntelSurface(scope: BundleScope): FeatureSurface {
     anomalies: async (args) => {
       const { listRecords } = await import('../campaign-connectors/performanceService.js');
       const { detectAnomalies } = await import('./budgetPlanner.js');
-      return { anomalies: detectAnomalies(await listRecords(tenantId, String(args.orgId ?? ''))) };
+      return { anomalies: detectAnomalies(await listRecords(tenantId, str(args.orgId))) };
     },
     optimizeBudget: async (args) => {
       const records = await listRecords(tenantId, str(args.orgId), optStr(args.campaignId));

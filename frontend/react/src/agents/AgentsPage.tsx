@@ -150,7 +150,7 @@ export function AgentsPage(): JSX.Element {
       <PageHeader
         eyebrow={t('templatesEyebrow')}
         title={t('templatesTitle')}
-        lede={<Trans t={t} i18nKey="templatesLede" components={{ 0: <Link to="/agents" />, 1: <code /> }} />}
+        lede={<Trans t={t} i18nKey="templatesLede" components={[<Link to="/agents" />, <code />]} />}
         actions={
           <>
             <Button variant="secondary" onClick={() => navigate('/agents/install')}>
@@ -225,7 +225,7 @@ export function AgentsPage(): JSX.Element {
             <Notice variant="info">
               <span className="u-flex u-gap-2 u-items-center">
                 <SearchIcon size={15} aria-hidden />
-                <Trans t={t} i18nKey="templatesNoMatchQuery" values={{ query }} components={{ 0: <code /> }} />
+                <Trans t={t} i18nKey="templatesNoMatchQuery" values={{ query }} components={[<code />]} />
               </span>
             </Notice>
           ) : view === 'grid' ? (

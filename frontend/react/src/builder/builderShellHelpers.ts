@@ -66,9 +66,7 @@ export function drawerEscapeHandler(close: () => void) {
 /** Host-advertised engine limits from `capabilities.limits` (RFC 0009 +
  *  RFC 0058). Optional fields are absent when the host doesn't advertise. */
 export interface HostLimits {
-  envelopesPerTurn?: number;
   clarificationRounds?: number;
-  schemaRounds?: number;
   maxNodeExecutions?: number;
   maxRunDurationMs?: number;
   maxLoopIterations?: number;

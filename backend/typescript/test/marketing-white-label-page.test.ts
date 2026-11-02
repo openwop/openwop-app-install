@@ -9,13 +9,16 @@
  *   claim gate, applied to the app's own seeded copy);
  * - on the demo deployment the page is published, carries two `video`
  *   sections, and the crawler render emits a <figure> + a VideoObject per film;
- * - off the demo deployment it is never seeded (ADR 0196 Gate A).
+ * - off the demo deployment it is never seeded (ADR 0196 Gate A) — asserted in
+ *   marketing-content-pages.test.ts › "appears in the public nav list", which
+ *   boots a non-demo host.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { validateSections } from '../src/features/cms/cmsService.js';
-import { MARKETING_CONTENT_PAGE_SPECS } from '../src/host/marketingContentPages.js';
+import { MARKETING_CONTENT_PAGE_SPECS, ensureMarketingContentPages } from '../src/host/marketingContentPages.js';
+import { createApp } from '../src/index.js';
 import { SYSTEM_SITE_PAGE_SEO } from '../src/host/systemSiteSeo.js';
 
 const GATED = /industry standard|independently validated|best-in-class|fully conformant|vendor-neutral standard|open standard/i;
@@ -76,10 +79,8 @@ describe('white-label page — seeded on the demo deployment', () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
     process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
     process.env.OPENWOP_DEMO_MODE = 'true';
-    const { createApp } = await import('../src/index.js');
     const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
     await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { PORT = (server.address() as AddressInfo).port; res(); }); });
-    const { ensureMarketingContentPages } = await import('../src/host/marketingContentPages.js');
     await ensureMarketingContentPages();
   });
   afterAll(async () => {
@@ -96,13 +97,19 @@ describe('white-label page — seeded on the demo deployment', () => {
   });
 
   it('the crawler render emits a <figure> and a VideoObject per film', async () => {
+    const prior = process.env.OPENWOP_PUBLIC_SITE_ORG_ID;
     process.env.OPENWOP_PUBLIC_SITE_ORG_ID = 'host-site';
-    const res = await rawGet('/p/white-label', { 'user-agent': 'GPTBot/1.0' });
-    expect(res.status).toBe(200);
-    expect(res.body.match(/<figure>/g)?.length).toBe(2);
-    expect(res.body).toContain('openwop-companies-poster.jpg');
-    expect(res.body).toContain('Watch on YouTube');
-    const ld = [...res.body.matchAll(/<script type="application\/ld\+json">(.*?)<\/script>/g)].map((m) => JSON.parse(m[1]!) as { '@type': string; duration?: string });
-    expect(ld.filter((b) => b['@type'] === 'VideoObject').map((b) => b.duration)).toEqual(['PT1M57S', 'PT1M15S']);
+    try {
+      const res = await rawGet('/p/white-label', { 'user-agent': 'GPTBot/1.0' });
+      expect(res.status).toBe(200);
+      expect(res.body.match(/<figure>/g)?.length).toBe(2);
+      expect(res.body).toContain('openwop-companies-poster.jpg');
+      expect(res.body).toContain('Watch on YouTube');
+      const ld = [...res.body.matchAll(/<script type="application\/ld\+json">(.*?)<\/script>/g)].map((m) => JSON.parse(m[1]!) as { '@type': string; duration?: string });
+      expect(ld.filter((b) => b['@type'] === 'VideoObject').map((b) => b.duration)).toEqual(['PT1M57S', 'PT1M15S']);
+    } finally {
+      if (prior === undefined) delete process.env.OPENWOP_PUBLIC_SITE_ORG_ID;
+      else process.env.OPENWOP_PUBLIC_SITE_ORG_ID = prior;
+    }
   });
 });

@@ -13,6 +13,10 @@
  * then the behavioral seam was unwired. Each fix moved the soft-skip one gate
  * later; only the third exposed the defect. The conformance suite is NOT in the
  * default `npm run ci` gate, so without this test the fix has no ratchet.
+ *
+ * TST-BZD-21 (grade-tests w66). Red when schemaRef resolution is skipped, the pack-dir
+ * escape check is dropped, or `displayName`/`exportFormats` stop being read or win over the
+ * host dialect.
  */
 import { describe, expect, it, beforeEach } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';

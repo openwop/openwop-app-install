@@ -115,7 +115,7 @@ export async function openConversation(input: {
  *  event on the run's stream. `exchangeKey` (ADR 0067 §Phase 2) is a stable
  *  per-attempt idempotency key: replaying it (double-submit, retry) returns the
  *  already-appended turns instead of duplicating them. */
-export async function exchange(runId: string, nodeId: string, input: { content: unknown; to?: string; exchangeKey?: string; webSearch?: boolean; model?: string; provider?: string; permissionMode?: 'safe' | 'bypass' }): Promise<ExchangeResult> {
+export async function exchange(runId: string, nodeId: string, input: { content: unknown; to?: string; exchangeKey?: string; webSearch?: boolean; model?: string; provider?: string; permissionMode?: 'safe' | 'bypass'; clarificationAnswer?: { askId: string; answers: unknown } }): Promise<ExchangeResult> {
   const res = await resolveByRun(runId, nodeId, {
     operation: 'exchange',
     turn: { content: input.content, ...(input.to ? { to: input.to } : {}) },
@@ -131,6 +131,8 @@ export async function exchange(runId: string, nodeId: string, input: { content: 
     // Per-exchange permission mode (ADR 0150) — the composer Safe/Bypass switch sends the
     // mode for THIS turn; `bypass` lets the agent act without an approval card.
     ...(input.permissionMode ? { permissionMode: input.permissionMode } : {}),
+    // ADR 1001 D7 — an answer to the agent's question card.
+    ...(input.clarificationAnswer ? { clarificationAnswer: input.clarificationAnswer } : {}),
   });
   const notice = exchangeNoticeOf(res);
   return notice ? { notice } : {};

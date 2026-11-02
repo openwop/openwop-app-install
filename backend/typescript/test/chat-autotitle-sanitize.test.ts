@@ -28,6 +28,10 @@ vi.mock('../src/providers/managedProvider.js', async (importOriginal) => {
 
 import { generateTitle, sanitizeTitle } from '../src/features/chat-autotitle/titleGenerator.js';
 
+/** ADR 1019 D3 — a conversation the managed tier served (the title rides its ladder). */
+const managedConv = (tenantId: string) => ({ tenantId, credentialRef: 'managed:openwop-free', served: { provider: 'openwop-free', model: 'openwop-free', managed: true as const } });
+
+
 describe('ADR 0151 — sanitizeTitle', () => {
   it('returns a clean short title unchanged', () => {
     expect(sanitizeTitle('Refactor the auth middleware')).toBe('Refactor the auth middleware');
@@ -69,8 +73,8 @@ describe('ADR 0151 — sanitizeTitle', () => {
 describe('ADR 0151 — generateTitle sanitizes the model completion (wiring)', () => {
   it('a chatty, quoted completion comes back cleaned; a sentinel comes back null', async () => {
     managed.completion = 'Title: "Plan\n the   migration"';
-    expect(await generateTitle('user:t', 'plan the migration', 'sure')).toBe('Plan the migration');
+    expect(await generateTitle(managedConv('user:t'), 'plan the migration', 'sure')).toBe('Plan the migration');
     managed.completion = 'NONE';
-    expect(await generateTitle('user:t', 'x', 'y')).toBeNull();
+    expect(await generateTitle(managedConv('user:t'), 'x', 'y')).toBeNull();
   });
 });

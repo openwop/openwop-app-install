@@ -82,14 +82,14 @@ function LinkAccountBody(props: {
               providers: pendingLink.existingProviders.map(providerLabel).join(` ${t('or')} `),
               attempted,
             }}
-            components={{ 0: <strong /> }}
+            components={[<strong />]}
           />
         ) : (
           <Trans
             t={t}
             i18nKey="alreadySignedUpUnknown"
             values={{ email: pendingLink.email, attempted }}
-            components={{ 0: <strong /> }}
+            components={[<strong />]}
           />
         )}
       </p>
@@ -168,7 +168,7 @@ export function SignInDialog(props: {
       ) : (
         <>
           <h3 className="signin-modal-title">
-            <Trans t={t} i18nKey={demo ? 'signInToSaveTitle' : 'signInIdentityTitle'} components={{ 0: <em /> }} />
+            <Trans t={t} i18nKey={demo ? 'signInToSaveTitle' : 'signInIdentityTitle'} components={[<em />]} />
           </h3>
           <p className="signin-modal-lede muted">
             {t(demo ? 'signInToSaveLede' : 'signInIdentityLede')}
@@ -204,7 +204,7 @@ export function DeleteAccountDialog(props: { email: string; onClose: () => void 
     >
       <h3 className="signin-modal-title">{t('deleteAccountTitle')}</h3>
       <p>
-        <Trans t={t} i18nKey="deleteAccountBody" values={{ email: props.email }} components={{ 0: <strong /> }} />
+        <Trans t={t} i18nKey="deleteAccountBody" values={{ email: props.email }} components={[<strong />]} />
       </p>
       {deleteError ? <Notice variant="error" announce={deleteError}>{deleteError}</Notice> : null}
       <div className="button-row">

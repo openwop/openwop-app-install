@@ -4,10 +4,22 @@
  * With `OPENWOP_CUSTOM_DOMAIN_EDGE_SA` set, every Certificate Manager call
  * carries a token minted for that account through IAM Credentials
  * `generateAccessToken` (using the runtime token), cached until a minute before
- * it expires. Unset, the runtime token is used as before.
+ * it expires. Unset, the runtime token is used as before. TST-CWF-3.
+ *
+ * Red when (sabotage-witnessed, wave 69): the provider ignores `impersonate` or
+ * mints with the wrong scope (case 1); the token is never cached, or is cached
+ * up to its real expiry instead of a minute before (case 2 — its second read
+ * falls INSIDE that last minute); a refused mint stops invalidating the runtime
+ * token (case 3); a malformed SA email is accepted (config case 2).
+ *
+ * CEILING (recorded): config case 1 shows the SA reaches `loadEdgeConfig` and
+ * that `resolveEdgeProvider` builds the GCP provider. That the built provider
+ * then impersonates is not observable here — it is built with the real egress
+ * fetch and no injection point — so that wiring (`edgeCertificates/index.ts`)
+ * is covered by reading only; case 1 covers the provider-level wiring.
  */
 import { describe, expect, it } from 'vitest';
-import { IAM_CREDENTIALS, createGcpCertificateManagerProvider, impersonatedMetadata, type EdgeMetadata } from '../src/host/edgeCertificates/gcpCertificateManager.js';
+import { EdgeProviderError, IAM_CREDENTIALS, createGcpCertificateManagerProvider, impersonatedMetadata, type EdgeMetadata } from '../src/host/edgeCertificates/gcpCertificateManager.js';
 import { loadEdgeConfig } from '../src/host/edgeCertificates/config.js';
 import { resolveEdgeProvider } from '../src/host/edgeCertificates/index.js';
 
@@ -54,9 +66,9 @@ describe('impersonation', () => {
     let now = Date.parse('2026-10-18T12:00:00Z');
     const m = impersonatedMetadata(runtime(), SA, g.fetch, () => now);
     expect(await m.accessToken()).toBe('sa-tok-1');
-    now += 58 * 60_000;
+    now += 58 * 60_000; // 12:58 — two minutes before expiry: cached
     expect(await m.accessToken()).toBe('sa-tok-1');
-    now += 2 * 60_000;
+    now += 90_000; // 12:59:30 — inside the last minute: re-minted, never served stale
     expect(await m.accessToken()).toBe('sa-tok-2');
   });
 
@@ -64,7 +76,10 @@ describe('impersonation', () => {
     const g = fakeGoogle({ iamStatus: 403 });
     const rt = runtime();
     const m = impersonatedMetadata(rt, SA, g.fetch);
-    await expect(m.accessToken()).rejects.toThrow(/serviceAccountTokenCreator/);
+    const err = await m.accessToken().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(EdgeProviderError);
+    expect((err as EdgeProviderError).status).toBe(403);
+    expect((err as EdgeProviderError).message).toContain('serviceAccountTokenCreator');
     expect(rt.invalidated).toBe(1);
   });
 
@@ -79,7 +94,7 @@ describe('impersonation', () => {
 
 describe('configuration', () => {
   const base = { OPENWOP_CUSTOM_DOMAIN_EDGE: 'gcp-certificate-manager', OPENWOP_CUSTOM_DOMAIN_CERT_MAP: 'm1' };
-  it('a valid service-account email is carried into the provider config', () => {
+  it('a valid service-account email is carried into the provider config (and the GCP provider is built)', () => {
     expect(loadEdgeConfig({ ...base, OPENWOP_CUSTOM_DOMAIN_EDGE_SA: SA } as NodeJS.ProcessEnv)).toMatchObject({ ready: true, serviceAccount: SA });
     expect(resolveEdgeProvider(loadEdgeConfig({ ...base, OPENWOP_CUSTOM_DOMAIN_EDGE_SA: SA } as NodeJS.ProcessEnv))?.id).toBe('gcp-certificate-manager');
   });

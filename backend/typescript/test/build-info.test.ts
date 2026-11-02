@@ -8,6 +8,10 @@
  * confidently-wrong commit is strictly worse than no commit: it would restore
  * exactly the false assurance (asset hashes "matching" a clobbering deploy) that
  * made the 2026-08-03 double-clobber invisible for an hour.
+ *
+ * TST-BBI-3 (w66 g4, sabotage-witnessed). Red when: SHA_RE loses its anchors; an
+ * env stamp is ignored; `stamped` is true without a commit; an unparseable
+ * deployedAt becomes "now".
  */
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';

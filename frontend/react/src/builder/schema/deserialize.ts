@@ -49,6 +49,8 @@ interface CanonicalNode {
   compensation?: Record<string, unknown>;
   /** RFC 0151 §B UQ4 — "this effect has no inverse"; read back likewise. */
   irreversibleEffect?: boolean;
+  /** RFC 0082 §B (ADR 1005) — the node's agent binding; read back likewise. */
+  agent?: Record<string, unknown>;
 }
 
 interface CanonicalEdge {
@@ -199,6 +201,8 @@ export function fromCanonicalDefinition(input: unknown): DeserializeResult {
         : {}),
       // RFC 0151 §B UQ4 — read "no inverse" back.
       ...(typeof n.irreversibleEffect === 'boolean' ? { irreversibleEffect: n.irreversibleEffect } : {}),
+      // RFC 0082 §B (ADR 1005) — read the agent binding back.
+      ...(n.agent && typeof n.agent === 'object' && !Array.isArray(n.agent) ? { agent: { ...n.agent } } : {}),
     });
   });
 

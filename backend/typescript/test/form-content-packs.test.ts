@@ -10,6 +10,12 @@
  *   - `createForm` sanitizes at instantiation (it cannot know a pack shipped a
  *     hostile count, but it knows what a field may contain).
  * These test the loader half plus the wiring that guarantees the second half runs.
+ *
+ * Tracker TST-DCE-3. Red when the loader admits an `intakeBinding`, lets a second
+ * pack shadow a templateId (or refuses a pack's own reload), admits an
+ * out-of-catalog type or a non-boolean `required`, loses a field / template /
+ * label / template-label cap, admits a duplicate field id, stops clearing on
+ * reload, or processes a pack of another kind (grade-tests w70 probes `fcpk-*`).
  */
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -22,7 +28,7 @@ import {
   getFormTemplate,
   _resetFormContentRegistryForTest,
 } from '../src/host/formContentPackLoader.js';
-import { WIRE_TYPES, WIRE_TO_HOST } from '../src/host/formContentPackLoader.js';
+import { WIRE_TYPES } from '../src/host/formContentPackLoader.js';
 
 const dirs: string[] = [];
 function packRoot(manifest: unknown, packDir = 'test.forms'): string {
@@ -55,11 +61,14 @@ describe('ADR 0516 — form-content pack loader', () => {
   it('kind-filters: a pack of another kind is IGNORED, not an error', () => {
     // The whole no-RFC argument rests on this. An unrecognized kind must be skipped
     // silently — if it errored, a host would "fail" on packs meant for someone else.
+    // The foreign pack carries a VALID template, so a loader that stopped
+    // filtering by kind would register it — the filter is the only reason it is absent.
     const out = loadFormContentPacks({
-      roots: [packRoot({ name: 'x', version: '1.0.0', kind: 'canvas-content', kits: [] })],
+      roots: [packRoot({ name: 'x', version: '1.0.0', kind: 'canvas-content', kits: [], templates: [validTemplate()] })],
     });
     expect(out.errors).toEqual([]);
     expect(out.installed).toEqual([]);
+    expect(listFormTemplates()).toEqual([]);
   });
 
   it('REJECTS a template declaring an intakeBinding — invariant form-content-template-no-submission-routing', () => {
@@ -89,7 +98,7 @@ describe('ADR 0516 — form-content pack loader', () => {
     const t = getFormTemplate('vendor.test.form.one');
     expect(t?.category).toBe('list-1');
     // Registered with the hint, and with NO routing anywhere on it.
-    expect((t as unknown as Record<string, unknown>).intakeBinding).toBeUndefined();
+    expect(Object.keys(t ?? {})).not.toContain('intakeBinding');
   });
 
   it('caps fields per template — a hostile count cannot reach the public form page', () => {
@@ -191,8 +200,11 @@ describe('ADR 0516 — form-content pack loader', () => {
     }));
     const out = loadFormContentPacks({ roots: [packRoot(manifest([validTemplate({ fields })]))] });
     expect(out.errors).toEqual([]);
-    // Registered as HOST types — the loader translates at the boundary.
-    expect(getFormTemplate('vendor.test.form.one')?.fields.map((f) => f.type)).toEqual(WIRE_TYPES.map((t) => WIRE_TO_HOST[t]));
+    // Registered as HOST types — the loader translates at the boundary. Literal
+    // expectations (the RFC 0137 wire order), never the loader's own map.
+    expect(WIRE_TYPES).toEqual(['text', 'longtext', 'number', 'boolean', 'select', 'multiselect', 'file', 'artifact-ref']);
+    expect(getFormTemplate('vendor.test.form.one')?.fields.map((f) => f.type))
+      .toEqual(['text', 'textarea', 'number', 'checkbox', 'select', 'text', 'text', 'text']);
   });
 
   it('REFUSES a non-boolean `required` — the service reads it as false', () => {

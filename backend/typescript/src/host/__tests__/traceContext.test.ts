@@ -15,6 +15,18 @@
  *  - `traceContext` is in `RESERVED_RUN_METADATA_KEYS`, so a caller's value is
  *    stripped before the host's own stamp lands.
  *
+ * Double guard (recorded): a non-object `run.metadata.traceContext` is refused by the
+ * `typeof … !== 'object'` check AND by `ofValue` (a string destructures to
+ * `traceparent: undefined`), so a probe on the first alone stays green
+ * (w74g4-tr-nonobj, vacuous by design).
+ *
+ * Red when (w74g4-tr-* probes, wave 74): version ff, an all-zero trace id or span id, an
+ * uppercase value or a version-00 trailing field is accepted; a future version's appended
+ * field is refused; the header beats the in-message carrier; an over-long tracestate is
+ * carried; `childOf` reuses the parent span, changes the trace id or drops tracestate; a
+ * null context emits a header; an absent tracestate is emitted; the reserved key is read
+ * under another name; `traceContext` leaves RESERVED_RUN_METADATA_KEYS.
+ *
  * @see RFCS/0207-trace-context-across-mcp-and-a2a.md §A, §B
  */
 import { describe, it, expect } from 'vitest';
@@ -52,7 +64,7 @@ describe('parseTraceparent (W3C §3.2.2)', () => {
     expect(parseTraceparent(`${TP}-extra`)).toBeNull();
   });
   it('accepts a FUTURE version that appends a field (forward compatibility)', () => {
-    expect(parseTraceparent(`01-${TRACE}-${SPAN}-01-future`)).not.toBeNull();
+    expect(parseTraceparent(`01-${TRACE}-${SPAN}-01-future`)).toEqual({ traceId: TRACE, parentId: SPAN, flags: '01' });
   });
 });
 
@@ -83,6 +95,7 @@ describe('childOf', () => {
     expect(p?.traceId).toBe(TRACE);
     expect(p?.flags).toBe('01');
     expect(p?.parentId).not.toBe(SPAN);
+    expect(p?.parentId).toMatch(/^[0-9a-f]{16}$/);
   });
   it('gives two concurrent outbound calls distinguishable span ids', () => {
     const a = childOf({ traceparent: TP });

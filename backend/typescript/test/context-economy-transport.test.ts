@@ -36,6 +36,12 @@ describe('acceptsGzip', () => {
     expect(acceptsGzip('deflate, br')).toBe(false);
     expect(acceptsGzip('gzip;q=0')).toBe(false);
   });
+  // ADR 1003 D6 — the most specific entry wins, whatever its position.
+  it('an explicit gzip entry beats the wildcard in both directions', () => {
+    expect(acceptsGzip('*;q=0, gzip')).toBe(true);
+    expect(acceptsGzip('gzip;q=0, *')).toBe(false);
+    expect(acceptsGzip('*, gzip;q=0')).toBe(false);
+  });
 });
 
 const bigBody = { data: 'y'.repeat(5000) };
@@ -49,14 +55,16 @@ beforeAll(async () => {
   app.get('/big', (_req, res) => { res.json(bigBody); });
   app.get('/small', (_req, res) => { res.json({ ok: true }); });
   app.get('/pre', (_req, res) => { res.setHeader('Content-Encoding', 'br'); res.json(bigBody); });
+  app.get('/strong', (_req, res) => { res.setHeader('ETag', '"rev-7"'); res.json(bigBody); });
+  app.get('/undef', (_req, res) => { res.json(undefined); });
   await new Promise<void>((resolve) => { server = app.listen(0, '127.0.0.1', () => { port = (server.address() as AddressInfo).port; resolve(); }); });
 });
 afterAll(async () => { await new Promise<void>((resolve) => server.close(() => resolve())); });
 
 /** Raw GET — node:http never decompresses, so `body` is exactly the wire bytes. */
-function get(path: string, acceptEncoding: string): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: Buffer }> {
+function get(path: string, acceptEncoding: string, extra: Record<string, string> = {}): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: Buffer }> {
   return new Promise((resolve, reject) => {
-    http.get({ host: '127.0.0.1', port, path, headers: { 'accept-encoding': acceptEncoding } }, (res) => {
+    http.get({ host: '127.0.0.1', port, path, headers: { 'accept-encoding': acceptEncoding, ...extra } }, (res) => {
       const chunks: Buffer[] = [];
       res.on('data', (c: Buffer) => chunks.push(c));
       res.on('end', () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks) }));
@@ -103,5 +111,37 @@ describe('jsonGzipMiddleware', () => {
     const r = await get('/pre', 'gzip');
     expect(r.headers['content-encoding']).toBe('br');
     expect(JSON.parse(r.body.toString())).toEqual(bigBody); // identity JSON, not re-gzipped
+  });
+
+  // ADR 1003 D6 — the compressed path goes through `res.send`, so Express's
+  // conditional-GET machinery still runs. Sabotage: ending the response with
+  // `res.end(gz)` (the first version) reds the ETag and 304 cases; dropping
+  // `weakenEtag` reds the strong-ETag case.
+  it('on + gzipped → carries an ETag and answers a matching revalidation with 304', async () => {
+    process.env.OPENWOP_CONTEXT_ECONOMY_TRANSPORT = 'on';
+    const first = await get('/big', 'gzip');
+    const etag = first.headers['etag'];
+    expect(typeof etag).toBe('string');
+    const again = await get('/big', 'gzip', { 'if-none-match': String(etag) });
+    expect(again.status).toBe(304);
+    expect(again.body.length).toBe(0);
+  });
+
+  it('on + a route\'s strong ETag → weakened on the gzipped representation, still revalidates', async () => {
+    process.env.OPENWOP_CONTEXT_ECONOMY_TRANSPORT = 'on';
+    const r = await get('/strong', 'gzip');
+    expect(r.headers['content-encoding']).toBe('gzip');
+    expect(r.headers['etag']).toBe('W/"rev-7"');
+    const again = await get('/strong', 'gzip', { 'if-none-match': 'W/"rev-7"' });
+    expect(again.status).toBe(304);
+    const identity = await get('/strong', 'deflate');
+    expect(identity.headers['etag']).toBe('"rev-7"');
+  });
+
+  it('on + res.json(undefined) → an empty 200, not a thrown 500', async () => {
+    process.env.OPENWOP_CONTEXT_ECONOMY_TRANSPORT = 'on';
+    const r = await get('/undef', 'gzip');
+    expect(r.status).toBe(200);
+    expect(r.headers['content-encoding']).toBeUndefined();
   });
 });

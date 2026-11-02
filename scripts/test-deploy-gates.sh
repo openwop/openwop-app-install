@@ -1334,8 +1334,16 @@ case "$SR_EMPTY" in *"stale revs  NOT CORROBORATED"*) ok "stale revs: no fires i
 SR_ERR="$(SR "" "" 1)"
 case "$SR_ERR" in *"stale revs  UNMEASURED"*) ok "stale revs: a failed log query → UNMEASURED, never OK" ;; *) bad "stale revs: a failed log query was not reported as UNMEASURED" ;; esac
 
-B1='b1	2026-08-18T16:28:06+00:00	SUCCESS'
-B2='b2	2026-08-18T16:29:11+00:00	SUCCESS'
+# The tags column is what gcloud prints for a Cloud Run source deploy (MEASURED
+# 2026-11-01). The window counts only builds tagged service_<OPENWOP_DEPLOY_SERVICE>,
+# which these fixtures leave at its default, openwop-app-backend.
+B1='b1	2026-08-18T16:28:06+00:00	SUCCESS	p-run;r-docker;bt-DOCKER;service_openwop-app-backend'
+B2='b2	2026-08-18T16:29:11+00:00	SUCCESS	p-run;r-docker;bt-DOCKER;service_openwop-app-backend'
+# A Cloud Run FUNCTION built in the same project and region (d8's
+# openwop-ci-budget-stop). Build ad14c2d7 is the one that flagged deploy 176d.
+F1='ad14c2d7	2026-08-18T16:29:30+00:00	SUCCESS	p-gcf;r-nodejs22;t-function;bt-LIFECYCLE;service_openwop-ci-budget-stop'
+# A service whose name merely STARTS with ours. The match is per tag, exact.
+X1='x1	2026-08-18T16:29:40+00:00	SUCCESS	p-run;r-docker;bt-DOCKER;service_openwop-app-backend-canary'
 
 # THE FLOOR, and the whole point of the card: empty must be a FAILURE. Before
 # H90 this exact condition was the permanent state of the check and read as
@@ -1355,6 +1363,23 @@ check "ONE build in the window PASSES" 0 "$(P "$B1")"
 # see this: a clobbering build's own stamps are internally consistent.
 check "TWO builds in the window FAIL (a parallel deploy may have landed on yours)" 1 "$(P "$B1
 $B2")"
+
+# 2026-11-01: deploy 176d read NOT VERIFIED because the window counted EVERY
+# build in the project, and a Cloud Run function (not our service) built during
+# it. Only builds of OUR service can have landed on our deploy.
+check "our build + a FUNCTION build in the window PASSES (not our service)" 0 "$(P "$B1
+$F1")"
+case "$(POUT "$B1
+$F1")" in
+  *"ignored 1 build(s)"*"peer build  OK"*) ok "  ...and says it ignored the other service's build rather than hiding it" ;;
+  *) bad "  ...but did not report the ignored build" ;;
+esac
+check "our build + a service whose name only STARTS with ours PASSES (exact tag match)" 0 "$(P "$B1
+$X1")"
+# Non-vacuity: the filter must not swallow the signal it exists to sharpen.
+check "TWO backend builds + a function build still FAIL" 1 "$(P "$B1
+$B2
+$F1")"
 
 # A missing tool must SKIP, never pass. Degrading to a green when gcloud is
 # absent would rebuild the inert-check this card exists to remove.
@@ -1486,6 +1511,11 @@ esac
 check "ONE build in the window AFTER A DEPLOY still PASSES" 0 "$(W "$B1" "$B1" --after-deploy)"
 check "TWO builds AFTER A DEPLOY still FAIL (the peer signal survives H92)" 1 "$(W "$B1" "$B1
 $B2" --after-deploy)"
+# The service filter must not turn "only someone else's build is here" into a
+# clean window: after a deploy our OWN build has to be among the counted ones.
+check "AFTER A DEPLOY, only a FUNCTION build in the window is WINDOW BROKEN, not OK" 1 "$(W "$B1" "$F1" --after-deploy)"
+check "AFTER A DEPLOY, our build + a function build PASSES" 0 "$(W "$B1" "$B1
+$F1" --after-deploy)"
 
 # STRUCTURAL. The flag is worthless if deploy.sh never sends it, and it must be
 # tied to the BACKEND condition — a frontend-only deploy produces no build and

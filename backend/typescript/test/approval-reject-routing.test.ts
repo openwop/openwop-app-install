@@ -13,11 +13,19 @@
  * single-approver reject, the quorum reject, and the timeout sweep — against
  * the SAME five-rule matrix, because the three paths used to be three separate
  * implementations and "routes the same way" is the claim under test.
+ *
+ * TST-BZA-6 (grade-tests w66). Red when: the rejection stops reaching the executor as
+ * `resumeRejection` (every matrix case); a pre-claimed reject loses its own CAS (the MCP
+ * retry case); the ACCEPT path's claim CAS is bypassed (the late-accept case — FORCED: the
+ * accept reads the open gate, is held on its owner-run read until the rejection has
+ * claimed and routed, then must lose the CAS). The sequential "concurrent ACCEPT queued
+ * behind" case is refused earlier, by resolveAndResume's entry `resolvedAt` check, so it is
+ * a DOUBLE GUARD with the CAS (recorded; the forced case is the CAS witness).
  */
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import { setEventLogBackend } from '../src/executor/eventLog.js';
 import { setSuspendBackend } from '../src/executor/suspendManager.js';
@@ -30,7 +38,6 @@ import { executeRun } from '../src/executor/executor.js';
 import { timeoutApprovalGateIfDue } from '../src/executor/approvalGateTimeout.js';
 import { registerWorkflow as registerHostWorkflow } from '../src/host/workflowsRegistry.js';
 import { __awaitRunResumeChainForTests, resolveAndResume } from '../src/routes/interrupts.js';
-import type { WorkflowDefinition } from '../src/executor/types.js';
 import type { EventRecord, RunRecord } from '../src/types.js';
 import { installRejectedGateRouter } from './support/rejectedGateRouter.js';
 
@@ -56,8 +63,6 @@ beforeAll(() => {
     for (const rule of RULES) {
       registerHostWorkflow({
         workflowId: wfId(path, rule),
-        name: `reject routing ${path} ${rule}`,
-        version: '1.0.0',
         nodes: [
           {
             nodeId: 'gate',
@@ -67,7 +72,7 @@ beforeAll(() => {
           { nodeId: 'recover', typeId: 'core.noop', config: {} },
         ],
         edges: [{ edgeId: 'e1', sourceNodeId: 'gate', targetNodeId: 'recover', triggerRule: rule }],
-      } as unknown as WorkflowDefinition);
+      });
     }
   }
 });
@@ -169,6 +174,7 @@ async function suspendedRun(rule: Rule): Promise<{ runId: string; interruptId: s
 }
 
 describe('RFC 0223 — exactly-once around the routed rejection', () => {
+  afterEach(() => { vi.restoreAllMocks(); });
   it('a caller that PRE-CLAIMED the interrupt (the MCP retry) still routes a reject — the run is not stranded', async () => {
     const { runId, interruptId } = await suspendedRun('all_success');
     // The ENG-6 claim the MCP retry makes before calling resolveAndResume.
@@ -186,9 +192,15 @@ describe('RFC 0223 — exactly-once around the routed rejection', () => {
     // routed over any_failed to a second gate, so the run is NOT terminal and
     // its persisted snapshot is live. A late accept for the FIRST gate would
     // hydrate that snapshot and mark the failed gate completed.
+    //
+    // FORCED interleave (ADR 0778 D1): the accept reads the gate while it is still
+    // OPEN (so resolveAndResume's entry `resolvedAt` check passes), then is held on
+    // its owner-run read until the rejection has claimed and routed. Only the
+    // accept path's own claim CAS can refuse it now. A sequential late accept never
+    // reaches that CAS — the entry check refuses it first.
     const WF = 'wf.reject-routing.race-second-gate';
     registerHostWorkflow({
-      workflowId: WF, name: 'race second gate', version: '1.0.0',
+      workflowId: WF,
       nodes: [
         { nodeId: 'gate', typeId: 'core.approvalGate', config: { prompt: 'Approve?', rejectionPolicy: 'single-veto' } },
         { nodeId: 'gate2', typeId: 'core.approvalGate', config: { prompt: 'Escalate?', rejectionPolicy: 'single-veto' } },
@@ -198,7 +210,7 @@ describe('RFC 0223 — exactly-once around the routed rejection', () => {
         { edgeId: 'e1', sourceNodeId: 'gate', targetNodeId: 'gate2', triggerRule: 'any_failed' },
         { edgeId: 'e2', sourceNodeId: 'gate', targetNodeId: 'after', triggerRule: 'all_success' },
       ],
-    } as unknown as WorkflowDefinition);
+    });
     const now = new Date().toISOString();
     const run: RunRecord = {
       runId: `run-routing-race2-${Math.random().toString(36).slice(2)}`, workflowId: WF, tenantId: 'default',
@@ -207,18 +219,36 @@ describe('RFC 0223 — exactly-once around the routed rejection', () => {
     await storage.insertRun(run);
     expect((await executeRun(storage, run, (await hostSuite.workflowCatalog.getWorkflow(WF))!.definition)).status).toBe('waiting-approval');
     const [first] = await storage.listOpenInterrupts(run.runId);
+
+    // One-shot hold on the NEXT `getRun` — the accept's owner-run read, which comes
+    // after its interrupt load and before any claim.
+    let release!: () => void;
+    const gateOpen = new Promise<void>((r) => { release = r; });
+    let signalArrived!: () => void;
+    const arrived = new Promise<void>((r) => { signalArrived = r; });
+    let holds = 0;
+    const realGetRun = storage.getRun.bind(storage);
+    vi.spyOn(storage, 'getRun').mockImplementationOnce(async (id: string) => {
+      holds += 1;
+      signalArrived();
+      await Promise.race([gateOpen, new Promise((r) => setTimeout(r, 2_000))]);
+      return realGetRun(id);
+    });
+    const lateAccept = resolveAndResume(storage, hostSuite, first!.interruptId, { action: 'accept' }, { capabilityToken: true })
+      .then(() => null, (e: unknown) => e);
+    await arrived;
     await resolveAndResume(storage, hostSuite, first!.interruptId, { action: 'reject' }, { capabilityToken: true });
     await __awaitRunResumeChainForTests(run.runId);
     expect((await storage.getRun(run.runId))!.status, 'routed on to gate2').toBe('waiting-approval');
-    // The late accept for the ALREADY-REJECTED first gate. ADR 0778 D1 — it is
-    // now REFUSED (409) rather than queued behind the rejection; the event
-    // assertions below are the invariant either way.
-    await expect(resolveAndResume(storage, hostSuite, first!.interruptId, { action: 'accept' }, { capabilityToken: true }))
-      .rejects.toMatchObject({ httpStatus: 409 });
+    release();
+    const refusal = await lateAccept;
+    expect(holds, 'the accept was held inside its window — otherwise this case is sequential').toBe(1);
+    expect(refusal, 'the late accept must lose the claim').toMatchObject({ code: 'interrupt_already_resolved', httpStatus: 409 });
     await __awaitRunResumeChainForTests(run.runId);
     const events = await storage.listEvents(run.runId);
     expect(events.some((e) => e.type === 'node.completed' && e.nodeId === 'gate'), 'the late accept completed a rejected gate').toBe(false);
     expect(events.some((e) => e.type === 'node.started' && e.nodeId === 'after'), 'the late accept released the all_success branch').toBe(false);
+    expect(events.filter((e) => e.type === 'interrupt.resolved' && e.nodeId === 'gate'), 'exactly one resolution of the first gate').toHaveLength(1);
     expect((await storage.getRun(run.runId))!.status).toBe('waiting-approval');
   });
 

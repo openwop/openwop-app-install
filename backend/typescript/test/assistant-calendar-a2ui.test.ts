@@ -35,6 +35,11 @@ import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { buildAssistantSurface } from '../src/features/assistant/surface.js';
 import { __resetAssistantStore } from '../src/features/assistant/assistantService.js';
 
+/** The resume value the form card sends: one answer per field (ADR 1013 D4). */
+const answers = (values: Record<string, unknown>): { answers: Array<{ id: string; answer: unknown }> } => ({
+  answers: Object.entries(values).map(([id, answer]) => ({ id, answer })),
+});
+
 // Mirrors the host-pinned closed catalog (frontend `chat/a2ui/catalog.ts`
 // SUPPORTED_COMPONENTS + A2UI_CATALOG_VERSION) — the renderer fail-closes on
 // anything outside it, so a producer surface MUST stay within this set.
@@ -62,8 +67,8 @@ describe('Assistant calendar.invite A2UI clarification (ADR 0051 §3/§5)', () =
 
   /** Assert a suspend payload carries a closed-catalog-valid A2UI surface. */
   const assertCatalogValid = (payload: Record<string, unknown>): void => {
-    expect(payload.catalogVersion).toBe(CATALOG_VERSION);
-    const surface = payload.surface as { title?: unknown; components?: unknown };
+    expect((payload.form as Record<string, unknown>).catalogVersion).toBe(CATALOG_VERSION);
+    const surface = (payload.form as Record<string, unknown>).surface as { title?: unknown; components?: unknown };
     expect(Array.isArray(surface.components)).toBe(true);
     for (const c of surface.components as Array<Record<string, unknown>>) {
       expect(CATALOG.has(String(c.component))).toBe(true);
@@ -96,7 +101,7 @@ describe('Assistant calendar.invite A2UI clarification (ADR 0051 §3/§5)', () =
     expect(captured!.resumeKey).toBe('calendar-invite-clarify');
     assertCatalogValid(captured!);
 
-    const components = (captured!.surface as { components: Array<Record<string, unknown>> }).components;
+    const components = ((captured!.form as Record<string, unknown>).surface as { components: Array<Record<string, unknown>> }).components;
     const ids = components.map((c) => c.id).filter((id): id is string => typeof id === 'string');
     // All three essentials were missing → the surface asks for each.
     expect(ids).toEqual(expect.arrayContaining(['summary', 'date', 'time', 'durationMinutes', 'attendees']));
@@ -124,7 +129,7 @@ describe('Assistant calendar.invite A2UI clarification (ADR 0051 §3/§5)', () =
       },
     };
     await expect(enqueueAction(ctx)).rejects.toThrow('__suspended__');
-    const components = (captured!.surface as { components: Array<Record<string, unknown>> }).components;
+    const components = ((captured!.form as Record<string, unknown>).surface as { components: Array<Record<string, unknown>> }).components;
     const ids = components.map((c) => c.id).filter((id): id is string => typeof id === 'string');
     expect(ids).toContain('attendees');
     expect(ids).not.toContain('summary');
@@ -145,7 +150,7 @@ describe('Assistant calendar.invite A2UI clarification (ADR 0051 §3/§5)', () =
       inputs: { kind: 'calendar.invite', draft: 'Set up the kickoff', payload: { event: {} } },
       // On resume, the executor re-invokes the node and ctx.suspend returns the
       // recorded resume value inline (suspendSignal.ts short-circuit).
-      suspend: async () => resume,
+      suspend: async () => answers(resume),
     };
     const r = await enqueueAction(ctx);
     const pa = field(r, 'pendingAction') as { status: string; kind: string; payload: { event: Record<string, unknown> } };
@@ -169,7 +174,7 @@ describe('Assistant calendar.invite A2UI clarification (ADR 0051 §3/§5)', () =
       features: { assistant: buildAssistantSurface({ tenantId: 't-cal-badtime' }) },
       inputs: { kind: 'calendar.invite', draft: 'Kickoff', payload: { event: {} } },
       // `time` is a free-text field — "99:99" must not leak into the dateTime.
-      suspend: async () => ({ action: 'confirm', summary: 'K', date: '2026-07-01', time: '99:99', durationMinutes: '30', attendees: 'a@b.com' }),
+      suspend: async () => answers({ summary: 'K', date: '2026-07-01', time: '99:99', durationMinutes: '30', attendees: 'a@b.com' }),
     };
     const r = await enqueueAction(ctx);
     const pa = field(r, 'pendingAction') as { payload: { event: { start?: { dateTime?: string }; end?: { dateTime?: string } } } };
@@ -182,7 +187,7 @@ describe('Assistant calendar.invite A2UI clarification (ADR 0051 §3/§5)', () =
     const ctx = {
       features: { assistant: buildAssistantSurface({ tenantId: 't-cal-baddate' }) },
       inputs: { kind: 'calendar.invite', draft: 'Kickoff', payload: { event: {} } },
-      suspend: async () => ({ action: 'confirm', summary: 'K', date: 'not-a-date', time: '14:00', durationMinutes: '60', attendees: 'a@b.com' }),
+      suspend: async () => answers({ summary: 'K', date: 'not-a-date', time: '14:00', durationMinutes: '60', attendees: 'a@b.com' }),
     };
     const r = await enqueueAction(ctx);
     const pa = field(r, 'pendingAction') as { payload: { event: Record<string, unknown> } };

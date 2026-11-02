@@ -77,6 +77,7 @@ import { setSecret } from '../src/byok/secretResolver.js';
 // the KMS envelope is orthogonal to what this file measures.
 const T = 'h57-authz';
 const PROVIDER = 'h57mcp';
+const PRIOR_ALLOW_PRIVATE = process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE;
 
 interface Recorded { method: string; auth?: string }
 
@@ -139,6 +140,8 @@ beforeAll(async () => {
 afterAll(async () => {
   await peer.stop();
   await __resetGovernanceStore();
+  if (PRIOR_ALLOW_PRIVATE === undefined) delete process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE;
+  else process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = PRIOR_ALLOW_PRIVATE;
 });
 
 afterEach(async () => {

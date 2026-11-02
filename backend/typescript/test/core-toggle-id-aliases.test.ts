@@ -9,6 +9,11 @@
  * (ADR 0820 §1). Core features are never sold, but a core feature is the next
  * candidate to leave core (§8), and the move is where a silent alias bites. So an
  * alias must be written down here, where the next move will read it.
+ *
+ * Tracker TST-CQC-2 (w68). Sabotage-witnessed: red when the settings toggle id is
+ * renamed to its package id (stale alias + offender) and when a core toggle id
+ * (`chat-autotitle`) drifts from its package id. The non-vacuity floor (> 5) is a
+ * floor, not a baseline: measured ≈ 13 toggled core features on 2026-10-29.
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';

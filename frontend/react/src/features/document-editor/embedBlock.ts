@@ -2,7 +2,7 @@
  * `embedBlock` — a sandboxed-HTML node for canvas.document (ADR 0334 2b-3). An
  * atom block holding an untrusted HTML body string in `data-html`; the React
  * NodeView renders it through the chat `SandboxedArtifactFrame` (isolated iframe,
- * no same-origin, no network egress). Editing goes through the surface's embed
+ * no same-origin, static until a reader runs its scripts — ADR 1017). Editing goes through the surface's embed
  * modal. Shared by the editable surface AND the read-only renderer.
  */
 import { Node, mergeAttributes } from '@tiptap/core';

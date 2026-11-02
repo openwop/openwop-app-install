@@ -37,10 +37,12 @@
  */
 
 import { maybeCaptureExecuteTool } from './evals/toolBoundary.js';
-import { createAiProvidersAdapter, providerSupportsToolCalling, AiProviderError, CREDENTIAL_PROVIDERS } from '../aiProviders/aiProvidersHost.js';
+import { createAiProvidersAdapter, providerSupportsToolCalling, toolRoundResult, AiProviderError, CREDENTIAL_PROVIDERS } from '../aiProviders/aiProvidersHost.js';
 import { explicitRefNamesOtherProvider } from '../aiProviders/credentialRefLadder.js';
 import { createScopedAgentToolProvider, builtinAgentToolIds } from './agentToolProvider.js';
 import { createTurnRunDispatchCollector, type TurnRunDispatch } from './turnRunDispatch.js';
+import { createChatClarificationCollector, isChatAskEnabled, type ChatClarificationAsk } from './clarificationChat.js';
+import { ASK_USER_TOOL } from './clarificationLift.js';
 import type { ServedModel } from './turnAttribution.js';
 import { compileAgentTools, runChatToolLoop, type AgentEvent, managedLimitCode } from './agentDispatch.js';
 import { resolveAgentToolPermissionSet } from './agentProfileService.js';
@@ -48,9 +50,9 @@ import { resolveAgentIdentity } from './agentIdentity.js';
 import { effectiveToolAllowlist, resolveAgentToolAllowlistOverride } from './agentToolAllowlistService.js';
 import { isManagedCredentialRef, managedProviderIdFromRef, dispatchManagedToolsRound } from '../providers/managedProvider.js';
 import { featureForToolName } from './managedCredits.js';
-import { compactToolSchema } from '../providers/toolSchemaCompaction.js';
-import { resolveConversationModelTarget, type ConversationModelTierInput } from '../features/model-router/applyRoute.js';
-import { contextEconomy } from './contextEconomy.js';
+import { dietToolSurface } from '../providers/toolSchemaCompaction.js';
+import { resolveConversationModelTarget, unchosenModelTarget, type ConversationModelTierInput, type ConversationModelTargetInput } from '../features/model-router/applyRoute.js';
+import type { RoutingTarget } from '../features/model-router/routeTurn.js';
 import { resolveSecret } from '../byok/secretResolver.js';
 import { createLogger } from '../observability/logger.js';
 import { listToolApprovals, recordToolApprovalRequested, approvedToolSets } from '../features/conversation-tools/approvalLedger.js';
@@ -90,6 +92,8 @@ export interface AgentToolTurnResult {
    *  allocation and the response, so the bubble lands at a correct index and
    *  reaches the client without a reload. Empty ⇒ no run was dispatched. */
   runDispatches?: TurnRunDispatch[];
+  /** ADR 1001 D7 — the agent ended its turn with questions (`openwop:ask-user`). */
+  clarificationAsk?: ChatClarificationAsk;
   /** ADR 0986 D1 — what ANSWERED: the loop's provider and the model it actually
    *  used after any bump fallback (a managed TIER id on the managed path). */
   served?: ServedModel;
@@ -108,6 +112,9 @@ export interface AgentToolTurnParams {
   /** ADR 0132 — the conversation this turn belongs to (keys the capability-scope
    *  config on `ConversationMeta`). */
   conversationId: string;
+  /** ADR 1017 D2 — the wire message id the exchange reserved for this turn's agent
+   *  reply; handed to the tools so a saved artifact can be shown under that turn. */
+  turnMessageId?: string;
   /** ADR 0132 — storage handle for the best-effort capability-scope provenance
    *  stamp (`run.metadata.capabilityScope`). Optional: absent ⇒ enforce live, skip
    *  the stamp (enforcement never depends on it). */
@@ -134,6 +141,8 @@ export interface AgentToolTurnParams {
   /** CS-GB-1 — conversation type + answering agent's modelClass for the
    *  same-provider class-tier default (group reasoning rooms). */
   tier?: ConversationModelTierInput;
+  /** ADR 1016 D3 — this exchange's model route (`resolveTurnModelRoute`). */
+  route?: RoutingTarget | null;
 }
 
 /**
@@ -146,7 +155,7 @@ export interface AgentToolTurnParams {
  * Mirrors the early returns in `runConversationAgentToolTurn` (the remaining
  * async checks — key resolution, tool compilation — can still fall back).
  */
-export function conversationToolTurnEligible(run: RunRecord, _agent: ResolvedAgentManifest, modelOverride?: { provider?: string; model?: string }): boolean {
+export function conversationToolTurnEligible(run: RunRecord, _agent: ResolvedAgentManifest, modelOverride?: { provider?: string; model?: string }, route?: RoutingTarget | null): boolean {
   // ADR 0315 — the default-on baseline means no agent is "pure persona"
   // anymore: eligibility reduces to provider tool-calling support. (The old
   // empty-manifest bail-out predates the baseline.)
@@ -156,9 +165,9 @@ export function conversationToolTurnEligible(run: RunRecord, _agent: ResolvedAge
   // round (dispatchManagedToolsRound enforces the same caps + provider hiding).
   if (isManagedCredentialRef(credentialRef)) return true;
   // CS-GB-1 — eligibility judges the provider that will ACTUALLY dispatch
-  // (route stamp / in-chat override included), not the raw run input. Before
+  // (this turn's route, ADR 1016, and the in-chat override included), not the raw run input. Before
   // this the loop read raw inputs and silently ignored both.
-  const target = resolveConversationModelTarget({ runInputs: inputs, metadata: run.metadata, ...(modelOverride ? { override: modelOverride } : {}) });
+  const target = resolveConversationModelTarget({ runInputs: inputs, metadata: run.metadata, ...(modelOverride ? { override: modelOverride } : {}), route });
   return !!target.provider && providerSupportsToolCalling(target.provider);
 }
 
@@ -339,7 +348,7 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
 
   // Pure-persona agent / managed tier / non-tool-calling provider ⇒ single
   // completion (same synchronous gate the caller used to decide async).
-  if (!conversationToolTurnEligible(run, agent, params.modelOverride)) return null;
+  if (!conversationToolTurnEligible(run, agent, params.modelOverride, params.route)) return null;
 
   const inputs = (run.inputs ?? {}) as { provider?: unknown; model?: unknown; credentialRef?: unknown; webSearch?: unknown };
   const credentialRef = typeof inputs.credentialRef === 'string' ? inputs.credentialRef : 'managed:openwop-free';
@@ -378,6 +387,11 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
   // EXCHANGE (one turnIndex allocator; the response owner) — see
   // `host/turnRunDispatch.ts` for the collision + invisibility this replaces.
   const runDispatchCollector = createTurnRunDispatchCollector();
+  // ADR 1001 D7 — the chat ask: offered, and its sink wired, only when the
+  // tenant's toggle is on. The sink is the ONLY way the tool can end a turn, and
+  // only this transport supplies one (voice and the run lane never do).
+  const chatAskOn = await isChatAskEnabled(run.tenantId);
+  const clarificationCollector = chatAskOn ? createChatClarificationCollector() : undefined;
   // ADR 0324 — composed through the ONE scope composer (shared with the
   // realtime voice bridge) so the fail-closed fields can't drift per transport.
   const toolProvider = createScopedAgentToolProvider({
@@ -387,13 +401,16 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
     ...(typeof orgScopeSubject === 'string' && orgScopeSubject ? { orgScopeSubject } : {}),
     ...(typeof chatSessionId === 'string' && chatSessionId ? { conversationId: chatSessionId } : {}),
     onRunDispatched: runDispatchCollector.sink,
+    ...(clarificationCollector ? { onClarificationAsk: clarificationCollector.sink } : {}),
+    ...(params.turnMessageId ? { turnMessageId: params.turnMessageId } : {}),
   });
   // ADR 0104 — apply a super-admin tool-allowlist override (per tenant+agent) to what
   // the chat agent is offered, exactly as runAgentDispatchLive does. Absent ⇒ the
   // manifest allowlist.
   const allowlistOverride = await resolveAgentToolAllowlistOverride(run.tenantId, agent.agentId);
   // ADR 0315 — one resolver: override (full-replace) ?? manifest ∪ baseline.
-  const tools = compileAgentTools(agent, builtinAgentToolIds(), toolProvider.resolveTool, effectiveToolAllowlist(agent.toolAllowlist, allowlistOverride));
+  const tools = compileAgentTools(agent, builtinAgentToolIds(), toolProvider.resolveTool, effectiveToolAllowlist(agent.toolAllowlist, allowlistOverride))
+    .filter((t) => chatAskOn || t.def.name !== ASK_USER_TOOL);
   if (tools.length === 0) return null;
 
   // Resolve the tool-calling transport. The MANAGED (free) tier routes through
@@ -433,24 +450,25 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
         messages: [{ role: 'system', content: r.systemPrompt ?? '' }, ...r.messages.map(toChatMessage)],
         // ADR 0148 A3 — tool-surface diet (gated; off ⇒ unchanged). Sibling site:
         // aiProviders/aiProvidersHost.ts (BYOK/workflow tools-round adapter).
-        tools: r.tools.map((t) => ({ ...t, inputSchema: compactToolSchema(t.inputSchema, contextEconomy().toolDiet) })),
+        // ADR 1003 D4 — the one funnel, which also reports what the diet did.
+        tools: dietToolSurface(r.tools, run.tenantId),
+        ...(r.cacheConversation ? { cacheConversation: true } : {}),
       });
       roundFeature = round.toolUses.map((t) => featureForToolName(t.name)).find((f): f is string => f !== null) ?? 'chat';
-      return {
-        content: round.text,
-        toolCalls: round.toolUses.map((t) => ({ id: t.id, name: t.name, input: t.input })),
-      };
+      return toolRoundResult(round);
     };
   } else {
     // CS-GB-1 — the ONE resolver (override > stamp > same-provider class tier >
     // inputs); the loop previously read raw inputs, so a stamped group-tier
     // route, the in-chat model switch, AND an advisor's reasoning class were
     // all silently ignored on tool-loop turns.
-    const target = resolveConversationModelTarget({
+    const targetInput: ConversationModelTargetInput = {
       runInputs: inputs, metadata: run.metadata,
       ...(params.modelOverride ? { override: params.modelOverride } : {}),
       ...(params.tier ? { tier: params.tier } : {}),
-    });
+      route: params.route,
+    };
+    const target = resolveConversationModelTarget(targetInput);
     const provider = target.provider ?? '';
     const model = target.model;
     // BYOK-direct: resolve the tenant key (SR-1 — never enters an event/prompt).
@@ -471,13 +489,10 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
     callAIWithTools = adapter.callAIWithTools;
     loopProvider = provider;
     loopModel = model;
-    // Same resolve WITHOUT the tier ⇒ the un-bumped selection; differs only
-    // when the reasoning-class bump chose the model above.
-    const selected = resolveConversationModelTarget({
-      runInputs: inputs, metadata: run.metadata,
-      ...(params.modelOverride ? { override: params.modelOverride } : {}),
-    });
-    loopFallbackModel = selected.model !== model ? selected.model : null;
+    // ADR 1016 D4b — the same resolve WITHOUT the tier AND WITHOUT the route:
+    // differs only when the reasoning-class bump or the router chose the model
+    // above, and is then the degrade target if that model cannot serve this key.
+    loopFallbackModel = unchosenModelTarget(targetInput, target)?.model ?? null;
     loopWebSearch = resolveWebSearchPreference(params.webSearch, inputs.webSearch);
   }
   // Both transports get the bounded 429 retry — see withRateLimitRetry above.
@@ -595,6 +610,7 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
   // the owner's own run (FW2-CD-1). Decision-preserving; best-effort — a ledger write
   // must not break the turn.
   const runDispatches = runDispatchCollector.drain();
+  const clarificationAsk = clarificationCollector?.drain();
   const pendingApprovals = loop.pendingApprovals ?? [];
   for (const p of actsAsOwner ? pendingApprovals : []) {
     try { await recordToolApprovalRequested(run.tenantId, conversationStateKey, p.toolName, { ...(p.origin ? { origin: p.origin } : {}), input: p.input }); }
@@ -617,5 +633,7 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
     // seam exists to remove. The earlier `return null` paths precede any tool
     // execution, so they can carry no dispatch.
     ...(runDispatches.length ? { runDispatches } : {}),
+    // ADR 1001 D7 — the turn ended on a question; the exchange persists it.
+    ...(clarificationAsk && !loop.error ? { clarificationAsk } : {}),
   };
 }

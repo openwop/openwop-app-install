@@ -7,6 +7,10 @@
  * becomes a markdown table; lists keep their markers; images never reach the text (a
  * data URI would be megabytes); only http(s) links keep a target; entities decode.
  * Sabotage: go back to `extractRawText` ⇒ the end-to-end case is red.
+ *
+ * TST-DJA-1 (grade-tests wave 71). Also red when the converter keeps a javascript:
+ * link target, stops escaping `|` in a cell, stops decoding numeric entities, or the
+ * ingest strips the `#` heading lines.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { mkdtempSync } from 'node:fs';

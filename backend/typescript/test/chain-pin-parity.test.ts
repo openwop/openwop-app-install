@@ -12,6 +12,9 @@
  * The fix it names is one command. A pin whose type the host does not have at all
  * fails here too — `unmetNodePins` deliberately leaves absent types to the
  * missing-type check, so this file asserts that half itself.
+ *
+ * TST-CCP-1. Red when an in-tree chain pins a version, or a type, the booted host
+ * does not run.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { join } from 'node:path';
@@ -24,18 +27,19 @@ const CHAIN_ROOT = join(__dirname, '..', '..', '..', 'examples', 'workflow-chain
 const FIX = 'cd backend/typescript && npm run chains:pin -- --write --repin';
 
 let installed: Map<string, string | undefined>;
+let loadErrors: unknown[] = [];
 
 beforeAll(async () => {
   await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   installed = new Map(buildNodeCatalog().map((n) => [n.typeId, n.version]));
   _resetChainRegistryForTest();
-  const outcome = loadWorkflowChainPacks({ roots: [CHAIN_ROOT] });
-  expect(outcome.errors, 'an in-tree chain pack failed to load').toEqual([]);
+  loadErrors = loadWorkflowChainPacks({ roots: [CHAIN_ROOT] }).errors;
 }, 120_000);
 
 describe('ADR 0766 P2 — in-tree chain pins match the installed node versions', () => {
   it('loaded the in-tree chains (a vacuous registry would pass everything)', () => {
-    expect(listChains().length).toBeGreaterThanOrEqual(60);
+    expect(loadErrors, 'an in-tree chain pack failed to load').toEqual([]);
+    expect(listChains().length).toBeGreaterThan(268); // measured 272 (2026-10-29)
   });
 
   it('no chain pins a version this host does not run', () => {

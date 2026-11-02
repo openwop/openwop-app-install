@@ -1,16 +1,17 @@
 /**
  * Campaign Connectors workflow surface (ADR 0159 / ADR 0014) —
- * `ctx.features['campaign-connectors']`. Tenant-trusted KPI + import reads the
- * sync/import nodes call.
+ * `ctx.features['campaign-connectors']`. The KPI read and the sync/import
+ * writes the nodes call. ADR 1022 D4: every write asks `workspace:write` of the
+ * run's person through the ADR 0832 floor (`CAMPAIGN_CONNECTORS_SURFACE_POLICY`).
  *
  * @see docs/adr/0159-campaign-studio-connectors-performance.md
  */
 
+import { OpenwopError } from '../../types.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { surfaceStr as str, surfaceOptStr as optStr, type FeatureSurface } from '../../host/featureSurfaces.js';
 import { importCsv, kpiSummary } from './performanceService.js';
-import { computeDerived, type ParsedRow } from './csvImport.js';
-import { persistSyncedRows, claimSync, syncCooldown, yesterdayIso, planSync, recordAccountRows, isLiveSyncPlatform, type SyncPlan } from './syncService.js';
+import { attemptOf, claimSync, noteSyncAttempt, planSync, recordAccountRows, isLiveSyncPlatform } from './syncService.js';
 import { listTenantDispatchRecords, makeAdsAdapter, type AccountMetricsRow } from '../../host/adsAdapter.js';
 import { assertOrgScope } from '../../host/accessControlService.js';
 import { hostExtStorage } from '../../host/hostExtPersistence.js';
@@ -24,10 +25,23 @@ import { AD_PLATFORMS, type AdPlatform } from './types.js';
 const asPlatform = (v: unknown): AdPlatform | undefined =>
   typeof v === 'string' && (AD_PLATFORMS as readonly string[]).includes(v) ? (v as AdPlatform) : undefined;
 
+/** ADR 1022 D4 — the floor asks what the HTTP doors ask: write for every write;
+ *  the audience build reads the TENANT-wide contact list, so it asks the tenant
+ *  scope the CRM doors ask (contacts are not org-scoped). */
+export const CAMPAIGN_CONNECTORS_SURFACE_POLICY = {
+  methodScopes: {
+    claimSync: 'workspace:write', planSync: 'workspace:write', recordAccountRows: 'workspace:write',
+    deliverConversions: 'workspace:write', pushCatalog: 'workspace:write', importCsv: 'workspace:write',
+  },
+  tenantMethodScopes: { buildAudienceUpload: 'workspace:write' },
+} as const;
+
 export function buildCampaignConnectorsSurface(scope: BundleScope): FeatureSurface {
   const tenantId = scope.tenantId;
   return {
-    kpiSummary: async (args) => ({ ...(await kpiSummary(tenantId, optStr(args.orgId), optStr(args.campaignId))) }),
+    // ADR 1022 D3 — an org is required (the service refuses ''); no org-less
+    // read of the whole tenant's performance.
+    kpiSummary: async (args) => ({ ...(await kpiSummary(tenantId, str(args.orgId), optStr(args.campaignId))) }),
     // C3 (ADR 0217) — suppression-safe, consent-checked, hashed audience build.
     buildAudienceUpload: async (args) => ({ ...(await buildAudienceUpload(tenantId, str(args.segmentId))) }),
     // C2 — the sync node's persist path (cooldown + dedup owned by syncService).
@@ -40,30 +54,6 @@ export function buildCampaignConnectorsSurface(scope: BundleScope): FeatureSurfa
     claimSync: async (args) => {
       const c = await claimSync(tenantId, str(args.orgId), str(args.platform));
       return c.claimed ? { blocked: false } : { blocked: true, ...(c.retryAtIso ? { retryAtIso: c.retryAtIso } : {}) };
-    },
-    // Retained (read-only, non-claiming) for any surface that only needs to peek
-    // the cooldown without reserving it.
-    checkSyncCooldown: async (args) => ({ ...(await syncCooldown(tenantId, str(args.orgId), str(args.platform))) }),
-    recordSyncedMetrics: async (args) => {
-      const orgId = str(args.orgId);
-      const platform = asPlatform(args.platform);
-      if (!orgId || !platform) return { imported: 0, deduped: 0, error: 'orgId and a known platform are required' };
-      const date = optStr(args.date) || yesterdayIso();
-      const raw = Array.isArray(args.rows) ? (args.rows as Array<Record<string, unknown>>) : [];
-      const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 0);
-      const rows: ParsedRow[] = raw
-        .filter((r) => typeof r.campaignName === 'string' && (r.campaignName as string).length > 0)
-        .map((r) => {
-          // The pre-ADR-0907 node path (sync@1.0.0): its rows carry no
-          // conversions/revenue. sync@1.1.0 records through recordAccountRows.
-          const base = { spend: num(r.spend), impressions: num(r.impressions), clicks: num(r.clicks), conversions: 0, revenue: 0 };
-          return { platform, campaignName: str(r.campaignName), adSet: optStr(r.adSet) || 'dispatched', date, ...base, ...computeDerived(base) };
-        });
-      if (rows.length === 0) return { imported: 0, deduped: 0 };
-      const campaignIdByName = args.campaignIdByName && typeof args.campaignIdByName === 'object'
-        ? Object.fromEntries(Object.entries(args.campaignIdByName as Record<string, unknown>).filter(([, v]) => typeof v === 'string')) as Record<string, string>
-        : undefined;
-      return { ...(await persistSyncedRows(tenantId, orgId, platform, rows, campaignIdByName ? { campaignIdByName } : {})) };
     },
     // ADR 0907 D3 — the node's half of the ONE sync implementation: plan
     // (which accounts, which window, which campaigns) and record (map + persist)
@@ -78,22 +68,49 @@ export function buildCampaignConnectorsSurface(scope: BundleScope): FeatureSurfa
     },
     recordAccountRows: async (args) => {
       const orgId = str(args.orgId);
-      const plan = args.plan as SyncPlan | undefined;
-      if (!orgId || !plan || !isLiveSyncPlatform(plan.platform) || !Array.isArray(plan.ledger)) return { imported: 0, deduped: 0, campaigns: 0, error: 'orgId and the plan from planSync are required' };
+      const platform = args.platform;
+      // Typed failures, never a `{error}` a node could read as "synced 0" (CP71CD-3).
+      if (!orgId || !isLiveSyncPlatform(platform) || !Array.isArray(args.batches)) throw new OpenwopError('validation_error', 'orgId, a live-sync platform and batches are required.', 400);
+      // ADR 1022 D1 (B1) — the node's plan is NOT trusted: the server plans
+      // again from this org's ledger and settings, and a batch from an account
+      // that plan does not name is dropped. A pack-built plan could otherwise
+      // name another org's dispatches or accounts.
+      const scope = args.syncScope === 'account' || args.syncScope === 'dispatched' ? args.syncScope : undefined;
+      const window = { ...(optStr(args.since) ? { since: str(args.since) } : {}), ...(optStr(args.until) ? { until: str(args.until) } : {}) };
+      const planned = await planSync(tenantId, orgId, platform, await listTenantDispatchRecords(tenantId), { ...(scope ? { scope } : {}), ...window });
+      if (planned.outcome !== 'plan') {
+        // CP71CD-13 — the cooldown is already claimed; leave the trace the
+        // status page reads before refusing.
+        await noteSyncAttempt(tenantId, orgId, platform, { at: new Date().toISOString(), outcome: 'failed', reason: 'plan_changed' });
+        throw new OpenwopError('conflict', `The sync plan changed while the accounts were read (${planned.outcome}); nothing was recorded.`, 409, { outcome: planned.outcome });
+      }
+      const allowed = new Set(planned.plan.adAccountIds);
       // Pack code hands these over: keep only well-formed rows (ISO day, string
-      // ids, finite non-negative numbers) — the recordSyncedMetrics stance.
+      // ids, finite non-negative numbers).
       const n = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 0);
-      const rows: AccountMetricsRow[] = (Array.isArray(args.rows) ? (args.rows as Array<Record<string, unknown>>) : [])
-        .filter((r) => r && typeof r.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(r.date) && typeof r.campaignId === 'string' && r.campaignId.length > 0)
-        .map((r) => ({
-          date: r.date as string, campaignId: r.campaignId as string,
-          campaignName: typeof r.campaignName === 'string' && r.campaignName ? r.campaignName.slice(0, 300) : (r.campaignId as string),
-          impressions: n(r.impressions), clicks: n(r.clicks), spend: n(r.spend),
-          // `null` is meaningful (unreported, ADR 0907 D3) — never coerce it to 0.
-          conversions: r.conversions === null ? null : n(r.conversions), revenue: r.revenue === null ? null : n(r.revenue),
-          ...(typeof r.currency === 'string' && /^[A-Z]{3}$/.test(r.currency) ? { currency: r.currency } : {}),
-        }));
-      return { ...(await recordAccountRows(tenantId, orgId, plan, rows)) };
+      const rows: AccountMetricsRow[] = [];
+      let droppedBatches = 0;
+      for (const b of args.batches as Array<Record<string, unknown>>) {
+        if (!b || typeof b.adAccountId !== 'string' || !allowed.has(b.adAccountId) || !Array.isArray(b.rows)) { droppedBatches += 1; continue; }
+        for (const r of b.rows as Array<Record<string, unknown>>) {
+          if (!r || typeof r.date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(r.date) || typeof r.campaignId !== 'string' || r.campaignId.length === 0) continue;
+          rows.push({
+            date: r.date, campaignId: r.campaignId,
+            campaignName: typeof r.campaignName === 'string' && r.campaignName ? r.campaignName.slice(0, 300) : r.campaignId,
+            impressions: n(r.impressions), clicks: n(r.clicks), spend: n(r.spend),
+            // `null` is meaningful (unreported, ADR 0907 D3) — never coerce it to 0.
+            conversions: r.conversions === null ? null : n(r.conversions), revenue: r.revenue === null ? null : n(r.revenue),
+            ...(typeof r.currency === 'string' && /^[A-Z]{3}$/.test(r.currency) ? { currency: r.currency } : {}),
+          });
+        }
+      }
+      const okAccounts = (args.batches as Array<Record<string, unknown>>).length - droppedBatches;
+      const failures = (Array.isArray(args.failures) ? (args.failures as Array<Record<string, unknown>>) : [])
+        .filter((f) => f && typeof f.adAccountId === 'string' && allowed.has(f.adAccountId))
+        .map((f) => ({ reason: typeof f.reason === 'string' ? f.reason.slice(0, 120) : 'unknown' }));
+      const recorded = rows.length > 0 ? await recordAccountRows(tenantId, orgId, planned.plan, rows) : { imported: 0, deduped: 0, campaigns: 0 };
+      await noteSyncAttempt(tenantId, orgId, platform, attemptOf(okAccounts, failures));
+      return { ...recorded, ...(droppedBatches > 0 ? { droppedBatches } : {}) };
     },
     // ADR 0907 D7 — the scheduled delivery node's ONE call. Acts as the RUN
     // OWNER (a schedule fires as its creator, ADR 0816 D8): the broker resolves

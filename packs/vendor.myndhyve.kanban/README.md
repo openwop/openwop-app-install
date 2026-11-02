@@ -1,9 +1,9 @@
 # `vendor.myndhyve.kanban`
 
-MyndHyve kanban-coordination pack. 7 nodes covering board lifecycle, task management, timeline planning, automation, and resource monitoring.
+MyndHyve kanban-coordination pack. 6 nodes covering board lifecycle, task management, timeline planning, automation, and resource monitoring.
 
 | Pack | `vendor.myndhyve.kanban` |
-| peerDependencies | `host.kanban: supported` (+ `host.aiEnvelope` softly required by `task.decompose`) |
+| peerDependencies | `host.kanban: supported` |
 
 ## Nodes (typeId-preserve)
 
@@ -12,18 +12,11 @@ MyndHyve kanban-coordination pack. 7 nodes covering board lifecycle, task manage
 | `kanban.board.create` | side-effect |
 | `kanban.board.review` | side-effect (read with summary) |
 | `kanban.task.assign` | side-effect |
-| `kanban.task.decompose` | side-effect (AI-powered) |
 | `kanban.timeline.plan` | side-effect (compute) |
 | `kanban.workflow.automate` | side-effect |
 | `kanban.resource.monitor` | side-effect (read) |
 
 All side-effectful + cacheable. Engine Layer-2 cache covers replay cost-once.
-
-## task.decompose AI dependency
-
-`task.decompose` requires both `host.kanban` AND `host.aiEnvelope`. The pack manifest only declares `host.kanban` (peer-level), since the other 6 nodes don't need AI. Hosts without `aiEnvelope` can register the pack but `task.decompose` throws `host_capability_missing` at dispatch.
-
-If you want strict peer-dep enforcement at register time, ship a separate pack with both deps; the 6-node base remains universally registerable.
 
 ## Workflow automate rule shapes
 
@@ -64,10 +57,8 @@ ctx.kanban.automateRules({ boardId, rules, replaceExisting, idempotencyKey })
 ctx.kanban.resourceMonitor({ boardId, maxConcurrentPerAssignee, includeAgents })
   → Promise<{ assigneeLoad, wipBreaches, overdueTasks, monitoredAt? }>
 
-ctx.aiEnvelope.generate(...) // for task.decompose
 ```
 
 ## See also
 
 - [`docs/plans/MYNDHYVE-TO-OPENWOP-PACK-MIGRATION.md`](https://github.com/openwop/openwop) (in myndhyve)
-- `vendor.myndhyve.ai` — `task.decompose` shares the envelope-generation primitive

@@ -69,6 +69,7 @@ export const callAiEchoAttemptsNode: NodeModule = {
     programMockForRun(ctx.runId, ctx.nodeId, served.map((e) => ({
       ...(e.kind === 'invalid-json' ? { content: '{ this is not json }', stopReason: 'end_turn' as const } : {}),
       ...(e.kind === 'truncated' ? { content: '{"partial":', stopReason: 'max_tokens' as const } : {}),
+      ...(e.kind === 'refusal' ? { refusalText: 'I cannot help with that.', stopReason: 'safety' as const } : {}),
       // The reply is built from the schema itself: a truncation retry drops the
       // prompt's schema hint, which the mock's default reply is derived from.
       ...(e.kind === 'valid' ? { stopReason: 'end_turn' as const, content: structured ? JSON.stringify(minimalInstance(cfg.responseSchema)) : 'ok' } : {}),

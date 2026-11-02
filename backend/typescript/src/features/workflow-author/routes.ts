@@ -27,9 +27,9 @@ import { ownerStampFromRequest } from '../../host/runOwner.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { seedRunVariables } from '../../host/variablesRuntime.js';
 import { buildRunRecord, dispatchRunInBackground } from '../../host/runDispatch.js';
-import { insertRunWithStartContext } from '../../host/runInsert.js';
-import { withRunLimit } from '../../host/runLimitSeam.js';
-import { runQuotaMiddleware, reserveConcurrentSlot } from '../../middleware/rateLimit.js';
+import { chargedAdmission, insertRunWithStartContext } from '../../host/runInsert.js';
+import { refuseRunAdmission, runAdmissionFor, runQuotaMiddleware } from '../../middleware/rateLimit.js';
+import { AdmissionRefusedError } from '../../storage/storage.js';
 import { requireString, optionalString, tenantOf } from '../featureRoute.js';
 import { resolveDisabledPacks } from '../../host/packVisibility.js';
 import { buildAuthoringCatalog } from './workflowAuthorService.js';
@@ -107,12 +107,18 @@ export function registerWorkflowAuthorRoutes(deps: RouteDeps): void {
       // ADR 0099 — single run-insert seam stamps the compaction decision.
       // ADR 0551 P1 — `enqueueDispatch`: this route promises a start and then
       // kicks the wakeup hint, so the intent is made durable with the run.
-      // ADR 0821 P5 follow-up — the plan's monthly run limit (a no-op until wired).
-      await withRunLimit(tenantId, () => insertRunWithStartContext(storage, run, { definition: wf.definition, enqueueDispatch: true }));
+      // ADR 0987 D3 — the plan's monthly run limit and this caller's concurrency
+      // slot, counted in the insert (D2); a full scope wrote nothing.
+      try {
+        await insertRunWithStartContext(storage, run, { admission: chargedAdmission(runAdmissionFor(req)), definition: wf.definition, enqueueDispatch: true });
+      } catch (err) {
+        if (err instanceof AdmissionRefusedError) {
+          refuseRunAdmission(req, res);
+          return;
+        }
+        throw err;
+      }
       seedRunVariables(run.runId, wf.definition.variables, inputs);
-      // Tie the rate-limiter's reserved concurrency slot to this runId so the
-      // runLifecycle bus auto-releases it on terminal status (mirrors POST /v1/runs).
-      reserveConcurrentSlot(req, run.runId);
       hostSuite.auditSink.record({
         principalId: actingUserId ?? 'anonymous',
         action: 'workflow-author.draft',

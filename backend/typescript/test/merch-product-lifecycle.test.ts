@@ -39,11 +39,17 @@ describe('merch product-lifecycle consumers (RI-4)', () => {
     const pinOnly = await createMerchRule({ tenantId: T, orgId: ORG, createdBy: 'test', name: 'Pin doomed', scope: 'all', actions: [{ kind: 'pin', productId: doomed.productId, position: 1 }] });
     const mixed = await createMerchRule({
       tenantId: T, orgId: ORG, createdBy: 'test', name: 'Pin + bury', scope: 'all',
-      actions: [{ kind: 'pin', productId: doomed.productId, position: 2 }, { kind: 'bury', predicate: { tags: ['stale'] } }],
+      // The keeper pin is the BYSTANDER: a prune that stripped every pin (not just
+      // the doomed product's) left the old fixture green (w72 probe).
+      actions: [{ kind: 'pin', productId: doomed.productId, position: 2 }, { kind: 'pin', productId: keeper.productId, position: 3 }, { kind: 'bury', predicate: { tags: ['stale'] } }],
     });
 
     const scopedOnly = await createPromotion({ tenantId: T, orgId: ORG, createdBy: 'test', name: 'Doomed only', type: 'product_discount', reward: { kind: 'percent', value: 10 }, scope: { productIds: [doomed.productId] } });
     const scopedBoth = await createPromotion({ tenantId: T, orgId: ORG, createdBy: 'test', name: 'Both beans', type: 'product_discount', reward: { kind: 'percent', value: 5 }, scope: { productIds: [doomed.productId, keeper.productId] } });
+    // The header's "category/all scopes survive": a promotion whose product ids
+    // empty but which ALSO scopes a category, or everything, still has a scope.
+    const scopedCategory = await createPromotion({ tenantId: T, orgId: ORG, createdBy: 'test', name: 'Doomed + beans', type: 'product_discount', reward: { kind: 'percent', value: 7 }, scope: { productIds: [doomed.productId], categories: ['beans'] } });
+    const scopedAll = await createPromotion({ tenantId: T, orgId: ORG, createdBy: 'test', name: 'Doomed + all', type: 'product_discount', reward: { kind: 'percent', value: 3 }, scope: { productIds: [doomed.productId], all: true } });
 
     expect(await deleteProduct(T, ORG, doomed.productId)).toBe(true);
 
@@ -54,7 +60,7 @@ describe('merch product-lifecycle consumers (RI-4)', () => {
     expect(pinOnlyAfter.actions).toHaveLength(0);
     expect(pinOnlyAfter.active).toBe(false); // emptied ⇒ deactivated, not deleted
     const mixedAfter = rules.find((r) => r.ruleId === mixed.ruleId)!;
-    expect(mixedAfter.actions).toEqual([{ kind: 'bury', predicate: { tags: ['stale'] } }]);
+    expect(mixedAfter.actions).toEqual([{ kind: 'pin', productId: keeper.productId, position: 3 }, { kind: 'bury', predicate: { tags: ['stale'] } }]);
     expect(mixedAfter.active).toBe(true); // predicate action survives, rule stays live
 
     // Promotions: emptied scope deactivates; shared scope shrinks and stays live.
@@ -64,6 +70,11 @@ describe('merch product-lifecycle consumers (RI-4)', () => {
     const bothAfter = (await getPromotion(T, ORG, scopedBoth.promotionId))!;
     expect(bothAfter.scope?.productIds).toEqual([keeper.productId]);
     expect(bothAfter.active).toBe(true);
+    for (const [label, id] of [['category', scopedCategory.promotionId], ['all', scopedAll.promotionId]] as const) {
+      const after = (await getPromotion(T, ORG, id))!;
+      expect(after.scope?.productIds, label).toEqual([]);
+      expect(after.active, `${label}-scoped promotion stays live`).toBe(true);
+    }
 
     // Idempotent re-fire finds nothing.
     expect(await prunedDiscovery(T, ORG, doomed.productId)).toEqual({ collections: 0, rules: 0 });

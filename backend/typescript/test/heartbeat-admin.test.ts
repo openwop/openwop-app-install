@@ -3,6 +3,12 @@
  * host-wide admin override (master kill, cadence override, per-agent precedence),
  * and (2) the service: durable resolve-for-core with the auto-disable window,
  * the read-time view, and PUT validation.
+ *
+ * Tracker TST-DFB-2. Red when (w71g1, witnessed): masterOff stops overriding a
+ * per-agent cadence; the admin cadence stops overriding the env default; the
+ * cadence floor, the off-clears-window rule or the future-window check is dropped;
+ * the auto-disable window never elapses; the countdown ignores `now`; a missing row
+ * resolves to a config instead of null.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -53,11 +59,14 @@ describe('ADR 0318 — effectiveHeartbeatIntervalMs honors the host-wide admin o
 
 describe('ADR 0318 — validateConfig', () => {
   it('rejects a bad status / out-of-bounds cadence / past window / negative budget', () => {
-    expect(() => validateConfig({ status: 'maybe', hostDefaultIntervalMs: 600_000 })).toThrow();
-    expect(() => validateConfig({ status: 'on', hostDefaultIntervalMs: 1000 })).toThrow(); // < 1 min floor
-    expect(() => validateConfig({ status: 'on', hostDefaultIntervalMs: 999_999_999 })).toThrow(); // > 24h ceiling
-    expect(() => validateConfig({ status: 'on', hostDefaultIntervalMs: 600_000, enabledUntil: '2000-01-01T00:00:00Z' })).toThrow();
-    expect(() => validateConfig({ status: 'on', hostDefaultIntervalMs: 600_000, runBudgetPerHour: -5 })).toThrow();
+    // Each body is valid except the one property under test; the message names it.
+    expect(() => validateConfig({ status: 'maybe', hostDefaultIntervalMs: 600_000 })).toThrow('`status` must be "on" or "off".');
+    expect(() => validateConfig({ status: 'on', hostDefaultIntervalMs: 59_999 })).toThrow(/^`hostDefaultIntervalMs` must be an integer between/); // < 1 min floor
+    expect(() => validateConfig({ status: 'on', hostDefaultIntervalMs: 86_400_001 })).toThrow(/^`hostDefaultIntervalMs` must be an integer between/); // > 24h ceiling
+    expect(validateConfig({ status: 'on', hostDefaultIntervalMs: 60_000 }).hostDefaultIntervalMs).toBe(60_000); // both bounds inclusive
+    expect(validateConfig({ status: 'on', hostDefaultIntervalMs: 86_400_000 }).hostDefaultIntervalMs).toBe(86_400_000);
+    expect(() => validateConfig({ status: 'on', hostDefaultIntervalMs: 600_000, enabledUntil: '2000-01-01T00:00:00Z' })).toThrow('`enabledUntil` must be in the future (or null for indefinite).');
+    expect(() => validateConfig({ status: 'on', hostDefaultIntervalMs: 600_000, runBudgetPerHour: -5 })).toThrow(/^`runBudgetPerHour` must be a non-negative integer/);
   });
 
   it('nulls the window when status is off (no stale re-arm) and accepts a valid on+window', () => {

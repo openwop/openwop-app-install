@@ -10,12 +10,18 @@
  *   - a re-executed node finds its claim and does NOT send again (at-most-once);
  *   - past its deadline → `maybe_executed`, never an automatic retry;
  *   - only the device the task went to may report it.
+ *
+ * TST-CFA-3. Red when: the summary loses its `<UNTRUSTED>` fence; the claim
+ * `putIfAbsent` is bypassed (AT-MOST-ONCE); the result route stops matching the
+ * reporting device; the D7 workflow-tasks opt-in filter is dropped; an offline
+ * device is chosen; the sweep never expires; a heartbeat run stops resolving the
+ * personal board's owner; node CONFIG stops reaching the frame.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { ensurePersonalBoard } from '../src/host/kanbanService.js';
+import { createBoard, ensurePersonalBoard } from '../src/host/kanbanService.js';
 import { afterAll, beforeAll, describe, expect, it, beforeEach } from 'vitest';
 import { WebSocket } from 'ws';
 import { getSetCookies } from './headerCookies.js';
@@ -51,13 +57,22 @@ beforeAll(async () => {
 });
 afterAll(async () => { delete process.env[CLAUDE_CODE_OPERATOR_ENV]; server.closeAllConnections(); await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res { status: number; body: any }
+interface TaskBody {
+  user?: { userId: string };
+  userCode?: string; deviceCode?: string; token?: string; deviceId?: string;
+  devices?: Array<{ online?: boolean; workflowTasks?: unknown }>;
+  workflowTasks?: unknown; alreadyFinished?: boolean;
+  error?: string; message?: string;
+}
+interface Res { status: number; body: TaskBody }
+interface Frame { type: string; runId?: string; taskId?: string; stepId?: string; kind?: string; tool?: string; inputs?: Record<string, unknown> }
 function client(bearer?: string) {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}), ...(bearer ? { authorization: `Bearer ${bearer}` } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    const parsed = (res.status === 204 ? {} : await res.json().catch(() => ({}))) as TaskBody;
+    return { status: res.status, body: parsed };
   };
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b), put: (p: string, b?: unknown) => call('PUT', p, b) };
 }
@@ -77,12 +92,12 @@ async function owner(opts: { workflowTasks?: boolean } = {}) {
     const on = await c.put(`${CC}/devices/${p.body.deviceId}/workflow-tasks`, { enabled: true });
     expect(on.status, JSON.stringify(on.body)).toBe(200);
   }
-  return { c, tenantId, userId: r.body.user.userId as string, token: p.body.token as string, deviceId: p.body.deviceId as string };
+  return { c, tenantId, userId: r.body.user?.userId as string, token: p.body.token as string, deviceId: p.body.deviceId as string };
 }
 function connectDevice(token: string) {
   const ws = new WebSocket(`${WS}/host/openwop-app/claude-code/device`, { headers: { authorization: `Bearer ${token}` } });
-  const frames: any[] = [];
-  ws.on('message', (d, bin) => { if (!bin) frames.push(JSON.parse(String(d))); });
+  const frames: Frame[] = [];
+  ws.on('message', (d, bin) => { if (!bin) frames.push(JSON.parse(String(d)) as Frame); });
   const ready = new Promise<void>((resolve) => { const t = setInterval(() => { if (frames.some((f) => f.type === 'hello')) { clearInterval(t); resolve(); } }, 10); });
   return { ws, frames, ready };
 }
@@ -92,17 +107,17 @@ const until = async (pred: () => boolean | Promise<boolean>, ms = 3000): Promise
   throw new Error('condition not met in time');
 };
 
-async function startTaskRun(tenantId: string, actingUserId: string | null, extraMeta: Record<string, unknown> = {}, node: Record<string, unknown> = { inputs: { prompt: 'Make the failing test pass' } }): Promise<{ run: RunRecord; def: WorkflowDefinition; result: Awaited<ReturnType<typeof executeRun>> }> {
+async function startTaskRun(tenantId: string, actingUserId: string | null, extraMeta: Record<string, unknown> = {}, node: { inputs?: Record<string, unknown>; config?: Record<string, unknown> } = { inputs: { prompt: 'Make the failing test pass' } }): Promise<{ run: RunRecord; def: WorkflowDefinition; result: Awaited<ReturnType<typeof executeRun>> }> {
   const def: WorkflowDefinition = {
     workflowId: `wf.cc-task.${randomUUID()}`,
     nodes: [{ nodeId: 'code', typeId: TASK_NODE_TYPE, ...node }],
     edges: [],
-  } as unknown as WorkflowDefinition;
+  };
   // A chain step is always a REGISTERED workflow; the resume re-loads it from the catalog.
   registerWorkflow(def);
   const now = new Date().toISOString();
-  const run: RunRecord = { runId: randomUUID(), workflowId: def.workflowId, tenantId, status: 'pending', inputs: {}, metadata: { ...(actingUserId ? { actingUserId } : {}), ...extraMeta }, configurable: {}, createdAt: now, updatedAt: now } as RunRecord;
-  await insertRunWithStartContext(storage, run, { definition: def });
+  const run: RunRecord = { runId: randomUUID(), workflowId: def.workflowId, tenantId, status: 'pending', inputs: {}, metadata: { ...(actingUserId ? { actingUserId } : {}), ...extraMeta }, configurable: {}, createdAt: now, updatedAt: now };
+  await insertRunWithStartContext(storage, run, { admission: { plan: 'exempt:test-fixture' }, definition: def });
   const result = await executeRun(storage, run, def);
   return { run, def, result };
 }
@@ -114,15 +129,16 @@ describe('ADR 0785 P5 — app-dispatched tasks', () => {
     const o = await owner();
     const dev = connectDevice(o.token);
     await dev.ready;
-    await until(async () => (await o.c.get(`${CC}/devices`)).body.devices[0]?.online === true);
+    await until(async () => (await o.c.get(`${CC}/devices`)).body.devices?.[0]?.online === true);
 
     const { run } = await startTaskRun(o.tenantId, o.userId);
     await until(() => dev.frames.some((f) => f.type === 'task'));
     const task = dev.frames.find((f) => f.type === 'task');
     expect(task).toMatchObject({ runId: run.runId, stepId: 'code', kind: 'tool', tool: 'claude-code.task', inputs: { prompt: 'Make the failing test pass' } });
-    expect(task.taskId).toBe(taskIdFor(run.runId, 'code'));
+    expect(task?.taskId).toBe(taskIdFor(run.runId, 'code'));
+    const taskId = task?.taskId ?? '';
 
-    const posted = await client(o.token).post(`${CC}/tasks/${task.taskId}/result`, { status: 'completed', isError: false, summary: 'Fixed: off-by-one in the parser.', numTurns: 4, costUsd: 0.12 });
+    const posted = await client(o.token).post(`${CC}/tasks/${taskId}/result`, { status: 'completed', isError: false, summary: 'Fixed: off-by-one in the parser.', numTurns: 4, costUsd: 0.12 });
     expect(posted.status, JSON.stringify(posted.body)).toBe(200);
     await until(async () => (await storage.getRun(run.runId))?.status === 'completed', 5000);
     const events = await storage.listEvents(run.runId);
@@ -132,9 +148,9 @@ describe('ADR 0785 P5 — app-dispatched tasks', () => {
     expect(summary).toContain('off-by-one');
 
     // A second report is idempotent, and a stranger's key cannot report at all.
-    expect((await client(o.token).post(`${CC}/tasks/${task.taskId}/result`, { status: 'completed', summary: 'again' })).body.alreadyFinished).toBe(true);
+    expect((await client(o.token).post(`${CC}/tasks/${taskId}/result`, { status: 'completed', summary: 'again' })).body.alreadyFinished).toBe(true);
     const other = await owner();
-    expect((await client(other.token).post(`${CC}/tasks/${task.taskId}/result`, { status: 'completed', summary: 'x' })).status).toBe(404);
+    expect((await client(other.token).post(`${CC}/tasks/${taskId}/result`, { status: 'completed', summary: 'x' })).status).toBe(404);
     dev.ws.close();
   });
 
@@ -151,12 +167,15 @@ describe('ADR 0785 P5 — app-dispatched tasks', () => {
     const o = await owner({ workflowTasks: false });
     const dev = connectDevice(o.token);
     await dev.ready;
-    await until(async () => (await o.c.get(`${CC}/devices`)).body.devices[0]?.online === true);
+    await until(async () => (await o.c.get(`${CC}/devices`)).body.devices?.[0]?.online === true);
     const { run, result } = await startTaskRun(o.tenantId, o.userId);
     expect(result.status).toBe('failed');
     expect(JSON.stringify(await storage.listEvents(run.runId))).toContain('consent_required');
     expect(await __getTaskForTest(taskIdFor(run.runId, 'code'))).toBeNull();
     await new Promise((r) => setTimeout(r, 100));
+    // Positive control: the socket is live and delivering (its hello arrived), so an
+    // absent task frame is an absence, not a dead socket.
+    expect(dev.frames.some((f) => f.type === 'hello')).toBe(true);
     expect(dev.frames.some((f) => f.type === 'task')).toBe(false);
 
     // Turning it on, then OFF again, leaves it refused: the switch is honoured both ways.
@@ -171,10 +190,14 @@ describe('ADR 0785 P5 — app-dispatched tasks', () => {
     const o = await owner();
     const dev = connectDevice(o.token);
     await dev.ready;
-    await until(async () => (await o.c.get(`${CC}/devices`)).body.devices[0]?.online === true);
+    await until(async () => (await o.c.get(`${CC}/devices`)).body.devices?.[0]?.online === true);
     const { run } = await startTaskRun(o.tenantId, o.userId, {}, { config: { prompt: 'Rename the helper', maxTurns: 5 } });
     await until(() => dev.frames.some((f) => f.type === 'task' && f.runId === run.runId));
-    expect(dev.frames.find((f) => f.type === 'task' && f.runId === run.runId).inputs).toEqual({ prompt: 'Rename the helper', maxTurns: 5 });
+    expect(dev.frames.find((f) => f.type === 'task' && f.runId === run.runId)?.inputs).toEqual({ prompt: 'Rename the helper', maxTurns: 5 });
+    // …and an upstream INPUT wins over the same key in CONFIG (`{ ...config, ...inputs }`).
+    const both = await startTaskRun(o.tenantId, o.userId, {}, { config: { prompt: 'Rename the helper', maxTurns: 5 }, inputs: { prompt: 'From upstream' } });
+    await until(() => dev.frames.some((f) => f.type === 'task' && f.runId === both.run.runId));
+    expect(dev.frames.find((f) => f.type === 'task' && f.runId === both.run.runId)?.inputs).toEqual({ prompt: 'From upstream', maxTurns: 5 });
     dev.ws.close();
   });
 
@@ -184,15 +207,16 @@ describe('ADR 0785 P5 — app-dispatched tasks', () => {
     const stranger = await owner({ workflowTasks: false });
     expect((await stranger.c.put(`${CC}/devices/${o.deviceId}/workflow-tasks`, { enabled: true })).status).toBe(404);
     expect((await o.c.put(`${CC}/devices/${o.deviceId}/workflow-tasks`, { enabled: 'yes' })).status).toBe(400);
-    const listed = (await o.c.get(`${CC}/devices`)).body.devices[0];
-    expect(listed.workflowTasks).toBeUndefined();
+    const listed = (await o.c.get(`${CC}/devices`)).body.devices?.[0];
+    expect(listed).toBeDefined();
+    expect(listed?.workflowTasks).toBeUndefined();
   });
 
   it('past its deadline → maybe_executed (the sweep), never an automatic retry', async () => {
     const o = await owner();
     const dev = connectDevice(o.token);
     await dev.ready;
-    await until(async () => (await o.c.get(`${CC}/devices`)).body.devices[0]?.online === true);
+    await until(async () => (await o.c.get(`${CC}/devices`)).body.devices?.[0]?.online === true);
     const { run } = await startTaskRun(o.tenantId, o.userId);
     await until(() => dev.frames.some((f) => f.type === 'task'));
     expect(await sweepExpiredTasks(Date.now() + 3 * 60 * 60_000)).toBeGreaterThanOrEqual(1);
@@ -206,13 +230,14 @@ describe('ADR 0785 P5 — app-dispatched tasks', () => {
     const o = await owner();
     const dev = connectDevice(o.token);
     await dev.ready;
-    await until(async () => (await o.c.get(`${CC}/devices`)).body.devices[0]?.online === true);
+    await until(async () => (await o.c.get(`${CC}/devices`)).body.devices?.[0]?.online === true);
     const node = getNodeRegistry().get(TASK_NODE_TYPE);
     expect(node).toBeTruthy();
-    const ctx = (runId: string) => ({
+    const ctx = (runId: string): NodeContext => ({
       runId, nodeId: 'code', tenantId: o.tenantId, actingUserId: o.userId, inputs: { prompt: 'p' },
+      configurable: {}, attempt: 1, secrets: {}, emit: async () => ({ eventId: 'e1', sequence: 1 }),
       suspend: async () => ({ status: 'completed', isError: false, summary: 'ok' }),
-    }) as unknown as NodeContext;
+    });
     const runId = randomUUID();
     await node!.execute(ctx(runId));
     await node!.execute(ctx(runId)); // the same node, executed again
@@ -231,10 +256,11 @@ describe('ADR 0785 P5 — app-dispatched tasks', () => {
     const o = await owner();
     const dev = connectDevice(o.token);
     await dev.ready;
-    await until(async () => (await o.c.get(`${CC}/devices`)).body.devices[0]?.online === true);
+    await until(async () => (await o.c.get(`${CC}/devices`)).body.devices?.[0]?.online === true);
     const { run } = await startTaskRun(o.tenantId, o.userId);
     await until(() => dev.frames.some((f) => f.type === 'task'));
     const frame = dev.frames.find((f) => f.type === 'task');
+    expect(frame).toBeDefined();
 
     const url = new URL('../../../clients/agent-host/src/taskRunner.js', import.meta.url).href;
     const { TaskRunner } = (await import(url)) as { TaskRunner: new (o: Record<string, unknown>) => { run(f: unknown): Promise<string> } };
@@ -261,11 +287,12 @@ describe('ADR 0785 P5 — app-dispatched tasks', () => {
     const o = await owner();
     const dev = connectDevice(o.token);
     await dev.ready;
-    await until(async () => (await o.c.get(`${CC}/devices`)).body.devices[0]?.online === true);
+    await until(async () => (await o.c.get(`${CC}/devices`)).body.devices?.[0]?.online === true);
     // The card's board is the owner's personal board — its owner is unambiguous.
     const board = await ensurePersonalBoard(`user:${o.userId}-personal`, o.userId);
     const { run } = await startTaskRun(o.tenantId, null, { heartbeat: { boardId: board.id, cardId: 'card-1', source: 'heartbeat' } });
     await until(() => dev.frames.some((f) => f.type === 'task' && f.runId === run.runId));
+    expect(dev.frames.find((f) => f.type === 'task' && f.runId === run.runId)?.stepId).toBe('code');
     dev.ws.close();
   });
 
@@ -273,7 +300,11 @@ describe('ADR 0785 P5 — app-dispatched tasks', () => {
     const o = await owner();
     const dev = connectDevice(o.token);
     await dev.ready;
-    const { run, result } = await startTaskRun(o.tenantId, null, { heartbeat: { boardId: 'board-agent-does-not-exist', source: 'heartbeat' } });
+    await until(async () => (await o.c.get(`${CC}/devices`)).body.devices?.[0]?.online === true);
+    // A REAL board with no `ownerUserId` (a team/agent board) — not a missing one.
+    const agentBoard = await createBoard({ tenantId: o.tenantId, name: 'Agent board' });
+    expect(agentBoard.ownerUserId).toBeUndefined();
+    const { run, result } = await startTaskRun(o.tenantId, null, { heartbeat: { boardId: agentBoard.id, source: 'heartbeat' } });
     expect(result.status).toBe('failed');
     expect(JSON.stringify(await storage.listEvents(run.runId))).toContain('runner_unavailable');
     expect(dev.frames.filter((f) => f.type === 'task' && f.runId === run.runId)).toHaveLength(0);

@@ -42,10 +42,19 @@
  * KEY-PRESENCE, not value validation — see `findMissingRequiredConfig`. A chain
  * legitimately authors `"provider": "{{params.provider}}"`; the value arrives
  * when expansion freezes params in.
+ *
+ * TST-CCC-4. Red when (each witnessed by a w67 probe): a node schema gains a required
+ * key a chain does not supply (count ceiling); present-but-undefined config stops
+ * counting as missing (stale ceiling); whole-value unfilled params stop being recorded
+ * (unfillable ceiling); email-send gains required inputs (input ceiling); a chain or
+ * node pins a provider/model `providers.json` does not offer; a branch node loses its
+ * predicate or an out-edge condition; a `{{params.X}}` names an undeclared param; a rag
+ * node reads its query from config; a param default breaks its node's schema pattern;
+ * a pack JSON gains a duplicate key; or ADR 0498 §Open stops quoting the live ceilings.
  */
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { findMissingRequiredConfig, expandChain, findUnfilledExpansionParams, type WorkflowChain } from '../src/host/workflowChainPackLoader.js';
 import { readPackManifest } from './helpers/readPackManifest.js';
 
@@ -131,7 +140,7 @@ const findings = chains.flatMap((c) => {
 
 describe('chain node config conformance', () => {
   it('the scan is NON-VACUOUS (a broken reader would report zero and pass)', () => {
-    expect(chains.length, 'no chains read — the walker is broken, not the content').toBeGreaterThan(20);
+    expect(chains.length, 'no chains read — the walker is broken, not the content').toBeGreaterThan(268); // measured 272 (2026-10-29)
     expect(requiredMap.size, 'no node type declared required config — schemas unreadable').toBeGreaterThan(10);
     // The known-good control: this node type genuinely requires `outputSchema`.
     // (CORRECTED 2026-10-17, ADR 0903: it used to be chatCompletion's
@@ -182,17 +191,23 @@ describe('chain node config conformance', () => {
  */
 describe('P2 runtime reachability', () => {
   it('the catalog-backed accessor returns real required keys when packs are installed', async () => {
-    const { requiredConfigKeysFor, requiredConfigKeyMap } = await import('../src/host/nodeCatalogBuilder.js');
-    const map = requiredConfigKeyMap();
-    if (map.size === 0) {
-      // No installed packs in this environment — nothing to assert against.
-      expect(requiredConfigKeysFor('core.ai.chatCompletion')).toEqual([]);
-      return;
-    }
-    // Installed: the accessor must agree with the repo scan for a known type.
-    const fromCatalog = requiredConfigKeysFor('core.ai.chatCompletion');
-    if (fromCatalog.length > 0) {
-      expect(fromCatalog).toEqual(expect.arrayContaining(['provider', 'model']));
+    // CORRECTED 2026-10-29 (grade-tests w67, TST-CCC-4): this used to branch on
+    // whatever the per-worker pack dir held (usually nothing ⇒ it asserted `[]` of an
+    // empty map), and its "installed" branch expected chatCompletion to require
+    // provider/model, which ADR 0903 removed — so it could not fail anywhere. Now it
+    // points the catalog at the in-repo `packs/` (read-only scan), loads a FRESH copy
+    // of the module (its required-key map is memoized), and checks agreement with the
+    // repo scan above for a type that really requires config.
+    const prev = process.env.OPENWOP_PACK_DIR;
+    process.env.OPENWOP_PACK_DIR = NODE_PACK_ROOT;
+    try {
+      vi.resetModules();
+      const { requiredConfigKeysFor } = await import('../src/host/nodeCatalogBuilder.js');
+      expect(requiredConfigKeysFor('core.ai.structuredOutput')).toEqual(expect.arrayContaining(['outputSchema']));
+      expect([...requiredConfigKeysFor('core.ai.structuredOutput')].sort()).toEqual([...requiredFor('core.ai.structuredOutput')].sort());
+    } finally {
+      if (prev === undefined) delete process.env.OPENWOP_PACK_DIR; else process.env.OPENWOP_PACK_DIR = prev;
+      vi.resetModules();
     }
   });
 
@@ -219,22 +234,35 @@ describe('chain provider/model defaults track providers.json', () => {
   const catalogPath = join(REPO, 'providers.json');
 
   it('every provider/model default a chain declares exists in the catalog', () => {
-    if (!existsSync(catalogPath)) return; // catalog vendored elsewhere in this env
-    const raw = JSON.parse(readFileSync(catalogPath, 'utf8')) as unknown;
-    const provs = (Array.isArray(raw) ? raw : (raw as { providers?: unknown[] }).providers ?? []) as Array<{ id?: string; models?: Array<{ id?: string }> }>;
-    const models = new Map(provs.map((p) => [p.id, new Set((p.models ?? []).map((m) => m.id))]));
+    // CORRECTED 2026-10-29 (grade-tests w67, TST-CCC-4): since ADR 0903 no chain
+    // declares a provider/model PARAM default (the next case), so this loop used to
+    // check nothing (probe-witnessed vacuous). The same drift risk lives on in the
+    // LITERAL pins some chains still author into node config (26 at HEAD:
+    // slides.design, app-builder.*, notebooks.*, insights) — those are checked too.
+    const raw = JSON.parse(readFileSync(catalogPath, 'utf8')) as { providers?: Array<{ id?: string; models?: Array<{ id?: string }> }> };
+    const models = new Map((raw.providers ?? []).map((p) => [p.id, new Set((p.models ?? []).map((m) => m.id))]));
+    expect(models.size, 'providers.json read nothing').toBeGreaterThan(3);
 
     const bad: string[] = [];
+    let literalPins = 0;
+    const check = (where: string, prov: unknown, model: unknown): void => {
+      if (typeof prov !== 'string') return;
+      if (!models.has(prov)) { bad.push(`${where}: provider "${prov}" not in providers.json`); return; }
+      if (typeof model === 'string' && !models.get(prov)!.has(model)) bad.push(`${where}: model "${model}" not advertised by "${prov}"`);
+    };
+    const isToken = (v: unknown): boolean => typeof v === 'string' && v.includes('{{');
     for (const c of chains) {
       const props = ((c.parameters as { properties?: Record<string, { default?: unknown }> } | undefined)?.properties) ?? {};
-      const prov = props.provider?.default;
-      const model = props.model?.default;
-      if (typeof prov !== 'string') continue;
-      if (!models.has(prov)) { bad.push(`${c.chainId}: provider "${prov}" not in providers.json`); continue; }
-      if (typeof model === 'string' && !models.get(prov)!.has(model)) {
-        bad.push(`${c.chainId}: model "${model}" not advertised by "${prov}"`);
+      check(`${c.chainId} (param default)`, props.provider?.default, props.model?.default);
+      for (const n of c.dag.nodes) {
+        const cfg = n.config ?? {};
+        if (typeof cfg.provider === 'string' && !isToken(cfg.provider)) {
+          literalPins += 1;
+          check(`${c.chainId}/${n.id}`, cfg.provider, isToken(cfg.model) ? undefined : cfg.model);
+        }
       }
     }
+    expect(literalPins, 'fixture guard: no literal provider pins scanned').toBeGreaterThan(10); // measured 13 nodes
     expect(
       bad,
       'A chain pins a provider/model the catalog no longer advertises. Re-run the model sweep '
@@ -261,7 +289,7 @@ describe('chain provider/model defaults track providers.json', () => {
   it('the sweep is non-vacuous (chains still DECLARE provider/model params)', () => {
     const declaring = chains.filter((c) =>
       ((c.parameters as { properties?: Record<string, unknown> } | undefined)?.properties ?? {}).provider !== undefined);
-    expect(declaring.length).toBeGreaterThan(50);
+    expect(declaring.length).toBeGreaterThan(81); // measured 87 (95 before ADR 1023 D2 removed the eight funnel blueprint + step chains' provider/model, which never reached their model in any lane)
   });
 });
 
@@ -359,7 +387,7 @@ describe('core.flow.if nodes branch for real', () => {
   const ifNodesOf = (c: WorkflowChain) => c.dag.nodes.filter((n) => n.typeId === 'core.flow.if');
 
   it('is non-vacuous — the shipped packs really do contain branch nodes', () => {
-    expect(chains.flatMap(ifNodesOf).length).toBeGreaterThan(3);
+    expect(chains.flatMap(ifNodesOf).length).toBeGreaterThanOrEqual(7); // measured 7
   });
 
   it('every core.flow.if declares a predicate (absence throws a TypeError at dispatch)', () => {
@@ -426,6 +454,8 @@ describe('core.flow.if nodes branch for real', () => {
  * host-owned in-app notification node, not per-chain bindings.
  */
 const REQUIRED_INPUT_CEILING = 7;
+/** See the GRD-5 docblock in the describe block below (measured on the EXPANDED blank copy). */
+const UNFILLABLE_INPUT_CEILING = 5;
 
 describe('required INPUTS conformance (the unratcheted half)', () => {
   const requiredInputsFor = (() => {
@@ -527,7 +557,6 @@ describe('required INPUTS conformance (the unratcheted half)', () => {
    * `notification-push` x55 contract defect in ADR 0498 §Open. Confirm against
    * the node pack before authoring bindings for them.
    */
-  const UNFILLABLE_INPUT_CEILING = 5;
 
   const unfillableInputs = (c: WorkflowChain): string[] => {
     let def: ReturnType<typeof expandChain>;
@@ -568,7 +597,7 @@ describe('required INPUTS conformance (the unratcheted half)', () => {
     expect(sample, 'the sample chain must exist or this rule proves nothing').toBeTruthy();
     const def = expandChain(sample!, { params: {} });
     const send = def.nodes.find((n) => n.typeId === 'core.openwop.integration.email-send');
-    const inputs = ((send as unknown as { inputs?: Record<string, unknown> })?.inputs ?? {});
+    const inputs: Record<string, unknown> = send?.inputs ?? {};
     // The exact shape this rule exists for: present, and undefined.
     expect(Object.prototype.hasOwnProperty.call(inputs, 'to')).toBe(true);
     expect(inputs.to).toBeUndefined();
@@ -622,7 +651,7 @@ describe('required INPUTS conformance (the unratcheted half)', () => {
       ));
       for (const n of c.dag.nodes) {
         for (const slot of ['config', 'inputs'] as const) {
-          const bag = (n as unknown as Record<string, unknown>)[slot];
+          const bag = n[slot];
           if (!bag) continue;
           for (const [key, value] of Object.entries(bag as Record<string, unknown>)) {
             for (const m of JSON.stringify(value).matchAll(PARAM_TOKEN)) {
@@ -643,13 +672,13 @@ describe('required INPUTS conformance (the unratcheted half)', () => {
       if (Object.keys(((c.parameters as { properties?: Record<string, unknown> } | undefined)?.properties) ?? {}).length) withDeclarations += 1;
       for (const n of c.dag.nodes) {
         for (const slot of ['config', 'inputs'] as const) {
-          const bag = (n as unknown as Record<string, unknown>)[slot];
+          const bag = n[slot];
           if (bag) tokens += [...JSON.stringify(bag).matchAll(PARAM_TOKEN)].length;
         }
       }
     }
-    expect(tokens, 'no param tokens found at all — the scan is looking at the wrong place').toBeGreaterThan(50);
-    expect(withDeclarations, 'no chain declares parameters — the `declared` set is always empty').toBeGreaterThan(10);
+    expect(tokens, 'no param tokens found at all — the scan is looking at the wrong place').toBeGreaterThan(941); // measured 957 (966 before ADR 1023 D2 removed the funnel step chains' dead provider/model config tokens; 981 before ADR 1020 D1 deleted the orchestration's 15 per-item `nextWorkerInputs` tokens)
+    expect(withDeclarations, 'no chain declares parameters — the `declared` set is always empty').toBeGreaterThan(181); // measured 184
   });
 });
 
@@ -671,8 +700,17 @@ describe('ADR 0498 §Open quotes the live ceilings', () => {
   it('the ADR exists and names both ratchets', () => {
     expect(existsSync(adr), 'ADR renamed or renumbered — update this guard').toBe(true);
     const text = readFileSync(adr, 'utf8');
-    expect(text).toMatch(/ceiling 42|ceiling \*\*42\*\*/i);
-    expect(text).toMatch(/ceiling 72|ceiling \*\*72\*\*/i);
+    // CORRECTED 2026-10-29 (grade-tests w67, TST-CCX-5): this used to match the
+    // literals `ceiling 42` / `ceiling 72`, so it stayed green while the ceilings
+    // moved to 50 / 7 (and correcting the ADR would have turned it RED). It now reads
+    // the constants, so moving any ceiling without the ADR following goes red.
+    for (const [name, value] of [
+      ['MISSING_CONFIG_CEILING', MISSING_CONFIG_CEILING],
+      ['REQUIRED_INPUT_CEILING', REQUIRED_INPUT_CEILING],
+      ['UNFILLABLE_INPUT_CEILING', UNFILLABLE_INPUT_CEILING],
+    ] as const) {
+      expect(text, `ADR 0498 §Open must quote \`${name}\` = **${value}**`).toContain(`\`${name}\` = **${value}**`);
+    }
   });
 
   it('the ADR does not still describe CLOSED work as open', () => {
@@ -717,7 +755,7 @@ describe('feature.kb.nodes.rag binds its inputs, not its config', () => {
     c.dag.nodes.filter((n) => n.typeId === RAG).map((n) => ({ chain: c, node: n })));
 
   it('is non-vacuous — the shipped packs really do use this node', () => {
-    expect(ragNodes.length, 'no rag nodes found — renamed? update this guard').toBeGreaterThanOrEqual(4);
+    expect(ragNodes.length, 'no rag nodes found — renamed? update this guard').toBeGreaterThanOrEqual(7); // measured 7
   });
 
   it('every rag node supplies orgId/collectionId/query via inputs (or an in-edge on that port)', () => {

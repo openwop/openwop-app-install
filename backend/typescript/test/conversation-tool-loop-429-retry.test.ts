@@ -1,15 +1,21 @@
 /**
- * withRateLimitRetry — the chat tool loop's bounded 429 resilience (the
+ * withRateLimitRetry — the chat tool loop's bounded 429 resilience (RESIL-2; the
  * 2026-07-14 boardroom failure: back-to-back advisor turns tripped the
  * provider's per-minute limit and the whole turn died). Pins the contract:
- * exactly ONE retry, only for the typed provider_rate_limited failure, other
+ * exactly ONE retry, for a rate limit (typed or the raw `<provider>_429:` shape)
+ * or a transient 5xx (500/502/503/504 — ADR 0773 G-10b, 2026-10-03), other
  * errors and codes propagate untouched, and 0 backoff disables the wrapper.
+ *
+ * TST-CKC-1. Red when: a non-transient failure is retried, 501 joins the transient
+ * set, the raw 429 shape stops matching, waitMs 0 still wraps, the retry is not
+ * bounded to one, or the logged upstream slice exceeds 200 chars.
  */
 import { describe, it, expect, vi } from 'vitest';
+import type { AiToolCallRequest } from '../src/executor/types.js';
 import { withRateLimitRetry, providerFailureFields } from '../src/host/conversationToolLoop.js';
 import { AiProviderError } from '../src/aiProviders/aiProvidersHost.js';
 
-const req = { systemPrompt: 's', messages: [], tools: [] } as never;
+const req: AiToolCallRequest = { provider: 'p', model: 'm', systemPrompt: 's', messages: [], tools: [] };
 const ok = { content: 'answer', toolCalls: [] };
 const rateLimited = () => new AiProviderError('provider_rate_limited', 'Provider rate-limited.', { status: 429 });
 
@@ -93,7 +99,7 @@ describe('isProviderRateLimited — the shared vocabulary (grade-pass RESIL-2)',
   it('does not match other raw upstream statuses or non-errors', async () => {
     for (const err of [new Error('google_400: bad request'), new Error('rate limit but wrong shape'), 'minimax_429: not-an-Error']) {
       const call = vi.fn().mockRejectedValue(err);
-      await expect(withRateLimitRetry(call, 1)(req)).rejects.toBeTruthy();
+      await expect(withRateLimitRetry(call, 1)(req)).rejects.toBe(err);
       expect(call).toHaveBeenCalledTimes(1);
     }
   });

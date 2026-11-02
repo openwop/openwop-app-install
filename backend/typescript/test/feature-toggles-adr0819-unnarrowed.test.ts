@@ -4,6 +4,12 @@
  * resolver must be byte-identical to the pure toggle read: same object for every
  * toggle and subject, sellable or not. The paywall exists only where an operator
  * turned it on.
+ *
+ * Tracker TST-DCA-4. Red when `resolveOne` changes what it returns on the
+ * entitled path (grade-tests w70 probe `un-resolveone`). DOUBLE GUARD, two files:
+ * `features/billing/entitlementGuard.ts` returns early when no plan is configured,
+ * AND `billingService.planFeatures` answers '*' then anyway — removing either one
+ * alone stays green by design (probe `un-guard`, vacuous in w70).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -39,7 +45,9 @@ describe('ADR 0819 §1 — no narrowed plan ⇒ resolveOne ≡ resolveToggle', (
   it('every toggle, for tenant-only, user-carrying and overridden subjects', async () => {
     const defs = listToggleDefaults();
     // Floor: the comparison must cover sellable features, or it proves nothing.
-    expect(defs.filter((d) => isSellableBundleFeature(d.id)).length).toBeGreaterThan(10);
+    // A liveness floor, not a baseline: MEASURED 64 sellable toggles on 2026-10-30;
+    // the floor is ~95% of that.
+    expect(defs.filter((d) => isSellableBundleFeature(d.id)).length).toBeGreaterThanOrEqual(61);
     const subjects = [{ tenantId: 'user:unnarrowed-1' }, { tenantId: 'user:unnarrowed-2', userId: 'oidc:someone' }, { tenantId: 'ws:abc' }];
     for (const d of defs) {
       for (const subject of subjects) {

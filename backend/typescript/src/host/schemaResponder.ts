@@ -6,10 +6,7 @@
  * node BEFORE authoring (CLAUDE.md "AI↔app information exchange": schema text
  * reaching a model is generated from its SSoT).
  *
- * NOTE: this is NOT the RFC 0021 `schema.request` responder — that wire kind asks
- * for an ENVELOPE KIND's schema ({ envelopeType }, answered out-of-band by
- * `agentDispatch.runChatToolLoop` from `loadEnvelopePayloadSchema`); node-type
- * schemas are a tool-mediated ask-path.
+ * Node-type schemas are a tool-mediated ask-path.
  *
  * SOURCE: `buildNodeCatalog()` — the SAME inventory `GET …/node-catalog` serves
  * (the in-process registry's modules plus every pack-declared node, with the

@@ -8,6 +8,12 @@
  *  - retry: a failed certificate is released and issued afresh; 429 within a
  *    minute; 409 while releasing;
  *  - status refreshes a stale busy row and not a fresh one.
+ *
+ * Tracker TST-CXA-2. Red when (customDomains.ts): a partial release deletes the
+ * row; a releasing row keeps serving (`isServingDomain`); force-delete is
+ * allowed before 3 attempts or audits without resource ids; a failed cert is
+ * not re-issued; the once-a-minute limit or the releasing refusal is removed;
+ * `domainStatus` stops refreshing a stale busy row or refreshes a fresh one.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -74,6 +80,7 @@ describe('ADR 0906 D4 — delete releases first', () => {
     expect(await removeDomain('t1', 'o1', 'pages.example.com', provider)).toBe('deleted');
     expect(state.resources.size).toBe(0);
     expect(await getDomain('t1', 'o1', 'pages.example.com')).toBeNull();
+    expect(audits).toHaveLength(0); // a clean delete is not a force-release
   });
 
   it('a partial release keeps the row RELEASING, stops serving at once, and a retry finishes it', async () => {
@@ -96,7 +103,9 @@ describe('ADR 0906 D4 — delete releases first', () => {
     await live('pages.example.com', provider);
     state.releaseOk = false;
     await removeDomain('t1', 'o1', 'pages.example.com', provider); // attempt 1
-    await expect(forceRemoveDomain('t1', 'o1', 'pages.example.com', 'admin')).rejects.toThrow(/after 3/);
+    await expect(forceRemoveDomain('t1', 'o1', 'pages.example.com', 'admin')).rejects.toMatchObject({
+      code: 'conflict', httpStatus: 409, message: 'Force removal is only available after 3 failed release attempts.',
+    });
     await removeDomain('t1', 'o1', 'pages.example.com', provider); // attempt 2
     await removeDomain('t1', 'o1', 'pages.example.com', provider); // attempt 3
     expect((await getDomain('t1', 'o1', 'pages.example.com'))?.edge?.releaseAttempts).toBe(3);
@@ -132,7 +141,9 @@ describe('ADR 0906 P3 — check again', () => {
   it('is rate-limited to once a minute', async () => {
     const { provider } = fakeProvider();
     await live('pages.example.com', provider);
-    await expect(retryDomainEdge('t1', 'o1', 'pages.example.com', provider, Date.now())).rejects.toThrow(/less than a minute/);
+    await expect(retryDomainEdge('t1', 'o1', 'pages.example.com', provider, Date.now())).rejects.toMatchObject({
+      code: 'rate_limited', httpStatus: 429, message: 'Checked less than a minute ago. Try again shortly.',
+    });
   });
 
   it('is refused while the domain is releasing', async () => {
@@ -140,7 +151,9 @@ describe('ADR 0906 P3 — check again', () => {
     await live('pages.example.com', provider);
     state.releaseOk = false;
     await removeDomain('t1', 'o1', 'pages.example.com', provider);
-    await expect(retryDomainEdge('t1', 'o1', 'pages.example.com', provider, Date.now() + 120_000)).rejects.toThrow(/being removed/);
+    await expect(retryDomainEdge('t1', 'o1', 'pages.example.com', provider, Date.now() + 120_000)).rejects.toMatchObject({
+      code: 'conflict', httpStatus: 409, message: 'This domain is being removed or re-issued; try again shortly.',
+    });
   });
 
   it('status refreshes a stale busy row, and not a fresh one', async () => {

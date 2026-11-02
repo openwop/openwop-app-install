@@ -6,18 +6,13 @@
  * this is the authed admin surface. Org picker → DataTable; mirrors the reviewed
  * admin-page precedent.
  *
- * NO FEATURE TOGGLE, deliberately. This docstring claimed the page "gates on
- * `useFeatureAccess('chat-widget')`" long after that stopped being true: the
- * per-tenant toggle was removed in the ADR 0134 graduation, so the page held a
- * hard-coded always-on `access` literal and a not-enabled branch that no input
- * could reach. Two lies for the price of one — a dead branch that read as a live
- * gate, and a docstring naming a hook the file does not import. Both are gone
- * rather than "restored": `chat-widget` registers no `toggleDefault`
- * (`backend/…/chat-widget/feature.ts`), so re-introducing the hook here would
- * resolve to the OFF FALLBACK for an ABSENT id and brick the page for everyone —
- * the trap `cms/CmsPage` already records. Exposure is controlled PER WIDGET
- * (`enabled` + a token + a non-empty `allowedDomains`), which is where a
- * widget's kill-switch belongs.
+ * NO TOGGLE READ ON THE PAGE. The `chat-widget` toggle (ADR 0820 §8.2 restored it;
+ * default ON, Support bundle) is enforced SERVER-side on every operator route through
+ * `authorizeOrgScope` (toggle + plan), so a tenant with the feature off sees the load
+ * error rather than a page that pretends to work. (This docstring used to say the
+ * feature had no toggle at all; that was true between ADR 0134 and ADR 0820.)
+ * Exposure is still controlled PER WIDGET too (`enabled` + a token + a non-empty
+ * `allowedDomains`).
  */
 import { Button } from '../../ui/Button.js';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -33,8 +28,11 @@ import { DataTable, type DataColumn } from '../../ui/DataTable.js';
 import { StatusBadge } from '../../ui/StatusBadge.js';
 import { confirm } from '../../ui/confirm.js';
 import { ActivityIcon } from '../../ui/icons/index.js';
-import { listWidgets, provisionWidget, rotateWidgetToken, deleteWidget, listOrgs, embedSnippet, type Widget, type Org } from '../../client/chatWidgetClient.js';
+import { listWidgets, provisionWidget, rotateWidgetToken, deleteWidget, patchWidget, listOrgs, embedSnippet, WidgetApiError, isWidgetByokRequired, type Widget, type Org } from '../../client/chatWidgetClient.js';
+import { listAgents, type AgentEntry } from '../../client/agentsClient.js';
+import { useNavigate } from 'react-router-dom';
 import { WidgetGrantEditor } from './WidgetGrantEditor.js';
+import { WidgetConversations } from './WidgetConversations.js';
 import { copyToClipboard } from '../../ui/copyToClipboard.js';
 
 export function WidgetsPage(): JSX.Element {
@@ -55,9 +53,19 @@ export function WidgetsPage(): JSX.Element {
   const [creating, setCreating] = useState(false);
   const [snippetFor, setSnippetFor] = useState<Widget | null>(null);
   const [editing, setEditing] = useState<Widget | null>(null); // ADR 0469 P B — grant/caps editor
+  const [viewing, setViewing] = useState<Widget | null>(null); // ADR 1018 D3 — visitor conversations
   // §4.5 collection kit — gated search over the widgets table (agent or an
   // allowed domain); feeds a separate memo over the unfiltered rows.
   const [query, setQuery] = useState('');
+  // grade-ux `CW68U-2` — the agent is PICKED from the roster, not typed: a typo used to
+  // make a widget that reported "Active" while every visitor turn 404'd. The server
+  // refuses an unservable id too; the free-text input stays only if the roster read fails.
+  // A failed roster read is its own state: the form falls back to the typed id (the
+  // server still refuses an unservable one) rather than reading as "no agents".
+  const [agents, setAgents] = useState<readonly AgentEntry[] | null>(null);
+  const [agentsFailed, setAgentsFailed] = useState(false);
+  useEffect(() => { void listAgents().then(setAgents).catch(() => setAgentsFailed(true)); }, []);
+  const navigate = useNavigate();
   const visibleRows = useMemo(() => {
     const q = query.trim().toLowerCase();
     return (rows ?? []).filter((r) => !q || r.agentId.toLowerCase().includes(q) || r.allowedDomains.some((d) => d.toLowerCase().includes(q)));
@@ -86,7 +94,15 @@ export function WidgetsPage(): JSX.Element {
     if (!orgId || !agentId || domains.length === 0 || creating) return;
     setCreating(true);
     try { await provisionWidget(orgId, { agentId, allowedDomains: domains }); setNewAgent(''); setNewDomains(''); load(orgId); }
-    catch { setError(t('loadError')); }
+    // The server names what was wrong (an unservable agent, a non-host domain entry).
+    catch (err) {
+      const field = err instanceof WidgetApiError ? err.field : undefined;
+      // ADR 1018 D8 — checked first: no own model key, whatever field it names.
+      setError(isWidgetByokRequired(err) ? t('byokRequired')
+        : field === 'agentId' ? t('createErrorAgent')
+        : field === 'allowedDomains' && err instanceof WidgetApiError && err.entry ? t('createErrorDomain', { entry: err.entry })
+          : t('createError'));
+    }
     finally { setCreating(false); }
   }, [newAgent, newDomains, creating, orgId, load, t]);
 
@@ -97,9 +113,21 @@ export function WidgetsPage(): JSX.Element {
   }, [orgId, load, t]);
 
   const onDelete = useCallback(async (w: Widget) => {
-    if (!(await confirm({ title: t('deleteConfirmTitle'), body: t('common:cannotBeUndone'), danger: true, confirmLabel: t('common:delete') }))) return;
+    if (!(await confirm({ title: t('deleteConfirmTitle'), body: t('deleteConfirmBody'), danger: true, confirmLabel: t('common:delete') }))) return;
     await deleteWidget(orgId, w.widgetId).catch(() => setError(t('loadError')));
     setSnippetFor((s) => (s?.widgetId === w.widgetId ? null : s));
+    setViewing((v) => (v?.widgetId === w.widgetId ? null : v));
+    load(orgId);
+  }, [orgId, load, t]);
+
+  // grade-ux `CW68U-8` — a widget disabled when its agent was deleted could not be
+  // turned back on from the UI.
+  const onToggleEnabled = useCallback(async (w: Widget) => {
+    // grade-ux CW68U-17 — turning a LIVE public widget off is confirmed first.
+    if (w.enabled && !(await confirm({ title: t('disableConfirmTitle'), body: t('disableConfirmBody', { domains: w.allowedDomains.join(', ') }), confirmLabel: t('disable') }))) return;
+    // CW68U-16 — the server refuses to enable a widget whose agent is gone; say so.
+    await patchWidget(orgId, w.widgetId, { enabled: !w.enabled }).catch((err: unknown) => setError(t(isWidgetByokRequired(err) ? 'byokRequired'
+      : err instanceof WidgetApiError && err.field === 'agentId' ? 'enableErrorAgent' : 'loadError')));
     load(orgId);
   }, [orgId, load, t]);
 
@@ -109,13 +137,15 @@ export function WidgetsPage(): JSX.Element {
     { key: 'status', header: t('colStatus'), render: (r) => <StatusBadge status={r.enabled ? 'completed' : 'paused'} label={t(r.enabled ? 'active' : 'disabled')} /> },
     { key: 'actions', header: '', align: 'right', render: (r) => (
       <span className="u-flex u-gap-1 u-justify-end">
+        <Button variant="secondary" size="sm" onClick={() => setViewing(r)}>{t('conversations')}</Button>
         <Button variant="secondary" size="sm" onClick={() => setEditing(r)}>{t('configure')}</Button>
+        <Button variant="quiet" size="sm" onClick={() => void onToggleEnabled(r)}>{t(r.enabled ? 'disable' : 'enable')}</Button>
         <Button variant="secondary" size="sm" onClick={() => setSnippetFor(r)}>{t('embed')}</Button>
         <Button variant="secondary" size="sm" onClick={() => void onRotate(r)}>{t('rotate')}</Button>
         <Button variant="quiet" size="sm" onClick={() => void onDelete(r)}>{t('delete')}</Button>
       </span>
     ) },
-  ], [t, onRotate, onDelete]);
+  ], [t, onRotate, onDelete, onToggleEnabled]);
 
   return (
     <>
@@ -128,7 +158,16 @@ export function WidgetsPage(): JSX.Element {
         </label>
       )}
       <div className="surface-form">
-        <label className="field"><span className="field-label">{t('newAgent')}</span><input value={newAgent} onChange={(e) => setNewAgent(e.target.value)} /></label>
+        <label className="field"><span className="field-label">{t('newAgent')}</span>
+          {!agentsFailed && agents && agents.length > 0 ? (
+            <select value={newAgent} onChange={(e) => setNewAgent(e.target.value)}>
+              <option value="">{t('newAgentPlaceholder')}</option>
+              {agents.map((a) => <option key={a.agentId} value={a.agentId}>{a.label || a.agentId}</option>)}
+            </select>
+          ) : (
+            <input value={newAgent} onChange={(e) => setNewAgent(e.target.value)} />
+          )}
+        </label>
         <label className="field"><span className="field-label">{t('newDomains')}</span><input value={newDomains} onChange={(e) => setNewDomains(e.target.value)} placeholder={t('newDomainsPlaceholder')} /></label>
         <Button variant="primary" disabled={!orgId || !newAgent.trim() || !newDomains.trim() || creating} onClick={() => void onCreate()}>{t('create')}</Button>
       </div>
@@ -141,8 +180,9 @@ export function WidgetsPage(): JSX.Element {
           onSaved={() => { setEditing(null); load(orgId); }}
         />
       )}
+      {viewing && <WidgetConversations orgId={orgId} widget={viewing} onClose={() => setViewing(null)} />}
       {snippetFor && (
-        <section className="surface-card u-p-3 u-mt-2" aria-label={t('embedAria')} aria-live="polite">
+        <section className="surface-card u-p-3 u-mt-2" aria-label={t('embedAria')}>
           <div className="u-flex u-items-center u-justify-between u-mb-1">
             <h2 ref={embedHeadingRef} tabIndex={-1} className="u-fs-12 u-fw-600">{t('embedTitle')}</h2>
             <Button
@@ -154,6 +194,12 @@ export function WidgetsPage(): JSX.Element {
             >{t('copy')}</Button>
           </div>
           <p className="muted u-fs-11 u-mb-1">{t('embedHint')}</p>
+          {/* grade-ux CW68U-1 — the console's origin is never on a widget's allowlist,
+              so the agent is tried in the ONE chat (deep link), not in a second panel. */}
+          <p className="u-fs-11 u-mb-1">
+            <Button variant="quiet" size="sm" onClick={() => navigate(`/chat?agent=${encodeURIComponent(snippetFor.agentId)}`)}>{t('tryAgent')}</Button>
+            <span className="muted"> {t('tryAgentHint')}</span>
+          </p>
           <pre className="msgrender-code-pre"><code>{embedSnippet(snippetFor.token)}</code></pre>
         </section>
       )}

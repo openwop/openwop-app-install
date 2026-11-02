@@ -18,6 +18,15 @@
  *   3. FORK-ELIGIBILITY (§C.2). Forking a dead-lettered run still works. The
  *      fork route gates on ownership, not status — incidental today, asserted
  *      here so it stays true.
+ *
+ * TST-CUC-2. Red when `reason` carries the raw `error.message`, when `attempts`
+ * ignores `config.retry`, when the row names the wrong node, when the advert
+ * fabricates `retentionDays`, or when `replay_source_missing` falls to the generic
+ * classifier arm.
+ * CEILINGS: `failedRun` polls the run status (no settle hook to await); and the
+ * classifier case casts the code `'replay_source_missing'` to never because the product's
+ * own seam feeds that out-of-union code through `AiProviderError` (grade-code row
+ * W69-G1-DL53-TYPE in the w69 g1 verdicts — the product type is the problem).
  */
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -115,6 +124,9 @@ describe('RFC 0053 — a terminally-failed run is dead-lettered', () => {
     // does not reach the dead-letter row.
     expect(reason).not.toContain(LEAKY);
     expect(reason).not.toContain('sk-live-');
+    // …and it is a real classified sentence, not an empty field or the raw text.
+    expect(reason.length).toBeGreaterThan(0);
+    expect(reason).not.toContain('upstream rejected the request');
   });
 
   it('counts real attempts when the node declares config.retry', async () => {
@@ -134,6 +146,9 @@ describe('RFC 0053 — a terminally-failed run is dead-lettered', () => {
     // The whole point of the sink: inspect, fix the cause, re-run from here.
     expect(fork.status).toBe(201);
     expect(fork.body.runId).toBeTruthy();
+    expect(bareRunId(fork.body.runId)).not.toBe(bareRunId(runId));
+    // the fork is a real run the host can read back
+    expect((await api<{ runId: string }>(`/runs/${fork.body.runId}`)).status).toBe(200);
   });
 });
 

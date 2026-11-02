@@ -13,7 +13,12 @@
  *    (ADR 0840), whose Content-Security-Policy HEADER carries the same `sandbox` plus
  *    the deny-egress policy (`default-src 'none'`, no `connect-src` →
  *    `frontend-plugin-egress`). It used to be an `srcdoc` with a `<meta>` policy,
- *    which no HTTP observer could see.
+ *    which no HTTP observer could see. That policy blocks the plugin's requests; it
+ *    does NOT stop the frame navigating itself, a meta refresh or WebRTC (ADR 1021,
+ *    measured in `e2e/plugin-frame-egress.spec.ts`), so a plugin can send what it
+ *    reads to a server it chooses. The page a navigation loads keeps this frame's
+ *    `contentWindow`, so it passes the `ev.source` check below; ADR 1021 measured
+ *    why counting the frame's loads cannot close that (D5).
  *  - The plugin talks to the host ONLY through ui-plugin/1 postMessage. Every inbound
  *    request is checked against the plugin's DECLARED `hostApi` (its closed allowlist,
  *    `frontend-plugin-rpc-allowlist`) BEFORE it is forwarded to the canonical host
@@ -31,15 +36,11 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { callHostRpc, frameUrl, type ServedPlugin } from './pluginClient.js';
+import { PLUGIN_SANDBOX } from './pluginSandbox.js';
 
 const UI_PLUGIN_PROTOCOL = 'ui-plugin/1';
 
-/** allow-scripts ONLY — the deliberate ABSENCE of allow-same-origin is what makes
- *  the frame a distinct opaque origin. ADR 0840: the host's frame response carries
- *  the same `sandbox` in its Content-Security-Policy header, together with the
- *  deny-egress policy, so this attribute is the second, independent boundary. There
- *  is no client-side CSP any more: the header is the policy (RFC 0238 §B). */
-export const PLUGIN_SANDBOX = 'allow-scripts';
+export { PLUGIN_SANDBOX };
 
 interface UiPluginRequest {
   openwop: typeof UI_PLUGIN_PROTOCOL;

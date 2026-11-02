@@ -5,6 +5,9 @@
  * OPENWOP_SUPERADMIN_TENANTS allowlist match and no explicit dev opt-in ⇒ 403,
  * regardless of NODE_ENV. The wildcard bearer (admin key) is allowed; the
  * explicit OPENWOP_FEATURE_TOGGLES_DEV_OPEN opt-in re-opens it for local dev.
+ *
+ * Tracker TST-DCA-7. Red when `isSuperadmin` treats DEV_OPEN as always on, ignores
+ * it, or stops honouring the wildcard bearer (grade-tests w70 probes `sa-*`).
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -38,11 +41,15 @@ describe('feature-toggle superadmin gate (fail-closed)', () => {
   it('denies an authenticated non-superadmin (anon session) by default — 403', async () => {
     const res = await fetch(`${BASE}${adminPath}`); // no bearer ⇒ anon cookie session
     expect(res.status).toBe(403);
+    const body = (await res.json()) as { error?: string; message?: string };
+    expect(body.error).toBe('forbidden');
+    expect(body.message).toContain('Feature-toggle administration requires a superadmin principal');
   });
 
   it('allows the wildcard bearer (admin key) — 200', async () => {
     const res = await fetch(`${BASE}${adminPath}`, { headers: { authorization: 'Bearer dev-token' } });
     expect(res.status).toBe(200);
+    expect(Array.isArray(((await res.json()) as { configs?: unknown }).configs)).toBe(true);
   });
 
   it('the explicit dev opt-in re-opens it for any authed caller — 200', async () => {
@@ -50,6 +57,7 @@ describe('feature-toggle superadmin gate (fail-closed)', () => {
     try {
       const res = await fetch(`${BASE}${adminPath}`); // anon session, now allowed
       expect(res.status).toBe(200);
+      expect(Array.isArray(((await res.json()) as { configs?: unknown }).configs)).toBe(true);
     } finally {
       delete process.env.OPENWOP_FEATURE_TOGGLES_DEV_OPEN;
     }

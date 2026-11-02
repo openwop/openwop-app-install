@@ -23,7 +23,16 @@
  *
  * Sabotage: putting `/v1` back in front of any documented write in README.md,
  * DEPLOY.md, DEPLOY-SMOKE.md, WHITE-LABEL.md, a deploy README or `.env.example`
- * reds half 1 with the file and line. The docs read here all ship in the
+ * reds half 1 with the file and line (witnessed w74: README's BYOK recipe line).
+ * MEASURED w74: the scan currently finds exactly 3 addresses, all of them the
+ * held OAuth callback read (README ×2, DEPLOY.md ×1), so half 1 is a tripwire
+ * for a re-introduced `/v1` write rather than a check of live writes today.
+ * Half 2's sabotage, each red (w74): the 410 answering 200; the BYOK write
+ * keyed to a tenant; the response echoing the value; the webhook skipping its
+ * signature check; the fee write storing a different percentage.
+ *
+ * Every case in half 2 writes what it needs itself (the webhook case writes its
+ * own signing secret), so the file holds alone and reordered. The docs read here all ship in the
  * white-label bundle (`scripts/build-whitelabel-zip.sh`), so this is not a
  * steward-lane test.
  */
@@ -56,7 +65,7 @@ beforeAll(async () => {
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   const d = getToggleDefault('billing');
   if (d) await saveConfig({ ...d, status: 'on' }, 'test');
-});
+}, 120_000);
 afterAll(async () => {
   for (const k of ['OPENWOP_STORAGE_DSN', 'OPENWOP_SESSION_SECRET', 'OPENWOP_API_KEYS', 'OPENWOP_BYOK_EPHEMERAL']) delete process.env[k];
   await new Promise<void>((res) => server.close(() => res()));
@@ -114,6 +123,10 @@ describe('S01-T1 — every documented /v1 address of this host still answers', (
     // The OAuth callback is documented on purpose (ADR 0806: the provider console
     // holds it); if the scan stops seeing even that, the scan broke, not the docs.
     expect(refs.some((r) => r.path.endsWith('/callback'))).toBe(true);
+    // MEASURED w74: README.md:417, README.md:443, DEPLOY.md:1528 — every one a
+    // GET of an OAuth callback. A doc edit that drops one reds here; a new
+    // documented address only raises the count.
+    expect(refs.length).toBeGreaterThanOrEqual(3);
   });
 
   it('no documented /v1 address answers 410', async () => {
@@ -131,11 +144,13 @@ describe('S01-T1 — the README Stripe recipe, run as written', () => {
     const t = Math.floor(Date.now() / 1000);
     return `t=${t},v1=${createHmac('sha256', secret).update(`${t}.${body}`).digest('hex')}`;
   };
+  /** The README's BYOK recipe step: the host-global webhook signing secret. */
+  const writeWebhookSecret = (): Promise<Response> => fetch(`${BASE}/host/openwop-app/byok/secrets`, {
+    method: 'POST', headers: auth, body: JSON.stringify({ credentialRef: 'billing:webhook-secret', value: 'whsec_s01_fixture' }),
+  });
 
   it('the BYOK write lands host-global, where billing resolves it, and echoes no value', async () => {
-    const res = await fetch(`${BASE}/host/openwop-app/byok/secrets`, {
-      method: 'POST', headers: auth, body: JSON.stringify({ credentialRef: 'billing:webhook-secret', value: 'whsec_s01_fixture' }),
-    });
+    const res = await writeWebhookSecret();
     expect(res.status).toBe(201);
     const text = await res.text();
     expect(text).not.toContain('whsec_s01_fixture');
@@ -143,6 +158,8 @@ describe('S01-T1 — the README Stripe recipe, run as written', () => {
   });
 
   it('a webhook signed with that secret is acknowledged; one signed with another is refused', async () => {
+    // Its own secret write — the case must not depend on the BYOK case running first.
+    expect((await writeWebhookSecret()).status).toBe(201);
     const raw = JSON.stringify({ id: 'evt_s01_fixture', type: 'customer.created', data: { object: { id: 'cus_s01' } } });
     const good = await fetch(`${BASE}/host/openwop-app/billing/webhook`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'stripe-signature': sign(raw, 'whsec_s01_fixture') }, body: raw,

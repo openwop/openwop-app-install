@@ -49,7 +49,7 @@ describe('detectTypedArtifact', () => {
   });
 
   it('JSON-serializes an object payload (chart spec) for content', () => {
-    const got = detectTypedArtifact({ artifact: { artifactTypeId: 'interactive.chart', payload: { chartType: 'bar', data: { labels: ['a'], values: [1] } } } }, 'n1');
+    const got = detectTypedArtifact({ artifact: { artifactTypeId: 'interactive.chart', payload: { chartType: 'bar', data: { labels: ['a'], datasets: [{ label: 's', data: [1] }] } } } }, 'n1');
     expect(got?.artifactTypeId).toBe('interactive.chart');
     expect(JSON.parse(got!.content).chartType).toBe('bar');
   });
@@ -113,7 +113,7 @@ describe('producer node — feature.interactive-artifacts.nodes.render', () => {
   });
 
   it('accepts a chart object spec', async () => {
-    const r = await render({ inputs: { kind: 'chart', chart: { chartType: 'line', data: { labels: ['a'], values: [1] } } } });
+    const r = await render({ inputs: { kind: 'chart', chart: { chartType: 'line', data: { labels: ['a'], datasets: [{ label: 's', data: [1] }] } } } });
     expect(r.status).toBe('success');
     const art = artifactOf(r.outputs);
     expect(art.artifactTypeId).toBe('interactive.chart');
@@ -126,5 +126,16 @@ describe('producer node — feature.interactive-artifacts.nodes.render', () => {
 
   it('rejects mermaid with no source', async () => {
     await expect(render({ inputs: { kind: 'mermaid' } })).rejects.toThrow(/source/);
+  });
+
+  // ADR 1017 D5 — the node used to accept these and SUCCEED; the host then stored each
+  // as an untyped JSON blob (a typed failure is the honest outcome for a workflow step).
+  it('rejects a chart the workbench cannot draw, as a typed validation_error', async () => {
+    await expect(render({ inputs: { kind: 'chart', chart: { chartType: 'pie', data: { datasets: [{ data: [1] }] } } } }))
+      .rejects.toMatchObject({ code: 'validation_error', message: expect.stringMatching(/chartType/) });
+    for (const data of [{}, { datasets: [] }, { datasets: [{ label: 'no data' }] }]) {
+      await expect(render({ inputs: { kind: 'chart', chart: { chartType: 'bar', data } } }))
+        .rejects.toMatchObject({ code: 'validation_error', message: expect.stringMatching(/datasets/) });
+    }
   });
 });

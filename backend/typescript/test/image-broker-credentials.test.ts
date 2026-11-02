@@ -3,8 +3,14 @@
  * (a workspace-scoped Connection wins over the host-wide env key); the endpoint
  * stays env-configured. The mock endpoint echoes the Authorization header so we
  * can assert WHICH key was used.
+ *
+ * TST-DGC-1. Red when a resolved broker secret is ignored (env wins), when the
+ * env fallback key is dropped, and when a broker-served call stops stamping
+ * run.metadata.connectionUse (sabotage-witnessed, wave 71). `lastAuth` and the
+ * request count are reset per case, so a case whose dispatch made no request
+ * cannot read the previous case's header.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/index.js';
@@ -16,8 +22,13 @@ import { hostExtStorage } from '../src/host/hostExtPersistence.js';
 let server: http.Server;
 let PORT = 0;
 let lastAuth = '';
+let requests = 0;
 // A non-signed-in tenant → byok uses the local-aes secret tier (no KMS in the test host).
 const T = 'img-tenant';
+/** Its own tenant + connection, so the provenance case never shares T's connections. */
+const T_PROV = 'img-tenant-prov';
+const ENV_KEYS = ['OPENWOP_IMAGE_PROVIDER_ENABLED', 'OPENWOP_WEBHOOK_ALLOW_PRIVATE', 'OPENWOP_IMAGE_PROVIDER_ENDPOINT', 'OPENWOP_IMAGE_PROVIDER_KEY'] as const;
+const priorEnv = new Map<string, string | undefined>(ENV_KEYS.map((k) => [k, process.env[k]]));
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -29,7 +40,8 @@ beforeAll(async () => {
     scopes: { read: [] }, refreshable: false, defaultScopes: [], consumerNodes: [], apiHosts: ['127.0.0.1'],
   });
   server = http.createServer((req, res) => {
-    lastAuth = (req.headers.authorization as string) ?? '';
+    requests += 1;
+    lastAuth = req.headers.authorization ?? '';
     let raw = ''; req.on('data', (c) => { raw += c; });
     req.on('end', () => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ images: [{ base64: 'aGk=', mimeType: 'image/png' }] })); });
   });
@@ -41,25 +53,30 @@ beforeAll(async () => {
 });
 afterAll(async () => {
   await new Promise<void>((r) => server.close(() => r()));
-  for (const k of Object.keys(process.env)) {
-    if (k.startsWith('OPENWOP_IMAGE_PROVIDER_') || k === 'OPENWOP_WEBHOOK_ALLOW_PRIVATE') delete process.env[k];
+  for (const [k, v] of priorEnv) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
   }
 });
+beforeEach(() => { lastAuth = ''; requests = 0; });
 
 describe('ADR 0244 — broker-resolved image key', () => {
   it('a workspace Connection key WINS over the host-wide env key', async () => {
     await createSecretConnection({ tenantId: T, provider: 'openai-images', kind: 'api_key', secret: 'BROKER_KEY', scope: 'workspace' });
     await dispatchImageGeneration({ prompt: 'x', n: 1, provider: 'openai', tenantId: T });
+    expect(requests).toBe(1);
     expect(lastAuth).toBe('Bearer BROKER_KEY'); // broker beats env
   });
 
   it('falls back to the env key when the tenant has no image Connection', async () => {
     await dispatchImageGeneration({ prompt: 'x', n: 1, provider: 'openai', tenantId: 'no-conn-tenant' });
+    expect(requests).toBe(1);
     expect(lastAuth).toBe('Bearer ENV_KEY');
   });
 
   it('no tenantId → the env key (no broker lookup at all)', async () => {
     await dispatchImageGeneration({ prompt: 'x', n: 1, provider: 'openai' });
+    expect(requests).toBe(1);
     expect(lastAuth).toBe('Bearer ENV_KEY');
   });
 });
@@ -67,22 +84,23 @@ describe('ADR 0244 — broker-resolved image key', () => {
 describe('ADR 0253 — RFC 0079 connection-use provenance stamp', () => {
   it('a broker-resolved image call stamps run.metadata.connectionUse; the env-key path stamps nothing', async () => {
     const storage = hostExtStorage();
-    await createSecretConnection({ tenantId: T, provider: 'openai-images', kind: 'api_key', secret: 'BROKER_KEY', scope: 'workspace' });
+    await createSecretConnection({ tenantId: T_PROV, provider: 'openai-images', kind: 'api_key', secret: 'BROKER_KEY', scope: 'workspace' });
+    const now = '2026-01-01T00:00:00.000Z';
 
     // Broker path: a Connection served the call → the use is stamped on the run.
-    await storage.insertRun({ runId: 'run-img-1', workflowId: 'w', tenantId: T, status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: 'x', updatedAt: 'x' });
-    await dispatchImageGeneration({ prompt: 'x', n: 1, provider: 'openai', tenantId: T, runId: 'run-img-1' });
+    await storage.insertRun({ runId: 'run-img-1', workflowId: 'w', tenantId: T_PROV, status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: now, updatedAt: now });
+    await dispatchImageGeneration({ prompt: 'x', n: 1, provider: 'openai', tenantId: T_PROV, runId: 'run-img-1' });
     const meta = (await storage.getRun('run-img-1'))?.metadata as Record<string, unknown> | undefined;
     const uses = meta?.connectionUse as Array<{ provider?: string }> | undefined;
     expect(uses?.some((u) => u.provider === 'openai-images')).toBe(true);
 
     // Idempotent: a re-dispatch on the same run doesn't double-stamp (dedup by connectionId).
-    await dispatchImageGeneration({ prompt: 'x', n: 1, provider: 'openai', tenantId: T, runId: 'run-img-1' });
+    await dispatchImageGeneration({ prompt: 'x', n: 1, provider: 'openai', tenantId: T_PROV, runId: 'run-img-1' });
     const metaAgain = (await storage.getRun('run-img-1'))?.metadata as Record<string, unknown> | undefined;
     expect((metaAgain?.connectionUse as unknown[] | undefined)?.length).toBe(1);
 
     // Env-key path: a tenant with no Connection has no provenance → nothing stamped.
-    await storage.insertRun({ runId: 'run-img-2', workflowId: 'w', tenantId: 'no-conn-tenant', status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: 'x', updatedAt: 'x' });
+    await storage.insertRun({ runId: 'run-img-2', workflowId: 'w', tenantId: 'no-conn-tenant', status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: now, updatedAt: now });
     await dispatchImageGeneration({ prompt: 'x', n: 1, provider: 'openai', tenantId: 'no-conn-tenant', runId: 'run-img-2' });
     const meta2 = (await storage.getRun('run-img-2'))?.metadata as Record<string, unknown> | undefined;
     expect(meta2?.connectionUse).toBeUndefined();

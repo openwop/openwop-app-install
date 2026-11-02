@@ -1,11 +1,21 @@
 /**
  * ADR 0328 Phase 4 — the present-remote capability: stateless HMAC token
  * (mint/verify roundtrip + tamper/expiry rejection), the per-type outline
- * registry, and the nav pub/sub payload discipline.
+ * registry, and the nav pub/sub payload discipline. ADR 0886 D3 — the token names
+ * its minter and org, so a minter swap is a forgery and a v1 token is retired.
+ *
+ * 'binds the tenant' is a subset of the roundtrip case's exact claims check (both go red
+ * on w74g4-pr-claims-map); protected, kept.
+ *
+ * Red when (w74g4-pr-* probes, wave 74): the signature check, the expiry check or the
+ * version check is skipped; the signature stops covering the claims; tenant and canvas are
+ * read from the wrong claim; the nav channel stops including the canvas; malformed or
+ * unknown-kind payloads reach the subscriber; the outline provider is not given the state,
+ * or an unregistered type gets another type's outline.
  */
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { openStorage } from '../../storage/index.js';
-import { initHostExtPersistence } from '../hostExtPersistence.js';
+import { initHostExtPersistence, publishHostExtEvent } from '../hostExtPersistence.js';
 import {
   mintPresentRemoteToken,
   verifyPresentRemoteToken,
@@ -15,9 +25,16 @@ import {
   subscribePresentNav,
 } from '../presentRemote.js';
 
+const prevSecret = process.env.OPENWOP_SESSION_SECRET;
+
 beforeAll(async () => {
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
   initHostExtPersistence(await openStorage('memory://'));
+});
+
+afterAll(() => {
+  if (prevSecret === undefined) delete process.env.OPENWOP_SESSION_SECRET;
+  else process.env.OPENWOP_SESSION_SECRET = prevSecret;
 });
 
 describe('present-remote token', () => {
@@ -70,11 +87,15 @@ describe('present nav pub/sub', () => {
     const claims = { tenantId: 't1', canvasId: 'c1', userId: 'user:p', orgId: 'o1', exp: 0 };
     const got: unknown[] = [];
     const unsubscribe = await subscribePresentNav(claims, (ev) => got.push(ev));
+    // Malformed and unknown-kind payloads on the SAME channel (literal, not the product's
+    // channelOf) must be dropped, never delivered.
+    await publishHostExtEvent('hostext:present:nav:t1:c1', 'not json');
+    await publishHostExtEvent('hostext:present:nav:t1:c1', JSON.stringify({ kind: 'evil', action: 'next' }));
     await publishPresentNav(claims, { kind: 'command', action: 'next' });
     await publishPresentNav(claims, { kind: 'position', current: 3 });
     // A different canvas's channel must NOT arrive here.
     await publishPresentNav({ tenantId: 't1', canvasId: 'other', userId: 'user:p', orgId: 'o1', exp: 0 }, { kind: 'command', action: 'prev' });
-    await new Promise((r) => setTimeout(r, 50));
+    // Memory pub/sub delivers synchronously inside publish, so no wait is needed.
     expect(got).toEqual([
       { kind: 'command', action: 'next' },
       { kind: 'position', current: 3 },

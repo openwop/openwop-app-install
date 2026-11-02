@@ -8,6 +8,7 @@ import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
+import type { ManualTestRun } from '../src/features/manual-tests/manualTestsService.js';
 
 let BASE: string; let server: http.Server;
 beforeAll(async () => {
@@ -20,13 +21,14 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+interface Body { run?: ManualTestRun | null; runs?: ManualTestRun[] }
+interface Res { status: number; body: Body }
 function client() {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    for (const c of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(c); if (m?.[1]) cookie = m[1]; }
+    const out: Body = res.status === 204 ? {} : ((await res.json().catch(() => ({}))) as Body);
     return { status: res.status, body: out };
   };
   return { get: (p: string) => call('GET', p), put: (p: string, b?: unknown) => call('PUT', p, b), post: (p: string, b?: unknown) => call('POST', p, b) };
@@ -45,15 +47,15 @@ describe('manual-tests — durable per-user runs', () => {
       'CHAT-04': { status: 'untested', note: 'will retry' },    // kept (has a note)
     } });
     expect(put.status).toBe(200);
-    expect(put.body.run.suiteKey).toBe('chat');
-    expect(Object.keys(put.body.run.results).sort()).toEqual(['CHAT-01', 'CHAT-02', 'CHAT-04']);
-    expect(put.body.run.results['CHAT-02'].note).toBe('streaming stalled');
+    expect(put.body.run?.suiteKey).toBe('chat');
+    expect(Object.keys(put.body.run?.results ?? {}).sort()).toEqual(['CHAT-01', 'CHAT-02', 'CHAT-04']);
+    expect(put.body.run?.results['CHAT-02']?.note).toBe('streaming stalled');
 
     const got = await u.get(`${RUNS}/chat`);
-    expect(got.body.run.results['CHAT-01'].status).toBe('pass');
+    expect(got.body.run?.results['CHAT-01']?.status).toBe('pass');
     const list = await u.get(RUNS);
     expect(list.body.runs).toHaveLength(1);
-    expect(list.body.runs[0].suiteKey).toBe('chat');
+    expect(list.body.runs?.[0]?.suiteKey).toBe('chat');
   });
 
   it('own-rows-only: a second user in the SAME tenant cannot see the first user\'s run', async () => {
@@ -65,12 +67,19 @@ describe('manual-tests — durable per-user runs', () => {
     expect((await b.get(`${RUNS}/agents`)).body.run).toBeNull();
     expect((await b.get(RUNS)).body.runs).toHaveLength(0);
     // A still sees their own.
-    expect((await a.get(`${RUNS}/agents`)).body.run.results['AGENTS-01'].status).toBe('pass');
+    expect((await a.get(`${RUNS}/agents`)).body.run?.results['AGENTS-01']?.status).toBe('pass');
   });
 
   it('an invalid status coerces to untested (and is therefore pruned)', async () => {
     const u = await login(`org:mt-${Date.now()}-${n++}`);
-    const put = await u.put(`${RUNS}/runs`, { results: { 'RUNS-01': { status: 'bogus', note: '' } } });
-    expect(put.body.run.results['RUNS-01']).toBeUndefined();
+    // A note keeps an untested row, so what is stored shows the COERCION itself —
+    // with an empty note the row would vanish for the prune reason as well.
+    const put = await u.put(`${RUNS}/runs`, { results: {
+      'RUNS-01': { status: 'bogus', note: 'why' },
+      'RUNS-02': { status: 'bogus', note: '' },
+    } });
+    expect(put.body.run?.results['RUNS-01']).toMatchObject({ status: 'untested', note: 'why' });
+    // ...and with no note it is therefore pruned.
+    expect(put.body.run?.results['RUNS-02']).toBeUndefined();
   });
 });

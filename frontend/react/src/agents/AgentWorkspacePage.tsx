@@ -54,7 +54,7 @@ function formatHeartbeat(intervalMs: number | undefined, t: TFunction): string {
   return t('wsHeartbeatHours', { hours: hrs });
 }
 
-type TabKey = 'overview' | 'workflows' | 'board' | 'schedules' | 'instructions' | 'knowledge' | 'memory' | 'evals' | 'integrations' | 'activity';
+type TabKey = 'overview' | 'workflows' | 'board' | 'schedules' | 'instructions' | 'knowledge' | 'memory' | 'evals' | 'deployments' | 'integrations' | 'activity';
 const TABS: ReadonlyArray<{ key: TabKey; labelKey: string }> = [
   { key: 'overview', labelKey: 'wsTabOverview' },
   { key: 'workflows', labelKey: 'wsTabWorkflows' },
@@ -68,9 +68,15 @@ const TABS: ReadonlyArray<{ key: TabKey; labelKey: string }> = [
   { key: 'memory', labelKey: 'wsTabMemory' },
   // ADR 0889 D8 — agent eval suites; shown only while the `evals` toggle is on.
   { key: 'evals', labelKey: 'wsTabEvals' },
+  // ADR 1005 P3c / ADR 1014 P4b — versions, transitions and promotion policy; shown
+  // only where this host serves `agents.deployment` (the feature tab's `available`).
+  { key: 'deployments', labelKey: 'wsTabDeployments' },
   { key: 'integrations', labelKey: 'wsTabIntegrations' },
   { key: 'activity', labelKey: 'wsTabActivity' },
 ];
+
+/** ADR 1014 P4b — the deployments feature's tab, looked up once (stable identity). */
+const DEPLOYMENTS_TAB = featureAgentWorkspaceTabs().find((t) => t.featureId === 'agent-deployments' && t.key === 'deployments');
 
 export function AgentWorkspacePage(): JSX.Element {
   const { t } = useTranslation('agents');
@@ -96,7 +102,21 @@ export function AgentWorkspacePage(): JSX.Element {
   // excludes `evals` has no tab to show (and never bundles the panel).
   const evalsTab = featureAgentWorkspaceTabs().find((t) => t.featureId === 'evals' && t.key === 'evals');
   const evalsOn = useFeatureAccess('evals').enabled && evalsTab !== undefined;
-  const visibleTabs = TABS.filter((t) => t.key !== 'evals' || evalsOn);
+  const registryAgentId = view?.entry.agentRef?.agentId;
+  // ADR 1014 P4b — probe once per AGENT (not per render: the registry builds a new
+  // tab object on every call, so depending on it re-ran the probe in a loop).
+  const [deploymentsOn, setDeploymentsOn] = useState<{ agentId: string; on: boolean } | null>(null);
+  useEffect(() => {
+    if (!DEPLOYMENTS_TAB || !registryAgentId) return undefined;
+    let cancelled = false;
+    // The tab applies only where this host serves deployments (the list answers 404 otherwise).
+    import('../client/agentDeploymentsClient.js')
+      .then(({ listDeployments }) => listDeployments(registryAgentId))
+      .then((rows) => { if (!cancelled) setDeploymentsOn({ agentId: registryAgentId, on: rows !== null }); }, () => undefined);
+    return () => { cancelled = true; };
+  }, [registryAgentId]);
+  const deploymentsTab = deploymentsOn?.on === true && deploymentsOn.agentId === registryAgentId ? DEPLOYMENTS_TAB : undefined;
+  const visibleTabs = TABS.filter((t) => (t.key !== 'evals' || evalsOn) && (t.key !== 'deployments' || deploymentsTab !== undefined));
   const tab: TabKey = visibleTabs.some((t) => t.key === tabParam) ? (tabParam as TabKey) : 'overview';
   // ADR 0889 grade remediation (EVUX-5) — a feature tab reports unsaved edits
   // through `onDirtyChange`; switching away asks first (the shared discard dialog).
@@ -443,6 +463,11 @@ export function AgentWorkspacePage(): JSX.Element {
       {tab === 'evals' && evalsTab ? (
         <Suspense fallback={<StateCard title={t('common:loading')} loading />}>
           {evalsTab.render({ agentId: entry.agentRef.agentId, persona: entry.persona, canWrite, onDirtyChange: setTabDirty })}
+        </Suspense>
+      ) : null}
+      {tab === 'deployments' && deploymentsTab ? (
+        <Suspense fallback={<StateCard title={t('common:loading')} loading />}>
+          {deploymentsTab.render({ agentId: entry.agentRef.agentId, persona: entry.persona, canWrite })}
         </Suspense>
       ) : null}
       {tab === 'integrations' ? (

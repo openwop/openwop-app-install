@@ -12,6 +12,7 @@
 import type { BackendFeature } from '../types.js';
 import { registerCustomDomainsRoutes } from './routes.js';
 import { startCustomDomainSweep } from '../../host/customDomainSweep.js';
+import { SITE_RUNTIME_TOGGLE } from '../../host/boundSite.js';
 
 export const customDomainsFeature: BackendFeature = {
   id: 'custom-domains',
@@ -21,6 +22,19 @@ export const customDomainsFeature: BackendFeature = {
     // (a clean negative demotes to failed; resolver noise never does).
     startCustomDomainSweep();
   },
+  // ADR 1015 D4 — whether this workspace's custom-domain pages load the visitor
+  // runtime (consent banner, beacons, heat, replay). Off ⇒ the page is the plain
+  // prerender, byte-identical to before. Each capture keeps its own toggle,
+  // consent and attestation gates; this adds no collection on its own.
+  extraToggleDefaults: [{
+    id: SITE_RUNTIME_TOGGLE,
+    label: 'Visitor runtime on custom domains',
+    description: 'Load the consent banner and the analytics, heat-map and session-replay capture on pages served from your own domain. Each capture still needs its own setting and the visitor\'s consent.',
+    category: 'Marketing',
+    status: 'off',
+    bucketUnit: 'tenant',
+    salt: SITE_RUNTIME_TOGGLE,
+  }],
   toggleDefault: {
     id: 'custom-domains',
     label: 'Custom domains',

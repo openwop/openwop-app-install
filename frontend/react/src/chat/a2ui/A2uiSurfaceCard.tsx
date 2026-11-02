@@ -4,17 +4,17 @@
  * The renderer is the whole point of the "declarative, not code" security
  * model: it walks a surface document and renders ONLY the host-pinned catalog
  * components (`catalog.ts`), collects field values into local form state, and
- * routes the user's action back through the EXISTING chat machinery — an
- * interrupt resume (`action.target: "resume"`) or a conversation exchange
- * (`action.target: "exchange"`, RFC 0005). It never evaluates surface-supplied
- * code, never injects markup (all text is rendered as React text nodes), and an
- * action can do nothing but resume/exchange — it is not a channel into the host.
+ * routes the user's action back through the EXISTING chat machinery, an
+ * interrupt resume (`action.target: "resume"`). It never evaluates
+ * surface-supplied code, never injects markup (all text is rendered as React
+ * text nodes), and an action can do nothing but resume: it is not a channel
+ * into the host.
  *
  * Security invariants enforced here (RFC 0102 §A):
  *  - `a2ui-surface-no-code-exec`  — out-of-catalog / malformed surface ⇒ a
  *    fail-closed `<Notice>`, never a render of unknown content.
- *  - `a2ui-action-confinement`    — the only side effects are `onAction('resolve' | 'exchange', …)`,
- *    which the registry binds to the interrupt-resume / conversation-exchange APIs.
+ *  - `a2ui-action-confinement`    — the only side effect is `onAction('resolve', …)`,
+ *    which the registry binds to the interrupt-resume API.
  *
  * Card type `ui.a2ui-surface` — the core, un-namespaced envelope kind RFC 0102
  * settled on (a vendor detour was reverted in the openwop-1 review). Shape is
@@ -26,7 +26,6 @@ import { Button } from '../../ui/Button.js';
 import { useState, useId, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { resolveByRun } from '../../client/interruptsClient.js';
-import { exchange } from '../conversationClient.js';
 import { registerCard } from '../registry/CardRegistry.js';
 import type { CardProps } from '../registry/types.js';
 import { Notice } from '../../ui/Notice.js';
@@ -257,16 +256,12 @@ function A2uiLegacySurfaceCard({ payload, onAction, isLoading }: CardProps): JSX
               disabled={actionsDisabled}
               {...(showHint ? { 'aria-describedby': hintId } : {})}
               // a2ui-action-confinement: a surface action can do exactly one
-              // thing — resume the open interrupt OR send a conversation
-              // exchange, with the collected values. The registry binds
-              // 'resolve'/'exchange' to those two host APIs; there is no path
-              // from a surface to any other host call. The button `id` rides
-              // along so a multi-button surface (e.g. approve/reject) is
-              // distinguishable in the resume value.
-              onClick={() => onAction(
-                btn.action.target === 'exchange' ? 'exchange' : 'resolve',
-                { action: btn.id, ...values },
-              )}
+              // thing, resume the open interrupt with the collected values
+              // (ADR 1013 D4: `{ answers }`, keyed by question id). There is no
+              // path from a surface to any other host call.
+              onClick={() => onAction('resolve', {
+                answers: Object.entries(values).map(([id, answer]) => ({ id, answer })),
+              })}
             >
               {btn.label}
             </Button>
@@ -283,13 +278,6 @@ async function resolveInterrupt(resumeValue: unknown, ctx: { runId: string; node
   return true;
 }
 
-/** Send the collected values as a conversation exchange (action.target: exchange, RFC 0005). */
-async function exchangeMessage(content: unknown, ctx: { runId: string; nodeId?: string }): Promise<boolean> {
-  if (!ctx.nodeId) return false;
-  await exchange(ctx.runId, ctx.nodeId, { content });
-  return true;
-}
-
 let registered = false;
 
 /** Register the A2UI surface renderer into the chat card registry. Idempotent;
@@ -300,7 +288,7 @@ export function registerA2uiSurfaceCard(): void {
     cardType: 'ui.a2ui-surface',
     label: 'A2UI surface',
     Component: A2uiSurfaceCard,
-    actionHandlers: { resolve: resolveInterrupt, exchange: exchangeMessage },
+    actionHandlers: { resolve: resolveInterrupt },
   });
   registered = true;
 }

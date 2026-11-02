@@ -77,6 +77,12 @@ below was re-read on `origin/main` before this ADR was written.
   - Option D1b: serve it and re-apply the fold in `mergeOrder` (`node-packs.md:172`).
   - Otherwise it is recorded as an open item with a ratchet.
   - Decided in P2, after measuring which chains reach it.
+  > **Added 2026-10-31 (ADR 1020, row 70).** Campaign Studio now depends on this fold:
+  > its consistency check reads each channel child's `channelResult` from the parent's
+  > variable bag, written by `perWorkerOutputMappings` at join. If D1b serves
+  > `core.dispatch` from the log WITHOUT re-applying the fold in `mergeOrder`, every
+  > replay fork of a campaign fails `drafts_missing` (honest, but broken). Filed there
+  > as `CS70WF-5`.
 
 ### D2 — a chain parent forwards the params a sub-chain maps
 

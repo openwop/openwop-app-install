@@ -363,6 +363,10 @@ export interface AiToolCallRequest extends Omit<AiCallRequest, 'responseSchema' 
   /** Enable the provider's NATIVE web search/grounding for this turn, using the
    *  same provider key (ADR 0101). Honored only by providers that advertise it. */
   webSearch?: boolean;
+  /** ADR 1003 D3 — host-internal hint: this is a tool-loop round after the
+   *  first, so a provider that supports an explicit conversation cache
+   *  breakpoint may place one. Never part of the replay digest (ADR 1002). */
+  cacheConversation?: boolean;
 }
 
 /** Tool-use block from a single `callAIWithTools` round. Pack-level
@@ -372,6 +376,9 @@ export interface AiToolUseBlock {
   id: string;
   name: string;
   input: Record<string, unknown>;
+  /** ADR 1011 — the provider sent arguments that are not a JSON object. `input`
+   *  is `{}` and the call must not run. */
+  argumentsInvalid?: true;
 }
 
 /** A web-search/grounding source (ADR 0101 Phase 2), mirroring the provider
@@ -449,6 +456,9 @@ export interface NodeContext {
   runId: string;
   nodeId: string;
   tenantId: string;
+  /** ADR 1009 — record that this run consumed untrusted content. Sticky and
+   *  write-once. Absent outside a run body. */
+  markUntrustedContext?: () => Promise<void>;
   /** ADR 0632 — the run's abort signal (armed once per run by `executeRunBody`).
    *  Fires on cancel and on an `immediate` pause; a long-running node body
    *  (sleeps, provider calls) SHOULD race against it. `undefined` when the
@@ -462,6 +472,15 @@ export interface NodeContext {
    *  can honor `nodes[].agent.agentId`. Undefined when the node carries no
    *  pin. Distinct from `config`, which the schema models as a sibling. */
   nodeAgent?: AgentRef;
+  /** ADR 1014 D3 — the agent version this node runs: the channel pin's resolved
+   *  version, or the node's exact `agent.version`. An agent dispatch for the node's
+   *  own agent runs exactly that version, or fails; never another version's code. */
+  agentVersion?: string;
+  /** ADR 1014 M6 — the version an UNPINNED agent runs in this run: resolved from
+   *  `stable` once per (run, agent) and recorded, so a resume or a fork reuses it.
+   *  `version` absent: run the head (versions not served, or no deployment rows).
+   *  Absent outside a run body. */
+  pinServedAgent?: (agentId: string) => Promise<{ ok: true; version?: string } | { ok: false; error: { code: string; message: string } }>;
   /** Run-level configurable overlay from RunOptions.configurable. */
   configurable: Record<string, unknown>;
   /** ctx.triggerData — the run-scoped trigger payload the `core.openwop.triggers`

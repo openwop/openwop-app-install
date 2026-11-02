@@ -6,16 +6,24 @@
  * returns a value from a CLOSED label set, so there is no code path by which an
  * email body becomes an action — an attacker with total control of the body can
  * at most cause a wrong LABEL, which a human sees on a card and can correct.
+ *
+ * Tracker TST-DHC-3 (wave 71). Red when: instruction-shaped text stops being
+ * flagged (`w71g3-io-flag`) or the role-prefix detector goes (`io-roleprefix`);
+ * a rule's implied stage changes (`io-infreq`); a fabricating model draft is
+ * shown instead of withheld (`io-withhold`); the interview rule is consulted
+ * before the rejection rule (`io-order-r2`). The two "structurally" cases are
+ * source scans of the module's imports — they fail on an added transport, not
+ * on behaviour.
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { classifyInboxMessage, type InboxLabel } from '../src/features/job-search/agent/inboxClassification.js';
 import { draftWarmIntro } from '../src/features/job-search/agent/outreachDraft.js';
+import { stripComments } from './helpers/stripComments.js';
 
 const LABELS: InboxLabel[] = ['rejection', 'interview-invite', 'information-request', 'offer', 'automated-receipt', 'other'];
 const SRC = (f: string) => readFileSync(join(process.cwd(), 'src', 'features', 'job-search', 'agent', f), 'utf8');
-const stripComments = (s: string): string => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
 
 describe('ADR 0543 P4 — an instructing email is classified, never obeyed', () => {
   it.each([
@@ -76,6 +84,11 @@ describe('ADR 0543 P4 — classification quality on ORDINARY recruiter mail', ()
     const c = classifyInboxMessage(null, 'After your interview last week, unfortunately we are not moving forward.');
     expect(c.label).toBe('rejection');
     expect(c.proposedStage).toBeNull();
+    // The ORDER witness: this body matches BOTH the interview-invite rule
+    // ("schedule a call") and the rejection rule, so only rule order decides.
+    const both = classifyInboxMessage(null, 'Thank you for taking the time to schedule a call with us. Unfortunately we are not moving forward.');
+    expect(both.label).toBe('rejection');
+    expect(both.proposedStage).toBeNull();
   });
 
   it('does NOT reuse the job-posting screen — the base rates are opposite', () => {

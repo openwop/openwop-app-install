@@ -15,12 +15,12 @@
  * 30 — both went red under the same chainId sabotage).
  */
 import { beforeAll, describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
-import { MARKET_INTEL_WORKFLOWS, MARKET_INTEL_WORKFLOW_ID } from '../src/features/campaign-brief/intelWorkflows.js';
+import { MARKET_INTEL_WORKFLOWS, MARKET_INTEL_WORKFLOW_ID, KERNEL_WORKFLOWS, KERNEL_WORKFLOW_ID } from '../src/features/campaign-brief/intelWorkflows.js';
 import { registerLegacyDefsChainBacked } from '../src/features/index.js';
 import { getChainBackedWorkflow } from '../src/host/chainBackedWorkflows.js';
 import {
@@ -43,6 +43,7 @@ beforeAll(() => {
   _resetChainRegistryForTest();
   loadErrors = loadWorkflowChainPacks({ roots: defaultWorkflowChainPackRoots() }).errors;
   registerLegacyDefsChainBacked(MARKET_INTEL_WORKFLOWS);
+  registerLegacyDefsChainBacked(KERNEL_WORKFLOWS);
 });
 
 describe('campaign-studio.market-intel workflow', () => {
@@ -78,5 +79,56 @@ describe('campaign-studio.market-intel workflow', () => {
       if (typeId.startsWith('core.')) continue;
       expect(declared.has(typeId), `${typeId} missing from the pack manifest`).toBe(true);
     }
+  });
+});
+
+describe('ADR 1020 P2 — the brief chains as they run', () => {
+  it('messaging-kernel: generate (staged) → approve → promote, the kernel reaching promote by data edges; promote is the primary output', () => {
+    const wf = getChainBackedWorkflow(KERNEL_WORKFLOW_ID)!;
+    const byStep = (s: string) => wf.nodes.find((n) => n.nodeId === s || n.nodeId.endsWith(`_${s}`))!;
+    expect(byStep('generate_kernel').config).toMatchObject({ stageKernel: true });
+    expect(byStep('promote').typeId.split('@')[0]).toBe('feature.campaign-brief.nodes.promote-kernel');
+    const into = (target: string) => (wf.edges ?? []).filter((e) => e.targetNodeId === byStep(target).nodeId).map((e) => [e.sourceNodeId === byStep('approve').nodeId ? 'approve' : 'generate_kernel', e.sourceOutput ?? null, e.targetInput ?? null]);
+    expect(into('promote')).toEqual(expect.arrayContaining([['approve', null, null], ['generate_kernel', 'kernel', 'kernel'], ['generate_kernel', 'briefVersion', 'briefVersion'], ['generate_kernel', 'priorKernelAt', 'priorKernelAt']]));
+    expect(wf.nodes.filter((n) => n.outputRole === 'primary').map((n) => n.nodeId)).toEqual([byStep('promote').nodeId]);
+  });
+
+  it('market-intel: the platform is a closed enum, and the checkpoint says research is already saved', () => {
+    const chain = getChain(MARKET_INTEL_WORKFLOW_ID)!.chain;
+    expect((chain.parameters.properties as Record<string, { enum?: string[] }>).platform!.enum).toEqual(['meta', 'google', 'linkedin', 'tiktok']);
+    const gate = chain.dag.nodes.find((n) => n.id === 'approve')!;
+    expect(String((gate.config as Record<string, unknown>).prompt)).toContain('saved to the brief');
+  });
+});
+
+describe('ADR 1020 (grade-code M2) — every chain that saves a kernel stages it first', () => {
+  it('a chain with promote-kernel sets stageKernel on its generator and wires kernel + briefVersion into promote', () => {
+    const roots = defaultWorkflowChainPackRoots();
+    let checked = 0;
+    for (const root of roots) {
+      for (const dir of readdirSync(root)) {
+        const file = join(root, dir, 'pack.json');
+        if (!existsSync(file)) continue;
+        const pack = JSON.parse(readFileSync(file, 'utf8')) as { kind?: string; chains?: Array<{ chainId: string; dag: { nodes: Array<{ id: string; typeId: string; config?: Record<string, unknown> }>; edges: Array<{ from: string; to: string }> } }> };
+        if (pack.kind !== 'workflow-chain') continue;
+        for (const chain of pack.chains ?? []) {
+          const promote = chain.dag.nodes.filter((n) => n.typeId.split('@')[0] === 'feature.campaign-brief.nodes.promote-kernel');
+          if (promote.length === 0) continue;
+          for (const p of promote) {
+            checked += 1;
+            const into = chain.dag.edges.filter((e) => e.to.split('.')[0] === p.id);
+            const kernelEdge = into.find((e) => e.to === `${p.id}.kernel`);
+            const versionEdge = into.find((e) => e.to === `${p.id}.briefVersion`);
+            expect(into.find((e) => e.to === `${p.id}.priorKernelAt`), `${chain.chainId}: ${p.id} is not told which kernel it replaces`).toBeTruthy();
+            expect(kernelEdge, `${chain.chainId}: ${p.id} gets no kernel`).toBeTruthy();
+            expect(versionEdge, `${chain.chainId}: ${p.id} gets no briefVersion`).toBeTruthy();
+            const generator = chain.dag.nodes.find((n) => n.id === kernelEdge!.from.split('.')[0])!;
+            expect(generator.typeId.split('@')[0]).toBe('feature.campaign-brief.nodes.generate-kernel');
+            expect(generator.config, `${chain.chainId}: ${generator.id} saves before the approval`).toMatchObject({ stageKernel: true });
+          }
+        }
+      }
+    }
+    expect(checked, 'the scan found no promote-kernel at all').toBeGreaterThanOrEqual(2);
   });
 });

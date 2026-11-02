@@ -405,8 +405,12 @@ function sendRefusal(res: Response, reason: IssueRefusal): void {
 
   app.get(`${JOB_SEARCH_BASE}/orgs/:orgId/grants`, async (req, res, next) => {
     try {
-      const { tenantId, orgId } = await authorizeOrgScope(req, FEATURE, 'workspace:read');
-      const rows = (await applyGrants.listByPrefix(`${tenantId}:`)).filter((g) => g.orgId === orgId);
+      const { tenantId, orgId, user } = await authorizeOrgScope(req, FEATURE, 'workspace:read');
+      // DG-SEC-1 — only the caller's OWN grants. A job search is sensitive inside
+      // an org: a peer must not learn that a colleague has an auto-apply campaign.
+      const rows = (await applyGrants.listByPrefix(`${tenantId}:`)).filter(
+        (g) => g.orgId === orgId && (g.subjectId === user.userId || g.grantedBy === user.userId),
+      );
       // Projected, not returned raw: a grant is an authority record and the list
       // is what the "what have I authorised" surface renders.
       res.json({
@@ -427,12 +431,20 @@ function sendRefusal(res: Response, reason: IssueRefusal): void {
     try {
       const { tenantId, orgId, user } = await authorizeOrgScope(req, FEATURE, 'workspace:write');
       const b = (req.body ?? {}) as Record<string, unknown>;
+      // DG-SEC-1 — a grant is SELF-consent. `subjectId` (whose applications) is the
+      // acting user, exactly like `grantedBy`. A body naming anyone else is refused
+      // and nothing is stored: ADR 0541 OQ-3 (granting on another member's behalf)
+      // is undecided, and until it is decided no one may consent for someone else.
+      if (b.subjectId !== undefined && b.subjectId !== user.userId) {
+        res.status(403).json({ error: 'forbidden', message: 'An apply grant authorises your own applications only.' });
+        return;
+      }
       // `grantedBy` is the ACTING USER, never a body field: a grant records who
       // authorised it, and letting a caller name someone else would forge consent.
       const grant = await createApplyGrant({
         tenantId,
         orgId,
-        subjectId: typeof b.subjectId === 'string' && b.subjectId ? b.subjectId : user.userId,
+        subjectId: user.userId,
         grantedBy: user.userId,
         campaignId: String(b.campaignId ?? ''),
         maxSubmits: b.maxSubmits as number,

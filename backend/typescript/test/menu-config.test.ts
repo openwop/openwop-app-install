@@ -35,7 +35,7 @@ const j = async <T>(res: Response): Promise<T> => (await res.json()) as T;
 /** A signed-in but NON-superadmin caller (personal tenant), via the test seam.
  *  Captures the `__session` cookie specifically (the session identity), matching
  *  the working route-test harnesses (e.g. test/priority-matrix-route.test.ts). */
-async function normalClient(): Promise<(method: string, path: string, body?: unknown) => Promise<Response>> {
+async function normalClient(tenantId?: string): Promise<(method: string, path: string, body?: unknown) => Promise<Response>> {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Response> => {
     const res = await fetch(`${BASE}${path}`, {
@@ -49,7 +49,7 @@ async function normalClient(): Promise<(method: string, path: string, body?: unk
     }
     return res;
   };
-  const login = await call('POST', '/host/openwop-app/test/login', { email: `mc-${n++}@x.test` });
+  const login = await call('POST', '/host/openwop-app/test/login', { email: `mc-${n++}@x.test`, ...(tenantId ? { tenantId } : {}) });
   expect(login.status).toBe(201);
   return call;
 }
@@ -96,8 +96,13 @@ describe('menu-config — tenant layer (superadmin)', () => {
 
 describe('menu-config — user layer (caller-scoped)', () => {
   it("a user PUT writes only the caller's own layer; another user is unaffected", async () => {
-    const alice = await normalClient();
-    const bob = await normalClient();
+    // SAME tenant: the user layer is keyed (tenant, user), so the isolation
+    // that matters is between two users of ONE workspace. (With each user in
+    // their own personal tenant — the old fixture — dropping the userId from
+    // the key stayed green: MEASURED w72 probe mcfg-userkey.)
+    const shared = `mc-shared-${Date.now()}-${n++}`;
+    const alice = await normalClient(shared);
+    const bob = await normalClient(shared);
     const put = await alice('PUT', `${BASE_PATH}/me`, { config: { items: { '/widgets': { hidden: true } }, headers: [] } });
     expect(put.status).toBe(200);
 
@@ -106,28 +111,44 @@ describe('menu-config — user layer (caller-scoped)', () => {
 
     const bobGot = await j<{ user: { items: Record<string, unknown> } }>(await bob('GET', BASE_PATH));
     expect(bobGot.user.items).toEqual({});
+    // Positive control: Bob's own write lands in Bob's layer, not Alice's.
+    expect((await bob('PUT', `${BASE_PATH}/me`, { config: { items: { '/gadgets': { hidden: true } }, headers: [] } })).status).toBe(200);
+    const aliceAgain = await j<{ user: { items: Record<string, unknown> } }>(await alice('GET', BASE_PATH));
+    expect(aliceAgain.user.items).toEqual({ '/widgets': { hidden: true } });
   });
 });
 
 describe('menu-config — validation (fail closed)', () => {
-  it('rejects a bad tier', async () => {
-    const res = await admin('PUT', `${BASE_PATH}/tenant`, { config: { items: { '/x': { tier: 'sidebar' } }, headers: [] } });
+  /** A refused PUT is the validator's refusal (code + the field it names), not
+   *  any 400. The caller-scoped `me` lane is used so the check is independent
+   *  of the shared tenant layer other cases write. */
+  const refused = async (config: unknown, field: string): Promise<void> => {
+    const call = await normalClient();
+    const res = await call('PUT', `${BASE_PATH}/me`, { config });
     expect(res.status).toBe(400);
+    const body = await j<{ error?: string; details?: { field?: string } }>(res);
+    expect(body.error).toBe('validation_error');
+    expect(body.details?.field).toBe(field);
+    // Nothing was written.
+    const got = await j<{ user: unknown }>(await call('GET', BASE_PATH));
+    expect(got.user).toEqual({ items: {}, headers: [] });
+  };
+
+  it('rejects a bad tier', async () => {
+    await refused({ items: { '/x': { tier: 'sidebar' } }, headers: [] }, 'items["/x"].tier');
   });
 
   it('rejects a header without a tier', async () => {
-    const res = await admin('PUT', `${BASE_PATH}/tenant`, { config: { items: {}, headers: [{ id: 'hdr_1' }] } });
-    expect(res.status).toBe(400);
+    await refused({ items: {}, headers: [{ id: 'hdr_1' }] }, 'headers[].tier');
   });
 
   it('rejects a non-object config', async () => {
-    const res = await admin('PUT', `${BASE_PATH}/tenant`, { config: 'nope' });
-    expect(res.status).toBe(400);
+    await refused('nope', 'config');
   });
 
   it('strips unknown override fields (normalizes to the known shape)', async () => {
     const call = await normalClient();
-    await call('PUT', `${BASE_PATH}/me`, { config: { items: { '/x': { tier: 'admin', bogus: 1 } }, headers: [] } });
+    expect((await call('PUT', `${BASE_PATH}/me`, { config: { items: { '/x': { tier: 'admin', bogus: 1 } }, headers: [] } })).status).toBe(200);
     const got = await j<{ user: { items: Record<string, unknown> } }>(await call('GET', BASE_PATH));
     expect(got.user.items['/x']).toEqual({ tier: 'admin' });
   });
@@ -148,6 +169,8 @@ describe('menu-config — validation (fail closed)', () => {
       method: 'PUT', headers: { ...ADMIN, 'If-Match': v1! }, body: JSON.stringify({ config: cfg }),
     });
     expect(ok.status).toBe(200);
+    // (Not asserted to differ from v1: the version is the write's ISO
+    // timestamp, and two writes inside one millisecond share it.)
     expect(ok.headers.get('etag')).toBeTruthy();
   });
 });

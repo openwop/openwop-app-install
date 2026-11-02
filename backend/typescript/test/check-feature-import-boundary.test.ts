@@ -9,6 +9,11 @@
  * work on fixtures; this repo's dominant defect family is the gate that is
  * green because it never ran (#3070), and the child-process case is what rules
  * that out here.
+ *
+ * Tracker TST-CED-3. Red when (w67g3, witnessed): core features stop being
+ * permitted; stale allowlist entries are never reported; an allowlist entry
+ * matches on the feature alone, ignoring the file; the excludable verdict stops
+ * naming the manifests it defeats.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { execFileSync } from 'node:child_process';
@@ -132,9 +137,10 @@ describe('classify — one verdict per way "reachable" fails', () => {
 
   it('an allowlist entry matches on (file, feature) and moves the import to the backlog', () => {
     const allowlist: AllowlistEntry[] = [{ file: 'App.tsx', feature: 'commerce', owner: 'features/commerce', why: 'public storefront route' }];
-    const r = classify({ imports: [hit('App.tsx', 'commerce'), hit('App.tsx', 'commerce', 2)], dirToId, backendIds, core: [], bundleOf, exclusions: noExclusions, allowlist });
-    expect(r.violations).toEqual([]);
-    expect(r.allowlisted).toHaveLength(2);
+    const r = classify({ imports: [hit('App.tsx', 'commerce'), hit('App.tsx', 'commerce', 2), hit('Other.tsx', 'commerce')], dirToId, backendIds, core: [], bundleOf, exclusions: noExclusions, allowlist });
+    // The same feature imported from a file the entry does NOT name stays a violation.
+    expect(r.violations.map((v) => `${v.file}:${v.dir}`)).toEqual(['Other.tsx:commerce']);
+    expect(r.allowlisted.map((a) => `${a.file}:${a.line}`)).toEqual(['App.tsx:1', 'App.tsx:2']);
     expect(r.stale).toEqual([]);
   });
 

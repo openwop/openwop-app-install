@@ -37,7 +37,7 @@ import { optimizeBudget, forecastCampaigns } from './intelligence.js';
 import { planBudget } from './budgetPlanner.js';
 import { buildPacing } from './pacing.js';
 import { buildAttribution } from './attribution.js';
-import { orgScopeGranted } from './routes.js';
+import { orgScopeGranted } from './orgScope.js';
 import { listCaps, getCapState } from './spendCaps.js';
 import { proposeReallocation } from './reallocation.js';
 import { makeAdsAdapter } from '../../host/adsAdapter.js';

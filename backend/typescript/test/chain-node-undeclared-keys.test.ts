@@ -20,6 +20,10 @@
  * under-declares what the node honours, or authored config nothing reads — and
  * both are worth failing a build over. Which one it is cannot be decided by this
  * test, so it fails and makes a human decide.
+ *
+ * TST-CCC-8. Red when: a chain node authors a key its closed-world node schema does
+ * not declare; a non-notify node gains `inputs.title`; or a notify node is titled
+ * with another chain's label.
  */
 import { describe, expect, it } from 'vitest';
 import { existsSync } from 'node:fs';
@@ -122,12 +126,13 @@ describe('chain nodes author no key their node type does not declare', () => {
   it('fixture guard: the corpus and the closed-world schemas are both real', () => {
     // Without this the whole file passes vacuously the day a glob or a manifest
     // field is renamed — the way a gate stops gating. The thresholds sit just
-    // under the real values (551 / 364), not far below: a guard set at 100 when
-    // reality is 364 still passes with `additionalProperties` handling inverted
-    // (measured: 253), so a slack threshold is a guard that has already stopped
-    // guarding.
-    expect(nodesChecked, 'no chain nodes scanned').toBeGreaterThan(500);   // real: 551
-    expect(closedWorldChecks, 'no node type closes its world — nothing was actually checked').toBeGreaterThan(300); // real: 364
+    // under the real values, not far below: a guard set at 100 when reality is 364
+    // still passes with `additionalProperties` handling inverted (measured then:
+    // 253), so a slack threshold is a guard that has already stopped guarding.
+    // Re-measured 2026-10-29 (w67): 914 nodes / 557 closed-world checks — the old
+    // 500 / 300 floors had drifted to roughly half of reality.
+    expect(nodesChecked, 'no chain nodes scanned').toBeGreaterThan(911);   // real: 914
+    expect(closedWorldChecks, 'no node type closes its world — nothing was actually checked').toBeGreaterThan(553); // real: 557
   });
 
   it('has no violation outside the recorded baseline', () => {

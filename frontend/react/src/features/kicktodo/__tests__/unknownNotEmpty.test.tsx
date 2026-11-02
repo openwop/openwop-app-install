@@ -59,7 +59,7 @@ const CHALLENGE: NegotiatedChallenge = {
 const enrollmentRow = (id: string, challengeId: string): Enrollment => ({
   id, challengeId, challengeVersion: 1, state: 'active', goalId: `goal-${id}`, planRevision: 1, timezone: 'UTC', startDateLocal: '2026-09-01',
 });
-const ENROL_CTA = `${en.previewAndStart}: Run 5k`;
+const ENROL_CTA = `${en.startChallenge}: Run 5k`;
 
 const mountDetail = async (): Promise<void> => {
   render(
@@ -122,7 +122,7 @@ describe('KT-G1 — a failed enrolment read never offers to enrol', () => {
       </MemoryRouter>,
     );
     await act(async () => {});
-    fireEvent.click(screen.getByRole('button', { name: /Preview my plan.*Run 5k/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^Start this challenge: Run 5k$/i }));
     await waitFor(() => expect(screen.getByTestId('today-state').textContent).toContain('enrollment-new'));
     expect(screen.getByTestId('today-state').textContent).toContain('Run 5k');
   });

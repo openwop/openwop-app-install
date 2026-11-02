@@ -110,7 +110,7 @@ describe('insertRunWithStartContext derives the agent from attribution', () => {
   it('an attributed run of an opted-in agent freezes lossy', async () => {
     await setAgentLossy({ lossy: true, head: 3, tail: 2 });
     const run = attributedRun('run-p2-1');
-    await insertRunWithStartContext(storage, run);
+    await insertRunWithStartContext(storage, run, { admission: { plan: 'exempt:test-fixture' } });
     const stored = await storage.getRun('run-p2-1');
     expect(readCompactionDecision(stored?.metadata)).toEqual({ mode: 'lossy', head: 3, tail: 2 });
   });
@@ -118,12 +118,12 @@ describe('insertRunWithStartContext derives the agent from attribution', () => {
   it('replay-safe: editing the profile AFTER creation does not change the frozen decision', async () => {
     await setAgentLossy({ lossy: true, head: 3, tail: 2 });
     const run = attributedRun('run-p2-2');
-    await insertRunWithStartContext(storage, run);
+    await insertRunWithStartContext(storage, run, { admission: { plan: 'exempt:test-fixture' } });
 
     // Agent later turns lossy OFF — the already-created run must be unaffected.
     await setAgentLossy({ lossy: false });
     // Non-vacuity: the edit LANDED — a run created now sees it and freezes lossless.
-    await insertRunWithStartContext(storage, attributedRun('run-p2-3'));
+    await insertRunWithStartContext(storage, attributedRun('run-p2-3'), { admission: { plan: 'exempt:test-fixture' } });
     expect(readCompactionDecision((await storage.getRun('run-p2-3'))?.metadata)).toEqual({ mode: 'lossless' });
     // …while the earlier run keeps the decision it was born with. Honest ceiling:
     // nothing between insert and read re-resolves the profile, so this half is a

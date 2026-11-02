@@ -7,6 +7,12 @@
  * prefix — the Chief of Staff is the first consumer); clearing reverts to the
  * manifest. The override is still intersected with `availableTools`, so granting a
  * tool that isn't mounted is a no-op.
+ *
+ * Cross-tenant fail-closed is a DOUBLE guard in agentToolAllowlistService.ts:
+ * the tenant-prefixed collection key (`keyOf`) AND the per-row
+ * `row.tenantId !== tenantId` check. Breaking either one alone is an equivalent
+ * mutant (w73 probe ov-tenant-row read vacuous); breaking both in one edit
+ * (ov-tenant-both) reds the cross-tenant case.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
@@ -67,7 +73,7 @@ describe('agentToolAllowlistService — override store (ADR 0104)', () => {
 
 describe('compileAgentTools — honors the allowlist override (ADR 0104)', () => {
   // Mirrors the manifest stub idiom in agent-tool-provider.test.ts.
-  const agent = { agentId: PACK_AGENT, persona: 'SUPERVISOR', toolAllowlist: ['openwop:manifest-only'] } as unknown as ResolvedAgentManifest;
+  const agent: ResolvedAgentManifest = { agentId: PACK_AGENT, persona: 'SUPERVISOR', modelClass: 'general', systemPrompt: '', packName: 'vendor.openwop-app.assistant.agents', packVersion: '1.0.0', toolAllowlist: ['openwop:manifest-only'] };
   const available = ['openwop:manifest-only', 'openwop:granted'];
   const resolveTool = (name: string): { name: string; description: string; inputSchema: Record<string, unknown> } => ({ name, description: name, inputSchema: { type: 'object' } });
 
@@ -89,7 +95,7 @@ describe('compileAgentTools — honors the allowlist override (ADR 0104)', () =>
 
 
 describe('effectiveToolAllowlist — the ADR 0315 default-on baseline', () => {
-  it('unions the manifest with the six baseline tools when no override exists', () => {
+  it('unions the manifest with every baseline tool when no override exists', () => {
     const eff = effectiveToolAllowlist(['openwop:knowledge.search'], undefined);
     expect(eff).toContain('openwop:knowledge.search');
     for (const id of DEFAULT_ON_AGENT_TOOL_IDS) expect(eff).toContain(id);

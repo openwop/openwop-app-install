@@ -145,7 +145,20 @@ export function logicalInvocationId(input: LogicalEffectIdentityInput): string {
  * across processes. What IS compared across processes is the resulting identity,
  * which is a pure function of its inputs.
  */
-const ordinalCounters = new Map<string, { attempt: number; next: number }>();
+const ordinalCounters = new Map<string, { attempt: number; next: number; base: number }>();
+
+/**
+ * ADR 1001 D3.3 / ADR 1002 — each VISIT of a node owns a disjoint ordinal range
+ * starting at `visit * VISIT_ORDINAL_STRIDE`. Without it, two visits of one node
+ * at the same attempt (a loop revisit) allocate identical ordinals, so two
+ * identical requests share one invocation-log record and a replay serves the
+ * LAST write to both. Visit 0's base is 0, so every record written before this
+ * existed (and every node that is never revisited) keeps its identity. 2^20
+ * logical effects per visit is far past any real node body; the executor's
+ * `maxNodeExecutions` (1000) bounds the visit count, so the largest base stays
+ * a safe integer.
+ */
+export const VISIT_ORDINAL_STRIDE = 2 ** 20;
 
 function ordinalScopeKey(runId: string, nodeId: string): string {
   return `${runId}\u0000${nodeId}`;
@@ -168,8 +181,9 @@ function ordinalScopeKey(runId: string, nodeId: string): string {
  * non-executor effect site). Both paths must agree, so the state they touch is
  * the same map.
  */
-export function beginNodeActivity(runId: string, nodeId: string, attempt: number): void {
-  ordinalCounters.set(ordinalScopeKey(runId, nodeId), { attempt, next: 0 });
+export function beginNodeActivity(runId: string, nodeId: string, attempt: number, visit = 0): void {
+  const base = Math.max(0, Math.floor(visit)) * VISIT_ORDINAL_STRIDE;
+  ordinalCounters.set(ordinalScopeKey(runId, nodeId), { attempt, next: base, base });
 }
 
 /**
@@ -183,12 +197,43 @@ export function nextLogicalInvocationOrdinal(runId: string, nodeId: string, atte
   const key = ordinalScopeKey(runId, nodeId);
   const state = ordinalCounters.get(key);
   if (!state || state.attempt !== attempt) {
-    ordinalCounters.set(key, { attempt, next: 1 });
-    return 0;
+    // A new attempt rewinds to its VISIT's base (a retry stays in its visit:
+    // RFC 0150 §B retry-stability), or to 0 when nothing declared a visit.
+    const base = state?.base ?? 0;
+    ordinalCounters.set(key, { attempt, next: base + 1, base });
+    return base;
   }
   const ordinal = state.next;
   state.next = ordinal + 1;
   return ordinal;
+}
+
+/**
+ * ADR 1001 D3.3 — the ordinal the next logical activity of `(runId, nodeId)`
+ * would take, without allocating it. A node that pauses mid-body (a
+ * clarification) records this beside its continuation checkpoint.
+ */
+export function peekNodeActivityOrdinal(runId: string, nodeId: string): number {
+  return ordinalCounters.get(ordinalScopeKey(runId, nodeId))?.next ?? 0;
+}
+
+/**
+ * ADR 1001 D3.3 — continue a node body from a checkpoint at the ordinal it
+ * paused at. `beginNodeActivity` rewinds every re-entry to 0, which is right for
+ * a body that re-runs from the top, but a body that RESUMES from a checkpoint
+ * skips the activities before the pause. Without this, the source run's
+ * continuation (a re-entry, rewound to 0) and a replay fork's continuation (the
+ * same invocation, still counting) allocate different ordinals for the same
+ * logical call, and the fork misses the source's invocation log and calls the
+ * provider live. Seeding both to the recorded cursor makes them agree. The
+ * current attempt and visit base are kept: this moves the cursor, never the
+ * attempt or the visit. The recorded cursor already includes the visit base,
+ * because `peekNodeActivityOrdinal` returns absolute ordinals.
+ */
+export function seedNodeActivity(runId: string, nodeId: string, next: number): void {
+  const key = ordinalScopeKey(runId, nodeId);
+  const state = ordinalCounters.get(key);
+  ordinalCounters.set(key, { attempt: state?.attempt ?? 1, next: Math.max(0, Math.floor(next)), base: state?.base ?? 0 });
 }
 
 /** Drop a run's ordinal state once the run is finished (or in tests). */

@@ -1,5 +1,14 @@
 /**
- * Migration journey store (EP1 MG-0) — default shape + merge-patch persistence.
+ * Migration journey store (EP1 MG-0; CAS per ADR 0775 P4) — default shape,
+ * merge-patch persistence, and tenant scoping (CTI-1).
+ *
+ * What breaks: a merge that rebuilds from defaults drops an earlier stage's
+ * answers; a `!== undefined` check loosened to truthiness makes `null` unable to
+ * clear a field; and a key without the tenant hands one tenant's data manifest
+ * (data sources, sensitivity — financial PII) to another. The tenant lives in
+ * TWO places — the collection's own key function and the read key — and they
+ * must agree, so a probe has to move both (a read-only change just misses the
+ * row and fails the write's CAS).
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
@@ -34,7 +43,7 @@ describe('migration journey', () => {
 
   it('merge-patches only the provided fields and persists', async () => {
     await patchMigrationJourney(T, WF, {
-      target: { workflowId: 'openwop-app.agents.invoice-post', targetOutcome: 'clear exceptions in <1 day' },
+      target: { workflowId: 'wf.test.invoice-post', targetOutcome: 'clear exceptions in <1 day' },
       stageStatus: { target: 'done' },
     });
     // a second patch touches a different field; the first must survive
@@ -44,7 +53,7 @@ describe('migration journey', () => {
     });
 
     const j = await getMigrationJourney(T, WF);
-    expect(j.target?.workflowId).toBe('openwop-app.agents.invoice-post');
+    expect(j.target?.workflowId).toBe('wf.test.invoice-post');
     expect(j.dataManifest?.sensitivity).toBe('financial PII');
     expect(j.stageStatus.target).toBe('done');
     expect(j.stageStatus['map-data']).toBe('done');
@@ -61,7 +70,11 @@ describe('migration journey', () => {
     await patchMigrationJourney('tenant-a', WF, {
       dataManifest: { dataSources: 'tenant-a ERP', sensitivity: 'financial PII', approvalModel: '>$5k' },
     });
+    // Owner positive control: the row is really there for tenant-a, so tenant-b's
+    // null below is isolation, not a write that never landed.
+    expect((await getMigrationJourney('tenant-a', WF)).dataManifest?.dataSources).toBe('tenant-a ERP');
     const b = await getMigrationJourney('tenant-b', WF);
+    expect(b.tenantId).toBe('tenant-b');
     expect(b.dataManifest).toBeNull(); // tenant-b sees a fresh journey, not tenant-a's content
   });
 });

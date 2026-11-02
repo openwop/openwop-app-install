@@ -14,6 +14,11 @@
  * totally invalid manifest. Every assertion below goes past that: `errors` is
  * empty, the chain RESOLVES by id, and expansion PRESERVES the fields the export
  * carried.
+ *
+ * TST-CCF-3. Red when: the loader stops schema-validating (the fixture guard and the
+ * 128-char bound), stops refusing an unpinned chain, or expansion drops/stops
+ * substituting a node's `inputs`. HONEST CEILING: `EXPORTED_MANIFEST` mirrors the
+ * frontend exporter's output by hand (the exporter is frontend-only).
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
@@ -154,6 +159,7 @@ describe('a builder export loads as a chain pack', () => {
     const broken = JSON.parse(JSON.stringify(EXPORTED_MANIFEST)) as typeof EXPORTED_MANIFEST;
     delete (broken.chains[0] as { dag?: unknown }).dag;
     const { errors } = installExport(broken);
-    expect(errors.length, 'the loader accepted a chain with no dag').toBeGreaterThan(0);
+    // The SCHEMA refusal specifically — any other error would also be "> 0".
+    expect(errors, 'the loader accepted a chain with no dag').toEqual([expect.objectContaining({ code: 'workflow_chain_pack_manifest_invalid' })]);
   });
 });

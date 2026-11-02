@@ -149,7 +149,7 @@ describe('ADR 0852 P1 — campaign runs bind to the campaign project', () => {
     const mk = async (metadata: Record<string, unknown>) => {
       const now = new Date().toISOString();
       const run: RunRecord = { runId: `run-cp-${n++}`, workflowId: 'wf.test.cp', tenantId: s.tenantId, status: 'pending', inputs: {}, metadata, configurable: {}, createdAt: now, updatedAt: now };
-      await insertRunWithStartContext(storage, run);
+      await insertRunWithStartContext(storage, run, { admission: { plan: 'exempt:test-fixture' } });
       return (await storage.getRun(run.runId))!;
     };
     const bound = await mk({ campaignOrchestration: { briefId: c.briefId, agentId: 'a' }, actingUserId: s.ownerId });

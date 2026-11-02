@@ -3,10 +3,9 @@
  *
  * The chat already renders open interrupts as cards keyed by
  * `interrupt.<kind>` (the textarea/buttons in `registry/defaultCards.tsx`).
- * When a producer raises a `clarification` (or any) interrupt that carries an
- * A2UI surface in its `data` — `{ catalogVersion, surface }`, RFC 0102 shape —
- * we render it with the `ui.a2ui-surface` card instead: a real form whose
- * collected field values become the interrupt resume value. This is the
+ * When a producer raises a `clarification` interrupt with a `data.form`
+ * (RFC 0255 §E, `{ catalogVersion, surface }` or an A2UI v0.9 form), we render it with the `ui.a2ui-surface` card instead: a real form whose
+ * collected field values become the `{ answers }` resume value. This is the
  * "structured clarification / parameter collection instead of a free-text
  * textarea" use case (e.g. a meeting-scheduling form).
  *
@@ -37,31 +36,24 @@ export interface A2uiInterruptCard {
  *  profile parse is the validator and fail-closes. */
 export type V09CardPayload = Record<string, unknown> | { surfaces: unknown[] };
 
-const V09_KEYS = ['version', 'catalogId', 'surfaceId', 'messages', 'reasoning'] as const;
-
 /**
- * If `interrupt.data` carries an A2UI surface (`{ catalogVersion: string,
- * surface: object }`), return the `ui.a2ui-surface` card props to render it;
- * otherwise return `null` (caller falls back to `interrupt.<kind>`).
+ * If `interrupt.data.form` carries an A2UI surface, return the `ui.a2ui-surface`
+ * card props to render it; otherwise return `null` (caller falls back to
+ * `interrupt.<kind>`). ADR 1013 D5: `data.form` is the only place a form lives.
  */
 export function a2uiInterruptCard(
   interrupt: Pick<OpenInterrupt, 'data'> | null | undefined,
 ): A2uiInterruptCard | null {
   const data = interrupt?.data;
-  if (!isRecord(data)) return null;
-  if (Array.isArray(data.surfaces) && data.surfaces.length > 0) {
-    return { cardType: 'ui.a2ui-surface', payload: { surfaces: data.surfaces } };
+  if (!isRecord(data) || !isRecord(data.form)) return null;
+  const form = data.form;
+  if (Array.isArray(form.surfaces) && form.surfaces.length > 0) {
+    return { cardType: 'ui.a2ui-surface', payload: { surfaces: form.surfaces } };
   }
-  if (data.version === 'v0.9') {
-    // Carry ONLY the payload's own keys — an interrupt's data also holds a
-    // free-text `question` fallback, which the closed profile would refuse.
-    const payload: Record<string, unknown> = {};
-    for (const k of V09_KEYS) if (k in data) payload[k] = data[k];
-    return { cardType: 'ui.a2ui-surface', payload };
-  }
-  if (!isRecord(data.surface) || typeof data.catalogVersion !== 'string') return null;
+  if (form.version === 'v0.9') return { cardType: 'ui.a2ui-surface', payload: form };
+  if (!isRecord(form.surface) || typeof form.catalogVersion !== 'string') return null;
   return {
     cardType: 'ui.a2ui-surface',
-    payload: { catalogVersion: data.catalogVersion, surface: data.surface },
+    payload: { catalogVersion: form.catalogVersion, surface: form.surface },
   };
 }

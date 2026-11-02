@@ -18,6 +18,9 @@
  * older `origin/main` — silently restored the old strings while keeping the
  * version bump, leaving the repo and the published registry disagreeing AT THE
  * SAME VERSION. A version comparison cannot see that; a content check can.
+ *
+ * TST-CCC-10. Red when a shipped chain parameter description gains a `ctx.*` path,
+ * a node type id, or "no upstream node" authoring rationale.
  */
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -56,7 +59,7 @@ for (const dir of PACK_DIRS) {
 
 describe('the scan reaches real parameter copy', () => {
   it('finds a substantial number of described chain parameters', () => {
-    expect(PARAMS.length, 'no described parameters found — the ratchet is scanning nothing').toBeGreaterThan(100);
+    expect(PARAMS.length, 'no described parameters found — the ratchet is scanning nothing').toBeGreaterThan(673); // measured 683 (699 on 2026-10-29, before ADR 1023 D2 removed 16 dead provider/model params from the eight funnel blueprint and step chains)
   });
 });
 

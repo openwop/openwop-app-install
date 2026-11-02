@@ -1,5 +1,12 @@
 /**
- * ADR 0137 Phase 1 — the pure run-signature + recurrence clustering.
+ * ADR 0137 Phase 1 — the pure run-signature + recurrence clustering; ADR 0930
+ * D1/A7 — ids are tenant- AND owner-separated, and never cluster across owners.
+ *
+ * TST-BXA-2. Red when: consecutive dedupe, the empty-name filter, the agent
+ * key, tool order, the `>= minCount` threshold, the owner filter, the
+ * chronological sort (the fixture is supplied NEWEST-FIRST so the sort decides
+ * sampleGoal/exampleRunIds/first-/lastSeenAt) or the tenant input of the id
+ * hash break (w66 probes sig-dedupe/empty/agent/order/min/owner/sort/tenant).
  */
 import { describe, it, expect } from 'vitest';
 import { computeRunSignature, clusterAndDetect, suggestionIdFor } from '../src/features/ambient-work-graph/runSignature.js';
@@ -28,11 +35,13 @@ describe('computeRunSignature', () => {
 });
 
 describe('clusterAndDetect', () => {
+  // Deliberately NOT in time order (newest first, the middle one last): only the
+  // clusterer's sort can produce the chronological evidence asserted below.
   const inputs: RunSignatureInput[] = [
-    run('r1', ['kb.search', 'email.send'], { createdAt: '2026-06-20T00:00:00Z', goal: 'old' }),
-    run('r2', ['kb.search', 'email.send'], { createdAt: '2026-06-22T00:00:00Z' }),
     run('r3', ['kb.search', 'email.send'], { createdAt: '2026-06-24T00:00:00Z', goal: 'latest goal' }),
+    run('r1', ['kb.search', 'email.send'], { createdAt: '2026-06-20T00:00:00Z', goal: 'old' }),
     run('r4', ['kb.search']), // different pattern, only once
+    run('r2', ['kb.search', 'email.send'], { createdAt: '2026-06-22T00:00:00Z' }),
   ];
 
   it('emits a suggestion for a pattern at/over the threshold; not for rare ones', () => {
@@ -58,7 +67,8 @@ describe('clusterAndDetect', () => {
   });
 
   it('never clusters across owners (ADR 0930 D1)', () => {
-    const mixed = [...inputs.slice(0, 2), { ...inputs[2]!, ownerKey: 'p' }];
+    const [r3, r1, , r2] = inputs;
+    const mixed = [r1!, r2!, { ...r3!, ownerKey: 'p' }];
     expect(clusterAndDetect('t', 'o', mixed, { minCount: 3 })).toHaveLength(0);
     expect(clusterAndDetect('t', 'p', mixed, { minCount: 1 })).toHaveLength(1);
   });

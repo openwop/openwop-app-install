@@ -9,6 +9,11 @@
  * Every figure comes from fields the turn already carries (`agentEvents`,
  * `meta`); a figure the turn cannot source is omitted, never estimated.
  *
+ * ADR 1017 D2 — a turn that ran a chat tool which SAVES an artifact (the
+ * interactive render tool, the code-exec tool) lists those artifacts as cards
+ * below the receipt, outside the fold, each opening in the Workbench. Before, the
+ * Visualizer told the user "the workbench renders it" and nothing in the chat did.
+ *
  * Default state: EXPANDED while the turn streams (you watch the work happen)
  * and whenever something went wrong (a failed tool or a failed verification
  * is never folded away); COLLAPSED once a healthy turn settles. A user toggle
@@ -19,12 +24,20 @@ import { useId, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { ChatMessage } from './types.js';
 import { Button } from '../ui/Button.js';
+import { Notice } from '../ui/index.js';
 import { ToolCallCard, HandoffIndicator, DecisionBadge, VerificationCard } from './AgentEventCards.js';
 import { formatUsd, turnCostUsd } from './lib/cost.js';
 import { formatDurationMs, formatNumber } from '../i18n/format.js';
 import { ChevronDownIcon, GlobeIcon } from '../ui/icons/index.js';
 import { useToolEffects, type ToolEffect } from './lib/toolEffects.js';
 import { useWorkbenchActions } from './workbench/workbenchActions.js';
+import { RunArtifactCards, useChatTurnArtifacts } from './RunArtifactCards.js';
+
+/** The chat tools that save an artifact under the turn that ran them (ADR 1017 D2). */
+export const CHAT_ARTIFACT_TOOLS: ReadonlySet<string> = new Set([
+  'openwop:interactive-artifacts.render',
+  'openwop:feature.code-exec.nodes.run',
+]);
 
 export interface TurnReceiptSummary {
   model: string | null;
@@ -72,6 +85,12 @@ export function TurnReceipt({ message }: { message: ChatMessage }): JSX.Element 
   const s = summarizeTurn(message, effects);
   const workbench = useWorkbenchActions();
   const settled = !message.isStreaming;
+  // ADR 1017 D2 — ask for this turn's artifacts only when a chat tool that saves one
+  // finished without an error, in a shell with a Workbench to open them in.
+  const savedArtifact = (message.agentEvents?.toolCalls ?? []).some((c) => CHAT_ARTIFACT_TOOLS.has(c.toolName) && Boolean(c.finishedAt) && !c.error);
+  const openArtifact = workbench?.openArtifact;
+  const [artifactsAttempt, setArtifactsAttempt] = useState(0);
+  const turnArtifacts = useChatTurnArtifacts(message.turnRef, settled && savedArtifact && Boolean(openArtifact), artifactsAttempt);
   // The meta half only speaks once the turn settles (tokens/cost are final
   // then); the event half is live while streaming.
   const showMeta = settled && Boolean(message.meta) && !message.meta?.error;
@@ -101,6 +120,7 @@ export function TurnReceipt({ message }: { message: ChatMessage }): JSX.Element 
 
   const ev = message.agentEvents;
   return (
+    <>
     <div className="turn-receipt" data-troubled={troubled ? 'true' : undefined}>
       <Button
         variant="quiet"
@@ -150,5 +170,14 @@ export function TurnReceipt({ message }: { message: ChatMessage }): JSX.Element 
         </div>
       ) : null}
     </div>
+    {openArtifact && turnArtifacts.status === 'ready' ? <RunArtifactCards items={turnArtifacts.items} onOpen={openArtifact} label={t('chatTurnArtifactsLabel')} /> : null}
+    {turnArtifacts.status === 'failed' ? (
+      // A failed read is its own state: the reply just promised a visual.
+      <div className="turn-receipt-artifacts-failed">
+        <Notice variant="warning">{t('chatTurnArtifactsFailed')}</Notice>
+        <Button variant="secondary" onClick={() => setArtifactsAttempt((n) => n + 1)}>{t('chatTurnArtifactsRetry')}</Button>
+      </div>
+    ) : null}
+    </>
   );
 }

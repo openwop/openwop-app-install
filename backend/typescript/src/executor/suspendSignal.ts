@@ -84,23 +84,39 @@ export class SuspendSignal extends Error {
   }
 }
 
+/** ADR 1001 D3.2 — reads THIS run and node's own resolved row for a key. */
+export type DurableResolutionLookup = (resumeKey: string) => Promise<{ value: unknown } | null>;
+
 /** Build a `ctx.suspend`/`ctx.interrupt` method bound to a node. Returns the
  *  seeded resolution when re-invoked with the matching key (the spec's
- *  short-circuit); otherwise throws a `SuspendSignal`. */
+ *  short-circuit); otherwise throws a `SuspendSignal`.
+ *
+ *  ADR 1001 D3.2 — a payload with `durable: true` is ALSO served from the
+ *  node's own resolved interrupt row for that key, when the seeded resolution
+ *  is for a different key. A re-invoke resume seeds only the LATEST answer, so
+ *  a node that suspends twice (an approval gate, then a clarification) could
+ *  otherwise never get past its first suspend on re-entry. Opt-in, because a
+ *  node that deliberately re-asks on one key must keep being asked. */
 export function makeSuspendFn(
   fallbackKey: string,
   resolution: { resumeKey: string; value: unknown } | undefined,
+  durableLookup?: DurableResolutionLookup,
 ): (payload: SuspendPayload) => Promise<unknown> {
   return async (payload: SuspendPayload): Promise<unknown> => {
     const resumeKey = String(payload.resumeKey ?? payload.key ?? fallbackKey);
     if (resolution && resolution.resumeKey === resumeKey) {
       return resolution.value;
     }
+    if (payload.durable === true && durableLookup) {
+      const served = await durableLookup(resumeKey);
+      if (served) return served.value;
+    }
+    const { durable: _durable, ...rest } = payload;
     const schema = (payload.answerSchema ?? payload.resumeSchema) as Record<string, unknown> | undefined;
     throw new SuspendSignal({
       kind: mapSuspendKind(payload.reason ?? payload.kind),
       resumeKey,
-      data: { ...payload },
+      data: payload.durable === true ? { ...rest, __durable: true } : { ...rest },
       ...(schema !== undefined ? { resumeSchema: schema } : {}),
       ...(typeof payload.timeoutMs === 'number' ? { timeoutMs: payload.timeoutMs } : {}),
     });

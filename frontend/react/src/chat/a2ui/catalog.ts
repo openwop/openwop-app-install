@@ -37,10 +37,9 @@ export const SUPPORTED_COMPONENTS = [
 
 export type A2uiComponentType = (typeof SUPPORTED_COMPONENTS)[number];
 
-/** Confined action target (RFC 0102 §A rule 4): a surface action resolves to
- *  exactly one host-allowlisted destination — an interrupt resume or a
- *  conversation exchange — never an arbitrary URL/endpoint. */
-export type A2uiActionTarget = 'resume' | 'exchange';
+/** Confined action target (RFC 0255 §E): a surface action resolves the
+ *  interrupt that carries it, never an arbitrary URL/endpoint. */
+export type A2uiActionTarget = 'resume';
 
 export interface A2uiSelectOption {
   value: string;
@@ -57,7 +56,7 @@ export type A2uiComponent =
   | { component: 'action.button'; id: string; label: string; action: { target: A2uiActionTarget } };
 
 /** A field component carries a binding `id` whose user-entered value flows into
- *  the resume/exchange payload keyed by that id. */
+ *  the resume value as the answer to the question of that id. */
 export type A2uiFieldComponent = Extract<A2uiComponent, { component: `field.${string}` }>;
 
 /** The A2UI surface document — `surface` in the envelope payload. */
@@ -118,7 +117,7 @@ function rejectComponent(raw: unknown): string | null {
       return null;
     case 'action.button': {
       if (typeof raw.id !== 'string' || typeof raw.label !== 'string') return i18n.t('chat:a2uiRejectButtonIdLabel');
-      if (!isRecord(raw.action) || (raw.action.target !== 'resume' && raw.action.target !== 'exchange')) {
+      if (!isRecord(raw.action) || raw.action.target !== 'resume') {
         return i18n.t('chat:a2uiRejectButtonTarget');
       }
       return null;

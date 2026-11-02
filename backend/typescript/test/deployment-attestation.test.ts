@@ -11,6 +11,13 @@
  * The positive case is asserted alongside every negative. A verifier that
  * rejects everything passes all four negatives and is useless; the pairing is
  * what makes each negative meaningful.
+ *
+ * TST-CVB-7. Red when: the signature check is skipped (TAMPER, ORDER and the
+ * environmentClass relabel), canonicalization stops sorting keys (re-serialize),
+ * env provenance is accepted, expiry / revision / discovery-drift checks are
+ * dropped, an unpinned key reads as a bad signature, or expiry is checked before
+ * the signature (ORDER). Digests are pinned as literals (sha256 computed outside
+ * the product), never via the product's `sha256Hex`.
  */
 import { generateKeyPairSync, sign as edSign } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
@@ -24,6 +31,11 @@ import {
 
 const KEY_ID = 'openwop-app-deploy-2026';
 const DISCOVERY = '{"capabilities":{"runs":{"supported":true}}}';
+// sha256 of DISCOVERY and of the drifted document below, computed with
+// `node -e` (node:crypto) — never with the product's `sha256Hex`.
+const DISCOVERY_SHA256 = '8091d8a497122e1d05d60fafbbc71f1d1d44660e0bf54bddf2c5f1f733418181';
+const DRIFTED_DISCOVERY = '{"capabilities":{"runs":{"supported":true},"voice":{"supported":true}}}';
+const DRIFTED_SHA256 = 'baf2e08da1d31c665d43eee67bb496a75c30304428092fc053c22b3e56cd2cb4';
 const COMMIT = 'a222fe76a4ec0e0f1d2c3b4a5968778899aabbcc';
 
 function makeKeypair() {
@@ -46,7 +58,7 @@ function makePayload(over: Partial<DeploymentAttestationPayload> = {}): Deployme
     environmentClass: 'local',
     versions: { conformanceSuite: '1.73.0', protocol: null, corpusStamp: null },
     profiles: ['openwop-core'],
-    discoveryDigest: sha256Hex(DISCOVERY),
+    discoveryDigest: DISCOVERY_SHA256,
     runtime: { storageAdapter: 'memory', queueAdapter: null },
     telemetry: { attests: 'declaration', objectives: 31, objectiveIds: ['A1', 'A2', 'A3'], declarationDigest: 'f'.repeat(64) },
     evidence: { collected: 418, passed: 2541, failed: 0, skipped: 87, artifactDigest: sha256Hex('evidence') },
@@ -96,12 +108,23 @@ describe('deployment attestation verifier (ADR 0550 P3)', () => {
     const { privateKey, pem } = makeKeypair();
     const payload = makePayload();
     const signed = signPayload(payload, privateKey);
-    // Rebuild with the top-level keys in REVERSE insertion order. A spread
+    // Rebuild with the top-level keys written in REVERSE order. A spread
     // would preserve order (and duplicate a key), so it would not exercise
     // canonicalization at all.
-    const reordered = Object.fromEntries(
-      Object.entries(payload).reverse(),
-    ) as unknown as DeploymentAttestationPayload;
+    const reordered: DeploymentAttestationPayload = {
+      signerKeyId: payload.signerKeyId,
+      expiresAt: payload.expiresAt,
+      issuedAt: payload.issuedAt,
+      evidence: payload.evidence,
+      telemetry: payload.telemetry,
+      runtime: payload.runtime,
+      discoveryDigest: payload.discoveryDigest,
+      profiles: payload.profiles,
+      versions: payload.versions,
+      environmentClass: payload.environmentClass,
+      build: payload.build,
+      kind: payload.kind,
+    };
     expect(Object.keys(reordered)).not.toEqual(Object.keys(payload)); // the reorder is real
     expect(verifyAttestation({ payload: reordered, signature: signed.signature }, live, {
       now: NOW,
@@ -136,10 +159,13 @@ describe('deployment attestation verifier (ADR 0550 P3)', () => {
   it('DISCOVERY-DRIFT — the host still runs the attested build but now advertises differently', () => {
     const { privateKey, pem } = makeKeypair();
     const signed = signPayload(makePayload(), privateKey);
-    const drifted = { ...live, discoveryDocument: '{"capabilities":{"runs":{"supported":true},"voice":{"supported":true}}}' };
-    const verdict = verifyAttestation(signed, drifted, { now: NOW, keyring: { [KEY_ID]: pem } });
-    expect(verdict.ok).toBe(false);
-    expect(verdict).toMatchObject({ reason: 'discovery_drift', attested: sha256Hex(DISCOVERY) });
+    const drifted = { ...live, discoveryDocument: DRIFTED_DISCOVERY };
+    expect(verifyAttestation(signed, drifted, { now: NOW, keyring: { [KEY_ID]: pem } })).toEqual({
+      ok: false,
+      reason: 'discovery_drift',
+      attested: DISCOVERY_SHA256,
+      live: DRIFTED_SHA256,
+    });
   });
 
   it('UNKNOWN SIGNER — an unpinned key id fails closed, and is NOT reported as a bad signature', () => {

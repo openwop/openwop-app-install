@@ -10,6 +10,12 @@
  *  - let `raise()` replace on a severity tie → red ('a tie keeps the policy approvers');
  *  - make `ruleAtLeastAsStrict` return true → red ('dropping an escalation is a loosen');
  *  - drop the client-floor external-class guard → red ('a preview client still generates').
+ * Every refusal is asserted by the exact `details.field` path `fail()` writes
+ * (`validate.ts`), not only a message fragment, so a neighbouring check that
+ * refuses the same fixture cannot stand in for the one named. The two ladder
+ * lists are written out by hand from `presets.ts` (autopilot vs guarded, and an
+ * autopilot base vs review-everything), never computed by the comparison under
+ * test.
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -24,12 +30,15 @@ const custom = (rules: ActionRule[], basePreset?: ResolvedPolicy['basePreset']):
   policyId: 'apol_test', version: 1, name: 'test', rules, ...(basePreset ? { basePreset } : {}), hash: 'h',
 });
 
-function expectInvalid(rules: unknown, fragment: string): void {
+function expectInvalid(rules: unknown, fragment: string, field: string): void {
   try {
     validateRules(rules);
   } catch (err) {
-    expect(err).toBeInstanceOf(OpenwopError);
-    expect((err as OpenwopError).message).toContain(fragment);
+    if (!(err instanceof OpenwopError)) throw err;
+    expect(err.code).toBe('validation_error');
+    expect(err.message.startsWith(`${field}: `), err.message).toBe(true);
+    expect(err.message).toContain(fragment);
+    expect(err.details).toEqual({ field });
     return;
   }
   throw new Error(`expected validateRules to refuse (${fragment})`);
@@ -53,7 +62,7 @@ describe('ADR 0942 D2 — presets', () => {
         expect(r.decision.outcome, `${id} ${c}`).toBe('approve');
       }
     }
-    expectInvalid([{ actionClass: 'email.resume-sending', default: { outcome: 'auto' } }], 'never be looser than approve');
+    expectInvalid([{ actionClass: 'email.resume-sending', default: { outcome: 'auto' } }], 'never be looser than approve', 'rules[0].default.outcome');
   });
 
   it('new clients bind to Guarded; the fallback is Review everything', () => {
@@ -75,7 +84,11 @@ describe('ADR 0942 D2 — presets', () => {
   it('the presets are a monotonic ladder: review-everything ≥ guarded ≥ autopilot, per class and stage', () => {
     expect(loosenedClasses(presetPolicy('guarded@1'), presetPolicy('autopilot@1'))).toEqual([]);
     expect(loosenedClasses(presetPolicy('review-everything@1'), presetPolicy('guarded@1'))).toEqual([]);
-    expect(loosenedClasses(presetPolicy('autopilot@1'), presetPolicy('guarded@1')).length).toBeGreaterThan(0);
+    // Read off presets.ts: guarded approves plan.approve, creative.review (every stage), email.campaign-send,
+    // social.post and experiment.promote where autopilot notifies or autos, and adds the $500 escalation to ads.budget.
+    expect(loosenedClasses(presetPolicy('autopilot@1'), presetPolicy('guarded@1'))).toEqual([
+      'plan.approve', 'creative.review:internal', 'creative.review:compliance', 'ads.budget', 'email.campaign-send', 'social.post', 'experiment.promote',
+    ]);
   });
 
   it('Autopilot never launches or raises spend without approval (owner decision 4)', () => {
@@ -160,34 +173,34 @@ describe('ADR 0942 D3 — the resolver', () => {
 
 describe('ADR 0942 D2/D10.1 — the closed-world validator', () => {
   it('refuses an escalation that loosens', () => {
-    expectInvalid([{ actionClass: 'ads.budget', default: approveAdmins, escalations: [{ when: [{ fact: 'spendMinor', op: '<', value: 100 }], then: { outcome: 'auto' } }] }], 'at least as strict');
+    expectInvalid([{ actionClass: 'ads.budget', default: approveAdmins, escalations: [{ when: [{ fact: 'spendMinor', op: '<', value: 100 }], then: { outcome: 'auto' } }] }], 'at least as strict', 'rules[0].escalations[0].then.outcome');
   });
   it('refuses unknown classes, facts, ops, keys, and ops illegal for a fact type', () => {
-    expectInvalid([{ actionClass: 'ads.nuke', default: { outcome: 'auto' } }], 'actionClass');
-    expectInvalid([{ actionClass: 'ads.budget', default: { outcome: 'auto' }, extra: 1 }], 'unknown field');
-    expectInvalid([{ actionClass: 'ads.budget', default: approveAdmins, escalations: [{ when: [{ fact: 'mood', op: '>', value: 1 }], then: approveAdmins }] }], 'fact');
-    expectInvalid([{ actionClass: 'ads.budget', default: approveAdmins, escalations: [{ when: [{ fact: 'regulatedCategory', op: '>', value: 1 }], then: approveAdmins }] }], 'use ==');
-    expectInvalid([{ actionClass: 'ads.budget', default: approveAdmins, escalations: [{ when: [{ fact: 'spendMinor', op: 'in', value: ['a'] }], then: approveAdmins }] }], 'is a number');
-    expectInvalid([{ actionClass: 'ads.budget', default: approveAdmins, escalations: [{ when: [{ fact: 'spendMinor', op: '>', value: '5' }], then: approveAdmins }] }], 'compares against a number');
+    expectInvalid([{ actionClass: 'ads.nuke', default: { outcome: 'auto' } }], 'must be one of', 'rules[0].actionClass');
+    expectInvalid([{ actionClass: 'ads.budget', default: { outcome: 'auto' }, extra: 1 }], 'unknown field', 'rules[0].extra');
+    expectInvalid([{ actionClass: 'ads.budget', default: approveAdmins, escalations: [{ when: [{ fact: 'mood', op: '>', value: 1 }], then: approveAdmins }] }], 'must be one of', 'rules[0].escalations[0].when[0].fact');
+    expectInvalid([{ actionClass: 'ads.budget', default: approveAdmins, escalations: [{ when: [{ fact: 'regulatedCategory', op: '>', value: 1 }], then: approveAdmins }] }], 'use ==', 'rules[0].escalations[0].when[0].op');
+    expectInvalid([{ actionClass: 'ads.budget', default: approveAdmins, escalations: [{ when: [{ fact: 'spendMinor', op: 'in', value: ['a'] }], then: approveAdmins }] }], 'is a number', 'rules[0].escalations[0].when[0].op');
+    expectInvalid([{ actionClass: 'ads.budget', default: approveAdmins, escalations: [{ when: [{ fact: 'spendMinor', op: '>', value: '5' }], then: approveAdmins }] }], 'compares against a number', 'rules[0].escalations[0].when[0].value');
   });
   it('an approval must name roles or groups; subjects alone are refused', () => {
-    expectInvalid([{ actionClass: 'ads.budget', default: { outcome: 'approve', approver: { subjectRefs: ['u1'], requiredApprovals: 1, delegation: 'allowed' } } }], 'D10.1');
+    expectInvalid([{ actionClass: 'ads.budget', default: { outcome: 'approve', approver: { subjectRefs: ['u1'], requiredApprovals: 1, delegation: 'allowed' } } }], 'D10.1', 'rules[0].default.approver');
   });
   it('client approvers only on change sets, and a mixed spec needs a per-party quorum', () => {
     const client = { clientApprover: true, requiredApprovals: 1, delegation: 'allowed' };
-    expectInvalid([{ actionClass: 'ads.budget', default: { outcome: 'approve', approver: client } }], 'Q4');
+    expectInvalid([{ actionClass: 'ads.budget', default: { outcome: 'approve', approver: client } }], 'Q4', 'rules[0].default.approver.clientApprover');
     expect(() => validateRules([{ actionClass: 'campaign.change-set.apply', default: { outcome: 'approve', approver: client } }])).not.toThrow();
-    expectInvalid([{ actionClass: 'campaign.change-set.apply', default: { outcome: 'approve', approver: { ...client, roleRefs: ['admin'], requiredApprovals: 2 } } }], 'per-party quorum');
+    expectInvalid([{ actionClass: 'campaign.change-set.apply', default: { outcome: 'approve', approver: { ...client, roleRefs: ['admin'], requiredApprovals: 2 } } }], 'per-party quorum', 'rules[0].default.approver.perParty');
     expect(() => validateRules([{ actionClass: 'campaign.change-set.apply', default: { outcome: 'approve', approver: {
       ...client, roleRefs: ['admin'], requiredApprovals: 2,
       perParty: [{ party: 'agency', refs: 'roleRefs', min: 1 }, { party: 'client', refs: 'clientApprover', min: 1 }],
     } } }])).not.toThrow();
   });
   it('a veto window is at least an hour; SLA rungs come in order; one rule per class and stage', () => {
-    expectInvalid([{ actionClass: 'content.publish', default: { outcome: 'notify-after', notify: { roleRefs: ['admin'], channels: ['inbox'], digest: 'immediate', vetoWindowMs: 60_000 } } }], 'vetoWindowMs');
-    expectInvalid([{ actionClass: 'ads.budget', default: { outcome: 'approve', approver: { roleRefs: ['admin'], requiredApprovals: 1, delegation: 'allowed', sla: { remindAfterMs: 7_200_000, escalateAfterMs: 3_600_000 } } } }], 'in that order');
-    expectInvalid([{ actionClass: 'ads.budget', default: { outcome: 'auto' } }, { actionClass: 'ads.budget', default: approveAdmins }], 'a second rule');
-    expectInvalid([{ actionClass: 'ads.budget', stage: 'client', default: { outcome: 'auto' } }], 'only creative.review');
+    expectInvalid([{ actionClass: 'content.publish', default: { outcome: 'notify-after', notify: { roleRefs: ['admin'], channels: ['inbox'], digest: 'immediate', vetoWindowMs: 60_000 } } }], 'between 3600000', 'rules[0].default.notify.vetoWindowMs');
+    expectInvalid([{ actionClass: 'ads.budget', default: { outcome: 'approve', approver: { roleRefs: ['admin'], requiredApprovals: 1, delegation: 'allowed', sla: { remindAfterMs: 7_200_000, escalateAfterMs: 3_600_000 } } } }], 'in that order', 'rules[0].default.approver.sla');
+    expectInvalid([{ actionClass: 'ads.budget', default: { outcome: 'auto' } }, { actionClass: 'ads.budget', default: approveAdmins }], 'a second rule', 'rules[1]');
+    expectInvalid([{ actionClass: 'ads.budget', stage: 'client', default: { outcome: 'auto' } }], 'only creative.review', 'rules[0].stage');
   });
 });
 
@@ -218,6 +231,11 @@ describe('ADR 0942 D9 — strictness comparison', () => {
     const p = custom([{ actionClass: 'creative.generate', default: { outcome: 'auto' } }]);
     expect(loosenedClasses(p, rev)).toEqual([]);
     const withAutopilotBase = custom([{ actionClass: 'creative.generate', default: { outcome: 'auto' } }], 'autopilot@1');
-    expect(loosenedClasses(withAutopilotBase, rev).length).toBeGreaterThan(5);
+    // Read off presets.ts: every class autopilot does not approve, i.e. all but creative.generate (auto in both),
+    // ads.launch, creative.review's stage-less and client asks, and the seven always-approve classes.
+    expect(loosenedClasses(withAutopilotBase, rev)).toEqual([
+      'plan.approve', 'creative.review:internal', 'creative.review:compliance', 'content.publish', 'ads.publish', 'ads.budget',
+      'email.campaign-send', 'sms.send', 'social.post', 'experiment.promote', 'lead.contact', 'campaign.change-set.apply',
+    ]);
   });
 });

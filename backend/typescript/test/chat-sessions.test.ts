@@ -1,13 +1,26 @@
 /**
- * Sample-extension chat-session history routes (Phase 2C.1).
+ * Sample-extension chat-session history routes (Phase 2C.1; pagination ADR 0043
+ * Phase 3b).
  *
  * Covers the 7 endpoint shapes (list / create / get / patch / delete /
- * list-messages / append-message), tenant isolation across sessions,
- * cascade-delete from sessions to messages, idempotent unique-violation
- * handling, and `updated_at` bump + `message_count` increment on append.
+ * list-messages / append-message), cascade-delete from sessions to messages,
+ * idempotent unique-violation handling, and `updated_at` bump +
+ * `message_count` increment on append.
+ *
+ * > CORRECTED 2026-10-29 (/grade-tests w67, TST-CEC-11): this header also
+ * > claimed "tenant isolation across sessions". No case here tests it — every
+ * > request uses the dev-token wildcard — so the claim is removed rather than
+ * > left standing on nothing. The list-order case used to read sessions OTHER
+ * > cases had created (order-dependent, and trivially true on tied stamps); it
+ * > now seeds its own three with distinct activity times. The cascade case used
+ * > to prove only that the parent was gone; it now re-creates the same id and
+ * > reads the message list back empty.
+ * Red when (w67g3, witnessed): the session list sorts ascending; the append's
+ * count bump stops incrementing; the page-size cap or the cursor validation is
+ * dropped; `hasMore` is never set (no cursor).
  */
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
@@ -47,10 +60,9 @@ async function jsonFetch<T = unknown>(
       ...(init.headers ?? {}),
     },
   });
-  if (res.status === 204) {
-    return { status: 204, body: undefined as unknown as T };
-  }
-  return { status: res.status, body: (await res.json()) as T };
+  // A 204 carries no body; callers of DELETE read only the status.
+  const text = await res.text();
+  return { status: res.status, body: (text ? JSON.parse(text) : {}) as T };
 }
 
 interface SessionRecord {
@@ -126,16 +138,28 @@ describe('sample chat sessions — CRUD + tenant isolation', () => {
   });
 
   it('lists sessions for the calling tenant in latest-activity order', async () => {
-    // The smoke tests have already created sessions under `_anon`.
-    // Verify the list endpoint at least returns a non-empty array and
-    // sorts by updatedAt DESC.
-    const list = await jsonFetch<{ sessions: SessionRecord[] }>('/host/openwop-app/chat/sessions');
-    expect(list.status).toBe(200);
-    expect(list.body.sessions.length).toBeGreaterThan(0);
-    for (let i = 1; i < list.body.sessions.length; i++) {
-      const prev = list.body.sessions[i - 1]!.updatedAt;
-      const curr = list.body.sessions[i]!.updatedAt;
-      expect(prev >= curr, 'sessions MUST be sorted by updatedAt DESC').toBe(true);
+    // Seed three sessions whose LAST ACTIVITY order differs from their creation
+    // order, at fake instants later than any other case's rows (only `Date` is
+    // faked, and only inside this case).
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2031-01-01T00:00:00.000Z'));
+      const ids: string[] = [];
+      for (const title of ['order-a', 'order-b', 'order-c']) {
+        ids.push((await jsonFetch<SessionRecord>('/host/openwop-app/chat/sessions', { method: 'POST', body: JSON.stringify({ title }) })).body.sessionId);
+      }
+      const [a, b, c] = ids as [string, string, string];
+      // Activity: c, then a, then b — so the newest-first order is b, a, c.
+      for (const [n, id] of [c, a, b].entries()) {
+        vi.setSystemTime(new Date(Date.UTC(2031, 0, 1, 0, 0, n + 1)));
+        const r = await jsonFetch(`/host/openwop-app/chat/sessions/${id}/messages`, { method: 'POST', body: JSON.stringify({ messageId: `order-${n}`, role: 'user', content: 'x' }) });
+        expect(r.status).toBe(201);
+      }
+      const list = await jsonFetch<{ sessions: SessionRecord[] }>('/host/openwop-app/chat/sessions');
+      expect(list.status).toBe(200);
+      expect(list.body.sessions.slice(0, 3).map((s) => s.sessionId)).toEqual([b, a, c]);
+    } finally {
+      vi.useRealTimers();
     }
   });
 });
@@ -224,11 +248,12 @@ describe('sample chat sessions — messages sub-collection + cascade', () => {
   });
 
   it('cascade-deletes messages when the session is removed', async () => {
+    const id = 'cascade-pinned';
     const fresh = await jsonFetch<SessionRecord>('/host/openwop-app/chat/sessions', {
       method: 'POST',
-      body: JSON.stringify({ title: 'will-be-deleted' }),
+      body: JSON.stringify({ sessionId: id, title: 'will-be-deleted' }),
     });
-    const id = fresh.body.sessionId;
+    expect(fresh.status).toBe(201);
 
     await jsonFetch(`/host/openwop-app/chat/sessions/${id}/messages`, {
       method: 'POST',
@@ -243,6 +268,13 @@ describe('sample chat sessions — messages sub-collection + cascade', () => {
     // along with it.
     const gone = await jsonFetch<{ error: string }>(`/host/openwop-app/chat/sessions/${id}/messages`);
     expect(gone.status).toBe(404);
+
+    // The parent's 404 alone cannot show the ROWS went: re-create the same id and
+    // read its messages — an orphaned row would surface under the new parent.
+    expect((await jsonFetch('/host/openwop-app/chat/sessions', { method: 'POST', body: JSON.stringify({ sessionId: id }) })).status).toBe(201);
+    const reborn = await jsonFetch<{ messages: unknown[] }>(`/host/openwop-app/chat/sessions/${id}/messages`);
+    expect(reborn.status).toBe(200);
+    expect(reborn.body.messages).toEqual([]);
   });
 });
 

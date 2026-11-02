@@ -2,6 +2,12 @@
  * ENG-2 / ENG-1 (docs/steward/CODEBASE-ASSESSMENT.md): the conformance-only node typeIds
  * must be OFF by default in production, and the sub-run dispatcher must NOT
  * fall back to a guessable literal credential under enforced auth.
+ *
+ * Tracker TST-CJA-6 (grade-tests w68). Red when: the NODE_ENV=production default
+ * flips on; the explicit 'true'/'false' flag stops winning; the LEAK-8 auth-posture
+ * fail-closed is removed; the bearer-enforced fallback stops throwing; or the
+ * internal token stops preferring OPENWOP_INTERNAL_TOKEN / trimming / splitting a
+ * `<key>:<tenant>` entry.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { conformanceNodesEnabled } from '../src/bootstrap/conformanceMockAgent.js';
@@ -17,6 +23,7 @@ afterEach(() => {
     'OPENWOP_INTERNAL_TOKEN',
     'OPENWOP_API_KEYS',
     'OPENWOP_API_KEY',
+    'OPENWOP_DEPLOY_POSTURE',
   ]) {
     if (SAVED[k] === undefined) delete process.env[k];
     else process.env[k] = SAVED[k];
@@ -27,13 +34,30 @@ describe('conformanceNodesEnabled', () => {
   it('is ON by default outside production (dev/test/conformance)', () => {
     delete process.env.NODE_ENV;
     delete process.env.OPENWOP_ENABLE_CONFORMANCE_NODES;
+    delete process.env.OPENWOP_DEPLOY_POSTURE;
+    delete process.env.OPENWOP_AUTH_ENFORCE_BEARER;
     expect(conformanceNodesEnabled()).toBe(true);
   });
 
   it('is OFF by default under NODE_ENV=production', () => {
     process.env.NODE_ENV = 'production';
     delete process.env.OPENWOP_ENABLE_CONFORMANCE_NODES;
+    delete process.env.OPENWOP_DEPLOY_POSTURE;
+    delete process.env.OPENWOP_AUTH_ENFORCE_BEARER;
     expect(conformanceNodesEnabled()).toBe(false);
+  });
+
+  it('LEAK-8: is OFF in the enterprise auth posture even when NODE_ENV is not production', () => {
+    // A prod fork that forgot NODE_ENV=production must still not expose the
+    // conformance nodes: the auth posture alone fails closed.
+    delete process.env.NODE_ENV;
+    delete process.env.OPENWOP_ENABLE_CONFORMANCE_NODES;
+    delete process.env.OPENWOP_AUTH_ENFORCE_BEARER;
+    process.env.OPENWOP_DEPLOY_POSTURE = 'auth';
+    expect(conformanceNodesEnabled()).toBe(false);
+    // Positive control: the same env in the cookie posture is ON.
+    process.env.OPENWOP_DEPLOY_POSTURE = 'cookie-per-visitor';
+    expect(conformanceNodesEnabled()).toBe(true);
   });
 
   it('can be force-enabled in production (reference conformance host)', () => {
@@ -44,6 +68,7 @@ describe('conformanceNodesEnabled', () => {
 
   it('can be force-disabled outside production', () => {
     delete process.env.NODE_ENV;
+    delete process.env.OPENWOP_DEPLOY_POSTURE;
     process.env.OPENWOP_ENABLE_CONFORMANCE_NODES = 'false';
     expect(conformanceNodesEnabled()).toBe(false);
   });

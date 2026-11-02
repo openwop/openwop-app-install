@@ -178,7 +178,7 @@ function pathsFor(events: readonly AnalyticsEvent[], linked: ReadonlyMap<string,
 }
 
 export async function buildAttribution(tenantId: string, orgId: string): Promise<AttributionReport> {
-  const [campaigns, records, attributionEvents, engagement, emailCampaigns, settingsRow, aliases] = await Promise.all([
+  const [campaigns, records, attributionEvents, tenantEngagement, emailCampaigns, settingsRow, aliases] = await Promise.all([
     listCampaigns(tenantId, orgId),
     listRecords(tenantId, orgId),
     // UNCAPPED read (grade-code AUDIT-1): a recency-capped `listEvents` window
@@ -191,6 +191,11 @@ export async function buildAttribution(tenantId: string, orgId: string): Promise
     getAttributionSettings(tenantId, orgId),
     listAliases(tenantId, orgId),
   ]);
+  // ADR 1022 D2 — engagement is read tenant-wide (the email store has no org
+  // index); keep only THIS org's email campaigns before either rollup, or the
+  // report's `email` block lists every org's campaigns and their opens.
+  const orgEmailIds = new Set(emailCampaigns.map((c) => c.campaignId));
+  const engagement = tenantEngagement.filter((e) => orgEmailIds.has(e.campaignId));
   const conversions = attributionEvents.filter((e) => e.type === 'conversion');
   const aliasTo = new Map(aliases.map((a) => [a.utmCampaign, a.campaignId] as const));
   const { byKey, resolve } = campaignResolver(campaigns, aliasTo);

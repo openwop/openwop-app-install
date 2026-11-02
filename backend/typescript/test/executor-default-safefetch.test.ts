@@ -9,6 +9,15 @@
  * declares no connections — threw `host_capability_missing` in production while
  * passing every mock-`ctx` unit test. This drives a real `executeRun()` (no mock
  * ctx) and asserts a no-connections run still sees a callable `ctx.http.safeFetch`.
+ *
+ * Tracker: TST-DBC-2. Red when: the executor provides `ctx.http` only for runs
+ * whose `connections` is non-empty (probe w70g2-sf-always → case 1), or only for
+ * runs with none (w70g2-sf-optin → case 2).
+ *
+ * Case 2 is NOT covered by `connection-injection.test.ts`: that file builds the
+ * safeFetch with `makeConnectionSafeFetch` directly and never goes through the
+ * executor's `ctx`, so an executor that dropped `ctx.http` for opted-in runs
+ * leaves it green (cross-file probe w70g2-sf-optin-ci-r2).
  */
 import { describe, expect, it, beforeAll } from 'vitest';
 import { executeRun } from '../src/executor/executor.js';
@@ -37,17 +46,18 @@ beforeAll(() => {
     typeId: 'test.observe-safefetch',
     version: '1.0.0',
     async execute(ctx) {
-      const http = (ctx as { http?: { safeFetch?: unknown } }).http;
-      observations.push({ hasHttp: !!http, safeFetchType: typeof http?.safeFetch });
+      observations.push({ hasHttp: !!ctx.http, safeFetchType: typeof ctx.http?.safeFetch });
       return { status: 'success', outputs: { output: null } };
     },
   });
 });
 
+let runSeq = 0;
 async function newRun(configurable: Record<string, unknown>): Promise<RunRecord> {
   const now = new Date().toISOString();
+  runSeq += 1;
   const run: RunRecord = {
-    runId: `run-${Math.random().toString(36).slice(2)}`,
+    runId: `run-safefetch-${runSeq}`,
     workflowId: 'wf.safefetch',
     tenantId: 'demo',
     status: 'pending',
@@ -74,8 +84,8 @@ describe('executor — ctx.http.safeFetch is always provided (MEDIA-1)', () => {
     const result = await executeRun(storage, run, def);
     expect(result.status).toBe('completed');
     expect(observations).toHaveLength(1);
-    expect(observations[0].hasHttp).toBe(true);
-    expect(observations[0].safeFetchType).toBe('function');
+    expect(observations[0]?.hasHttp).toBe(true);
+    expect(observations[0]?.safeFetchType).toBe('function');
   });
 
   it('still exposes safeFetch when Connections ARE opted in', async () => {
@@ -83,6 +93,8 @@ describe('executor — ctx.http.safeFetch is always provided (MEDIA-1)', () => {
     const run = await newRun({ connections: ['github'] });
     const result = await executeRun(storage, run, def);
     expect(result.status).toBe('completed');
+    expect(observations).toHaveLength(1);
+    expect(observations[0]?.hasHttp).toBe(true);
     expect(observations[0]?.safeFetchType).toBe('function');
   });
 });

@@ -1,5 +1,27 @@
 /** ADR 0954 P0 recovery — physical CAS barriers and reopened SQLite storage,
- * rather than index-shape assertions, witness admission/deletion ownership. */
+ * rather than index-shape assertions, witness admission/deletion ownership
+ * (`features/cdp/visitorEventIndex.ts` is the one owner of admission, the
+ * per-visitor index and deletion; erasure is PII, so this file is protected).
+ *
+ * Sabotage-witnessed (grade-tests w73, TST-DRA): dropping the post-index primary
+ * liveness check reds "erasure wins … primary"; dropping the receipt `live` CAS
+ * refusal reds "… receipt"; dropping the pending-receipt digest check in
+ * `persistCollectedEvent` reds "a conflicting pending dedupe candidate"; moving
+ * revalidation ahead of replay reds the replay case; skipping the reconcile of a
+ * `pending` / `deleting` / projection-only receipt reds the matching restart case;
+ * dropping the E164 identity forms reds the phone case; dropping the eraser
+ * registration reds the fan-out case.
+ *
+ * DOUBLE GUARDS (recorded, each probed with one edit that breaks both):
+ *  - Dedupe through `collectEvent`: `replayCollectedEvent` refuses a different
+ *    digest before `persistCollectedEvent` refuses it again. The dedupe case
+ *    therefore also calls `persistCollectedEvent` directly, so the persist guard
+ *    is witnessed alone.
+ *  - Tombstone cap: product forward tombstones carry no `visitorHash`, so the
+ *    hash filter excludes them as well as `!r.deleted` (dropping either alone is
+ *    an equivalent mutant); dropping both makes the read say `truncated`.
+ *  - The `forward` lane of "erasure wins" is held three times (`old?.deleted`,
+ *    the canonical-diff refusal, the post-index primary check): no single edit. */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -74,6 +96,13 @@ describe('CDP canonical event ownership', () => {
     try {
       await entered;
       await expect(collectEvent(tenantId, 'funnel.step_viewed', { visitor: 'visitor-b' }, 'same-key')).rejects.toMatchObject({ httpStatus: 409 });
+      // The same conflict straight at the owner, past the replay guard: the
+      // persist guard alone must refuse it and write no primary.
+      const [pending] = await receipts.listByPrefix(`${tenantId}::`);
+      expect(pending).toMatchObject({ state: 'pending' });
+      await expect(persistCollectedEvent({ ...row(pending!.eventId, 'visitor-b'), at: pending!.at! }))
+        .rejects.toMatchObject({ httpStatus: 409, details: { reason: 'collected_event_closed' } });
+      expect(await collectedEvents.get(pending!.eventId)).toBeNull();
     } finally { release(); }
     const accepted = await first;
     expect(await collectEvent(tenantId, 'funnel.step_viewed', { visitor: 'visitor-b' }, 'same-key')).toEqual(accepted);
@@ -155,6 +184,12 @@ describe('CDP canonical event ownership', () => {
     await expect(eraseCdpCollectedEvents(tenantId, 'legacy-private-visitor')).rejects.toThrow('cleanup unavailable');
     expect(failed).toBe(true);
     await reopen(); await reconcileCollectedEventReceipts();
+    // The restart reconcile alone finishes the delete (before any retry).
+    expect(await collectedEvents.get(event.eventId)).toEqual({ tenantId, eventId: event.eventId, deleted: true });
+    expect(await forwards.get(legacyKey)).toBeNull();
+    expect(await receipts.get(`${tenantId}::${event.eventId}`)).toEqual({ reservationId: `${tenantId}::${event.eventId}`, tenantId, eventId: event.eventId, state: 'deleted' });
+    expect(JSON.stringify(await receipts.list())).not.toContain('legacy-private-visitor');
+    // An idempotent retry of the erase changes nothing.
     await eraseCdpCollectedEvents(tenantId, 'legacy-private-visitor');
     expect(await collectedEvents.get(event.eventId)).toEqual({ tenantId, eventId: event.eventId, deleted: true });
     expect(await forwards.get(legacyKey)).toBeNull();
@@ -248,7 +283,7 @@ describe('CDP canonical event ownership', () => {
     expect((await eventsForVisitors(tenantId, ['visitor-a']))).toMatchObject({ events: [expect.objectContaining({ eventId: event.eventId })], truncated: false });
   }, 120_000);
 
-  it('a stale backfill snapshot cannot recreate an erased primary', async () => {
+  it('a stale backfill snapshot cannot re-index an erased event', async () => {
     const event = row('stale-backfill', 'visitor-a');
     await persistCollectedEvent(event); await deleteCollectedEvent(tenantId, event.eventId);
     await indexCollectedEvent(event);

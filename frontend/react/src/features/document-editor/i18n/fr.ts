@@ -89,7 +89,7 @@ export const messages = {
   embedHint: 'Insérer ou modifier un HTML isolé (bac à sable)',
   embedTitle: 'Contenu intégré',
   embedHtml: 'HTML',
-  embedNote: 'Ce HTML s’exécute de façon isolée : aucun accès réseau ni cookies.',
+  embedNote: 'Les lecteurs voient un aperçu statique. Les scripts de ce HTML ne s’exécutent que pour le lecteur qui choisit Lancer les scripts, et ils peuvent alors accéder au réseau.',
   embedInserted: 'Contenu intégré',
   focusMode: 'Mode focus',
   focusModeHint: 'Mode focus — atténue tout sauf le bloc actuel',
@@ -123,5 +123,5 @@ export const messages = {
   importWarningsTitle: "{{count}} partie(s) du .docx n’ont pas pu être converties et manquent :",
   importWarningsMore: "…et {{count}} de plus.",
   importWarningsDismiss: "Ignorer",
-  embedDefaultHtml: "<h2>Bonjour depuis un embed</h2>\n<p>Modifiez ce HTML \u2014 il s\u2019ex\u00e9cute isol\u00e9 (ni r\u00e9seau, ni cookies).</p>",
+  embedDefaultHtml: "<h2>Bonjour depuis un embed</h2>\n<p>Modifiez ce HTML. Il s’affiche en aperçu statique jusqu’à ce qu’un lecteur lance ses scripts.</p>",
 };

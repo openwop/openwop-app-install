@@ -35,6 +35,7 @@ type Client = typeof import('../../../client/operationsClient.js');
 const api = vi.hoisted(() => ({
   getHealthSummary: vi.fn<Client['getHealthSummary']>(), getDlqSummary: vi.fn<Client['getDlqSummary']>(),
   getOutboxSummary: vi.fn<Client['getOutboxSummary']>(), getSloSummary: vi.fn<Client['getSloSummary']>(),
+  getAdmissionSummary: vi.fn<Client['getAdmissionSummary']>(),
   replayDlqMessage: vi.fn<Client['replayDlqMessage']>(),
 }));
 vi.mock('../../../client/operationsClient.js', async (importOriginal) => {
@@ -43,7 +44,7 @@ vi.mock('../../../client/operationsClient.js', async (importOriginal) => {
 });
 
 import { OperationsHubPage } from '../OperationsHubPage.js';
-import { OperationsRequestError, type DlqSummary, type HealthSummary, type OutboxSummary, type SloSummary } from '../../../client/operationsClient.js';
+import { OperationsRequestError, type AdmissionSummary, type DlqSummary, type HealthSummary, type OutboxSummary, type SloSummary } from '../../../client/operationsClient.js';
 import { messages as en } from '../i18n/en.js';
 
 const HEALTH: HealthSummary = {
@@ -93,12 +94,20 @@ function spoken(): string {
   return document.querySelector('[aria-live="polite"]')?.textContent ?? '';
 }
 
+// ADR 0987 D6 — the hub's fifth read. Answered here so this file's panels stay the
+// ones under test, and no live fetch leaves the test (ADR 0661).
+const ADMISSION: AdmissionSummary = {
+  profile: 'evaluation', families: [], holding: { count: 0, atLeast: false, limit: 1000 },
+  concurrencyRefusals: {}, windowUnavailable: 0, perInstance: true, fetchedAt: '2026-10-31T00:00:00Z',
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
   api.getHealthSummary.mockResolvedValue(HEALTH);
   api.getDlqSummary.mockResolvedValue(DLQ);
   api.getOutboxSummary.mockResolvedValue(OUTBOX);
   api.getSloSummary.mockResolvedValue(SLO);
+  api.getAdmissionSummary.mockResolvedValue(ADMISSION);
 });
 afterEach(cleanup);
 

@@ -209,7 +209,7 @@ describe('insertRunWithStartContext (the single run-insert owner)', () => {
       createdAt: '2026-06-20T00:00:00Z',
       updatedAt: '2026-06-20T00:00:00Z',
     };
-    await insertRunWithStartContext(storage, run);
+    await insertRunWithStartContext(storage, run, { admission: { plan: 'exempt:test-fixture' } });
     const stored = await storage.getRun('run-1');
     expect(readCompactionDecision(stored?.metadata)).toEqual({ mode: 'lossless' });
     expect(stored?.metadata).toMatchObject({ source: 'test' });
@@ -229,7 +229,7 @@ describe('insertRunWithStartContext (the single run-insert owner)', () => {
       createdAt: '2026-06-20T00:00:00Z',
       updatedAt: '2026-06-20T00:00:00Z',
     };
-    await insertRunWithStartContext(storage, run);
+    await insertRunWithStartContext(storage, run, { admission: { plan: 'exempt:test-fixture' } });
     const stored = await storage.getRun('run-2');
     expect(readCompactionDecision(stored?.metadata)).toBeUndefined();
   });

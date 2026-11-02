@@ -5,11 +5,15 @@
  * publicRead types, LIVE rows only — so a draft or non-public entity can NEVER
  * appear in prerendered HTML. Plus: sectionHtml renders resolved items, chrome
  * fallback when unresolved, and the core registry is feature-pure.
+ *
+ * TST-DAA-4. Red when (sabotage-witnessed, wave 70): `readPublicEntities` stops
+ * excluding drafts (`excludeDrafts`); the public gate stops requiring
+ * `publicRead`; a publishing module imports `../entities/` directly.
  */
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
@@ -50,8 +54,6 @@ beforeAll(async () => {
   registerEntityContentResolvers();
 });
 
-afterEach(() => { /* registry persists across tests in this file (feature-init parity) */ });
-
 const listSection = (): Section => ({
   sectionId: 'sec-el', type: 'entityList',
   data: { heading: 'Upcoming events', tenantId: T, typeName: 'event', titleField: 'name', bodyField: 'venue', limit: 10 },
@@ -74,13 +76,14 @@ describe('ADR 0407 D3 — server-side entity resolution (no cloaking)', () => {
     await updateEntityType({ tenantId: T, name: 'secret', patch: { status: 'published' }, actor: 'u1' }); // published but NOT publicRead
     await createEntity({ tenantId: T, typeName: 'secret', entityId: 's1', values: { name: 'Top Secret' }, createdBy: 'u1' });
     const resolved = await resolveContentSection('entityList', { tenantId: T, typeName: 'secret', titleField: 'name', limit: 10 }, { pageTenantId: T });
-    // Resolver caught the 404 and returned null (degrade to chrome) — or an empty list; never the row.
-    expect(resolved === null || resolved.items.length === 0).toBe(true);
+    // The gate 404s, the (non-essential) resolver catch degrades to chrome: null, never the row.
+    expect(resolved).toBeNull();
   });
 
   it('sectionHtml renders resolved items into semantic HTML, escaping content', async () => {
     const resolved = await resolveContentSection('entityList', listSection().data as Record<string, unknown>, { pageTenantId: T });
-    const html = sectionHtml(listSection(), { assetBase: 'https://app.test', resolvedSections: { 'sec-el': resolved! } });
+    expect(resolved).not.toBeNull();
+    const html = sectionHtml(listSection(), { assetBase: 'https://app.test', resolvedSections: { 'sec-el': resolved ?? { items: [] } } });
     expect(html).toContain('<ul>');
     expect(html).toContain('<h3>Live Roast Fest</h3>');
     expect(html).toContain('<p>The Roastery</p>');
@@ -107,7 +110,7 @@ describe('ADR 0407 D3 — end-to-end prerender (real crawler HTML)', () => {
 
     const result = await prerenderPage(org.orgId, 'events', 'https://app.test', null);
     expect(result).not.toBeNull();
-    const html = result!.html;
+    const html = result?.html ?? '';
     // Server-rendered entity content (the SEO payoff) — live only.
     expect(html).toContain('<h3>Live Roast Fest</h3>');
     expect(html).toContain('The Roastery');

@@ -1,15 +1,45 @@
 /**
- * Demo messaging relay-gateway (host-extension, non-normative).
+ * Demo messaging relay-gateway (host-extension, non-normative; no originating
+ * ADR — the v2 envelope fields are ADR 0769).
  * Boots the real app and exercises the device lifecycle + outbound queue +
  * connector CRUD over HTTP, plus device-token auth and tenant scoping.
+ *
+ * (w72) Tenant scoping is asserted with two COOKIE-session owners in two
+ * tenants: every tenant check in `routes/messaging.ts` is
+ * `tenantId !== X && !isWildcard(req)`, and the dev-token is the wildcard, so a
+ * dev-token-only suite never exercised one of them. The pure / bridge-unit cases
+ * live OUTSIDE the HTTP describe, so they no longer pay a full app boot each.
+ * Revoke is a DOUBLE GUARD: it drops `deviceTokenHash` AND sets
+ * `status:'revoked'`, and `requireDevice` refuses on either; only a probe that
+ * breaks both can red the lifecycle case.
  */
 
-import { describe, expect, it, beforeEach, afterEach } from 'vitest';
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
+import { getSetCookies } from './headerCookies.js';
+import type { ChatIngressEnvelope, MessagingRoutingRuleRecord } from '../src/messaging/types.js';
+import type { Storage } from '../src/storage/storage.js';
 
 const OP = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
+
+/** The response fields these cases read — typed at the boundary, not `any`. */
+interface OutMsg { conversationId: string; text: string; replyToMessageId?: string; media?: Array<{ url: string; filename?: string }>; components?: Array<{ id: string }>; reactions?: string[] }
+interface Body {
+  relayId?: string; activationCode?: string; deviceToken?: string; heartbeatIntervalSeconds?: number;
+  ok?: boolean; accepted?: boolean; sessionKey?: string; runId?: string; egressId?: string;
+  messages?: OutMsg[]; acked?: number; revoked?: boolean;
+  sessions?: Array<{ sessionKey: string; messageCount: number }>; peerId?: string;
+  connectorId?: string; enabled?: boolean; liveRelayDevices?: number; detail?: string; connectors?: unknown[];
+  dmPolicy?: string; groupPolicy?: string; requireMention?: boolean; warning?: string;
+  ruleId?: string; rules?: Array<{ workflowId?: string }>; deleted?: boolean;
+  identityId?: string; peers?: unknown[]; identities?: unknown[];
+  entries?: Array<{ direction?: string; status?: string; peerId?: string; conversationId?: string }>;
+  notifyId?: string; status?: string; components?: unknown[];
+  pairing?: { code: string }; approved?: boolean; dropped?: string;
+  error?: string; user?: { userId: string };
+}
 
 let server: http.Server;
 let BASE = '';
@@ -19,11 +49,16 @@ let BASE = '';
 // does not reserve a port: a parallel listener can take it during createApp,
 // which caused EADDRINUSE and a hook timeout in the combined D6 gate.
 
+describe('messaging relay-gateway — over HTTP (one app boot per case)', () => {
 // Fresh in-memory SQLite per test → durable-but-isolated relay state (replaces
 // the old module-Map reset; the gateway is now Storage-backed).
 beforeEach(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
-  process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
+  // Cookie sessions ON (the tenant-scoping cases sign in two real owners); the
+  // dev-token bearer every other case uses is unaffected.
+  delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
+  process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
+  process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
   // The bridge self-polls /v1/runs and the test polls /device/outbound; both
   // share the per-IP (127.0.0.1) sliding window. Disable for the suite.
   process.env.OPENWOP_RATELIMIT_DISABLED = 'true';
@@ -55,11 +90,11 @@ async function post(path: string, headers: Record<string, string>, body?: unknow
     headers,
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
-  return { status: res.status, body: (await res.json().catch(() => ({}))) as Record<string, any> };
+  return { status: res.status, body: (await res.json().catch(() => ({}))) as Body };
 }
 async function get(path: string, headers: Record<string, string>) {
   const res = await fetch(`${BASE}${path}`, { headers });
-  return { status: res.status, body: (await res.json().catch(() => ({}))) as Record<string, any> };
+  return { status: res.status, body: (await res.json().catch(() => ({}))) as Body };
 }
 async function put(path: string, headers: Record<string, string>, body?: unknown) {
   const res = await fetch(`${BASE}${path}`, {
@@ -67,11 +102,11 @@ async function put(path: string, headers: Record<string, string>, body?: unknown
     headers,
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
-  return { status: res.status, body: (await res.json().catch(() => ({}))) as Record<string, any> };
+  return { status: res.status, body: (await res.json().catch(() => ({}))) as Body };
 }
 async function del(path: string, headers: Record<string, string>) {
   const res = await fetch(`${BASE}${path}`, { method: 'DELETE', headers });
-  return { status: res.status, body: (await res.json().catch(() => ({}))) as Record<string, any> };
+  return { status: res.status, body: (await res.json().catch(() => ({}))) as Body };
 }
 
 async function activeRelay(channel = 'signal') {
@@ -98,7 +133,7 @@ describe('messaging relay-gateway — device lifecycle', () => {
     expect(act.body.deviceToken).toMatch(/^dtok_/);
     expect(act.body.heartbeatIntervalSeconds).toBeGreaterThan(0);
 
-    const dev = { 'x-openwop-device-token': act.body.deviceToken, 'content-type': 'application/json' };
+    const dev = { 'x-openwop-device-token': act.body.deviceToken!, 'content-type': 'application/json' };
 
     const hb = await post('/device/heartbeat', dev, { status: 'connected' });
     expect(hb.status).toBe(200);
@@ -129,7 +164,7 @@ describe('messaging relay-gateway — device lifecycle', () => {
     const out = await get('/device/outbound', dev);
     expect(out.status).toBe(200);
     expect(out.body.messages).toHaveLength(1);
-    expect(out.body.messages[0].text).toBe('hi back');
+    expect(out.body.messages?.[0]?.text).toBe('hi back');
 
     // device acks → queue drains
     const ack = await post('/device/ack', dev, { egressIds: [enq.body.egressId] });
@@ -147,16 +182,20 @@ describe('messaging relay-gateway — device lifecycle', () => {
   it('rejects device-loop endpoints without a valid device token', async () => {
     const noTok = await post('/device/heartbeat', OP, {});
     expect(noTok.status).toBe(401);
+    expect(noTok.body.error).toBe('unauthenticated');
     const badTok = await post('/device/inbound', { 'x-openwop-device-token': 'dtok_bogus', 'content-type': 'application/json' }, {});
     expect(badTok.status).toBe(401);
+    expect(badTok.body.error).toBe('unauthenticated');
   });
 
   it('rejects an unknown channel and invalid activation code', async () => {
     const bad = await post('/relay/register', OP, { channel: 'telegram' });
     expect(bad.status).toBe(400);
     const reg = await post('/relay/register', OP, { channel: 'whatsapp' });
+    expect(reg.status).toBe(201);
     const act = await post('/relay/activate', OP, { relayId: reg.body.relayId, activationCode: 'wrong' });
     expect(act.status).toBe(400);
+    expect(act.body.error).toBe('invalid_request');
   });
 
   it('records a session and bumps messageCount across inbound messages', async () => {
@@ -166,8 +205,8 @@ describe('messaging relay-gateway — device lifecycle', () => {
       await post('/device/inbound', dev, { platformMessageId: `m${i}`, conversationId: 'conv', peerId: 'p', text: `t${i}` });
     }
     const sessions = await get('/sessions', OP);
-    const s = sessions.body.sessions.find((x: any) => x.sessionKey === 'imessage:conv');
-    expect(s.messageCount).toBe(3);
+    const s = sessions.body.sessions?.find((x) => x.sessionKey === 'imessage:conv');
+    expect(s?.messageCount).toBe(3);
 
     const detail = await get('/sessions/imessage:conv', OP);
     expect(detail.body.peerId).toBe('p');
@@ -192,14 +231,14 @@ describe('messaging relay-gateway — inbound→run bridge', () => {
     expect(inbound.status).toBe(202);
     expect(inbound.body.runId).toBeTruthy(); // bridge created a run
 
-    // Poll the device outbound queue until the bridge enqueues the reply.
-    let reply: any;
-    for (let i = 0; i < 60; i++) {
-      await new Promise((r) => setTimeout(r, 50));
+    // Wait for the bridge to enqueue the reply (a condition, not a sleep).
+    let reply: OutMsg | undefined;
+    await vi.waitFor(async () => {
       const out = await get('/device/outbound', dev);
-      if (out.body.messages.length > 0) { reply = out.body.messages[0]; break; }
-    }
-    expect(reply, 'bridge should enqueue an outbound reply').toBeTruthy();
+      reply = out.body.messages?.[0];
+      expect(reply, 'bridge should enqueue an outbound reply').toBeTruthy();
+    }, { timeout: 10_000, interval: 25 });
+    if (!reply) throw new Error('unreachable: waitFor asserted a reply');
     expect(reply.conversationId).toBe('conv-bridge');
     // openwop-app.uppercase uppercases the inbound text
     expect(reply.text).toBe('HELLO BRIDGE');
@@ -226,11 +265,13 @@ describe('messaging relay-gateway — connectors', () => {
     expect(dis.body.enabled).toBe(false);
 
     const list = await get('/connectors', OP);
-    expect(list.body.connectors.length).toBe(1);
+    expect(list.body.connectors).toHaveLength(1);
 
-    // wildcard operator scoping by ?tenantId — connector lives under 'default'
+    // wildcard operator scoping by ?tenantId — connector lives under 'default'.
+    // (The non-wildcard tenant fence is asserted with real sessions in
+    // "tenant scoping (cookie sessions)" below.)
     const other = await get('/connectors?tenantId=someone-else', OP);
-    expect(other.body.connectors.length).toBe(0);
+    expect(other.body.connectors).toHaveLength(0);
   });
 
   it('test probe is deliverable only with a live relay device for the channel', async () => {
@@ -292,7 +333,7 @@ describe('messaging relay-gateway — routing rules', () => {
 
     const list = await get('/routing', OP);
     expect(list.body.rules).toHaveLength(2);
-    expect(list.body.rules[0].workflowId).toBe('wf.support'); // higher priority first
+    expect(list.body.rules?.[0]?.workflowId).toBe('wf.support'); // higher priority first
 
     const gone = await del(`/routing/${r1.body.ruleId}`, OP);
     expect(gone.body.deleted).toBe(true);
@@ -349,18 +390,25 @@ describe('messaging relay-gateway — delivery log', () => {
     await post('/relay/enqueue', OP, { relayId, conversationId: 'c1', text: 'reply' });
 
     const all = await get('/logs', OP);
-    expect(all.body.entries.length).toBeGreaterThanOrEqual(2);
+    expect(all.body.entries?.length).toBeGreaterThanOrEqual(2);
 
     const inbound = await get('/logs?direction=inbound', OP);
-    expect(inbound.body.entries.every((e: any) => e.direction === 'inbound')).toBe(true);
+    // Non-empty first: an `.every` over an empty list is vacuously true.
+    expect(inbound.body.entries?.length).toBeGreaterThanOrEqual(1);
+    expect(inbound.body.entries?.every((e) => e.direction === 'inbound')).toBe(true);
+    expect(inbound.body.entries?.some((e) => e.conversationId === 'c1')).toBe(true);
     const outbound = await get('/logs?direction=outbound', OP);
-    expect(outbound.body.entries.some((e: any) => e.status === 'queued')).toBe(true);
+    expect(outbound.body.entries?.length).toBeGreaterThanOrEqual(1);
+    expect(outbound.body.entries?.every((e) => e.direction === 'outbound')).toBe(true);
+    expect(outbound.body.entries?.some((e) => e.status === 'queued')).toBe(true);
   });
 
   it('clamps ?limit — positive bounds, and rejects negative/non-numeric without dumping or erroring', async () => {
     const { relayId } = await activeRelay('signal');
-    // Seed three outbound entries.
-    for (let i = 0; i < 3; i++) {
+    // Seed MORE rows than the default page (100): with three rows a negative
+    // LIMIT that reached SQLite unbounded still returned ≤100, so the clamp
+    // could not fail (w72 probe mrr-clamp).
+    for (let i = 0; i < 105; i++) {
       await post('/relay/enqueue', OP, { relayId, conversationId: 'climit', text: `m${i}` });
     }
 
@@ -372,12 +420,12 @@ describe('messaging relay-gateway — delivery log', () => {
     // the default (100), NOT return the whole table and NOT error.
     const neg = await get('/logs?limit=-1', OP);
     expect(neg.status).toBe(200);
-    expect(neg.body.entries.length).toBeLessThanOrEqual(100);
+    expect(neg.body.entries).toHaveLength(100); // coerced to the default, not unbounded
 
     // Non-numeric limit must not reach the driver as NaN (would 500).
     const nan = await get('/logs?limit=abc', OP);
     expect(nan.status).toBe(200);
-    expect(Array.isArray(nan.body.entries)).toBe(true);
+    expect(nan.body.entries).toHaveLength(100);
   });
 });
 
@@ -416,12 +464,12 @@ describe('messaging relay-gateway — envelope v2', () => {
     // Pull from the device queue — the v2 fields must survive persistence.
     const out = await get('/device/outbound', dev);
     expect(out.status).toBe(200);
-    const m = out.body.messages.find((x: any) => x.conversationId === 'c-v2');
+    const m = out.body.messages?.find((x) => x.conversationId === 'c-v2');
     expect(m).toBeTruthy();
-    expect(m.text).toBe('pick one');
-    expect(m.media[0]).toMatchObject({ url: 'https://x/y.png', filename: 'y.png' });
-    expect(m.components.map((c: any) => c.id)).toEqual(['yes', 'docs']);
-    expect(m.reactions).toEqual(['👍']);
+    expect(m?.text).toBe('pick one');
+    expect(m?.media?.[0]).toMatchObject({ url: 'https://x/y.png', filename: 'y.png' });
+    expect(m?.components?.map((c) => c.id)).toEqual(['yes', 'docs']);
+    expect(m?.reactions).toEqual(['👍']);
   });
 
   it('accepts inbound v2 kinds (reaction/command) without rejecting them', async () => {
@@ -433,6 +481,8 @@ describe('messaging relay-gateway — envelope v2', () => {
       kind: 'reaction', reaction: { emoji: '❤️', targetMessageId: 'm9' },
     });
     expect(reaction.status).toBe(202);
+    expect(reaction.body.accepted).toBe(true);
+    expect(reaction.body.sessionKey).toBe('signal:cv2');
 
     const command = await post('/device/inbound', dev, {
       platformMessageId: 'cmd1', conversationId: 'cv2', peerId: 'p', text: '/help',
@@ -440,6 +490,8 @@ describe('messaging relay-gateway — envelope v2', () => {
       channelMeta: { guildId: 'g1', threadId: 't1' },
     });
     expect(command.status).toBe(202);
+    expect(command.body.accepted).toBe(true);
+    expect(command.body.sessionKey).toBe('signal:cv2');
   });
 });
 
@@ -468,11 +520,11 @@ describe('messaging relay-gateway — policy enforcement (Phase C)', () => {
     expect(first.status).toBe(202);
     expect(first.body.accepted).toBe(false);
     expect(first.body.pairing).toBeTruthy();
-    expect(first.body.pairing.code).toMatch(/^[A-Z2-9]{6}$/);
+    expect(first.body.pairing?.code).toMatch(/^[A-Z2-9]{6}$/);
     expect(first.body.runId).toBeUndefined();
 
     // 2) Operator approves → allowlist row written, pairing removed.
-    const approve = await post('/pairing/approve', OP, { connectorId, code: first.body.pairing.code });
+    const approve = await post('/pairing/approve', OP, { connectorId, code: first.body.pairing?.code });
     expect(approve.status).toBe(200);
     expect(approve.body.approved).toBe(true);
 
@@ -486,7 +538,7 @@ describe('messaging relay-gateway — policy enforcement (Phase C)', () => {
 
     // The (channel, peerId) is now on the allowlist.
     const al = await get(`/allowlist?connectorId=${encodeURIComponent(connectorId)}`, OP);
-    expect(al.body.entries.some((e: any) => e.peerId === 'peer-unknown')).toBe(true);
+    expect(al.body.entries?.some((e) => e.peerId === 'peer-unknown')).toBe(true);
   });
 
   it('dmPolicy=disabled drops every DM; the bridge is not invoked', async () => {
@@ -537,7 +589,7 @@ describe('messaging relay-gateway — policy enforcement (Phase C)', () => {
       method: 'PUT', headers: OP,
       body: JSON.stringify({ requireMention: true }),
     });
-    const body = await put.json() as any;
+    const body = (await put.json()) as Body;
     expect(body.requireMention).toBe(true);
     expect(body.warning).toMatch(/OPENWOP_MESSAGING_BOT_ID_SIGNAL|OPENWOP_MESSAGING_BOT_NAME/);
   });
@@ -550,7 +602,7 @@ describe('messaging relay-gateway — policy enforcement (Phase C)', () => {
         method: 'PUT', headers: OP,
         body: JSON.stringify({ requireMention: true }),
       });
-      const body = await put.json() as any;
+      const body = (await put.json()) as Body;
       expect(body.requireMention).toBe(true);
       expect(body.warning).toBeUndefined();
     } finally {
@@ -573,16 +625,60 @@ describe('messaging relay-gateway — policy enforcement (Phase C)', () => {
 describe('messaging relay-gateway — allowlist CRUD', () => {
   it('add → list → delete', async () => {
     const c = await post('/connectors', OP, { channel: 'signal' });
-    const connectorId = c.body.connectorId;
+    const connectorId = c.body.connectorId!;
     const add = await post('/allowlist', OP, { connectorId, channel: 'signal', peerId: '+15551111' });
     expect(add.status).toBe(201);
     const list = await get(`/allowlist?connectorId=${encodeURIComponent(connectorId)}`, OP);
-    expect(list.body.entries.length).toBe(1);
+    expect(list.body.entries).toHaveLength(1);
     const del = await fetch(`${BASE}/allowlist?connectorId=${encodeURIComponent(connectorId)}&channel=signal&peerId=${encodeURIComponent('+15551111')}`, { method: 'DELETE', headers: OP });
     expect(del.status).toBe(200);
     const after = await get(`/allowlist?connectorId=${encodeURIComponent(connectorId)}`, OP);
-    expect(after.body.entries.length).toBe(0);
+    expect(after.body.entries).toHaveLength(0);
   });
+});
+
+describe('messaging relay-gateway — tenant scoping (cookie sessions)', () => {
+  /** A signed-in OWNER of their own fresh tenant (first login founds it). */
+  async function owner(label: string): Promise<{ call: (method: string, path: string, body?: unknown) => Promise<{ status: number; body: Body }> }> {
+    let cookie = '';
+    const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: Body }> => {
+      const res = await fetch(`${BASE}${path}`, {
+        method,
+        headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      });
+      for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m?.[1]) cookie = m[1]; }
+      return { status: res.status, body: (await res.json().catch(() => ({}))) as Body };
+    };
+    const origin = BASE.replace(/\/host\/openwop-app\/messaging$/, '');
+    const login = await fetch(`${origin}/host/openwop-app/test/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: `relay-${label}-${Date.now()}@acme.test`, tenantId: `relay-${label}-${Date.now()}` }),
+    });
+    expect(login.status).toBe(201);
+    for (const ck of getSetCookies(login.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m?.[1]) cookie = m[1]; }
+    return { call };
+  }
+
+  it("a foreign tenant cannot revoke a relay or read a connector; the owner can", async () => {
+    const a = await owner('a');
+    const b = await owner('b');
+    const reg = await a.call('POST', '/relay/register', { channel: 'signal' });
+    expect(reg.status).toBe(201);
+    const conn = await a.call('POST', '/connectors', { channel: 'signal' });
+    expect(conn.status).toBe(201);
+
+    // B is refused at the tenant fence (404: no existence leak)…
+    expect(await b.call('POST', '/relay/revoke', { relayId: reg.body.relayId })).toMatchObject({ status: 404, body: { error: 'not_found' } });
+    expect(await b.call('GET', `/connectors/${conn.body.connectorId}/policy`)).toMatchObject({ status: 404, body: { error: 'not_found' } });
+    // …and B's connector list does not contain A's row.
+    expect((await b.call('GET', '/connectors')).body.connectors).toEqual([]);
+
+    // Positive controls: A, in its own tenant, passes the same fences.
+    expect((await a.call('GET', `/connectors/${conn.body.connectorId}/policy`)).status).toBe(200);
+    expect(await a.call('POST', '/relay/revoke', { relayId: reg.body.relayId })).toMatchObject({ status: 200, body: { revoked: true } });
+  });
+});
 });
 
 import { selectWorkflowByRules } from '../src/messaging/bridge.js';
@@ -590,7 +686,7 @@ import { selectWorkflowByRules } from '../src/messaging/bridge.js';
 describe('messaging bridge — selectWorkflowByRules (pure)', () => {
   const dev = { channel: 'signal' as const };
   const env = (conversationId: string, peerId: string) => ({ conversationId, peerId });
-  const rule = (over: Partial<any> = {}) => ({
+  const rule = (over: Partial<MessagingRoutingRuleRecord> = {}): MessagingRoutingRuleRecord => ({
     ruleId: 'r', tenantId: 't', pattern: '*', workflowId: 'wf.default', priority: 0,
     createdAt: '2026-01-01T00:00:00Z', ...over,
   });
@@ -622,62 +718,72 @@ describe('messaging bridge — selectWorkflowByRules (pure)', () => {
 
 import { createSelfHttpBridge } from '../src/messaging/bridge.js';
 
-/** Build a fake Storage that exposes only the methods the bridge touches. */
-function mockStorage(rules: any[], seedTurns: any[] = [], identities: any[] = [], sessions: any[] = []) {
-  const turns: any[] = [...seedTurns];
-  return {
+interface Turn { turnId: string; sessionKey: string; tenantId: string; role: string; content: string; at: string }
+/** The JSON bodies the spy fetch captures. */
+interface PostedRun { workflowId?: string; tenantId?: string; inputs: { messages: Array<{ role: string; content: string }> } }
+const json = (status: number, body: unknown): Response =>
+  new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+const isRunsPost = (url: string | URL | Request, init?: RequestInit): boolean => String(url).endsWith('/runs') && init?.method === 'POST';
+const env = (e: Omit<ChatIngressEnvelope, 'channel'> & { channel?: ChatIngressEnvelope['channel'] }): ChatIngressEnvelope => ({ channel: 'signal', ...e });
+
+/** Build a fake Storage that exposes only the methods the bridge touches.
+ *  FIXTURE-HONESTY LIMIT (w72): the bridge takes the whole `Storage`, so this
+ *  partial needs one cast; every method it does expose is typed. */
+function mockStorage(rules: MessagingRoutingRuleRecord[], seedTurns: Turn[] = [], identities: unknown[] = [], sessions: unknown[] = []) {
+  const turns: Turn[] = [...seedTurns];
+  const partial = {
     listMessagingRoutingRules: async () => rules,
     // Phase B: turn history seam (tenantId filter is defense-in-depth).
     listMessagingTurns: async (sessionKey: string, limit: number, tenantId: string) =>
       turns.filter((t) => t.sessionKey === sessionKey && t.tenantId === tenantId).slice(-Math.max(1, limit)),
-    appendMessagingTurn: async (t: any) => { turns.push(t); },
+    appendMessagingTurn: async (t: Turn) => { turns.push(t); },
     // Phase E: identities + sessions seam.
     listMessagingIdentities: async () => identities,
     listMessagingSessions: async () => sessions,
-    _turns: turns as any[],
     // The detached completeAndReply path polls + enqueues; we never let it
     // complete because the spy fetchImpl returns a non-terminal status forever.
-    getRelayDevice: async () => null,
-    enqueueRelayOutbound: async () => {},
+    getRelayDevice: async (): Promise<unknown> => null,
+    enqueueRelayOutbound: async (_e: unknown): Promise<void> => {},
     appendDeliveryLog: async () => {},
-  } as any;
+  };
+  return { storage: partial as unknown as Storage, partial, turns };
 }
 
 describe('messaging bridge — routing wiring (unit)', () => {
   it('passes the rule-resolved workflowId on POST /runs', async () => {
-    let capturedBody: any;
-    const fetchImpl: any = async (url: string, init?: any) => {
-      if (String(url).endsWith('/runs') && init?.method === 'POST') {
-        capturedBody = JSON.parse(init.body as string);
-        return new Response(JSON.stringify({ runId: 'r-1' }), { status: 201, headers: { 'content-type': 'application/json' } });
+    let capturedBody: PostedRun | undefined;
+    const fetchImpl: typeof fetch = async (url, init) => {
+      if (isRunsPost(url, init)) {
+        capturedBody = JSON.parse(String(init?.body)) as PostedRun;
+        return json(201, { runId: 'r-1' });
       }
       // Detached poll loop — keep it pending forever (test ends first).
-      return new Response(JSON.stringify({ status: 'running' }), { status: 200, headers: { 'content-type': 'application/json' } });
+      return json(200, { status: 'running' });
     };
     const bridge = createSelfHttpBridge({
       storage: mockStorage([
         { ruleId: 'r1', tenantId: 't', pattern: 'pick-me', workflowId: 'wf.routed', priority: 5, createdAt: '2026-01-01T00:00:00Z' },
-      ]),
+      ]).storage,
       baseUrl: 'http://test', bearer: 'x', defaultWorkflowId: 'wf.default', fetchImpl,
     });
     const res = await bridge.onInbound({
       device: { relayId: 'rl', tenantId: 't', channel: 'signal' },
-      envelope: { channel: 'signal', platformMessageId: 'm1', conversationId: 'pick-me-room', peerId: 'p', text: 'hi', timestamp: '2026-05-27T00:00:00Z' } as any,
+      envelope: env({ platformMessageId: 'm1', conversationId: 'pick-me-room', peerId: 'p', text: 'hi', timestamp: '2026-05-27T00:00:00Z' }),
       sessionKey: 'signal:pick-me-room',
     });
-    expect(res && (res as any).runId).toBe('r-1');
-    expect(capturedBody.workflowId).toBe('wf.routed');
-    expect(capturedBody.tenantId).toBe('t');
+    expect(res ? res.runId : undefined).toBe('r-1');
+    expect(capturedBody?.workflowId).toBe('wf.routed');
+    expect(capturedBody?.tenantId).toBe('t');
   });
 
   it('threads prior turns into messages[] (Phase B: chat-style continuity)', async () => {
-    let bodies: any[] = [];
-    const fetchImpl: any = async (url: string, init?: any) => {
-      if (String(url).endsWith('/runs') && init?.method === 'POST') {
-        bodies.push(JSON.parse(init.body as string));
-        return new Response(JSON.stringify({ runId: `r-${bodies.length}` }), { status: 201, headers: { 'content-type': 'application/json' } });
+    const bodies: PostedRun[] = [];
+    const fetchImpl: typeof fetch = async (url, init) => {
+      if (isRunsPost(url, init)) {
+        bodies.push(JSON.parse(String(init?.body)) as PostedRun);
+        return json(201, { runId: `r-${bodies.length}` });
       }
-      return new Response(JSON.stringify({ status: 'running' }), { status: 200, headers: { 'content-type': 'application/json' } });
+      return json(200, { status: 'running' });
     };
     // Seed a prior assistant turn so the second inbound sees [user, assistant, user].
     const store = mockStorage([], [
@@ -685,31 +791,31 @@ describe('messaging bridge — routing wiring (unit)', () => {
       { turnId: 't0a', sessionKey: 'signal:c1', tenantId: 't', role: 'assistant', content: 'first-reply', at: '2026-05-27T00:00:01Z' },
     ]);
     const bridge = createSelfHttpBridge({
-      storage: store, baseUrl: 'http://test', bearer: 'x', defaultWorkflowId: 'wf.default', fetchImpl,
+      storage: store.storage, baseUrl: 'http://test', bearer: 'x', defaultWorkflowId: 'wf.default', fetchImpl,
     });
     await bridge.onInbound({
       device: { relayId: 'rl', tenantId: 't', channel: 'signal' },
-      envelope: { channel: 'signal', platformMessageId: 'm2', conversationId: 'c1', peerId: 'p', text: 'second', timestamp: '2026-05-27T00:00:02Z' } as any,
+      envelope: env({ platformMessageId: 'm2', conversationId: 'c1', peerId: 'p', text: 'second', timestamp: '2026-05-27T00:00:02Z' }),
       sessionKey: 'signal:c1',
     });
-    expect(bodies[0].inputs.messages).toEqual([
+    expect(bodies[0]?.inputs.messages).toEqual([
       { role: 'user', content: 'first' },
       { role: 'assistant', content: 'first-reply' },
       { role: 'user', content: 'second' },
     ]);
     // The new inbound user turn was persisted (prior-2 + new-1 = 3 user/assistant rows + the new user).
-    const userTurns = (store._turns as any[]).filter((t) => t.role === 'user');
+    const userTurns = store.turns.filter((t) => t.role === 'user');
     expect(userTurns.map((t) => t.content)).toEqual(['first', 'second']);
   });
 
   it('cross-channel identity merges history across linked peers (Phase E)', async () => {
-    let postBody: any;
-    const fetchImpl: any = async (url: string, init?: any) => {
-      if (String(url).endsWith('/runs') && init?.method === 'POST') {
-        postBody = JSON.parse(init.body as string);
-        return new Response(JSON.stringify({ runId: 'r-1' }), { status: 201, headers: { 'content-type': 'application/json' } });
+    let postBody: PostedRun | undefined;
+    const fetchImpl: typeof fetch = async (url, init) => {
+      if (isRunsPost(url, init)) {
+        postBody = JSON.parse(String(init?.body)) as PostedRun;
+        return json(201, { runId: 'r-1' });
       }
-      return new Response(JSON.stringify({ status: 'running' }), { status: 200, headers: { 'content-type': 'application/json' } });
+      return json(200, { status: 'running' });
     };
     // Identity links signal:+15551111 ↔ discord:user-X.
     const identity = {
@@ -721,80 +827,79 @@ describe('messaging bridge — routing wiring (unit)', () => {
       { sessionKey: 'signal:c-sig', tenantId: 't', channel: 'signal', conversationId: 'c-sig', peerId: '+15551111', lastInboundAt: '2026-05-27T00:00:00Z', messageCount: 1 },
       { sessionKey: 'discord:c-dis', tenantId: 't', channel: 'discord', conversationId: 'c-dis', peerId: 'user-X', lastInboundAt: '2026-05-27T00:00:02Z', messageCount: 1 },
     ];
-    const seedTurns = [
+    const seedTurns: Turn[] = [
       { turnId: 'ts1', sessionKey: 'signal:c-sig', tenantId: 't', role: 'user', content: 'said on signal', at: '2026-05-27T00:00:00Z' },
       { turnId: 'ts2', sessionKey: 'signal:c-sig', tenantId: 't', role: 'assistant', content: 'replied on signal', at: '2026-05-27T00:00:01Z' },
     ];
     const bridge = createSelfHttpBridge({
-      storage: mockStorage([], seedTurns, [identity], sessions),
+      storage: mockStorage([], seedTurns, [identity], sessions).storage,
       baseUrl: 'http://test', bearer: 'x', defaultWorkflowId: 'wf.default', fetchImpl,
     });
     // Inbound on Discord from the linked peer — its history should include the prior Signal turns.
     await bridge.onInbound({
       device: { relayId: 'rl', tenantId: 't', channel: 'discord' },
-      envelope: { channel: 'discord', platformMessageId: 'm-d1', conversationId: 'c-dis', peerId: 'user-X', text: 'now on discord', timestamp: '2026-05-27T00:00:03Z' } as any,
+      envelope: env({ channel: 'discord', platformMessageId: 'm-d1', conversationId: 'c-dis', peerId: 'user-X', text: 'now on discord', timestamp: '2026-05-27T00:00:03Z' }),
       sessionKey: 'discord:c-dis',
     });
-    expect(postBody.inputs.messages.map((m: any) => m.content)).toEqual([
+    expect(postBody?.inputs.messages.map((m) => m.content)).toEqual([
       'said on signal', 'replied on signal', 'now on discord',
     ]);
   });
 
   it('rule with agentId dispatches the agent instead of POST /runs (Phase D)', async () => {
-    let runPost: any;
-    let dispatchPost: any;
-    const fetchImpl: any = async (url: string, init?: any) => {
+    let runPost: unknown;
+    let dispatchPost: { url: string; body: { task: { text: string } } } | undefined;
+    const fetchImpl: typeof fetch = async (url, init) => {
       const u = String(url);
-      if (u.endsWith('/runs') && init?.method === 'POST') {
-        runPost = JSON.parse(init.body as string);
-        return new Response('{}', { status: 201, headers: { 'content-type': 'application/json' } });
+      if (isRunsPost(url, init)) {
+        runPost = JSON.parse(String(init?.body));
+        return json(201, {});
       }
       if (u.includes('/host/openwop-app/agents/') && u.endsWith('/dispatch') && init?.method === 'POST') {
-        dispatchPost = { url: u, body: JSON.parse(init.body as string) };
-        return new Response(JSON.stringify({ status: 'completed', result: { text: 'AGENT REPLY' } }), { status: 200, headers: { 'content-type': 'application/json' } });
+        dispatchPost = { url: u, body: JSON.parse(String(init?.body)) as { task: { text: string } } };
+        return json(200, { status: 'completed', result: { text: 'AGENT REPLY' } });
       }
-      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+      return json(200, {});
     };
     const bridge = createSelfHttpBridge({
       storage: mockStorage([
         { ruleId: 'r1', tenantId: 't', pattern: '*', agentId: 'core.openwop.agents.assistant', priority: 9, createdAt: '2026-01-01T00:00:00Z' },
-      ]),
+      ]).storage,
       baseUrl: 'http://test', bearer: 'x', defaultWorkflowId: 'wf.default', fetchImpl,
     });
     await bridge.onInbound({
       device: { relayId: 'rl', tenantId: 't', channel: 'signal' },
-      envelope: { channel: 'signal', platformMessageId: 'm1', conversationId: 'c1', peerId: 'p', text: 'hi', timestamp: '2026-05-27T00:00:00Z' } as any,
+      envelope: env({ platformMessageId: 'm1', conversationId: 'c1', peerId: 'p', text: 'hi', timestamp: '2026-05-27T00:00:00Z' }),
       sessionKey: 'signal:c1',
     });
     expect(runPost, 'should NOT POST /v1/runs when bound to an agent').toBeUndefined();
     expect(dispatchPost).toBeTruthy();
-    expect(dispatchPost.url).toContain('/agents/core.openwop.agents.assistant/dispatch');
-    expect(dispatchPost.body.task.text).toBe('hi');
+    expect(dispatchPost?.url).toContain('/agents/core.openwop.agents.assistant/dispatch');
+    expect(dispatchPost?.body.task.text).toBe('hi');
   });
 
   it('agent dispatch is bounded by a timeout (no inbound hang on a slow agent)', async () => {
-    let enqueued: any;
+    let enqueued: { text?: unknown } | undefined;
     // fetchImpl for /dispatch hangs until the AbortController aborts; the
     // request body capture proves we actually called dispatch, the
     // OutboundEnqueue capture proves the timeout path enqueues a notice.
-    const fetchImpl: any = async (url: string, init?: any) => {
+    const fetchImpl: typeof fetch = async (url, init) => {
       const u = String(url);
       if (u.endsWith('/dispatch')) {
         // Hang until the signal aborts; throw the abort error fetch would throw.
-        return new Promise((_resolve, reject) => {
+        return new Promise<Response>((_resolve, reject) => {
           init?.signal?.addEventListener('abort', () => {
-            const e: any = new Error('aborted'); e.name = 'AbortError'; reject(e);
+            reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
           });
         });
       }
-      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+      return json(200, {});
     };
     // Capture enqueueOutbound via a storage stub that records the enqueue call.
-    const store = {
-      ...mockStorage([{ ruleId: 'r1', tenantId: 't', pattern: '*', agentId: 'a1', priority: 5, createdAt: '2026-01-01T00:00:00Z' }]),
-      getRelayDevice: async () => ({ relayId: 'rl', tenantId: 't', channel: 'signal' } as any),
-      enqueueRelayOutbound: async (e: any) => { enqueued = e; },
-    };
+    const mock = mockStorage([{ ruleId: 'r1', tenantId: 't', pattern: '*', agentId: 'a1', priority: 5, createdAt: '2026-01-01T00:00:00Z' }]);
+    mock.partial.getRelayDevice = async () => ({ relayId: 'rl', tenantId: 't', channel: 'signal' });
+    mock.partial.enqueueRelayOutbound = async (e: unknown) => { enqueued = e as { text?: unknown }; };
+    const store = mock.storage;
     const prev = process.env.OPENWOP_MESSAGING_AGENT_DISPATCH_TIMEOUT_MS;
     process.env.OPENWOP_MESSAGING_AGENT_DISPATCH_TIMEOUT_MS = '50';
     try {
@@ -804,13 +909,13 @@ describe('messaging bridge — routing wiring (unit)', () => {
       const start = Date.now();
       await bridge.onInbound({
         device: { relayId: 'rl', tenantId: 't', channel: 'signal' },
-        envelope: { channel: 'signal', platformMessageId: 'm1', conversationId: 'c1', peerId: 'p', text: 'hi', timestamp: '2026-05-27T00:00:00Z' } as any,
+        envelope: env({ platformMessageId: 'm1', conversationId: 'c1', peerId: 'p', text: 'hi', timestamp: '2026-05-27T00:00:00Z' }),
         sessionKey: 'signal:c1',
       });
       // Bounded by 50ms (+a little slack), NOT the natural 5min request budget.
       expect(Date.now() - start).toBeLessThan(2000);
       expect(enqueued).toBeTruthy();
-      expect(String(enqueued.text)).toMatch(/timed out/i);
+      expect(String(enqueued?.text)).toMatch(/timed out/i);
     } finally {
       if (prev === undefined) delete process.env.OPENWOP_MESSAGING_AGENT_DISPATCH_TIMEOUT_MS;
       else process.env.OPENWOP_MESSAGING_AGENT_DISPATCH_TIMEOUT_MS = prev;
@@ -818,25 +923,25 @@ describe('messaging bridge — routing wiring (unit)', () => {
   });
 
   it('falls back to the default workflow when no rule matches (backward-compat)', async () => {
-    let capturedBody: any;
-    const fetchImpl: any = async (url: string, init?: any) => {
-      if (String(url).endsWith('/runs') && init?.method === 'POST') {
-        capturedBody = JSON.parse(init.body as string);
-        return new Response(JSON.stringify({ runId: 'r-2' }), { status: 201, headers: { 'content-type': 'application/json' } });
+    let capturedBody: PostedRun | undefined;
+    const fetchImpl: typeof fetch = async (url, init) => {
+      if (isRunsPost(url, init)) {
+        capturedBody = JSON.parse(String(init?.body)) as PostedRun;
+        return json(201, { runId: 'r-2' });
       }
-      return new Response(JSON.stringify({ status: 'running' }), { status: 200, headers: { 'content-type': 'application/json' } });
+      return json(200, { status: 'running' });
     };
     const bridge = createSelfHttpBridge({
       storage: mockStorage([
         { ruleId: 'r1', tenantId: 't', pattern: 'support', channel: 'whatsapp', workflowId: 'wf.support', priority: 5, createdAt: '2026-01-01T00:00:00Z' },
-      ]),
+      ]).storage,
       baseUrl: 'http://test', bearer: 'x', defaultWorkflowId: 'wf.default', fetchImpl,
     });
     await bridge.onInbound({
       device: { relayId: 'rl', tenantId: 't', channel: 'signal' }, // wrong channel for the rule
-      envelope: { channel: 'signal', platformMessageId: 'm1', conversationId: 'support-room', peerId: 'p', text: 'hi', timestamp: '2026-05-27T00:00:00Z' } as any,
+      envelope: env({ platformMessageId: 'm1', conversationId: 'support-room', peerId: 'p', text: 'hi', timestamp: '2026-05-27T00:00:00Z' }),
       sessionKey: 'signal:support-room',
     });
-    expect(capturedBody.workflowId).toBe('wf.default');
+    expect(capturedBody?.workflowId).toBe('wf.default');
   });
 });

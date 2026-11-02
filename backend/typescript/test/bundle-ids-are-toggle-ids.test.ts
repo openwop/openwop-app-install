@@ -8,6 +8,11 @@
  * MEASURED 2026-10-05: the priced `agents` bundle listed `twin`, whose toggle is
  * `twin-recall`, so the twin was never paywalled on any lane — buyers paid for a
  * feature every tenant already had, and `--check` stayed green.
+ *
+ * TST-BBG-2 (w66 g4, sabotage-witnessed). Red when a bundle lists an id that is
+ * not a registered toggle (e.g. `twin`). The two non-vacuity floors are far below
+ * the measured catalog (64 bundled ids on 2026-10-29) by design: they only guard
+ * an empty read.
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';

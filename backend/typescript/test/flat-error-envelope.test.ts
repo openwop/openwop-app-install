@@ -29,6 +29,10 @@
  *
  * @see spec/v1/rest-endpoints.md §"Error response shape"
  * @see schemas/error-envelope.schema.json
+ *
+ * Tracker TST-DCC-3. Red when `sendError` nests the code, when an inline refusal
+ * skips localization, or when the MCP interop refusal's `details.retriable`
+ * changes (grade-tests w70 probes `fe-*`).
  */
 
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
@@ -104,35 +108,42 @@ const REFUSALS: ReadonlyArray<{
   name: string;
   path: string;
   body: unknown;
+  /** The exact refusal status (each emitter's own `sendError(res, <status>, …)`). */
+  expectStatus: number;
   expectCode?: string;
 }> = [
   {
     name: 'runner seam — dispatch validation (routes/runnerSeam.ts)',
     path: '/host/sample/runner/dispatch',
     body: { subject: '', runId: '', stepId: '' },
+    expectStatus: 400,
     expectCode: 'validation_error',
   },
   {
     name: 'workload-identity seam — refusal (routes/workloadIdentitySeam.ts)',
     path: '/host/sample/test/workload-identity/resolve',
     body: { identity: { scheme: 'spiffe', subject: 'spiffe://example/x', token: 'eyJhbGciOiJIUzI1NiJ9.a.b' } },
+    expectStatus: 400,
   },
   {
     name: 'memory-compaction seam — missing memoryRef (routes/memoryCompactionSeam.ts)',
     path: '/test/memory/seed',
     body: {},
+    expectStatus: 400,
     expectCode: 'openwop-app.invalid_argument',
   },
   {
     name: 'test seam — prompt/compose missing templateId (routes/testSeam.ts)',
     path: '/host/openwop-app/prompt/compose',
     body: {},
+    expectStatus: 400,
     expectCode: 'invalid_argument',
   },
   {
     name: 'agents — TTS missing text (routes/agents.ts)',
     path: '/host/sample/ai/call-speech-synthesizer',
     body: { voiceId: 'v1' },
+    expectStatus: 400,
     expectCode: 'openwop-app.invalid_request',
   },
 ];
@@ -144,7 +155,7 @@ describe('H27 — converted routes emit the canonical FLAT error envelope', () =
       // A 404 would mean the route is not mounted in this boot, which would make
       // the leg vacuous rather than passing.
       expect(res.status, `${r.path} is not mounted — this leg would prove nothing`).not.toBe(404);
-      expect(res.status).toBeGreaterThanOrEqual(400);
+      expect(res.status).toBe(r.expectStatus);
       const env = assertFlatErrorEnvelope(res.body, r.path);
       expect(typeof env.error).toBe('string');
       expect(typeof env.message).toBe('string');

@@ -1,3 +1,15 @@
+/**
+ * Durable host-surface adapters for host.db.vector / host.db.search /
+ * host.db.nosql (`src/host/durable/durableData.ts` + `queryHelpers.ts`; the
+ * Phase 2 durable surfaces registered by `initDurableSurfaces`), exercised on the
+ * dialect-agnostic sqlite store. TST-CWD-1. Tenant isolation for these surfaces
+ * is durable-isolation.test.ts (CTI-1).
+ *
+ * Red when (sabotage-witnessed, wave 69): vector results sort ascending; search
+ * scores ignore term frequency or `delete` stops removing the indexed doc;
+ * nosql ignores `$unset`, the `$`-operator filter guard is removed, projection
+ * includes nothing, or `upsert:true` stops inserting.
+ */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
@@ -38,6 +50,8 @@ describe('durable search surface', () => {
     expect(res.hits.map((h) => h.id)).toEqual(['2', '1']); // doc 2 has 'quick' twice
     expect(await s.query({ index: 'i', q: 'nonexistent' })).toEqual({ hits: [] });
     expect(await s.delete({ index: 'i', ids: ['2'] })).toEqual({ deleted: 1 });
+    // …and the doc is really gone from the index, not just counted.
+    expect(((await s.query({ index: 'i', q: 'quick' })) as { hits: Array<{ id: string }> }).hits.map((h) => h.id)).toEqual(['1']);
   });
 });
 
@@ -65,7 +79,11 @@ describe('durable nosql surface', () => {
       .rejects.toThrow(/not supported/);
   });
   it('upsert creates when no match', async () => {
-    const res = await n.update({ datasource: 'd', collection: 'up', filter: { k: 'v' }, update: { $set: { a: 1 } }, upsert: true }) as { upsertedId?: string };
-    expect(res.upsertedId).toBeTruthy();
+    const res = await n.update({ datasource: 'd', collection: 'up', filter: { k: 'v' }, update: { $set: { a: 1 } }, upsert: true }) as { matched: number; upsertedId?: string };
+    expect(res.matched).toBe(0);
+    expect(typeof res.upsertedId).toBe('string');
+    // The inserted doc is the filter merged with the $set, under the minted id.
+    const back = await n.find({ datasource: 'd', collection: 'up', filter: { k: 'v' } }) as { docs: Array<Record<string, unknown>> };
+    expect(back.docs).toEqual([{ k: 'v', a: 1, _id: res.upsertedId }]);
   });
 });

@@ -17,6 +17,10 @@
  */
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
+/** ADR 1019 D3 — a conversation the managed tier served (the title rides its ladder). */
+const managedConv = (tenantId: string) => ({ tenantId, credentialRef: 'managed:openwop-free', served: { provider: 'openwop-free', model: 'openwop-free', managed: true as const } });
+
+
 // `vi.mock` is hoisted above the import of the generator. Replace
 // `dispatchManagedChat` with a stub that honors the AbortSignal — when the
 // signal fires we reject with an AbortError, matching what the underlying fetch
@@ -66,7 +70,7 @@ describe('chat-autotitle: managed dispatch timeout (ATC-2)', () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     _setTitleTimeoutMs(250);
     let settled = false;
-    const p = generateTitle('user:t', 'hello there', 'general kenobi').then((t) => { settled = true; return t; });
+    const p = generateTitle(managedConv('user:t'), 'hello there', 'general kenobi').then((t) => { settled = true; return t; });
     // One tick short of the window: still waiting (the bound is not early).
     await vi.advanceTimersByTimeAsync(249);
     expect(settled).toBe(false);

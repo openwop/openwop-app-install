@@ -3,14 +3,20 @@
  *
  * Two layers:
  *  1. Unit — `presentationEnabled()` is the single gate all four sites consume
- *     (discovery uiPlugins + realtimeVoice, the uiPlugins route module, the voice
+ *     (discovery uiPlugins, the uiPlugins route module, the voice
  *     feature, the chat-widget public gateway). Covers all three presentation
  *     capabilities × full/headless/override deterministically — including
  *     `chatWidget`, whose public gateway returns a uniform fail-closed 404 by
  *     design (no existence oracle) and so can't be black-box HTTP-probed.
- *  2. Integration — a booted host: `headless` withholds uiPlugins + realtimeVoice
- *     from `/.well-known/openwop` AND unmounts their routes; `full` (default) is
+ *  2. Integration — a booted host: `headless` withholds uiPlugins from
+ *     `/.well-known/openwop` AND unmounts the uiPlugins + voice routes (the
+ *     realtimeVoice advert itself retired with major 1); `full` (default) is
  *     exactly today's behavior; the per-capability override wins.
+ *
+ * Tracker TST-DFA-3. Red when (w71g1, witnessed): `presentationEnabled` ignores the
+ * profile or either override direction; an unrecognized profile reads as headless; the
+ * voice feature mounts regardless of the gate; discovery advertises uiPlugins regardless;
+ * the ui-plugin isolation probe answers regardless.
  *
  * @see docs/adr/0168-headless-profile-and-first-party-cli.md
  * @see src/host/hostProfile.ts
@@ -83,7 +89,7 @@ async function boot(env: Record<string, string | undefined>): Promise<{ base: st
 }
 const close = (s: http.Server) => new Promise<void>((res) => s.close(() => res()));
 
-interface Advert { uiPlugins?: unknown; aiProviders?: { realtimeVoice?: unknown }; realtimeVoice?: unknown; agents?: unknown }
+interface Advert { uiPlugins?: unknown; agents?: unknown }
 const discover = async (base: string): Promise<Advert> => (await (await fetch(`${base}/.well-known/openwop`, { headers: H })).json()) as Advert;
 const status = (base: string, method: string, path: string) =>
   fetch(`${base}${path}`, { method, headers: H, ...(method === 'POST' ? { body: '{}' } : {}) }).then((r) => r.status);
@@ -123,8 +129,9 @@ describe('ADR 0168 — headless profile withholds advert + unmounts routes', () 
   it('omits uiPlugins + realtimeVoice from discovery; keeps non-presentational surfaces', async () => {
     const d = await discover(base);
     expect(d.uiPlugins, 'uiPlugins withheld in headless').toBeUndefined();
-    expect(d.aiProviders?.realtimeVoice, 'realtimeVoice withheld in headless').toBeUndefined();
-    expect(d.realtimeVoice, 'realtimeVoice root mirror withheld too').toBeUndefined();
+    // No realtimeVoice advert assertion: that advert retired with major 1 (ADR 0812
+    // P3c-0), so it is absent in EVERY profile and could not fail here. The voice half
+    // of the profile is witnessed by the mount leg below.
     expect(d.agents, 'agents capability still present in headless').toBeTruthy();
   });
 
@@ -142,7 +149,6 @@ describe('ADR 0168 — per-capability override wins over the profile (integratio
   it('headless + OPENWOP_PRESENTATION_UIPLUGINS=on → uiPlugins back (advert + route), voice stays off', async () => {
     const d = await discover(base);
     expect(d.uiPlugins, 'override re-presents uiPlugins advert').toBeTruthy();
-    expect(d.aiProviders?.realtimeVoice, 'realtimeVoice still withheld').toBeUndefined();
     expect(await status(base, 'GET', UIPLUGIN_PROBE), 'override re-presents the ui-plugin surface').toBe(200);
     expect(await status(base, 'POST', VOICE_SESSION), 'voice still unmounted').toBe(404);
   });

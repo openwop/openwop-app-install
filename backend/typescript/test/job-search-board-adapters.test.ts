@@ -6,6 +6,14 @@
  * properties the architecture review put in place — a descriptor must not
  * advertise a credential model nothing exercises, and the coverage story must
  * not quietly claim Workday.
+ *
+ * TST-DGE-5. Red when the company token is not URL-encoded, when an unknown
+ * board resolves to a URL, when the Tier-1 set changes (adding Workday reds
+ * 'ships the four Tier-1 boards' — the exact list, which is why the separate
+ * Workday case was cut), and when a licensed adapter missing ANY ONE of
+ * termsUrl / acceptedBy / acceptedAt registers (sabotage-witnessed, wave 71).
+ * "A credentialed board cannot carry a secret" is a property of the
+ * `BoardAdapter['auth']` type, so tsc holds it; that case was cut.
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -17,6 +25,9 @@ import {
 
 describe('ADR 0542 D1 (corrected) — adding a board is DATA, not code', () => {
   it('ships the four Tier-1 boards', () => {
+    // Exactly these four — in particular NOT Workday (ADR 0545 D5a: ~32% of
+    // enterprise postings and no public candidate submission API; listing it
+    // Tier A would be the coverage overclaim the ADR corrected).
     expect(TIER_1_BOARDS.map((b) => b.id).sort()).toEqual(['ashby', 'greenhouse', 'lever', 'workable']);
   });
 
@@ -53,29 +64,6 @@ describe('ADR 0542 P2 — the honesty properties the review installed', () => {
     }
   });
 
-  it('a credentialed board REFERENCES a connection provider — never its own secret', () => {
-    // The one credential model rule: a descriptor may name a provider whose
-    // credential the existing broker holds; it may not carry one.
-    const authed: BoardAdapter = {
-      id: 'authed-board', displayName: 'Authed', origin: 'authed.test',
-      auth: { kind: 'connection', providerId: 'some-provider' }, tier: 'B',
-      searchUrlTemplate: 'https://authed.test/{company}', postingsPath: 'jobs',
-      map: { title: 'title' }, docsUrl: 'https://authed.test',
-    };
-    registerBoardAdapter(authed);
-    const got = getBoardAdapter('authed-board')!;
-    expect(got.auth.kind).toBe('connection');
-    // Structural: the type has no field for a secret, so one cannot be smuggled.
-    expect(Object.keys(got.auth)).toEqual(['kind', 'providerId']);
-  });
-
-  it('does NOT claim Workday — the biggest ATS is deliberately absent', () => {
-    // ADR 0545 D5a: Workday is ~32% of enterprise postings and publishes no
-    // public candidate submission API. Listing it Tier A here would be the
-    // coverage overclaim the ADR explicitly corrected.
-    expect(TIER_1_BOARDS.map((b) => b.id)).not.toContain('workday');
-  });
-
   it('every Tier-1 origin is a real host a grant can be scoped to', () => {
     // The grant scopes by ORIGIN (ADR 0541), so a descriptor whose origin does
     // not match the URL it actually calls would make auto-apply fail closed for
@@ -104,16 +92,27 @@ describe('ADR 0542 P2 — the honesty properties the review installed', () => {
   });
 
   it('a licensed adapter without a RECORDED acceptance is refused, loudly', () => {
-    const incomplete = {
-      id: 'agg', displayName: 'Aggregator', origin: 'api.agg.test',
-      auth: { kind: 'licensed' as const, providerId: 'agg', termsUrl: '', acceptedBy: '', acceptedAt: '' },
-      tier: 'A' as const, searchUrlTemplate: 'https://api.agg.test/{company}',
-      postingsPath: 'jobs', map: { title: 'title' }, docsUrl: 'https://agg.test',
-    };
-    // Loud, not inert: registering it silently would look identical to a working
-    // board right up until every listing from it was skipped.
-    expect(() => registerBoardAdapter(incomplete)).toThrow(/termsUrl|acceptedBy|respected/);
-    expect(getBoardAdapter('agg')).toBeUndefined();
+    const full = { termsUrl: 'https://agg.test/terms', acceptedBy: 'user-1', acceptedAt: '2026-02-01T00:00:00.000Z' };
+    // Each fixture is missing exactly ONE field, so a guard that only refuses
+    // when all three are missing cannot pass this case.
+    for (const missing of ['termsUrl', 'acceptedBy', 'acceptedAt'] as const) {
+      const id = `agg-missing-${missing}`;
+      const incomplete: BoardAdapter = {
+        id, displayName: 'Aggregator', origin: 'api.agg.test',
+        auth: {
+          kind: 'licensed', providerId: 'agg',
+          termsUrl: missing === 'termsUrl' ? '' : full.termsUrl,
+          acceptedBy: missing === 'acceptedBy' ? '' : full.acceptedBy,
+          acceptedAt: missing === 'acceptedAt' ? '' : full.acceptedAt,
+        },
+        tier: 'A', searchUrlTemplate: 'https://api.agg.test/{company}',
+        postingsPath: 'jobs', map: { title: 'title' }, docsUrl: 'https://agg.test',
+      };
+      // Loud, not inert: registering it silently would look identical to a working
+      // board right up until every listing from it was skipped.
+      expect(() => registerBoardAdapter(incomplete), `missing ${missing}`).toThrow(/needs termsUrl \+ acceptedBy \+ acceptedAt/);
+      expect(getBoardAdapter(id)).toBeUndefined();
+    }
   });
 
   it('a licensed adapter WITH an attributable acceptance registers', () => {

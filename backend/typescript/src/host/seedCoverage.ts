@@ -68,6 +68,7 @@ export const ACKNOWLEDGED_UNSEEDED: Readonly<Record<string, string>> = {
   'builder-pair': 'ADR 0773 — pairing context + suggestions are per-conversation, 24 h, created by a live Architect turn; seeding one would be a fake suggestion on a real canvas',
   accessibility: 'authored-content a11y (ADR 0363) — alt text/checks ride EXISTING media/cms/document content; no standalone demo entity to seed',
   'tool-output-compaction': 'runtime tool-output behavior — no data',
+  'agent-clarification': 'runtime agent behavior (a paused turn asks a person) — its only rows are a live run\'s interrupts and checkpoints, which a seed cannot fabricate',
   'twin-recall': 'runtime memory recall — no seeded corpus',
   // ADR 0820 §8 — these five regained a toggle (always-on → sellable). None owns seedable rows:
   'chat-widget': 'a widget config is a per-site embed (allowed origins + agent binding); seeded configs would point at origins nobody owns. A demo creates one in the chat-deployment console in seconds',

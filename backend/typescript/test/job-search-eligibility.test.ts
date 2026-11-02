@@ -9,6 +9,11 @@
  * The never-skip cases are the point of the file. Each is a rule someone will
  * eventually be tempted to add ("why are we applying to onsite roles in another
  * city?"), and each test fails the moment they do.
+ *
+ * Tracker TST-DHB-1 (wave 71). Red when: silence on sponsorship disqualifies
+ * (`w71g3-el-silent`); the skip stops quoting the posting (`el-quote`); the
+ * clearance rule ignores what the applicant holds (`el-clear`); salary fit reads
+ * the BOTTOM of the range (`el-saltop-r2`); missing skills project 0 (`el-neutral`).
  */
 import { describe, expect, it } from 'vitest';
 import { checkEligibility, ELIGIBILITY_RULES } from '../src/features/job-search/domain/eligibility.js';
@@ -123,8 +128,13 @@ describe('ADR 0540 D5 — fit scoring composes the shared engine', () => {
   });
 
   it('scores the TOP of a salary range — a range is what is negotiable', () => {
-    const wide = projectFitScores(digest({ salaryMin: 120_000, salaryMax: 180_000 }), profile);
-    const low = projectFitScores(digest({ salaryMin: 90_000, salaryMax: 100_000 }), profile);
-    expect(wide['salary-fit']!).toBeGreaterThan(low['salary-fit']!);
+    // Asymmetric on purpose: the wide range wins on its TOP and loses on its
+    // bottom, so a bottom-of-range reading flips the order. Hand-derived against
+    // the 150k floor: round(1 + top/floor × 5) — wide 200k → 7.67 → 8,
+    // narrow 150k → 6 (bottom-of-range would give wide 100k → 4, narrow 140k → 6).
+    const wide = projectFitScores(digest({ salaryMin: 100_000, salaryMax: 200_000 }), profile);
+    const narrow = projectFitScores(digest({ salaryMin: 140_000, salaryMax: 150_000 }), profile);
+    expect(wide['salary-fit']).toBe(8);
+    expect(narrow['salary-fit']).toBe(6);
   });
 });

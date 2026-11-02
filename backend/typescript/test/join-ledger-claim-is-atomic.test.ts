@@ -13,11 +13,16 @@
  * So every assertion here counts WINNERS, not rows. That is the transferable
  * rule from this repo's double-refund incident: a check that only inspects the
  * end state cannot see two writers who both believed they were first.
+ *
+ * Tracker TST-DHE-1 (wave 71). Red when: `claimJoin` goes back to get-then-put
+ * (`w71g3-jl-getput`: 12 winners, 6 member rows) or keys the lock on the
+ * workspace alone (`jl-perid`).
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { claimJoin, hasJoined, autoJoinDefaultWorkspaces } from '../src/host/workspaceJoinLedger.js';
 import { createOrg, listMembers } from '../src/host/accessControlService.js';
 import { registerToggleDefault } from '../src/host/featureToggles/registry.js';
+import type { ToggleConfig } from '../src/host/featureToggles/types.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
 
@@ -58,7 +63,8 @@ describe('claimJoin — exactly one winner per (subject, workspace)', () => {
 describe('the side effect the lock protects — no duplicate membership', () => {
   it('concurrent first sign-ins create ONE member row, not N', async () => {
     const t = { featureId: 'f-race', orgId: 'host-racej', tenantId: 'host-racej', name: 'Race' };
-    registerToggleDefault({ id: t.featureId, label: t.name, status: 'on', bucketUnit: 'user', salt: t.featureId } as never);
+    const toggle: ToggleConfig = { id: t.featureId, label: t.name, status: 'on', bucketUnit: 'user', salt: t.featureId };
+    registerToggleDefault(toggle);
     await createOrg({ tenantId: t.tenantId, orgId: t.orgId, createdBy: 'system', name: t.name });
 
     // Six binds landing together — the real shape of the hazard, since

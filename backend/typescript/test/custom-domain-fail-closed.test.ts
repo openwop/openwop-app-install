@@ -8,10 +8,18 @@
  * logs (read-only), every prod request arrives with `Host` set to one of the two
  * run.app forms (`…-89896419173.us-central1.run.app`, `…-jkav3gnlqa-uc.a.run.app`),
  * never `app.openwop.dev` — the Firebase rewrite does not forward the public Host.
+ *
+ * Tracker TST-CQG-1 (w68). The unit legs drive `customDomainMiddleware()` on a
+ * bare `express()` app over a real socket (no hand-built req/res casts); a request
+ * that reaches the terminal handler is "passed through". Sabotage-witnessed: red
+ * when a failed lookup lets every host through, when Retry-After changes, when
+ * `*.run.app` leaves the platform suffixes, when the configured origins stop
+ * counting as platform hosts, when a sixth pending claim is admitted, and when an
+ * `anon:` tenant may add a domain.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import type { NextFunction, Request, Response } from 'express';
+import express from 'express';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const lookup = vi.hoisted(() => ({ fail: false }));
@@ -49,22 +57,31 @@ afterEach(() => {
   for (const k of ENV_KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
 });
 
-function run(host: string): Promise<{ passed: boolean; err?: unknown; status?: number; retryAfter?: string; body?: any }> {
-  return new Promise((resolve) => {
-    const headers: Record<string, string> = {};
-    let status = 200;
-    const res = {
-      headersSent: false,
-      setHeader: (k: string, v: string) => { headers[k.toLowerCase()] = v; },
-      status(code: number) { status = code; return this; },
-      json(body: unknown) { resolve({ passed: false, status, retryAfter: headers['retry-after'], body }); return this; },
-      type() { return this; },
-      send(body: unknown) { resolve({ passed: false, status, retryAfter: headers['retry-after'], body }); return this; },
-      set(k: string, v: string) { headers[k.toLowerCase()] = v; return this; },
-    } as unknown as Response;
-    const req = { headers: { host }, method: 'GET', path: '/runs', url: '/runs' } as unknown as Request;
-    const next: NextFunction = (err?: unknown) => resolve({ passed: true, err });
-    void customDomainMiddleware()(req, res, next);
+/** The ErrorEnvelope shape (middleware/errorEnvelope.ts) plus the terminal handler's marker. */
+interface Body { passed?: boolean; error?: string; message?: string }
+
+let unit: http.Server; let unitPort = 0;
+beforeAll(async () => {
+  const app = express();
+  app.use(customDomainMiddleware());
+  app.use((_req, res) => { res.status(200).json({ passed: true }); }); // reached ⇒ passed through
+  await new Promise<void>((res) => { unit = app.listen(0, '127.0.0.1', () => { unitPort = (unit.address() as AddressInfo).port; res(); }); });
+});
+afterAll(async () => { await new Promise<void>((res) => unit.close(() => res())); });
+
+/** One GET through the middleware with a spoofed Host (fetch forbids overriding Host). */
+function run(host: string): Promise<{ passed: boolean; status: number; retryAfter?: string; body: Body }> {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port: unitPort, method: 'GET', path: '/runs', headers: { host } }, (res) => {
+      let raw = ''; res.on('data', (c) => (raw += c));
+      res.on('end', () => {
+        let body: Body = {};
+        try { body = JSON.parse(raw); } catch { /* a non-JSON answer (express's default error page) is not a pass */ }
+        const retry = res.headers['retry-after'];
+        resolve({ passed: body.passed === true, status: res.statusCode ?? 0, ...(typeof retry === 'string' ? { retryAfter: retry } : {}), body });
+      });
+    });
+    req.on('error', reject); req.end();
   });
 }
 
@@ -85,7 +102,7 @@ describe('ADR 0906 D8 — a failed lookup fails closed', () => {
     lookup.fail = true;
     const out = await run(host);
     expect(out.passed).toBe(true);
-    expect(out.err).toBeUndefined();
+    expect(out.status).toBe(200); // reached the next handler with no error forwarded
   });
 
   it('a customer host gets 503 service_unavailable with Retry-After, and never reaches the next handler', async () => {
@@ -94,7 +111,7 @@ describe('ADR 0906 D8 — a failed lookup fails closed', () => {
     expect(out.passed).toBe(false);
     expect(out.status).toBe(503);
     expect(out.retryAfter).toBe('30');
-    expect(JSON.stringify(out.body)).toContain('service_unavailable');
+    expect(out.body.error).toBe('service_unavailable');
   });
 
   it('a healthy lookup is unchanged: an unbound customer host passes through', async () => {
@@ -145,9 +162,13 @@ describe('ADR 0906 D8 — over HTTP: a customer host never reaches an authed rou
     lookup.fail = true;
     const customer = await get(vendorPath('/orgs'), 'pages.customer.com');
     expect(customer.status).toBe(503);
-    expect(customer.body).toContain('service_unavailable');
+    const customerBody: Body = JSON.parse(customer.body);
+    expect(customerBody.error).toBe('service_unavailable');
     const platform = await get(vendorPath('/orgs'), `127.0.0.1:${port}`);
-    expect(platform.status).not.toBe(503);
-    expect([401, 403, 200]).toContain(platform.status); // reached auth, i.e. the app surface
+    // The platform host reaches the app's own route and is answered by it (this
+    // test app admits an anonymous caller there), never by the fail-closed guard.
+    expect(platform.status).toBe(200);
+    const platformBody: Body = JSON.parse(platform.body);
+    expect(platformBody.error).toBeUndefined();
   });
 });

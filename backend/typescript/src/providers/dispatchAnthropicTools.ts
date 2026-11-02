@@ -21,6 +21,7 @@ import { contextEconomy } from '../host/contextEconomy.js';
 import {
   cacheableAnthropicSystem,
   withAnthropicToolCache,
+  withAnthropicMessageCache,
   extractAnthropicCacheTokens,
   type AnthropicToolDef,
 } from './promptCaching.js';
@@ -51,6 +52,8 @@ export interface ToolUseBlock {
   id: string;
   name: string;
   input: Record<string, unknown>;
+  /** ADR 1011 — the provider sent arguments that are not a JSON object. */
+  argumentsInvalid?: true;
 }
 
 /**
@@ -74,6 +77,11 @@ export interface ToolsRoundRequest {
   /** RFC 0116 — opaque (tenant, cachePrefixId) prefix-cache scope; namespaces
    *  the cached prefix for cross-tenant isolation. Cost-only, replay-invariant. */
   cachePrefixScope?: { tenant: string; cachePrefixId: string };
+  /** ADR 1003 D3 — the caller's word that this is a tool-loop round AFTER the
+   *  first, so this round's prefix repeats the previous round's and a breakpoint
+   *  on the last message is read back next round. A dispatcher hint only: the
+   *  ADR 1002 digest names its fields explicitly and never sees it. */
+  cacheConversation?: boolean;
 }
 
 export interface ToolsRoundResult {
@@ -150,9 +158,12 @@ export async function dispatchAnthropicWithTools(req: ToolsDispatchRequest): Pro
       body: JSON.stringify({
         model: req.model,
         max_tokens: req.maxTokens ?? 4096,
-        tools: cachedTools,
+        ...(cachedTools.length > 0 ? { tools: cachedTools } : {}),
         ...(cachedSystem !== undefined ? { system: cachedSystem } : {}),
-        messages: log,
+        // ADR 1003 D3 — from round 2 on, the newest message carries the
+        // conversation breakpoint so round n+1 reads rounds 1..n from cache.
+        // Built per round from a copy; `log` is never mutated.
+        messages: withAnthropicMessageCache(log, round > 0 && contextEconomy().conversationCache),
       }),
     });
     if (!res.ok) {
@@ -274,9 +285,14 @@ export async function dispatchAnthropicToolsRound(req: ToolsRoundRequest): Promi
     body: JSON.stringify({
       model: req.model,
       max_tokens: req.maxTokens ?? 4096,
-      tools: withAnthropicToolCache(assembledTools, cacheOn),
+      // ADR 1001 — omit an empty tool list (a no-tool agent's turn).
+      ...(assembledTools.length > 0 ? { tools: withAnthropicToolCache(assembledTools, cacheOn) } : {}),
       ...(cachedSystem !== undefined ? { system: cachedSystem } : {}),
-      messages: conversation.map((m) => ({ role: m.role, content: contentToText(m.content) })),
+      // ADR 1003 D3 — the conversation breakpoint, only on a continuation round.
+      messages: withAnthropicMessageCache(
+        conversation.map((m) => ({ role: m.role as 'user' | 'assistant', content: contentToText(m.content) })),
+        contextEconomy().conversationCache && req.cacheConversation === true,
+      ),
     }),
     ...(req.signal ? { signal: req.signal } : {}),
   });

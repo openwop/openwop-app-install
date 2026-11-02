@@ -24,7 +24,7 @@
  */
 
 import { CURRENT_ENGINE_VERSION } from '../storage/eventEra.js';
-import type { InsertRunOptions, Storage } from '../storage/storage.js';
+import { AdmissionRefusedError, type InsertRunOptions, type Storage } from '../storage/storage.js';
 import type { RunRecord } from '../types.js';
 import { stampRunStartContext, type RunStartContext } from './runStartContext.js';
 import { extractRunAttribution } from './agentRunActivityIndex.js';
@@ -44,6 +44,34 @@ function definitionNodePins(def: WorkflowDefinition): Record<string, string> | u
 }
 import { revisionHashOf } from './definitionHash.js';
 import type { WorkflowDefinition } from '../executor/types.js';
+import { reservePlanRun } from './planRunLimit.js';
+import { recordAdmissionRefusal } from './admissionRefusals.js';
+
+/**
+ * ADR 0987 D3 — the admission every new run passes, at this one seam.
+ *
+ * - `plan`: `'charge'` takes one unit of the tenant's monthly plan run limit
+ *   (ADR 0821, `reservePlanRun`) immediately before the insert, after every
+ *   refusal the caller made, and gives it back when the insert throws. A lane
+ *   that does not count says why: `'exempt:<reason>'`.
+ * - `concurrency`: the D2 scope (a digest and its cap), counted by the store
+ *   from run state inside the insert transaction. A full scope throws
+ *   `AdmissionRefusedError` and nothing is written. Absent: the lane has no
+ *   caller scope to count (a schedule, a webhook, a child run inside its
+ *   parent's slot, Q1).
+ *
+ * One minted run is one unit, so a bulk creator (redrive) charges per run by
+ * construction. A replay never reaches an insert, so it never counts.
+ */
+export interface RunAdmissionPolicy {
+  plan: 'charge' | `exempt:${string}`;
+  concurrency?: { key: string; cap: number };
+}
+
+/** A lane that charges the plan, with the caller's concurrency scope if it has one. */
+export function chargedAdmission(concurrency?: { key: string; cap: number }): RunAdmissionPolicy {
+  return concurrency ? { plan: 'charge', concurrency } : { plan: 'charge' };
+}
 
 /**
  * ADR 0551 P1 — how far in the future a new outbox row's `nextAttemptAt` sits.
@@ -93,7 +121,7 @@ async function fireRunInsertedHooks(run: RunRecord, derivedFromRun: boolean): Pr
 export async function insertRunWithStartContext(
   storage: Storage,
   run: RunRecord,
-  ctx?: Partial<RunStartContext> & {
+  ctx: Partial<RunStartContext> & {
     /** ADR 0474 — the definition this run was created against; stamps
      *  `run.metadata.definitionRevision` (the lifecycle-stripped content
      *  hash) so replay/`:fork`/resume can re-resolve the EXACT definition.
@@ -121,13 +149,13 @@ export async function insertRunWithStartContext(
      * which is the two-window duplicate H56 closes.
      */
     idempotencyCommit?: InsertRunOptions['idempotencyCommit'];
-    /** ADR 0987 D2 — concurrency admission, counted inside the insert (see
-     *  `InsertRunOptions.admission`). A refusal throws `AdmissionRefusedError`
-     *  and nothing is written. */
-    admission?: InsertRunOptions['admission'];
+    /** ADR 0987 D3 — this run's admission. REQUIRED: a lane that is exempt says
+     *  so (`plan: 'exempt:<reason>'`), so an exemption is visible in the code
+     *  rather than an omission. See `RunAdmissionPolicy`. */
+    admission: RunAdmissionPolicy;
   },
 ): Promise<void> {
-  if (ctx?.definition && (run.metadata as Record<string, unknown> | undefined)?.definitionRevision === undefined) {
+  if (ctx.definition && (run.metadata as Record<string, unknown> | undefined)?.definitionRevision === undefined) {
     run.metadata = { ...(run.metadata ?? {}), definitionRevision: revisionHashOf(ctx.definition) };
   }
   // grade-data D-3 — the definition says which node versions it was built
@@ -136,7 +164,7 @@ export async function insertRunWithStartContext(
   // pin above: a fork keeps its parent's record verbatim. Only node modules
   // already loaded are compared (a pack node resolves lazily; an unloaded one is
   // unknown here, not a mismatch).
-  if (ctx?.definition && (run.metadata as Record<string, unknown> | undefined)?.nodePinMismatches === undefined) {
+  if (ctx.definition && (run.metadata as Record<string, unknown> | undefined)?.nodePinMismatches === undefined) {
     const registry = getNodeRegistry();
     const mismatches = pinMismatches(definitionNodePins(ctx.definition), (typeId) => registry.get(typeId)?.version);
     if (mismatches.length > 0) {
@@ -154,28 +182,40 @@ export async function insertRunWithStartContext(
   // `definitionRevision` above, which is a pin and must NOT be overwritten.)
   run.metadata = { ...(run.metadata ?? {}), engineVersion: CURRENT_ENGINE_VERSION };
   const attribution = extractRunAttribution(run.metadata);
-  const agentId = ctx?.agentId ?? attribution?.rosterId;
+  const agentId = ctx.agentId ?? attribution?.rosterId;
   run.metadata = await stampRunStartContext(run.metadata, {
-    tenantId: ctx?.tenantId ?? run.tenantId,
+    tenantId: ctx.tenantId ?? run.tenantId,
     ...(agentId ? { agentId } : {}),
     // ADR 0604 (TOCWF-1) — forwarded so a per-run-decision contributor can tell
     // a fresh metadata blob from a `:fork`-copied one. See RunStartContext.
-    ...(ctx?.derivedFromRun ? { derivedFromRun: true } : {}),
+    ...(ctx.derivedFromRun ? { derivedFromRun: true } : {}),
     // ADR 0942 D4 / D10.4 — lineage, read from the row being inserted (host-written).
     ...(run.parentRunId ? { parentRunId: run.parentRunId } : {}),
     ...(run.forkMode ? { forkMode: run.forkMode } : {}),
     // ADR 0831 P2 — read-only view of the blob being stamped.
     metadata: run.metadata ?? {},
     // ADR 0943 D2 — read-only, for per-node decisions (agent bindings).
-    ...(ctx?.definition ? { definition: ctx.definition } : {}),
+    ...(ctx.definition ? { definition: ctx.definition } : {}),
     // ADR 0959 D8 — which workflow this run is (the playbook stamp keys on it).
     workflowId: run.workflowId,
   });
   const opts: InsertRunOptions = {
-    ...(ctx?.enqueueDispatch ? { dispatchOutbox: { nextAttemptAt: Date.now() + DISPATCH_OUTBOX_HINT_GRACE_MS } } : {}),
-    ...(ctx?.idempotencyCommit ? { idempotencyCommit: ctx.idempotencyCommit } : {}),
-    ...(ctx?.admission ? { admission: ctx.admission } : {}),
+    ...(ctx.enqueueDispatch ? { dispatchOutbox: { nextAttemptAt: Date.now() + DISPATCH_OUTBOX_HINT_GRACE_MS } } : {}),
+    ...(ctx.idempotencyCommit ? { idempotencyCommit: ctx.idempotencyCommit } : {}),
+    ...(ctx.admission.concurrency ? { admission: ctx.admission.concurrency } : {}),
   };
-  await storage.insertRun(run, Object.keys(opts).length > 0 ? opts : undefined);
-  if (runInsertedHooks.size > 0) await fireRunInsertedHooks(run, ctx?.derivedFromRun === true);
+  // ADR 0987 D3 — the monthly plan unit is taken here, last, so a refusal the
+  // caller made above never consumes one; an insert that throws (a concurrency
+  // refusal, a peer's identical deterministic run, a storage error) returns it.
+  const reservation = ctx.admission.plan === 'charge' ? await reservePlanRun(run.tenantId) : null;
+  try {
+    await storage.insertRun(run, Object.keys(opts).length > 0 ? opts : undefined);
+  } catch (err) {
+    await reservation?.release().catch(() => undefined);
+    // ADR 0987 D6 — counted here, at the one seam every lane's insert passes (D3),
+    // so a lane that answers the refusal its own way is still counted.
+    if (err instanceof AdmissionRefusedError) recordAdmissionRefusal('concurrency', 'at_cap');
+    throw err;
+  }
+  if (runInsertedHooks.size > 0) await fireRunInsertedHooks(run, ctx.derivedFromRun === true);
 }

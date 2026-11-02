@@ -7,6 +7,10 @@
  *
  * The derivation is wrapped to report the conflict; its own refusal is
  * witnessed in `fork-replay-derive-race.test.ts`.
+ *
+ * Tracker TST-DCD-2. Red when the executor applies a derivation marked `conflict` instead of failing
+ * the gate node `replay_gate_conflict` (grade-tests w70 probe `frc-fail-closed`).
+ * The 20 ms status poll is an honest ceiling: no settle hook exists over HTTP.
  */
 import { vi } from 'vitest';
 import { bareRunId } from './support/bareRunId.js';
@@ -35,14 +39,15 @@ beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  registerWorkflow({
+  const def: WorkflowDefinition = {
     workflowId: 'wf.derive',
     nodes: [
       { nodeId: 'gate', typeId: 'core.approvalGate', config: { title: 'Derive?', actions: ['accept', 'reject'], rejectionPolicy: 'single-veto' } },
       { nodeId: 'after', typeId: 'core.noop', config: {} },
     ],
     edges: [{ edgeId: 'g-a', sourceNodeId: 'gate', targetNodeId: 'after' }],
-  } as unknown as WorkflowDefinition);
+  };
+  registerWorkflow(def);
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });

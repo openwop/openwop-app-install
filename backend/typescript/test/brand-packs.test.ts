@@ -3,6 +3,11 @@
  * `ctx.features.brand` surface (incl. the LLM blend via a stub ctx.callAI) + the
  * agent pack manifest loading (systemPromptRef + tool-allowlist). Mirrors
  * priority-matrix-packs.test.ts.
+ *
+ * TST-BBR-4 (w66 g4, sabotage-witnessed). Red when: the 60/40 blend weights swap;
+ * the banned-phrase ≤30 cap is dropped; resolve-voice stops failing on a missing
+ * brand; the surface guard stops throwing host_capability_missing; the agent
+ * allowlist stops naming the registered `openwop:brand.*` tools.
  */
 import { describe, it, expect } from 'vitest';
 import { join } from 'node:path';

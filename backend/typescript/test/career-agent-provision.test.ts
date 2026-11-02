@@ -5,6 +5,13 @@
  * this ADR ships no loop, and D2 says the persona is data — so the tests that
  * matter assert that host source contains nothing about this agent, and that the
  * heartbeat was not touched to accommodate it.
+ *
+ * grade-tests w67 (TST-CBK-1): red when provisioning stops defaulting to
+ * `review`, mints a second roster member or board on a re-run, creates a board
+ * the roster member does not own, writes into another tenant, when host source
+ * or the heartbeat names the agent, or when the pack's allowlist or prompt
+ * rules drift. "ships NO loop" can only go red when a file is ADDED (an honest
+ * ceiling: no edit to existing source can probe it).
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -56,8 +63,18 @@ describe('ADR 0543 P1 — provisioning', () => {
   });
 
   it('is tenant-isolated', async () => {
-    await provisionCareerAgent(TENANT);
+    const mine = await provisionCareerAgent(TENANT);
     expect(await listRoster('user:t-elsewhere')).toEqual([]);
+    expect(await listBoards('user:t-elsewhere')).toEqual([]);
+    // The idempotency lookup must not cross tenants: the second tenant gets its
+    // OWN roster entry and board, not the first tenant's. (Roster ids are the
+    // persona slug, unique per tenant, so the ids themselves may match.)
+    const theirs = await provisionCareerAgent('user:t-elsewhere');
+    expect(theirs.created, 'the first tenant\'s agent must not satisfy the second tenant\'s lookup').toBe(true);
+    expect((await listRoster('user:t-elsewhere')).filter((r) => r.persona === CAREER_PERSONA)).toHaveLength(1);
+    expect(theirs.boardId).not.toBe(mine.boardId);
+    expect((await listBoards('user:t-elsewhere')).map((b) => b.id)).toEqual([theirs.boardId]);
+    expect((await listBoards(TENANT)).map((b) => b.id)).toEqual([mine.boardId]);
   });
 });
 
@@ -86,6 +103,7 @@ describe('ADR 0543 D2 — the persona is DATA, not source', () => {
 
   it('the pack declares the persona, its prompt and a SCOPED tool allowlist', () => {
     const manifest = JSON.parse(readFileSync(join(PACK, 'pack.json'), 'utf8')) as {
+      name: string;
       agents: Array<{ agentId: string; systemPromptRef: string; toolAllowlist: string[] }>;
     };
     const agent = manifest.agents[0]!;
@@ -93,7 +111,8 @@ describe('ADR 0543 D2 — the persona is DATA, not source', () => {
     // pack-prefix rule (RFC 0003 §B), so the agent had NEVER loaded. It must now
     // live under its own pack's namespace.
     expect(agent.agentId).toBe('vendor.openwop-app.career-agent.agents.default');
-    expect(agent.agentId.startsWith(`${(manifest as unknown as { name: string }).name}.`), 'agentId must extend its pack name or the loader refuses it').toBe(true);
+    expect(manifest.name).toBe('vendor.openwop-app.career-agent.agents');
+    expect(agent.agentId.startsWith(`${manifest.name}.`), 'agentId must extend its pack name or the loader refuses it').toBe(true);
     expect(readFileSync(join(PACK, agent.systemPromptRef), 'utf8').length).toBeGreaterThan(200);
 
     // The allowlist is PER AGENT, so declaring job-search tools here cannot

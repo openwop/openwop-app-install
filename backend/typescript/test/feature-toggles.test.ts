@@ -7,11 +7,18 @@
  *   2. Resolution (service.ts) — on/off, beta cohort eligibility, per-tenant
  *      overrides, sticky variant assignment, durable store round-trip.
  *   3. Validation (validate.ts) — weights-sum-to-100, unique keys, bindings.
+ *
+ * Tracker TST-DCA-8. Every literal bucket / hash below was computed BY HAND
+ * (djb2: h = h*31 + charCode, int32, abs) — never with the function under test.
+ * Sabotage witnesses (grade-tests w70): red when the closed-beta check, the user
+ * arm of the cohort, the open-beta rule, the tenant override, the tenant bucket
+ * unit, orphan pruning / hiding, the salt, the metadata merge, the lean save, the
+ * weights sum, the duplicate-key check, the status enum or the ref-kind check goes.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
-import { initHostExtPersistence, __resetHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { initHostExtPersistence, __resetHostExtPersistence, DurableCollection } from '../src/host/hostExtPersistence.js';
 import { assignVariant, bucketOf, hashString } from '../src/host/featureToggles/bucketing.js';
 import {
   __resetToggleDefaults,
@@ -20,6 +27,7 @@ import {
 import {
   __clearToggleStore,
   getEffectiveConfig,
+  getStoredConfig,
   listEffectiveConfigs,
   pruneOrphanedConfigs,
   resolveConfig,
@@ -41,8 +49,12 @@ const AB: ToggleConfig = {
 };
 
 describe('bucketing (pure, deterministic)', () => {
-  it('hashString is stable for the same input', () => {
-    expect(hashString('user-1:demo:salt')).toBe(hashString('user-1:demo:salt'));
+  it('hashString is stable ACROSS RELEASES — pinned literal outputs', () => {
+    // A changed hash silently moves users between variants, so the outputs
+    // themselves are the contract (hand-computed djb2 values).
+    expect(hashString('a')).toBe(97);
+    expect(hashString('openwop')).toBe(1263171058);
+    expect(hashString('user-1:demo:salt')).toBe(673368194);
   });
 
   it('bucketOf is in [0, 10000)', () => {
@@ -132,10 +144,14 @@ describe('resolution (service, pure given config+subject)', () => {
   });
 
   it('tenant bucketUnit buckets every user in a tenant the same', () => {
+    // Hand-computed buckets (salt s1, id demo.experiment, 50/50 ⇒ A below 5000):
+    // userA → 2876 (A), userB → 7101 (B), tenant-1 → 8748 (B).
+    // Control: under the USER unit the two users really do split.
+    expect(resolveConfig(AB, sub('tenant-1', 'userA')).variant).toBe('A');
+    expect(resolveConfig(AB, sub('tenant-1', 'userB')).variant).toBe('B');
     const cfg: ToggleConfig = { ...AB, bucketUnit: 'tenant' };
-    const a = resolveConfig(cfg, sub('tenant-1', 'userA')).variant;
-    const b = resolveConfig(cfg, sub('tenant-1', 'userB')).variant;
-    expect(a).toBe(b);
+    expect(resolveConfig(cfg, sub('tenant-1', 'userA')).variant).toBe('B');
+    expect(resolveConfig(cfg, sub('tenant-1', 'userB')).variant).toBe('B');
   });
 });
 
@@ -178,8 +194,10 @@ describe('durable store + effective config', () => {
     // config MUST take the admin choice (status) from the row but the declared metadata
     // (category/label/bucketUnit/salt) from CODE, so it still groups under Canvases.
     registerToggleDefault({ ...AB, id: 'canvas.feature', status: 'off', category: 'Canvases', label: 'Canvas' });
-    const staleRow: ToggleConfig = { id: 'canvas.feature', status: 'on', bucketUnit: 'user', salt: 's1' }; // no category, no label
-    await saveConfig(staleRow, 'admin');
+    // Written straight to the store (bypassing saveConfig, which would strip the
+    // metadata) — the shape an OLDER release persisted, so the merge is the only guard.
+    const staleRow: ToggleConfig = { id: 'canvas.feature', status: 'on', bucketUnit: 'user', salt: 's1', category: 'General', label: 'Old label' };
+    await new DurableCollection<ToggleConfig>('feature-toggle', (c) => c.id).put(staleRow);
 
     const eff = await getEffectiveConfig('canvas.feature');
     expect(eff?.status).toBe('on'); // admin choice, from the store
@@ -203,6 +221,11 @@ describe('durable store + effective config', () => {
     expect(saved.category).toBe('Canvases'); // code metadata, not the stale 'Stale'
     expect(saved.label).toBe('Canvas');
     expect((await getEffectiveConfig('grp.feature'))?.category).toBe('Canvases');
+    // The ROW itself is lean — the claim, read from storage, not through the merge.
+    const row = await getStoredConfig('grp.feature');
+    expect(row?.status).toBe('on');
+    expect(row).not.toHaveProperty('category');
+    expect(row).not.toHaveProperty('label');
   });
 
   it('resolveOne returns null for an unknown toggle', async () => {

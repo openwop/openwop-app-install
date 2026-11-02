@@ -94,7 +94,7 @@ async function suspendedOnProject(s: { tenantId: string; ownerId: string; boardI
     metadata: onProject ? { kanban: { boardId: s.boardId, cardId: 'c1' }, actingUserId: s.ownerId } : { actingUserId: s.ownerId },
     configurable: {}, createdAt: now, updatedAt: now,
   };
-  await insertRunWithStartContext(storage, run);
+  await insertRunWithStartContext(storage, run, { admission: { plan: 'exempt:test-fixture' } });
   const def = (await hostSuite.workflowCatalog.getWorkflow(workflowId))!.definition;
   const r = await executeRun(storage, (await storage.getRun(run.runId))!, def);
   expect(r.status.startsWith('waiting')).toBe(true);

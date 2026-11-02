@@ -7,6 +7,10 @@
  * shapes — so the scenario counted two runs. The replay sent the stored body with
  * `res.send(raw)`, skipping the major-2 `res.json` projection (`protocolVersion.ts`)
  * that tenant-binds run ids; the original went through it.
+ *
+ * TST-DGA-3. Red when the replay branch in `routes/runs.ts` sends the stored
+ * body raw instead of through `res.json`, or drops the replay header
+ * (sabotage-witnessed, wave 71).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';

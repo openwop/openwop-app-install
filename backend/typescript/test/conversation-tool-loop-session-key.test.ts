@@ -8,6 +8,10 @@
  * chat-started run a scope set from the UI never narrowed anything. This drives
  * the REAL turn entry with the managed round stubbed and asserts what the model
  * is OFFERED — the observable, not the store.
+ *
+ * TST-CKC-4. Red when the loop keys the scope read by the gate id even for a
+ * session-stamped run (case 2), or drops the gate-id fallback for an unstamped run
+ * (case 3). Case 1 is the control that the narrowing is observable.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
@@ -31,16 +35,20 @@ import type { ProviderPolicyResolver } from '../src/host/index.js';
 
 const TENANT = 'tenant-scope-key';
 const ONLY = 'openwop:kanban.add-todo';
-const agent = { agentId: 'a', persona: 'P', toolAllowlist: [] } as unknown as ResolvedAgentManifest;
-const run = (metadata: Record<string, unknown>, runId: string): RunRecord =>
-  ({ runId, tenantId: TENANT, inputs: { credentialRef: 'managed:openwop-free' }, metadata } as unknown as RunRecord);
+const agent: ResolvedAgentManifest = { agentId: 'a', persona: 'P', modelClass: 'general', systemPrompt: 'sp', packName: 'core.openwop.test', packVersion: '0', toolAllowlist: [] };
+const run = (metadata: Record<string, unknown>, runId: string): RunRecord => ({
+  runId, workflowId: 'openwop-app.conversation', tenantId: TENANT, status: 'waiting-input',
+  inputs: { credentialRef: 'managed:openwop-free' }, metadata, configurable: {},
+  createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+});
+const policyResolver: ProviderPolicyResolver = { resolveForRun: async () => [] };
 
 async function offeredFor(r: RunRecord): Promise<string[]> {
   offered.length = 0;
   await runConversationAgentToolTurn({
     run: r, agent, systemPrompt: 'sp', history: [{ role: 'user', content: 'hi' }],
     runId: r.runId, nodeId: 'n', conversationId: `${r.runId}:n:0`,
-    policyResolver: (() => undefined) as unknown as ProviderPolicyResolver,
+    policyResolver,
   });
   expect(offered.length).toBeGreaterThan(0);
   return offered[0]!;

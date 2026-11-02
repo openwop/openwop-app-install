@@ -8,6 +8,14 @@
  * objective text, no evidence refs), closed-on-terminal for all four finals,
  * NO emission on a replayed evaluation, no re-emit on repeated abandon, and
  * the capability gate (flag off → zero events).
+ *
+ * TST-DEE-4 — red when: the evaluated payload gains or loses a field (content
+ * leaks), a closure is not announced (judge, iteration bound, bind-time cost
+ * flip), an unsatisfied verdict announces a closure, a replay re-emits, or events
+ * emit with the flag off. "Repeated abandon does not re-emit" is a DOUBLE GUARD:
+ * `transitionGoal` returns a terminal goal unchanged on `abandon` (OUTER, probed —
+ * removing it turns the repeat into a thrown GoalNotActiveError) and the emit is
+ * guarded on `g.state === 'active'` (INNER, unreachable while the outer holds).
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -146,8 +154,9 @@ describe('host.goals.evaluated / host.goals.closed', () => {
   it('abandon emits closed(abandoned) once; repeated abandon does not re-emit', async () => {
     registerGoalVerifier('ev:ab', async () => ({ satisfied: false, confidence: 0, runId: 'r' }));
     const id = await makeGoal('ev:ab');
-    await transitionGoal(TENANT, id, 'abandon');
-    await transitionGoal(TENANT, id, 'abandon');
+    expect((await transitionGoal(TENANT, id, 'abandon'))?.state).toBe('abandoned');
+    // The repeat is a quiet no-op that returns the goal unchanged.
+    expect((await transitionGoal(TENANT, id, 'abandon'))?.state).toBe('abandoned');
     const closed = ofType('host.goals.closed');
     expect(closed).toHaveLength(1);
     expect(closed[0].payload).toEqual({ goalId: id, finalState: 'abandoned' });

@@ -1072,11 +1072,28 @@ export type ApprovalEligibilityCheck = (
 ) => Promise<void>;
 
 const eligibilityChecks = new Map<string, ApprovalEligibilityCheck>();
+/** Kinds whose owner's check IS the decide authority (see `decidesAuthority`). */
+const ownerDecidedKinds = new Set<string>();
 
 /** Register (or replace) the decider-eligibility check for one approval kind.
- *  Called by the OWNING feature at boot (the redactor-registry inversion). */
-export function registerApprovalEligibility(kind: string, check: ApprovalEligibilityCheck): void {
+ *  Called by the OWNING feature at boot (the redactor-registry inversion).
+ *
+ *  `decidesAuthority` (ADR 0910 D11 correction) — the owner declares that its
+ *  check states WHO may decide, fully, and refuses an absent or ineligible
+ *  decider. The `/reviews` approval arm then skips the membership half of its
+ *  `approvals:respond` floor for this kind (the key-lane half always runs), so
+ *  `/reviews` decides it exactly as `/approvals/:id/claim` does. Opt in only
+ *  when the check would be safe as the ONLY gate; a kind without the flag keeps
+ *  the floor. */
+export function registerApprovalEligibility(kind: string, check: ApprovalEligibilityCheck, opts?: { decidesAuthority?: true }): void {
   eligibilityChecks.set(kind, check);
+  if (opts?.decidesAuthority) ownerDecidedKinds.add(kind);
+  else ownerDecidedKinds.delete(kind);
+}
+
+/** True when `kind`'s registered owner check is the whole decide authority. */
+export function approvalKindOwnsDecideAuthority(kind: string | undefined): boolean {
+  return kind !== undefined && ownerDecidedKinds.has(kind) && eligibilityChecks.has(kind);
 }
 
 /** Enforce the kind's registered eligibility check (no-op for kinds without one

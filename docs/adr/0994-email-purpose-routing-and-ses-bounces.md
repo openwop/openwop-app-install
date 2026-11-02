@@ -83,6 +83,14 @@ credentials (`host: email-smtp.<region>.amazonaws.com`, `port: 587`,
 campaigns prefer it. Campaign sends already count toward the sender breaker
 (`recordSends` in `sendCampaign`), whatever the provider.
 
+> **IMPLEMENTATION NOTE 2026-10-29 (operational logging):** a failed SMTP send
+> logged only `reason`, which the PII mask hashes, so a production SES auth
+> failure read as `pii_54a0e8c17e`. `smtp send failed` (and `smtp dial failed`
+> for a non-egress pre-dial throw) now carry `failure: auth | connect | timeout |
+> rejected | other` from `classifySmtpFailure` (`host/smtpSend.ts`, nodemailer's
+> `code`, then the reply code), the ADR 0900 `reasonCode: smtp_<class>` that the
+> mask cannot hash, and the numeric `responseCode`. Never the reply text.
+
 ### D4. SES bounces and complaints arrive as signed SNS notifications
 
 `ses` joins `BounceProvider` on the ADR 0241 endpoint

@@ -1,9 +1,14 @@
 /**
  * EDBC-6a (remainder) — the dashboard's per-(tenant, subject) isolation.
  *
- * The filed row said "no backend self-scope/IDOR test". That half is STALE: all
- * three resources already have a same-tenant caller-B leg
- * (`dashboard-layout-route.test.ts:56,89,98`, `dashboard-briefing-route.test.ts:63`).
+ * The filed row said "no backend self-scope/IDOR test". That half lives in the
+ * route files, each with a SAME-tenant caller-B leg so the subject half of the key
+ * is reached: `dashboard-layout-route.test.ts` › "is self-scoped: caller B never
+ * sees caller A's layout" and › "note: GET-absent … self-scoped", and
+ * `dashboard-briefing-route.test.ts` › "is self-scoped … even in the SAME tenant".
+ * (CORRECTED w69 / TST-CUB-4: this header used to cite the layout legs as
+ * same-tenant when they signed B into its own tenant; a fixed-subject probe stayed
+ * green on them. They were moved into one tenant in the same pass.)
  * What was genuinely missing is the other two halves the row named:
  *
  *  1. CROSS-TENANT. Every store key is `(tenantId, subject)`, and nothing pinned
@@ -17,6 +22,10 @@
  *     that today and every existing test would still pass if a SEVENTH took
  *     `req.params.userId`. A protection provided by never doing something needs a
  *     guard over the whole surface, not a case per resource.
+ *
+ * TST-CUB-4. Red when a getter falls back to a same-subject row from another tenant
+ * (each of layout / note / briefing), or when a handler takes its subject from the
+ * request instead of `requireSubject(req)`.
  */
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -27,6 +36,7 @@ import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import {
   getLayout, putLayout, getNote, putNote, getBriefingConfig, putBriefingConfig,
 } from '../src/features/dashboard/dashboardService.js';
+import { stripComments } from './helpers/stripComments.js';
 
 const ROUTES = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'features', 'dashboard', 'routes.ts');
 const A = 'tenant-alpha';
@@ -73,7 +83,7 @@ describe('EDBC-6a — EVERY dashboard handler keys off the SESSION, never reques
   // Strip comments: prose in this file legitimately discusses `req.body` and
   // "request input", and a detector that counts comments measures the wrong thing
   // (the trap that bit the GATE-EPIPE ratchet and a slice marker the same night).
-  const code = src.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
+  const code = stripComments(src);
 
   it('every registered handler calls requireSubject, and the counts MATCH', () => {
     const handlers = code.match(/app\.(get|put|post|patch|delete)\(/g) ?? [];

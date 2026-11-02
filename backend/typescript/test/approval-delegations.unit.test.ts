@@ -6,9 +6,22 @@
  * rule (`consumeVoteIdentity`). The HTTP/authz + end-to-end quorum layers
  * live in approval-delegations.test.ts (they boot the real app, which owns
  * the host-ext persistence singleton this file re-initializes).
+ *
+ * Open gates: `resolveEligibleApprovers` expands delegations only from resolved
+ * principals, and an open gate resolves none, so "an open gate adds no delegate"
+ * holds structurally as well as by its `!openGate` guard (w66 dl-open stayed
+ * green by construction). The leg asserts the open gate's answer, not the guard.
+ *
+ * TST-BXF-4. Red when: self-delegation or an inverted window is accepted (w66
+ * dl-self, dl-window), revoking twice re-stamps (dl-revoke-idem, with a moved
+ * clock), an expired or revoked delegation counts (dl-active-window,
+ * dl-active-revoked), an outsider delegate is added to an org gate (dl-org), the
+ * delegate is not added (dl-fanout), a delegate votes as themselves
+ * (dl-countas), or a several-principal delegate is not made to choose /
+ * may name a principal they do not cover (dl-several, dl-actedfor).
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
 import { initHostExtPersistence, __resetHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { __resetAccessStores, createMember } from '../src/host/accessControlService.js';
@@ -43,14 +56,22 @@ describe('approval delegations — store + resolution + identity (service)', () 
 
   it('store: validates window and self-delegation; revocation is idempotent', async () => {
     await expect(createDelegation({ tenantId: T, fromSubject: 'u:a', toSubject: 'u:a', startsAt: iso(0), endsAt: iso(HOUR), createdBy: 'u:a' }))
-      .rejects.toMatchObject({ code: 'validation_error' });
+      .rejects.toMatchObject({ code: 'validation_error', message: 'A delegation to yourself has no effect.' });
     await expect(createDelegation({ tenantId: T, fromSubject: 'u:a', toSubject: 'u:b', startsAt: iso(HOUR), endsAt: iso(0), createdBy: 'u:a' }))
-      .rejects.toMatchObject({ code: 'validation_error' });
+      .rejects.toMatchObject({ code: 'validation_error', message: 'endsAt must be after startsAt.' });
     const d = await createDelegation({ tenantId: T, fromSubject: 'u:a', toSubject: 'u:b', startsAt: iso(-HOUR), endsAt: iso(HOUR), createdBy: 'u:a' });
-    const r1 = await revokeDelegation(T, d.delegationId, 'u:a');
-    expect(r1.revokedAt).toBeTruthy();
-    const r2 = await revokeDelegation(T, d.delegationId, 'u:a');
-    expect(r2.revokedAt).toBe(r1.revokedAt); // idempotent
+    // The two revokes happen at DIFFERENT instants, so a re-stamp would show.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(NOW + 1_000);
+      const r1 = await revokeDelegation(T, d.delegationId, 'u:a');
+      expect(r1.revokedAt).toBe(new Date(NOW + 1_000).toISOString());
+      vi.setSystemTime(NOW + 2_000);
+      const r2 = await revokeDelegation(T, d.delegationId, 'u:a');
+      expect(r2.revokedAt).toBe(r1.revokedAt); // idempotent: the first stamp stands
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('activeDelegations honors the window and revocation (fail closed on expiry)', async () => {
@@ -65,7 +86,7 @@ describe('approval delegations — store + resolution + identity (service)', () 
     expect(byPrincipal.has('u:p3')).toBe(false); // revoked
   });
 
-  it('resolution: an active delegation adds the delegate for a NON-open gate; open gates skip it', async () => {
+  it('resolution: an active delegation adds the delegate for a NON-open gate; an open gate reports no subjects or delegates', async () => {
     await createDelegation({ tenantId: T, fromSubject: 'u:principal', toSubject: 'u:delegate', startsAt: iso(-HOUR), endsAt: iso(HOUR), createdBy: 'u:principal' });
     const named = await resolveEligibleApprovers({ approverRefs: ['u:principal'] }, { tenantId: T });
     expect(named.subjects.sort()).toEqual(['u:delegate', 'u:principal']); // principal stays — no lockout

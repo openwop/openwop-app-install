@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 import { locateRepoSchemasDir } from '../src/host/_repoPath.js';
 import { V2_TENANT_ID, fromWireRunId, toWireRunId } from '../src/host/v2Ids.js';
+import { mintAnonSession } from '../src/middleware/cookieSession.js';
 
 /**
  * ADR 0704 — this host's `V2_TENANT_ID` guard must be EXACTLY as wide as the
@@ -28,6 +29,12 @@ import { V2_TENANT_ID, fromWireRunId, toWireRunId } from '../src/host/v2Ids.js';
  * patterns to admit `anon:`. ADR 0704 first kept anonymous runs UNBOUND; ADR 0760
  * (issue #4169) binds them, because a bare id on the major-2 wire is exactly what
  * identity.md §5 forbids. The equality leg is restored.
+ *
+ * TST-BXC-4. Red when: the session mint stops producing `anon:` tenants (case 1
+ * calls the real `mintAnonSession`; it used to grep the source, which comments
+ * satisfied — w66 trip-mint read vacuous), `V2_TENANT_ID` drifts from the corpus
+ * segment (trip-regex), an anon tenant stops binding (trip-anonwire), or the
+ * inbound tenant check is dropped (trip-mismatch).
  */
 function tenantSegmentOf(boundPattern: string): string {
   // `^<tenant>/<opaque>$` — take everything between the anchor and the slash.
@@ -47,11 +54,9 @@ describe('anon-tenant bound ids (crosstalk dd19)', () => {
   it('this host mints anon: tenants, so the question is live', () => {
     // Non-vacuity: if this host stopped minting them the rest of the test would
     // be guarding nothing, and would keep passing while guarding nothing.
-    const src = readFileSync(
-      join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'middleware', 'cookieSession.ts'),
-      'utf8',
-    );
-    expect(src.includes('anon:'), 'cookieSession mints an anon: tenant').toBe(true);
+    const { tenantId, tier } = mintAnonSession();
+    expect(tier).toBe('anon');
+    expect(tenantId, 'the anonymous session mint produces an anon: tenant').toMatch(/^anon:[A-Za-z0-9_-]+$/);
   });
 
   it('the guard is EXACTLY the corpus tenant segment, anon: prefix included (ADR 0760)', () => {

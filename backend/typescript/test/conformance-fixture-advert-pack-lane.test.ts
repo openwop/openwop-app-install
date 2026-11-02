@@ -9,13 +9,23 @@
  * (`core.ai.structuredOutput` from `core.openwop.ai` backs ten of them) in a real
  * boot while every test stayed green. Its own file because the resolver is a
  * process-global the other file must not inherit.
+ *
+ * Tracker: TST-CGK-5 (WS0, 2026-09-24 — the structural advert rule in
+ * host/index.ts `fixtureIsAdvertisable`). Red when `NodeRegistry.isResolvable`
+ * (executor/nodeRegistry.ts) stops consulting the installed-pack probe.
  */
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 beforeAll(async () => {
   process.env.OPENWOP_ENABLE_CONFORMANCE_NODES = 'true';
   const { ensureNodesRegistered } = await import('../src/bootstrap/nodes.js');
   ensureNodesRegistered();
+});
+
+afterAll(async () => {
+  // The resolver is process-global: leave none installed behind this file.
+  const { setNodePackResolver } = await import('../src/executor/nodeRegistry.js');
+  setNodePackResolver(async () => null);
 });
 
 describe('fixture advert — the installed-pack lane of isResolvable', () => {

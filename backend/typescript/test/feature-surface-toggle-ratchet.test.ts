@@ -11,6 +11,10 @@
  *
  * Observed RED against unmodified source: `sales-commissions → surface
  * 'commissions'` was the one offender.
+ *
+ * Tracker: TST-DBE-5. Red when: a surface id matches no toggle, a surface is
+ * gated on a sibling's toggle, or an always-on exemption goes stale (probes
+ * w70g2-st-*).
  */
 import { describe, expect, it } from 'vitest';
 import { BACKEND_FEATURES } from '../src/features/index.js';

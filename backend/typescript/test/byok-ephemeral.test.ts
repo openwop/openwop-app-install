@@ -8,6 +8,10 @@
  *   - clearExpiredEphemeralSecrets keeps only the listed tenants.
  *   - Without scope.tenantId, ephemeral resolveSecret returns null
  *     (closed by construction — there's no fallback global bucket).
+ *
+ * TST-BBY-5 (w66 g4, sabotage-witnessed). Red when: resolve reads another
+ * tenant's bucket; a scopeless resolve returns a key; listSecretRefs unions
+ * buckets; the expiry sweep ignores `keep`; a single-tenant clear wipes all.
  */
 
 import { beforeEach, afterAll, describe, expect, it } from 'vitest';

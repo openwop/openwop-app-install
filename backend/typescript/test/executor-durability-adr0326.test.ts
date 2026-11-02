@@ -1,22 +1,54 @@
 /**
- * ADR 0326 P1/P2 (CS-WF-3/4) — executor durability.
+ * ADR 0326 P1/P2/P3 (CS-WF-3/4) — executor durability (TST-DBC-3).
  *
  * P1 — bounded opt-in node retry: `config.retry.maxAttempts` re-queues a
  * failing node (each attempt = its own node.started/node.failed pair in the
- * event log; existing vocabulary), non-retryable classes and no-config nodes
- * fail exactly as before, and the recursion cap still bounds total work.
+ * event log; existing vocabulary), the budget caps the attempts, and a node
+ * with no retry config makes exactly one attempt. (Non-retryable error classes
+ * and the recursion cap are NOT exercised here — CORRECTED in w70: this header
+ * used to claim both.)
  *
  * P2 — cross-instance SSE fan-out: run-event ticks coalesce on the host-ext
- * bus, and the stream's per-connection watermark delivers each event at most
- * once even when the in-proc path AND a tick-triggered gap fetch both see it.
+ * bus (fake `setTimeout`, so the 100 ms window is advanced, not slept), and the
+ * stream's per-connection watermark delivers each event at most once even when
+ * the in-proc path AND a tick-triggered gap fetch both see it. That "at most
+ * once" is a TRIPLE guard in routes/streams.ts — `deliverOnce`'s
+ * `ev.sequence <= deliveredThrough`, `scheduleGapFetch`'s same check (twice),
+ * and the gap fetch reading `fromSeq: deliveredThrough` — on non-adjacent
+ * lines, so no single-edit sabotage can produce a duplicate (round-1 probe
+ * w70g2-dur-once was vacuous by design). The case still guards the sum.
+ *
+ * P3a/P3b + ADR 0341 — failed provider calls record and replay at their
+ * attempt key in the same class family; a branch fork resumes from its
+ * checkpoint; a replay fork never fires a side-effecting node.
+ *
+ * The `countChatSessionMessages` case is a storage-adapter claim that came out
+ * of the same architect review (findings 1–2). It lives here because its only
+ * other coverage is the Postgres testcontainers parity test, which skips in the
+ * gate; it is the sqlite/memory adapter's witness.
+ *
+ * Dedupe row TST-DBC-3-DEDUPE (protected, human decision): "a branch fork whose
+ * fromSeq lands on a suspended checkpoint inherits the gate" is covered in full
+ * by adr0751-fork-suspended-checkpoint.test.ts.
+ *
+ * Red when: retries are disabled or the budget is off by one, a no-config node
+ * retries, the coalesce flushes per publish or a terminal tick waits, an
+ * in-proc event skips the gap fetch, the count adapter miscounts, a branch fork
+ * re-runs its prefix, a failure is not recorded or replays in the wrong family,
+ * or a replay fork fires a side-effecting node (probes w70g2-dur-*).
  */
-import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import { describe, expect, it, beforeAll, afterAll, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import { getNodeRegistry } from '../src/executor/nodeRegistry.js';
 import { publishRunEventTick, subscribeRunEventTicks } from '../src/host/runEventBus.js';
 import { bareRunId } from './support/bareRunId.js';
+import type { AiCallRequest } from '../src/executor/types.js';
+import type { ProviderPolicyResolver } from '../src/host/index.js';
+
+const NO_POLICIES: ProviderPolicyResolver = { async resolveForRun() { return []; } };
+const TERMINAL = ['completed', 'failed', 'cancelled'];
 
 let server: http.Server;
 let BASE: string;
@@ -35,10 +67,10 @@ beforeAll(async () => {
     typeId: 'test.flaky-until',
     version: '1.0.0',
     async execute(ctx) {
-      const key = (ctx as { runId?: string }).runId ?? 'x';
+      const key = ctx.runId;
       const n = (callsByRun.get(key) ?? 0) + 1;
       callsByRun.set(key, n);
-      const succeedAt = Number((ctx as { config?: { succeedAt?: unknown } }).config?.succeedAt ?? 3);
+      const succeedAt = Number(ctx.config?.succeedAt ?? 3);
       if (n < succeedAt) throw new Error(`transient failure #${n}`);
       return { status: 'success', outputs: { output: `ok after ${n}` } };
     },
@@ -55,17 +87,29 @@ async function api<T = Record<string, unknown>>(path: string, init: RequestInit 
   return { status: res.status, body: (text ? JSON.parse(text) : {}) as T };
 }
 
+/** Wait (polling the run, never a fixed settle) until `pred(status)` holds. */
+async function waitForStatus(runId: string, pred: (s: string) => boolean, timeout = 10_000): Promise<string> {
+  let status = '';
+  await vi.waitFor(async () => {
+    status = (await api<{ status: string }>(`/runs/${runId}`)).body.status;
+    if (!pred(status)) throw new Error(`run ${runId} still ${status}`);
+  }, { timeout, interval: 25 });
+  return status;
+}
+
+/** Drain pending immediates/microtasks (in-proc fan-out + sqlite reads). */
+async function drain(): Promise<void> {
+  for (let i = 0; i < 10; i++) await new Promise<void>((r) => setImmediate(r));
+}
+
 async function runToTerminal(workflowId: string, nodes: unknown[], inputs: Record<string, unknown> = {}): Promise<{ runId: string; status: string; events: Array<{ type?: string; nodeId?: string }> }> {
   await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({ workflowId, nodes, edges: [] }) });
   const create = await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs, tenantId: '_anon' }) });
   expect(create.status).toBe(201);
   const runId = create.body.runId;
-  let status = 'pending';
-  for (let i = 0; i < 120; i++) {
-    await new Promise((r) => setTimeout(r, 25));
-    status = (await api<{ status: string }>(`/runs/${runId}`)).body.status;
-    if (['completed', 'failed', 'cancelled'].includes(status)) break;
-  }
+  // The executor's retry backoff is real (250 ms base, unexported) — the
+  // 10 s budget absorbs it under load.
+  const status = await waitForStatus(runId, (s) => TERMINAL.includes(s));
   const events = (await api<{ events?: Array<{ type?: string; nodeId?: string }> }>(`/host/openwop-app/runs/${bareRunId(runId)}/debug-bundle`)).body.events ?? [];
   return { runId, status, events };
 }
@@ -105,15 +149,21 @@ describe('ADR 0326 P2 — run-event ticks + the SSE watermark', () => {
   it('ticks coalesce (many publishes → one bus frame carrying the max seq); terminal flushes immediately', async () => {
     const seen: number[] = [];
     const unsub = await subscribeRunEventTicks('run-tick-co', (seq) => { seen.push(seq); });
-    publishRunEventTick('run-tick-co', 1);
-    publishRunEventTick('run-tick-co', 2);
-    publishRunEventTick('run-tick-co', 3);
-    await new Promise((r) => setTimeout(r, 200)); // > coalesce window
-    expect(seen).toEqual([3]);
-    publishRunEventTick('run-tick-co', 4, true); // terminal — immediate
-    await new Promise((r) => setTimeout(r, 50));
-    expect(seen).toEqual([3, 4]);
-    await unsub();
+    // The memory bus delivers synchronously; only the coalesce timer is faked.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      publishRunEventTick('run-tick-co', 1);
+      publishRunEventTick('run-tick-co', 2);
+      publishRunEventTick('run-tick-co', 3);
+      expect(seen).toEqual([]); // nothing before the window closes
+      vi.advanceTimersByTime(150); // > the 100 ms coalesce window
+      expect(seen).toEqual([3]);
+      publishRunEventTick('run-tick-co', 4, true); // terminal — immediate, no timer advance
+      expect(seen).toEqual([3, 4]);
+    } finally {
+      vi.useRealTimers();
+      await unsub();
+    }
   });
 
   it('the SSE stream delivers each event exactly once despite in-proc + tick double-sighting', async () => {
@@ -121,23 +171,35 @@ describe('ADR 0326 P2 — run-event ticks + the SSE watermark', () => {
     await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({ workflowId: 'adr0326.sse', nodes: [{ nodeId: 'gate', typeId: 'core.conversationGate', config: { prompt: 'x' } }], edges: [] }) });
     const create = await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId: 'adr0326.sse', inputs: { provider: 'mock', model: 'mock-1' }, tenantId: '_anon' }) });
     const runId = create.body.runId;
-    for (let i = 0; i < 60; i++) { await new Promise((r) => setTimeout(r, 20)); const s = (await api<{ status: string }>(`/runs/${runId}`)).body.status; if (s.startsWith('waiting')) break; }
+    await waitForStatus(runId, (s) => s.startsWith('waiting'));
 
     const ac = new AbortController();
     const res = await fetch(`${BASE}/runs/${runId}/events?stream=1`, { headers: { ...H, accept: 'text/event-stream' }, signal: ac.signal });
     expect(res.status).toBe(200);
-    const reader = res.body!.getReader();
+    if (!res.body) throw new Error('no SSE body');
+    const reader = res.body.getReader();
     let buf = '';
     const readAll = (async () => {
       const dec = new TextDecoder();
       for (;;) { const { value, done } = await reader.read(); if (done) return; buf += dec.decode(value, { stream: true }); }
     })();
-    await new Promise((r) => setTimeout(r, 150)); // stream subscribed
+    // Subscribed: the buffered replay has reached the client.
+    await vi.waitFor(() => { if (!buf.includes('"sequence"')) throw new Error('no replay frame yet'); }, { timeout: 5000, interval: 10 });
+    const ticks: number[] = [];
+    const unsubTicks = await subscribeRunEventTicks(bareRunId(runId), (seq) => { ticks.push(seq); });
 
     // One exchange appends events; the in-proc fanout AND the (self-)tick both fire.
+    const before = buf.length;
     const ex = await api(`/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: 'watermark probe' } } }) });
     expect(ex.status).toBe(200);
-    await new Promise((r) => setTimeout(r, 400)); // in-proc + coalesced tick + gap fetch settle
+    // Await BOTH sightings: new frames on the wire AND the coalesced tick that
+    // triggers the second (gap-fetch) path; then drain that fetch.
+    await vi.waitFor(() => {
+      if (buf.length === before) throw new Error('no new frames yet');
+      if (ticks.length === 0) throw new Error('no tick yet');
+    }, { timeout: 5000, interval: 10 });
+    await drain();
+    await unsubTicks();
     ac.abort();
     await readAll.catch(() => undefined);
 
@@ -158,14 +220,15 @@ describe('post-merge review fixes (architect findings 1-2)', () => {
     await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({ workflowId: 'adr0326.gap', nodes: [{ nodeId: 'gate', typeId: 'core.conversationGate', config: { prompt: 'x' } }], edges: [] }) });
     const create = await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId: 'adr0326.gap', inputs: { provider: 'mock', model: 'mock-1' }, tenantId: '_anon' }) });
     const runId = create.body.runId;
-    for (let i = 0; i < 60; i++) { await new Promise((r) => setTimeout(r, 20)); const s = (await api<{ status: string }>(`/runs/${runId}`)).body.status; if (s.startsWith('waiting')) break; }
+    await waitForStatus(runId, (s) => s.startsWith('waiting'));
 
     const ac = new AbortController();
     const res = await fetch(`${BASE}/runs/${runId}/events?stream=1`, { headers: { ...H, accept: 'text/event-stream' }, signal: ac.signal });
-    const reader = res.body!.getReader();
+    if (!res.body) throw new Error('no SSE body');
+    const reader = res.body.getReader();
     let buf = '';
     const readAll = (async () => { const dec = new TextDecoder(); for (;;) { const { value, done } = await reader.read(); if (done) return; buf += dec.decode(value, { stream: true }); } })();
-    await new Promise((r) => setTimeout(r, 150));
+    await vi.waitFor(() => { if (!buf.includes('"sequence"')) throw new Error('no replay frame yet'); }, { timeout: 5000, interval: 10 });
 
     const { hostExtStorage } = await import('../src/host/hostExtPersistence.js');
     const storage = hostExtStorage();
@@ -175,7 +238,10 @@ describe('post-merge review fixes (architect findings 1-2)', () => {
     // "Instance A": an in-proc append — NON-contiguous with the stream's watermark.
     const { getEventLog } = await import('../src/executor/eventLog.js');
     await getEventLog().append({ runId: bareRunId(runId), type: 'custom.gap-a', payload: { i: 3 } });
-    await new Promise((r) => setTimeout(r, 300)); // gap fetch settles
+    // The in-proc event is the LAST appended; once it is on the wire the
+    // stream has either fetched the gap before it or skipped it for good.
+    await vi.waitFor(() => { if (!buf.includes('custom.gap-a')) throw new Error('gap-a not delivered yet'); }, { timeout: 5000, interval: 10 });
+    await drain();
     ac.abort();
     await readAll.catch(() => undefined);
 
@@ -212,22 +278,14 @@ describe('ADR 0326 P3b — fork re-execution (branch resumes from the checkpoint
     const res = await fetch(`${BASE}/runs/${runId}/events`, { headers: { ...H, accept: 'application/json' } });
     return ((await res.json()) as { events: EvDoc[] }).events;
   }
-  async function pollTerminal(runId: string): Promise<string> {
-    let status = 'pending';
-    for (let i = 0; i < 200; i++) {
-      await new Promise((r) => setTimeout(r, 25));
-      status = (await api<{ status: string }>(`/runs/${runId}`)).body.status;
-      if (['completed', 'failed', 'cancelled'].includes(status)) break;
-    }
-    return status;
-  }
+  const pollTerminal = (runId: string): Promise<string> => waitForStatus(runId, (s) => TERMINAL.includes(s));
 
   it('a branch fork from a mid-run checkpoint does NOT re-execute the copied prefix; its outputs flow into the suffix', async () => {
     const emitExecutions: string[] = [];
     getNodeRegistry().register({
       typeId: 'test.p3b.emit', version: '1.0.0',
       async execute(ctx) {
-        emitExecutions.push((ctx as { runId?: string }).runId ?? '?');
+        emitExecutions.push(ctx.runId);
         return { status: 'success', outputs: { output: 'prefix-payload' } };
       },
     });
@@ -291,7 +349,7 @@ describe('ADR 0326 P3b — fork re-execution (branch resumes from the checkpoint
     }) });
     const create = await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId: 'adr0326.p3b-suspended', inputs: { provider: 'mock', model: 'mock-1' }, tenantId: '_anon' }) });
     const runId = create.body.runId;
-    for (let i = 0; i < 60; i++) { await new Promise((r) => setTimeout(r, 20)); const s = (await api<{ status: string }>(`/runs/${runId}`)).body.status; if (s.startsWith('waiting')) break; }
+    await waitForStatus(runId, (s) => s.startsWith('waiting'));
 
     const events = await listRunEvents(runId);
     const maxSeq = Math.max(...events.map((e) => e.sequence));
@@ -300,8 +358,7 @@ describe('ADR 0326 P3b — fork re-execution (branch resumes from the checkpoint
     });
     expect(fork.status).toBe(201);
     const forkId = String(fork.body.runId);
-    let forkStatus = '';
-    for (let i = 0; i < 100; i++) { await new Promise((r) => setTimeout(r, 20)); forkStatus = (await api<{ status: string }>(`/runs/${forkId}`)).body.status; if (forkStatus.startsWith('waiting') || forkStatus === 'failed') break; }
+    const forkStatus = await waitForStatus(forkId, (s) => s.startsWith('waiting') || s === 'failed');
     expect(forkStatus).toMatch(/^waiting/);
     const gates = await api<{ interrupts: Array<{ kind: string }> }>(`/host/openwop-app/runs/${bareRunId(forkId)}/interrupts`);
     expect(gates.body.interrupts.map((g) => g.kind)).toEqual(['conversation']);
@@ -312,10 +369,9 @@ describe('ADR 0326 P3b — fork re-execution (branch resumes from the checkpoint
     getNodeRegistry().register({
       typeId: 'test.p3b.ai', version: '1.0.0',
       async execute(ctx) {
-        const callAI = (ctx as { callAI?: (req: unknown) => Promise<{ content: string }> }).callAI;
-        if (!callAI) throw new Error('callAI missing from node ctx');
-        const res = await callAI({ provider: 'mock', model: 'mock-1', messages: [{ role: 'user', content: 'deterministic probe' }] });
-        return { status: 'success', outputs: { output: res.content } };
+        if (!ctx.callAI) throw new Error('callAI missing from node ctx');
+        const res = await ctx.callAI({ provider: 'mock', model: 'mock-1', messages: [{ role: 'user', content: 'deterministic probe' }] });
+        return { status: 'success', outputs: { output: res.content ?? '' } };
       },
     });
     resetMockPrograms();
@@ -376,9 +432,9 @@ describe('ADR 0326 P3a — invocation-log attempt fidelity (record failures, rep
     // Program: call 1 throws (transient), call 2 succeeds.
     programMock(nodeId, [{ errorCode: 'provider_unavailable' }, { content: 'recovered' }]);
     const mk = (attempt: number) => createAiProvidersAdapter({
-      runId: 'run-p3a-1', nodeId, tenantId: '_anon', attempt, secrets: {},
-    } as Parameters<typeof createAiProvidersAdapter>[0]);
-    const req = { provider: 'mock', model: 'mock-1', messages: [{ role: 'user' as const, content: 'x' }] } as Parameters<ReturnType<typeof createAiProvidersAdapter>['callAI']>[0];
+      runId: 'run-p3a-1', nodeId, tenantId: '_anon', attempt, secrets: {}, policyResolver: NO_POLICIES,
+    });
+    const req: AiCallRequest = { provider: 'mock', model: 'mock-1', messages: [{ role: 'user', content: 'x' }] };
 
     // ADR 0549 P3 — each "replay" below re-enters the NODE BODY, so it declares
     // that explicitly. Under RFC 0150 §B a bare second `callAI` at the same
@@ -428,9 +484,9 @@ describe('ADR 0326 P3a — invocation-log attempt fidelity (record failures, rep
     const nodeId = 'gcchat3.family';
     programMock(nodeId, [{ errorCode: 'provider_unavailable' }]);
     const mk = () => createAiProvidersAdapter({
-      runId: 'run-gcchat3-1', nodeId, tenantId: '_anon', attempt: 1, secrets: {},
-    } as Parameters<typeof createAiProvidersAdapter>[0]);
-    const req = { provider: 'mock', model: 'mock-1', messages: [{ role: 'user' as const, content: 'x' }] } as Parameters<ReturnType<typeof createAiProvidersAdapter>['callAI']>[0];
+      runId: 'run-gcchat3-1', nodeId, tenantId: '_anon', attempt: 1, secrets: {}, policyResolver: NO_POLICIES,
+    });
+    const req: AiCallRequest = { provider: 'mock', model: 'mock-1', messages: [{ role: 'user', content: 'x' }] };
 
     // ADR 0549 P3 — see the sibling case: each `callAI` below stands for a fresh
     // node-body entry, so the ordinal (and therefore the identity) is rewound.
@@ -440,27 +496,27 @@ describe('ADR 0326 P3a — invocation-log attempt fidelity (record failures, rep
     reenter();
     await expect(mk().callAI(req)).rejects.toMatchObject({ name: 'AiProviderError' });
     const key = __lastInvocationCacheKeyForTests();
-    expect(key).toBeTruthy();
-    const recorded = await getInvocationLog().get(key!) as Record<string, unknown>;
-    expect(recorded['__openwopInvocationOutcome']).toBe('failure');
-    expect(recorded['kind']).toBe('provider');
+    if (!key) throw new Error('no invocation key recorded');
+    expect(await getInvocationLog().get(key)).toMatchObject({ __openwopInvocationOutcome: 'failure', kind: 'provider' });
 
     // Seed a GENERIC envelope at the same key → replay throws a plain Error
     // with the live name restored, NOT an AiProviderError.
-    await getInvocationLog().put(key!, { __openwopInvocationOutcome: 'failure', kind: 'generic', name: 'TypeError', message: 'boom from a dispatcher' });
+    await getInvocationLog().put(key, { __openwopInvocationOutcome: 'failure', kind: 'generic', name: 'TypeError', message: 'boom from a dispatcher' });
     reenter();
     const genericErr = await mk().callAI(req).then(() => null, (e: unknown) => e);
     expect(genericErr).toBeInstanceOf(Error);
     expect(genericErr).not.toBeInstanceOf(AiProviderError);
-    expect((genericErr as Error).name).toBe('TypeError');
-    expect((genericErr as Error).message).toBe('boom from a dispatcher');
+    if (!(genericErr instanceof Error)) throw new Error('unreachable');
+    expect(genericErr.name).toBe('TypeError');
+    expect(genericErr.message).toBe('boom from a dispatcher');
 
     // Back-compat: a kind-LESS envelope (pre-change record) replays provider-classed.
-    await getInvocationLog().put(key!, { __openwopInvocationOutcome: 'failure', code: 'rate_limited', message: 'old-style envelope' });
+    await getInvocationLog().put(key, { __openwopInvocationOutcome: 'failure', code: 'rate_limited', message: 'old-style envelope' });
     reenter();
     const legacyErr = await mk().callAI(req).then(() => null, (e: unknown) => e);
     expect(legacyErr).toBeInstanceOf(AiProviderError);
-    expect((legacyErr as { code?: string }).code).toBe('rate_limited');
+    if (!(legacyErr instanceof AiProviderError)) throw new Error('unreachable');
+    expect(legacyErr.code).toBe('rate_limited');
   });
 });
 
@@ -472,14 +528,7 @@ describe('ADR 0341 — replay-fork side-effect suppression', () => {
     const res = await fetch(`${BASE}/runs/${runId}/events`, { headers: { ...H, accept: 'application/json' } });
     return ((await res.json()) as { events: Ev341[] }).events;
   };
-  const terminal = async (runId: string): Promise<string> => {
-    for (let i = 0; i < 100; i++) {
-      const r = await api<{ status: string }>(`/runs/${runId}`);
-      if (['completed', 'failed', 'cancelled'].includes(r.body.status)) return r.body.status;
-      await new Promise((res) => setTimeout(res, 50));
-    }
-    return 'timeout';
-  };
+  const terminal = (runId: string): Promise<string> => waitForStatus(runId, (s) => TERMINAL.includes(s));
   const mkRun = async (workflowId: string): Promise<string> => {
     const r = await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs: {}, tenantId: '_anon' }) });
     expect(r.status).toBe(201);

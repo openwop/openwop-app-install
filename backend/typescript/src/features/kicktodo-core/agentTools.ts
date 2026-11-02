@@ -13,6 +13,7 @@
 import { createHash } from 'node:crypto';
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
 import { getAgentRegistry } from '../../executor/agentRegistry.js';
+import { resolveServedAgentDetailed } from '../../host/agentServing.js';
 import { runAgentDispatch } from '../../host/agentDispatch.js';
 import { registerJob, listJobsForSubject, ONE_SHOT_CRON } from '../../host/schedulingService.js';
 import { upsertAgentToolAllowlistOverride, clearAgentToolAllowlistOverride } from '../../host/agentToolAllowlistService.js';
@@ -143,7 +144,10 @@ export async function conveneSpecialist(
   const context = typeof input.context === 'string' ? input.context.trim() : '';
   // Resolve BEFORE dispatch so an uninstalled pack is an honest typed error,
   // not a thrown AgentNotFoundError. (Pack agents resolve tenant-less.)
-  const resolved = getAgentRegistry().get(agentId);
+  // ADR 1014 M6 — the version the deployment serves (the head with versions off), so
+  // the provenance and the confinement below name the code that will run.
+  const served = getAgentRegistry().get(agentId) ? await resolveServedAgentDetailed(agentId, scope.tenantId, scope.conversationId ?? agentId) : null;
+  const resolved = served?.agent ?? null;
   if (!resolved) {
     return { content: JSON.stringify({ error: 'specialist_unavailable', specialist }), isError: true };
   }

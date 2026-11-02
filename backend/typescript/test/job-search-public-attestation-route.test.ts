@@ -4,6 +4,20 @@
  * Public-route tests: no PII beyond claims, payload cap, uniform 404. The
  * verifier is an unauthenticated stranger, so every assertion here is about what
  * a stranger can learn — including from the SHAPE of a refusal.
+ *
+ * Booted with `OPENWOP_AUTH_DISABLE_COOKIES=true` (the bearer-only posture,
+ * restored after): with cookies on, a credential-less request is minted an
+ * anonymous session on EVERY path, so the public-path allowlist was never reached
+ * and dropping this route from it stayed green (round-1 `w71g3-pa-anon`).
+ * (`OPENWOP_AUTH_ENFORCE_BEARER` would also do it but implies the `auth` deploy
+ * posture, which refuses to boot without a KMS key.)
+ *
+ * Tracker TST-DHD-1 (wave 71). Red when: the route leaves the public-path
+ * allowlist (`pa-anon-r2`); a revoked token resolves (`pa-revoked`); the
+ * projection carries a tenant id (`pa-pii`); the path joins the SSE rate-limit
+ * exemption (`pa-sse`). CEILING: "caps the payload BEFORE any lookup" is not
+ * observable — the cap and the not-found path return the same frozen body by
+ * design (`pa-cap` is an equivalent mutant); the case asserts the uniform refusal.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -20,14 +34,21 @@ const TENANT = 'user:t-pubatt';
 let server: Server;
 let BASE: string;
 
+const savedCookies = process.env.OPENWOP_AUTH_DISABLE_COOKIES;
+
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
+  process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((r) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; r(); }); });
   await enableTenantOverride('job-search', TENANT, 'test');
 }, 180_000);
 
-afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
+afterAll(async () => {
+  await new Promise<void>((r) => server.close(() => r()));
+  if (savedCookies === undefined) delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
+  else process.env.OPENWOP_AUTH_DISABLE_COOKIES = savedCookies;
+});
 
 let seq = 0;
 
@@ -88,7 +109,7 @@ describe('ADR 0544 P3 — the public verification route', () => {
     expect(await bad.text()).toBe(await unknown.text());
   });
 
-  it('caps the payload BEFORE doing any lookup', async () => {
+  it('an oversized token gets the same uniform refusal (the payload cap)', async () => {
     // An unbounded path segment on an anonymous route is free work for anyone.
     const res = await fetch(`${BASE}${PUB}/${'x'.repeat(5000)}`);
     expect(res.status).toBe(404);
@@ -101,7 +122,8 @@ describe('ADR 0544 P3 — the public verification route', () => {
     // otherwise-authenticated namespace is how a public hole opens by accident.
     const { token } = await issue();
     const nested = await fetch(`${BASE}/host/openwop-app/job-search/public/attestations/${token}`);
-    expect(nested.status, 'no anonymous route may live under /job-search').toBeGreaterThanOrEqual(400);
+    expect(nested.status, 'no anonymous route may live under /job-search').toBe(401);
+    expect(((await nested.json()) as { error?: string }).error).toBe('unauthenticated');
   });
 
   it('stays under the per-IP rate budget — it is not on the SSE exemption list', () => {

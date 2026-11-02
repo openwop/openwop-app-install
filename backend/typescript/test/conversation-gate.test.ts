@@ -5,10 +5,15 @@
  * `conversation.opened` (turnIndex 0), and suspends with interrupt kind
  * `conversation`. Exchanges/close are driven through the resolve path (tested
  * end-to-end elsewhere); here we pin the node's open contract.
+ *
+ * TST-CKB-5. Ids are pinned as LITERALS (RFC 0005 §C encoding), never computed with
+ * `conversationIdFor`/`turnMessageId`, so a change to the id format reds case 1.
+ * Also red when: the interrupt turnIndex moves off 0 or the prompt stops becoming
+ * the opening turn (case 1), or the schema stops reaching `resumeSchema` (case 2).
  */
 import { describe, it, expect } from 'vitest';
 import { conversationGateNode } from '../src/bootstrap/nodes.js';
-import { conversationIdFor, turnMessageId, type ConversationTurn } from '../src/host/conversation.js';
+import type { ConversationTurn } from '../src/host/conversation.js';
 import type { NodeContext } from '../src/executor/types.js';
 
 interface Captured { type: string; payload: unknown }
@@ -20,7 +25,7 @@ function makeCtx(config: Record<string, unknown> = {}): { ctx: NodeContext; even
     runId: 'run-conv', nodeId: 'gate-1', tenantId: 't1', inputs: {}, config,
     configurable: {}, attempt: 1, secrets: {},
     async emit(type, payload) { const eventId = `e${seq}`; const sequence = seq++; events.push({ type, payload }); return { eventId, sequence }; },
-  } as NodeContext;
+  };
   return { ctx, events };
 }
 
@@ -34,7 +39,7 @@ describe('core.conversationGate — open', () => {
     if (out.status !== 'suspended') throw new Error('unreachable');
     expect(out.interrupt.kind).toBe('conversation');
     const data = out.interrupt.data as { conversationId: string; turnIndex: number };
-    const expectedId = conversationIdFor('run-conv', 'gate-1');
+    const expectedId = 'run-conv:gate-1:0'; // `${runId}:${nodeId}:${attempt}` (RFC 0005 §C)
     expect(data.conversationId).toBe(expectedId);
     expect(data.turnIndex).toBe(0);
 
@@ -45,7 +50,7 @@ describe('core.conversationGate — open', () => {
     expect(p.conversationId).toBe(expectedId);
     expect(p.initialTurn.turnIndex).toBe(0);
     expect(p.initialTurn.role).toBe('system');
-    expect(p.initialTurn.messageId).toBe(turnMessageId(expectedId, 0, 'system'));
+    expect(p.initialTurn.messageId).toBe('run-conv:gate-1:0:0:system'); // `${conversationId}:${turnIndex}:${role}`
     expect(p.initialTurn.content).toBe('How can the team help?');
     expect(p.capabilities).toContain('multi-turn');
   });

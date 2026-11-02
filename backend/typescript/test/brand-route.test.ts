@@ -6,6 +6,20 @@
  *   - input sanitization (formality clamp, channel-rule allowlist)
  *   - IDOR: a co-tenant member without workspace:read in the brand's org gets 404
  *   - governance authority: lockLevel 'full' blocks a non-admin editor (403)
+ *
+ * TST-BBR-3 (w66 g4, sabotage-witnessed). Authz cases use a SAME-tenant caller
+ * (an `org:` tenant with an owner, an org editor and a non-member), because a
+ * cross-tenant stranger is refused by the tenant lookup before any org check
+ * runs. Red when: `loadBrandScoped` drops the org-read check; the 'full' lock
+ * lets a non-admin edit or delete; the governance-change bar is skipped for a
+ * non-admin, non-creator editor; `governanceChanged` stops sorting editors; the
+ * route audits 'editor' instead of the signed-in user; the formality clamp or
+ * the channel allowlist is removed; a blank name is accepted.
+ *
+ * DOUBLE GUARD (recorded): the BR-SP-5 stale-token 409 is enforced by the route
+ * (`routes.ts`, before the governance checks) AND again by `updateBrand`
+ * (`brandService.ts`). The copies are in different files, so no single-edit
+ * probe can remove both; removing either one alone stays green here.
  */
 
 import http from 'node:http';
@@ -13,6 +27,11 @@ import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
+import { governanceChanged } from '../src/features/brand/routes.js';
+import type { BrandAuditRow } from '../src/features/brand/brandService.js';
+import {
+  DEFAULT_GOVERNANCE, EMPTY_KEY_PHRASES, EMPTY_POSITIONING, EMPTY_VOICE_PROFILE, type Brand,
+} from '../src/features/brand/types.js';
 
 let BASE: string;
 let server: http.Server;
@@ -28,14 +47,23 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> }
+/** The error envelope (`middleware/errorEnvelope.ts`): code in `error`. */
+interface ErrorBody { error?: string; message?: string }
+interface Res<T> { status: number; body: T & ErrorBody }
+interface Client {
+  get: <T = unknown>(p: string) => Promise<Res<T>>;
+  post: <T = unknown>(p: string, b?: unknown) => Promise<Res<T>>;
+  patch: <T = unknown>(p: string, b?: unknown) => Promise<Res<T>>;
+  del: <T = unknown>(p: string) => Promise<Res<T>>;
+}
+interface BrandBody { brand: Brand }
 function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const text = await res.text(); // wire JSON (a 204 has no body → {})
+    const out: T & ErrorBody = text ? JSON.parse(text) : {};
     return { status: res.status, body: out };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), del: (p) => call('DELETE', p) };
@@ -43,16 +71,40 @@ function client(): Client {
 
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 async function signup(c: Client, opts: { tenantId?: string } = {}): Promise<{ userId: string }> {
-  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('brand'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
+  const r = await c.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: uniqEmail('brand'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
 async function ownerWithOrg(): Promise<{ owner: Client; userId: string; orgId: string }> {
   const owner = client();
   const u = await signup(owner);
-  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, userId: u.userId, orgId: org.body.orgId };
+}
+
+/** An agency-shaped `org:` tenant: the owner (org admin) created ONE org in it. */
+async function orgTenant(): Promise<{ tenantId: string; owner: Client; orgId: string }> {
+  const tenantId = `org:brand-route-${Date.now()}-${n++}`;
+  const owner = client();
+  await signup(owner, { tenantId });
+  const org = await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
+  expect(org.status, JSON.stringify(org.body)).toBe(201);
+  return { tenantId, owner, orgId: org.body.orgId };
+}
+/** A second user in the SAME tenant who is in no org (zero scopes there). */
+async function nonMemberOf(tenantId: string): Promise<Client> {
+  const c = client();
+  await signup(c, { tenantId });
+  return c;
+}
+/** A same-tenant user added to the org as an EDITOR (workspace:write, not an admin). */
+async function editorOf(t: { tenantId: string; owner: Client; orgId: string }): Promise<Client> {
+  const c = client();
+  const u = await signup(c, { tenantId: t.tenantId });
+  const add = await t.owner.post(`/host/openwop-app/orgs/${encodeURIComponent(t.orgId)}/members`, { displayName: 'Ed', subject: u.userId, roles: ['editor'] });
+  expect(add.status, JSON.stringify(add.body)).toBe(201);
+  return c;
 }
 
 const B = '/host/openwop-app/brand/brands';
@@ -63,7 +115,7 @@ describe('brand — always-on (ADR 0170: no feature-toggle gate)', () => {
     await signup(c);
     // graduated to core: no toggle to flip — the route is reachable (200), and
     // RBAC (not a feature gate) is what bounds access (covered below).
-    const r = await c.get(B);
+    const r = await c.get<{ brands: Brand[] }>(B);
     expect(r.status).toBe(200);
     expect(Array.isArray(r.body.brands)).toBe(true);
   });
@@ -72,7 +124,7 @@ describe('brand — always-on (ADR 0170: no feature-toggle gate)', () => {
 describe('brand — CRUD + sanitization', () => {
   it('creates, lists, and gets a brand; clamps formality + filters channel rules', async () => {
     const { owner, orgId } = await ownerWithOrg();
-    const r = await owner.post(B, {
+    const r = await owner.post<BrandBody>(B, {
       orgId,
       name: 'FlashPick',
       voiceProfile: { voice: 'confident, not arrogant', formalityLevel: 99 },
@@ -89,11 +141,11 @@ describe('brand — CRUD + sanitization', () => {
     expect(r.body.brand.channelVoiceRules[0].channel).toBe('landing_page');
     expect(r.body.brand.keyPhrases.bannedPhrases).toEqual(['cheap', 'revolutionary']);
 
-    const list = await owner.get(`${B}?orgId=${orgId}`);
+    const list = await owner.get<{ brands: Brand[] }>(`${B}?orgId=${orgId}`);
     expect(list.status).toBe(200);
-    expect(list.body.brands.map((b: any) => b.id)).toContain(r.body.brand.id);
+    expect(list.body.brands.map((b) => b.id)).toContain(r.body.brand.id);
 
-    const got = await owner.get(`${B}/${r.body.brand.id}`);
+    const got = await owner.get<BrandBody>(`${B}/${r.body.brand.id}`);
     expect(got.status).toBe(200);
     expect(got.body.brand.name).toBe('FlashPick');
   });
@@ -101,14 +153,14 @@ describe('brand — CRUD + sanitization', () => {
   it('requires a name on create', async () => {
     const { owner, orgId } = await ownerWithOrg();
     const r = await owner.post(B, { orgId, name: '   ' });
-    expect(r.status).toBe(400);
+    expect([r.status, r.body.error, r.body.message]).toEqual([400, 'validation_error', 'A brand name is required.']);
   });
 
   it('updates and deletes a brand', async () => {
     const { owner, orgId } = await ownerWithOrg();
-    const created = await owner.post(B, { orgId, name: 'Acme Voice' });
+    const created = await owner.post<BrandBody>(B, { orgId, name: 'Acme Voice' });
     const id = created.body.brand.id;
-    const patched = await owner.patch(`${B}/${id}`, { description: 'updated', voiceProfile: { voice: 'warm', formalityLevel: 2 } });
+    const patched = await owner.patch<BrandBody>(`${B}/${id}`, { description: 'updated', voiceProfile: { voice: 'warm', formalityLevel: 2 } });
     expect(patched.status).toBe(200);
     expect(patched.body.brand.description).toBe('updated');
     expect(patched.body.brand.voiceProfile.formalityLevel).toBe(2);
@@ -119,7 +171,7 @@ describe('brand — CRUD + sanitization', () => {
 
   it('exposes the static channel vocabulary', async () => {
     const { owner } = await ownerWithOrg();
-    const r = await owner.get('/host/openwop-app/brand/channels');
+    const r = await owner.get<{ channels: string[] }>('/host/openwop-app/brand/channels');
     expect(r.status).toBe(200);
     expect(r.body.channels).toContain('landing_page');
     expect(r.body.channels).toContain('social_posts');
@@ -128,23 +180,37 @@ describe('brand — CRUD + sanitization', () => {
 
 describe('brand — isolation + governance', () => {
   it('a member without read in the brand org gets a uniform 404 (no existence leak)', async () => {
-    const { owner, orgId } = await ownerWithOrg();
-    const created = await owner.post(B, { orgId, name: 'Secret Brand' });
+    const t = await orgTenant();
+    const created = await t.owner.post<BrandBody>(B, { orgId: t.orgId, name: 'Secret Brand' });
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
     const id = created.body.brand.id;
-    // A different user in their own org/tenant must not read the foreign brand.
-    const stranger = client();
-    await signup(stranger);
-    expect((await stranger.get(`${B}/${id}`)).status).toBe(404);
-    expect((await stranger.patch(`${B}/${id}`, { name: 'hijack' })).status).toBe(404);
+    // SAME tenant, so the tenant lookup finds the brand: only the org-read check
+    // in `loadBrandScoped` stands between this caller and the row.
+    const nonMember = await nonMemberOf(t.tenantId);
+    const read = await nonMember.get(`${B}/${id}`);
+    expect([read.status, read.body.error]).toEqual([404, 'not_found']);
+    const write = await nonMember.patch(`${B}/${id}`, { name: 'hijack' });
+    expect([write.status, write.body.error]).toEqual([404, 'not_found']);
+    expect((await t.owner.get<BrandBody>(`${B}/${id}`)).body.brand.name).toBe('Secret Brand');
   });
 
   it("lockLevel 'full' blocks editing for a non-admin and 404s a cross-tenant id", async () => {
-    const { owner, orgId } = await ownerWithOrg();
-    const created = await owner.post(B, { orgId, name: 'Locked Brand', governance: { lockLevel: 'full' } });
+    const t = await orgTenant();
+    const { owner } = t;
+    const created = await owner.post<BrandBody>(B, { orgId: t.orgId, name: 'Locked Brand', governance: { lockLevel: 'full' } });
+    expect(created.body.brand.governance.lockLevel).toBe('full');
     const id = created.body.brand.id;
-    // The owner is the org admin (tenant owner) → may still edit a fully-locked brand.
+    // The owner is the org admin → may still edit a fully-locked brand.
     const adminEdit = await owner.patch(`${B}/${id}`, { description: 'admin can' });
     expect(adminEdit.status, JSON.stringify(adminEdit.body)).toBe(200);
+    // An org EDITOR has workspace:write, so only the lock refuses them.
+    const editor = await editorOf(t);
+    const locked = 'This brand is locked — only an org admin may edit it.';
+    const edit = await editor.patch(`${B}/${id}`, { description: 'editor cannot' });
+    expect([edit.status, edit.body.error, edit.body.message]).toEqual([403, 'forbidden_scope', locked]);
+    const del = await editor.del(`${B}/${id}`);
+    expect([del.status, del.body.error, del.body.message]).toEqual([403, 'forbidden_scope', locked]);
+    expect((await owner.get<BrandBody>(`${B}/${id}`)).body.brand.description).toBe('admin can');
     // A foreign tenant id is simply not found.
     const stranger = client();
     await signup(stranger);
@@ -155,22 +221,35 @@ describe('brand — isolation + governance', () => {
 describe('R2 BR-SP-4 — governance-field changes carry their own bar', () => {
   it('the creator may set the INITIAL lock; preserving governance on a content edit needs no admin', async () => {
     const { owner, orgId } = await ownerWithOrg();
-    const created = await owner.post(B, { orgId, name: 'SelfGov' });
+    const created = await owner.post<BrandBody>(B, { orgId, name: 'SelfGov' });
     const id = created.body.brand.id;
     // Creator sets the initial lock (round-1 self-governance flow).
-    const locked = await owner.patch(`${B}/${id}`, { governance: { lockLevel: 'partial' } });
+    const locked = await owner.patch<BrandBody>(`${B}/${id}`, { governance: { lockLevel: 'partial' } });
     expect(locked.status, JSON.stringify(locked.body)).toBe(200);
     // A content edit that ECHOES the current governance unchanged (what the
     // R2 merge-preserving editor sends) does not trip the governance gate.
     const echo = await owner.patch(`${B}/${id}`, { description: 'new copy', governance: { ...locked.body.brand.governance } });
     expect(echo.status, JSON.stringify(echo.body)).toBe(200);
+
+    // The bar itself: an org EDITOR (workspace:write, not the creator, not an
+    // admin) cannot lock an UNLOCKED brand — the 'none' lock passes the base
+    // gate, so only the governance-change bar refuses.
+    const t = await orgTenant();
+    const open = await t.owner.post<BrandBody>(B, { orgId: t.orgId, name: 'Unlocked' });
+    const editor = await editorOf(t);
+    const grab = await editor.patch(`${B}/${open.body.brand.id}`, { governance: { lockLevel: 'full' } });
+    expect([grab.status, grab.body.error, grab.body.message]).toEqual([403, 'forbidden_scope', "Changing a brand's governance (lock, editors, approval, compliance) requires an org admin."]);
+    expect((await t.owner.get<BrandBody>(`${B}/${open.body.brand.id}`)).body.brand.governance.lockLevel).toBe('none');
   });
 
   it('governanceChanged discriminates: echoes are NOT changes; lock/editors/approval/compliance edits ARE', async () => {
-    const { governanceChanged } = await import('../src/features/brand/routes.js');
-    const base = {
-      governance: { lockLevel: 'partial' as const, allowedEditors: ['u1', 'u2'], requireApproval: true, compliance: { blockPublish: 'critical' as const } },
-    } as never;
+    const base: Brand = {
+      id: 'b1', tenantId: 't1', orgId: 'o1', name: 'Gov', description: '', status: 'active',
+      voiceProfile: { ...EMPTY_VOICE_PROFILE }, positioning: { ...EMPTY_POSITIONING }, keyPhrases: { ...EMPTY_KEY_PHRASES },
+      channelVoiceRules: [],
+      governance: { ...DEFAULT_GOVERNANCE, lockLevel: 'partial', allowedEditors: ['u1', 'u2'], requireApproval: true, compliance: { blockPublish: 'critical' } },
+      createdBy: 'u1', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+    };
     // Echo (what the merge-preserving editor sends) — order-insensitive.
     expect(governanceChanged(base, { governance: { lockLevel: 'partial', allowedEditors: ['u2', 'u1'], requireApproval: true, compliance: { blockPublish: 'critical' as const } } })).toBe(false);
     expect(governanceChanged(base, {})).toBe(false);
@@ -189,15 +268,16 @@ describe('R2 BR-SP-4 — governance-field changes carry their own bar', () => {
 describe('R2 BR-SP-5 — optimistic concurrency', () => {
   it('a stale expectedUpdatedAt is a 409, never a silent clobber; a fresh one saves', async () => {
     const { owner, orgId } = await ownerWithOrg();
-    const created = await owner.post(B, { orgId, name: 'CasBrand' });
+    const created = await owner.post<BrandBody>(B, { orgId, name: 'CasBrand' });
     const id = created.body.brand.id;
-    const v1 = created.body.brand.updatedAt as string;
+    const v1 = created.body.brand.updatedAt;
     // A concurrent edit moves updatedAt.
-    const second = await owner.patch(`${B}/${id}`, { description: 'edit B' });
+    const second = await owner.patch<BrandBody>(`${B}/${id}`, { description: 'edit B' });
     expect(second.status).toBe(200);
     // The stale editor (still holding v1) must get a conflict.
     const stale = await owner.patch(`${B}/${id}`, { description: 'edit A', expectedUpdatedAt: v1 });
-    expect(stale.status, JSON.stringify(stale.body)).toBe(409);
+    expect([stale.status, stale.body.error], JSON.stringify(stale.body)).toEqual([409, 'conflict']);
+    expect((await owner.get<BrandBody>(`${B}/${id}`)).body.brand.description).toBe('edit B'); // not clobbered
     // And the fresh token saves.
     const fresh = await owner.patch(`${B}/${id}`, { description: 'edit A2', expectedUpdatedAt: second.body.brand.updatedAt });
     expect(fresh.status, JSON.stringify(fresh.body)).toBe(200);
@@ -205,7 +285,7 @@ describe('R2 BR-SP-5 — optimistic concurrency', () => {
 
   it('R2 BR-SP-1 — a rename-only save PRESERVES governance + agent-authored voice fields (route-level)', async () => {
     const { owner, orgId } = await ownerWithOrg();
-    const created = await owner.post(B, {
+    const created = await owner.post<BrandBody>(B, {
       orgId, name: 'MergeBrand',
       voiceProfile: { voice: 'warm', samplePhrases: ['hello there'] },
       governance: { lockLevel: 'partial', allowedEditors: ['user:listed'], requireApproval: true },
@@ -214,7 +294,7 @@ describe('R2 BR-SP-5 — optimistic concurrency', () => {
     // What the R2 merge-preserving editor sends for a rename: full facets
     // spread from the loaded brand with only edited keys overridden.
     const b = created.body.brand;
-    const renamed = await owner.patch(`${B}/${id}`, {
+    const renamed = await owner.patch<BrandBody>(`${B}/${id}`, {
       name: 'MergeBrand v2',
       voiceProfile: { ...b.voiceProfile, voice: 'warm' },
       governance: { ...b.governance },
@@ -230,7 +310,7 @@ describe('R2 BR-SP-5 — optimistic concurrency', () => {
 describe('brand — guardrail audit trail (ADR 0354 P5 / BRAND-CODE-3)', () => {
   it('a PATCH through the route audits the SIGNED-IN user as actor, never the "editor" default', async () => {
     const { owner, userId, orgId } = await ownerWithOrg();
-    const created = await owner.post(B, { orgId, name: 'Audited Brand' });
+    const created = await owner.post<BrandBody>(B, { orgId, name: 'Audited Brand' });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     const id = created.body.brand.id;
 
@@ -238,9 +318,9 @@ describe('brand — guardrail audit trail (ADR 0354 P5 / BRAND-CODE-3)', () => {
     const patched = await owner.patch(`${B}/${id}`, { keyPhrases: { bannedPhrases: ['synergy'] } });
     expect(patched.status, JSON.stringify(patched.body)).toBe(200);
 
-    const audit = await owner.get(`${B}/${id}/audit`);
+    const audit = await owner.get<{ audit: BrandAuditRow[] }>(`${B}/${id}/audit`);
     expect(audit.status, JSON.stringify(audit.body)).toBe(200);
-    const rows = audit.body.audit as Array<{ actor: string; changes: Array<{ field: string }> }>;
+    const rows = audit.body.audit;
     expect(rows.length).toBeGreaterThan(0);
     // Newest-first: the newest row records the signed-in user as actor.
     expect(rows[0].actor).toBe(userId);

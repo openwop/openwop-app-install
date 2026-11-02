@@ -39,6 +39,7 @@ import {
 import {
   LS_SESSION_INDEX_VERSION,
 } from '../lib/storageKeys.js';
+import { CHAT_SESSIONS_CHANNEL } from '../lib/sessionBroadcast.js';
 
 /** Cross-tab message envelope. JSON-RPC-style discriminated union so we
  *  can extend with new event kinds (e.g., `session:message-appended`)
@@ -48,7 +49,7 @@ type CrossTabEvent =
   | { kind: 'session:renamed'; sessionId: string }
   | { kind: 'session:deleted'; sessionId: string };
 
-const CHANNEL_NAME = 'openwop-sample-chat';
+const CHANNEL_NAME = CHAT_SESSIONS_CHANNEL;
 
 export interface UseChatSessionsResult {
   sessions: readonly ChatSessionHeader[];
@@ -104,6 +105,7 @@ export function useChatSessions(options: UseChatSessionsOptions = {}): UseChatSe
   // is in flight (e.g., user clicks New + refresh near-simultaneously),
   // drop the duplicate to avoid trampling state.
   const inFlightRef = useRef(false);
+  const refreshAgainRef = useRef(false);
   // BroadcastChannel for cross-tab session-list sync (Phase 2C.2).
   // Feature-detected — Safari + older Edge in private mode lack it; the
   // hook still works inside the originating tab, just doesn't propagate.
@@ -112,39 +114,50 @@ export function useChatSessions(options: UseChatSessionsOptions = {}): UseChatSe
   const onSessionDeletedRef = useRef(options.onSessionDeleted);
   onSessionDeletedRef.current = options.onSessionDeleted;
 
-  const refresh = useCallback(async () => {
-    if (inFlightRef.current) return;
+  // ADR 1019 D4 — a refresh asked for BECAUSE a header changed (`mustSee`) is not
+  // dropped while another is in flight: that fetch may have left before the change
+  // (an auto-title written a moment later), so one more runs when it finishes. A
+  // plain refresh (mount, subject settle, a button) is still coalesced as before.
+  const refreshImpl = useCallback(async (mustSee: boolean) => {
+    if (inFlightRef.current) { if (mustSee) refreshAgainRef.current = true; return; }
     inFlightRef.current = true;
-    setError(null);
     try {
-      const list = await listChatSessions();
-      // BE-first: if the backend returns chat sessions, use them.
-      // If the BE list is empty (Cloud Run cold start, 401 between
-      // deploys, fresh tenant), fall back to the local session index
-      // populated by `persistSession` in useChatSession. This is what
-      // keeps the History drawer from being permanently empty on the
-      // public demo when write-through is degraded.
-      if (list.length > 0) {
-        setSessions(list);
-      } else {
-        const local = readLocalSessionIndex();
-        setSessions(local);
-      }
-    } catch (err) {
-      // BE errored — fall back to local index. The user still sees
-      // their chats; we just can't sync across tabs/devices.
-      const local = readLocalSessionIndex();
-      if (local.length > 0) {
-        setSessions(local);
+      do {
+        refreshAgainRef.current = false;
         setError(null);
-      } else {
-        setError(err instanceof Error ? err.message : String(err));
-      }
+        try {
+          const list = await listChatSessions();
+          // BE-first: if the backend returns chat sessions, use them.
+          // If the BE list is empty (Cloud Run cold start, 401 between
+          // deploys, fresh tenant), fall back to the local session index
+          // populated by `persistSession` in useChatSession. This is what
+          // keeps the History drawer from being permanently empty on the
+          // public demo when write-through is degraded.
+          if (list.length > 0) {
+            setSessions(list);
+          } else {
+            const local = readLocalSessionIndex();
+            setSessions(local);
+          }
+        } catch (err) {
+          // BE errored — fall back to local index. The user still sees
+          // their chats; we just can't sync across tabs/devices.
+          const local = readLocalSessionIndex();
+          if (local.length > 0) {
+            setSessions(local);
+            setError(null);
+          } else {
+            setError(err instanceof Error ? err.message : String(err));
+          }
+        } finally {
+          setIsLoading(false);
+        }
+      } while (refreshAgainRef.current);
     } finally {
-      setIsLoading(false);
       inFlightRef.current = false;
     }
   }, []);
+  const refresh = useCallback(() => refreshImpl(false), [refreshImpl]);
 
   /** Read the localStorage session index written by `persistSession`
    *  in `useChatSession`. Mirrors the BE `ChatSessionHeader` shape so
@@ -179,8 +192,9 @@ export function useChatSessions(options: UseChatSessionsOptions = {}): UseChatSe
 
   // Open the channel on mount; listen for events from other tabs and
   // re-fetch the headers on any mutation. Posting our own events is
-  // best-effort — channel.postMessage NEVER fires on the originating
-  // tab's own listener, so this is a clean fan-out.
+  // best-effort — postMessage never fires on the SAME channel object that sent
+  // it, so this hook's own posts are a clean fan-out. A post from a separate
+  // channel object (`announceSessionRenamed`, ADR 1019 D4) reaches this tab too.
   useEffect(() => {
     if (typeof BroadcastChannel === 'undefined') return;
     const ch = new BroadcastChannel(CHANNEL_NAME);
@@ -188,7 +202,7 @@ export function useChatSessions(options: UseChatSessionsOptions = {}): UseChatSe
     ch.onmessage = (event: MessageEvent<CrossTabEvent>) => {
       const kind = event.data?.kind;
       if (kind === 'session:created' || kind === 'session:renamed' || kind === 'session:deleted') {
-        void refresh();
+        void refreshImpl(true);
       }
       if (kind === 'session:deleted' && event.data.sessionId) {
         onSessionDeletedRef.current?.(event.data.sessionId);
@@ -198,7 +212,7 @@ export function useChatSessions(options: UseChatSessionsOptions = {}): UseChatSe
       ch.close();
       channelRef.current = null;
     };
-  }, [refresh]);
+  }, [refreshImpl]);
 
   useEffect(() => {
     void refresh();

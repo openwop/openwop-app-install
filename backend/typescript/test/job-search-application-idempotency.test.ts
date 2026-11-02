@@ -12,6 +12,9 @@
  * it failed on listing #2 — meaning every real user would have hit this on their
  * second job application. This test is the direct pin, so the regression cannot
  * hide behind the campaign suite.
+ *
+ * TST-DGE-3. Red when the existing-definition check compares the raw key
+ * instead of its stored (normalised) form (sabotage-witnessed, wave 71).
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { ensureApplicationFieldDefs, APPLICATION_FIELD_DEFS } from '../src/features/job-search/domain/applications.js';

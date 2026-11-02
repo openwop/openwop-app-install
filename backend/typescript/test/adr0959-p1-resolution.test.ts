@@ -12,6 +12,12 @@
  *  - the slot binding ignored by the resolver                                              → "a slot binding"
  *  - layer 1 dropped from `mergeLayers`                                                    → "the agency layer"
  *  - `installationDrift` comparing nothing (always `none`)                                → "drift"
+ *
+ * "drift" publishes and installs its OWN playbook (wave 73: it read case 1's `pinned` install
+ * and went red when shuffled first). Refusals assert `details.code` / `reason` / `key`, and the
+ * test chain pack's load is asserted inside case 1 too, so a broken pack is a red case rather
+ * than a skipped file. Probes (wave 73, all witnessed): w73g3-pb1-sibling-global, -host-version,
+ * -cross-tenant, -slot, -agency-layer, -drift.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -34,12 +40,15 @@ let BASE = '';
 let server: http.Server;
 const ws: Record<'a' | 'b', { tenant: string; cookie: string; orgs: string[] }> = { a: { tenant: '', cookie: '', orgs: [] }, b: { tenant: '', cookie: '', orgs: [] } };
 
-interface Res { status: number; body: Record<string, unknown> }
+interface Res { status: number; body: unknown }
+const get = (b: unknown, ...path: string[]): unknown => path.reduce<unknown>((o, k) => (typeof o === 'object' && o !== null ? Reflect.get(o, k) : undefined), b);
+let packErrors: unknown[] = [];
+let seq = 0;
 async function call(who: 'a' | 'b', method: string, path: string, body?: unknown): Promise<Res> {
   const res = await fetch(`${BASE}/host/openwop-app${path}`, { method, headers: { cookie: ws[who].cookie, 'content-type': 'application/json' }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
   const raw = res.status === 204 ? '' : await res.text();
-  let parsed: Record<string, unknown> = {};
-  try { parsed = raw ? JSON.parse(raw) as Record<string, unknown> : {}; } catch { /* not JSON */ }
+  let parsed: unknown = {};
+  try { parsed = raw ? JSON.parse(raw) : {}; } catch { /* not JSON */ }
   return { status: res.status, body: parsed };
 }
 
@@ -69,10 +78,14 @@ async function publish(who: 'a' | 'b', id: string, body: Record<string, unknown>
 async function install(org: string, playbookId: string, clientLayer?: unknown): Promise<Res> {
   return call('a', 'POST', `/campaign-playbooks/clients/${org}/installs`, { playbookId, version: '1.0.0', ...(clientLayer ? { clientLayer } : {}) });
 }
-const workflowOf = (r: Res): string => (r.body.installation as { workflowId: string }).workflowId;
+const workflowOf = (r: Res): string => {
+  const id = get(r.body, 'installation', 'workflowId');
+  if (typeof id !== 'string' || !id) throw new Error(`no installation.workflowId: ${r.status} ${JSON.stringify(r.body)}`);
+  return id;
+};
 async function childDefsOf(workflowId: string): Promise<string> {
   const def = await getRegisteredWorkflowAsync(workflowId);
-  const childIds = (def?.nodes ?? []).map((n) => (n.config as { workflowId?: string } | undefined)?.workflowId).filter((x): x is string => !!x);
+  const childIds = (def?.nodes ?? []).map((n) => get(n.config, 'workflowId')).filter((x): x is string => typeof x === 'string' && !!x);
   const children = await Promise.all(childIds.map((id) => getRegisteredWorkflowAsync(id)));
   return JSON.stringify({ childIds, children });
 }
@@ -89,7 +102,8 @@ beforeAll(async () => {
   mkdirSync(join(root, 'child'));
   writeFileSync(join(root, 'child', 'pack.json'), JSON.stringify({ name: 'community.pbtest.child', version: '2.0.0', kind: 'workflow-chain', engines: { openwop: '>=1.0.0 <3.0.0' }, chains: [leaf('acme.child', '2.0.0', 'host-v2')] }));
   const loaded = loadWorkflowChainPacks({ roots: [root] });
-  expect(loaded.errors.filter((e) => e.pack.includes('pbtest')), JSON.stringify(loaded.errors)).toEqual([]);
+  packErrors = loaded.errors.filter((e) => e.pack.includes('pbtest'));
+  expect(packErrors, JSON.stringify(loaded.errors)).toEqual([]);
   expect(getChain('acme.child')?.chain.version).toBe('2.0.0');
   for (const k of ['a', 'b'] as const) {
     const tag = randomBytes(3).toString('hex');
@@ -104,11 +118,14 @@ beforeAll(async () => {
     const now = Math.floor(Date.now() / 1000);
     ws[k].cookie = `__session=${signSession({ sid: randomBytes(12).toString('hex'), tenantId: ws[k].tenant, tier: 'user', userId: admin.userId, personalTenant: `ws:home-${admin.userId}`, iat: now, exp: now + COOKIE_TTL_SECONDS })}`;
   }
-});
+}, 120_000);
 afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
 
 describe('ADR 0959 D2 — versioned sub-chain resolution', () => {
   it('a playbook pinning child@1.0.0 still resolves @1.0.0 after @2.0.0 is installed globally', async () => {
+    // The premise, as a case (a beforeAll failure would SKIP every case, not red one).
+    expect(packErrors).toEqual([]);
+    expect(getChain('acme.child')?.chain.version).toBe('2.0.0');
     const pub = await publish('a', 'pinned', { chains: [parent('acme.child'), leaf('acme.child', '1.0.0', 'playbook-v1')], entryChainId: 'acme.parent' });
     expect(pub.status, JSON.stringify(pub.body)).toBe(201);
     const r = await install(ws.a.orgs[0]!, 'pinned');
@@ -129,6 +146,7 @@ describe('ADR 0959 D2 — versioned sub-chain resolution', () => {
     expect(missing.body).toMatchObject({ details: { code: 'sub_chain_unresolved' } });
     const wrongPack = await publish('a', 'host-other', { chains: [parent({ packName: 'community.someone-else', chainId: 'acme.child', version: '2.0.0' })], entryChainId: 'acme.parent' });
     expect(wrongPack.status).toBe(422);
+    expect(wrongPack.body).toMatchObject({ error: 'validation_error', details: { field: 'chains', code: 'sub_chain_unresolved' } });
     const ok = await publish('a', 'host-ok', { chains: [parent({ packName: 'community.pbtest.child', chainId: 'acme.child', version: '2.0.0' })], entryChainId: 'acme.parent' });
     expect(ok.status, JSON.stringify(ok.body)).toBe(201);
     const r = await install(ws.a.orgs[2]!, 'host-ok');
@@ -145,6 +163,7 @@ describe('ADR 0959 D2 — versioned sub-chain resolution', () => {
     expect(await childDefsOf(workflowOf(r))).toContain('lib-a');
     const foreign = await publish('a', 'uses-foreign', { chains: [parent({ packName: 'playbook:lib-b', chainId: 'lib.step', version: '1.0.0' })], entryChainId: 'acme.parent' });
     expect(foreign.status).toBe(422);
+    expect(foreign.body).toMatchObject({ error: 'validation_error', details: { field: 'chains', code: 'sub_chain_unresolved' } });
   });
 });
 
@@ -178,6 +197,7 @@ describe('ADR 0959 D3 — slots and layers', () => {
     expect(set.status, JSON.stringify(set.body)).toBe(200);
     const notAllowed = await call('a', 'PUT', '/campaign-playbooks/playbooks/layered/agency-layer', { params: { other: 1 } });
     expect(notAllowed.status).toBe(400);
+    expect(notAllowed.body).toMatchObject({ error: 'validation_error', details: { reason: 'playbook_key_not_overridable', key: 'other' } });
     const r = await install(ws.a.orgs[5]!, 'layered', { params: { region: 'Austin' } });
     expect(r.status, JSON.stringify(r.body)).toBe(201);
     const def = JSON.stringify((await getRegisteredWorkflowAsync(workflowOf(r)))!.nodes);
@@ -189,15 +209,24 @@ describe('ADR 0959 D3 — slots and layers', () => {
 
 describe('ADR 0959 D3 — drift', () => {
   it('an installation reports none, then edited after a builder save, then missing after delete', async () => {
+    const id = `drifty-${(++seq).toString(36)}`;
+    const pub = await publish('a', id, { chains: [leaf('drifty.step', '1.0.0', 'drift-marker')], entryChainId: 'drifty.step' });
+    expect(pub.status, JSON.stringify(pub.body)).toBe(201);
     const org = ws.a.orgs[0]!;
-    const list = async () => ((await call('a', 'GET', `/campaign-playbooks/clients/${org}/installs`)).body.installations as Array<{ playbookId: string; drift: string; workflowId: string }>).find((i) => i.playbookId === 'pinned')!;
-    const row = await list();
-    expect(row.drift).toBe('none');
-    const def = (await getRegisteredWorkflowAsync(row.workflowId))!;
+    const installed = await install(org, id);
+    expect(installed.status, JSON.stringify(installed.body)).toBe(201);
+    const workflowId = workflowOf(installed);
+    const list = async (): Promise<unknown> => {
+      const rows = get((await call('a', 'GET', `/campaign-playbooks/clients/${org}/installs`)).body, 'installations');
+      if (!Array.isArray(rows)) throw new Error('installations is not an array');
+      return rows.find((i) => get(i, 'playbookId') === id);
+    };
+    expect(await list()).toMatchObject({ workflowId, drift: 'none' });
+    const def = (await getRegisteredWorkflowAsync(workflowId))!;
     await registerWorkflowDurable({ ...def, nodes: def.nodes.map((n, i) => (i === 0 ? { ...n, name: 'Renamed in the builder' } : n)) });
-    expect((await list()).drift).toBe('edited');
-    const del = await fetch(`${BASE}/host/openwop-app/workflows/${encodeURIComponent(row.workflowId)}`, { method: 'DELETE', headers: { cookie: ws.a.cookie } });
-    expect([200, 204]).toContain(del.status);
-    expect((await list()).drift).toBe('missing');
+    expect(get(await list(), 'drift')).toBe('edited');
+    const del = await fetch(`${BASE}/host/openwop-app/workflows/${encodeURIComponent(workflowId)}`, { method: 'DELETE', headers: { cookie: ws.a.cookie } });
+    expect(del.status).toBe(200); // routes/workflows.ts answers the delete with res.json
+    expect(get(await list(), 'drift')).toBe('missing');
   });
 });

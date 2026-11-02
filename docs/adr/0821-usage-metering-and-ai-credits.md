@@ -97,6 +97,15 @@ D2/D3. Its doc comment becomes true.
 - The pricing page may display only limits that have an enforcement site. A ratchet test pins the set of
   displayed limit keys to the enforced keys.
 
+> **CORRECTION 2026-10-29 (ADR 0987 D5 / Q2): the run limit fails closed under the strict profile.** P5 shipped the
+> counter fail-open on both a store error and sustained compare-and-swap contention, so a limited tenant's run
+> started uncounted whenever the counter could not answer. The user accepted ADR 0987 Q2: the limit is shown as a
+> limit, so under the strict ADR 0981 profile (`OPENWOP_DEPLOY_POSTURE=auth`) a store error is now a `503`
+> (`plan_run_limit_unavailable`) and sustained contention a `429` (`plan_run_limit_contention`), with nothing
+> counted. The evaluation profiles keep the fail-open posture. A tenant with no `workflowRuns` limit never reads the
+> counter, so a store outage cannot refuse its runs. Witness: `test/adr0987-p3-plan-posture.test.ts`. This reaches
+> operators through the release notes (ADR 0987 P4).
+
 ## Architect pass (adversarial, decision text) — 2026-10-05
 
 Run with `/architect`, Track A. Findings on THIS ADR. Each is corrected here; the original decision text above is
@@ -178,6 +187,14 @@ kept for the trail.
 > `workflowRuns` limit are a no-op with no write (prod sets no `workflowRuns`, so deploy changes nothing), and a
 > refused launch never counts. Witness: `test/adr0821-p5-run-limit-wired.test.ts` (boots `createApp`, drives
 > `POST /v1/runs` and `:fork`; RED before the registration — the count stayed 0).
+>
+> > **CORRECTION 2026-10-29 (ADR 0987 P2): the seam is gone, and the counter has one caller.** `host/runLimitSeam.ts`
+> > (`withRunLimit` / `registerRunLimitReserver`) is deleted. `reservePlanRun` is now called once, inside the run-insert
+> > seam (`host/runInsert.ts`), for every lane whose `admission.plan` is `'charge'`, and `startWorkflowRun` no longer
+> > calls it directly. The same counter, the same postures and the same "refused launch never counts" order. Two
+> > lanes this note listed as excluded now count, per ADR 0987 Q1: `core.subWorkflow` children and the cross-canvas
+> > invoke. The `adr0821-p5-run-limit-wired` witness still drives `POST /runs` and `:fork` through `createApp`; the
+> > per-lane table is `test/adr0987-p2-admission-lanes.test.ts`.
 
 **Implementation note, 2026-10-05: the D1/D4 and D5 UIs.** PR #4422 shipped both without a UI.
 - **D1/D2/D4, the billing-page credit meter.** It reads `GET /v1/host/openwop-app/billing/ai-credits`

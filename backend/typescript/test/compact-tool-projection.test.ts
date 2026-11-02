@@ -3,6 +3,13 @@
  * `GET /tools?view=compact` + `GET /tools/{toolId}?view=compact` and the
  * `toolCatalog.compactView` advert. Rides the same MCP-catalog harness as
  * notebooks-mcp.test.ts (the notebook tools are the projected `mcp` source).
+ * Tracker: TST-CGA-2.
+ *
+ * Red when: the route stops projecting through `toCompactDescriptor` (full
+ * descriptors leak `auth`/`egress`/…); `compactInputSchema` returns the stripped
+ * schema whole (a leaked `required`/`additionalProperties` fails the closed v2
+ * schema — the suite 2.40.0 `tool-catalog-compact-projection` failure); the subset
+ * check stops omitting `$ref`/`oneOf`; or the `toolCatalog.compactView` advert drops.
  */
 import http from 'node:http';
 import { readFileSync } from 'node:fs';
@@ -14,7 +21,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
-import { compactInputSchema, toCompactDescriptor, type FullToolDescriptor } from '../src/host/compactToolDescriptor.js';
+import { compactInputSchema, toCompactDescriptor, type CompactToolDescriptor, type FullToolDescriptor } from '../src/host/compactToolDescriptor.js';
 
 let BASE: string;
 let server: http.Server;
@@ -36,22 +43,24 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res> }
+interface Res<T> { status: number; body: T }
+interface Client { get: <T>(p: string) => Promise<Res<T>>; post: <T>(p: string, b?: unknown) => Promise<Res<T>> }
 function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as T;
     return { status: res.status, body: out };
   };
-  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b) };
+  return { get: <T>(p: string) => call<T>('GET', p), post: <T>(p: string, b?: unknown) => call<T>('POST', p, b) };
 }
+/** A compact descriptor as served — read loosely so a LEAKED key is observable. */
+type ServedDescriptor = CompactToolDescriptor & Record<string, unknown>;
 /** Authenticated owner with an org (mirrors notebooks-mcp.test.ts ownerWithOrg). */
 async function owner(who: string): Promise<Client> {
   const c = client();
-  const r = await c.post('/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test` });
+  const r = await c.post<unknown>('/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test` });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   return c;
@@ -71,10 +80,10 @@ describe('RFC 0112 — compactView advert', () => {
 describe('RFC 0112 — GET /tools?view=compact', () => {
   it('returns { tools: CompactToolDescriptor[] } dropping non-compact fields; required fields present', async () => {
     const c = await owner('compact-list');
-    const res = await c.get('/tools?view=compact');
+    const res = await c.get<{ tools: ServedDescriptor[] }>('/tools?view=compact');
     expect(res.status).toBe(200);
     expect(Array.isArray(res.body)).toBe(false);
-    const tools = res.body.tools as Array<Record<string, unknown>>;
+    const tools = res.body.tools;
     expect(Array.isArray(tools)).toBe(true);
     expect(tools.length).toBeGreaterThan(0);
     for (const d of tools) {
@@ -95,9 +104,9 @@ describe('RFC 0112 — GET /tools?view=compact', () => {
     const schema = JSON.parse(readFileSync(join(process.cwd(), '..', '..', 'schemas', 'v2', 'compact-tool-descriptor.schema.json'), 'utf8')) as object;
     const validate = new Ajv2020({ allErrors: true, strict: false }).compile(schema);
     const c = await owner('cmp-schema');
-    const res = await c.get('/tools?view=compact');
+    const res = await c.get<{ tools: ServedDescriptor[] }>('/tools?view=compact');
     expect(res.status).toBe(200);
-    const tools = (res.body as { tools: Array<Record<string, unknown>> }).tools;
+    const tools = res.body.tools;
     const withSchema = tools.filter((d) => d.inputSchema !== undefined);
     expect(withSchema.length, 'non-vacuity: at least one compact descriptor must carry an inputSchema').toBeGreaterThan(0);
     for (const d of tools) {
@@ -107,20 +116,23 @@ describe('RFC 0112 — GET /tools?view=compact', () => {
 
   it('compact toolId set EQUALS the standard view for the same principal (RFC 0074)', async () => {
     const c = await owner('compact-parity');
-    const std = (await c.get('/tools')).body as Array<{ toolId: string }>;
-    const cmp = (await c.get('/tools?view=compact')).body.tools as Array<{ toolId: string }>;
+    const std = (await c.get<Array<{ toolId: string }>>('/tools')).body;
+    const cmp = (await c.get<{ tools: ServedDescriptor[] }>('/tools?view=compact')).body.tools;
     expect(new Set(cmp.map((d) => d.toolId))).toEqual(new Set(std.map((d) => d.toolId)));
   });
 
   it('serves a single compact descriptor by id (bare, not enveloped) and 404s unknown', async () => {
     const c = await owner('compact-byid');
-    const one = await c.get('/tools/mcp:notebook-search?view=compact');
+    const one = await c.get<ServedDescriptor>('/tools/mcp:notebook-search?view=compact');
     expect(one.status).toBe(200);
     expect(one.body.toolId).toBe('mcp:notebook-search');
     expect(one.body.tools).toBeUndefined(); // bare, not enveloped
     for (const k of DROPPED) expect(one.body[k]).toBeUndefined();
-    const unknown = await c.get('/tools/mcp:does-not-exist?view=compact');
+    const unknown = await c.get<{ error?: string; message?: string }>('/tools/mcp:does-not-exist?view=compact');
     expect(unknown.status).toBe(404);
+    // The unknown-tool refusal, not the catalog-disabled one (same code).
+    expect(unknown.body.error).toBe('not_found');
+    expect(unknown.body.message).toBe('Tool not found.');
   });
 });
 

@@ -6,6 +6,9 @@
  * `ui.a2ui-surface` — the STORED spelling on an era-3 log and the major-2 read
  * are `openwop-app.interrupt-vote-recorded`; the v1 wire and every host-internal
  * emitter keep `interrupt.vote.recorded`.
+ *
+ * TST-DGD-3. Red when the vendor-row mapping in `storage/eventEra.ts` changes
+ * the stored spelling (sabotage-witnessed, wave 71).
  */
 import { describe, expect, it } from 'vitest';
 import { toContractVocabulary, toStorageVocabulary } from '../src/storage/eventEra.js';

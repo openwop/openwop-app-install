@@ -11,7 +11,9 @@
  *      `role:side-effect`, and the pack is pinned.
  *
  * Sabotage (run 2026-10-20): removing the org floor from `write` reds 1; adding
- * a `launch` method reds 2; projecting `salt` reds 3.
+ * a `launch` method reds 2; projecting `salt` reds 3. Re-run w73 (p2b-write,
+ * p2b-read, p2b-salt — witnessed). The non-member is a real same-tenant user
+ * with no org membership, refused with the floor's own code.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -38,7 +40,7 @@ beforeAll(async () => {
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   for (const id of ['experiments', 'analytics']) { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); }
-});
+}, 120_000);
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 async function owner() {
@@ -53,7 +55,11 @@ async function owner() {
   const userId = (login.user as { userId: string }).userId;
   const orgId = (await post('/host/openwop-app/orgs', { name: 'Client A' })).orgId as string;
   const page = await createPage({ tenantId, orgId, title: `LP ${n}`, createdBy: 'u', sections: [{ type: 'hero', data: { heading: 'Hi' } }] });
-  return { tenantId, orgId, userId, page };
+  // A REAL user of the same tenant who is not a member of the org: refused by
+  // the org floor itself, not by an earlier tenant or unknown-user check.
+  const other = await fetch(`${BASE}/host/openwop-app/test/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: `p2b-out-${n++}@acme.test`, tenantId }) });
+  const outsiderId = ((await other.json()) as { user: { userId: string } }).user.userId;
+  return { tenantId, orgId, userId, outsiderId, page };
 }
 
 const PLAN = { primaryMetric: { kind: 'conversion', name: 'signup' }, guardrails: [], baselineRate: 0.1, mde: 0.02, alpha: 0.05, power: 0.8, fdrQ: 0.05, minDays: 7, maxDays: 30 };
@@ -71,9 +77,9 @@ describe('ADR 0949 P2b — ctx.features.experiments', () => {
     expect(locked.experiment.plan.minSamplePerArm).toBe(3841);
     await expect(member.updateDraft({ orgId: o.orgId, experimentId: drafted.experiment.experimentId, name: 'x' })).rejects.toMatchObject({ details: { reason: 'plan_locked' } });
 
-    const stranger = buildExperimentsSurface({ tenantId: o.tenantId, actingUserId: 'user:stranger' });
-    await expect(stranger.list({ orgId: o.orgId })).rejects.toBeTruthy();
-    await expect(stranger.createDraft({ orgId: o.orgId, name: 'Nope', surface: { kind: 'cms.page', ref: o.page.pageId }, arms: ARMS })).rejects.toBeTruthy();
+    const stranger = buildExperimentsSurface({ tenantId: o.tenantId, actingUserId: o.outsiderId });
+    await expect(stranger.list({ orgId: o.orgId })).rejects.toMatchObject({ code: 'forbidden_scope' });
+    await expect(stranger.createDraft({ orgId: o.orgId, name: 'Nope', surface: { kind: 'cms.page', ref: o.page.pageId }, arms: ARMS })).rejects.toMatchObject({ code: 'forbidden_scope' });
     expect(((await member.list({ orgId: o.orgId })) as { experiments: unknown[] }).experiments).toHaveLength(1);
   });
 
@@ -82,6 +88,9 @@ describe('ADR 0949 P2b — ctx.features.experiments', () => {
     const surface = buildExperimentsSurface({ tenantId: o.tenantId, actingUserId: o.userId });
     expect(surface).not.toHaveProperty('launch');
     const { experiment } = await surface.createDraft({ orgId: o.orgId, name: 'Hero', surface: { kind: 'cms.page', ref: o.page.pageId }, arms: ARMS }) as { experiment: Record<string, unknown> };
+    // Positive control: the projection is the row (its id, arms, org), minus salt and tenant.
+    expect(experiment).toMatchObject({ orgId: o.orgId, arms: ARMS, status: 'draft' });
+    expect(experiment.experimentId).toEqual(expect.any(String));
     expect(experiment).not.toHaveProperty('salt');
     expect(experiment).not.toHaveProperty('tenantId');
     const got = await surface.get({ orgId: o.orgId, experimentId: experiment.experimentId }) as { experiment: Record<string, unknown> };

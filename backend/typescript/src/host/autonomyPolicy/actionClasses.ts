@@ -31,6 +31,7 @@ export const NODE_ACTION_CLASSES: Readonly<Record<string, ActionClassEntry>> = O
   'feature.campaign-brief.nodes.build-targeting': { class: 'creative.generate', why: 'Model-built targeting draft.' },
   'feature.campaign-brief.nodes.generate-angles': { class: 'creative.generate', why: 'Model-generated creative angles; a draft.' },
   'feature.campaign-channels.nodes.generate': { class: 'creative.generate', why: 'Generates one channel\'s drafts.' },
+  'feature.campaign-channels.nodes.create-creative-briefs': { class: 'none', why: 'ADR 1020 D14: creates the APPROVED creative_briefs draft as managed briefs on the Creative Briefs page, after the approval; nothing leaves the host and nothing is charged.' },
   'feature.production.nodes.plan-generate': { class: 'creative.generate', why: 'Generates the production plan from the merged channels.' },
   // ── external effects ──
   'core.openwop.integration.email-send': { class: 'email.campaign-send', why: 'Sends marketing email from a journey step.' },
@@ -42,6 +43,7 @@ export const NODE_ACTION_CLASSES: Readonly<Record<string, ActionClassEntry>> = O
   // ── internal: no campaign action class ──
   'feature.campaign-autopilot.nodes.start-stage': { class: 'none', why: 'ADR 0961 starts an internal drafting stage with projected, frozen campaign decisions. Each child effect retains its own approval and spend chokepoint; this node grants no external authority.' },
   'feature.campaign-brief.nodes.validate': { class: 'none', why: 'Validates the brief; writes nothing outside it.' },
+  'feature.campaign-brief.nodes.promote-kernel': { class: 'none', why: 'ADR 1020 D8: saves the APPROVED messaging kernel onto the brief, after the approval; nothing leaves the host.' },
   'feature.campaign-orchestration.nodes.consistency-check': { class: 'none', why: 'Scores drafts against the kernel; a report.' },
   'feature.campaign-orchestration.nodes.finalize': { class: 'none', why: 'Writes the campaign row from the brief; nothing leaves the host.' },
   'feature.campaign-ops.nodes.compute-snapshot': { class: 'none', why: 'Freezes client figures for review; no external delivery.' },
@@ -70,6 +72,7 @@ export const NODE_ACTION_CLASSES: Readonly<Record<string, ActionClassEntry>> = O
   'core.openwop.mcp.expose-tool': { class: 'none', why: 'Declares an MCP tool; the head of a read-tool chain, no effect.' },
   'core.dispatch': { class: 'none', why: 'Fans out child runs; children inherit the campaign stamps through the sub-workflow dispatcher.' },
   'core.orchestrator.supervisor': { class: 'none', why: 'Emits a dispatch plan; no effect.' },
+  'core.noop': { class: 'none', why: 'ADR 1020 D3: the terminal a skipped channel ends on (the brief does not enable it); passes its inputs through, no effect.' },
   // ── refused: egress outside a chokepoint (G5) ──
   // typeIds of the `vendor.myndhyve.ads-publish-*` packs.
   'ads.publish.meta': { class: 'refused', why: 'vendor.myndhyve.ads-publish-meta: publishes ads with its own credentials and net.outbound, bypassing the adsAdapter spend chokepoint.' },

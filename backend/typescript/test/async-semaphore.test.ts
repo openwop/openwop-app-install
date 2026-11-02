@@ -3,9 +3,16 @@
  * ops so generative-video buffers can't OOM a small instance. Proves it never
  * exceeds `max` in-flight, releases on both success and throw, hands slots to
  * waiters in FIFO order, and is a zero-overhead pass-through when disabled.
+ *
+ * Tracker TST-BEA-4 (w66). Red when: `acquire` admits at `active <= max`; the
+ * slot is released only on success; waiters are taken LIFO (`pop`); `max <= 0`
+ * stops being a pass-through. Settling is microtask/`setImmediate`-driven, so
+ * the cases drain instead of sleeping.
  */
 import { describe, it, expect } from 'vitest';
 import { createSemaphore } from '../src/util/asyncSemaphore.js';
+
+const drain = async (): Promise<void> => { for (let i = 0; i < 5; i++) await new Promise<void>((r) => setImmediate(r)); };
 
 const defer = () => {
   let resolve!: () => void;
@@ -26,7 +33,7 @@ describe('createSemaphore', () => {
     });
     const all = Promise.all([task(), task(), task(), task()]);
     // Let the first wave acquire; only 2 should be active with the gate held.
-    await new Promise((r) => setTimeout(r, 10));
+    await drain();
     expect(active).toBe(2);
     gate.resolve();
     await all;
@@ -37,8 +44,13 @@ describe('createSemaphore', () => {
   it('releases the slot even when the task throws', async () => {
     const sem = createSemaphore(1);
     await expect(sem.run(async () => { throw new Error('boom'); })).rejects.toThrow('boom');
-    // A second task must still acquire (the slot was released in `finally`).
-    await expect(sem.run(async () => 'ok')).resolves.toBe('ok');
+    // A second task must still acquire (the slot was released in `finally`):
+    // asserted after a drain, so a leaked slot fails here, not at the timeout.
+    let settled = false;
+    const second = sem.run(async () => 'ok').then((v) => { settled = true; return v; });
+    await drain();
+    expect(settled).toBe(true);
+    await expect(second).resolves.toBe('ok');
   });
 
   it('hands slots to waiters in FIFO order', async () => {
@@ -46,7 +58,7 @@ describe('createSemaphore', () => {
     const order: number[] = [];
     const hold = defer();
     const first = sem.run(async () => { await hold.promise; }); // occupies the only slot
-    await new Promise((r) => setTimeout(r, 0));
+    await drain();
     const second = sem.run(async () => { order.push(2); });
     const third = sem.run(async () => { order.push(3); });
     hold.resolve();
@@ -61,7 +73,7 @@ describe('createSemaphore', () => {
     const gate = defer();
     const task = () => sem.run(async () => { active += 1; peak = Math.max(peak, active); await gate.promise; active -= 1; });
     const all = Promise.all([task(), task(), task(), task(), task()]);
-    await new Promise((r) => setTimeout(r, 10));
+    await drain();
     expect(peak).toBe(5); // all ran at once — no limit imposed
     gate.resolve();
     await all;

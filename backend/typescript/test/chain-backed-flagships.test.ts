@@ -11,12 +11,21 @@
  * truthy/falsy conditions round-trip, the reject-safe `none_failed` barrier survives,
  * produced-var bag bindings stay literal, and the parallel fan-out spine is intact.
  *
+ * TST-CCB-1. Red when: the host-default bind leaves `subChainRef` on a build-N node;
+ * the wire `falsy` maps to another host op; expansion drops an edge `triggerRule`;
+ * expansion rewrites a `{type:'variable'}` produced-variable read; the deferred
+ * param rename stops rewiring node inputs to the bare name; or a variable the
+ * parent's `inputMapping` seeds into lesson-batch is no longer declared there.
+ * (The postProcess HOOK is witnessed by chain-backed-workflows 'applies the optional
+ * postProcess hook'; this file's old outputRole case passed with no hook at all.)
+ *
  * @see docs/adr/0472-retire-builtin-workflows-seam.md (Phase 4 terminal)
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import {
   loadWorkflowChainPacks,
   defaultWorkflowChainPackRoots,
+  getChain,
   _resetChainRegistryForTest,
 } from '../src/host/workflowChainPackLoader.js';
 import { buildChainBackedDefinition } from '../src/host/chainBackedWorkflows.js';
@@ -26,11 +35,14 @@ const LESSON_BATCH = 'openwop-app.kicktodo.lesson-batch';
 /** Chain expansion prefixes node ids (`<chainSlug>_<expansionId>_<origId>`); match the tail. */
 const bare = (id: string): string => id.replace(/^.*_/, '');
 
+let loadErrors: unknown[] = [];
 beforeAll(() => {
   _resetChainRegistryForTest();
-  const { errors } = loadWorkflowChainPacks({ roots: defaultWorkflowChainPackRoots() });
-  // A malformed flagship pack (a bad producedVariables/subChainRef declaration) surfaces here.
-  expect(errors, `flagship packs must load clean: ${JSON.stringify(errors)}`).toEqual([]);
+  loadErrors = loadWorkflowChainPacks({ roots: defaultWorkflowChainPackRoots() }).errors;
+});
+
+it('the flagship packs load clean (a bad producedVariables/subChainRef declaration surfaces here)', () => {
+  expect(loadErrors).toEqual([]);
 });
 
 describe('ADR 0472 P4 — Challenge Factory chain-backed behavior preservation', () => {
@@ -75,8 +87,7 @@ describe('ADR 0472 P4 — Challenge Factory chain-backed behavior preservation',
   it('produced variables stay LITERAL run-bag bindings (not frozen params)', () => {
     const artifact = def.nodes.find((n) => bare(n.nodeId) === 'outline-approve')?.inputs?.artifact;
     expect(artifact).toEqual({ type: 'variable', variableName: 'plan' }); // written by `generate`
-    const task = def.nodes.find((n) => bare(n.nodeId) === 'sim-newcomer')?.inputs?.task
-      ?? def.nodes.find((n) => bare(n.nodeId).startsWith('sim-'))?.inputs?.task;
+    const task = def.nodes.find((n) => bare(n.nodeId) === 'sim-newcomer')?.inputs?.task;
     expect(task).toEqual({ type: 'variable', variableName: 'planBrief' }); // written by `checkpoint-plan`
   });
 
@@ -93,12 +104,15 @@ describe('ADR 0472 P4 — lesson-batch chain-backed (the sub-chain child)', () =
     // The child receives candidateId/authorSubject/days/generateMedia from the parent's
     // core.subWorkflow inputMapping — they MUST be declared variables so the executor
     // seeds them into the child bag (the F3 concern, handled by deferred materialization).
-    const names = (def.variables ?? []).map((v) => v.name).sort();
-    // ADR 0458 §2.2 correction (chain 1.1.0) — the child also receives the
-    // structured evidence its lessons are grounded on and validated against.
-    // Chain 1.3.0 (XCH-LB-6) — and its own image binding, separate from the chat one;
-    // 1.4.0 (XCH-GATE-1) — and the produced `lessonBatch` its parent's gate shows.
-    expect(names).toEqual(['authorSubject', 'candidateId', 'credentialRef', 'days', 'evidenceClaims', 'generateMedia', 'imageCredentialRef', 'imageModel', 'imageProvider', 'lessonBatch', 'model', 'provider']);
+    const names = new Set((def.variables ?? []).map((v) => v.name));
+    // Read what the PARENT seeds (the build-0 dispatch node's inputMapping keys, plus
+    // the value its outputMapping reads back) from the loaded factory chain itself —
+    // the SSoT — rather than a hand-kept list that churns with every pack bump.
+    const build0 = getChain('openwop-app.kicktodo.challenge-factory')!.chain.dag.nodes.find((n) => n.id === 'build-0')!;
+    const cfg = build0.config as { inputMapping: Record<string, string>; outputMapping: Record<string, string> };
+    const seeded = [...Object.keys(cfg.inputMapping), ...Object.values(cfg.outputMapping)];
+    expect(seeded.length, 'fixture guard: build-0 seeds nothing').toBeGreaterThan(3);
+    expect(seeded.filter((name) => !names.has(name)), 'seeded by the parent but not declared by the child').toEqual([]);
     expect(def.nodes[0]?.inputs?.days).toEqual({ type: 'variable', variableName: 'days' });
   });
 });
@@ -109,11 +123,12 @@ describe('ADR 0472 P4 — campaign-orchestration chain-backed (parallel fan-out)
     def = buildChainBackedDefinition('campaign-studio.campaign-orchestration');
   });
 
-  it('is the parallel spine: validate → kernel → kernel-approve → supervisor → dispatch → …', () => {
+  it('is the parallel spine: validate → kernel → kernel-approve → promote-kernel → supervisor → dispatch → …', () => {
     expect(def.nodes.map((n) => bare(n.nodeId))).toEqual([
       'validate',
       'kernel',
       'kernel-approve',
+      'promote-kernel', // ADR 1020 D8 — the approved kernel is saved only here
       'channel-supervisor',
       'channel-dispatch',
       'production-plan',
@@ -128,23 +143,5 @@ describe('ADR 0472 P4 — campaign-orchestration chain-backed (parallel fan-out)
     for (const ch of ['landing-page', 'ad-variants', 'email-sequence', 'creative-briefs', 'social-posts']) {
       expect(plan).toContain(`campaign-studio.channel.${ch}`);
     }
-  });
-
-  it('finalize is the primary output (outputRole preserved from the builtin)', () => {
-    // registerLegacyDefsChainBacked restores outputRole via postProcess; assert the
-    // builder here reproduces it (the shared helper passes the same postProcess).
-    const src = [{ workflowId: 'campaign-studio.campaign-orchestration', nodes: [{ nodeId: 'finalize', outputRole: 'primary' as const }] }][0];
-    const roles = new Map(src.nodes.filter((n) => n.outputRole).map((n) => [n.nodeId, n.outputRole] as const));
-    const built = buildChainBackedDefinition('campaign-studio.campaign-orchestration', {
-      postProcess: (d) => {
-        for (const node of d.nodes) {
-          let role: 'primary' | 'secondary' | undefined;
-          for (const [origId, r] of roles) if (node.nodeId === origId || node.nodeId.endsWith(`_${origId}`)) role = r;
-          if (role) node.outputRole = role;
-          else if (node.outputRole !== undefined) delete node.outputRole;
-        }
-      },
-    });
-    expect(built.nodes.find((n) => bare(n.nodeId) === 'finalize')?.outputRole).toBe('primary');
   });
 });

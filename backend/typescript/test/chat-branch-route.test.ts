@@ -1,7 +1,15 @@
 /**
  * ADR 0117 Phase 1 — conversation branch route.
  * Branching forks the message lineage at a settled turn: the child carries the
- * parent's prefix + records `branchedFrom`; fromSeq is bounds-checked.
+ * parent's prefix (same roles, contents, order) + records `branchedFrom`;
+ * fromSeq is bounds-checked.
+ *
+ * Tracker TST-CEC-1. Red when (w67g3, witnessed): the child copies the whole
+ * thread instead of `slice(0, fromSeq)`; an omitted `fromSeq` defaults to 0;
+ * the past-the-end (422) or negative (400) refusal is dropped; the
+ * `branchedFrom` lineage is not recorded on the child's meta.
+ * The 404 case is held by two guards (`requireVisibleAsync` on a missing meta
+ * and the missing `getChatSession`), so it pins the outcome, not one guard.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -12,16 +20,30 @@ let server: http.Server;
 let BASE: string;
 const TOKEN = 'dev-token';
 
-async function j<T = any>(path: string, init: RequestInit = {}): Promise<{ status: number; body: T }> {
+interface Conversation { sessionId: string; title: string; branchedFrom?: { conversationId: string; fromSeq: number } }
+interface Msg { role: string; content: string }
+interface ErrorBody { error: string; message: string }
+
+async function j<T>(path: string, init: RequestInit = {}): Promise<{ status: number; body: T }> {
   const res = await fetch(`${BASE}${path}`, { ...init, headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}`, ...(init.headers ?? {}) } });
-  return { status: res.status, body: (res.status === 204 ? undefined : await res.json()) as T };
+  return { status: res.status, body: (await res.json()) as T };
 }
 async function newSession(title: string): Promise<string> {
-  return (await j<{ sessionId: string }>('/host/openwop-app/chat/sessions', { method: 'POST', body: JSON.stringify({ title }) })).body.sessionId;
+  const r = await j<Conversation>('/host/openwop-app/chat/sessions', { method: 'POST', body: JSON.stringify({ title }) });
+  expect(r.status).toBe(201);
+  return r.body.sessionId;
 }
-async function addMsg(id: string, role: string, content: string): Promise<void> {
-  await j(`/host/openwop-app/chat/sessions/${id}/messages`, { method: 'POST', body: JSON.stringify({ messageId: `${id}-${Math.random().toString(36).slice(2)}`, role, content }) });
+async function addMsgs(id: string, msgs: Array<[string, string]>): Promise<void> {
+  for (let n = 0; n < msgs.length; n++) {
+    const [role, content] = msgs[n]!;
+    const r = await j<unknown>(`/host/openwop-app/chat/sessions/${id}/messages`, { method: 'POST', body: JSON.stringify({ messageId: `${id}-m${n}`, role, content }) });
+    expect(r.status).toBe(201);
+  }
 }
+const branch = (id: string, body: Record<string, unknown>) =>
+  j<Conversation & ErrorBody>(`/host/openwop-app/chat/sessions/${id}/branch`, { method: 'POST', body: JSON.stringify(body) });
+const messagesOf = async (id: string): Promise<Array<[string, string]>> =>
+  (await j<{ messages: Msg[] }>(`/host/openwop-app/chat/sessions/${id}/messages`)).body.messages.map((m) => [m.role, m.content]);
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -34,45 +56,48 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 describe('conversation branch route', () => {
   it('branches at a settled turn — child carries the prefix + branchedFrom lineage', async () => {
     const parent = await newSession('Planning');
-    await addMsg(parent, 'user', 'first question');
-    await addMsg(parent, 'assistant', 'first answer');
-    await addMsg(parent, 'user', 'second question');
-    await addMsg(parent, 'assistant', 'second answer');
+    const thread: Array<[string, string]> = [
+      ['user', 'first question'], ['assistant', 'first answer'], ['user', 'second question'], ['assistant', 'second answer'],
+    ];
+    await addMsgs(parent, thread);
 
     // Branch after the first exchange (carry 2 messages).
-    const r = await j<{ sessionId: string; branchedFrom?: { conversationId: string; fromSeq: number }; title: string }>(
-      `/host/openwop-app/chat/sessions/${parent}/branch`, { method: 'POST', body: JSON.stringify({ fromSeq: 2 }) });
+    const r = await branch(parent, { fromSeq: 2 });
     expect(r.status).toBe(201);
     const child = r.body.sessionId;
-    expect(child).toBeTruthy();
     expect(child).not.toBe(parent);
-    expect(r.body.title).toContain('(branch)');
+    expect(r.body.title).toBe('Planning (branch)');
+    expect(r.body.branchedFrom).toEqual({ conversationId: parent, fromSeq: 2 });
 
-    const childMsgs = await j<{ messages: unknown[] }>(`/host/openwop-app/chat/sessions/${child}/messages`);
-    expect(childMsgs.body.messages).toHaveLength(2);
-
-    const parentMsgs = await j<{ messages: unknown[] }>(`/host/openwop-app/chat/sessions/${parent}/messages`);
-    expect(parentMsgs.body.messages).toHaveLength(4); // parent unchanged
+    expect(await messagesOf(child)).toEqual(thread.slice(0, 2));
+    expect(await messagesOf(parent)).toEqual(thread); // parent unchanged
   });
 
   it('defaults fromSeq to the full length when omitted', async () => {
     const parent = await newSession('Full');
-    await addMsg(parent, 'user', 'a');
-    await addMsg(parent, 'assistant', 'b');
-    const r = await j<{ sessionId: string }>(`/host/openwop-app/chat/sessions/${parent}/branch`, { method: 'POST', body: JSON.stringify({}) });
+    await addMsgs(parent, [['user', 'a'], ['assistant', 'b']]);
+    const r = await branch(parent, {});
     expect(r.status).toBe(201);
-    const child = r.body.sessionId;
-    expect((await j<{ messages: unknown[] }>(`/host/openwop-app/chat/sessions/${child}/messages`)).body.messages).toHaveLength(2);
+    expect(r.body.branchedFrom).toEqual({ conversationId: parent, fromSeq: 2 });
+    expect(await messagesOf(r.body.sessionId)).toEqual([['user', 'a'], ['assistant', 'b']]);
   });
 
   it('rejects fromSeq past the end (422) and a negative fromSeq (400)', async () => {
     const parent = await newSession('Bounds');
-    await addMsg(parent, 'user', 'only');
-    expect((await j(`/host/openwop-app/chat/sessions/${parent}/branch`, { method: 'POST', body: JSON.stringify({ fromSeq: 99 }) })).status).toBe(422);
-    expect((await j(`/host/openwop-app/chat/sessions/${parent}/branch`, { method: 'POST', body: JSON.stringify({ fromSeq: -1 }) })).status).toBe(400);
+    await addMsgs(parent, [['user', 'only']]);
+    const past = await branch(parent, { fromSeq: 99 });
+    expect(past.status).toBe(422);
+    expect(past.body.error).toBe('validation_error');
+    expect(past.body.message).toBe('fromSeq 99 exceeds the conversation length (1).');
+    const negative = await branch(parent, { fromSeq: -1 });
+    expect(negative.status).toBe(400);
+    expect(negative.body.error).toBe('validation_error');
+    expect(negative.body.message).toBe('fromSeq MUST be a non-negative integer.');
   });
 
   it('404s branching a non-existent conversation', async () => {
-    expect((await j('/host/openwop-app/chat/sessions/nope-nope/branch', { method: 'POST', body: JSON.stringify({}) })).status).toBe(404);
+    const r = await branch('nope-nope', {});
+    expect(r.status).toBe(404);
+    expect(r.body.error).toBe('not_found');
   });
 });

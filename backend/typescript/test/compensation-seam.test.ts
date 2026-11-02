@@ -14,6 +14,15 @@
  * NOT be a mock that returns a canned event list: the executor, plan
  * persistence, and ordering must be the ones the production failure path uses,
  * or the witness proves nothing."
+ *
+ * Tracker: TST-CGG-1. Red when: the run tree stops unwinding in DESCENDING ordinal
+ * order (`obligationsForRunTree`); the seam stops refusing a non-boolean `fail` or a
+ * node count outside 1..8 (each asserted by its own message); `fail:false` still
+ * fails; a replay mints obligations; or the replay seam stops being a replay at all.
+ *
+ * "replaying … re-fires NOTHING" is held by THREE fences (named in the next case);
+ * no single-fence sabotage can red it. Its witness is the edit that removes all
+ * three at once — the seam running the "replay" as a fresh run.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -86,8 +95,11 @@ describe('host-sample-test-seams.md §21 — the compensation unwind seam', () =
     const body = await unwind();
     // Without this the rollup leg has no path to a snapshot and lands as
     // another shape-only claim — which is the whole reason §21 requires it.
+    // The id must RESOLVE to the run the seam just drove, not merely be a string.
     expect(typeof body.runId).toBe('string');
-    expect(body.runId?.length ?? 0).toBeGreaterThan(0);
+    const snap = await fetch(`${BASE}/runs/${encodeURIComponent(body.runId!)}`, { headers: AUTH });
+    expect(snap.status).toBe(200);
+    expect(((await snap.json()) as { status?: string }).status).toBe('failed');
   });
 
   it('drives the REAL executor: the run fails forward AND unwinds', async () => {
@@ -209,6 +221,7 @@ describe('host-sample-test-seams.md §21 — the compensation unwind seam', () =
       body: JSON.stringify({ nodes: 2, fail: 'false' }),
     });
     expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: 'validation_error', message: 'fail must be a boolean' });
   });
 
   it('rejects a node count outside 1..8 rather than silently clamping', async () => {
@@ -218,7 +231,8 @@ describe('host-sample-test-seams.md §21 — the compensation unwind seam', () =
         headers: { 'content-type': 'application/json', ...AUTH },
         body: JSON.stringify({ nodes }),
       });
-      expect(res.status).toBe(400);
+      expect(res.status, `nodes=${nodes}`).toBe(400);
+      expect(await res.json()).toMatchObject({ error: 'validation_error', message: 'nodes must be an integer in 1..8' });
     }
   });
 });

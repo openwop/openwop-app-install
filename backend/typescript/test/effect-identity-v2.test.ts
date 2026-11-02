@@ -15,6 +15,13 @@
  * This file supplies the missing half at host tier. It drives the real
  * `callAI` path twice at two different `attempt` values and asserts the identity
  * is byte-identical — the observation G9 says the wire cannot make.
+ *
+ * Tracker TST-CXC-5. Red when (effectIdentity.ts / aiProvidersHost.ts): the
+ * ordinal does not rewind per attempt, repeats within one, or leaks across
+ * nodes/runs; tenantId leaves the preimage; the NUL guard is dropped; the §E
+ * dual-read is removed; `beginNodeActivity` stops rewinding a re-entered node;
+ * a host field is folded into the providerKey; `mintEffectIdentity` carries the
+ * attempt into the identity; or a commerce refund key gains run scope.
  */
 
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
@@ -26,6 +33,8 @@ import {
   beginNodeActivity,
   ACTIVITY_IDENTITY_RECIPE_V2,
 } from '../src/host/effectIdentity.js';
+import { mintEffectIdentity } from '../src/host/effectEscapeLedger.js';
+import { runWithEffectContext } from '../src/host/runEffectContext.js';
 import {
   createAiProvidersAdapter,
   __lastInvocationCacheKeyForTests,
@@ -89,14 +98,20 @@ describe('RFC 0150 §B — the v2 composition', () => {
     expect(() => logicalInvocationId({ ...BASE, tenantId: 'a\u0000b' })).toThrow(/NUL/);
   });
 
-  it('the type offers no way to pass an attempt counter', () => {
+  it('the type offers no way to pass an attempt counter', async () => {
     // The v1 composition `sha256(runId ':' nodeId ':' attempt ':' providerKey)`
-    // was retired as a safety-fix. Structural, not aspirational: adding
-    // `attempt` to the call below is a compile error, which is why this leg
-    // asserts on the surface rather than on a value.
-    expect(Object.keys(BASE).sort()).toEqual(
-      ['logicalInvocationOrdinal', 'nodeId', 'providerKey', 'runId', 'tenantId'],
-    );
+    // was retired as a safety-fix. Witnessed through the product's ONE minting
+    // seam: the same logical effect minted at attempt 1 and at attempt 2 carries
+    // a different `attempt` and the SAME identity.
+    resetLogicalInvocationOrdinals();
+    const ctx = { runId: 'mint-run', nodeId: 'mint-node', tenantId: 'tenant-a', replaying: false };
+    const first = await runWithEffectContext({ ...ctx, attempt: 1 }, async () => mintEffectIdentity('stripe:create-charge'));
+    const second = await runWithEffectContext({ ...ctx, attempt: 2 }, async () => mintEffectIdentity('stripe:create-charge'));
+    expect(first?.attempt).toBe(1);
+    expect(second?.attempt).toBe(2);
+    expect(second?.invocationId).toBe(first?.invocationId);
+    expect(first?.invocationId).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    resetLogicalInvocationOrdinals();
   });
 });
 
@@ -336,7 +351,8 @@ describe('RFC 0150 §B v1.4 — cross-scope effects are keyed on a BUSINESS iden
       fs.readFile(new URL('../src/features/commerce/commerceService.ts', import.meta.url), 'utf8'),
     );
     const keys = [...src.matchAll(/idempotencyKey:\s*`([^`]+)`/g)].map((m) => m[1]);
-    expect(keys.length, 'the refund paths MUST still pass explicit idempotency keys').toBeGreaterThan(0);
+    // Measured 2026-10-29: 3 keys (order-confirm, refund, partial-refund).
+    expect(keys.length, 'the refund paths MUST still pass explicit idempotency keys').toBeGreaterThanOrEqual(3);
     for (const key of keys) {
       expect(key, `business key "${key}" must be order-derived`).toMatch(/orderId/);
       expect(key, `business key "${key}" must not carry run scope`).not.toMatch(/runId|nodeId|attempt|ordinal/);

@@ -12,7 +12,13 @@
  * visible at this level: an old client sending a name the server does not yet
  * honour must NOT end up having declared it once the server adds it. So the
  * parse result is asserted directly.
+ *
+ * Tracker TST-DCB-2. Red when the parser keeps unknown tokens, returns an empty
+ * set instead of `undefined`, drops the repeated-header join, throws on a
+ * non-string, stops trimming, or the header name drifts from the SPA's
+ * (grade-tests w70 probes `fc-*`).
  */
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { parseFieldContract, FIELD_CONTRACT_HEADER } from '../src/host/preserveDroppedFields.js';
 
@@ -58,8 +64,12 @@ describe('parseFieldContract', () => {
 
   it('the header name matches the one the SPA sends', () => {
     // Two literals on either side of a wire is how a contract silently stops
-    // being honoured. The frontend copy lives in
-    // `builder/persistence/fieldContract.ts` and is pinned by its own test.
+    // being honoured. READ the frontend side (a separate build cannot import a
+    // backend constant — the form-cap-parity precedent) rather than copying it.
+    const fe = readFileSync(new URL('../../../frontend/react/src/builder/persistence/fieldContract.ts', import.meta.url), 'utf8');
+    const m = /export const FIELD_CONTRACT_HEADER\s*=\s*'([^']+)'/.exec(fe);
+    expect(m, 'could not read FIELD_CONTRACT_HEADER from the SPA').not.toBeNull();
+    expect(FIELD_CONTRACT_HEADER).toBe(m![1]);
     expect(FIELD_CONTRACT_HEADER).toBe('x-openwop-field-contract');
   });
 });

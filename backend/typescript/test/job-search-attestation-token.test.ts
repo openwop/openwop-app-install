@@ -6,13 +6,18 @@
  * checking each returns something falsy: three different reasons must produce
  * one identical answer, or an employer learns something about the applicant they
  * were never given.
+ *
+ * TST-DGF-5. Red when issuance skips the subject rule, when a preview reads
+ * around it, when a revoked token still resolves, when `issuedAt` leaves day
+ * precision, and when another campaign's applications are counted for this
+ * deal (sabotage-witnessed, wave 71).
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   issueAttestation, previewAttestation, resolveAttestation, revokeAttestation, listAttestations,
-  eraseSubjectAttestations, type IssueResult,
+  eraseSubjectAttestations, __hashIndexCountForTest, type IssueResult,
 } from '../src/features/job-search/attestation/token.js';
 import { createApplyGrant, consumeSubmit } from '../src/host/applyGrant.js';
 import { hashToken } from '../src/host/capabilityToken.js';
@@ -78,8 +83,11 @@ describe('ADR 0544 P2 — hash at rest, resolve by point lookup', () => {
     // The projection has no hash field at all, and the raw token appears nowhere.
     expect(JSON.stringify(rec)).not.toContain(token);
     expect(Object.keys(rec)).not.toContain('tokenHash');
-    // …and the stored hash is genuinely the hash of the token.
-    expect(hashToken(token)).toBeTruthy();
+    // …and the index holds ONE entry, reached from the raw token only: holding
+    // the stored hash (what a database read yields) resolves nothing.
+    expect(await __hashIndexCountForTest(TENANT)).toBe(1);
+    expect(await resolveAttestation(token)).not.toBeNull();
+    expect(await resolveAttestation(hashToken(token))).toBeNull();
   });
 
   it('the verifier view leaks NOTHING about the applicant’s workspace', async () => {
@@ -138,7 +146,7 @@ describe('ADR 0544 P2 — hash at rest, resolve by point lookup', () => {
 describe('ADR 0544 D4 — indistinguishability, compared against each other', () => {
   beforeEach(() => { __resetHostExtPersistence(); initHostExtPersistence(openSqliteStorage(':memory:')); });
 
-  it('unknown, revoked and cross-tenant all produce the IDENTICAL answer', async () => {
+  it('unknown and revoked produce the IDENTICAL answer; a cross-tenant token leaks no tenant', async () => {
     const mine = await seed(TENANT);
     const theirs = await seed(OTHER);
     await revokeAttestation(TENANT, mine.attestationId, Date.now());

@@ -6,11 +6,22 @@
  * authority object whose entire purpose is to bound submission — so its absence
  * is a security property, not an omission, and it needs a test that fails if
  * someone helpfully adds one.
+ *
+ * Tracker TST-DHB-7 (wave 71). Red when: `runCampaignPass` gains a parameter
+ * (`w71g3-sp-noinputs`); the surface drops the posting's quote (`sp-quote`) or
+ * blesses a fabricating rewrite (`sp-guard`); a missing orgId reaches the
+ * provisioning read (`sp-orgid-r2`); the campaign node loses `side-effectful`
+ * (`sp-sideeffect`); a node with no surface stops failing loudly (`sp-loud`);
+ * the surface stops normalising a partial digest (`sp-scorefit-r2`).
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildJobSearchSurface } from '../src/features/job-search/surface.js';
+import type { BundleScope } from '../src/host/inMemorySurfaces.js';
+import { listPipelines } from '../src/features/crm/crmEntitiesService.js';
+import { __resetHostExtPersistence, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { openSqliteStorage } from '../src/storage/sqlite/index.js';
 
 const PACK_DIR = join(process.cwd(), '..', '..', 'packs', 'feature.job-search.nodes');
 const manifest = JSON.parse(readFileSync(join(PACK_DIR, 'pack.json'), 'utf8')) as {
@@ -18,7 +29,8 @@ const manifest = JSON.parse(readFileSync(join(PACK_DIR, 'pack.json'), 'utf8')) a
   nodes: Array<{ typeId: string; role: string; capabilities?: string[] }>;
 };
 
-const surface = () => buildJobSearchSurface({ tenantId: 'user:t-surface', runId: 'run:1' } as never);
+const SCOPE: BundleScope = { tenantId: 'user:t-surface', runId: 'run:1' };
+const surface = () => buildJobSearchSurface(SCOPE);
 
 describe('ADR 0540 P4 — the surface exposes read + ONE terminal write', () => {
   it('has no op that could SUBMIT an application', () => {
@@ -46,11 +58,14 @@ describe('ADR 0540 P4 — the surface exposes read + ONE terminal write', () => 
     expect(surface().runCampaignPass.length).toBe(0);
   });
 
-  it('scoreFit is pure — same input, same score', async () => {
+  it('scoreFit normalises a partial workflow digest — and is pure', async () => {
     const s = surface();
     const input = { digest: { title: 'Backend Engineer', skills: ['typescript'] }, profile: { skills: ['TypeScript'], targetTitles: ['Backend Engineer'] } };
-    const a = await (s.scoreFit as (i: unknown) => Promise<{ score: number }>)(input);
-    const b = await (s.scoreFit as (i: unknown) => Promise<{ score: number }>)(input);
+    const a = await s.scoreFit!(input);
+    const b = await s.scoreFit!(input);
+    // Hand-derived: every listed skill held (10), title contained (10); no
+    // salary floor and no remote preference ⇒ the neutral 5s.
+    expect(a.scores).toEqual({ 'skill-overlap': 10, 'title-match': 10, 'salary-fit': 5, 'location-fit': 5 });
     expect(a.score).toBe(b.score);
   });
 
@@ -58,7 +73,7 @@ describe('ADR 0540 P4 — the surface exposes read + ONE terminal write', () => 
     // The quote is what makes a skip falsifiable. If the surface dropped it, a
     // chain could report a skip the user cannot check against the posting.
     const s = surface();
-    const v = await (s.checkEligibility as (i: unknown) => Promise<{ eligible: boolean; quote: string | null }>)({
+    const v = await s.checkEligibility!({
       digest: { sponsorship: 'not-offered', sponsorshipQuote: 'We cannot sponsor visas.' },
       applicant: { requiresSponsorship: true },
     });
@@ -70,16 +85,24 @@ describe('ADR 0540 P4 — the surface exposes read + ONE terminal write', () => 
     // A dishonest rewrite is a negative VERDICT, not a host failure — the chain
     // must be able to branch on it and repair.
     const s = surface();
-    const v = await (s.guardRewrite as (i: unknown) => Promise<{ ok: boolean }>)({
+    const v = await s.guardRewrite!({
       original: 'Cut latency 40%.', reworded: 'Cut latency 90%.',
     });
     expect(v.ok).toBe(false);
   });
 
-  it('a missing orgId reads EMPTY, never cross-tenant', async () => {
-    const s = surface();
-    const out = await (s.listApplications as (i: unknown) => Promise<{ applications: unknown[] }>)({});
-    expect(out.applications).toEqual([]);
+  it('a missing orgId reads EMPTY and provisions nothing', async () => {
+    // With a real store: a missing orgId must never reach `listApplications`,
+    // which PROVISIONS the application pipeline for the org it is handed.
+    __resetHostExtPersistence();
+    initHostExtPersistence(openSqliteStorage(':memory:'));
+    try {
+      const out = await surface().listApplications!({});
+      expect(out.applications).toEqual([]);
+      expect(await listPipelines(SCOPE.tenantId, ''), 'no pipeline minted for an empty org').toEqual([]);
+    } finally {
+      __resetHostExtPersistence();
+    }
   });
 });
 

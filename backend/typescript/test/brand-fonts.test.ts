@@ -1,8 +1,17 @@
 /**
  * ADR 0399 OQ-1 — brand custom fonts: the name-table family extraction (C2),
- * TTF/OTF sniff (C3), the attestation-gated upload/list/delete routes (RBAC +
- * governance authority + IDOR), the brand-delete cascade (C1), and the renderer
- * integration (a custom font changes the render's family + composite hash).
+ * TTF/OTF sniff (C3), the attestation-gated upload/list/delete routes and their
+ * cross-tenant IDOR 404, and the brand-delete cascade (C1). The renderer
+ * integration (a custom font changes the render's family + composite hash) is
+ * `creative-briefs-render.test.ts` › "brand custom fonts in the render".
+ *
+ * Tracker TST-BEG-3 (w66). Red when: the attestation check is dropped; an
+ * unknown role is accepted; the family is read from a name id other than 1;
+ * the stored bytes come back in the response; delete stops 404ing an absent
+ * font; brand delete stops purging fonts. Double guard (recorded): non-font
+ * bytes are refused by the TTF/OTF sniff AND by the family-name parse that
+ * follows it (`brandFonts.ts putBrandFont`); only breaking both reds the
+ * non-TTF case.
  *
  * Real TTF fixtures come from the renderer's OWN embedded fonts (Inter / PT
  * Serif) — no external files, and they are genuine valid faces.
@@ -32,22 +41,30 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res { status: number; body: any }
+interface Res<T> { status: number; body: T }
+type ErrBody = { error?: string; details?: { field?: string } };
+type FontMeta = { role: string; family: string; licenseAttested: boolean; contentBase64?: unknown };
 function client() {
   let cookie = '';
-  const call = async (m: string, p: string, b?: unknown): Promise<Res> => {
+  const call = async <T>(m: string, p: string, b?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${p}`, { method: m, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(b !== undefined ? { body: JSON.stringify(b) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const mm = /(__session=[^;]+)/.exec(ck); if (mm) cookie = mm[1]; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    const body: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    return { status: res.status, body: body as T };
   };
-  return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b), put: (p: string, b?: unknown) => call('PUT', p, b), del: (p: string) => call('DELETE', p) };
+  return {
+    get: <T>(p: string) => call<T>('GET', p),
+    post: <T>(p: string, b?: unknown) => call<T>('POST', p, b),
+    put: <T>(p: string, b?: unknown) => call<T>('PUT', p, b),
+    del: <T>(p: string) => call<T>('DELETE', p),
+  };
 }
 async function ownerWithBrand(): Promise<{ c: ReturnType<typeof client>; orgId: string; brandId: string }> {
   const c = client();
-  const r = await c.post('/host/openwop-app/test/login', { email: `bf-${Date.now()}-${Math.floor(Math.random() * 1e6)}@t.test`, tenantId: `org:bf-${Date.now()}-${Math.floor(Math.random() * 1e6)}` });
+  const r = await c.post<unknown>('/host/openwop-app/test/login', { email: `bf-${Date.now()}-${Math.floor(Math.random() * 1e6)}@t.test`, tenantId: `org:bf-${Date.now()}-${Math.floor(Math.random() * 1e6)}` });
   expect(r.status).toBe(201);
-  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
-  const brand = await c.post('/host/openwop-app/brand/brands', { orgId: org.body.orgId, name: 'FlashPick' });
+  const org = await c.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
+  const brand = await c.post<{ brand: { id: string } }>('/host/openwop-app/brand/brands', { orgId: org.body.orgId, name: 'FlashPick' });
   expect(brand.status, JSON.stringify(brand.body)).toBe(201);
   return { c, orgId: org.body.orgId, brandId: brand.body.brand.id };
 }
@@ -66,37 +83,47 @@ describe('extractFontFamily + sniff (C2/C3)', () => {
 describe('brand font upload routes (ADR 0399 OQ-1)', () => {
   it('requires the license attestation (hard 400)', async () => {
     const { c, brandId } = await ownerWithBrand();
-    const r = await c.put(F(brandId, 'serif'), { contentBase64: PT_SERIF_B64 });
+    const r = await c.put<ErrBody>(F(brandId, 'serif'), { contentBase64: PT_SERIF_B64 });
     expect(r.status).toBe(400);
     expect(r.body.error).toBe('validation_error');
-    expect(JSON.stringify(r.body)).toContain('licenseAttested');
+    expect(r.body.details?.field).toBe('licenseAttested');
   });
 
-  it('rejects non-TTF/OTF bytes and bad base64', async () => {
+  it('rejects non-TTF/OTF bytes and bad base64 (undecodable input is refused by the font sniff)', async () => {
     const { c, brandId } = await ownerWithBrand();
-    expect((await c.put(F(brandId, 'serif'), { contentBase64: Buffer.from('WOFF2xxxxxxxx').toString('base64'), licenseAttested: true })).status).toBe(400);
-    expect((await c.put(F(brandId, 'serif'), { contentBase64: '!!!not base64', licenseAttested: true })).status).toBe(400);
+    const woff = await c.put<ErrBody>(F(brandId, 'serif'), { contentBase64: Buffer.from('WOFF2xxxxxxxx').toString('base64'), licenseAttested: true });
+    expect(woff.status).toBe(400);
+    expect(woff.body).toMatchObject({ error: 'validation_error', details: { field: 'contentBase64' } });
+    // `Buffer.from(…, 'base64')` never throws: garbage decodes to non-font bytes.
+    const garbage = await c.put<ErrBody>(F(brandId, 'serif'), { contentBase64: '!!!not base64', licenseAttested: true });
+    expect(garbage.status).toBe(400);
+    expect(garbage.body).toMatchObject({ error: 'validation_error', details: { field: 'contentBase64' } });
+    expect((await c.get<{ fonts: FontMeta[] }>(F(brandId))).body.fonts).toEqual([]); // nothing stored
   });
 
   it('rejects an unknown role', async () => {
     const { c, brandId } = await ownerWithBrand();
-    expect((await c.put(F(brandId, 'mono'), { contentBase64: PT_SERIF_B64, licenseAttested: true })).status).toBe(400);
+    const r = await c.put<ErrBody>(F(brandId, 'mono'), { contentBase64: PT_SERIF_B64, licenseAttested: true });
+    expect(r.status).toBe(400);
+    expect(r.body).toMatchObject({ error: 'validation_error', details: { field: 'role' } });
   });
 
   it('stores an attested font, reports the REAL family, lists + deletes it', async () => {
     const { c, brandId } = await ownerWithBrand();
-    const put = await c.put(F(brandId, 'serif'), { contentBase64: PT_SERIF_B64, licenseAttested: true });
+    const put = await c.put<{ font: FontMeta }>(F(brandId, 'serif'), { contentBase64: PT_SERIF_B64, licenseAttested: true });
     expect(put.status, JSON.stringify(put.body)).toBe(201);
     expect(put.body.font.family).toBe('PT Serif'); // extracted, not caller-typed
     expect(put.body.font).not.toHaveProperty('contentBase64'); // bytes never returned
     expect(put.body.font.licenseAttested).toBe(true);
 
-    const list = await c.get(F(brandId));
-    expect(list.body.fonts.map((f: { role: string }) => f.role)).toEqual(['serif']);
+    const list = await c.get<{ fonts: FontMeta[] }>(F(brandId));
+    expect(list.body.fonts.map((f) => f.role)).toEqual(['serif']);
 
     expect((await c.del(F(brandId, 'serif'))).status).toBe(204);
-    expect((await c.get(F(brandId))).body.fonts).toEqual([]);
-    expect((await c.del(F(brandId, 'serif'))).status).toBe(404); // idempotent-ish
+    expect((await c.get<{ fonts: FontMeta[] }>(F(brandId))).body.fonts).toEqual([]);
+    const again = await c.del<ErrBody>(F(brandId, 'serif'));
+    expect(again.status).toBe(404); // idempotent-ish
+    expect(again.body.error).toBe('not_found');
   });
 
   it('cross-tenant access is a uniform 404 (loadBrandScoped IDOR)', async () => {

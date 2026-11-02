@@ -31,9 +31,10 @@ import { scrollBehavior } from '../ui/motion.js';
 import { MessageBubble } from './MessageBubble.js';
 import { WorkflowRunBubble } from './WorkflowRunBubble.js';
 import { CardHost } from './registry/CardHost.js';
-import { getCard } from './registry/CardRegistry.js';
 import { a2uiInterruptCard } from './a2ui/interruptBridge.js';
 import { HitlDecisionCard } from './HitlDecisionCard.js';
+import { AGENT_CLARIFICATION_PROFILE } from '../interrupts/clarificationModel.js';
+import { isRecord } from './lib/typeGuards.js';
 import { WorkflowCompletionCard } from './WorkflowCompletionCard.js';
 import { MessageComments } from './MessageComments.js';
 import { SelectionRewriteOverlay } from './SelectionRewrite.js';
@@ -160,15 +161,7 @@ function InterruptCardStack({
                 ...(nodeName ? { nodeName } : {}),
                 ...(message.workflowRun?.workflowName ? { workflowName: message.workflowRun.workflowName } : {}),
               }}
-              onAction={async (actionId, payload) => {
-                // ADR 0749 (RFC 0209 §C.10) — an A2UI `exchange` action is a
-                // conversation turn, not a resolution: route it to the card's own
-                // registered `exchange` handler. Everything else resolves.
-                const exchangeHandler = actionId === 'exchange' ? getCard(a2ui ? a2ui.cardType : `interrupt.${interrupt.kind}`)?.actionHandlers?.exchange : undefined;
-                if (exchangeHandler) {
-                  await exchangeHandler(payload, { runId: runIdFor(message), nodeId: interrupt.nodeId, tenantId });
-                  return;
-                }
+              onAction={async (_actionId, payload) => {
                 await onResolveInterrupt(message.id, payload, interrupt.nodeId);
               }}
             />
@@ -243,6 +236,10 @@ interface Props {
    *  surfaces that have a Workbench pass it; the preview offers the button only
    *  once the run's artifact for that node is confirmed. */
   onOpenArtifact?: (a: { artifactId: string }) => void;
+  /** ADR 1001 D7 — answer an agent's chat question card (`askId` is the wire
+   *  turn id; `answers` the spec `ClarificationResume.answers`, `[]` = skip).
+   *  Surfaces that send through the conversation pass it; absent ⇒ no card. */
+  onAnswerClarification?: (askId: string, data: unknown, answers: unknown) => Promise<void>;
 }
 
 export function MessageFeed({
@@ -268,6 +265,7 @@ export function MessageFeed({
   onSummarize,
   summarizeBusy,
   onOpenArtifact,
+  onAnswerClarification,
 }: Props): JSX.Element {
   const { t } = useTranslation('chat');
   const endRef = useRef<HTMLDivElement>(null);
@@ -314,7 +312,11 @@ export function MessageFeed({
   // we render them as `/<workflow-slug>` to match the new syntax.
   // Memoize so we don't rewalk + re-rewrite on every render that
   // doesn't change messages.
-  const displayMessages = useMemo(() => normalizeWorkflowMentions(messages), [messages]);
+  // ADR 1001 D7 — a Skip of an agent's questions reads in the VIEWER's language
+  // (the host persists an English fallback for clients without the card).
+  const displayMessages = useMemo(() => normalizeWorkflowMentions(messages).map((m) => (
+    m.meta?.clarificationSkipped ? { ...m, content: t('clarifySkippedTurn') } : m
+  )), [messages, t]);
 
   // Distance from the bottom (px) under which we consider the user "at the
   // bottom" and keep auto-following. Generous enough that a stray wheel tick or a
@@ -582,6 +584,23 @@ export function MessageFeed({
             tenantId={tenantId}
             onResolveInterrupt={onResolveInterrupt}
           />
+          {/* ADR 1001 D7 — an agent's chat question card: the SAME clarification
+              card the run lane uses, under the agent's latest turn while it is
+              unanswered. The answer is the next exchange, not an interrupt. */}
+          {onAnswerClarification && m.role === 'assistant' && m.meta?.clarificationAsk && !m.meta.clarificationAsk.answered && i === displayMessages.length - 1 ? (
+            <div className="msgfeed-card-indent">
+              <CardHost
+                cardType="interrupt.clarification"
+                payload={{ kind: 'clarification', data: { ...(isRecord(m.meta.clarificationAsk.data) ? m.meta.clarificationAsk.data : {}), profile: AGENT_CLARIFICATION_PROFILE, ...(m.agentPersona ? { askedBy: m.agentPersona } : {}) } }}
+                context={{ runId: runIdFor(m), tenantId }}
+                onAction={async (_actionId, payload) => {
+                  const ask = m.meta?.clarificationAsk;
+                  if (!ask) return;
+                  await onAnswerClarification(ask.askId, ask.data, isRecord(payload) && Array.isArray(payload.answers) ? payload.answers : []);
+                }}
+              />
+            </div>
+          ) : null}
           {/* Persistent HITL decision artifacts — one per resolved
               interrupt. Survives the open interrupt being cleared.
               Renders only the resolved entries; an open interrupt is

@@ -2,6 +2,17 @@
 
 **Status:** implemented — 2026-06-27 (all 4 phases). Phase→artifact: **P1** package+toggle+data-model — `src/features/chat-autotitle/{feature,titleGenerator,binding}.ts`, `chat-autotitle` toggle (ON, `user`), `ChatSessionRecord.titleSource` + sqlite mig 32 / postgres mig 29; **P2** first-exchange binding — `maybeAutotitleOnFirstExchange` fired from `conversationExchange.finishExchange` (gated on `titleSource==='default'`, fail-closed, TOCTOU re-check); **P3** `openwop-app.conversation.titled` event + FE `titledFromEvent` consumed in `useChatSession`; **P4** admin (toggle auto-surfaces in `FeatureTogglePanel`) + i18n (title is in the conversation's language ⇒ no new app keys; manual-rename PATCH stamps `titleSource='user'`). Tests: `chat-autotitle-sanitize` (6) + `chat-autotitle-binding` (7) + FE `titledFromEvent` (2); storage-parity 60 + chat-session routes 28 green; backend tsc + FE build gate clean. `/architect` (pre-phase seam audit, with one call-site correction: bind at the first exchange, not close), `/code-review`, `/ux-review` clean.
 
+> **CORRECTED 2026-10-31 (ADR 1019, feature-loop row 69) — four promises in this ADR were false
+> as shipped.** (1) "on the first exchange of a conversation whose title is still the default
+> placeholder": `'default'` meant only "not renamed via PATCH", so boards, projects, notebooks,
+> channels, DMs, branches and imports were renamed by the model on their next exchange, and the
+> binding had no first-exchange check at all. (2) "title ONCE": a failed call re-fired on every
+> later turn. (3) "the cheapest fast model on the active credential … or the user's BYOK model":
+> the call always went through the no-chosen-provider headless resolver, so a BYOK, Copilot or
+> self-hosted chat's text went to the platform managed model, unmetered to the person. (4) "rail/tab
+> update within ~2 s": the event lands after the exchange's stream closes, and nothing the person
+> sees read it. ADR 1019 records the measurement and the fix; the text below is the original design.
+
 **Correction note (impl):** §Phase 2 cites mirroring `maybeExtractMemoryOnClose`, which fires at conversation **close**. The title must fire on the **first exchange**, so the binding is called from inside `finishExchange` (after both turns are durable), not from the close path — the *pattern* (fire-and-forget + fail-closed + idempotent-once) is reused, the *call site* differs. Idempotency keys on `titleSource==='default'` (not a turn count), which also structurally fixes the multi-tab `messages.length===0` regression §13 describes.
 **Toggle:** new feature-package `chat-autotitle` · default **ON** (product decision 2026-06-27 — auto-naming is expected default behavior; per-user opt-out via the toggle, `bucketUnit: user`). The substring placeholder remains the fallback when OFF or on any failure.
 **Surface:** host-extension only — a first-exchange LLM side-effect that writes the existing chat-session **title** and emits a non-normative `openwop-app.conversation.titled` event on the run SSE. **No new wire** (see RFC verdict).

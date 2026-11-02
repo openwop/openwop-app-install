@@ -8,8 +8,20 @@
  *  - a recent HUMAN run or chat-session update keeps a tenant alive;
  *  - signed-in (`user:*`) tenants are never candidates;
  *  - teardown is complete (runs + kv gone) and tombstoned with an audit row.
+ *
+ * Every case opens its OWN store (`beforeEach`): the first version shared one
+ * store across cases and asserted a count that included another case's tenant,
+ * so it reddened under shuffle (w66 grade).
+ *
+ * TST-BXD-2. Red when: the lifecycle runs with the env unset (lc-off),
+ * scheduler runs count as human activity (lc-sched), chat activity stops
+ * protecting a tenant (lc-chat), a non-`anon:` tenant becomes a candidate
+ * (lc-prefix), the runs-anchored leg deletes runs before the purges that can
+ * fail (lc-runsorder), the runless leg purges its hostext anchor before the
+ * other purges (lc-hostextlast), the runless leg purges before probing for a
+ * run (lc-probe), or a non-`hostext:` row anchors a tenant (lc-kprefix).
  */
-import { afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { pruneAbandonedAnonTenants } from '../src/host/retentionSweepDaemon.js';
@@ -28,7 +40,8 @@ const run = (runId: string, tenantId: string, daysAgo: number, scheduled: boolea
   createdAt: iso(daysAgo), updatedAt: iso(daysAgo),
 });
 
-beforeAll(async () => {
+beforeEach(async () => {
+  // A fresh store per case: no case may count another case's tenants.
   storage = await openStorage('memory://');
   initHostExtPersistence(storage);
 });
@@ -57,15 +70,18 @@ describe('ADR 0372 — pruneAbandonedAnonTenants', () => {
     await storage.insertRun(run('us-old', 'user:abc', 200, false));
 
     const torn = await pruneAbandonedAnonTenants({ storage }, NOW);
-    // 2 = anon:flood + the OFF-test's anon:off-tenant (90d idle — abandoned
-    // the moment the env enables; shared store across tests, asserted here).
-    expect(torn).toBe(2);
-    expect(await storage.getRun('off-r1')).toBeNull();
+    expect(torn).toBe(1); // anon:flood only — this case's own store
     expect(await storage.getRun('fl-old')).toBeNull();
     expect(await storage.getRun('fl-cron')).toBeNull();
     expect(await storage.getRun('hu-new')).not.toBeNull();
     expect(await storage.getRun('ch-old')).not.toBeNull();
     expect(await storage.getRun('us-old')).not.toBeNull();
+    // kv gone too (the host-ext ghost-row sweep), and the teardown is tombstoned.
+    expect(await storage.kvGet('hostext:kanban:anon-flood-card')).toBeNull();
+    const tombstones = (await storage.listAudit({ actionPrefix: 'governance.retention.purged' }))
+      .map((a) => (a.payload as { feature?: string; tenantId?: string } | undefined))
+      .filter((pl) => pl?.feature === 'anon-tenant-lifecycle');
+    expect(tombstones.map((pl) => pl?.tenantId)).toEqual(['anon:flood']);
   });
 
   it('RE-ENTRANCY (RETENTION-DATA-1): a mid-teardown purge failure leaves the tenant re-surfaceable (runs intact)', async () => {
@@ -91,29 +107,13 @@ describe('grade-pass DATA-1 — the runless (hostext-anchored) leg', () => {
   const FUTURE = () => Date.now() + (DAYS + 1) * DAY;
 
   /**
-   * A FRESH store for this leg — and the reason is a bug that already bit.
-   *
-   * The describe above back-dates its fixtures against a FIXED clock
-   * (`NOW` = 2026-07-15). This one prunes against the REAL clock, because kvSet
-   * stamps `updated_at` itself and cannot be back-dated. Sharing one module-level
-   * `storage` between them means this leg also sees the other's tenants — and
-   * judges them by a clock they were never written for.
-   *
-   * That is a DATE BOMB, not a flake. `anon:human` is inserted at `iso(2)` =
-   * 2026-07-13T12:00Z; the real cutoff is `now - 14d`. On 2026-07-27T12:00Z the
-   * two crossed, this leg started sweeping a tenant belonging to another test,
-   * and `toBe(0)` became `1` — on a suite that had been green for weeks and with
-   * nobody having touched retention. It gets worse every day it is left.
-   *
-   * Isolating the store fixes the cause rather than the symptom: the alternative
-   * (assert on one tenant instead of the count) would keep the cross-describe
-   * coupling and lose the "swept NOTHING" guarantee, which is the assertion worth
-   * having on a teardown path.
+   * This leg prunes against the REAL clock (kvSet stamps `updated_at` itself and
+   * cannot be back-dated), while the describe above back-dates against a FIXED
+   * `NOW`. Sharing a store between them was a DATE BOMB: on 2026-07-27 this leg
+   * began sweeping the other describe's `anon:human` and `toBe(0)` became `1`.
+   * The file-level `beforeEach` now gives every case its own store, which
+   * removes that coupling for every case rather than for this describe only.
    */
-  beforeAll(async () => {
-    storage = await openStorage('memory://');
-    initHostExtPersistence(storage);
-  });
 
   it('listHostExtTenantActivity enumerates only prefix-matching tenants and survives malformed rows', async () => {
     await storage.kvSet('hostext:roster:anon:hx-a:host:x', JSON.stringify({ rosterId: 'host:x', tenantId: 'anon:hx-a' }));
@@ -154,7 +154,7 @@ describe('grade-pass DATA-1 — the runless (hostext-anchored) leg', () => {
     // runless-1 (stale, unprotected) is torn; runless-chat survives on chat.
     expect(await storage.kvGet('hostext:roster:anon:runless-1:host:a')).toBeNull();
     expect(await storage.kvGet('hostext:roster:anon:runless-chat:host:b')).not.toBeNull();
-    expect(tornFuture).toBeGreaterThanOrEqual(1);
+    expect(tornFuture).toBe(1); // runless-1 only — this case's own store
   });
 
   it('RE-ENTRANCY inverted for the runless anchor: hostext (the anchor) purges LAST', async () => {

@@ -5,14 +5,29 @@
  * extracted". The rest of these exist because the input is an ATTACKER-CONTROLLED
  * page: the interesting cases are the ones designed to make the extractor hang,
  * exhaust memory, or take a campaign down with it.
+ *
+ * Tracker TST-DHB-4 (wave 71). Red when: the block cap goes (`w71g3-js-blocks`),
+ * the field clip goes (`js-field`), the depth cap goes (`js-depth-r2`), a
+ * titleless posting is kept (`js-title`), a malformed block rethrows
+ * (`js-malformed`), or an array `@type` is ignored (`js-arraytype`).
+ * DOUBLE GUARDS (recorded, each half alone is an equivalent mutant):
+ *  - the posting count: `collectPostings`'s `into.length` cap AND
+ *    `raw.slice(0, MAX_POSTINGS)` — the two are in different functions, so no
+ *    single-edit probe reaches it (`js-count` was an equivalent mutant); the case
+ *    asserts the exact 200;
+ *  - a null JSON-LD value: the `node == null` return AND the per-block
+ *    try/catch, which swallows the TypeError (`js-null` was an equivalent
+ *    mutant; `js-malformed` witnesses the catch).
+ * The `fetchListingPage.ts` egress scan duplicates job-search-injection-publish-gate
+ * (dedupe row TST-DHB-3b — both kept, SSRF-protected).
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { extractJobPostings, MAX_HTML_BYTES } from '../src/features/job-search/boards/jsonLd.js';
+import { stripComments } from './helpers/stripComments.js';
 
 /** Strip block and line comments so a source scan reads CODE, not prose. */
-const stripComments = (s: string): string => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
 
 /** Real pages escape `</` inside JSON-LD (otherwise the literal string would
  *  close the surrounding <script> tag). The fixture must do the same, or it is
@@ -73,7 +88,7 @@ describe('ADR 0542 D3 — the input is hostile, and one bad page must not stop a
     ['a bare number', '<script type="application/ld+json">42</script>'],
     ['an unclosed script tag', '<script type="application/ld+json">{"@type":"JobPosting","title":"x"'],
   ])('never throws on %s', (_l, html) => {
-    expect(() => extractJobPostings(html)).not.toThrow();
+    expect(extractJobPostings(html)).toEqual([]);
   });
 
   it('a posting with NO title is dropped rather than stored as blank', () => {
@@ -85,23 +100,27 @@ describe('ADR 0542 D3 — the input is hostile, and one bad page must not stop a
     // A nesting bomb is the cheapest way to take a parser down.
     let deep: unknown = POSTING;
     for (let i = 0; i < 200; i += 1) deep = { '@graph': [deep] };
-    expect(() => extractJobPostings(page(deep))).not.toThrow();
+    // A posting nested past the depth cap is NOT collected (200 levels do not
+    // overflow the stack, so "does not throw" alone held without the cap).
+    expect(extractJobPostings(page(deep))).toEqual([]);
+    // Positive control: two levels of @graph are well inside the cap.
+    expect(extractJobPostings(page({ '@graph': [{ '@graph': [POSTING] }] }))).toHaveLength(1);
   });
 
   it('bounds the NUMBER of postings from one page', () => {
     const many = Array.from({ length: 5000 }, (_, i) => ({ ...POSTING, title: `Job ${i}` }));
-    expect(extractJobPostings(page(many)).length).toBeLessThanOrEqual(200);
+    expect(extractJobPostings(page(many)).length).toBe(200);
   });
 
   it('bounds a single enormous FIELD rather than storing megabytes of prose', () => {
     const huge = { ...POSTING, description: 'x'.repeat(5_000_000) };
     const [p] = extractJobPostings(page(huge));
-    expect(p!.description.length).toBeLessThanOrEqual(20_000);
+    expect(p!.description.length).toBe(20_000);
   });
 
   it('bounds the number of script BLOCKS it will consider', () => {
     const blocks = Array.from({ length: 500 }, () => `<script type="application/ld+json">${JSON.stringify(POSTING)}</script>`).join('');
-    expect(extractJobPostings(blocks).length).toBeLessThanOrEqual(20);
+    expect(extractJobPostings(blocks).length).toBe(20);
   });
 
   it('treats extracted text as DATA — no evaluation, markup preserved verbatim', () => {

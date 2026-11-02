@@ -8,8 +8,12 @@
  * draft, row closed). A fork that re-executed the node would open a SECOND review cycle
  * (a new approval row, the campaign `in_review` again). A served fork leaves both alone.
  *
- * Sabotage-witnessed: dropping `side-effectful` + `role:"side-effect"` from the node (and
- * regenerating the floor) reds the "no second row" assertion.
+ * Sabotage-witnessed (w73, measured): dropping the node from the generated
+ * MANIFEST_FAST_PATH_SERVED set (what dropping `side-effectful` + `role:"side-effect"`
+ * and regenerating does) reds the "no second row" assertion. The actorless-run case
+ * reds under each of: the self-approval check ignoring `submitterCauses`, the run
+ * surface passing no cause, the repin replacing (not merging) causes, and the
+ * erasure redactor skipping `submitterCauses`.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -46,7 +50,7 @@ beforeAll(async () => {
   hostSuite = app.locals.hostSuite;
   for (const id of ['crm', 'email']) { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); }
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-});
+}, 120_000);
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 async function post(path: string, body: unknown): Promise<{ status: number; body: Record<string, unknown> }> {

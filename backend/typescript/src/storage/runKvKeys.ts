@@ -29,3 +29,19 @@ export function toolBoundaryKeyPatterns(tenantId: string, runId: string): string
     `hostext:agent:tool-boundary-run:${t}:%:${r}`,
   ];
 }
+
+/**
+ * ADR 1001 D3.1 — an agent node's clarification continuation checkpoints
+ * (`host/clarificationCheckpoint.ts`): one row per (run, node, round), keyed
+ *
+ *   hostext:runclarify:<runId>:<nodeId>:<round>
+ *
+ * They hold the transcript tail of a paused agent turn (tool output included),
+ * so they retire with the run on every run-delete path, like the run artifacts.
+ * The host module builds its keys FROM this prefix so the two cannot drift.
+ */
+export const CLARIFICATION_CHECKPOINT_PREFIX = 'hostext:runclarify:';
+
+export function clarificationCheckpointKeyPattern(runId: string): string {
+  return `${CLARIFICATION_CHECKPOINT_PREFIX}${esc(runId)}:%`;
+}

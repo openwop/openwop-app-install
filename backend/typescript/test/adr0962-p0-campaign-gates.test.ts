@@ -11,7 +11,9 @@
  *     each campaign runs; a plain run is not; a missing ancestor fails closed.
  *   - MCP ROUND TRIP (route, `tools/call` + `inputResponses`): a campaign gate's
  *     retry is refused and the gate stays open; the SAME workflow without campaign
- *     provenance still resolves (positive control: the refusal is the guard's).
+ *     provenance gets ADR 1009's refusal instead, and a clarification on the same
+ *     mount still resolves (positive controls: the refusal text is the guard's, and
+ *     the retry lane works).
  *   - A2A: the 0.3 card lists no campaign agent; `message/send` to one is refused on
  *     both lanes exactly as an unknown agent is; a non-campaign pack agent is still
  *     listed (positive control).
@@ -176,6 +178,7 @@ describe('ADR 0962 D4.1 / D4.2 — over the MCP mount, an external agent cannot 
   const CAMPAIGN_TOOL = `campaign_gate_probe_${STAMP}`;
   const PLAIN_TOOL = `plain_gate_probe_${STAMP}`;
   const CHAT_GATE_TOOL = `campaign_chat_gate_probe_${STAMP}`;
+  const CLARIFY_TOOL = `plain_clarify_probe_${STAMP}`;
 
   async function register(workflowId: string, tool: string, chainId?: string, gateTypeId = 'core.approvalGate'): Promise<void> {
     const res = await fetch(`${BASE}/host/openwop-app/workflows`, {
@@ -227,6 +230,7 @@ describe('ADR 0962 D4.1 / D4.2 — over the MCP mount, an external agent cannot 
     await register(`mcp.probe.campaign.${STAMP}`, CAMPAIGN_TOOL, 'campaign-studio.mcp-gate-probe');
     await register(`mcp.probe.plain.${STAMP}`, PLAIN_TOOL);
     await register(`mcp.probe.chatgate.${STAMP}`, CHAT_GATE_TOOL, 'campaign-journeys.mcp-gate-probe', 'core.chat.approvalGate');
+    await register(`mcp.probe.clarify.${STAMP}`, CLARIFY_TOOL, undefined, 'core.clarificationGate');
   }, 120_000);
   afterAll(async () => {
     delete process.env.OPENWOP_MCP_SERVER_ENABLED;
@@ -234,9 +238,20 @@ describe('ADR 0962 D4.1 / D4.2 — over the MCP mount, an external agent cannot 
     await new Promise<void>((res) => server.close(() => res()));
   });
 
-  it('POSITIVE CONTROL: the same gate without campaign provenance is resolved by the retry (today\'s MRTR behaviour)', async () => {
-    const { first, retry } = await startAndApprove(PLAIN_TOOL);
+  it('CONTROL: without campaign provenance the gate gets ADR 1009\'s refusal, not this guard\'s, and stays open', async () => {
+    const { first, retry, again } = await startAndApprove(PLAIN_TOOL);
     expect(first.result?.resultType, JSON.stringify(first)).toBe('input_required');
+    expect(retry.result?.isError, JSON.stringify(retry)).toBe(true);
+    expect(JSON.stringify(retry)).toContain('can only be decided in the app');
+    expect(JSON.stringify(retry)).not.toContain('decide it in the inbox');
+    expect(JSON.stringify(again)).toContain('can only be decided in the app');
+  });
+
+  it('POSITIVE CONTROL: a clarification on the same mount is resolved by the retry', async () => {
+    const first = await call(CLARIFY_TOOL);
+    expect(first.result?.resultType, JSON.stringify(first)).toBe('input_required');
+    const key = Object.keys((first.result?.inputRequests ?? {}) as Record<string, unknown>)[0]!;
+    const retry = await call(CLARIFY_TOOL, { requestState: first.result?.requestState, inputResponses: { [key]: { action: 'accept', content: { answers: [{ id: 'q1', answer: 'yes' }] } } } });
     expect(retry.result?.resultType, JSON.stringify(retry)).toBe('complete');
     expect(retry.result?.isError, JSON.stringify(retry)).toBe(false);
   });

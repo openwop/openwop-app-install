@@ -8,6 +8,10 @@
  * relies on (a fork re-derives scheduler state from the parent run's
  * checkpointed node outputs; if that derivation weren't a pure function of the
  * recorded outputs, replay would diverge).
+ *
+ * Tracker TST-CXB-1. Red when the false-condition fold in `evaluateTrigger`
+ * is removed (scheduler.ts — the unmatched branch runs), or `contains` stops
+ * comparing members (every branch runs).
  */
 import { describe, expect, it, beforeAll } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -110,10 +114,15 @@ describe('edge-condition control-flow — real executor run (ECR-1/ECR-3)', () =
   });
 
   it('routing is DETERMINISTIC — identical inputs reproduce the identical branch set', async () => {
+    // An intervening run that routes the OTHER way, on the same storage and
+    // registry, must not change what the repeated input routes to: routing is a
+    // function of the run's own recorded outputs only.
     const first = await completedNodeIds({ key: 'a' });
+    const between = await completedNodeIds({ key: 'b' });
     const second = await completedNodeIds({ key: 'a' });
+    expect(first).toEqual(['a', 'merge', 'route']);
+    expect(between).toEqual(['b', 'merge', 'route']);
     expect(second).toEqual(first);
-    expect(second).not.toContain('b'); // the skipped branch never leaks across runs
   });
 
   it('skip derivation is order-independent — the replay-safety property (ECR-1)', () => {
@@ -128,9 +137,10 @@ describe('edge-condition control-flow — real executor run (ECR-1/ECR-3)', () =
       releaseDownstream('route', g, s);
       // Idempotent re-release (a replay may re-invoke) must not change anything.
       releaseDownstream('route', g, s);
-      return { a: s.nodeState.get('a'), b: s.nodeState.get('b') };
+      return { a: s.nodeState.get('a'), b: s.nodeState.get('b'), merge: s.nodeState.get('merge') };
     };
-    expect(verdicts()).toEqual({ a: 'ready', b: 'skipped' });
-    expect(verdicts()).toEqual(verdicts()); // stable across independent derivations
+    // The join waits on the taken branch; the re-release did not settle it.
+    expect(verdicts()).toEqual({ a: 'ready', b: 'skipped', merge: 'pending' });
+    expect(verdicts()).toEqual({ a: 'ready', b: 'skipped', merge: 'pending' }); // a second independent derivation
   });
 });

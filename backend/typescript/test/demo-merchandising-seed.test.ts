@@ -6,6 +6,12 @@
  * (collections + taxonomy + merch rules + embeddings rebuild), recommendations
  * (placements + affinity rebuild). Also asserts the honest skip when toggles are
  * off, and a clean round-trip.
+ *
+ * TST-CUE-5. The all-off case turns the three toggles off for ITS tenant only (a
+ * per-tenant override) — it used to re-register the global defaults OFF, which
+ * broke the seed case whenever it ran second. Red when a re-seed re-creates
+ * promotions, when clear leaves demo affinity rows, or when the all-off gate is
+ * skipped (each sub-step then reports its own skip instead).
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -14,6 +20,7 @@ import { join } from 'node:path';
 import { initHostExtPersistence, DurableCollection } from '../src/host/hostExtPersistence.js';
 import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { registerToggleDefault } from '../src/host/featureToggles/registry.js';
+import { getEffectiveConfig, saveConfig } from '../src/host/featureToggles/service.js';
 import { openStorage } from '../src/storage/index.js';
 import { seedDemoPeople } from '../src/host/demoPeopleSeed.js';
 import { seedDemoMedia } from '../src/host/demoMediaSeed.js';
@@ -90,16 +97,17 @@ describe('demo-merchandising seeder', () => {
 
   it('skips honestly when all three toggles are off', async () => {
     const tenantId = 'demo-merch-off';
-    // No toggles registered for this tenant beyond the global ON defaults; force
-    // off via a per-tenant override is heavier than needed — instead assert the
-    // seeder reports skips for features by seeding into a tenant where commerce
-    // has no catalog (nothing to reference) is not the gate. Use a dedicated
-    // registry with all three off.
-    registerToggleDefault({ id: 'promotions', salt: 'promotions', status: 'off', bucketUnit: 'tenant' });
-    registerToggleDefault({ id: 'discovery', salt: 'discovery', status: 'off', bucketUnit: 'tenant' });
-    registerToggleDefault({ id: 'recommendations', salt: 'recommendations', status: 'off', bucketUnit: 'tenant' });
+    // OFF for this tenant only — the global defaults (ON) stay as the seed case needs them.
+    for (const id of ['promotions', 'discovery', 'recommendations']) {
+      const cfg = await getEffectiveConfig(id);
+      if (!cfg) throw new Error(`no ${id} toggle config`);
+      await saveConfig({ ...cfg, tenantOverrides: { ...(cfg.tenantOverrides ?? {}), [tenantId]: { status: 'off' } } }, 'test');
+    }
     const r = await seedDemoMerchandising(tenantId);
     expect(r.created).toBe(0);
-    expect((r.details?.skipped as string)).toContain('off');
+    // the single all-off skip (a string), not three per-step skips (an array)
+    const skipped = r.details?.skipped;
+    expect(typeof skipped).toBe('string');
+    expect(skipped).toBe('promotions, discovery, and recommendations are all off');
   });
 });

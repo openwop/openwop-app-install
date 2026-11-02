@@ -6,7 +6,9 @@
  * The end-to-end send (a paid order emails its contact through the transport) stays
  * pinned by `commerce-phase-d.test.ts`; this file pins the copy.
  *
- * Sabotage-witnessed: hard-coding English in `compose` reds three locale goldens.
+ * TST-CFD-3. Sabotage-witnessed: hard-coding English in `compose` reds three locale
+ * goldens; formatting the total without `f.money` reds every case; putting the link
+ * before the body reds the linked goldens; always appending a link reds the last case.
  */
 import { describe, expect, it } from 'vitest';
 import { renderTransactional, TRANSACTIONAL_LOCALES } from '../src/host/transactionalEmail.js';

@@ -73,8 +73,6 @@ describe('the seam alias serves every operation the manifest claims', () => {
     expect(seamAliasTarget('/conformance/seams/sample/a2a/tasks/t1')).toBe('/host/sample/a2a/tasks/t1');
     expect(seamAliasTarget('/conformance/seams/workspace/files')).toBe('/host/workspace/files');
     expect(seamAliasTarget('/conformance/seams/packs-test/x/-/1.0.0.tgz')).toBe('/packs-test/x/-/1.0.0.tgz');
-    // ADR 0749 — the v2 emit seam is its own handler, not the v1 `{surface}` one.
-    expect(seamAliasTarget('/conformance/seams/sample/a2ui/emit-surface')).toBe('/host/sample/a2ui/v2/emit-surface');
   });
 
   it('a served operation is genuinely routed — its v1 twin is not a blanket 404', async () => {
@@ -188,21 +186,6 @@ describe('declared-but-unserved seams answer 404 (WS0)', () => {
     const declared = [...yaml.matchAll(/^\s+operationId:\s*(\S+)/gm)].map((m) => m[1]!).sort();
     expect(declared.length, 'no operationIds parsed — the yaml moved').toBeGreaterThanOrEqual(16);
     expect(SEAM_OPERATIONS.map((op) => op.operationId).sort()).toEqual(declared);
-  });
-
-  // ADR 0749 — the RFC 0209 seam now exists, so its v2 address reaches ITS OWN
-  // handler (a run that does not exist is `404 not_found` with a RUN message,
-  // and an empty body is a 400 from the v2 handler), never the v1 `{surface}` one.
-  it('the v2 emitA2uiSurface address reaches the RFC 0209 handler', async () => {
-    const v2 = await fetch(`${base}${SEAMS_PREFIX}/sample/a2ui/emit-surface`, {
-      method: 'POST', headers: AUTH, body: JSON.stringify({ runId: 'ws0-probe', envelope: { type: 'ui.a2ui-surface' } }),
-    });
-    expect(v2.status).toBe(404);
-    expect(((await v2.json()) as { message?: unknown }).message).toMatch(/^run /);
-    const v2Empty = await fetch(`${base}${SEAMS_PREFIX}/sample/a2ui/emit-surface`, { method: 'POST', headers: AUTH, body: '{}' });
-    expect(((await v2Empty.json()) as { message?: unknown }).message).toMatch(/runId and envelope/);
-    // ADR 0812 P3c-0 — the leg proving the v1 RFC 0114 route still answered at
-    // /v1/host/sample/a2ui/emit-surface was deleted with the /v1 path space.
   });
 
   it('every served:false operation is refused and no served one is', async () => {

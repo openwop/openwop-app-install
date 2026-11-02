@@ -14,6 +14,9 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
 import { isAnonHitlOnlyTool } from '../../host/agentToolProvider.js';
+import { normalizeAllowedDomain } from './originAllowlist.js';
+import { deleteWidgetThreads } from './visitorThreads.js';
+import { MAX_TURNS_PER_SESSION } from './capsTracker.js';
 
 export interface WidgetCaps { maxTurnsPerSession?: number; maxSessionsPerDay?: number; maxWritesPerDay?: number; maxAutoWritesPerSession?: number }
 
@@ -97,22 +100,41 @@ function cleanDomains(v: unknown): string[] {
   if (!Array.isArray(v) || v.length === 0) {
     throw new OpenwopError('validation_error', '`allowedDomains` MUST be a non-empty array (default-deny).', 400, { field: 'allowedDomains' });
   }
-  const out = v
-    .filter((d): d is string => typeof d === 'string' && d.trim().length > 0)
-    .map((d) => d.trim().toLowerCase())
-    .slice(0, 50);
+  // ADR 1018 D5 — every entry must be a host (`acme.com`, `app.acme.com`, `localhost`).
+  // A pasted URL is reduced to its host; a bare label, a wildcard or a port is refused
+  // by name, because a bare `com` would admit every `.com` site.
+  const out: string[] = [];
+  for (const d of v) {
+    if (typeof d !== 'string' || d.trim().length === 0) continue;
+    const host = normalizeAllowedDomain(d);
+    if (!host) {
+      throw new OpenwopError('validation_error', `\`allowedDomains\` entry "${d.trim().slice(0, 100)}" is not a domain. Use a host such as acme.com or app.acme.com.`, 400, { field: 'allowedDomains', entry: d.trim().slice(0, 100) });
+    }
+    if (!out.includes(host)) out.push(host);
+  }
   if (out.length === 0) throw new OpenwopError('validation_error', '`allowedDomains` MUST contain at least one domain.', 400, { field: 'allowedDomains' });
-  return out;
+  return out.slice(0, 50);
 }
+
+/** ADR 1018 D4 — the ceiling an operator may set for new visitor sessions per day. */
+export const MAX_SESSIONS_PER_DAY = 2_000;
 
 function cleanCaps(v: unknown): WidgetCaps {
   const c = (v ?? {}) as Record<string, unknown>;
   const caps: WidgetCaps = {};
-  if (typeof c.maxTurnsPerSession === 'number' && c.maxTurnsPerSession > 0) caps.maxTurnsPerSession = Math.floor(c.maxTurnsPerSession);
-  if (typeof c.maxSessionsPerDay === 'number' && c.maxSessionsPerDay > 0) caps.maxSessionsPerDay = Math.floor(c.maxSessionsPerDay);
+  if (typeof c.maxTurnsPerSession === 'number' && c.maxTurnsPerSession > 0) {
+    // Refused, not silently clamped: the operator should know the value they typed is
+    // not the one that runs. The read path clamps too (`capsTracker.checkWidgetTurn`).
+    if (c.maxTurnsPerSession > MAX_TURNS_PER_SESSION) {
+      throw new OpenwopError('validation_error', `\`caps.maxTurnsPerSession\` cannot exceed ${MAX_TURNS_PER_SESSION}.`, 400, { field: 'caps.maxTurnsPerSession', max: MAX_TURNS_PER_SESSION });
+    }
+    caps.maxTurnsPerSession = Math.floor(c.maxTurnsPerSession);
+  }
+  // ADR 1018 D4 — bounded: the day row keeps one short hash per admitted session.
+  if (typeof c.maxSessionsPerDay === 'number' && c.maxSessionsPerDay > 0) caps.maxSessionsPerDay = Math.min(MAX_SESSIONS_PER_DAY, Math.floor(c.maxSessionsPerDay));
   // ADR 0469 A3 — anon write/egress cap: the per-day ceiling on HELD writes a
   // widget's visitors can queue for operator review (anti-flood — gates approval
-  // CREATION). Unset ⇒ uncapped (but the tier is off by default anyway).
+  // CREATION). Unset ⇒ the secure default in `capsTracker.ts` (25/day, ADR 0470 P3).
   if (typeof c.maxWritesPerDay === 'number' && c.maxWritesPerDay > 0) caps.maxWritesPerDay = Math.floor(c.maxWritesPerDay);
   // ADR 0469 Phase D — the per-session cap that bounds the `rate-limit-session-cap`
   // auto-write control. Required by that control (a bound-less auto control is the
@@ -279,7 +301,9 @@ export async function rotateWidgetToken(tenantId: string, orgId: string, widgetI
  * ADR 0288 roster-lifecycle consumer (grade-data AGT-1) — DISABLE (never delete)
  * every public widget bound to a deleted roster member: a widget is a live
  * public credential, so serving must stop immediately, but the authored config
- * (domains/caps/token) survives visibly disabled for re-assignment. Matches
+ * (domains/caps/token) survives visibly disabled. Re-assignment is a PATCH of `agentId`
+ * (the operator API; the console's Configure panel has no agent picker yet — filed
+ * `CW68U-16b`), and re-enabling re-checks the agent server-side (`routes.ts`). Matches
  * both id forms. Idempotent; bounded tenant-prefixed scan.
  */
 export async function disableWidgetsForDeletedAgent(tenantId: string, ids: { rosterId: string; agentId?: string }): Promise<number> {
@@ -297,6 +321,7 @@ export async function deleteWidget(tenantId: string, orgId: string, widgetId: st
   const w = await mustGet(tenantId, orgId, widgetId);
   await widgets.delete(keyOf(w));
   await tokenIndex.delete(w.token).catch(() => undefined); // PUB-6
+  await deleteWidgetThreads(w); // ADR 1018 D3 — a deleted widget keeps no visitor text
 }
 
 /**

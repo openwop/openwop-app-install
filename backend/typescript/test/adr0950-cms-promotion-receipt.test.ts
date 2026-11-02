@@ -1,6 +1,23 @@
 /** ADR 0950: real CMS primary commits, acknowledgement loss and restart.
  * The winner, original draft and approval posture are observable product state;
- * a terminal receipt must prevent a paused finalizer from publishing afterwards. */
+ * a terminal receipt must prevent a paused finalizer from publishing afterwards.
+ *
+ * w73 measurements. DOUBLE GUARD (approval posture): the gate is read twice in
+ * `reconcilePagePromotion` — at the `prepared` restore (republish or not) and at
+ * the `restored` transition (submit or publish). Forcing the first read off alone
+ * stays green (cr-gate vacuous); cr-gate-both forces both and reds the
+ * submit-acknowledgement case. The paused-finalizer case is closed by the
+ * `prepared` → `rolled_back` branch and refused by the terminal
+ * `promotion_rolled_back` else-arm, not by the `rolling_back` admission CAS (cr-close
+ * reddened other cases, not that one). DOUBLE GUARD / EQUIVALENT MUTANT (w73 r2):
+ * that terminal `promotion_rolled_back` else-arm in `reconcilePagePromotion` is
+ * a backstop — `cmsService.ts preparePagePromotion` refuses a finalize of every
+ * closed phase first, so cr-fence (the else-arm alone) was vacuous. The case
+ * asserts preparePagePromotion's own message, so cr-prepare-fence (dropping that
+ * first guard) reds it; the guards live in two files, so no single edit breaks
+ * both. Every
+ * refusal is asserted by its reason or message: a rollback over a later human edit
+ * exhausts the reconciler's retries as `promotion_changed`. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -108,7 +125,9 @@ describe('CMS-owned promotion receipts', () => {
       if (!crossed && writtenPage(next)?.promotionReceipts?.[experimentId]?.phase === 'restored') { crossed = true; await restore(); }
       return cas(key, expected, next);
     });
-    await expect(publish()).rejects.toMatchObject({ details: { reason: 'promotion_rolled_back' } });
+    // Refused by the receipt preparation (`cmsService preparePagePromotion`), the
+    // first guard a closed receipt meets; its message names it.
+    await expect(publish()).rejects.toMatchObject({ message: 'The promotion has been closed.', details: { reason: 'promotion_rolled_back' } });
     expect(crossed).toBe(true); vi.restoreAllMocks(); await reopen();
     expect(heading(await current())).toBe('Original draft');
     expect((await current())?.status).toBe('draft');
@@ -171,7 +190,7 @@ describe('CMS-owned promotion receipts', () => {
       }
       return result;
     });
-    await expect(finalizeExperiment(tenantId, orgId, experimentId, context)).rejects.toThrow();
+    await expect(finalizeExperiment(tenantId, orgId, experimentId, context)).rejects.toMatchObject(loseAck ? { message: 'stopped after surface commit' } : { details: { reason: 'not_running' } });
     expect(stopped).toBe(true);
     vi.restoreAllMocks(); await reopen();
     await expect(finalizeExperiment(tenantId, orgId, experimentId, context)).rejects.toMatchObject({ details: { reason: 'not_running' } });
@@ -205,11 +224,11 @@ describe('CMS-owned promotion receipts', () => {
       if (!crossed && writtenPage(next)?.title === 'Stale edit') { crossed = true; await publish(); }
       return cas(key, expected, next);
     });
-    await expect(updatePage(tenantId, orgId, pageId, { title: 'Stale edit' }, 'editor')).rejects.toMatchObject({ httpStatus: 409 });
+    await expect(updatePage(tenantId, orgId, pageId, { title: 'Stale edit' }, 'editor')).rejects.toMatchObject({ httpStatus: 409, message: expect.stringContaining('The page changed while this change was being saved') });
     expect(crossed).toBe(true); vi.restoreAllMocks(); await reopen();
     expect((await current())?.promotionReceipts?.[experimentId]?.phase).toBe('finalized');
     await updatePage(tenantId, orgId, pageId, { sections: sections('Later human edit') }, 'editor');
-    await expect(restore()).rejects.toMatchObject({ httpStatus: 409 });
+    await expect(restore()).rejects.toMatchObject({ httpStatus: 409, details: { reason: 'promotion_changed' } });
     expect(heading(await current())).toBe('Later human edit');
   });
 

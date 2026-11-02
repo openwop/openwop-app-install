@@ -24,11 +24,10 @@ import { definitionHashOf } from './definitionHash.js';
 import { resolveLaunchWorkflow } from './resolveLaunchDefinition.js';
 import { executeRun } from '../executor/executor.js';
 import { recordRunAttribution } from './agentRunActivityIndex.js';
-import { insertRunWithStartContext } from './runInsert.js';
+import { chargedAdmission, insertRunWithStartContext } from './runInsert.js';
 import { stripReservedRunMetadata, failRunClosedOnDispatchError } from './runDispatch.js';
 import { inheritedRunMetadata } from './inheritedRunMetadata.js';
 import { workflowBudgetExhausted } from './workflowBudgets.js';
-import { reservePlanRun } from './planRunLimit.js';
 import { seedRunVariables } from './variablesRuntime.js';
 import { assertEffectAllowed } from './runEffectContext.js';
 import { createLogger } from '../observability/logger.js';
@@ -148,12 +147,6 @@ export async function startWorkflowRun(
       { workflowId: input.workflowId, reason: 'workflow_budget_exhausted' },
     );
   }
-  // ADR 0821 D6 / P5 — the plan's monthly run limit. Deliberately AFTER the
-  // launch-definition resolve, the hash check and the budget cap (the ADR 0823
-  // ordering requirement): a foreign, missing or refused workflow must never
-  // consume a run. Exempt service tenants and unlimited plans count nothing.
-  // A failed insert below releases the reservation.
-  const reservation = await reservePlanRun(input.tenantId);
   const runId = input.runId ?? randomUUID();
   const now = new Date().toISOString();
   const run: RunRecord = {
@@ -187,11 +180,13 @@ export async function startWorkflowRun(
   // and the same fix. The definition came from the catalog, so the durable
   // worker can re-resolve it.
   try {
-    await insertRunWithStartContext(storage, run, { definition: wf.definition, enqueueDispatch: true, ...(input.idempotencyCommit ? { idempotencyCommit: input.idempotencyCommit } : {}) });
+    // ADR 0987 D3 — the plan's monthly run limit (ADR 0821 D6 / P5) is charged
+    // inside the insert seam, after the launch-definition resolve, the hash check
+    // and the budget cap above (the ADR 0823 ordering requirement): a foreign,
+    // missing or refused workflow never consumes a run, and an insert that throws
+    // (including a peer's identical deterministic run) gives the unit back.
+    await insertRunWithStartContext(storage, run, { definition: wf.definition, enqueueDispatch: true, admission: chargedAdmission(), ...(input.idempotencyCommit ? { idempotencyCommit: input.idempotencyCommit } : {}) });
   } catch (err) {
-    // ADR 0821 P5 — this run never landed (or a peer's identical run did, which
-    // that peer already counted): give the reserved unit back.
-    await reservation.release();
     // Two workers can observe an expired Kanban/work-source lease at the same
     // time. The deterministic primary key is the final arbiter: when another
     // worker won the insert race, return its run without emitting a second

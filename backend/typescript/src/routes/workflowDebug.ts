@@ -23,7 +23,7 @@
 
 import { CALLER_LINKAGE_KEYS } from '../host/runLinkage.js';
 import type { Express, Request } from 'express';
-import type { Storage } from '../storage/storage.js';
+import { AdmissionRefusedError, type Storage } from '../storage/storage.js';
 import type { HostAdapterSuite } from '../host/index.js';
 import type { WorkflowDefinition } from '../executor/types.js';
 import { OpenwopError } from '../types.js';
@@ -34,8 +34,7 @@ import { loadOwnedRun } from '../host/runAccess.js';
 import { resolveRunDefinition } from '../host/resolveRunDefinition.js';
 import { isAgentEvalRun } from '../host/evals/agentEvalRun.js';
 import { inheritedRunMetadata } from '../host/inheritedRunMetadata.js';
-import { insertRunWithStartContext } from '../host/runInsert.js';
-import { withRunLimit } from '../host/runLimitSeam.js';
+import { chargedAdmission, insertRunWithStartContext } from '../host/runInsert.js';
 import { launchSubjectOf } from '../features/featureRoute.js';
 import { assertWorkflowFeatureLaunchable } from '../host/workflowFeatureGate.js';
 import { buildRunRecord, dispatchRunInBackground, failRunClosedOnDispatchError } from '../host/runDispatch.js';
@@ -43,7 +42,7 @@ import { seedRunVariables, deferredConfigurableInputs } from '../host/variablesR
 import { executeRun, snapshotFromEventPrefix, type SerializedSnapshot } from '../executor/executor.js';
 import { getEventLog } from '../executor/eventLog.js';
 import { capabilityGatedTypeIdRefusal } from './runs.js';
-import { runQuotaMiddleware, reserveConcurrentSlot } from '../middleware/rateLimit.js';
+import { refuseRunAdmission, runAdmissionFor, runQuotaMiddleware } from '../middleware/rateLimit.js';
 import { requireProtocolScope } from '../host/protocolAuthorization.js';
 import {
   putDebugPin,
@@ -290,7 +289,17 @@ export function registerWorkflowDebugRoutes(app: Express, deps: { storage: Stora
       // ADR 0820 §7 / G6 — a debug run is a new run of a (tenant-owned) head:
       // the owning-feature gate (typed 403) and the plan's run limit apply.
       await assertWorkflowFeatureLaunchable(run.tenantId, workflowId, def, launchSubjectOf(req));
-      await withRunLimit(run.tenantId, () => insertRunWithStartContext(deps.storage, run, { definition: def }));
+      // ADR 0987 D3 — the plan unit and this caller's concurrency slot, counted
+      // in the insert (D2). A full scope wrote nothing.
+      try {
+        await insertRunWithStartContext(deps.storage, run, { admission: chargedAdmission(runAdmissionFor(req)), definition: def });
+      } catch (err) {
+        if (err instanceof AdmissionRefusedError) {
+          refuseRunAdmission(req, res);
+          return;
+        }
+        throw err;
+      }
       seedRunVariables(run.runId, def.variables, deferredConfigurableInputs(def, run.configurable, inputs));
 
       // Self-describing synthetic prefix (the fork-copied-prefix semantics):
@@ -313,7 +322,6 @@ export function registerWorkflowDebugRoutes(app: Express, deps: { storage: Stora
         nodeErrors: [],
       };
 
-      reserveConcurrentSlot(req, run.runId);
       deps.hostSuite.auditSink.record({
         principalId: req.principal?.principalId ?? 'anonymous',
         action: 'run.create',
@@ -471,14 +479,15 @@ export function registerWorkflowDebugRoutes(app: Express, deps: { storage: Stora
           // another run's metadata (`routes/runs.ts` `:fork` is the first), and
           // `test/run-metadata-copy-sites.test.ts` is the ratchet over that
           // population.
-          await withRunLimit(run.tenantId, () => insertRunWithStartContext(deps.storage, run, { definition: resolved.definition, enqueueDispatch: true, derivedFromRun: true }));
+          // ADR 0987 D3 — each minted run is one plan unit and one concurrency
+          // slot; a source refused at the cap reports `rate_limited` below.
+          await insertRunWithStartContext(deps.storage, run, { admission: chargedAdmission(runAdmissionFor(req)), definition: resolved.definition, enqueueDispatch: true, derivedFromRun: true });
           seedRunVariables(
             run.runId,
             resolved.definition.variables,
             deferredConfigurableInputs(resolved.definition, run.configurable, run.inputs),
           );
-          reserveConcurrentSlot(req, run.runId);
-          deps.hostSuite.auditSink.record({
+              deps.hostSuite.auditSink.record({
             principalId: req.principal?.principalId ?? 'anonymous',
             action: 'run.create',
             resource: `run:${run.runId}`,
@@ -490,7 +499,7 @@ export function registerWorkflowDebugRoutes(app: Express, deps: { storage: Stora
         } catch (err) {
           results.push({
             runId: sourceRunId,
-            error: err instanceof OpenwopError ? err.code : 'internal_error',
+            error: err instanceof OpenwopError ? err.code : err instanceof AdmissionRefusedError ? 'rate_limited' : 'internal_error',
           });
         }
       }

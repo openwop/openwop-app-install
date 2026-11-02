@@ -23,80 +23,87 @@
  * This drives the actual middleware through a real OPTIONS preflight and reads
  * the response header. Reformat `cors.ts` however you like; this only goes red
  * when the BEHAVIOUR regresses.
+ *
+ * §w68 (TST-CQB-1) — the preflight now runs through `corsMiddleware()` mounted on
+ * a bare `express()` app over a real socket (no `createApp`, no hand-built
+ * req/res casts), and every header check splits the allow-list into TOKENS
+ * (a substring of the joined string can be satisfied by a neighbour).
+ * Sabotage-witnessed: red when `X-OpenWOP-Field-Contract` or `ACT_AS_HEADER`
+ * leaves HOST_REQUEST_HEADERS, when the de-dupe filter drops if-match /
+ * openwop-version / openwop-client-version / idempotency-key, and when `ETag`
+ * leaves Expose-Headers.
  */
-import { describe, expect, it } from 'vitest';
-import type { Request, Response } from 'express';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
+import express from 'express';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { corsMiddleware, ALLOWED_REQUEST_HEADERS } from '../src/middleware/cors.js';
+import { corsMiddleware } from '../src/middleware/cors.js';
 import { VERSION_RESPONSE_HEADER } from '../src/middleware/protocolVersion.js';
 import { FIELD_CONTRACT_HEADER } from '../src/host/preserveDroppedFields.js';
 
 const ORIGIN = 'http://localhost:5173';
 
-/** Run one OPTIONS preflight through the middleware and collect its headers. */
-function preflight(origin = ORIGIN): Record<string, string> {
-  const prev = process.env.OPENWOP_CORS_ORIGINS;
+let server: http.Server;
+let BASE = '';
+let prevOrigins: string | undefined;
+beforeAll(async () => {
+  prevOrigins = process.env.OPENWOP_CORS_ORIGINS;
   process.env.OPENWOP_CORS_ORIGINS = ORIGIN;
-  try {
-    const headers: Record<string, string> = {};
-    // Mirrors what the middleware actually reads: `req.header('origin')` and
-    // `req.path` (NOT `req.get`). The fixture guard below is what caught the
-    // first version of this mock — it used `get` and every assertion failed,
-    // which is the correct outcome for a stub that does not match its subject.
-    const req = {
-      method: 'OPTIONS',
-      path: '/host/openwop-app/workflows',
-      headers: { origin },
-      header: (n: string) => (n.toLowerCase() === 'origin' ? origin : undefined),
-    } as unknown as Request;
-    const res = {
-      set: (k: string, v: string) => { headers[k.toLowerCase()] = v; return res; },
-      // Express's res.vary APPENDS; the CORS middleware uses it (Vary is append-only).
-      vary: (f: string) => { const have = (headers['vary'] ?? '').split(',').map((x) => x.trim()).filter(Boolean); if (!have.includes(f)) have.push(f); headers['vary'] = have.join(', '); return res; },
-      status: () => res,
-      send: () => res,
-      end: () => res,
-    } as unknown as Response;
-    corsMiddleware()(req, res, () => {});
-    return headers;
-  } finally {
-    if (prev === undefined) delete process.env.OPENWOP_CORS_ORIGINS;
-    else process.env.OPENWOP_CORS_ORIGINS = prev;
-  }
+  const app = express();
+  app.use(corsMiddleware());
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+});
+afterAll(async () => {
+  await new Promise<void>((res) => server.close(() => res()));
+  if (prevOrigins === undefined) delete process.env.OPENWOP_CORS_ORIGINS;
+  else process.env.OPENWOP_CORS_ORIGINS = prevOrigins;
+});
+
+/** Run one real OPTIONS preflight through the middleware and return its response headers. */
+async function preflight(origin = ORIGIN): Promise<Headers> {
+  const res = await fetch(`${BASE}/host/openwop-app/workflows`, {
+    method: 'OPTIONS',
+    headers: { origin, 'access-control-request-method': 'POST' },
+  });
+  expect(res.status).toBe(204);
+  return res.headers;
 }
 
+/** A comma-separated header as lower-cased TOKENS. */
+const tokens = (v: string | null): string[] => (v ?? '').toLowerCase().split(',').map((h) => h.trim()).filter(Boolean);
+const allowed = async (): Promise<string[]> => tokens((await preflight()).get('access-control-allow-headers'));
+
 describe('CORS preflight admits the custom headers the SPA sends', () => {
-  it('fixture guard: a preflight from an allowed origin actually sets the header', () => {
+  it('fixture guard: a preflight from an allowed origin actually sets the header', async () => {
     // Without this, every assertion below would pass against a middleware that
-    // set NOTHING — `undefined` contains no header name either.
-    const h = preflight();
-    expect(h['access-control-allow-headers'], 'the preflight set no allow-headers at all').toBeTruthy();
-    expect(h['access-control-allow-origin']).toBe(ORIGIN);
+    // set NOTHING — an empty token list contains no header name either.
+    const h = await preflight();
+    expect(tokens(h.get('access-control-allow-headers')).length, 'the preflight set no allow-headers at all').toBeGreaterThan(0);
+    expect(h.get('access-control-allow-origin')).toBe(ORIGIN);
   });
 
-  it('admits the ADR 0524 field-contract header', () => {
-    const allowed = (preflight()['access-control-allow-headers'] ?? '').toLowerCase();
+  it('admits the ADR 0524 field-contract header', async () => {
     expect(
-      allowed,
+      await allowed(),
       `${FIELD_CONTRACT_HEADER} is not admitted by the preflight — cross-origin builder saves will be blocked`,
     ).toContain(FIELD_CONTRACT_HEADER.toLowerCase());
   });
 
-  it('admits If-Match, the builder save precondition (ADR 0770 D5)', () => {
+  it('admits If-Match, the builder save precondition (ADR 0770 D5)', async () => {
     // Not CORS-safelisted and not `x-openwop-*`, so the generator below cannot
     // see it: pinned by name, like the negotiation header.
-    const allowed = (preflight()['access-control-allow-headers'] ?? '').toLowerCase();
-    expect(allowed.split(',').map((h) => h.trim())).toContain('if-match');
-    expect((preflight()['access-control-expose-headers'] ?? '').toLowerCase()).toContain('etag');
+    expect(await allowed()).toContain('if-match');
+    expect(tokens((await preflight()).get('access-control-expose-headers'))).toContain('etag');
   });
 
-  it('still admits the pre-existing headers', () => {
+  it('still admits the pre-existing headers', async () => {
     // Guards the other direction: a fix that ADDED the new header by replacing
     // the list would break authorization and content-type.
-    const allowed = (preflight()['access-control-allow-headers'] ?? '').toLowerCase();
+    const list = await allowed();
     for (const h of ['authorization', 'content-type', 'idempotency-key']) {
-      expect(allowed, `${h} was dropped from the allow-list`).toContain(h);
+      expect(list, `${h} was dropped from the allow-list`).toContain(h);
     }
   });
 
@@ -132,10 +139,9 @@ describe('CORS preflight admits the custom headers the SPA sends', () => {
    * So this leg is stated directly, derived from the constant the negotiator
    * itself publishes — if that is renamed, this follows.
    */
-  it('admits the protocol negotiation header the SDK sends on every major-2 request', () => {
-    const allowed = (preflight()['access-control-allow-headers'] ?? '').toLowerCase();
+  it('admits the protocol negotiation header the SDK sends on every major-2 request', async () => {
     expect(
-      allowed.split(',').map((h) => h.trim()),
+      await allowed(),
       'the SPA speaks major 2; without this every cross-origin v2 request is blocked by the browser',
     ).toContain(VERSION_RESPONSE_HEADER.toLowerCase());
   });
@@ -152,7 +158,7 @@ describe('CORS preflight admits the custom headers the SPA sends', () => {
    * requires the preflight to admit each one. Webhook signing helpers are
    * server-to-server, never browser requests, and live in other files.
    */
-  it('GENERATOR: every OpenWOP-* request header the installed SDK client sends is admitted', () => {
+  it('GENERATOR: every OpenWOP-* request header the installed SDK client sends is admitted', async () => {
     const candidates = [
       resolve(__dirname, '../../../frontend/react/node_modules/@openwop/openwop/dist/client.js'),
       resolve(__dirname, '../node_modules/@openwop/openwop/dist/client.js'),
@@ -162,16 +168,15 @@ describe('CORS preflight admits the custom headers the SPA sends', () => {
     const src = readFileSync(file!, 'utf8');
     const sent = new Set([...src.matchAll(/['"`](OpenWOP-[A-Za-z-]+)['"`]/g)].map((m) => m[1]!.toLowerCase()));
     expect(sent.size, 'no OpenWOP-* header literal found — the SDK moved, and this leg would be vacuous').toBeGreaterThan(0);
-    const allowed = (preflight()['access-control-allow-headers'] ?? '').toLowerCase().split(',').map((h) => h.trim());
-    for (const h of sent) expect(allowed, `the SDK sends ${h}; a cross-origin request carrying it fails preflight`).toContain(h);
+    const list = await allowed();
+    for (const h of sent) expect(list, `the SDK sends ${h}; a cross-origin request carrying it fails preflight`).toContain(h);
   });
 
-  it('admits OpenWOP-Client-Version before the SPA takes SDK 2.5.0 (RFC 0219)', () => {
-    const allowed = (preflight()['access-control-allow-headers'] ?? '').toLowerCase().split(',').map((h) => h.trim());
-    expect(allowed).toContain('openwop-client-version');
+  it('admits OpenWOP-Client-Version before the SPA takes SDK 2.5.0 (RFC 0219)', async () => {
+    expect(await allowed()).toContain('openwop-client-version');
   });
 
-  it('GENERATOR: every custom x-openwop-* request header the SPA sends is admitted', () => {
+  it('GENERATOR: every custom x-openwop-* request header the SPA sends is admitted', async () => {
     const SRC = resolve(__dirname, '../../../frontend/react/src');
     const found = new Set<string>();
     const walk = (dir: string): void => {
@@ -208,13 +213,17 @@ describe('CORS preflight admits the custom headers the SPA sends', () => {
 
     // Fixture guard: if the walk finds nothing, the assertion below is vacuous.
     expect(found.size, 'the SPA scan found no custom headers at all — the walk is broken').toBeGreaterThan(0);
+    // Two-sided: the walk must SEE the two real sends this file exists for, so a
+    // regex that silently stops matching cannot turn the check below vacuous.
+    expect([...found]).toEqual(expect.arrayContaining(['x-openwop-field-contract', 'x-openwop-act-as']));
 
-    // `x-openwop-cv-*` are drag-and-drop DataTransfer MIME types, not HTTP
-    // headers — they never reach a preflight. Excluded by name, with the reason,
-    // rather than by a loose pattern that would quietly excuse a real header.
-    const NOT_HTTP_HEADERS = new Set(['x-openwop-cv-component', 'x-openwop-cv-frame', 'x-openwop-cv-move']);
-    const admitted = new Set(ALLOWED_REQUEST_HEADERS.map((h) => h.toLowerCase()));
-    const missing = [...found].filter((h) => !admitted.has(h) && !NOT_HTTP_HEADERS.has(h));
+    // (A `NOT_HTTP_HEADERS` exclusion for the `x-openwop-cv-*` drag-and-drop MIME
+    // types used to sit here. It was dead: those strings are spelled
+    // `'application/x-openwop-cv-…'`, so the quote-anchored regex above can never
+    // capture them — measured 2026-10-29, w68. Removed; nothing is excused.)
+    // Checked against the SERVED preflight, not the constant, so both sides are behaviour.
+    const admitted = new Set(await allowed());
+    const missing = [...found].filter((h) => !admitted.has(h));
     expect(
       missing,
       `the SPA sends custom header(s) the CORS preflight does not admit: ${missing.join(', ')} — `

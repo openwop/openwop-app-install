@@ -10,6 +10,12 @@
  *
  * It asserts through the real HTTP route and the real storage handle — the two
  * things the ADR's exit criterion is actually about.
+ *
+ * TST-CWB-3. Red when (sabotage-witnessed, wave 69): `routes/runs.ts` stops
+ * passing `enqueueDispatch: true` (all three cases), or the intent is written
+ * already due, leaving the wakeup hint no grace window (case 1). Cases 2 and 3
+ * COUNT this workflow's pending intents, so a second intent minted by a retry
+ * or a double insert is visible, not only "an intent exists".
  */
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -39,6 +45,13 @@ async function api<T = Record<string, unknown>>(path: string, init: RequestInit 
 }
 
 const storage = (): Storage => app.locals.storage as Storage;
+
+/** Pending intents for one workflow — the count a duplicate mint would raise. */
+async function pendingIntentsFor(workflowId: string): Promise<string[]> {
+  return (await storage().listDispatchOutbox({ status: 'pending', limit: 500 }))
+    .filter((r) => r.workflowId === workflowId)
+    .map((r) => r.runId);
+}
 
 describe('ADR 0551 P1 — POST /v1/runs writes a durable dispatch intent', () => {
   const workflowId = 'openwop-app.dispatch-outbox-route-test';
@@ -73,16 +86,19 @@ describe('ADR 0551 P1 — POST /v1/runs writes a durable dispatch intent', () =>
   });
 
   it('records exactly one intent per run', async () => {
+    const before = await pendingIntentsFor(workflowId);
     const a = await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs: {}, tenantId: '_anon' }) });
     const b = await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs: {}, tenantId: '_anon' }) });
     expect(a.body.runId).not.toBe(b.body.runId);
-    expect((await storage().getDispatchOutbox(bareRunId(a.body.runId)))?.runId).toBe(bareRunId(a.body.runId));
-    expect((await storage().getDispatchOutbox(bareRunId(b.body.runId)))?.runId).toBe(bareRunId(b.body.runId));
+    const added = (await pendingIntentsFor(workflowId)).filter((id) => !before.includes(id));
+    // Exactly two new intents for two runs, one each.
+    expect(added.sort()).toEqual([bareRunId(a.body.runId), bareRunId(b.body.runId)].sort());
   });
 
   it('an Idempotency-Key replay does not mint a second intent', async () => {
     const key = `outbox-replay-${Date.now()}`;
     const body = JSON.stringify({ workflowId, inputs: {}, tenantId: '_anon' });
+    const before = await pendingIntentsFor(workflowId);
     const first = await api<{ runId: string }>('/runs', { method: 'POST', headers: { 'idempotency-key': key }, body });
     const replay = await api<{ runId: string }>('/runs', { method: 'POST', headers: { 'idempotency-key': key }, body });
 
@@ -92,5 +108,7 @@ describe('ADR 0551 P1 — POST /v1/runs writes a durable dispatch intent', () =>
     // silently create a second dispatch too.
     expect(replay.body.runId).toBe(first.body.runId);
     expect((await storage().getDispatchOutbox(bareRunId(first.body.runId)))?.attempts).toBe(0);
+    // ONE new intent across the original and its replay — not two.
+    expect((await pendingIntentsFor(workflowId)).filter((id) => !before.includes(id))).toEqual([bareRunId(first.body.runId)]);
   });
 });

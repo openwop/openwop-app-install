@@ -2,8 +2,15 @@
  * ADR 0132 Phase 3 — per-conversation tool approval: the loop defers a
  * require-approval call (does not execute it), the pure decision fold, and the
  * durable ledger.
+ *
+ * TST-CKC-5 (protected: approval gate, DSAR eraser, secret scrub). Red when: a
+ * require-approval call executes, the fold keeps an approved tool gated or a denied
+ * one enabled, a re-ask resets a decision, a policy ask does not re-open a
+ * baseline approval, an approval lands with no pending row or on a row that moved,
+ * held arguments are stored unscrubbed, approvedToolSets mixes origins, the DSAR
+ * eraser keeps the approver, or a deleted conversation keeps its approvals.
  */
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, vi } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
 import { runChatToolLoop, type CompiledTool, type ChatToolLoopOpts } from '../src/host/agentDispatch.js';
@@ -116,11 +123,21 @@ describe('approval ledger — ADR 0834 D2/D6', () => {
   });
 
   it('compare-and-set: approving a row that moved since it was shown is refused', async () => {
-    await recordToolApprovalRequested('t', 'cas', 'http.fetch', { input: { url: 'a' } });
-    const [shown] = await listToolApprovals('t', 'cas');
-    await new Promise((r) => setTimeout(r, 5));
-    await recordToolApprovalRequested('t', 'cas', 'http.fetch', { input: { url: 'b' } }); // the agent re-asked
-    expect(await resolveToolApproval('t', 'cas', 'http.fetch', 'approved', 'owner', shown!.requestedAt)).toEqual({ ok: false, reason: 'approval_changed' });
+    // `requestedAt` is ms-resolution: fake ONLY Date so the re-ask is stamped a
+    // second later (a same-ms re-ask would carry the shown version and the CAS check
+    // could not be told apart from a stale one).
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-03-01T10:00:00.000Z'));
+      await recordToolApprovalRequested('t', 'cas', 'http.fetch', { input: { url: 'a' } });
+      const [shown] = await listToolApprovals('t', 'cas');
+      expect(shown?.requestedAt).toBe('2026-03-01T10:00:00.000Z');
+      vi.setSystemTime(new Date('2026-03-01T10:00:01.000Z'));
+      await recordToolApprovalRequested('t', 'cas', 'http.fetch', { input: { url: 'b' } }); // the agent re-asked
+      expect(await resolveToolApproval('t', 'cas', 'http.fetch', 'approved', 'owner', shown!.requestedAt)).toEqual({ ok: false, reason: 'approval_changed' });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('a policy ask RE-OPENS a tool approved only for the baseline; a baseline ask does not', async () => {
@@ -150,7 +167,7 @@ describe('approval ledger — ADR 0834 D2/D6', () => {
     await eraseConversationToolApprovalsSubject('t-er', 'alice');
     const [row] = await listToolApprovals('t-er', 'c');
     expect(row?.status).toBe('approved');
-    expect(row?.resolvedBy).not.toBe('alice');
+    expect(row?.resolvedBy).toBe('[erased]'); // the ERASED literal (host/subjectErasureRedaction.ts)
   });
 
   it('a deleted conversation takes its approvals with it', async () => {

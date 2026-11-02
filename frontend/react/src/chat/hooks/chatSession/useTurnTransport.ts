@@ -6,7 +6,7 @@
  * `cancel`, `emitSystem`, and `regenerate`.
  */
 
-import { useCallback, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { errorReasonOf } from '../../../client/classifyHttpError.js';
 import i18n from '../../../i18n/index.js';
 import { formatNumber } from '../../../i18n/format.js';
@@ -17,8 +17,10 @@ import { setConversationRun } from '../../../client/chatSessionsClient.js';
 import type { BYOKActiveConfig } from '../../../byok/lib/useBYOKConfig.js';
 import { chatSessionReducer } from '../../lib/chatSessionReducer.js';
 import { applyAutoTitle } from '../../lib/applyAutoTitle.js';
+import { followAutoTitle } from '../../lib/followAutoTitle.js';
+import { useFeatureAccess } from '../../../featureToggles/FeatureAccessContext.js';
 import { backendNodeCount } from '../../lib/workflowMentions.js';
-import { openConversationSession, sendConversationTurn, fetchTurns, turnsToBubbles, seedRunState, streamDeltaFromEvent, exchangeSettleSignal, exchangeErrorPayload, toolActivityFromEvent, titledFromEvent, recallUsedFromEvent, contextDegradedFromEvent, CONVERSATION_GATE_NODE_ID, type ConversationBubble } from '../../conversationTransport.js';
+import { openConversationSession, sendConversationTurn, fetchTurns, turnsToBubbles, seedRunState, streamDeltaFromEvent, exchangeSettleSignal, exchangeErrorPayload, toolActivityFromEvent, titledFromEvent, recallUsedFromEvent, contextDegradedFromEvent, contextBudgetedFromEvent, CONVERSATION_GATE_NODE_ID, type ConversationBubble, type ClarificationState } from '../../conversationTransport.js';
 import type { ConversationTurn } from '../../conversationClient.js';
 import { WopError } from '@openwop/openwop';
 import type { ChatMessage, ContentPart, SendOptions } from '../../types.js';
@@ -40,6 +42,25 @@ export function useTurnTransport(
     animation, rehydrateWorkflowRunsRef,
   } = core;
   const { persistMessage, ensureSessionInBackend } = deps;
+  // ADR 1019 D4 — the auto-title follow. Only when the person's `chat-autotitle`
+  // toggle is on (the server would not title otherwise); one follow per chat; the
+  // in-exchange SSE event and the follow both land through `applyAutoTitle` once.
+  const autotitleOn = useFeatureAccess('chat-autotitle').enabled;
+  const autotitleOnRef = useRef(autotitleOn);
+  autotitleOnRef.current = autotitleOn;
+  const titledSessionsRef = useRef<Set<string>>(new Set());
+  const titleFollowsRef = useRef<Map<string, () => void>>(new Map());
+  useEffect(() => () => {
+    for (const cancel of titleFollowsRef.current.values()) cancel();
+    titleFollowsRef.current.clear();
+  }, []);
+  const applyTitleOnce = useCallback((title: string, sessionId: string): void => {
+    if (titledSessionsRef.current.has(sessionId)) return;
+    titledSessionsRef.current.add(sessionId);
+    titleFollowsRef.current.get(sessionId)?.();
+    titleFollowsRef.current.delete(sessionId);
+    applyAutoTitle(title, setSession, sessionId, sessionRef.current.id === sessionId); // + SR announcement (ATU-1) + rail/tab refresh
+  }, [setSession, sessionRef]);
 
   // Fold tailed turns into the accumulator and rebuild the message list from the
   // wire (the source of truth). Keyed by messageId so a re-fetch is idempotent;
@@ -56,6 +77,11 @@ export function useTurnTransport(
   // marker survive the merge, the persist (it rides the message's content JSON —
   // no backend change), and a later reopen.
   const orchestratedIdsRef = useRef<Set<string>>(new Set());
+  // The tool-call cards a turn collected while it streamed (ADR 1017 side fix). They
+  // land on the optimistic "thinking" bubble, which the merge below REPLACES with the
+  // wire turn, so without this every settled reply lost every tool card it had shown. Same re-stamp-by-id shape
+  // as the refs below; bounded the same way.
+  const toolEventsRef = useRef<Map<string, NonNullable<ChatMessage['agentEvents']>>>(new Map());
   // RCL-UX-1 — ids of assistant turns that drew on twin borrowed recall (the
   // `recall_used` run event). Same shape and rationale as `orchestratedIdsRef`:
   // the merge rebuilds every message from the wire, so the stamp must be
@@ -64,6 +90,20 @@ export function useTurnTransport(
   // RCL-UX-2 / RCL-7 — degradation ledgers per assistant-turn id, so the
   // reduced-context notice survives every wire rebuild (same rationale).
   const degradedIdsRef = useRef<Map<string, string[]>>(new Map());
+  // ADR 1003 D5 — same re-stamp bookkeeping as `degradedIdsRef`.
+  const budgetedIdsRef = useRef<Map<string, number>>(new Map());
+  // ADR 1001 D7 — the chat question cards (by canonical message id) and the
+  // asks already answered (by wire ask id), folded from the run log on every
+  // fetch so the card is re-stamped on each rebuild and survives a reopen.
+  const clarifyAsksRef = useRef<Map<string, { askId: string; data: unknown }>>(new Map());
+  const clarifyAnsweredRef = useRef<Set<string>>(new Set());
+  const clarifySkippedRef = useRef<Set<string>>(new Set());
+  const absorbClarification = (state: ClarificationState | undefined): void => {
+    if (!state) return;
+    for (const a of state.asks) clarifyAsksRef.current.set(conversationMessageId(a.askId), a);
+    for (const id of state.answered) clarifyAnsweredRef.current.add(id);
+    for (const id of state.skippedTurns) clarifySkippedRef.current.add(conversationMessageId(id));
+  };
   const boundIdSet = (set: Set<string> | Map<string, unknown>): void => {
     if (set.size < 1000) return;
     const iter = set.keys();
@@ -74,7 +114,7 @@ export function useTurnTransport(
     }
   };
 
-  const mergeConversationTurns = useCallback((incoming: readonly ConversationTurn[], orchestrated = false, recallUsed = false, degradedBlocks: string[] | null = null): ChatMessage[] => {
+  const mergeConversationTurns = useCallback((incoming: readonly ConversationTurn[], orchestrated = false, recallUsed = false, degradedBlocks: string[] | null = null, contextOmittedTurns: number | null = null): ChatMessage[] => {
     // The ids new to THIS merge (the exchange delta), in the canonical scheme.
     const incomingIds = new Set(
       incoming.map((t) => t?.messageId).filter((id): id is string => typeof id === 'string').map(conversationMessageId),
@@ -83,9 +123,32 @@ export function useTurnTransport(
       if (t && typeof t.messageId === 'string') conversationTurnsRef.current.set(t.messageId, t);
     }
     const sorted = [...conversationTurnsRef.current.values()].sort((a, b) => a.turnIndex - b.turnIndex);
+    // Keep tool cards across this rebuild (ADR 1017 side fix). (1) A reply already on screen
+    // keeps the cards it has, including ones restored from the durable store on reopen
+    // (the store keeps the whole message). (2) The in-flight bubble's cards go to THIS
+    // exchange's reply: the agent turn right after its newest user turn. Not "the last
+    // agent turn": a run the tool ignited is an agent turn too, and sorts after it.
+    for (const m of sessionRef.current.messages) {
+      if (m.role === 'assistant' && m.agentEvents && m.agentEvents.toolCalls.length > 0 && !toolEventsRef.current.has(m.id)) {
+        boundIdSet(toolEventsRef.current);
+        toolEventsRef.current.set(m.id, m.agentEvents);
+      }
+    }
+    const inFlightId = inFlightAssistantIdRef.current;
+    const inFlight = inFlightId ? sessionRef.current.messages.find((m) => m.id === inFlightId) : undefined;
+    if (inFlight?.agentEvents && inFlight.agentEvents.toolCalls.length > 0) {
+      const asked = incoming.filter((t) => t?.role === 'user').reduce((max, t) => Math.max(max, t.turnIndex), -1);
+      const reply = incoming.find((t) => t?.role === 'agent' && t.turnIndex === asked + 1 && typeof t.messageId === 'string');
+      if (reply) {
+        boundIdSet(toolEventsRef.current);
+        toolEventsRef.current.set(conversationMessageId(reply.messageId), inFlight.agentEvents);
+      }
+    }
     // Resolve each turn's raw agentId (wire `agent.agentId`/`from`) to its lineup
     // row so the bubble can attribute by name + @handle, not a raw id "blob".
     const lineup = sessionRef.current.activeAgents?.lineup ?? [];
+    // ADR 1017 D2 — the conversation run the turns' wire ids belong to (the turnRef).
+    const conversationRunId = conversationRef.current?.runId;
     const mapped: ChatMessage[] = turnsToBubbles(sorted).map((b: ConversationBubble) => {
       const rawId = b.agentPersona; // turnsToBubbles set this to agent.agentId ?? from
       const row = rawId ? lineup.find((a) => a.agentId === rawId) : undefined;
@@ -127,13 +190,22 @@ export function useTurnTransport(
       if (role === 'assistant' && twinRecalledIdsRef.current.has(base.id)) meta.twinRecalled = true;
       const dg = role === 'assistant' ? degradedIdsRef.current.get(base.id) : undefined;
       if (dg) meta.degradedBlocks = dg;
+      const omitted = role === 'assistant' ? budgetedIdsRef.current.get(base.id) : undefined;
+      if (omitted) meta.contextOmittedTurns = omitted;
       // ADR 0665 D4 — carried on the WIRE TURN itself (not an id set like the two
       // above), so it needs no re-stamp bookkeeping and survives a reopen for free.
       if (role === 'assistant' && b.noContribution) meta.noContribution = true;
+      const ask = role === 'assistant' ? clarifyAsksRef.current.get(base.id) : undefined;
+      if (ask) meta.clarificationAsk = { ...ask, ...(clarifyAnsweredRef.current.has(ask.askId) ? { answered: true } : {}) };
+      if (role === 'user' && clarifySkippedRef.current.has(base.id)) meta.clarificationSkipped = true;
+      const toolEvents = role === 'assistant' ? toolEventsRef.current.get(base.id) : undefined;
       return {
         ...base, role,
+        // ADR 1017 D2 — where this reply lives on the wire, for its artifact cards.
+        ...(role === 'assistant' && conversationRunId ? { turnRef: { conversationRunId, turnMessageId: b.id } } : {}),
         ...(role === 'user' && orchestratedIdsRef.current.has(base.id) ? { orchestrated: true as const } : {}),
         ...(Object.keys(meta).length > 0 ? { meta } : {}),
+        ...(toolEvents ? { agentEvents: toolEvents } : {}),
       };
     });
     if (orchestrated) {
@@ -161,7 +233,7 @@ export function useTurnTransport(
         mine.orchestrated = true;
       }
     }
-    if (recallUsed || degradedBlocks) {
+    if (recallUsed || degradedBlocks || contextOmittedTurns) {
       // The newest INCOMING assistant turn is the reply this exchange's
       // recall_used / context_degraded events describe (one exchange, one
       // assistant turn).
@@ -177,6 +249,11 @@ export function useTurnTransport(
           degradedIdsRef.current.set(mine.id, degradedBlocks);
           mine.meta = { ...(mine.meta ?? {}), degradedBlocks };
         }
+        if (contextOmittedTurns) {
+          boundIdSet(budgetedIdsRef.current);
+          budgetedIdsRef.current.set(mine.id, contextOmittedTurns);
+          mine.meta = { ...(mine.meta ?? {}), contextOmittedTurns };
+        }
       }
     }
     setSession((s) => ({ ...s, messages: mapped }));
@@ -190,7 +267,7 @@ export function useTurnTransport(
       rehydrateWorkflowRunsRef.current({ ...sessionRef.current, messages: mapped });
     }
     return mapped.filter((m) => incomingIds.has(m.id) && (m.role === 'user' || m.role === 'assistant'));
-  }, [conversationTurnsRef, sessionRef, setSession, rehydrateWorkflowRunsRef]);
+  }, [conversationTurnsRef, sessionRef, setSession, rehydrateWorkflowRunsRef, inFlightAssistantIdRef, conversationRef]);
 
   // Mirror newly-arrived conversation turns into the durable chat-message store so
   // reopening a past chat from the rail (loadSessionFromBackend reads that store)
@@ -237,6 +314,10 @@ export function useTurnTransport(
       ...(thinkingRow?.persona ? { agentPersona: thinkingRow.persona } : {}),
       ...(thinkingRow?.slug ? { agentSlug: thinkingRow.slug } : {}),
     };
+    // ADR 1019 D4 — the chat this turn belongs to, and whether it is the chat's first
+    // turn (the only one the server titles).
+    const titleSessionId = sessionRef.current.id;
+    const firstOfChat = sessionRef.current.messages.length === 0;
     setSession((s) => ({ ...s, title: s.messages.length === 0 ? text.slice(0, 60) : s.title, messages: [...s.messages, optimistic, thinking] }));
     // Stable idempotency key for THIS send: a double-submit / retry reuses it so
     // the backend returns the existing turns instead of duplicating them (ADR 0067).
@@ -265,6 +346,7 @@ export function useTurnTransport(
           if (conversationCursorRef.current === 0 && conversationTurnsRef.current.size === 0) {
             try {
               const hydrated = await fetchTurns(persistedRunId, 0);
+              absorbClarification(hydrated.clarification);
               conversationCursorRef.current = hydrated.lastSeq;
               for (const t of hydrated.turns) {
                 if (t && typeof t.messageId === 'string') conversationTurnsRef.current.set(t.messageId, t);
@@ -322,6 +404,8 @@ export function useTurnTransport(
       // RCL-UX-2 / RCL-7 — the turn's degradation ledger, stamped onto the
       // settled reply so the acting user finally sees what the model was told.
       const degraded = { value: null as string[] | null };
+      // ADR 1003 D5 — the window's omitted-turn count for this exchange.
+      const budgeted = { value: null as number | null };
       streamSub = subscribeToRun(runId, {
         modes: ['updates'],
         onEvent: (ev) => {
@@ -331,6 +415,8 @@ export function useTurnTransport(
           if (recallUsedFromEvent(ev, startSeq)) { recallUsed.value = true; return; }
           const degradedBlocks = contextDegradedFromEvent(ev, startSeq);
           if (degradedBlocks) { degraded.value = degradedBlocks; return; }
+          const omittedTurns = contextBudgetedFromEvent(ev, startSeq);
+          if (omittedTurns) { budgeted.value = omittedTurns; return; }
           // ADR 0089 Phase 2 — render the agent's live tool progress into the
           // in-flight bubble's existing `agentEvents.toolCalls` cards.
           const activity = toolActivityFromEvent(ev, startSeq);
@@ -339,7 +425,7 @@ export function useTurnTransport(
           // placeholder live. A manual rename ('user' provenance) is never emitted,
           // so this only ever replaces a default/auto title.
           const autoTitle = titledFromEvent(ev, startSeq);
-          if (autoTitle) { applyAutoTitle(autoTitle, setSession); return; } // + SR announcement (ATU-1)
+          if (autoTitle) { applyTitleOnce(autoTitle, titleSessionId); return; }
           const signal = exchangeSettleSignal(ev, startSeq);
           if (signal === 'error') { asyncErr.value = exchangeErrorPayload(ev); resolveSettle?.('error'); }
           else if (signal === 'agent') resolveSettle?.('agent');
@@ -370,11 +456,14 @@ export function useTurnTransport(
         },
       });
       // Tail from the cursor: fetch only events past what we've folded, then merge.
-      const { turns, lastSeq, notice } = await sendConversationTurn(
+      const { turns, lastSeq, notice, clarification } = await sendConversationTurn(
         runId, nodeId,
-        { content: turnContent, exchangeKey, ...(opts?.activeAgentId ? { to: opts.activeAgentId } : {}), ...(opts?.webSearch !== undefined ? { webSearch: opts.webSearch } : {}), ...(opts?.model ? { model: opts.model } : {}), ...(opts?.provider ? { provider: opts.provider } : {}), ...(opts?.permissionMode ? { permissionMode: opts.permissionMode } : {}) },
+        { content: turnContent, exchangeKey, ...(opts?.activeAgentId ? { to: opts.activeAgentId } : {}), ...(opts?.webSearch !== undefined ? { webSearch: opts.webSearch } : {}), ...(opts?.model ? { model: opts.model } : {}), ...(opts?.provider ? { provider: opts.provider } : {}), ...(opts?.permissionMode ? { permissionMode: opts.permissionMode } : {}), ...(opts?.clarificationAnswer ? { clarificationAnswer: opts.clarificationAnswer } : {}) },
         conversationCursorRef.current,
       );
+      absorbClarification(clarification);
+      // The answer is in flight: hide its card at once (the wire confirms it).
+      if (opts?.clarificationAnswer) clarifyAnsweredRef.current.add(opts.clarificationAnswer.askId);
       // ADR 0178 — the turn SUCCEEDED but the org is approaching its BYOK daily
       // spend cap. Surface a non-blocking, dismissible warning toast (never block
       // the turn); auto-coalesced so a run of near-cap turns shows one toast.
@@ -407,7 +496,7 @@ export function useTurnTransport(
         // the wire; reconcile immediately.
         animation.flush();
         conversationCursorRef.current = lastSeq;
-        persistTurns(mergeConversationTurns(turns, opts?.orchestrated === true, recallUsed.value, degraded.value));
+        persistTurns(mergeConversationTurns(turns, opts?.orchestrated === true, recallUsed.value, degraded.value, budgeted.value));
       } else {
         // Async ack — the reply lands later on the SSE. Wait for the settle
         // signal (or a generous timeout matching the backend dispatch budget)
@@ -427,11 +516,20 @@ export function useTurnTransport(
           throw Object.assign(new Error(asyncErr.value?.message ?? i18n.t('chat:replyFailed')), { code: asyncErr.value?.code });
         }
         const tail = await fetchTurns(runId, conversationCursorRef.current);
+        absorbClarification(tail.clarification);
         if (tail.lastSeq <= conversationCursorRef.current) {
           throw new Error(i18n.t('chat:replyTimedOut'));
         }
         conversationCursorRef.current = tail.lastSeq;
-        persistTurns(mergeConversationTurns(tail.turns, opts?.orchestrated === true, recallUsed.value, degraded.value));
+        persistTurns(mergeConversationTurns(tail.turns, opts?.orchestrated === true, recallUsed.value, degraded.value, budgeted.value));
+      }
+      // ADR 1019 D4 — the server names a chat AFTER its first exchange is durable, so
+      // the title usually arrives after this exchange's stream has closed. Follow the
+      // header until it settles (bounded; persisted chats only — an ephemeral chat
+      // has no server row).
+      if (firstOfChat && persist && autotitleOnRef.current
+          && !titledSessionsRef.current.has(titleSessionId) && !titleFollowsRef.current.has(titleSessionId)) {
+        titleFollowsRef.current.set(titleSessionId, followAutoTitle(titleSessionId, (t) => applyTitleOnce(t, titleSessionId)));
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -453,7 +551,10 @@ export function useTurnTransport(
       // `interrupt_not_found` joins them: the gate this conversation would resume
       // is not there, so the bound run cannot take another turn either way.
       const DEAD_RUN_CODES = new Set(['interrupt_already_resolved', 'interrupt_gone', 'interrupt_not_found', 'run_not_found']);
-      const isDeadRun = code ? DEAD_RUN_CODES.has(code) : /resolved|gone|not.?found/i.test(message);
+      // ADR 1001 R12 — the codeless fallback (older servers) never reads a 409 as
+      // dead: a 409 is a refusal against a live run (e.g. an in-flight duplicate).
+      const status = err instanceof WopError ? err.status : undefined;
+      const isDeadRun = code ? DEAD_RUN_CODES.has(code) : status !== 409 && /resolved|gone|not.?found/i.test(message);
       if (isDeadRun) {
         conversationRef.current = null;
         conversationTurnsRef.current = new Map();
@@ -489,7 +590,7 @@ export function useTurnTransport(
     // so it's intentionally not a dependency (adding the fresh-each-render object
     // would recreate this handler every render for no behavioral gain).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mergeConversationTurns, persistTurns, persist, ensureSessionInBackend]);
+  }, [mergeConversationTurns, persistTurns, persist, ensureSessionInBackend, applyTitleOnce]);
 
   const send = useCallback(async (text: string, config: BYOKActiveConfig, opts?: SendOptions) => {
     // Backend-keyed tab (ADR 0140): if a turn is fired before the one-shot mount-load

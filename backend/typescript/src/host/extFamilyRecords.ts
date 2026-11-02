@@ -23,8 +23,8 @@
  * method each needs, so the contract test still accounts for every call.
  *
  * Deliberately NOT claimed (ADR 0765 § Withheld, ADR 0769): `brand`,
- * `entities`, `coordination`, `a2ui-surface`. This host vendors the first
- * three families' packs, but the executor wires no `ctx.brand` /
+ * `entities`, `coordination`. This host vendors these
+ * families' packs, but the executor wires no `ctx.brand` /
  * `ctx.entities` / `ctx.agentRuntime`, so their nodes fail
  * `host_capability_missing`; claiming them would advertise a pack that cannot run.
  */
@@ -62,8 +62,7 @@ export const EXT_FAMILY_CLAIMS: readonly ExtFamilyClaim[] = [
   { extensionName: 'chat', surface: 'chat', nodePack: 'vendor.myndhyve.chat', methods: ['emitCard', 'sendMessage', 'updateCard'] },
   {
     extensionName: 'kanban', surface: 'kanban', nodePack: 'vendor.myndhyve.kanban',
-    methods: ['automateRules', 'boardCreate', 'boardReview', 'resourceMonitor', 'taskAssign', 'taskCreateBatch', 'taskGet', 'timelinePlan'],
-    unavailable: [{ node: 'task.decompose', needs: 'ctx.aiEnvelope' }],
+    methods: ['automateRules', 'boardCreate', 'boardReview', 'resourceMonitor', 'taskAssign', 'timelinePlan'],
   },
   { extensionName: 'knowledge', surface: 'knowledge', nodePack: 'vendor.myndhyve.knowledge-tools', methods: ['retrieve'] },
   {
@@ -73,7 +72,6 @@ export const EXT_FAMILY_CLAIMS: readonly ExtFamilyClaim[] = [
   {
     extensionName: 'web-research', surface: 'webResearch', nodePack: 'vendor.myndhyve.web-research',
     methods: ['fetchBatch', 'research', 'search'],
-    unavailable: [{ node: 'research synthesis (ctx.aiEnvelope.generate)', needs: 'ctx.aiEnvelope' }],
   },
   {
     extensionName: 'messaging', surface: 'messaging', wiring: 'adapter', nodePack: 'vendor.myndhyve.entities', adr: '0769',

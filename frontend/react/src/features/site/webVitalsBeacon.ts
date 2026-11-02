@@ -7,7 +7,7 @@
  * `{ type:'event', name:'web-vital', props:{ metric, value } }` — no new event
  * type, no backend schema change; `summarize()` computes the p75 + rating.
  */
-import { config } from '../../client/config.js';
+import { visitorApiBase } from './visitorApi.js';
 import { measureWebVitals, type VitalSample } from '../../platform/measureWebVitals.js';
 import { consentTokenFor, repairConsentTokenFrom } from './visitorConsent.js';
 
@@ -15,7 +15,7 @@ function sendVital(orgId: string, sessionKey: string, sample: VitalSample): void
   try {
     // Round to a sane precision: CLS is a small unitless float, the rest are ms.
     const value = sample.metric === 'CLS' ? Math.round(sample.value * 1000) / 1000 : Math.round(sample.value);
-    const url = `${config.baseUrl}/host/openwop-app/public-analytics/${encodeURIComponent(orgId)}/collect`;
+    const url = `${visitorApiBase()}/host/openwop-app/public-analytics/${encodeURIComponent(orgId)}/collect`;
     void fetch(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },

@@ -13,6 +13,12 @@
  *   5. a choke whose `stripeApiBase()` stops defaulting to api.stripe.com is a
  *      violation;
  *   6. the REAL tree has no violation, and the real entry point runs green on it.
+ *
+ * Tracker TST-CED-4. Red when (w67g3, witnessed): the exemption stops requiring
+ * the choke FILE (leg 4) or is dropped (leg 2); KEEP-marked lines are scanned
+ * (leg 9); the own-path pattern stops requiring a segment boundary (leg 8); a
+ * non-repo scan reads as zero (#4484); the `stripeApiBase` default or the
+ * outside-the-choke check is dropped (legs 5, 4).
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { execFileSync } from 'node:child_process';

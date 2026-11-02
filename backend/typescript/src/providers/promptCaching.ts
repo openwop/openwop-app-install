@@ -108,6 +108,41 @@ export function withAnthropicToolCache<T extends AnthropicToolDef>(
   return out;
 }
 
+/** A message as sent to the Anthropic Messages API: text, or content blocks. */
+export interface AnthropicCacheableMessage {
+  role: 'user' | 'assistant';
+  content: string | ReadonlyArray<{ type: string; [k: string]: unknown }>;
+}
+
+/**
+ * ADR 1003 D3 — return a NEW messages array whose LAST message carries an
+ * ephemeral breakpoint on its last block, so the next request that repeats this
+ * prefix reads it from cache. A string content becomes one text block; a block
+ * array gets the marker on its final block (text or `tool_result`). Non-mutating:
+ * the caller's array, messages and blocks are never written. Off, or no
+ * messages ⇒ the input unchanged (byte-identical body).
+ *
+ * The caller decides WHEN: only a tool-loop round after the first, where tools
+ * and system match the previous round byte-for-byte. Marking every request pays
+ * the 1.25× write on the whole conversation each exchange and, when the system
+ * prompt carries per-turn retrieval, never reads it back (ADR 1003 B1/B2).
+ */
+export function withAnthropicMessageCache<T extends AnthropicCacheableMessage>(
+  messages: readonly T[],
+  enabled: boolean,
+): readonly T[] {
+  if (!enabled || messages.length === 0) return messages;
+  const out = [...messages];
+  const last = out[out.length - 1];
+  // Anthropic refuses an empty text block, so an empty final message stays unmarked.
+  if (last.content.length === 0) return messages;
+  const content = typeof last.content === 'string'
+    ? [{ type: 'text', text: last.content, cache_control: EPHEMERAL }]
+    : [...last.content.slice(0, -1), { ...last.content[last.content.length - 1], cache_control: EPHEMERAL }];
+  out[out.length - 1] = { ...last, content };
+  return out;
+}
+
 /** Cache-token counts read from an Anthropic `usage` block. Both keys are
  *  reported by Anthropic only when prompt caching is engaged; absent ⇒ 0. */
 export interface AnthropicCacheTokens {

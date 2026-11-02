@@ -5,6 +5,12 @@
  *    existing runs-reference guard — else the job would fire against a gone workflowId.
  *  - RI-10: hard-deleting a contact/company UNLINKS its deals (contacts tenant-wide,
  *    companies org-scoped) via the `onCrmRecordDeleted` seam — the CRM-5 blind spot.
+ *
+ * TST-CUC-5. Red when the delete skips the schedule check (RI-9), when the deal
+ * unlink drops its org filter (only THIS file holds a cross-org DEAL with a
+ * colliding companyId — `crm-unlink-cascades.test.ts` collides tasks), or when a
+ * contact delete stops unlinking deals (also caught by crm-unlink-cascades'
+ * "delete a CONTACT" case; kept here because the idempotent re-fire reads it).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -46,7 +52,7 @@ async function signup(c: ReturnType<typeof client>): Promise<void> {
 }
 
 describe('RI-9 — workflow delete refuses while a schedule binds it', () => {
-  it('409 workflow_scheduled while bound (enabled OR disabled); 200 once the job is gone', async () => {
+  it('409 workflow_scheduled while bound (a DISABLED job still binds); 200 once the job is gone', async () => {
     const c = client();
     await signup(c);
     const wfId = `wf.dcg-${Date.now()}`;
@@ -58,6 +64,7 @@ describe('RI-9 — workflow delete refuses while a schedule binds it', () => {
 
     const refused = await c.del(`/host/openwop-app/workflows/${wfId}`);
     expect(refused.status).toBe(409);
+    expect(refused.body['error']).toBe('conflict');
     expect((refused.body as { details?: { reason?: string } }).details?.reason).toBe('workflow_scheduled');
 
     // remove the schedule → the workflow deletes cleanly.

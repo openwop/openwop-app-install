@@ -185,7 +185,7 @@ export function BoardMentionAutocomplete({ text, cursorPos, onPick, onDismiss, c
     const store = storeFor('advisory-board');
     return (
       <EmptyPanel listRef={listRef}>
-        <Trans i18nKey="boardsLocked" ns="chat" components={{ 1: <Link to={store?.to ?? ''} onClick={store?.onClick} /> }} />
+        <Trans i18nKey="boardsLocked" ns="chat" components={[<></>, <Link to={store?.to ?? ''} onClick={store?.onClick} />]} />
       </EmptyPanel>
     );
   }
@@ -198,14 +198,14 @@ export function BoardMentionAutocomplete({ text, cursorPos, onPick, onDismiss, c
   if (boards.length === 0) {
     return (
       <EmptyPanel listRef={listRef}>
-        <Trans i18nKey="noBoardsInstalled" ns="chat" components={{ 1: <strong />, 3: <code /> }} />
+        <Trans i18nKey="noBoardsInstalled" ns="chat" components={[<></>, <strong />, <></>, <code />]} />
       </EmptyPanel>
     );
   }
   if (matches.length === 0) {
     return (
       <EmptyPanel listRef={listRef}>
-        <Trans i18nKey="noBoardsMatch" ns="chat" values={{ query }} components={{ 1: <code /> }} />
+        <Trans i18nKey="noBoardsMatch" ns="chat" values={{ query }} components={[<></>, <code />]} />
       </EmptyPanel>
     );
   }

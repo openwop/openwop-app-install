@@ -6,6 +6,11 @@
  * here against the backend's own list, and the run-and-read claim is proved
  * over HTTP with the preset's real scopes (the MCP "Read & act" preset, the only
  * one a person could pick before, creates a run and then cannot read it).
+ *
+ * TST-BXC-3. Red when: a preset names a scope the server will not mint (w66
+ * pp-mint), "cli" loses a protocol scope (pp-cli), "run" loses runs:read
+ * (pp-run), "read" gains runs:create (pp-read), or the server stops narrowing a
+ * key to its declared scopes (pp-narrow).
  */
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';

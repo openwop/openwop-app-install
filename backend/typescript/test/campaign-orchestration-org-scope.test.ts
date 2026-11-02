@@ -11,9 +11,16 @@
  *    scope in the ROW's org (`workspace:write` for the two writes);
  *  - an actorless, causeless system run keeps the tenant-trusted model.
  *
- * Driven through the real seam (`buildFeatureSurfaces`). Sabotage (run
- * 2026-10-20): dropping the row-org check reds all four; reading at the
- * `workspace:read` bar instead of `workspace:write` reds 4.
+ * Driven through the real seam (`buildFeatureSurfaces`).
+ *
+ * Tracker: TST-CBA-6 (/grade-tests wave 67). Red when (probe-witnessed,
+ * 2026-10-29): `mayUseOrg` stops comparing the row's org with a given `orgId`
+ * (case 2); stops checking the person in the row's org (cases 1, 3, 4); the list
+ * stops filtering by readable org (cases 1, 3); a personless system run is no
+ * longer tenant-trusted (case 3); `finalizeFromBrief` reads at the
+ * `workspace:read` bar (case 4); the seam floor's `methodScopes` for the two
+ * writes drop to `workspace:read` (case 4, with `orgId` passed — the floor runs
+ * only then); a tagged run's live-membership recheck is skipped (revocation cases).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -29,7 +36,6 @@ import { deleteMember, listMembers } from '../src/host/accessControlService.js';
 import { stampCampaignRun } from '../src/features/campaign-orchestration/campaignRunTag.js';
 import { createBrief } from '../src/features/campaign-brief/briefService.js';
 import { finalizeFromBrief, getCampaign } from '../src/features/campaign-orchestration/campaignService.js';
-import { campaignOrchestrationFeature } from '../src/features/campaign-orchestration/feature.js';
 
 let BASE = '';
 let server: http.Server;
@@ -48,16 +54,28 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-// `any`: the JSON wire boundary of a test-only HTTP helper (the adr0832 probe precedent).
-function client(): { post: (p: string, b?: unknown) => Promise<{ status: number; body: any }> } {
+interface LoginBody { user: { userId: string } }
+interface OrgBody { orgId: string }
+function client(): { post: (p: string, b?: unknown) => Promise<{ status: number; body: unknown }> } {
   let cookie = '';
   return {
     post: async (path, body) => {
       const res = await fetch(`${BASE}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
       for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]!; }
-      return { status: res.status, body: await res.json().catch(() => undefined) };
+      const parsed: unknown = await res.json().catch(() => undefined);
+      return { status: res.status, body: parsed };
     },
   };
+}
+function userIdOf(body: unknown): string {
+  const id = (body as Partial<LoginBody> | undefined)?.user?.userId;
+  if (typeof id !== 'string') throw new Error(`login failed: ${JSON.stringify(body)}`);
+  return id;
+}
+function orgIdOf(body: unknown): string {
+  const id = (body as Partial<OrgBody> | undefined)?.orgId;
+  if (typeof id !== 'string') throw new Error(`org create failed: ${JSON.stringify(body)}`);
+  return id;
 }
 
 const H = '/host/openwop-app';
@@ -69,18 +87,17 @@ const leaks = (v: unknown): boolean => JSON.stringify(v ?? null).includes(SECRET
 async function fixture() {
   const tenantId = `org:orchscope-${Date.now()}-${n++}`;
   const owner = client();
-  const ownerId: string = (await owner.post(`${H}/test/login`, { email: `os-o-${n++}@acme.test`, tenantId })).body.user.userId;
+  const ownerId = userIdOf((await owner.post(`${H}/test/login`, { email: `os-o-${n++}@acme.test`, tenantId })).body);
   const member = client();
-  const memberId: string = (await member.post(`${H}/test/login`, { email: `os-m-${n++}@acme.test`, tenantId })).body.user.userId;
+  const memberId = userIdOf((await member.post(`${H}/test/login`, { email: `os-m-${n++}@acme.test`, tenantId })).body);
   const viewer = client();
-  const viewerId: string = (await viewer.post(`${H}/test/login`, { email: `os-v-${n++}@acme.test`, tenantId })).body.user.userId;
-  const orgA: string = (await owner.post(`${H}/orgs`, { name: 'Client A' })).body.orgId;
-  const orgB: string = (await owner.post(`${H}/orgs`, { name: 'Client B' })).body.orgId;
+  const viewerId = userIdOf((await viewer.post(`${H}/test/login`, { email: `os-v-${n++}@acme.test`, tenantId })).body);
+  const orgA = orgIdOf((await owner.post(`${H}/orgs`, { name: 'Client A' })).body);
+  const orgB = orgIdOf((await owner.post(`${H}/orgs`, { name: 'Client B' })).body);
   expect((await owner.post(`${H}/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'M', subject: memberId, roles: ['editor'] })).status).toBe(201);
   expect((await owner.post(`${H}/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'V', subject: viewerId, roles: ['viewer'] })).status).toBe(201);
-  // `as never`: the brief input carries many optional fields; only the names matter here.
-  const briefA = await createBrief(tenantId, orgA, ownerId, { name: 'Client A launch', productName: 'Widget' } as never);
-  const briefB = await createBrief(tenantId, orgB, ownerId, { name: SECRET, productName: SECRET } as never);
+  const briefA = await createBrief(tenantId, orgA, ownerId, { name: 'Client A launch', productName: 'Widget' });
+  const briefB = await createBrief(tenantId, orgB, ownerId, { name: SECRET, productName: SECRET });
   const campA = await finalizeFromBrief(tenantId, briefA, ownerId);
   const campB = await finalizeFromBrief(tenantId, briefB, ownerId);
   return { tenantId, ownerId, memberId, viewerId, orgA, orgB, briefA: briefA.id, briefB: briefB.id, campA: campA.id, campB: campB.id };
@@ -127,9 +144,12 @@ describe('campaign-orchestration surface — a client-A run cannot reach client 
 
   it('4. the write bar: a viewer of A reads A but cannot attach to or finalize it', async () => {
     const f = await fixture();
-    expect(campaignOrchestrationFeature.surface && 'orgPolicy' in campaignOrchestrationFeature.surface ? campaignOrchestrationFeature.surface.orgPolicy?.methodScopes : undefined)
-      .toMatchObject({ finalizeFromBrief: 'workspace:write', attachAssets: 'workspace:write' });
     const viewer = surface({ tenantId: f.tenantId, runId: 'r1', actingUserId: f.viewerId });
+    // Naming the org runs the seam floor at the method's declared scope (write).
+    const missingWrite = { code: 'forbidden_scope', message: 'Missing required scope: workspace:write' };
+    await expect(viewer.attachAssets!({ orgId: f.orgA, campaignId: f.campA, assetIds: ['asset:v'] })).rejects.toMatchObject(missingWrite);
+    await expect(viewer.finalizeFromBrief!({ orgId: f.orgA, briefId: f.briefA })).rejects.toMatchObject(missingWrite);
+    // Without it, the row's own org is held to the same write bar.
     expect((await viewer.getCampaign!({ campaignId: f.campA })).campaign).toMatchObject({ id: f.campA });
     expect(await viewer.attachAssets!({ campaignId: f.campA, assetIds: ['asset:v'] })).toEqual({ found: false });
     expect(await viewer.finalizeFromBrief!({ briefId: f.briefA })).toEqual({ found: false });

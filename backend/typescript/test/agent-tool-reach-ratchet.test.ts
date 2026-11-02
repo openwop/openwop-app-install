@@ -41,6 +41,7 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '../../..');
 /** Unreached ON PURPOSE: granting it is the decision, and the default is none. */
 const BY_DESIGN: Readonly<Record<string, string>> = {
   'openwop:workflows.compose-and-run': 'ADR 0369 §6: runs a model-written workflow unreviewed; granted per agent by an operator, zero by default',
+  'openwop:ask-user': 'ADR 1001 D7: behind the agent-clarification-chat toggle (OFF); granted per agent by an allowlist override until a pack opts in',
 };
 
 /** Unreached DEBT: registered for a persona no shipped pack provides yet. Shrink-only. */

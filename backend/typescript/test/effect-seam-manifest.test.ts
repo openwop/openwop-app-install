@@ -13,6 +13,11 @@
  * `assertEffectAllowed(` call sites and fails if any file holding one is missing
  * from `SEAM_CALL_SITES` — so a new guarded effect anywhere in `src/` cannot reach
  * the wire as an omitted row.
+ *
+ * Tracker TST-CXC-7. Red when a guarded call site is missing from
+ * SEAM_CALL_SITES or a listed file holds none; a call site names a seam with
+ * no row or a row is not guarded; or the served body stops validating against
+ * the vendored schema or changes its manifest version.
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -21,6 +26,7 @@ import { describe, it, expect } from 'vitest';
 
 import { SEAM_CALL_SITES, SEAM_ROWS } from '../src/host/effectSeamManifest.js';
 import { effectSeamManifestBody } from '../src/routes/effectSeams.js';
+import { stripComments } from './helpers/stripComments.js';
 
 /** Every `.ts` under src/, excluding the guard's own definition site. */
 function sourceFiles(dir: string, acc: string[] = []): string[] {
@@ -41,9 +47,7 @@ function callSiteFiles(): Set<string> {
   const found = new Set<string>();
   for (const abs of sourceFiles('src')) {
     if (abs.endsWith('host/runEffectContext.ts')) continue; // the definition, not a call
-    const src = readFileSync(abs, 'utf8')
-      .replace(/\/\*[\s\S]*?\*\//g, '')
-      .replace(/^\s*\/\/.*$/gm, '');
+    const src = stripComments(readFileSync(abs, 'utf8'));
     if (/\bassertEffectAllowed\s*\(/.test(src)) found.add(abs.replace(/\\/g, '/'));
   }
   return found;
@@ -54,7 +58,9 @@ describe('effect-seam manifest (RFC 0173 §C.1)', () => {
     const actual = callSiteFiles();
     // Non-vacuity: if this probe finds nothing, it is broken, and a broken probe
     // would report a perfectly clean manifest for a host with no rows at all.
-    expect(actual.size).toBeGreaterThan(5);
+    // Liveness floor, not the ratchet: measured 19 call-site files on
+    // 2026-10-29 (w69). The two-sided equality below is the real check.
+    expect(actual.size).toBeGreaterThanOrEqual(18);
 
     const declared = new Set(SEAM_CALL_SITES.map((c) => c.file));
     const unclassified = [...actual].filter((f) => !declared.has(f)).sort();
@@ -109,7 +115,7 @@ describe('effect-seam manifest (RFC 0173 §C.1)', () => {
   it('the served body validates against the vendored effect-seam-manifest schema', async () => {
     const { default: Ajv2020 } = await import('ajv/dist/2020.js');
     const { readFileSync } = await import('node:fs');
-    const schema = JSON.parse(readFileSync('../../schemas/v2/effect-seam-manifest.schema.json', 'utf8')) as object;
+    const schema = JSON.parse(readFileSync(new URL('../../../schemas/v2/effect-seam-manifest.schema.json', import.meta.url), 'utf8')) as object;
     const validate = new Ajv2020({ strict: false, allErrors: true }).compile(schema);
     const body = effectSeamManifestBody();
     expect(validate(body), `manifest violates the schema: ${JSON.stringify(validate.errors ?? [])}`).toBe(true);

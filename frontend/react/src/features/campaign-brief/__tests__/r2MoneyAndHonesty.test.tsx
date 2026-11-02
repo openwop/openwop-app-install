@@ -34,6 +34,7 @@ const validateBriefById = vi.fn();
 const listPersonas = vi.fn();
 const listOrgs = vi.fn();
 const findCampaignForBrief = vi.fn();
+const getPendingKernelRun = vi.fn();
 
 vi.mock('../campaignBriefClient.js', async (orig) => {
   const actual = await orig<Record<string, unknown>>();
@@ -47,6 +48,7 @@ vi.mock('../campaignBriefClient.js', async (orig) => {
     listBrands: vi.fn(async () => []),
     deleteBrief: vi.fn(async () => {}),
     findCampaignForBrief: (...a: unknown[]) => findCampaignForBrief(...a),
+    getPendingKernelRun: (...a: unknown[]) => getPendingKernelRun(...a),
   };
 });
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
@@ -75,6 +77,7 @@ beforeEach(() => {
   listPersonas.mockReset().mockResolvedValue([]);
   listOrgs.mockReset().mockResolvedValue([{ orgId: 'org-1', name: 'Acme' }]);
   findCampaignForBrief.mockReset().mockResolvedValue(null);
+  getPendingKernelRun.mockReset().mockResolvedValue(null);
 });
 afterEach(cleanup);
 
@@ -225,5 +228,33 @@ describe('R3 CB-G3 — the un-renameable brief gets an inline rename', () => {
     fireEvent.keyDown(screen.getByRole('textbox', { name: /rename brief/i }), { key: 'Escape' });
     expect(screen.queryByRole('textbox', { name: /rename brief/i })).toBeNull();
     expect(updateBrief).not.toHaveBeenCalled();
+  });
+});
+
+describe('ADR 1020 D8 — a kernel waiting for approval, and a stale one, are explained', () => {
+  const KERNEL = { headline: 'Pick faster', supportingStatement: 'Save hours', proofPoints: ['40%'], primaryCta: 'Demo', secondaryCta: '', tone: 'direct', channelTones: {}, sourceDocIds: [], generatedAt: '2026-10-31T00:00:00.000Z' };
+
+  it('while a kernel run waits, the page says so, links to the run, and does not invite a second generation', async () => {
+    getPendingKernelRun.mockResolvedValue('run-77');
+    await openDetail();
+    await act(async () => {});
+    expect(getPendingKernelRun).toHaveBeenCalledWith('brief-1');
+    const link = await screen.findByRole('link', { name: /review it/i });
+    expect(link.getAttribute('href')).toBe('/runs/run-77');
+    expect(screen.queryByText(/No messaging kernel yet/i)).toBeNull();
+  });
+
+  it('polarity: nothing pending → the usual "no kernel yet" prompt, no notice', async () => {
+    await openDetail();
+    await act(async () => {});
+    expect(screen.queryByRole('link', { name: /review it/i })).toBeNull();
+    expect(screen.getByText(/No messaging kernel yet/i)).toBeTruthy();
+  });
+
+  it('a stale kernel says what it means for generation', async () => {
+    listBriefs.mockResolvedValue([{ ...BRIEF, kernel: KERNEL, kernelStale: true }]);
+    await openDetail();
+    await act(async () => {});
+    expect(screen.getByText(/won’t use it until you regenerate/i)).toBeTruthy();
   });
 });

@@ -136,7 +136,7 @@ export function AgentTwinPanel({ rosterId, persona }: { rosterId: string; person
     <div className="surface-card u-flex u-flex-col u-gap-3 u-mt-4">
       <span className="u-flex u-items-center u-gap-2"><SparklesIcon size={16} /> <strong>{t('digitalTwin')}</strong></span>
       <p className="muted u-fs-13 u-m-0">
-        <Trans t={t} i18nKey="panelIntro" values={{ persona }} components={{ 0: <strong /> }} />
+        <Trans t={t} i18nKey="panelIntro" values={{ persona }} components={[<strong />]} />
       </p>
       {error ? <Notice variant="error">{error}</Notice> : null}
       {notice ? <Notice variant="success" announce={notice}>{notice}</Notice> : null}
@@ -177,7 +177,7 @@ export function AgentTwinPanel({ rosterId, persona }: { rosterId: string; person
             <span className="u-flex u-items-center u-gap-2">
               <UserIcon size={14} />
               {mine === true
-                ? <Trans t={t} i18nKey="twinOfYou" components={{ 0: <strong /> }} />
+                ? <Trans t={t} i18nKey="twinOfYou" components={[<strong />]} />
                 : mine === 'unknown'
                   // Don't attribute the link to "a person" we can't rule out is
                   // the viewer — that raw id may well be their own.

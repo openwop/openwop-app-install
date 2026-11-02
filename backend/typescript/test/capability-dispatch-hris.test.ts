@@ -4,6 +4,14 @@
  * core.openwop.connectors.hris-action reports the connected `hr` provider (Workday
  * today) and RECOMMENDS a worker action — it applies NOTHING (HRIS writes are
  * high-stakes; real execution is a future gated slice). Fails on an unknown action.
+ *
+ * Tracker TST-CBC-3 (fork/retry idempotency of a non-idempotent HR write; protected).
+ * Red when: an absent `dryRun` submits; the Workday URL or the days[] body is
+ * mis-built; the idempotency record is skipped (a fork double-submits); a
+ * create/terminate executes or loses its `staffing_soap_only` reason; the workerId,
+ * baseUrl or date guard is dropped; an unknown action is accepted; a platform
+ * rejection reads as success (w67g1-hris-* probes, wave 67). Each refusal case carries
+ * every other field, so exactly one guard holds it.
  */
 import { describe, expect, it, beforeAll } from 'vitest';
 import { createApp } from '../src/index.js';
@@ -46,7 +54,10 @@ describe('ADR 0186 slice 3 — hris-action node', () => {
   it('applies nothing — never calls the connector', async () => {
     let called = false;
     const c = { ...conns('workday'), invoke: async () => { called = true; return { ok: true }; } };
-    await node().execute(makeCtx({ config: { action: 'submit-time-off', dates: 'Jul 4-8' }, connectors: c }));
+    // A complete, executable time-off request (Workday + baseUrl + workerId + date):
+    // only the dry-run default (dryRun absent) holds it back.
+    const res = await node().execute(makeCtx({ tenantId: 'to0', config: { action: 'submit-time-off', baseUrl: timeOffCfg.baseUrl, workerId: 'W-1', date: '2026-07-04', timeOffType: 'PTO' }, connectors: c }));
+    expect(outputsOf(res)).toMatchObject({ connected: true, applied: false, provider: 'workday' });
     expect(called).toBe(false);
   });
 
@@ -107,19 +118,37 @@ describe('ADR 0186 slice 3b — submit-time-off real execution (Workday, dry-run
 
   it('create/terminate stay recommend-only even with dryRun:false (staffing SOAP)', async () => {
     const c = execConns('workday');
-    const res = await node().execute(makeCtx({ tenantId: 'to4', config: { action: 'terminate-worker', dryRun: false, baseUrl: timeOffCfg.baseUrl, workerId: 'W-9' }, connectors: c.surface }));
+    // date present too, so only the action guard (staffing is never executed) holds it.
+    const res = await node().execute(makeCtx({ tenantId: 'to4', config: { action: 'terminate-worker', dryRun: false, baseUrl: timeOffCfg.baseUrl, workerId: 'W-9', date: '2026-07-04' }, connectors: c.surface }));
     expect(outputsOf(res)).toMatchObject({ applied: false, reason: 'staffing_soap_only' });
     expect(c.calls.length).toBe(0);
   });
 
-  it('dryRun:false but missing workerId/baseUrl ⇒ recommend, no submit', async () => {
+  it('dryRun:false but missing workerId ⇒ recommend, no submit', async () => {
     const c = execConns('workday');
-    expect(outputsOf(await node().execute(makeCtx({ tenantId: 'to5', config: { action: 'submit-time-off', dryRun: false, date: '2026-07-04' }, connectors: c.surface })))).toMatchObject({ applied: false });
+    const { workerId: _omit, ...cfg } = timeOffCfg;
+    expect(outputsOf(await node().execute(makeCtx({ tenantId: 'to5', config: cfg, connectors: c.surface })))).toMatchObject({ applied: false });
+    expect(c.calls.length).toBe(0);
+  });
+
+  it('dryRun:false but missing baseUrl ⇒ recommend, no submit', async () => {
+    const c = execConns('workday');
+    const { baseUrl: _omit, ...cfg } = timeOffCfg;
+    expect(outputsOf(await node().execute(makeCtx({ tenantId: 'to5b', config: cfg, connectors: c.surface })))).toMatchObject({ applied: false });
+    expect(c.calls.length).toBe(0);
+  });
+
+  it('dryRun:false but missing date ⇒ recommend, no submit', async () => {
+    const c = execConns('workday');
+    const { date: _omit, ...cfg } = timeOffCfg;
+    expect(outputsOf(await node().execute(makeCtx({ tenantId: 'to5c', config: cfg, connectors: c.surface })))).toMatchObject({ applied: false });
     expect(c.calls.length).toBe(0);
   });
 
   it('a real submit that the platform rejects → failure', async () => {
     const c = execConns('workday', false);
-    expect((await node().execute(makeCtx({ tenantId: 'to6', config: timeOffCfg, connectors: c.surface }))).status).toBe('failure');
+    const res = await node().execute(makeCtx({ tenantId: 'to6', config: timeOffCfg, connectors: c.surface }));
+    if (res.status !== 'failure') throw new Error(`expected failure, got ${res.status}`);
+    expect(res.error?.code).toBe('bad_request');
   });
 });

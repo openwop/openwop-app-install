@@ -40,6 +40,7 @@ import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createOrg } from '../src/host/accessControlService.js';
 import { createBrief } from '../src/features/campaign-brief/briefService.js';
+import { __budgetReadsForTests } from '../src/host/workflowBudgets.js';
 import {
   CAMPAIGN_ORCH_STATUS_TOOL_ID,
   CAMPAIGN_ORCH_GET_TOOL_ID,
@@ -163,6 +164,20 @@ describe('campaign-orchestration.run (action)', () => {
     expect(out.isError).toBe(true);
     expect(JSON.parse(out.content)).toMatchObject({ error: 'forbidden' });
   });
+  it('refuses TYPED, before any run, when Campaign Channels is off — and does not latch the dedup (ADR 1020 D4)', async () => {
+    // A fresh brief: the ignition window of the case above must not mask a latch.
+    const fresh = await createBrief(TENANT, orgId, 'u-1', { name: 'Channels off', channels: [{ type: 'email_sequence', enabled: true, config: {} }] });
+    await withToggleOff('campaign-channels', async () => {
+      const out = await exec(CAMPAIGN_ORCH_RUN_TOOL_ID, { briefId: fresh.id }, { actingUserId: 'u-1' });
+      expect(out.isError).toBe(true);
+      expect(JSON.parse(out.content)).toMatchObject({ error: 'forbidden', reason: 'feature_disabled', feature: 'campaign-channels' });
+    });
+    // Turned back on, the same brief ignites at once (no 5-minute latch over a refusal).
+    const retry = await exec(CAMPAIGN_ORCH_RUN_TOOL_ID, { briefId: fresh.id }, { actingUserId: 'u-1' });
+    expect(retry.isError).toBeFalsy();
+    expect(JSON.parse(retry.content)).toMatchObject({ workflowId: 'campaign-studio.campaign-orchestration' });
+    expect((JSON.parse(retry.content) as { runId?: string }).runId).toBeTruthy();
+  });
   it('fails TYPED for an unknown brief', async () => {
     const out = await exec(CAMPAIGN_ORCH_RUN_TOOL_ID, { briefId: 'missing' }, { actingUserId: 'u-1' });
     expect(out.isError).toBe(true);
@@ -204,6 +219,26 @@ describe('campaign-channels.generate (action)', () => {
     expect(parsed.runId).toBeTruthy();
     expect(parsed.channel).toBe('email_sequence');
     expect(parsed.workflowId).toBe('campaign-studio.channel.email-sequence');
+  });
+  it('refuses TYPED a channel the brief does not enable — no run (ADR 1020 D3)', async () => {
+    const out = await exec(CAMPAIGN_CHANNELS_GENERATE_TOOL_ID, { briefId, channel: 'landing_page' }, { actingUserId: 'u-1' });
+    expect(out.isError).toBe(true);
+    expect(JSON.parse(out.content)).toMatchObject({ error: 'channel_disabled', channel: 'landing_page' });
+    expect((JSON.parse(out.content) as { runId?: string }).runId).toBeUndefined();
+  });
+  it('a run start the host refuses keeps its code through the tool (ADR 1020 D5): an exhausted hard-capped budget', async () => {
+    const saved = { ...__budgetReadsForTests };
+    __budgetReadsForTests.budget = async (_t, wf) => (wf === 'campaign-studio.channel.email-sequence' ? { key: `${TENANT}:${encodeURIComponent(wf)}`, tenantId: TENANT, workflowId: wf, dailyUsd: 1, hardCap: true, updatedAt: new Date().toISOString() } : null);
+    __budgetReadsForTests.spend = async () => 5;
+    // A fresh brief: the ignition window of the case above would return its run.
+    const fresh = await createBrief(TENANT, orgId, 'u-1', { name: 'Budget spent', channels: [{ type: 'email_sequence', enabled: true, config: {} }] });
+    try {
+      const out = await exec(CAMPAIGN_CHANNELS_GENERATE_TOOL_ID, { briefId: fresh.id, channel: 'email_sequence' }, { actingUserId: 'u-1' });
+      expect(out.isError).toBe(true);
+      expect(JSON.parse(out.content)).toMatchObject({ error: 'rate_limited', reason: 'workflow_budget_exhausted' });
+    } finally {
+      Object.assign(__budgetReadsForTests, saved);
+    }
   });
   it('rejects an invalid channel with a typed error listing the valid set', async () => {
     const out = await exec(CAMPAIGN_CHANNELS_GENERATE_TOOL_ID, { briefId, channel: 'billboard' }, { actingUserId: 'u-1' });

@@ -418,7 +418,7 @@ export function ApprovalsInbox({ onResolved }: { onResolved?: () => void }): JSX
       width: '1fr',
       render: (a) => (
         <div>
-          <div><Trans t={t} i18nKey="approvalsRunWorkflow" values={{ name: workflowName(a.workflowId) }} components={{ 1: <strong /> }} /></div>
+          <div><Trans t={t} i18nKey="approvalsRunWorkflow" values={{ name: workflowName(a.workflowId) }} components={[<></>, <strong />]} /></div>
           {a.cardTitle && <div className="muted u-fs-12">{t('approvalsOnCard', { title: a.cardTitle })}</div>}
         </div>
       ),

@@ -4,6 +4,11 @@
  * app-builder suites; this pins the PER-TYPE bindings: each type's toggle
  * gate, canvas-type pin, validator wiring (422 on schema violations), a clean
  * save round-trip, and delete.
+ *
+ * Tracker TST-CXE-1. Red when a type's route config drops its `validate`
+ * (drawings/cad/campaign-studio routes.ts — the invalid save is accepted) or
+ * the factory's type pin is removed (canvasEditorRoutes.ts `loadCanvas` — a
+ * slides canvas is readable through this type's routes).
  */
 
 import http from 'node:http';
@@ -30,13 +35,15 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+/** The fields these cases read from the editor routes' JSON bodies. */
+interface Body { orgId?: string; canvasTypeId?: string; components?: unknown[]; newVersion?: number; error?: string; message?: string }
+interface Res { status: number; body: Body }
 function client(): { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> } {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out: Body = res.status === 204 ? {} : ((await res.json().catch(() => ({}))) as Body);
     return { status: res.status, body: out };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), del: (p) => call('DELETE', p) };
@@ -50,7 +57,7 @@ async function orgOwner(): Promise<{ c: ReturnType<typeof client>; orgId: string
   expect(r.status).toBe(201);
   const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status).toBe(201);
-  return { c, orgId: org.body.orgId, tenantId };
+  return { c, orgId: org.body.orgId ?? '', tenantId };
 }
 
 const CASES = [
@@ -87,17 +94,20 @@ describe.each(CASES)('$id editor routes (ADR 0310 Phase C)', (tc) => {
   it('is toggle-gated (404 off), type-pinned, validates (422), saves, and deletes', async () => {
     const { c, orgId, tenantId } = await orgOwner();
 
-    // Canvas types default ON (2026-07-09) — set off explicitly to test the gate.
-    const d0 = getToggleDefault(tc.toggle);
-    await saveConfig({ ...d0!, status: 'off' }, 'test');
-
-    // Toggle off → uniform 404.
-    const canvas = await createCanvasForTenant(tenantId, { canvasTypeId: tc.canvasTypeId, name: 'D', initialState: tc.valid });
-    expect((await c.get(`${tc.base(orgId)}/canvases/${canvas.canvasId}`)).status).toBe(404);
-
+    // Canvas types default ON (2026-07-09) — set off explicitly to test the gate,
+    // and restore ON in finally so a failure cannot leak OFF into later rows.
     const d = getToggleDefault(tc.toggle);
     expect(d, tc.toggle).toBeTruthy();
-    await saveConfig({ ...d!, status: 'on' }, 'test');
+    const canvas = await createCanvasForTenant(tenantId, { canvasTypeId: tc.canvasTypeId, name: 'D', initialState: tc.valid });
+    try {
+      await saveConfig({ ...d!, status: 'off' }, 'test');
+      // Toggle off → uniform 404.
+      const off = await c.get(`${tc.base(orgId)}/canvases/${canvas.canvasId}`);
+      expect(off.status).toBe(404);
+      expect(off.body.error).toBe('not_found');
+    } finally {
+      await saveConfig({ ...d!, status: 'on' }, 'test');
+    }
 
     // Catalog serves (empty component list — no catalog registered for the type).
     const cat = await c.get(`${tc.base(orgId)}/catalog`);
@@ -107,18 +117,29 @@ describe.each(CASES)('$id editor routes (ADR 0310 Phase C)', (tc) => {
 
     // Wrong-type pin: a slides canvas is a uniform 404 on this type's routes.
     const foreign = await createCanvasForTenant(tenantId, { canvasTypeId: 'canvas.slides', name: 'S', initialState: { title: 'S', slides: [{ layout: 'title' }] } });
-    expect((await c.get(`${tc.base(orgId)}/canvases/${foreign.canvasId}`)).status).toBe(404);
+    const foreignRead = await c.get(`${tc.base(orgId)}/canvases/${foreign.canvasId}`);
+    expect(foreignRead.status).toBe(404);
+    // The envelope redacts the high-entropy id (errorEnvelope sanitizer).
+    expect(foreignRead.body).toMatchObject({ error: 'not_found', message: "canvas '<redacted:high-entropy>' not found" });
 
-    // Validator wiring: schema violations reject with 422.
-    expect((await c.patch(`${tc.base(orgId)}/canvases/${canvas.canvasId}`, { state: tc.invalid, expectedVersion: 1 })).status).toBe(422);
-    expect((await c.patch(`${tc.base(orgId)}/canvases/${canvas.canvasId}`, { state: tc.invalid2, expectedVersion: 1 })).status).toBe(422);
+    // Validator wiring: schema violations reject with 422 from the catalog validator.
+    for (const state of [tc.invalid, tc.invalid2]) {
+      const bad = await c.patch(`${tc.base(orgId)}/canvases/${canvas.canvasId}`, { state, expectedVersion: 1 });
+      expect(bad.status).toBe(422);
+      expect(bad.body.error).toBe('validation_error');
+      expect(bad.body.message).toMatch(/^canvas state violates the component catalog: /);
+    }
 
     // Clean save round-trip + optimistic concurrency + delete.
     const save = await c.patch(`${tc.base(orgId)}/canvases/${canvas.canvasId}`, { state: tc.valid, expectedVersion: 1 });
     expect(save.status, JSON.stringify(save.body)).toBe(200);
     expect(save.body.newVersion).toBe(2);
-    expect((await c.patch(`${tc.base(orgId)}/canvases/${canvas.canvasId}`, { state: tc.valid, expectedVersion: 1 })).status).toBe(409);
+    const stale = await c.patch(`${tc.base(orgId)}/canvases/${canvas.canvasId}`, { state: tc.valid, expectedVersion: 1 });
+    expect(stale.status).toBe(409);
+    expect(stale.body.message).toMatch(/^canvas \S+ version conflict: expected 1, have 2$/);
     expect((await c.del(`${tc.base(orgId)}/canvases/${canvas.canvasId}`)).status).toBe(204);
-    expect((await c.get(`${tc.base(orgId)}/canvases/${canvas.canvasId}`)).status).toBe(404);
+    const gone = await c.get(`${tc.base(orgId)}/canvases/${canvas.canvasId}`);
+    expect(gone.status).toBe(404);
+    expect(gone.body.error).toBe('not_found');
   });
 });

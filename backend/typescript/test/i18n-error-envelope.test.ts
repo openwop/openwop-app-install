@@ -2,9 +2,14 @@
  * Localized error envelopes (ADR 0143 / i18n.md annex) — ROUTE-level harness.
  * Boots the real app with i18n enabled (OPENWOP_I18N_LOCALES=en,pt-BR) and drives
  * the error formatter end-to-end via GET /v1/workflows/:id on an unknown id
+ * (note: the test actually calls the unversioned `/workflows/...` path, v2)
  * (→ workflow_not_found, 404, no auth needed). Asserts the full negotiation
  * matrix: exact / family / default / unsupported / malformed Accept-Language, and
  * the honesty rule (Content-Language + details.locale ONLY when actually localized).
+ *
+ * Tracker TST-DFE-1. Red when (w71g1, witnessed): Content-Language is set on an
+ * unlocalized (default / unsupported / malformed) response; the language-family
+ * fallback is dropped; q stops ranking supported tags.
  */
 
 import { mintAnonSession, signSession } from '../src/middleware/cookieSession.js';
@@ -97,5 +102,10 @@ describe('localized error envelopes (ADR 0143)', () => {
     const r = await getMissing('de;q=0.9, pt-BR;q=0.8');
     expect(r.headers.get('content-language')).toBe('pt-BR'); // de unsupported → pt-BR wins
     expect(r.body.message).toBe('Fluxo de trabalho não encontrado.');
+    // And q decides between two SUPPORTED tags: en (0.9) beats an earlier pt-BR (0.5),
+    // so the answer is English with no localization markers.
+    const q = await getMissing('pt-BR;q=0.5, en;q=0.9');
+    expect(q.body.message).toBe('workflow not found');
+    expect(q.headers.get('content-language')).toBeNull();
   });
 });

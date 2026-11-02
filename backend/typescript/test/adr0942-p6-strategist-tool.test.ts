@@ -12,10 +12,17 @@
  *     floor cannot reach a run without the model being told it applies;
  *   - the pack allowlists it, and no tool in the allowlist can write a policy.
  *
- * What turns it red: dropping any guard in `runAutonomyTool`, widening the access
- * union to an optional subject (the stranger case), re-deriving the projection
- * instead of reading `describePolicy`, or a new `raise(…)` layer in resolve.ts
- * without a line in explain.ts.
+ * What turns it red (each run, w74 grade-tests): dropping the acting-user guard
+ * or the autonomy-toggle guard in `runAutonomyTool`; widening the access union
+ * to an optional subject (the stranger case); projecting anything but the
+ * `describePolicy` read model; or a `raise(…)` layer in resolve.ts without a
+ * line in explain.ts.
+ *
+ * DOUBLE GUARD (recorded): the PARENT toggle (`campaign-orchestration`) is
+ * checked twice, in different files — `orchestrationEnabled` in agentTools.ts
+ * AND `autonomyToggleOn` in host/autonomyPolicy/service.ts, which ANDs the
+ * parent with the sub-toggle. Dropping only the first stays green (measured);
+ * no single edit breaks both, so the parent-off case is held by either.
  */
 import http from 'node:http';
 import { readFileSync } from 'node:fs';
@@ -73,8 +80,13 @@ describe('ADR 0942 P6 — get-autonomy (read)', () => {
     const out = await exec({ campaignId }, { actingUserId: 'u-1' });
     expect(out.isError).toBeFalsy();
     const parsed = JSON.parse(out.content) as { autonomy: { steps: Array<{ step: string; stage?: string; outcome: string }> } };
-    const expected = projectPolicyForModel(campaignId, await describePolicy(TENANT, orgId, campaignId));
+    const view = await describePolicy(TENANT, orgId, campaignId);
+    const expected = projectPolicyForModel(campaignId, view);
     expect(parsed.autonomy).toEqual(JSON.parse(JSON.stringify(expected)));
+    // Derived from the read model itself, not through the projection: one step
+    // per effective row, with that row's own default outcome.
+    expect(parsed.autonomy.steps.map((s) => [s.step, s.stage ?? null, s.outcome]))
+      .toEqual(view.effective.map((r) => [r.actionClass, r.stage ?? null, r.rule.default.outcome]));
     // One step per class, and one per review stage.
     expect(parsed.autonomy.steps.filter((s) => s.step === 'creative.review').map((s) => s.stage)).toEqual(['internal', 'compliance', 'client']);
   });
@@ -105,7 +117,11 @@ describe('ADR 0942 P6 — what the model is told', () => {
   it('ALWAYS_APPLIES covers every layer rule id the resolver raises', () => {
     const src = readFileSync(new URL('../src/host/autonomyPolicy/resolve.ts', import.meta.url), 'utf8');
     const raised = new Set([...src.matchAll(/raise\([^;]*'((?:floor|ceiling|agent|live):[a-z-]+)'\)/g)].map((m) => m[1]!));
-    expect(raised.size).toBeGreaterThan(5);
+    // Measured 11 at d56470aa6 (floor:content-rules, floor:client, floor:vendor,
+    // floor:fidelity, floor:mcp-origin, floor:fork-posture, ceiling:governance,
+    // agent:never, agent:hitl, live:halt, live:campaign-status): a scan that
+    // stopped matching would shrink below it.
+    expect(raised.size).toBeGreaterThanOrEqual(11);
     for (const id of raised) expect(ALWAYS_APPLIES[id], id).toBeTruthy();
   });
 

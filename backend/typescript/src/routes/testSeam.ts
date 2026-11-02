@@ -42,12 +42,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import type { Express, Response, RequestHandler } from 'express';
 import { buildHostSurfaceBundle, resolvePresignToken } from '../host/inMemorySurfaces.js';
 import type { HostSurfaceBundle, SurfaceArgs, SurfaceFn } from '../host/inMemorySurfaces.js';
-import { acceptEnvelope, type AcceptOptions } from '../host/envelopeAcceptor.js';
-import { getEventLog } from '../executor/eventLog.js';
-import { admitA2uiSurface } from '../host/a2uiSurfaceAdmission.js';
-import { fromWireRunId, fromWireTenant } from '../host/v2Ids.js';
 import { vendorPath } from '../middleware/protocolVersion.js';
-import { randomUUID as a2uiRandomUUID } from 'node:crypto';
 import { cacheableAnthropicSystem, type AnthropicSystemBlock } from '../providers/promptCaching.js';
 
 /** RFC 0116 witness — a content-addressed prompt-prefix cache (the Anthropic
@@ -60,17 +55,14 @@ const _prefixCacheProbeSeen = new Set<string>();
 import { composePromptTemplate } from '../host/promptCompose.js';
 import { resolvePromptRef, type PromptKind } from '../host/promptResolve.js';
 import type { Storage } from '../storage/storage.js';
-import type { EnvelopeOutcome } from '../host/envelopeAcceptor.js';
 import { wrapForLLMPrompt, type PromptWrapInput } from '../host/promptInjectionGuard.js';
 import { setRunVariable, snapshotRunVariables } from '../host/variablesRuntime.js';
-import { projectOutcome } from '../host/envelopeProjection.js';
-import { listTestEvents, resetTestEventLog } from '../host/envelopeEventLog.js';
+import { listTestEvents, resetTestEventLog } from '../host/testEventLog.js';
 import { listTestSpans, resetTestSpanBuffer } from '../observability/spanBuffer.js';
 import {
   setCapabilityOverlay,
   resetCapabilityOverlay,
   snapshotCapabilityOverlay,
-  resolveCapabilityFlag,
 } from '../host/capabilityOverlay.js';
 import {
   semanticRequestDigestV2,
@@ -100,15 +92,6 @@ interface SeamBody {
 
 const SURFACES = ['kv', 'table', 'cache', 'blob', 'queueBus', 'sql', 'vector', 'search', 'fs'] as const;
 type SurfaceName = (typeof SURFACES)[number];
-
-// In-process correlationId → outcome map for the `envelope/accept` seam, so a
-// re-emission with the SAME correlationId across two sequential calls is deduped
-// (same type → cached outcome) or refused (divergent type → envelope_correlation_
-// conflict) per RFC 0021/0102 §"Replay determinism" WITHOUT the caller threading
-// priorCorrelations/persistedDedup. Cleared by `POST /test/reset`. Test-seam-only.
-// Bounded (evict-oldest) so a long un-reset run can't grow it without limit.
-const SEAM_CORRELATIONS_CAP = 10_000;
-const seamCorrelations = new Map<string, { outcome: EnvelopeOutcome; envelopeType: string }>();
 
 function isSurfaceName(s: string): s is SurfaceName {
   return (SURFACES as readonly string[]).includes(s);
@@ -225,7 +208,6 @@ async function handleWebhookSeam(storage: Storage, body: SeamBody, res: Response
   }
 }
 
-const A2UI_TERMINAL_RUN_STATUSES: ReadonlySet<string> = new Set(['completed', 'failed', 'cancelled']);
 
 export function registerTestSeamRoutes(app: Express, deps: { storage: Storage }): void {
   if (process.env.OPENWOP_TEST_SEAM_ENABLED !== 'true') {
@@ -304,7 +286,7 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
   // vacuously soft-skips) on 404 for any seam whose capability flag is advertised. The
   // product surface is `/v1/host/openwop-app/*`; this internal rewrite maps the WHOLE
   // `sample` namespace onto it (not just `/test/*` — the suite also calls
-  // `/v1/host/sample/envelope/accept`, `/ai/*`, `/agents/*`, etc.) so certification runs
+  // `/ai/*`, `/agents/*`, etc.) so certification runs
   // non-vacuously without forking the vendored harness. Gated to OPENWOP_TEST_SEAM_ENABLED
   // (never production). Host-private space (`spec/v1/host-extensions.md` §"Canonical
   // prefixes"), non-wire.
@@ -342,118 +324,6 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
     }
     armIdempotencyHold((req as { tenantId?: string }).tenantId ?? 'default', body.key, body.holdMs);
     res.status(201).json({ key: body.key, holdMs: body.holdMs });
-  });
-
-  // RFC 0114 §15 — A2UI surface emit seam (the non-vacuous delta witness driver).
-  // Emits a `ui.a2ui-surface` as a REAL run event through the REAL closed-catalog
-  // gate (`acceptEnvelope`), so the conformance suite / steward can drive a
-  // two-surface sequence on a real run and observe the `?a2uiDelta=1` transport
-  // (host/streams.ts) produce a delta frame. An out-of-catalog or
-  // contentTrust-dropping surface is rejected here (422) on the SAME gate a full
-  // surface receives — proving the no-code-exec boundary holds at emit. Gated to
-  // OPENWOP_TEST_SEAM_ENABLED (never production).
-  app.post('/host/openwop-app/a2ui/emit-surface', async (req, res) => {
-    const body = (req.body ?? {}) as { runId?: unknown; surface?: unknown; contentTrust?: unknown };
-    if (typeof body.runId !== 'string' || body.runId.length === 0) {
-      res.status(400).json({ error: 'invalid_argument', message: 'runId required' });
-      return;
-    }
-    if (body.surface === undefined || body.surface === null || typeof body.surface !== 'object') {
-      res.status(400).json({ error: 'invalid_argument', message: 'surface required' });
-      return;
-    }
-    // Per host-sample-test-seams.md §15, `surface` is the FULL `ui.a2ui-surface`
-    // payload (`{ catalogVersion, surface, reasoning? }`) — NOT the inner surface
-    // object. This seam previously re-wrapped it (payload.surface = the wrapper),
-    // so every spec-shaped request 422'd against the catalog schema; the host's
-    // own e2e test had pinned the wrong shape, which is why it stayed green.
-    const payload = body.surface as { catalogVersion?: unknown; surface?: unknown };
-    const catalogVersion = typeof payload.catalogVersion === 'string' ? payload.catalogVersion : '0.9.1';
-    // Validate the surface through the REAL ui.a2ui-surface envelope gate (closed
-    // catalog + contentTrust). Reject (422) exactly as a full surface would be —
-    // this is the emit-side half of the fail-closed security invariant.
-    const envelope = {
-      type: 'ui.a2ui-surface',
-      schemaVersion: 1,
-      envelopeId: a2uiRandomUUID(),
-      correlationId: a2uiRandomUUID(),
-      payload: { ...payload, catalogVersion },
-      meta: {
-        source: 'ai-generation' as const,
-        ts: new Date().toISOString(),
-        ...(body.contentTrust === 'untrusted' ? { contentTrust: 'untrusted' as const } : {}),
-      },
-    };
-    const outcome = acceptEnvelope(envelope);
-    if (outcome.status !== 'accepted') {
-      // H27-b — `reason` was a NEW TOP-LEVEL key, which the envelope forbids.
-      // The validator's own `details` is an ARRAY, and `details` on the envelope
-      // is typed as an OBJECT, so it rides a named key rather than being spread:
-      // an array at `details` would have been a second schema violation swapped
-      // in for the first.
-      sendError(res, 422, 'a2ui_surface_invalid', 'The a2ui surface envelope was not accepted.', {
-        reason: outcome.reason,
-        ...(outcome.status === 'invalid' ? { validation: outcome.details } : {}),
-      });
-      return;
-    }
-    // Append the FULL surface as a real run event (durable, replay-safe). The
-    // `?a2uiDelta=1` transport diffs consecutive surfaces per subscriber.
-    const rec = await getEventLog().append({
-      runId: body.runId,
-      type: 'ui.a2ui-surface',
-      payload: { ...payload, catalogVersion },
-    });
-    res.status(201).json({ eventId: rec.eventId, sequence: rec.sequence, surfaceRef: rec.eventId, catalogVersion });
-  });
-
-  // RFC 0209 — `emitA2uiSurface` (api/seams-v2.yaml), the MAJOR-2 witness driver.
-  // A different contract from the v1 seam above (`{runId, envelope}`, the whole
-  // envelope, its `schemaVersion` choosing the branch), so a different route
-  // rather than a body sniff; `conformanceSeams.ts` aliases the v2 address here.
-  // It supplies the envelope ONLY: `admitA2uiSurface` is the production
-  // admission path (catalog → branch → cross-field → fold guard → record), so
-  // the seam witnesses the host, not itself. Gated to OPENWOP_TEST_SEAM_ENABLED.
-  // Registered at the canonical, version-agnostic vendor path (ADR 0654).
-  app.post('/host/openwop-app/a2ui/v2/emit-surface', async (req, res, next) => {
-    try {
-      const body = (req.body ?? {}) as { runId?: unknown; envelope?: unknown };
-      if (typeof body.runId !== 'string' || body.runId.length === 0 || body.envelope === null || typeof body.envelope !== 'object') {
-        sendError(res, 400, 'validation_error', 'runId and envelope are required.');
-        return;
-      }
-      // The seam space carries no tenant context (`req.tenantId` is unset on
-      // these paths, so `loadOwnedRun` would refuse every run; the space is
-      // env-gated and never mounted in production). A major-2 caller names the
-      // run by its tenant-bound wire id (`<tenant>/<opaque>`, identity.md §5):
-      // decode it and hold the run to the tenant it names. A bare id is the v1
-      // spelling and — like the v1 emit seam — is checked for existence only.
-      const slash = body.runId.indexOf('/');
-      if (slash === 0) throw new OpenwopError('run_not_found', `run ${body.runId} not found`, 404);
-      const wireTenant = slash > 0 ? fromWireTenant(body.runId.slice(0, slash)) : null;
-      // `fromWireRunId` enforces the `<tenant>/<opaque>` grammar; the tenant it
-      // names is then checked against the STORED run's tenant below.
-      const resolved = fromWireRunId(body.runId, wireTenant ?? '');
-      const run = resolved.ok ? await deps.storage.getRun(resolved.runId) : null;
-      if (!run || !resolved.ok || (wireTenant !== null && run.tenantId !== wireTenant)) {
-        throw new OpenwopError('run_not_found', `run ${body.runId} not found`, 404);
-      }
-      const runId = resolved.runId;
-      if (A2UI_TERMINAL_RUN_STATUSES.has(run.status)) {
-        sendError(res, 409, 'run_terminal', `run ${body.runId} is ${run.status}; a surface cannot be admitted into a terminal run.`);
-        return;
-      }
-      const out = await admitA2uiSurface(runId, body.envelope, {
-        ...((run.metadata as { trustBoundary?: unknown } | undefined)?.trustBoundary === 'untrusted' ? { runTrustBoundary: 'untrusted' as const } : {}),
-      });
-      if (out.status === 'refused') {
-        sendError(res, 422, out.code, out.reason, out.details ? { validation: out.details } : undefined);
-        return;
-      }
-      res.status(201).json({ sequence: out.sequence });
-    } catch (err) {
-      next(err);
-    }
   });
 
   // RFC 0116 — prompt-prefix cache witness driver. Drives the REAL prefix
@@ -575,234 +445,6 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
     }
   });
 
-  // RFC 0021 §A — AIEnvelopeAcceptor reference implementation. The
-  // conformance suite POSTs candidate envelopes here and asserts the
-  // EnvelopeOutcome shape (accepted / invalid / gated / breached).
-  // Closes the spec-to-impl loop for RFC 0021: the host now actually
-  // runs the Ajv2020 gate that the spec section §A point 1-3 demands.
-  app.post('/host/openwop-app/envelope/accept', async (req, res) => {
-    const body = (req.body ?? {}) as {
-      envelope?: unknown;
-      hostSupportedEnvelopes?: string[];
-      nodeAllowedKinds?: string[];
-      runTrustBoundary?: 'trusted' | 'untrusted';
-      counters?: AcceptOptions['counters'];
-      schemaVersionFloor?: Record<string, number>;
-      envelopeStrictness?: 'warn' | 'strict';
-      /** Wire shape: `priorCorrelations` is a flat array on the JSON wire so
-       *  the conformance harness can ship it as plain JSON without serializing
-       *  a Map. The acceptor consumes a ReadonlyMap; we adapt here. */
-      priorCorrelations?: Array<{ correlationId: string; outcome: unknown; envelopeType: string }>;
-      /** RFC 0021 §"Redaction" + `agent-memory.md` §SR-1 — canonical SR-1
-       *  shape is `{ value, secretId }`. The seam validates each entry has
-       *  both fields before passing to the acceptor; entries with empty
-       *  `value` are dropped. */
-      byokCanaries?: Array<{ value: string; secretId: string }>;
-      /** When supplied, projects the outcome onto a test-only run event
-       *  log (`envelopeEventLog.ts`) so the conformance suite can query
-       *  the spec-prescribed events (cap.breached, node.failed,
-       *  interrupt.requested, log.appended) via
-       *  `GET /v1/host/openwop-app/test/runs/:runId/events`. RFC 0021 §A point
-       *  1-7 + interrupt.md + capabilities.md §"cap.breached". */
-      projectTo?: {
-        runId: string;
-        nodeId?: string;
-        refusalMode?: 'fail-node' | 'discard-and-warn';
-      };
-      /** Persisted dedup-state seam — backs the cross-process replay
-       *  contract from `ai-envelope.md §"Replay determinism"`. When set,
-       *  the acceptor's priorCorrelations is seeded from the
-       *  `envelope_correlations` storage table (keyed by runId), so a
-       *  fresh process (or any caller without an in-memory map) gets
-       *  the SAME cached outcome it would have gotten from the
-       *  original process's in-memory priorCorrelations. After accept,
-       *  the resulting outcome is persisted so subsequent re-emissions
-       *  read it back. Combine with `priorCorrelations` to override
-       *  per-call; persisted entries win on collision with explicit
-       *  entries (the persisted store is the cross-process source of
-       *  truth). */
-      persistedDedup?: { runId: string };
-      /** RFC 0021 §"Trust boundary" — when true, the acceptor evaluates
-       *  the post-normalization contentTrust and refuses with
-       *  `untrusted_content_blocks_approval` if the value is
-       *  `'untrusted'`. Conformance scenarios that drive an approval-
-       *  gate refusal assertion set this bit on the envelope/accept
-       *  call so the spec contract surfaces as an EnvelopeOutcome
-       *  (instead of having to wire a full interrupt + resume flow
-       *  through the engine). */
-      approvalGateContext?: boolean;
-      /** RFC 0102 §A.5 — the interrupt kind this envelope is presented to
-       *  resolve. `'approval'` makes the call an approval-gate resolution
-       *  (equivalent to `approvalGateContext: true`), so an untrusted
-       *  ui.a2ui-surface bound to an approval interrupt is refused with
-       *  `untrusted_content_blocks_approval`. */
-      boundInterruptKind?: string;
-    };
-    if (body.envelope === undefined) {
-      sendError(res, 400, 'invalid_argument', 'envelope required');
-      return;
-    }
-
-    // Capability gate (FIRST refusal layer per ai-envelope.md §"Capability
-    // handshake integration" line 305: capability-gated typeId refusal
-    // STACKS ATOP envelope-contract refusal). If the host doesn't
-    // advertise `host.aiEnvelope: supported`, every envelope/accept call
-    // refuses BEFORE the per-envelope contract gates (host-gate, node-
-    // gate, schema-floor, etc.) run. The refusal is observable as
-    // `capability_required` so the conformance suite can distinguish
-    // "capability absent" from "this specific envelope type not in the
-    // host's accepts list."
-    if (resolveCapabilityFlag('host.aiEnvelope.supported') === false) {
-      res.status(200).json({
-        status: 'invalid',
-        reason: 'capability_required',
-        details: [
-          {
-            instancePath: '/type',
-            schemaPath: '#/capabilities/host.aiEnvelope',
-            keyword: 'capability',
-            message:
-              "Host does not advertise capabilities.host.aiEnvelope: supported. " +
-              "Per ai-envelope.md §\"Capability handshake integration\" + " +
-              "capabilities.md §\"Unsupported capability — refusal contract\", " +
-              "a node requiring host.aiEnvelope MUST be refused before any " +
-              "envelope-contract gating runs.",
-          },
-        ],
-      });
-      return;
-    }
-
-    const opts: AcceptOptions = {};
-    if (body.hostSupportedEnvelopes !== undefined) opts.hostSupportedEnvelopes = body.hostSupportedEnvelopes;
-    if (body.nodeAllowedKinds !== undefined) opts.nodeAllowedKinds = body.nodeAllowedKinds;
-    if (body.runTrustBoundary !== undefined) opts.runTrustBoundary = body.runTrustBoundary;
-    if (body.counters !== undefined) opts.counters = body.counters;
-    if (body.schemaVersionFloor !== undefined) opts.schemaVersionFloor = body.schemaVersionFloor;
-    if (body.envelopeStrictness !== undefined) opts.envelopeStrictness = body.envelopeStrictness;
-    if (body.approvalGateContext === true) opts.approvalGateContext = true;
-    // RFC 0102 §A.5 — a surface bound to an approval interrupt is an approval-
-    // gate resolution; route it through the same untrusted-blocks-approval gate.
-    if (body.boundInterruptKind === 'approval') opts.approvalGateContext = true;
-    if (Array.isArray(body.byokCanaries) && body.byokCanaries.length > 0) {
-      // Drop entries missing either field — keeps the acceptor's
-      // [REDACTED:<secretId>] substitution deterministic.
-      const canaries = body.byokCanaries.filter(
-        (c): c is { value: string; secretId: string } =>
-          typeof c?.value === 'string' && c.value.length > 0 && typeof c?.secretId === 'string' && c.secretId.length > 0,
-      );
-      if (canaries.length > 0) opts.byokCanaries = canaries;
-    }
-    const dedupMap = new Map<string, { outcome: EnvelopeOutcome; envelopeType: string }>();
-    if (Array.isArray(body.priorCorrelations) && body.priorCorrelations.length > 0) {
-      for (const e of body.priorCorrelations) {
-        if (typeof e?.correlationId === 'string' && typeof e?.envelopeType === 'string') {
-          dedupMap.set(e.correlationId, {
-            outcome: e.outcome as EnvelopeOutcome,
-            envelopeType: e.envelopeType,
-          });
-        }
-      }
-    }
-    // Persisted dedup seam: if a runId is supplied AND the inbound
-    // envelope carries a correlationId, consult the persisted store
-    // and merge any cached outcome into the dedup map (overriding any
-    // explicit entry for the same correlationId — the persisted store
-    // is authoritative for cross-process semantics).
-    const inboundCorrelationId =
-      body.envelope && typeof body.envelope === 'object' &&
-      typeof (body.envelope as { correlationId?: unknown }).correlationId === 'string'
-        ? (body.envelope as { correlationId: string }).correlationId
-        : null;
-    if (body.persistedDedup?.runId && inboundCorrelationId) {
-      const persisted = await deps.storage.getEnvelopeCorrelation(
-        body.persistedDedup.runId,
-        inboundCorrelationId,
-      );
-      if (persisted) {
-        dedupMap.set(inboundCorrelationId, {
-          outcome: persisted.outcome as EnvelopeOutcome,
-          envelopeType: persisted.envelopeType,
-        });
-      }
-    }
-    // Seed from the in-process correlation map (RFC 0021/0102 §"Replay
-    // determinism") so a re-emission with the same correlationId is deduped/
-    // conflict-detected even without an explicit priorCorrelations/persistedDedup.
-    // Explicit + persisted entries (added above) win on collision.
-    if (inboundCorrelationId && !dedupMap.has(inboundCorrelationId)) {
-      const tracked = seamCorrelations.get(inboundCorrelationId);
-      if (tracked) dedupMap.set(inboundCorrelationId, tracked);
-    }
-    if (dedupMap.size > 0) opts.priorCorrelations = dedupMap;
-
-    const outcome = acceptEnvelope(body.envelope, opts);
-
-    // Record the FIRST outcome per correlationId in-process (only if not already
-    // tracked, so the original type/outcome is preserved for divergent-type
-    // conflict detection on the next call).
-    if (inboundCorrelationId && !seamCorrelations.has(inboundCorrelationId)) {
-      const envType =
-        body.envelope && typeof body.envelope === 'object' &&
-        typeof (body.envelope as { type?: unknown }).type === 'string'
-          ? (body.envelope as { type: string }).type
-          : 'unknown';
-      // Evict the oldest entry (Map preserves insertion order) before exceeding
-      // the cap — keeps the test-seam map bounded without a wholesale clear that
-      // could drop a correlationId an in-flight test still needs.
-      if (seamCorrelations.size >= SEAM_CORRELATIONS_CAP) {
-        const oldest = seamCorrelations.keys().next().value;
-        if (oldest !== undefined) seamCorrelations.delete(oldest);
-      }
-      seamCorrelations.set(inboundCorrelationId, { outcome, envelopeType: envType });
-    }
-
-    // Persist the outcome for future cross-process re-emissions. Only
-    // persist when the caller supplied persistedDedup AND the inbound
-    // envelope carried a correlationId AND the cache didn't already
-    // serve this call (re-persisting an already-cached outcome would
-    // bump recordedAt for no reason — semantically the same record).
-    if (
-      body.persistedDedup?.runId &&
-      inboundCorrelationId &&
-      !dedupMap.has(inboundCorrelationId)
-    ) {
-      const envType =
-        body.envelope && typeof body.envelope === 'object' &&
-        typeof (body.envelope as { type?: unknown }).type === 'string'
-          ? (body.envelope as { type: string }).type
-          : 'unknown';
-      await deps.storage.putEnvelopeCorrelation(
-        body.persistedDedup.runId,
-        inboundCorrelationId,
-        outcome,
-        envType,
-        new Date().toISOString(),
-      );
-    }
-    // Optional E.1 projection: emit the spec-prescribed events into the
-    // test event log so conformance can query them via /test/runs/:runId/events.
-    if (body.projectTo && typeof body.projectTo.runId === 'string') {
-      const env = (body.envelope ?? {}) as { type?: string; correlationId?: string; schemaVersion?: number };
-      if (typeof env.type === 'string' && typeof env.correlationId === 'string') {
-        const driftFloor = body.schemaVersionFloor?.[env.type];
-        projectOutcome(outcome, {
-          runId: body.projectTo.runId,
-          correlationId: env.correlationId,
-          envelopeType: env.type,
-          ...(typeof env.schemaVersion === 'number' ? { envelopeSchemaVersion: env.schemaVersion } : {}),
-          ...(typeof driftFloor === 'number' ? { driftFloor } : {}),
-          ...(body.projectTo.nodeId !== undefined ? { nodeId: body.projectTo.nodeId } : {}),
-          ...(body.projectTo.refusalMode !== undefined ? { refusalMode: body.projectTo.refusalMode } : {}),
-        });
-      }
-    }
-    res.status(200).json(outcome);
-  });
-
-  // E.1 — event-log query seam. Returns the test-only run event log
-  // populated by `envelope/accept` with `projectTo`. Supports filtering
-  // by type / causationId / correlationId (= causationId) / nodeId.
   // RFC 0076 §B — inline safe-fetch evaluation seam
   // (`POST /v1/host/sample/http/safe-fetch` via the LEGACY rewrite above;
   // host-sample-test-seams.md §"Open seams"). Evaluates ONE candidate egress
@@ -1027,13 +669,11 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
     resetTestEventLog();
     resetCapabilityOverlay();
     resetTestSpanBuffer();
-    seamCorrelations.clear();
     res.status(200).json({ ok: true });
   });
 
-  // E.2 — OTel scrape seam. Returns the test-only span buffer populated
-  // by `envelopeProjection.ts` so conformance scenarios can assert
-  // attribute redaction (canary absent) + drift attrs.
+  // E.2 — OTel scrape seam: the test-only span buffer, so conformance scenarios
+  // can assert attribute redaction (canary absent) + drift attrs.
   app.get('/host/openwop-app/test/otel/spans', (req, res) => {
     const q = req.query as Record<string, string | undefined>;
     const filter: { envelopeId?: string; runId?: string; name?: string } = {};
@@ -1126,138 +766,11 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
       return;
     }
     // Project to the test event log via the projection seam's append helper.
-    const { appendTestEvent } = await import('../host/envelopeEventLog.js');
+    const { appendTestEvent } = await import('../host/testEventLog.js');
     const event = appendTestEvent({
       runId: body.runId,
       type: 'provider.usage',
       payload: payload as Record<string, unknown>,
-      ...(typeof body.correlationId === 'string' ? { causationId: body.correlationId } : {}),
-      ...(typeof body.nodeId === 'string' ? { nodeId: body.nodeId } : {}),
-    });
-    res.status(200).json({ event });
-  });
-
-  // RFC 0032 §B envelope-reliability event emission seam.
-  // POST /v1/host/openwop-app/test/emit-envelope-reliability
-  // Body: { runId, type, payload, nodeId?, correlationId? }
-  //
-  // Synthesizes one of the six RFC 0032 envelope-reliability events into the
-  // test event log so conformance scenarios can verify event-payload shape
-  // without driving a full LLM dispatch. The seam validates `type` is one
-  // of the six RFC 0032 enum values and that `payload` carries the required
-  // fields per `run-event-payloads.schema.json` §envelope* `$defs`.
-  // Defense-in-depth: rejects payloads carrying credentialRef-shaped or
-  // prompt-content-shaped substrings in `refusalText`/`previousError`/
-  // `finalError` fields (the SR-1 + prompt-injection redaction discipline
-  // per SECURITY invariants `envelope-refusal-no-prompt-leak` and
-  // `envelope-reasoning-secret-redaction`). Production hosts MUST redact
-  // BEFORE emission; this seam refuses pre-redacted payloads as a CI gate.
-  app.post('/host/openwop-app/test/emit-envelope-reliability', async (req, res) => {
-    const body = (req.body ?? {}) as {
-      runId?: string;
-      type?: string;
-      payload?: Record<string, unknown>;
-      nodeId?: string;
-      correlationId?: string;
-    };
-    const RFC_0032_EVENTS = new Set([
-      'envelope.retry.attempted',
-      'envelope.retry.exhausted',
-      'envelope.refusal',
-      'envelope.truncated',
-      'envelope.nlToFormat.engaged',
-      'envelope.recovery.applied',
-    ]);
-    if (typeof body.runId !== 'string' || body.runId.length === 0) {
-      sendError(res, 400, 'invalid_argument', 'runId required');
-      return;
-    }
-    if (typeof body.type !== 'string' || !RFC_0032_EVENTS.has(body.type)) {
-      sendError(
-        res,
-        400,
-        'invalid_argument',
-        `type MUST be one of the 6 RFC 0032 envelope-reliability events; got: ${String(body.type)}`,
-      );
-      return;
-    }
-    if (!body.payload || typeof body.payload !== 'object') {
-      sendError(res, 400, 'invalid_argument', 'payload required (object)');
-      return;
-    }
-    // Per-type required-field check. Canonical source: the `required[]`
-    // arrays inside the six `envelope*` `$defs` in
-    // `schemas/run-event-payloads.schema.json`. Kept as an explicit inline
-    // map for best-effort clarity (the seam is sample-only — see the
-    // namespace banner at the top of this file). The schema-corpus-validity
-    // conformance scenario catches drift between this map and the canonical
-    // `$defs.required[]` shape because any conformance scenario that POSTs
-    // a payload here also asserts against the canonical schema. A future
-    // refactor MAY replace this with `ajv.compile(runEventPayloads.$defs[<def>])`
-    // — currently deemed over-engineering for sample-only code per the
-    // MEDIUM-tier finding in the code-review pass that flagged it (~15-line
-    // Ajv refactor judged against ~3-line explicit map; conformance covers
-    // the drift). Production hosts that wire end-to-end emission inside
-    // dispatchStructured() SHOULD use the canonical schema directly.
-    const requiredFields: Record<string, readonly string[]> = {
-      'envelope.retry.attempted': ['nodeId', 'attempt', 'reason'],
-      'envelope.retry.exhausted': ['nodeId', 'totalAttempts', 'finalReason'],
-      'envelope.refusal': ['nodeId', 'provider', 'model'],
-      'envelope.truncated': ['nodeId', 'provider', 'model', 'stopReason'],
-      'envelope.nlToFormat.engaged': ['nodeId', 'originalEnvelopeType'],
-      'envelope.recovery.applied': ['nodeId', 'path'],
-    };
-    const required = requiredFields[body.type] ?? [];
-    for (const field of required) {
-      if (!(field in body.payload)) {
-        sendError(
-          res,
-          400,
-          'invalid_argument',
-          `payload MUST include required field "${field}" for event type "${body.type}"`,
-        );
-        return;
-      }
-    }
-    // Defense-in-depth: reject pre-redacted payloads that look like they
-    // carry credentialRef or prompt-content substrings. Production hosts
-    // redact BEFORE emission; the seam refuses payloads that bypass the
-    // redaction stage as a CI gate per SECURITY invariants
-    // `envelope-refusal-no-prompt-leak` + `envelope-recovery-no-content-leak`.
-    const serialized = JSON.stringify(body.payload);
-    if (serialized.includes('"credentialRef"') || serialized.includes('secret-canary-')) {
-      sendError(
-        res,
-        400,
-        'envelope_reliability_credential_leak',
-        'payload contains credentialRef-shaped content; redact BEFORE emission per RFC 0032 §G + SECURITY/invariants.yaml envelope-refusal-no-prompt-leak',
-      );
-      return;
-    }
-    if (body.type === 'envelope.recovery.applied') {
-      // RFC 0032 §B.6 + SECURITY/invariants.yaml envelope-recovery-no-content-leak:
-      // recovery event MUST NOT carry pre-recovery output substrings. The
-      // schema's `additionalProperties: false` constrains the shape, but
-      // we add a defense-in-depth check that the payload's keys are
-      // exactly {nodeId, path, byteOffset} (no extras like `recoveredContent`).
-      const allowedKeys = new Set(['nodeId', 'path', 'byteOffset']);
-      for (const key of Object.keys(body.payload)) {
-        if (!allowedKeys.has(key)) {
-          sendError(
-            res,
-            400,
-            'envelope_recovery_content_leak',
-            `envelope.recovery.applied payload MUST NOT carry "${key}" — only {nodeId, path, byteOffset?} are emitted (RFC 0032 §B.6 + SECURITY envelope-recovery-no-content-leak)`,
-          );
-          return;
-        }
-      }
-    }
-    const { appendTestEvent } = await import('../host/envelopeEventLog.js');
-    const event = appendTestEvent({
-      runId: body.runId,
-      type: body.type,
-      payload: body.payload,
       ...(typeof body.correlationId === 'string' ? { causationId: body.correlationId } : {}),
       ...(typeof body.nodeId === 'string' ? { nodeId: body.nodeId } : {}),
     });

@@ -27,11 +27,14 @@ import { notifyHumanChatMessage } from './humanChatMessageObservers.js';
 import { getEventLog } from '../executor/eventLog.js';
 import { type ResolvedAgentManifest } from '../executor/agentRegistry.js';
 import { composeChatContext, groundingHonestyNotice } from './chatContext.js';
-import { makeTurn, type ConversationTurn } from './conversation.js';
+import { makeTurn, turnMessageId, type ConversationTurn } from './conversation.js';
 import { participantRosterOf, isParticipant } from './multiPartyConversation.js';
-import { contextEconomy } from './contextEconomy.js';
+import { contextEconomy, logContextEconomyApplied } from './contextEconomy.js';
 import { windowTranscript, transcriptBudgetConfig } from './transcriptBudget.js';
 import { resolveConversationModelTarget, type ConversationModelTierInput } from '../features/model-router/applyRoute.js';
+import { resolveTurnModelRoute } from '../features/model-router/resolveRoute.js';
+import type { RoutingTarget } from '../features/model-router/routeTurn.js';
+import { CREDENTIAL_PROVIDERS } from '../aiProviders/aiProvidersHost.js';
 import { OpenwopError, type InterruptRecord, type RunRecord } from '../types.js';
 import { stripSecretsFromPersisted } from '../byok/ephemeralRunSecrets.js';
 import { sanitizeFreeText, sanitizeFreeTextDeep } from '../byok/textRedaction.js';
@@ -50,16 +53,18 @@ import { authorizeConversationResolve } from './exchange/authorizeResolve.js';
 import { foldVoiceClipTranscript } from './exchange/transcribeAudio.js';
 import { asText, isContentParts, hasAttachmentPart, makeNoContribution, producedNothing } from './exchange/contentParts.js';
 import { resolvePersonaNames } from './agentIdentity.js';
-import { loadTurns } from './exchange/loadTurns.js';
+import { loadTurns, loadClarificationState } from './exchange/loadTurns.js';
+import { prepareChatAnswer, readClarificationAnswer } from './exchange/chatAnswer.js';
+import { CLARIFICATION_ANSWERED_EVENT, CLARIFICATION_REQUESTED_EVENT, type ChatClarificationAsk } from './clarificationChat.js';
 import { applyCouncilTurn, councilTurnOf, gateRosterOf } from './exchange/councilTurn.js';
-import { dispatchReply, turnsToMessages, maybeStampModelRoute, resolveModelProvenance, type ByokBudgetNotice, type DeepRunBudgetNotice, type ExchangeNotice } from './exchange/dispatchTurn.js';
+import { dispatchReply, turnsToMessages, resolveModelProvenance, type ByokBudgetNotice, type DeepRunBudgetNotice, type ExchangeNotice } from './exchange/dispatchTurn.js';
 import { recordTurnAttribution, type ServedModel } from './turnAttribution.js';
 import { persistExchangedPair, mirrorTurnToChannel, autotitleAfterExchange, maybeExtractMemoryOnClose } from './exchange/persistExchange.js';
 import { buildRunDispatchTurns, appendRunTurnDirect, type TurnRunDispatch } from './turnRunDispatch.js';
 
 // ── Public surface (preserved across the ADR 0327 P1 split) ────────────────
 export { loadTurns, __resetTurnsCacheForTests } from './exchange/loadTurns.js';
-export { computeRouteStamp, resolveModelProvenance } from './exchange/dispatchTurn.js';
+export { resolveModelProvenance } from './exchange/dispatchTurn.js';
 export type { ByokBudgetNotice, DeepRunBudgetNotice, ExchangeNotice } from './exchange/dispatchTurn.js';
 export type { ConversationResolve } from './exchange/validateTurn.js';
 
@@ -143,9 +148,10 @@ export function conversationDeepInvestigationEligible(
   agent: ResolvedAgentManifest,
   deepActivated: boolean,
   modelOverride?: { provider?: string; model?: string },
+  route?: RoutingTarget | null,
 ): boolean {
   return (deepActivated || agent.investigationDepth === 'deep')
-    && conversationToolTurnEligible(run, agent, modelOverride);
+    && conversationToolTurnEligible(run, agent, modelOverride, route);
 }
 
 /** ADR 0373 — is the deep-investigation capability activated for this agent?
@@ -202,7 +208,9 @@ export async function handleConversationResolve(
 ): Promise<ConversationResolveResult> {
   const data = (interrupt.data ?? {}) as { conversationId?: string };
   const conversationId = data.conversationId ?? `${interrupt.runId}:${interrupt.nodeId}:0`;
-  const { body, operation, exchangeWebSearch, exchangePermissionMode, exchangeModelOverride, exchangeKey, to } = parseResolveBody(resumeValue);
+  const parsedResolve = parseResolveBody(resumeValue);
+  const { body, operation, exchangeWebSearch, exchangePermissionMode, exchangeModelOverride } = parsedResolve;
+  let { exchangeKey, to } = parsedResolve;
 
   const run = await storage.getRun(interrupt.runId);
   if (!run) throw new OpenwopError('run_not_found', `run ${interrupt.runId} missing during conversation resolve`, 404);
@@ -260,7 +268,20 @@ export async function handleConversationResolve(
   }
 
   // ── exchange ───────────────────────────────────────────────────────────
-  const rawContent = body.turn?.content;
+  // ADR 1001 D7 — an answer to the agent's question card. Validated against the
+  // recorded ask BEFORE anything is claimed or written; the turn's content is
+  // host-built from the answers, and the exchange claim is keyed by the ask, so
+  // a question is answered at most once.
+  const clarificationAnswerInput = readClarificationAnswer(body.clarificationAnswer);
+  const chatAnswer = clarificationAnswerInput
+    ? await prepareChatAnswer({ storage, tenantId: run.tenantId, runId: interrupt.runId, conversationId, existing, answer: clarificationAnswerInput })
+    : undefined;
+  if (chatAnswer) {
+    exchangeKey = `clarify:${chatAnswer.askId}`;
+    // The answer goes to the agent that asked, whatever `to` the client sent.
+    if (chatAnswer.askedBy) to = chatAnswer.askedBy;
+  }
+  const rawContent = chatAnswer ? chatAnswer.display : body.turn?.content;
   validateExchangeContent(rawContent, conversationId); // RFC 0005 §E — 422 on an empty turn
 
   // Idempotency (ADR 0067 §Phase 2): a stable client `exchangeKey` lets a retried
@@ -276,7 +297,10 @@ export async function handleConversationResolve(
       return { operation, conversationId, turns: existing };
     }
     if (claim.outcome === 'in_progress') {
-      throw new OpenwopError('interrupt_already_resolved', 'an exchange with this key is already in progress', 409, { conversationId });
+      // ADR 1001 D7 / R12 — `conflict`, never `interrupt_already_resolved`: the
+      // chat client reads that code as a dead conversation run and drops its
+      // binding, so a double-sent turn would orphan a live conversation.
+      throw new OpenwopError('conflict', 'an exchange with this key is already in progress', 409, { conversationId });
     }
   }
 
@@ -349,6 +373,22 @@ export async function handleConversationResolve(
     ...(agent && tenantOk && agent.modelClass ? { agentModelClass: agent.modelClass } : {}),
   };
 
+  // ADR 1016 D3 — THIS exchange's model route, decided per turn and never stamped
+  // (it used to be stamped once on the first exchange and then judged nothing
+  // again). Skipped when the member chose a model for this exchange: their pick
+  // outranks the router, and a provider-only pick must not be mixed with a routed
+  // model. Decided BEFORE tool/deep eligibility so every lane judges the provider
+  // that will actually answer. A managed/subscription/compat conversation (the
+  // default) resolves `null` with no I/O.
+  const turnRoute = exchangeModelOverride ? null : await resolveTurnModelRoute({
+    tenantId: run.tenantId,
+    runInputs: (run.inputs ?? {}) as { provider?: unknown; credentialRef?: unknown },
+    credentialProviders: CREDENTIAL_PROVIDERS,
+    userText,
+    conversationKind: convMeta?.type,
+    hasAttachment: hasAttachmentPart(effectiveContent),
+  });
+
   // XCH-GRP-1 — capability honesty on group turns: when the group-room
   // tool-loop opt-out (#1831) routes this turn to the single-completion path,
   // the scaffold says so. The gate predicate and the notice live together in
@@ -404,7 +444,7 @@ export async function handleConversationResolve(
   // ⇒ legacy single completion. Provider/credential capability is re-checked
   // inside `runConversationAgentToolTurn` (it falls back to null when the run's
   // provider has no native tool-calling path).
-  const toolAgent = agent && tenantOk && answeringId && hostDeps?.policyResolver && conversationToolTurnEligible(run, agent, exchangeModelOverride)
+  const toolAgent = agent && tenantOk && answeringId && hostDeps?.policyResolver && conversationToolTurnEligible(run, agent, exchangeModelOverride, turnRoute)
     ? agent
     : null;
 
@@ -439,7 +479,7 @@ export async function handleConversationResolve(
     ? await deepInvestigationActivated(run.tenantId, agentIdentity?.profileId)
     : false;
   const startDeepRun = deepPossible && agent
-    && conversationDeepInvestigationEligible(run, agent, deepActivated, exchangeModelOverride)
+    && conversationDeepInvestigationEligible(run, agent, deepActivated, exchangeModelOverride, turnRoute)
     ? hostDeps?.startAgentMentionRun
     : undefined;
   let deepDegradedNotice: DeepRunBudgetNotice | undefined;
@@ -461,12 +501,16 @@ export async function handleConversationResolve(
     // path would have used. `agentRunnerNode.resolveParams` takes provider/model
     // VERBATIM and does no override resolution of its own, so this hand-off IS
     // the nested run's model decision. Reading `run.inputs` raw (the pre-0373
-    // bug) ignored BOTH the per-exchange override and the `metadata.modelRoute`
-    // stamp, so eligibility could be judged on one provider while the run
+    // bug) ignored BOTH the per-exchange override and the (pre-ADR 1016)
+    // `metadata.modelRoute` stamp, so eligibility could be judged on one provider while the run
     // dispatched on another. `resolveConversationModelTarget` is the ONE
     // resolver every other model decision on this path already shares — never a
     // second precedence chain here. `credentialRef` is deliberately NOT
     // per-exchange overridable (agentMentionConfigurable registers the BYOK ref).
+    // ADR 1016 (code grade MR66CD-2) — NO route here: the nested run takes its
+    // model verbatim and has no degrade-once lane (D4b), so a routed pro model the
+    // key cannot serve would fail every deep run. Deep investigations run on the
+    // conversation's own model (ADR 1016 residue R4).
     const deepTarget = resolveConversationModelTarget({
       runInputs: inputs, metadata: run.metadata,
       ...(exchangeModelOverride ? { override: exchangeModelOverride } : {}),
@@ -511,6 +555,7 @@ export async function handleConversationResolve(
     // The agent turn is a `workflow_run` mention: its content references the
     // dispatched run so the chat embeds it as a streamed run bubble (the
     // run-agnostic `runWorkflowMention` seam). SR-1 parity on persist.
+    // No route: the nested run was handed the un-routed model above (R4).
     const modelProv = resolveModelProvenance(run, exchangeModelOverride, modelTier);
     const agentTurn = makeTurn({
       conversationId, turnIndex: agentIndex, role: 'agent',
@@ -545,6 +590,17 @@ export async function handleConversationResolve(
   const { kept: budgetedExisting, omittedCount } = contextEconomy().transcriptBudget
     ? windowTranscript(existing, transcriptBudgetConfig(), (t) => asText(t.content).length)
     : { kept: existing, omittedCount: 0 };
+  // ADR 1003 D4 — counts only (guardrail 3).
+  if (omittedCount > 0) logContextEconomyApplied('transcript', run.tenantId, { transcriptKept: budgetedExisting.length, transcriptOmitted: omittedCount, windowStep: transcriptBudgetConfig().stepTurns ?? 1 });
+  // ADR 1003 D5 — the user is told too, not only the model. Same shape and
+  // rules as `context-degraded` / `recall-used` above: a host-namespaced event,
+  // best-effort, a COUNT only (no turn ids, no text), never model input.
+  if (omittedCount > 0) {
+    log.append({
+      runId: interrupt.runId, nodeId: interrupt.nodeId, type: 'openwop-app.conversation.context-budgeted',
+      payload: { conversationId, omittedTurns: omittedCount, ...(answeringId ? { speakerId: answeringId } : {}) },
+    }).catch(() => { /* disclosure is best-effort; never fails the turn */ });
+  }
   // ADR 0665 D5 — resolve the CAST for the narrative `[Persona]:` relay. Only ids
   // that will actually be cast are resolved: an agent turn by someone OTHER than
   // the agent now answering. A 1:1 chat yields an empty set and pays nothing, so
@@ -594,12 +650,21 @@ export async function handleConversationResolve(
     digests,
     transcript.map((t) => workflowRunRefOf(t)?.runId).filter((id): id is string => !!id),
   );
-  const messages = turnsToMessages([...transcript, userTurn], effectiveScaffold, answeringId, personaNameById, runDigestById);
+  // ADR 1001 D7 — a turn that answered a question card reads to the model as
+  // its fenced rendering (this one, and every earlier one in the transcript).
+  const { answers: recordedAnswers } = await loadClarificationState(storage, interrupt.runId, conversationId);
+  const answerTextById = new Map([...recordedAnswers.values()].map((a) => [a.turnMessageId, a.modelText] as const));
+  if (chatAnswer) answerTextById.set(userTurn.messageId, chatAnswer.modelText);
+  const messages = turnsToMessages([...transcript, userTurn], effectiveScaffold, answeringId, personaNameById, runDigestById, answerTextById);
   if (omittedCount > 0 && messages[0]?.role === 'system') {
     // Tell the model context was elided so it doesn't assume it has everything.
+    // ADR 1003 D2 — the line carries ONLY the omitted count, which changes when
+    // the window steps. It used to add "the M most recent are shown", and M
+    // grows on every exchange between steps, so the system message (and every
+    // cached byte after it) changed on every turn anyway.
     messages[0] = {
       ...messages[0],
-      content: `${asText(messages[0].content)}\n\n[Context budget: ${omittedCount} earlier turn(s) omitted; the ${budgetedExisting.length} most recent are shown.]`,
+      content: `${asText(messages[0].content)}\n\n[Context budget: ${omittedCount} earlier turn(s) omitted; the most recent are shown.]`,
     };
   }
   // ADR 0079 §Phase 1 — stream the reply's tokens as canonical `output.chunk`
@@ -638,6 +703,10 @@ export async function handleConversationResolve(
   // becomes the route's clean 4xx/5xx); under the async flag it runs in the
   // background after the POST is acked (see below).
   const finishExchange = async (): Promise<ConversationTurn[]> => {
+    // The agent reply's index, reserved before dispatch. ADR 1017 D2 hands its wire
+    // message id to the tools, so it is ONE value used both there and in `makeTurn`
+    // below: a tool's artifact names exactly the turn that is persisted.
+    const agentIndex = nextIndex + 1;
     let completion: string;
     // Runs this turn's tools ignited. Materialized by THIS function — it holds
     // the single turnIndex allocation (`nextIndex`) and builds the response — so
@@ -646,27 +715,29 @@ export async function handleConversationResolve(
     let runDispatches: readonly TurnRunDispatch[] = [];
     // ADR 0986 D1 — what ANSWERED this turn, as the dispatching branch reports it.
     let served: ServedModel | undefined;
+    // ADR 1001 D7 — the tool turn ended on a question card.
+    let clarificationAsk: ChatClarificationAsk | undefined;
     try {
       // ADR 0089 — tool-bearing agent: run the observe→act loop. A `null` return
       // (managed tier / non-tool provider / no resolvable tool / missing key)
       // falls through to the single completion below, so non-tool agents and
       // unsupported providers are unaffected.
-      // ADR 0130 Phase 3c — stamp the routed model ONCE (first exchange), BEFORE
-      // the tool loop (CS-GB-1: the stamp previously landed after it, so a
-      // tenant's group-tier rule never applied to the first tool-loop turn).
-      await maybeStampModelRoute(run, userText, storage, convMeta?.type, hasAttachmentPart(effectiveContent));
       let toolText: string | null = null;
       if (toolAgent && hostDeps?.policyResolver) {
         const toolTurn = await runConversationAgentToolTurn({
           run, agent: toolAgent, systemPrompt: effectiveScaffold, history: messages.slice(1),
           runId: interrupt.runId, nodeId: interrupt.nodeId,
           conversationId, storage,
+          // ADR 1017 D2 — the agent turn's id (the same `agentIndex` the turn is
+          // persisted at), so a tool's artifact can name its turn.
+          turnMessageId: turnMessageId(conversationId, agentIndex, 'agent'),
           policyResolver: hostDeps.policyResolver, onEvent: onAgentEvent,
           ...(exchangeWebSearch !== undefined ? { webSearch: exchangeWebSearch } : {}),
           ...(exchangePermissionMode !== undefined ? { permissionMode: exchangePermissionMode } : {}),
           ...(hostDeps.callerPrincipal ? { callerPrincipal: hostDeps.callerPrincipal } : {}),
           // CS-GB-1 — the loop resolves its model through the ONE resolver too.
           ...(exchangeModelOverride ? { modelOverride: exchangeModelOverride } : {}),
+          route: turnRoute,
           tier: modelTier,
         });
         if (toolTurn) {
@@ -688,6 +759,7 @@ export async function handleConversationResolve(
             });
           }
           runDispatches = toolTurn.runDispatches ?? [];
+          clarificationAsk = toolTurn.clarificationAsk;
           toolText = toolTurn.text;
           served = toolTurn.served;
           // The tool path has no token streaming (callAIWithTools is non-stream);
@@ -695,7 +767,7 @@ export async function handleConversationResolve(
           await onDelta(toolText);
         }
       }
-      const reply = toolText != null ? { completion: toolText } : await dispatchReply(run, messages, onDelta, exchangeWebSearch, exchangeModelOverride, modelTier);
+      const reply = toolText != null ? { completion: toolText } : await dispatchReply(run, messages, onDelta, exchangeWebSearch, exchangeModelOverride, modelTier, turnRoute);
       completion = sanitizeFreeText(reply.completion);
       if ('served' in reply && reply.served) served = reply.served;
       if ('budgetWarning' in reply && reply.budgetWarning) budgetNotice = reply.budgetWarning; // ADR 0178
@@ -717,8 +789,16 @@ export async function handleConversationResolve(
       throw new OpenwopError('internal_error', `Conversation reply failed: ${msg}`, 502, { conversationId, ...(reason ? { reason } : {}) });
     }
 
-    const agentIndex = nextIndex + 1;
-    const modelProv = resolveModelProvenance(run, exchangeModelOverride, modelTier);
+    // ADR 1016 (code grade MR66CD-1) — the RFC 0109 `agent.model` names what
+    // ANSWERED. When a routed (or class-bumped) model could not serve the key and
+    // the turn degraded once to the un-chosen model, the resolver still names the
+    // chosen one; `served` is what the dispatching branch reports. Taken only on
+    // the same provider, so the managed tier (which reports a TIER) and the
+    // subscription/compat lanes (which report a lane id) keep their resolved name.
+    const resolvedProv = resolveModelProvenance(run, exchangeModelOverride, modelTier, turnRoute);
+    const modelProv = served && !served.managed && resolvedProv && served.provider === resolvedProv.provider
+      ? { provider: served.provider, model: served.model }
+      : resolvedProv;
     // ADR 0665 D4 — an advisor that produced NOTHING did not contribute, and the
     // transcript must say so rather than carry an attributed empty turn the chair
     // then synthesises over as if it were assent.
@@ -768,6 +848,22 @@ export async function handleConversationResolve(
       runId: interrupt.runId, nodeId: interrupt.nodeId, conversationId,
       entries: [[nextIndex, userTurn], [agentIndex, agentTurn], ...runTurns.map((t) => [t.turnIndex, t] as [number, ConversationTurn])],
     });
+    // ADR 1001 D7 — the answer, then this turn's new ask, ride the run log next
+    // to the turns they belong to (read back by `loadClarificationState`).
+    // Awaited: a missing ask record only means the card cannot be answered as a
+    // card (the questions are still in the turn's text); never best-effort-lost.
+    if (chatAnswer) {
+      await log.append({
+        runId: interrupt.runId, nodeId: interrupt.nodeId, type: CLARIFICATION_ANSWERED_EVENT,
+        payload: stripSecretsFromPersisted({ conversationId, askId: chatAnswer.askId, turnMessageId: userTurn.messageId, modelText: chatAnswer.modelText, ...(chatAnswer.skipped ? { skipped: true } : {}) }),
+      });
+    }
+    if (clarificationAsk && !noContribution) {
+      await log.append({
+        runId: interrupt.runId, nodeId: interrupt.nodeId, type: CLARIFICATION_REQUESTED_EVENT,
+        payload: stripSecretsFromPersisted({ conversationId, askId: agentTurn.messageId, ...clarificationAsk }),
+      });
+    }
     mirrorTurnToChannel(interrupt.runId, { messageId: userTurn.messageId, role: 'user', content: userText, timestamp: new Date(userTurn.ts).toISOString() });
     mirrorTurnToChannel(interrupt.runId, {
       // The channel mirror carries a string — project the typed non-contribution
@@ -793,7 +889,9 @@ export async function handleConversationResolve(
     // the binding; emits `openwop-app.conversation.titled` so the FE rail/tab updates live).
     autotitleAfterExchange({
       run, chatSessionId, conversationId, nodeId: interrupt.nodeId,
-      userText, replyText: completion, storage,
+      userText, replyText: completion, storage, served,
+      // ADR 1019 D1 — only a chat's first exchange is titled.
+      firstExchange: !existing.some((t) => t.role === 'user'),
     });
     // ADR 0853 D3 — the person's turn, announced once both turns are durable (an
     // observer only enqueues; nothing calls a model in-request).

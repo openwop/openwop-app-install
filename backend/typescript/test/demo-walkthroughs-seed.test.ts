@@ -12,6 +12,12 @@
  *   3. `walkthroughIds.ts` re-declares the two node type ids that
  *      `walkthroughNodes.ts` owns (deliberately, to keep the seeder off the
  *      node-registration import path) — so they must be pinned equal.
+ *
+ * TST-CVA-4. Red when: a sample definition is dropped (the two ids are pinned),
+ * the example-data seeder id is renamed, an archived sample still counts or
+ * re-seeds as a no-op, or the clear stops removing ownership. Counts are pinned
+ * as the literal 2, not read from `DEMO_WALKTHROUGHS.length`, so a dropped
+ * definition cannot move the expectation with it.
  */
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -59,7 +65,8 @@ describe('sample walkthroughs are seeded demo data (ADR 0435)', () => {
 });
 
 describe('demo-walkthroughs seeder', () => {
-  const tenantId = `t-walkthrough-seed-${Math.random().toString(36).slice(2)}`;
+  const tenantId = 't-walkthrough-seed';
+  const SAMPLE_COUNT = 2;
 
   beforeAll(async () => {
     initHostExtPersistence(await openStorage('memory://'));
@@ -71,8 +78,8 @@ describe('demo-walkthroughs seeder', () => {
 
   it('seeds tenant-owned walkthroughs, idempotently', async () => {
     const first = await seedDemoWalkthroughs(tenantId);
-    expect(first.created).toBe(DEMO_WALKTHROUGHS.length);
-    expect(await countDemoWalkthroughs(tenantId)).toBe(DEMO_WALKTHROUGHS.length);
+    expect(first.created).toBe(SAMPLE_COUNT);
+    expect(await countDemoWalkthroughs(tenantId)).toBe(SAMPLE_COUNT);
 
     // Ownership is what makes it listable + editable + removable in the app.
     for (const def of DEMO_WALKTHROUGHS) {
@@ -82,13 +89,13 @@ describe('demo-walkthroughs seeder', () => {
 
     const second = await seedDemoWalkthroughs(tenantId);
     expect(second.created).toBe(0); // re-seed creates nothing (no "-2" duplicates)
-    expect(await countDemoWalkthroughs(tenantId)).toBe(DEMO_WALKTHROUGHS.length);
+    expect(await countDemoWalkthroughs(tenantId)).toBe(SAMPLE_COUNT);
   });
 
   it('clears what it seeded', async () => {
     await seedDemoWalkthroughs(tenantId);
     const cleared = await clearDemoWalkthroughs(tenantId);
-    expect(cleared.cleared).toBe(DEMO_WALKTHROUGHS.length);
+    expect(cleared.cleared).toBe(SAMPLE_COUNT);
     expect(await countDemoWalkthroughs(tenantId)).toBe(0);
     for (const def of DEMO_WALKTHROUGHS) {
       expect(await getOwned(tenantId, def.workflowId)).toBeNull();
@@ -106,11 +113,11 @@ describe('demo-walkthroughs seeder', () => {
       name: owned?.name ?? '', nodeCount: owned?.nodeCount ?? 0, archivedAt: '2026-07-19T00:00:00.000Z',
     });
 
-    expect(await countDemoWalkthroughs(tenantId)).toBe(DEMO_WALKTHROUGHS.length - 1);
+    expect(await countDemoWalkthroughs(tenantId)).toBe(SAMPLE_COUNT - 1);
 
     const again = await seedDemoWalkthroughs(tenantId);
     expect(again.created).toBe(1); // the archived one comes back
-    expect(await countDemoWalkthroughs(tenantId)).toBe(DEMO_WALKTHROUGHS.length);
+    expect(await countDemoWalkthroughs(tenantId)).toBe(SAMPLE_COUNT);
     expect((await getOwned(tenantId, first!.workflowId))?.archivedAt).toBeUndefined();
   });
 
@@ -120,7 +127,8 @@ describe('demo-walkthroughs seeder', () => {
     await seedDemoWalkthroughs(other);
     await clearDemoWalkthroughs(tenantId);
 
-    expect(await countDemoWalkthroughs(other)).toBe(DEMO_WALKTHROUGHS.length);
+    expect(await countDemoWalkthroughs(other)).toBe(SAMPLE_COUNT);
+    expect(await getOwned(other, CHAT_WALKTHROUGH_ID)).not.toBeNull();
     // The global def must survive so the other tenant's runs still resolve.
     expect(getRegisteredWorkflow(CHAT_WALKTHROUGH_ID)).toBeDefined();
     await clearDemoWalkthroughs(other);

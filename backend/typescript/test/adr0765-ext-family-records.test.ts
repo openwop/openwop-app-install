@@ -45,7 +45,7 @@ const declaration = JSON.parse(readFileSync(join(locateRepoSchemasDir(HERE, 'run
   extensionsKeyPattern: string; reservedOrgs: string[]; extensions: Record<string, unknown>;
   families?: { key: string; anchor?: string; extensionName?: string }[];
 };
-const WITHHELD = ['brand', 'entities', 'coordination', 'a2ui-surface'];
+const WITHHELD = ['brand', 'entities', 'coordination'];
 const CLAIMED = [...EXT_FAMILY_CLAIMS.map((c) => c.extensionName), 'rest-transport'];
 
 // One app for the whole file: it also runs initInMemorySurfaces(), which the
@@ -104,9 +104,9 @@ describe('ADR 0765 — execution: the executor\'s surface bundle provides every 
     const claim = EXT_FAMILY_CLAIMS.find((c) => c.extensionName === 'kanban')!;
     const bundle = bundleOf();
     const broken: typeof bundle = { ...bundle, kanban: { ...bundle.kanban } };
-    Reflect.deleteProperty(broken.kanban, 'taskGet');
-    expect(missingMethods(claim, broken)).toEqual(['taskGet']);
-    expect(() => extFamilyRecord(claim, broken)).toThrow(/ctx\.kanban lacks taskGet/);
+    Reflect.deleteProperty(broken.kanban, 'taskAssign');
+    expect(missingMethods(claim, broken)).toEqual(['taskAssign']);
+    expect(() => extFamilyRecord(claim, broken)).toThrow(/ctx\.kanban lacks taskAssign/);
   });
 });
 

@@ -21,6 +21,7 @@ import {
   subWorkflowId, workflowIdOrigin, workflowKind,
 } from '../src/host/workflowId.js';
 import * as browser from '../../../frontend/react/src/builder/persistence/workflowId.js';
+import { stripComments } from './helpers/stripComments.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, '..', '..', '..');
@@ -155,7 +156,7 @@ function sources(dir: string, out: string[] = []): string[] {
 
 /** Strip comments so prose about ids (there is a lot of it) cannot trip the gate. */
 function code(text: string): string {
-  return text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`\\])\/\/[^\n]*/g, '$1');
+  return stripComments(text);
 }
 
 // Building a workflow id by hand: a template literal of ANY family's shape that

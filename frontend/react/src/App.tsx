@@ -135,6 +135,7 @@ const TutorialHint = lazy(() => import('./features/tutorials/TutorialHint.js').t
 void import('./walkthroughs/corePacks.js').then((m) => m.registerCoreWalkthroughPacks());
 import { GlobalLiveRegion } from './ui/announce.js';
 import { ConfirmRoot } from './ui/confirm.js';
+import { ReauthRoot } from './auth/ReauthRoot.js';
 import { ErrorBoundary } from './ui/ErrorBoundary.js';
 import { Skeleton } from './ui/Skeleton.js';
 import { useBrand } from './brand/BrandProvider.js';
@@ -549,6 +550,7 @@ export function App() {
       <Toaster />
       <GlobalLiveRegion />
       <ConfirmRoot />
+      <ReauthRoot />
       <Suspense fallback={null}><WalkthroughOverlayHost /></Suspense>
       {/* ADR 0488 D7 — the contextual "Teach me this" affordance. */}
       <Suspense fallback={null}><TutorialHint /></Suspense>

@@ -2,16 +2,30 @@
  * ADR 0785 P3 — a paired Claude Code reaches this host over the MCP mount.
  *
  * Pinned, through the real HTTP boundary with the device's own developer key:
- *   - the three tools are listed for the device;
+ *   - the four tools are listed for the device (add-todo, my-todos,
+ *     schema-lookup, and the ADR 0785 P4 permission tool);
  *   - `claude-code-add-todo` files onto the HUMAN's personal board — the SAME
  *     board `GET /kanban/boards/personal` returns to that person (the tool and the
  *     route share one predicate: the board's two keys captured at approval);
- *   - `claude-code-my-todos` reads it back; a retried identical call does not
- *     duplicate the card;
+ *   - `claude-code-my-todos` reads it back;
  *   - `claude-code-schema-lookup` answers from the ONE lookup the chat tool uses;
  *   - a developer key that is NOT a paired device, and a person's own session,
- *     are refused by name (these tools act for a device's human, nobody else);
- *   - an MCP run now names who it acts for (`metadata.actingUserId`).
+ *     are refused by name (these tools act for a device's human, nobody else).
+ *
+ * > CORRECTED 2026-10-29 (/grade-tests w67, TST-CEE-4): this header also claimed
+ * > "a retried identical call does not duplicate the card" and "an MCP run names
+ * > who it acts for (`metadata.actingUserId`)". Neither was asserted here. The
+ * > add-todo card id hashes `ctx.runId` (`features/claude-code/mcpTools.ts:101`),
+ * > so the dedupe is PER RUN (an executor retry of the node); a client that
+ * > re-sends the same `tools/call` starts a new run and files a second card —
+ * > recorded as grade-code row CCMCP-RETRY-1, not claimed here.
+ *
+ * Red when (w67g3, witnessed): the device check is bypassed (both of its guards
+ * — `acting.startsWith('apikey:')` and `deviceForKey(...) !== null` — return the
+ * same refusal, so this is a recorded double guard and the witness breaks both).
+ * Ceiling: filing onto `device.tenantId/subject` instead of
+ * `personalTenant/ownerUserId` is the same board for a test-login user (their
+ * personal workspace IS the device's tenant), so that mutant is equivalent here.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -43,19 +57,23 @@ afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
 });
 
-interface Res { status: number; body: any }
+interface Res<T> { status: number; body: T }
+interface RpcResult { result?: { isError?: boolean; tools?: Array<{ name: string }>; content?: Array<{ text?: string }> } }
+interface Pairing { userCode: string; deviceCode: string; token: string }
+interface Board { board: { id: string }; cards: Array<{ id: string; title: string }> }
 function client(bearer?: string) {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...(cookie ? { cookie } : {}), ...(bearer ? { authorization: `Bearer ${bearer}` } : {}) },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    const text = await res.text();
+    return { status: res.status, body: (text ? JSON.parse(text) : {}) as T };
   };
-  return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
+  return { get: <T>(p: string) => call<T>('GET', p), post: <T>(p: string, b?: unknown) => call<T>('POST', p, b) };
 }
 let n = 0;
 async function person() {
@@ -66,22 +84,22 @@ async function person() {
 }
 async function pairDevice(owner: ReturnType<typeof client>): Promise<string> {
   const anon = client();
-  const s = await anon.post(`${CC}/pair/device/start`, { label: 'mcp laptop' });
+  const s = await anon.post<Pairing>(`${CC}/pair/device/start`, { label: 'mcp laptop' });
   expect((await owner.post(`${CC}/pair/requests/${s.body.userCode}/approve`, { consentHash: consentHash() })).status).toBe(204);
-  return (await anon.post(`${CC}/pair/device/poll`, { deviceCode: s.body.deviceCode })).body.token as string;
+  return (await anon.post<Pairing>(`${CC}/pair/device/poll`, { deviceCode: s.body.deviceCode })).body.token;
 }
 let rpcId = 0;
 const rpc = (c: ReturnType<typeof client>, method: string, params?: unknown) =>
-  c.post(MCP, { jsonrpc: '2.0', id: ++rpcId, method, ...(params !== undefined ? { params } : {}) });
-const text = (r: Res): string => (r.body?.result?.content?.[0]?.text ?? '') as string;
+  c.post<RpcResult>(MCP, { jsonrpc: '2.0', id: ++rpcId, method, ...(params !== undefined ? { params } : {}) });
+const text = (r: Res<RpcResult>): string => r.body.result?.content?.[0]?.text ?? '';
 
 describe('ADR 0785 P3 — Claude Code over the MCP mount', () => {
-  it('lists the three tools for a paired device', async () => {
+  it('lists the four claude-code tools for a paired device', async () => {
     const device = client(await pairDevice(await person()));
     const r = await rpc(device, 'tools/list');
     expect(r.status, JSON.stringify(r.body)).toBe(200);
-    const names = (r.body.result.tools as { name: string }[]).map((t) => t.name);
-    expect(names).toEqual(expect.arrayContaining(['claude-code-my-todos', 'claude-code-add-todo', 'claude-code-schema-lookup']));
+    const names = (r.body.result?.tools ?? []).map((t) => t.name).filter((n) => n.startsWith('claude-code-')).sort();
+    expect(names).toEqual(['claude-code-add-todo', 'claude-code-my-todos', 'claude-code-permission', 'claude-code-schema-lookup']);
   });
 
   it('add-todo lands on the SAME personal board the person sees through the kanban route', async () => {
@@ -92,9 +110,9 @@ describe('ADR 0785 P3 — Claude Code over the MCP mount', () => {
     const receipt = JSON.parse(text(filed)) as { cardId: string; filed: boolean };
     expect(receipt.filed).toBe(true);
 
-    const board = await human.get('/host/openwop-app/kanban/boards/personal');
+    const board = await human.get<Board>('/host/openwop-app/kanban/boards/personal');
     expect(board.status).toBe(200);
-    expect((board.body.cards as { id: string; title: string }[]).find((c) => c.id === receipt.cardId)?.title).toBe('Fix the flaky login test');
+    expect(board.body.cards.find((c) => c.id === receipt.cardId)?.title).toBe('Fix the flaky login test');
 
     const mine = await rpc(device, 'tools/call', { name: 'claude-code-my-todos', arguments: {} });
     const listed = JSON.parse(text(mine)) as { board: { boardId: string }; cards: { cardId: string; column: string }[] };
@@ -113,7 +131,7 @@ describe('ADR 0785 P3 — Claude Code over the MCP mount', () => {
 
   it('refuses a developer key that is not a paired device, and a person calling directly', async () => {
     const human = await person();
-    const plainKey = (await human.post('/host/openwop-app/developer-keys', { name: 'ci', scopes: ['workspace:read', 'workspace:write'] })).body.token as string;
+    const plainKey = (await human.post<{ token: string }>('/host/openwop-app/developer-keys', { name: 'ci', scopes: ['workspace:read', 'workspace:write'] })).body.token;
     const viaKey = await rpc(client(plainKey), 'tools/call', { name: 'claude-code-my-todos', arguments: {} });
     expect(viaKey.body.result?.isError).toBe(true);
     expect(text(viaKey)).toMatch(/paired Claude Code device/i);

@@ -3,6 +3,13 @@
  * (`host/knowledgeSourceFetch.ts`): Drive file-id extraction + mimeType→read-URL
  * planning. No network — the brokered fetch itself is covered by the route test's
  * fail-closed cases.
+ *
+ * TST-DKC-1 (grade-tests wave 72). The folder-id case is the Drive-query
+ * injection guard (`x' or '1'='1` → null, never a query). Red when (w72 probes):
+ * the bare-id charset widens (kf-bare), the folder-URL capture takes the query
+ * string (kf-folderpath), the /d/ or ?id= forms stop extracting (kf-dpath,
+ * kf-idparam), or a read URL changes (kf-sheet, kf-alldrives, kf-json).
+ * `encodeURIComponent(fileId)` is an equivalent mutant for every legal Drive id.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -49,23 +56,23 @@ describe('extractDriveFileId', () => {
 });
 
 describe('driveReadPlan', () => {
+  // Exact URLs, as literals: the base path, the export-vs-media choice and the
+  // shared-drive flag are all part of the read (a substring check passed a
+  // `supportsAllDrives=false` — w72 probe kf-alldrives).
+  const FILE = `https://www.googleapis.com/drive/v3/files/${ID}`;
   it('exports a Google Doc / Slides as text/plain', () => {
-    const doc = driveReadPlan(ID, 'application/vnd.google-apps.document');
-    const slides = driveReadPlan(ID, 'application/vnd.google-apps.presentation');
-    expect('url' in doc && doc.url).toContain('/export?mimeType=text%2Fplain');
-    expect('url' in slides && slides.url).toContain('/export?mimeType=text%2Fplain');
+    expect(driveReadPlan(ID, 'application/vnd.google-apps.document')).toEqual({ url: `${FILE}/export?mimeType=text%2Fplain&supportsAllDrives=true` });
+    expect(driveReadPlan(ID, 'application/vnd.google-apps.presentation')).toEqual({ url: `${FILE}/export?mimeType=text%2Fplain&supportsAllDrives=true` });
   });
   it('exports a Google Sheet as text/csv', () => {
-    const plan = driveReadPlan(ID, 'application/vnd.google-apps.spreadsheet');
-    expect('url' in plan && plan.url).toContain('/export?mimeType=text%2Fcsv');
+    expect(driveReadPlan(ID, 'application/vnd.google-apps.spreadsheet')).toEqual({ url: `${FILE}/export?mimeType=text%2Fcsv&supportsAllDrives=true` });
   });
   it('reads a plain-text / json file via alt=media', () => {
-    expect('url' in driveReadPlan(ID, 'text/plain') && driveReadPlan(ID, 'text/plain') as { url: string }).toBeTruthy();
-    const plan = driveReadPlan(ID, 'text/markdown');
-    expect('url' in plan && plan.url).toContain('alt=media');
+    for (const mime of ['text/plain', 'text/markdown', 'application/json']) {
+      expect(driveReadPlan(ID, mime), mime).toEqual({ url: `${FILE}?alt=media&supportsAllDrives=true` });
+    }
   });
   it('rejects a binary type with no extractable text', () => {
-    const plan = driveReadPlan(ID, 'image/png');
-    expect('unsupported' in plan && plan.unsupported).toBe('image/png');
+    expect(driveReadPlan(ID, 'image/png')).toEqual({ unsupported: 'image/png' });
   });
 });

@@ -32,6 +32,11 @@ import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { buildAssistantSurface } from '../src/features/assistant/surface.js';
 import { __resetAssistantStore, listPendingActions } from '../src/features/assistant/assistantService.js';
 
+/** The resume value the form card sends: one answer per field (ADR 1013 D4). */
+const answers = (values: Record<string, unknown>): { answers: Array<{ id: string; answer: unknown }> } => ({
+  answers: Object.entries(values).map(([id, answer]) => ({ id, answer })),
+});
+
 const CATALOG_VERSION = '0.9.1';
 const CATALOG = new Set(['heading', 'text', 'field.text', 'field.date', 'field.select', 'field.checkbox', 'action.button']);
 
@@ -52,8 +57,8 @@ describe('Assistant calendar.reschedule A2UI clarification (ADR 0051 §3/§5)', 
   const field = (r: { outputs?: Record<string, unknown> }, key: string): unknown => (r.outputs ?? {})[key];
 
   const assertCatalogValid = (payload: Record<string, unknown>): void => {
-    expect(payload.catalogVersion).toBe(CATALOG_VERSION);
-    const surface = payload.surface as { components?: unknown };
+    expect((payload.form as Record<string, unknown>).catalogVersion).toBe(CATALOG_VERSION);
+    const surface = (payload.form as Record<string, unknown>).surface as { components?: unknown };
     expect(Array.isArray(surface.components)).toBe(true);
     for (const c of surface.components as Array<Record<string, unknown>>) {
       expect(CATALOG.has(String(c.component))).toBe(true);
@@ -78,7 +83,7 @@ describe('Assistant calendar.reschedule A2UI clarification (ADR 0051 §3/§5)', 
     expect(captured!.reason).toBe('clarification');
     expect(captured!.resumeKey).toBe('calendar-reschedule-clarify');
     assertCatalogValid(captured!);
-    const components = (captured!.surface as { components: Array<Record<string, unknown>> }).components;
+    const components = ((captured!.form as Record<string, unknown>).surface as { components: Array<Record<string, unknown>> }).components;
     const ids = components.map((c) => c.id).filter((id): id is string => typeof id === 'string');
     expect(ids).toEqual(expect.arrayContaining(['date', 'time', 'durationMinutes']));
     // No event picker in the catalog — the surface never asks for an eventId.
@@ -86,11 +91,11 @@ describe('Assistant calendar.reschedule A2UI clarification (ADR 0051 §3/§5)', 
   });
 
   it('resumed time merges into patch.start/end and preserves the eventId', async () => {
-    const resume = { action: 'confirm', date: '2026-07-01', time: '14:00', durationMinutes: '60' };
+    const resume = { date: '2026-07-01', time: '14:00', durationMinutes: '60' };
     const ctx = {
       features: { assistant: buildAssistantSurface({ tenantId: 't-resched2' }) },
       inputs: { kind: 'calendar.reschedule', draft: 'Move the sync', payload: { eventId: 'evt123', patch: { summary: 'Sync' } } },
-      suspend: async () => resume,
+      suspend: async () => answers(resume),
     };
     const r = await enqueueAction(ctx);
     const pa = field(r, 'pendingAction') as {
@@ -147,7 +152,7 @@ describe('Assistant calendar.reschedule A2UI clarification (ADR 0051 §3/§5)', 
     const ctx = {
       features: { assistant: buildAssistantSurface({ tenantId: 't-resched5' }) },
       inputs: { kind: 'calendar.reschedule', draft: 'x', payload: { eventId: 'evt5', patch: {} } },
-      suspend: async () => ({ action: 'confirm', date: 'not-a-date', time: '14:00', durationMinutes: '60' }),
+      suspend: async () => answers({ date: 'not-a-date', time: '14:00', durationMinutes: '60' }),
     };
     await expect(enqueueAction(ctx)).rejects.toThrow(/new time/);
     expect((await listPendingActions('t-resched5')).length).toBe(0);

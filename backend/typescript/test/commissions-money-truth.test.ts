@@ -16,6 +16,14 @@
  *  - COM2-M6  a recompute silently reverted an APPROVED statement and dropped its approver
  *  - COM2-M7  mark-paid recorded neither payer nor time
  *  - COM2-M9  no subject eraser over four subject-keyed fields
+ *
+ * TST-CFE-1. Red when: the currency-offender filter is dropped, case-sensitive, or
+ * counts currency-less deals; per-line or total quantisation is dropped; the
+ * assignment check is dropped; either plan-window bound is ignored; an approved
+ * statement recomputes; mark-paid stops stamping payer/time; the pinned-total
+ * check is dropped; attainment takes `won` from every row or `quota` from only the
+ * shallowest; an unstateable ratio is recomputed; erasure keeps the row key or the
+ * plan assignment; the card loses the display name or the currency format.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -39,28 +47,37 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+interface Line { dealId?: string; rate: number; commission: number }
+interface Statement { statementId: string; total: number; status: string; subjectId: string; approvedBy?: string; paidBy?: string; paidAt?: string; lines: Line[]; attainmentPct?: number }
+interface ComBody extends Partial<Statement> {
+  user?: { userId: string }; orgId?: string; planId?: string; modelId?: string; territoryId?: string;
+  review?: { approvalId: string }; statements?: Statement[]; plans?: Array<{ planId: string; assignment?: unknown }>;
+  error?: string; message?: string; details?: Record<string, unknown>;
+}
+interface Res { status: number; body: ComBody }
 interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; put: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> }
 function client(): Client {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = (res.status === 204 ? {} : await res.json().catch(() => ({}))) as ComBody;
     return { status: res.status, body: out };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), put: (p, b) => call('PUT', p, b), del: (p) => call('DELETE', p) };
 }
 
 let n = 0;
+/** Distinctive, so `toContain` cannot match a fragment of an id or another word. */
+const REP_NAME = 'Rita Rep';
 async function scenario(): Promise<{ admin: Client; repId: string; orgId: string; tenantId: string }> {
   const tenantId = `org:com2-${Date.now()}-${n++}`;
   const admin = client();
   await admin.post('/host/openwop-app/test/login', { email: `a-${Date.now()}-${n++}@acme.test`, tenantId });
   const rep = client();
-  const repId = (await rep.post('/host/openwop-app/test/login', { email: `r-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
-  const orgId = (await admin.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
-  await admin.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'rep', subject: repId, roles: ['editor'] });
+  const repId = (await rep.post('/host/openwop-app/test/login', { email: `r-${Date.now()}-${n++}@acme.test`, tenantId })).body.user?.userId ?? '';
+  const orgId = (await admin.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId ?? '';
+  await admin.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: REP_NAME, subject: repId, roles: ['editor'] });
   return { admin, repId, orgId, tenantId };
 }
 const cbase = (orgId: string): string => `/host/openwop-app/commissions/orgs/${encodeURIComponent(orgId)}`;
@@ -70,7 +87,7 @@ const wonDeal = async (admin: Client, orgId: string, title: string, amount: numb
   const d = await admin.post(`${crm(orgId)}/deals`, { title, amount, owner, closeDate, status: 'won', ...(currency ? { currency } : {}) });
   expect(d.status, JSON.stringify(d.body)).toBe(201);
 };
-const mkPlan = async (admin: Client, orgId: string, over: Record<string, unknown> = {}): Promise<any> => {
+const mkPlan = async (admin: Client, orgId: string, over: Record<string, unknown> = {}): Promise<ComBody> => {
   const res = await admin.post(`${cbase(orgId)}/plans`, {
     name: 'AE 5%', currency: 'USD', effectiveFrom: '2026-01-01',
     rules: [{ basis: 'deal-won', type: 'percentage', rate: 5 }], ...over,
@@ -89,9 +106,10 @@ describe('COM2-B1 — a payout record is denominated, or it does not exist', () 
     // frozen onto an approval card. CRM's own report service refuses this shape already.
     await wonDeal(admin, orgId, 'JPY deal', 100_000, repId, '2026-02-10', 'JPY');
     await wonDeal(admin, orgId, 'USD deal', 20_000, repId, '2026-02-11', 'USD');
-    const res = await admin.post(`${cbase(orgId)}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
+    const res = await admin.post(`${cbase(orgId)}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
     expect(res.status).toBe(400);
-    expect(JSON.stringify(res.body)).toMatch(/JPY/);
+    expect(res.body.details?.field).toBe('currency');
+    expect(JSON.stringify(res.body.details?.deals)).toMatch(/JPY/);
   });
 
   it('a single-currency period still computes (the negative control)', async () => {
@@ -99,7 +117,7 @@ describe('COM2-B1 — a payout record is denominated, or it does not exist', () 
     const plan = await mkPlan(admin, orgId, { assignment: { kind: 'rep', ref: repId } });
     await wonDeal(admin, orgId, 'USD a', 1000, repId, '2026-02-10', 'USD');
     await wonDeal(admin, orgId, 'USD b', 2000, repId, '2026-02-11', 'USD');
-    const res = await admin.post(`${cbase(orgId)}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
+    const res = await admin.post(`${cbase(orgId)}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
     expect(res.status, JSON.stringify(res.body)).toBe(201);
     expect(res.body.total).toBe(150);
   });
@@ -110,7 +128,7 @@ describe('COM2-B1 — a payout record is denominated, or it does not exist', () 
     // The CRM field is optional and mostly unset; treating absence as conflict would
     // refuse nearly every real statement. This is a decision, so it has a test.
     await wonDeal(admin, orgId, 'unlabelled', 1000, repId, '2026-02-10');
-    const res = await admin.post(`${cbase(orgId)}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
+    const res = await admin.post(`${cbase(orgId)}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
     expect(res.status).toBe(201);
     expect(res.body.total).toBe(50);
   });
@@ -121,7 +139,7 @@ describe('COM2-M1 — the figure is quantised to the currency it is paid in', ()
     const { admin, repId, orgId } = await scenario();
     const plan = await mkPlan(admin, orgId, { currency: 'JPY', assignment: { kind: 'rep', ref: repId }, rules: [{ basis: 'deal-won', type: 'percentage', rate: 0.5 }] });
     await wonDeal(admin, orgId, 'JPY deal', 1_234_567, repId, '2026-02-10', 'JPY');
-    const res = await admin.post(`${cbase(orgId)}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
+    const res = await admin.post(`${cbase(orgId)}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
     expect(res.status, JSON.stringify(res.body)).toBe(201);
     // 1,234,567 × 0.5% = 6172.835 — not a representable amount in a currency with no
     // minor unit. Raw float arithmetic stored it anyway.
@@ -131,7 +149,7 @@ describe('COM2-M1 — the figure is quantised to the currency it is paid in', ()
     // the sum integral by itself, so a probe of the total-level rounding came back GREEN.
     // The per-line figure is what a rep reads beside the deal, and what the cap rescale
     // multiplies, so it is the one that has to be representable.
-    expect(res.body.lines.every((l: { commission: number }) => Number.isInteger(l.commission))).toBe(true);
+    expect((res.body.lines ?? []).every((l: { commission: number }) => Number.isInteger(l.commission))).toBe(true);
   });
 
   it('a USD plan keeps its cents (the negative control)', async () => {
@@ -139,9 +157,19 @@ describe('COM2-M1 — the figure is quantised to the currency it is paid in', ()
     const plan = await mkPlan(admin, orgId, { assignment: { kind: 'rep', ref: repId }, rules: [{ basis: 'deal-won', type: 'percentage', rate: 7.5 }] });
     await wonDeal(admin, orgId, 'a', 33_333.33, repId, '2026-02-10', 'USD');
     await wonDeal(admin, orgId, 'b', 66_666.67, repId, '2026-02-11', 'USD');
-    const res = await admin.post(`${cbase(orgId)}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
+    const res = await admin.post(`${cbase(orgId)}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
     expect(res.status).toBe(201);
     expect(res.body.total).toBe(7500);          // …and not 7500.000000000001
+    // The TOTAL is quantised too, not only each line: 0.10 + 0.20 lines sum to
+    // 0.30000000000000004 in raw float, which no ledger can hold.
+    const s2 = await scenario();
+    const plan2 = await mkPlan(s2.admin, s2.orgId, { assignment: { kind: 'rep', ref: s2.repId }, rules: [{ basis: 'deal-won', type: 'percentage', rate: 10 }] });
+    await wonDeal(s2.admin, s2.orgId, 'one', 1, s2.repId, '2026-02-10', 'USD');
+    await wonDeal(s2.admin, s2.orgId, 'two', 2, s2.repId, '2026-02-11', 'USD');
+    const tiny = await s2.admin.post(`${cbase(s2.orgId)}/plans/${plan2.planId ?? ''}/statements/compute`, { subjectId: s2.repId, period: '2026-Q1' });
+    expect(tiny.status, JSON.stringify(tiny.body)).toBe(201);
+    expect((tiny.body.lines ?? []).map((l) => l.commission).sort()).toEqual([0.1, 0.2]);
+    expect(tiny.body.total).toBe(0.3);
   });
 });
 
@@ -153,16 +181,17 @@ describe('COM2-B5 — a plan pays who it is assigned to', () => {
     // `assignment` is documented as "WHO a plan pays" and validated on write; nothing
     // ever read it, so an SDR plan on a 2% floor produced a valid-looking statement
     // paying an AE — beside the plan's own name, looking deliberate.
-    const res = await admin.post(`${cbase(orgId)}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
+    const res = await admin.post(`${cbase(orgId)}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
     expect(res.status).toBe(400);
-    expect(JSON.stringify(res.body)).toMatch(/assigned/i);
+    expect(res.body.details?.field).toBe('subjectId');
+    expect(res.body.message).toMatch(/assigned to a different rep/);
   });
 
   it('…and pays the rep it IS assigned to (the negative control)', async () => {
     const { admin, repId, orgId } = await scenario();
     const plan = await mkPlan(admin, orgId, { assignment: { kind: 'rep', ref: repId } });
     await wonDeal(admin, orgId, 'W', 1000, repId, '2026-02-10', 'USD');
-    expect((await admin.post(`${cbase(orgId)}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' })).status).toBe(201);
+    expect((await admin.post(`${cbase(orgId)}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: repId, period: '2026-Q1' })).status).toBe(201);
   });
 });
 
@@ -171,7 +200,7 @@ describe('COM2-M2 — the plan window is what makes a plan a plan', () => {
     const { admin, repId, orgId } = await scenario();
     const plan = await mkPlan(admin, orgId, { assignment: { kind: 'rep', ref: repId }, effectiveFrom: '2026-07-01' });
     await wonDeal(admin, orgId, 'before', 10_000, repId, '2026-02-10', 'USD');
-    const res = await admin.post(`${cbase(orgId)}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
+    const res = await admin.post(`${cbase(orgId)}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
     expect(res.status).toBe(201);
     expect(res.body.total).toBe(0);
     expect(res.body.lines).toHaveLength(0);
@@ -181,7 +210,8 @@ describe('COM2-M2 — the plan window is what makes a plan a plan', () => {
     const { admin, repId, orgId } = await scenario();
     const plan = await mkPlan(admin, orgId, { assignment: { kind: 'rep', ref: repId }, effectiveFrom: '2026-01-01', effectiveTo: '2026-01-31' });
     await wonDeal(admin, orgId, 'after', 10_000, repId, '2026-03-10', 'USD');
-    const res = await admin.post(`${cbase(orgId)}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
+    const res = await admin.post(`${cbase(orgId)}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
     expect(res.body.total).toBe(0);
   });
 
@@ -189,7 +219,7 @@ describe('COM2-M2 — the plan window is what makes a plan a plan', () => {
     const { admin, repId, orgId } = await scenario();
     const plan = await mkPlan(admin, orgId, { assignment: { kind: 'rep', ref: repId }, effectiveFrom: '2026-01-01', effectiveTo: '2026-12-31' });
     await wonDeal(admin, orgId, 'inside', 10_000, repId, '2026-02-10', 'USD');
-    expect((await admin.post(`${cbase(orgId)}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' })).body.total).toBe(500);
+    expect((await admin.post(`${cbase(orgId)}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: repId, period: '2026-Q1' })).body.total).toBe(500);
   });
 });
 
@@ -197,16 +227,16 @@ describe('COM2-M6/M7 — the terminal transitions record what they did', () => {
   const approveViaReview = async (c: Client, orgId: string, statementId: string): Promise<Res> => {
     const submit = await c.post(`${cbase(orgId)}/statements/${encodeURIComponent(statementId)}/approve`);
     if (submit.status !== 202) return submit;
-    return c.post(`/host/openwop-app/reviews/approval:${submit.body.review.approvalId}/actions/approve`);
+    return c.post(`/host/openwop-app/reviews/approval:${submit.body.review?.approvalId}/actions/approve`);
   };
 
   it('mark-paid records WHO released the money, and when', async () => {
     const { admin, repId, orgId } = await scenario();
     const plan = await mkPlan(admin, orgId, { assignment: { kind: 'rep', ref: repId } });
     await wonDeal(admin, orgId, 'W', 1000, repId, '2026-02-10', 'USD');
-    const st = (await admin.post(`${cbase(orgId)}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' })).body;
-    expect((await approveViaReview(admin, orgId, st.statementId)).status).toBe(200);
-    const paid = await admin.post(`${cbase(orgId)}/statements/${encodeURIComponent(st.statementId)}/pay`);
+    const st = (await admin.post(`${cbase(orgId)}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: repId, period: '2026-Q1' })).body;
+    expect((await approveViaReview(admin, orgId, st.statementId ?? '')).status).toBe(200);
+    const paid = await admin.post(`${cbase(orgId)}/statements/${encodeURIComponent(st.statementId ?? '')}/pay`);
     expect(paid.status, JSON.stringify(paid.body)).toBe(200);
     // `void actor;` threw the payer away, and the only trace was a best-effort audit
     // append documented as unable to fail the mutation — i.e. it may not be there at all.
@@ -218,25 +248,25 @@ describe('COM2-M6/M7 — the terminal transitions record what they did', () => {
     const { admin, repId, orgId } = await scenario();
     const plan = await mkPlan(admin, orgId, { assignment: { kind: 'rep', ref: repId } });
     await wonDeal(admin, orgId, 'W', 1000, repId, '2026-02-10', 'USD');
-    const st = (await admin.post(`${cbase(orgId)}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' })).body;
-    expect((await approveViaReview(admin, orgId, st.statementId)).status).toBe(200);
+    const st = (await admin.post(`${cbase(orgId)}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: repId, period: '2026-Q1' })).body;
+    expect((await approveViaReview(admin, orgId, st.statementId ?? '')).status).toBe(200);
 
     // The code said "an approved statement must be re-approved" and only refused `paid`:
     // a recompute returned the row to draft at a new total and DROPPED approvedBy with no
     // record, while the resolved card still showed a manager approving the old figure.
-    const again = await admin.post(`${cbase(orgId)}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
+    const again = await admin.post(`${cbase(orgId)}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
     expect(again.status).toBe(409);
     const rows = (await admin.get(`${cbase(orgId)}/statements`)).body.statements;
-    expect(rows[0].status).toBe('approved');
-    expect(rows[0].approvedBy).toBeTruthy();
+    expect(rows?.[0]?.status).toBe('approved');
+    expect(rows?.[0]?.approvedBy).toBeTruthy();
   });
 
   it('a DRAFT statement still recomputes freely (the negative control)', async () => {
     const { admin, repId, orgId } = await scenario();
     const plan = await mkPlan(admin, orgId, { assignment: { kind: 'rep', ref: repId } });
     await wonDeal(admin, orgId, 'W', 1000, repId, '2026-02-10', 'USD');
-    await admin.post(`${cbase(orgId)}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
-    expect((await admin.post(`${cbase(orgId)}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' })).status).toBe(201);
+    await admin.post(`${cbase(orgId)}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
+    expect((await admin.post(`${cbase(orgId)}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: repId, period: '2026-Q1' })).status).toBe(201);
   });
 });
 
@@ -245,31 +275,33 @@ describe('COM2-B4 — the reviewer approves the total they were shown', () => {
     const { admin, repId, orgId } = await scenario();
     const plan = await mkPlan(admin, orgId, { assignment: { kind: 'rep', ref: repId } });
     await wonDeal(admin, orgId, 'W1', 1000, repId, '2026-02-10', 'USD');
-    const st = (await admin.post(`${cbase(orgId)}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' })).body;
+    const st = (await admin.post(`${cbase(orgId)}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: repId, period: '2026-Q1' })).body;
     expect(st.total).toBe(50);
 
-    const submit = await admin.post(`${cbase(orgId)}/statements/${encodeURIComponent(st.statementId)}/approve`);
+    const submit = await admin.post(`${cbase(orgId)}/statements/${encodeURIComponent(st.statementId ?? '')}/approve`);
     expect(submit.status).toBe(202);                       // the card now says "50 USD"
 
     // A late deal lands and the statement is recomputed — allowed, it is still a draft.
     await wonDeal(admin, orgId, 'W2', 900_000, repId, '2026-02-20', 'USD');
-    const recomputed = (await admin.post(`${cbase(orgId)}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' })).body;
+    const recomputed = (await admin.post(`${cbase(orgId)}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: repId, period: '2026-Q1' })).body;
     expect(recomputed.total).toBe(45_050);
 
     // The card still reads 50 USD. Approving it used to apply 45,050 — the reviewer
     // authorised a figure they never saw, and the audit trail recorded their approval.
-    const decide = await admin.post(`/host/openwop-app/reviews/approval:${submit.body.review.approvalId}/actions/approve`);
+    const decide = await admin.post(`/host/openwop-app/reviews/approval:${submit.body.review?.approvalId}/actions/approve`);
     expect(decide.status).toBe(409);
-    expect((await admin.get(`${cbase(orgId)}/statements`)).body.statements[0].status).toBe('draft');
+    expect(decide.body.error).toBe('conflict');
+    expect(decide.body.details?.pinned).toEqual({ total: 50, currency: 'USD' });
+    expect((await admin.get(`${cbase(orgId)}/statements`)).body.statements?.[0]?.status).toBe('draft');
   });
 
   it('an unchanged statement approves normally (the negative control)', async () => {
     const { admin, repId, orgId } = await scenario();
     const plan = await mkPlan(admin, orgId, { assignment: { kind: 'rep', ref: repId } });
     await wonDeal(admin, orgId, 'W1', 1000, repId, '2026-02-10', 'USD');
-    const st = (await admin.post(`${cbase(orgId)}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' })).body;
-    const submit = await admin.post(`${cbase(orgId)}/statements/${encodeURIComponent(st.statementId)}/approve`);
-    expect((await admin.post(`/host/openwop-app/reviews/approval:${submit.body.review.approvalId}/actions/approve`)).status).toBe(200);
+    const st = (await admin.post(`${cbase(orgId)}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: repId, period: '2026-Q1' })).body;
+    const submit = await admin.post(`${cbase(orgId)}/statements/${encodeURIComponent(st.statementId ?? '')}/approve`);
+    expect((await admin.post(`/host/openwop-app/reviews/approval:${submit.body.review?.approvalId}/actions/approve`)).status).toBe(200);
   });
 });
 
@@ -292,7 +324,7 @@ describe('COM2-B2/B3 — the accelerator ratio', () => {
     expect((await admin.put(`${tbase(orgId)}/models/${modelId}/territories/${quotaTerritory.territoryId}/quota`, {
       period: '2026-Q1', amount: 400_000, currency: quotaCurrency, repSplits: [{ subjectId: repId, amount: 400_000 }],
     })).status).toBe(200);
-    await transitionModelViaReview(admin as never, tbase(orgId), modelId);
+    await transitionModelViaReview(admin, tbase(orgId), modelId ?? '');
   }
 
   it('B2: a rep at 125% is not read as 250% by counting the roll-up twice', async () => {
@@ -307,10 +339,10 @@ describe('COM2-B2/B3 — the accelerator ratio', () => {
       assignment: { kind: 'rep', ref: repId },
       rules: [{ basis: 'deal-won', type: 'percentage', rate: 6, accelerators: [{ attainmentGte: 200, rate: 12 }] }],
     });
-    const res = await admin.post(`${cbase(orgId)}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
+    const res = await admin.post(`${cbase(orgId)}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
     expect(res.status, JSON.stringify(res.body)).toBe(201);
     expect(res.body.attainmentPct).toBeCloseTo(125, 0);      // 500,000 / 400,000
-    expect(res.body.lines[0].rate).toBe(6);                  // …so the 200% accelerator does NOT fire
+    expect(res.body.lines?.[0]?.rate).toBe(6);                  // …so the 200% accelerator does NOT fire
   });
 
   it('B2: …and a rep who DID cross the threshold is still paid for it', async () => {
@@ -325,10 +357,10 @@ describe('COM2-B2/B3 — the accelerator ratio', () => {
       assignment: { kind: 'rep', ref: repId },
       rules: [{ basis: 'deal-won', type: 'percentage', rate: 6, accelerators: [{ attainmentGte: 100, rate: 12 }] }],
     });
-    const res = await admin.post(`${cbase(orgId)}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
+    const res = await admin.post(`${cbase(orgId)}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
     expect(res.status, JSON.stringify(res.body)).toBe(201);
     expect(res.body.attainmentPct).toBeCloseTo(125, 0);
-    expect(res.body.lines[0].rate).toBe(12);
+    expect(res.body.lines?.[0]?.rate).toBe(12);
   });
 
   it('B2: splits on BOTH levels sum once each — the discriminating case', async () => {
@@ -350,16 +382,16 @@ describe('COM2-B2/B3 — the accelerator ratio', () => {
         period: '2026-Q1', amount: 200_000, currency: 'USD', repSplits: [{ subjectId: repId, amount: 200_000 }],
       })).status).toBe(200);
     }
-    await transitionModelViaReview(admin as never, tbase(orgId), modelId);
+    await transitionModelViaReview(admin, tbase(orgId), modelId ?? '');
 
     const plan = await mkPlan(admin, orgId, {
       assignment: { kind: 'rep', ref: repId },
       rules: [{ basis: 'deal-won', type: 'percentage', rate: 6, accelerators: [{ attainmentGte: 200, rate: 12 }] }],
     });
-    const res = await admin.post(`${cbase(orgId)}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
+    const res = await admin.post(`${cbase(orgId)}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
     expect(res.status, JSON.stringify(res.body)).toBe(201);
     expect(res.body.attainmentPct).toBeCloseTo(125, 0);      // 500,000 / (200,000 + 200,000)
-    expect(res.body.lines[0].rate).toBe(6);
+    expect(res.body.lines?.[0]?.rate).toBe(6);
   });
 
   it('B2: the quota may be authored on the CHILD instead — same answer', async () => {
@@ -370,9 +402,9 @@ describe('COM2-B2/B3 — the accelerator ratio', () => {
       assignment: { kind: 'rep', ref: repId },
       rules: [{ basis: 'deal-won', type: 'percentage', rate: 6, accelerators: [{ attainmentGte: 100, rate: 12 }] }],
     });
-    const res = await admin.post(`${cbase(orgId)}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
+    const res = await admin.post(`${cbase(orgId)}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
     expect(res.body.attainmentPct).toBeCloseTo(125, 0);
-    expect(res.body.lines[0].rate).toBe(12);
+    expect(res.body.lines?.[0]?.rate).toBe(12);
   });
 
   it('B3: a quota in a different currency than the deals earns the BASE rate, not 12,000%', async () => {
@@ -387,10 +419,10 @@ describe('COM2-B2/B3 — the accelerator ratio', () => {
       currency: 'JPY', assignment: { kind: 'rep', ref: repId },
       rules: [{ basis: 'deal-won', type: 'percentage', rate: 1, accelerators: [{ attainmentGte: 200, rate: 10 }] }],
     });
-    const res = await admin.post(`${cbase(orgId)}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
+    const res = await admin.post(`${cbase(orgId)}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
     expect(res.status, JSON.stringify(res.body)).toBe(201);
     expect(res.body.attainmentPct).toBeUndefined();          // "no context" — the safe fallback
-    expect(res.body.lines[0].rate).toBe(1);
+    expect(res.body.lines?.[0]?.rate).toBe(1);
   });
 });
 
@@ -399,33 +431,33 @@ describe('review fold-in — defects the independent pass found in the fix', () 
     const { admin, repId, orgId } = await scenario();
     const plan = await mkPlan(admin, orgId, { assignment: { kind: 'rep', ref: repId } });
     await wonDeal(admin, orgId, 'W1', 1000, repId, '2026-02-10', 'USD');
-    const st = (await admin.post(`${cbase(orgId)}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' })).body;
-    const first = await admin.post(`${cbase(orgId)}/statements/${encodeURIComponent(st.statementId)}/approve`);
+    const st = (await admin.post(`${cbase(orgId)}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: repId, period: '2026-Q1' })).body;
+    const first = await admin.post(`${cbase(orgId)}/statements/${encodeURIComponent(st.statementId ?? '')}/approve`);
     expect(first.status).toBe(202);
 
     await wonDeal(admin, orgId, 'W2', 900_000, repId, '2026-02-20', 'USD');
-    await admin.post(`${cbase(orgId)}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
+    await admin.post(`${cbase(orgId)}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
     // The 409 tells the operator to re-submit. Both submit paths reused whatever pending
     // card they found and never re-pinned it, so re-submitting handed back the SAME card
     // and approve 409'd again — the only escape was reject, which is structurally the
     // dead end COM2-M5 exists to close, one guard over.
-    expect((await admin.post(`/host/openwop-app/reviews/approval:${first.body.review.approvalId}/actions/approve`)).status).toBe(409);
+    expect((await admin.post(`/host/openwop-app/reviews/approval:${first.body.review?.approvalId}/actions/approve`)).status).toBe(409);
 
-    const second = await admin.post(`${cbase(orgId)}/statements/${encodeURIComponent(st.statementId)}/approve`);
+    const second = await admin.post(`${cbase(orgId)}/statements/${encodeURIComponent(st.statementId ?? '')}/approve`);
     expect(second.status).toBe(202);
-    expect(second.body.review.approvalId).not.toBe(first.body.review.approvalId);   // a FRESH card
-    expect((await admin.post(`/host/openwop-app/reviews/approval:${second.body.review.approvalId}/actions/approve`)).status).toBe(200);
-    expect((await admin.get(`${cbase(orgId)}/statements`)).body.statements[0].status).toBe('approved');
+    expect(second.body.review?.approvalId).not.toBe(first.body.review?.approvalId);   // a FRESH card
+    expect((await admin.post(`/host/openwop-app/reviews/approval:${second.body.review?.approvalId}/actions/approve`)).status).toBe(200);
+    expect((await admin.get(`${cbase(orgId)}/statements`)).body.statements?.[0]?.status).toBe('approved');
   });
 
   it('an unchanged statement re-submits idempotently (the negative control)', async () => {
     const { admin, repId, orgId } = await scenario();
     const plan = await mkPlan(admin, orgId, { assignment: { kind: 'rep', ref: repId } });
     await wonDeal(admin, orgId, 'W1', 1000, repId, '2026-02-10', 'USD');
-    const st = (await admin.post(`${cbase(orgId)}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' })).body;
-    const a1 = await admin.post(`${cbase(orgId)}/statements/${encodeURIComponent(st.statementId)}/approve`);
-    const a2 = await admin.post(`${cbase(orgId)}/statements/${encodeURIComponent(st.statementId)}/approve`);
-    expect(a2.body.review.approvalId).toBe(a1.body.review.approvalId);
+    const st = (await admin.post(`${cbase(orgId)}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: repId, period: '2026-Q1' })).body;
+    const a1 = await admin.post(`${cbase(orgId)}/statements/${encodeURIComponent(st.statementId ?? '')}/approve`);
+    const a2 = await admin.post(`${cbase(orgId)}/statements/${encodeURIComponent(st.statementId ?? '')}/approve`);
+    expect(a2.body.review?.approvalId).toBe(a1.body.review?.approvalId);
   });
 
   it('a deal currency in the wrong CASE is not treated as a different currency', async () => {
@@ -435,7 +467,7 @@ describe('review fold-in — defects the independent pass found in the fix', () 
     // otherwise 400 every statement for that rep — naming the SAME currency as the
     // difference, with no console affordance to fix it.
     await wonDeal(admin, orgId, 'lower', 1000, repId, '2026-02-10', 'usd');
-    const res = await admin.post(`${cbase(orgId)}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
+    const res = await admin.post(`${cbase(orgId)}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
     expect(res.status, JSON.stringify(res.body)).toBe(201);
     expect(res.body.total).toBe(50);
   });
@@ -446,26 +478,26 @@ describe('COM2-M9 — subject erasure reaches the commissions rows', () => {
     const { admin, repId, orgId, tenantId } = await scenario();
     const plan = await mkPlan(admin, orgId, { assignment: { kind: 'rep', ref: repId } });
     await wonDeal(admin, orgId, 'W', 1000, repId, '2026-02-10', 'USD');
-    await admin.post(`${cbase(orgId)}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
+    await admin.post(`${cbase(orgId)}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
 
     await eraseSubject(tenantId, repId);
 
     const rows = (await admin.get(`${cbase(orgId)}/statements`)).body.statements;
-    expect(rows[0].subjectId).toBe('user:[erased]');
-    expect(rows[0].total).toBe(50);                        // the financial record survives
+    expect(rows?.[0]?.subjectId).toBe('user:[erased]');
+    expect(rows?.[0]?.total).toBe(50);                        // the financial record survives
     // …and the row KEY no longer embeds them either. The first version rewrote four
     // FIELDS and left `statementId` = `planId:subjectId:period`, which the route returns
     // verbatim, the console renders, and the analyst agent is handed with the whole row.
-    expect(rows[0].statementId).not.toContain(repId);
+    expect(rows?.[0]?.statementId).not.toContain(repId);
 
     // …and the plan no longer names them as someone to pay. NOT a sentinel: a sentinel
     // `ref` still satisfies the COM2-B5 assignment check, so the plan would keep paying.
     // The plan itself SURVIVES — erasure must not delete the business record.
     const plans = (await admin.get(`${cbase(orgId)}/plans`)).body.plans;
     expect(plans).toHaveLength(1);
-    expect(plans[0].assignment).toBeUndefined();
+    expect(plans?.[0]?.assignment).toBeUndefined();
     // …and an unassigned plan refuses to pay anyone until a human re-assigns it.
-    const blocked = await admin.post(`${cbase(orgId)}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
+    const blocked = await admin.post(`${cbase(orgId)}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
     expect(blocked.status).toBe(400);
   });
 
@@ -473,9 +505,9 @@ describe('COM2-M9 — subject erasure reaches the commissions rows', () => {
     const { admin, repId, orgId, tenantId } = await scenario();
     const plan = await mkPlan(admin, orgId, { assignment: { kind: 'rep', ref: repId } });
     await wonDeal(admin, orgId, 'W', 1000, repId, '2026-02-10', 'USD');
-    await admin.post(`${cbase(orgId)}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
+    await admin.post(`${cbase(orgId)}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
     await eraseSubject(tenantId, 'user:nobody-here');
-    expect((await admin.get(`${cbase(orgId)}/statements`)).body.statements[0].subjectId).toBe(repId);
+    expect((await admin.get(`${cbase(orgId)}/statements`)).body.statements?.[0]?.subjectId).toBe(repId);
   });
 });
 
@@ -484,12 +516,12 @@ describe('R3 — the approval card reads like the table (the COM-G3 reintroducti
     const { admin, repId, orgId } = await scenario();
     const plan = await mkPlan(admin, orgId, { assignment: { kind: 'rep', ref: repId } });
     await wonDeal(admin, orgId, 'Big deal', 20_000, repId, '2026-02-10', 'USD');
-    const st = (await admin.post(`${cbase(orgId)}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' })).body;
-    const submit = await admin.post(`${cbase(orgId)}/statements/${encodeURIComponent(st.statementId)}/approve`);
+    const st = (await admin.post(`${cbase(orgId)}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: repId, period: '2026-Q1' })).body;
+    const submit = await admin.post(`${cbase(orgId)}/statements/${encodeURIComponent(st.statementId ?? '')}/approve`);
     expect(submit.status).toBe(202);
     const { getApproval } = await import('../src/host/approvalService.js');
-    const card = await getApproval(submit.body.review.approvalId);
-    expect(card!.proposal).toContain('rep');            // the member's displayName
+    const card = await getApproval(submit.body.review?.approvalId ?? '');
+    expect(card!.proposal).toContain(REP_NAME);         // the member's displayName
     expect(card!.proposal).toContain('$1,000.00');      // 5% of $20k, currency-formatted
     expect(card!.proposal).not.toContain(repId);        // the raw id is gone
     expect(card!.proposal).not.toContain('1000 USD');   // …and so is the raw pair
@@ -499,14 +531,14 @@ describe('R3 — the approval card reads like the table (the COM-G3 reintroducti
     const { admin, orgId, tenantId } = await scenario();
     // A second authenticated user who was never added as an org member.
     const ghost = client();
-    const ghostId = (await ghost.post('/host/openwop-app/test/login', { email: `g-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
+    const ghostId = (await ghost.post('/host/openwop-app/test/login', { email: `g-${Date.now()}-${n++}@acme.test`, tenantId })).body.user?.userId ?? '';
     const plan = await mkPlan(admin, orgId, { assignment: { kind: 'rep', ref: ghostId } });
     await wonDeal(admin, orgId, 'Ghost deal', 10_000, ghostId, '2026-02-12', 'USD');
-    const st = (await admin.post(`${cbase(orgId)}/plans/${plan.planId}/statements/compute`, { subjectId: ghostId, period: '2026-Q1' })).body;
-    const submit = await admin.post(`${cbase(orgId)}/statements/${encodeURIComponent(st.statementId)}/approve`);
+    const st = (await admin.post(`${cbase(orgId)}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: ghostId, period: '2026-Q1' })).body;
+    const submit = await admin.post(`${cbase(orgId)}/statements/${encodeURIComponent(st.statementId ?? '')}/approve`);
     expect(submit.status).toBe(202);
     const { getApproval } = await import('../src/host/approvalService.js');
-    const card = await getApproval(submit.body.review.approvalId);
+    const card = await getApproval(submit.body.review?.approvalId ?? '');
     expect(card!.proposal).toContain(ghostId);          // no name to resolve — the id is the truth
     expect(card!.proposal).toContain('$500.00');        // money is still formatted
   });

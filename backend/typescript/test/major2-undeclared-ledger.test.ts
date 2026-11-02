@@ -19,6 +19,10 @@ import type { AppConfig } from '../src/index.js';
  * moves this test with it. A hand-written mirror of the advert would reproduce
  * exactly the drift being guarded against — two lists agreeing by maintenance
  * rather than by construction.
+ *
+ * TST-DKD-5 (grade-tests wave 72). The stub config is now a typed `AppConfig`
+ * (no cast). Red when (w72 probe m2-ledger): a ledger row names a family the
+ * v2 root advertises.
  */
 describe('RFC 0148 §B — the major-2 opt-out ledger and the served v2 root cannot both claim a family', () => {
   // A stub config is SAFE here, and the reason is worth stating rather than
@@ -28,7 +32,7 @@ describe('RFC 0148 §B — the major-2 opt-out ledger and the served v2 root can
   // start deciding the answer, and the assertion below would be measuring the
   // stub instead of the host. The `family.interrupt` floor in the vacuity test is
   // what would catch that.
-  const CONFIG = { serviceName: 'test', serviceVersion: '0.0.0' } as unknown as AppConfig;
+  const CONFIG: AppConfig = { port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.0', enableConsoleTracer: false };
 
   function advertisedV2Paths(): Set<string> {
     const advert = buildV2Advertisement(CONFIG);

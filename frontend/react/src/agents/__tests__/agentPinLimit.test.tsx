@@ -38,6 +38,8 @@ vi.mock('../rosterClient.js', async (orig) => ({
 // PIN lane, not their internals (each has its own coverage).
 vi.mock('../RecurringTasksPanel.js', () => ({ RecurringTasksPanel: () => null }));
 vi.mock('../AgentHealthPanel.js', () => ({ AgentHealthPanel: () => null }));
+// ADR 1014 P4b — the workspace probes whether this host serves deployments; this host does not.
+vi.mock('../../client/agentDeploymentsClient.js', () => ({ listDeployments: async () => null }));
 
 import { AgentWorkspacePage } from '../AgentWorkspacePage.js';
 import { ProfilesApiError, type Profile } from '../../features/profiles/profilesClient.js';

@@ -402,6 +402,84 @@ duration picker defaulting to 8 h, Firebase re-auth then the call), a live count
 *End now*, the activation list, and the switch hand-off. Copy states exactly what is granted: KickTodo
 authoring and publishing, including approving your own submission, and the workspace's AI keys.
 
+> **CORRECTION 2026-10-29 — "including approving your own submission" was false on the review
+> card once RFC 0049 enforcement was on.** MEASURED on kicktodo-prod (`kicktodo-backend-00062-gf9`,
+> `OPENWOP_AUTHORIZATION_ENFORCEMENT=true`): the user activated (23:17:37Z, 201), then
+> `POST /reviews/approval:appr:5fb0628e…/actions/approve` answered **403** at 23:34:03Z and
+> 23:34:10Z. The `/reviews` approval arm required `approvals:respond` (ADR 0795) before
+> `claimApproval`. The activation joins the operator as `['viewer']` and adds only D1's two scopes,
+> so neither carries it, and the request never reached the `challenge-publish` owner check (manage
+> authority plus D5's waiver). `/approvals/:id/claim` has no such floor and already deferred to that
+> check, so the two decide lanes disagreed.
+>
+> **Fix (option c of three, chosen by an architect pass):** a kind owner may register its
+> eligibility check with `decidesAuthority` (`approvalService.ts` `registerApprovalEligibility`).
+> For such a kind the `/reviews` arm keeps only the key-lane half of its floor
+> (`requireKeyDeclaredScope`), and `claimApproval` / `rejectApproval` run the owner check before any
+> effect. Only `challenge-publish` opts in. Rejected: (a) adding `approvals:respond` to the D1 role,
+> which would let a live operator decide every kind without an owner check and break D1's "exactly
+> two"; (b) naming `challenge-publish` in the core route, which gives the kind a second owner. The
+> trade accepted: a `host:kicktodo:manage` holder without `approvals:respond` can decide a
+> publication on `/reviews` too, which is no wider than `/approvals/:id/claim` already allowed
+> (KTFULL-B2). Witness: `test/adr0910-operator-reviews-approve.test.ts`, enforcement on, with four
+> sabotages red.
+
+**D12 — removing a participant from the default workspace (added 2026-10-31, P5).** A listed
+superadmin with a LIVE operator activation on a declared default workspace may remove one
+*participant* from it. This is the only member-removal lane the operator has. It exists because
+P4 step 5 (the ADR 0684 §7 ban-path witness) turned out to be impossible: `DELETE
+/orgs/:orgId/members/:memberId` requires `host:members:manage`, being a listed superadmin adds
+nothing to that check, and OQ1 keeps the scope out of the D1 role. The owner approved this
+amendment on 2026-10-31 ("proceed with your recommendations").
+
+- **Route:** `POST /host/openwop-app/workspaces/:id/participant-removals`
+  `{ member, reason, dryRun? }`. It is host-local and never on the wire.
+  - `member` is a member id, or an exact (case-insensitive) display name or email on a root
+    member row. Exactly one row must match. Zero matches → 404. Several → 409 `ambiguous`,
+    carrying only the count.
+  - `dryRun: true` returns `{ memberId, displayName }`, so the SPA can confirm the person before
+    anything changes.
+- **Request guards:** D3's G1 (eligible personal tenant), G2 (a person acting for themselves) and
+  G3 (MFA). There is no re-auth window, matching *End now*: the activation already proved a recent
+  sign-in.
+- **Host guards (`host/participantRemoval.ts`)**, each refused at use time and fail-closed:
+  - the target passes D3's G6 (`assertOperatorTarget`);
+  - the actor holds a live activation (D4's `isActivationLive`, which re-reads the allowlist) **and**
+    still holds the root membership: the D5 predicate, reused;
+  - the reason is 10–500 characters;
+  - the target is a **participant**: every role it holds, directly or through a group, is `viewer`.
+    So owners, admins and editors are refused here and stay on the members route;
+  - the target is not the actor;
+  - the target is not a listed superadmin (their user record's personal tenant is on the
+    allowlist).
+- **The ban half (ADR 0684 §7):** before removing the row, the action makes sure the subject's join
+  record exists (`claimJoin`, insert-if-absent). Without that, a person an operator had added by
+  hand, who has no record, would be auto-joined again on their next sign-in. The removal itself is
+  `deleteMember`, so twins, the point-read index, groups and the active-workspace preference go the
+  ordinary way.
+- **Audit first:** a `security.operator-participant-removed` chain row
+  `{ activationId, by, memberId, memberSubject, reason }` is appended before the removal, so a failed
+  append means nothing is removed. An append that lands before a failed removal records an attempt.
+  That is the same at-least-once evidence the D7.3 correction accepts.
+- **SPA (D11):** while the caller's activation is live, the Operator access panel shows *Remove from
+  KickTodo*. It takes the person's name, email or member id and a reason, looks the person up with a
+  dry run, and asks for confirmation before removing them. The aggregate-only rule of this lens
+  (ADR 0438 A4) holds: nothing lists members. The one name shown is the match for what the
+  operator typed.
+
+*Alternatives weighed:*
+
+- (a) Add `host:members:manage` to the D1 role. Rejected by OQ1. It would also let a live operator
+  remove admins and owners and invite people.
+- (b) A standing `admin` member row for the owner in `host-kicktodo`. Rejected for the reasons
+  Options A and C rejected a standing seat: it never expires, and nothing reviews it.
+- (c) This narrow, activation-gated, participant-only action. Chosen.
+
+*What it is not:* a ban. ADR 0684's erasure note stands: the account-level disable
+(`authRoutes.ts`, 403 before auto-join) is the control a DSAR cannot reach. This action makes
+**removal hold**: a removed participant is not silently re-joined. That is the property step 5
+witnesses.
+
 ## Trade-offs accepted
 
 - **Re-activation friction.** Multi-day authoring means re-activating, with MFA and re-auth, at least
@@ -539,6 +617,18 @@ red against the guard removed, and the result is recorded in the PR.
 | `frontend/react/src/features/kicktodo-admin/i18n/*.ts` | Keys in every shipped locale (the owner can review pt-BR). |
 | `frontend/react/src/features/kicktodo-admin/__tests__/OperatorAccessPanel.test.tsx` | Hidden for a non-superadmin. Justification required. `mfa_required`/`reauth_required` render their own states. The countdown reaches "expired" and offers re-activation. The copy names self-approval. Witness: render without the superadmin check → red. |
 
+### P5 — D12, participant removal (added 2026-10-31)
+
+| File | Change |
+|---|---|
+| `backend/typescript/src/host/participantRemoval.ts` | The D12 host guards, the join-record claim, audit-first, `deleteMember`. |
+| `backend/typescript/src/routes/operatorAccess.ts` | `POST …/participant-removals` (G1–G3), beside the activation routes. |
+| `frontend/react/src/features/kicktodo-admin/ParticipantRemovalCard.tsx` | *Remove from KickTodo* inside the live Operator access panel: look up (dry run), confirm, remove. |
+| `backend/typescript/test/adr0910-participant-removal.test.ts` | Each guard refused; audit row carries the activation id; the join record persists so a re-sign-in does not re-join. Sabotage witnesses recorded in the PR. |
+
+P4 step 5 then runs on it: remove a test participant from `/admin/kicktodo/people` while the activation is
+live, have that account sign in again, and confirm KickTodo is absent from its workspace switcher.
+
 ### P4 — production enactment (runbook, recorded in this ADR)
 
 1. Deploy P0–P2 (backend first, ADR 0530 `deploy.sh`), then P3.
@@ -552,8 +642,65 @@ red against the guard removed, and the result is recorded in the PR.
    this ref: its form builds `<provider>:<label>`, which the chat ladder would pick up. Run the Factory, then submit and
    self-approve (D5) while the activation is live, re-activating as needed.
 5. Record the ADR 0684 ban-path witness that the operator identity finally makes possible.
+
+   > **CORRECTED 2026-10-31 — "the operator identity finally makes possible" is false.** The operator
+   > identity cannot remove anyone. `DELETE /orgs/:orgId/members/:memberId` requires
+   > `host:members:manage` in the active workspace (`routes/accessControl.ts`). Being a listed
+   > superadmin adds nothing to that check, and the `kicktodo-operator` role omits the scope by OQ1. So
+   > no UI and no route lets the owner remove a member from `host-kicktodo`, with or without a live
+   > activation. Step 5 needs the narrow, audited removal action proposed as an amendment to this ADR
+   > (the ban-path PR). Until that ships, this step cannot be enacted.
 6. Readiness shows the activation and the Factory credential. Let the activation expire and confirm
    the sweep's audit row and the other superadmins' notice.
+
+> **P4 record, 2026-10-30 — steps 2 and 4 witnessed on kicktodo.com; steps 3, 5 and 6 are not yet
+> recorded here, so P4 stays open.**
+> - **Step 2:** the owner activated `kicktodo-operator` on `host-kicktodo` (201, 2026-10-29 23:17:37Z).
+> - **Step 4:** the owner self-approved their own Factory submission while the activation was live.
+>   `appr:5fb0628e` on run `ac43c2ff` → `POST …/reviews/approval:appr:5fb0628e…/actions/approve` **200** at
+>   2026-10-30 03:45:33Z on `kicktodo-backend-00063-7gd` (enforcement on, no Editor role), followed by
+>   `kicktodo_publication_completed` for `cand:1a385e8e` at 03:45:33.838Z (kicktodo-prod logs, read-only).
+>   The first two attempts (23:34:03Z / 23:34:10Z on `00062-gf9`) were 403. See the D11 correction (#5390).
+> - **Not yet recorded:** step 3 (the D-23 binding removal and the ADR 0711 B check), step 5 (the ADR 0684
+>   ban-path witness) and step 6 (readiness, and activation expiry with the sweep's audit row and notice).
+>   ADR 0975 §Context reports the D-23 binding removal as working on 2026-10-24/25. Record its evidence here
+>   before ticking step 3.
+>
+> **P4 record, 2026-10-31 — steps 3 and 6 witnessed (step 6 except the notice); step 5 blocked; a new
+> finding is open. P4 stays OPEN.** Read-only kicktodo-prod logs plus the owner's own browser reads.
+> - **Step 3 (D-23 and the ADR 0711 B check) — witnessed.**
+>   - The binding removal: `DELETE /byok/active-config` → **204** at 2026-10-25T02:28:53Z on
+>     `kicktodo-backend-00053-v74`. It is the only such request in the 10 days of logs read.
+>   - Option B: on 2026-10-31 at about 13:24Z (`00065-dmc`, commit `70603081e`), a participant account
+>     read `GET /byok/active-config` →
+>     `{"provider":"openwop-free","credentialRef":"managed:openwop-free","stored":false,"valid":true}`.
+>     The chat provider card showed "Try it free — included". A member with no stored binding reads the
+>     managed default as `valid`.
+> - **New open finding — participants cannot chat in `host-kicktodo` under enforcement.**
+>   - That same participant's first chat turn failed: `POST /api/runs` → **403** at
+>     2026-10-31T13:25:23.936Z, logged as `authorization.denied scope=runs:create`.
+>   - The participant is an auto-join `viewer`, and a chat turn is a run of the conversation workflow.
+>     `OPENWOP_AUTHORIZATION_ENFORCEMENT=true` has applied since 2026-10-26 at about 21:46Z.
+>   - This is the ADR 0975 #8 refusal, which hit the operator first. ADR 0975 D8's run-start and turn
+>     grants admit only a manage-authority holder talking to the Challenge Author, so participants were
+>     never covered.
+>   - So "verify participants still reach the managed default" holds for the provider, not for a turn.
+>   - A fix design is pending the owner's decision. It would extend the D8 run-start and turn grant to
+>     KickTodo's participant agent, not widen the `viewer` role.
+> - **Step 6 — readiness and expiry witnessed; the other superadmin's notice is not.**
+>   - Readiness at about 13:19Z on 2026-10-31 returned `status: ready`, `blockers: []`,
+>     `factory: {ready: true}` and `operatorAccess: {eligible: 2, live: 1, warnings: []}`.
+>   - Expiry: the D7 sweep logged `operator_access_swept expired:1` at 2026-10-30T07:31:08.641Z on
+>     `00063-7gd`, for the activation of 2026-10-29 23:17:37Z (8 h maximum). Earlier activations were
+>     swept the same way at 2026-10-29T20:46:20Z and 2026-10-29T00:16:58Z.
+>   - The same pass appends the `security.operator-access-expired` chain row before it retires the row
+>     (`host/operatorAccess.ts`, the `appendAudit` call; covered by
+>     `test/adr0910-operator-sweep.test.ts`). The row itself has no UI. `/audit-log` reads the plain
+>     `audit_log` store, not the hash chain, and the chain export needs `host:members:manage`. So the
+>     owner cannot view or export it.
+>   - `eligible: 2` means one other listed superadmin should hold an Inbox notice "Operator access
+>     expired on host-kicktodo". Nobody has looked at that account's Inbox, so the notice is unwitnessed.
+> - **Step 5 — blocked;** see the correction under step 5.
 
 ## Open questions — decided 2026-10-18 by the owner
 
@@ -613,6 +760,7 @@ red against the guard removed, and the result is recorded in the PR.
 - [ ] P1 merged
 - [ ] P2 merged
 - [ ] P3 merged
+- [ ] P5 (D12 participant removal) merged
 - [ ] P4 enacted on kicktodo.com and recorded here → `implemented`
 
 ### Recovery review correction (2026-10-21, P3)

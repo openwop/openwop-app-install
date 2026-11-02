@@ -20,14 +20,15 @@
 
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi, beforeEach } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import {
   isAllowed, mergeConsentCategories, recordConsent, setPolicy, partialCategories, STRICT_EXPLICIT_OPT_IN, CONSENT_CATEGORIES,
 } from '../src/features/consent/consentService.js';
-import { visitorReplayAllowed } from '../src/features/consent/visitorConsent.js';
+import * as visitorConsent from '../src/features/consent/visitorConsent.js';
+import { DurableCollection } from '../src/host/hostExtPersistence.js';
 import {
   putReplayChunk, getReplaySession, eraseSubjectReplays, sweepExpiredReplays, replayStorageStatus, replayChunkPrefix,
   __resetReplayStoreForTests, REPLAY_DEFAULT_RETENTION_DAYS, type ReplaySession,
@@ -39,6 +40,7 @@ import { setRetentionHold, clearRetentionHold } from '../src/host/retentionHold.
 import { purgeTenantHostExt } from '../src/host/hostExtPersistence.js';
 import { buildHostSurfaceBundle } from '../src/host/inMemorySurfaces.js';
 import { BUILT_IN_ROLES, MANAGEMENT_SCOPES, isProtocolScope } from '../src/host/accessControlService.js';
+import { attestReplayOrg, setReplayToggles } from './helpers/replayToggles.js';
 
 let BASE: string;
 let server: http.Server;
@@ -59,7 +61,10 @@ beforeAll(async () => {
   await setToggle('analytics', 'on');
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+// ADR 0951 P2.5: recordings need both replay toggles ON (helpers/replayToggles.ts).
+beforeEach(async () => { await setReplayToggles('on'); });
 afterEach(async () => {
+  vi.useRealTimers();
   delete process.env.OPENWOP_REPLAY_ALLOW_MEMORY_BLOB;
   await __resetReplayStoreForTests();
   for (const id of ['consent', 'analytics.session-replay', 'analytics.heatmaps']) await setToggle(id, 'off');
@@ -78,7 +83,27 @@ function row(tenantId: string, over: Partial<ReplaySession> = {}): ReplaySession
 }
 const CHUNK = Buffer.from('masked-chunk').toString('base64');
 async function record(r: ReplaySession, chunks = 2): Promise<void> {
+  await attestReplayOrg(r.tenantId, r.orgId);
+  // The private store now requires the same visitor-owned generation as public
+  // admission will. These fixtures model recordings made after explicit opt-in.
+  await mergeConsentCategories({ tenantId: r.tenantId, subjectKey: r.subjectKey,
+    categories: { 'analytics.replay': true }, source: `public:${r.orgId}` });
   for (let i = 0; i < chunks; i++) await putReplayChunk(r, i, CHUNK);
+}
+// The store owns its timestamps. Historical fixtures move only the server Date
+// clock, leaving real timers/I/O alone; a forged input timestamp cannot age rows.
+async function recordAtStart(r: ReplaySession, chunks = 2): Promise<void> {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date(r.startedAt));
+  try { await record(r, chunks); } finally { vi.useRealTimers(); }
+}
+/** A later chunk, 20 minutes into the visit: inside the P2.3 30-minute session
+ *  limit, and late enough that a window keyed on `updatedAt` would keep a row
+ *  a window keyed on `startedAt` deletes. */
+async function chunkLater(r: ReplaySession, index: number): Promise<void> {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date(Date.parse(r.startedAt) + 20 * 60_000));
+  try { await putReplayChunk(r, index, CHUNK); } finally { vi.useRealTimers(); }
 }
 async function chunkKeys(r: ReplaySession): Promise<string[]> {
   const blob = buildHostSurfaceBundle({ tenantId: '__openwop_session_replay__' }).storage.blob;
@@ -95,6 +120,7 @@ describe('ADR 0951 D1 — analytics.replay is a strict explicit opt-in', () => {
   });
 
   it('the consent toggle OFF does NOT permit it (no permissive escape)', async () => {
+    await setToggle('consent', 'off'); // explicit: the shared replay helper turns it on
     const t = T();
     expect(await isAllowed(t, 'visitor:x', 'analytics')).toBe(true); // the escape exists for analytics…
     expect(await isAllowed(t, 'visitor:x', 'analytics.replay')).toBe(false); // …and not for replay
@@ -129,13 +155,35 @@ describe('ADR 0951 D1 — analytics.replay is a strict explicit opt-in', () => {
     expect(await isAllowed(t, 'visitor:g', 'analytics.replay')).toBe(false);
   });
 
-  it('a visitor with no consent token is refused even after a grant on the session key', async () => {
+  // ADR 0951 P2 review #6: there was a second "may this visit be recorded"
+  // predicate (`visitorReplayAllowed`) that no production lane called, and it
+  // said YES to a legacy boolean grant with no generation, which the real gate
+  // refuses. It is deleted; these cases now run against the real gate: the
+  // upload lane requires the consent token's subject, and the store records
+  // only under that subject's live grant generation.
+  it('a grant on the session key alone records nothing; the token subject\'s grant does', async () => {
+    allowMemoryBlob();
     await setToggle('consent', 'on');
     const t = T();
+    await attestReplayOrg(t, 'org-a');
+    const r = row(t, { subjectKey: 'visitor:tok', sessionKey: 'vk-1' });
     await mergeConsentCategories({ tenantId: t, subjectKey: 'vk-1', categories: { 'analytics.replay': true }, source: 'public:org-test' });
-    expect(await visitorReplayAllowed(t, 'vk-1', { tokenSubject: undefined, region: null })).toBe(false);
+    await expect(putReplayChunk(r, 0, CHUNK)).rejects.toMatchObject({ httpStatus: 409 });
     await mergeConsentCategories({ tenantId: t, subjectKey: 'visitor:tok', categories: { 'analytics.replay': true }, source: 'public:org-test' });
-    expect(await visitorReplayAllowed(t, 'vk-1', { tokenSubject: 'visitor:tok', region: null })).toBe(true);
+    await putReplayChunk(r, 0, CHUNK);
+    expect(await getReplaySession(t, r.orgId, r.sessionId)).not.toBeNull();
+  });
+
+  it('a legacy grant with no generation is refused, and there is one gate', async () => {
+    allowMemoryBlob();
+    await setToggle('consent', 'on');
+    const t = T();
+    await attestReplayOrg(t, 'org-a');
+    const legacy = new DurableCollection<{ tenantId: string; subjectKey: string }>('consent:record', (c) => `${c.tenantId}:${c.subjectKey}`);
+    await legacy.put({ tenantId: t, subjectKey: 'visitor:legacy', categories: { necessary: true, analytics: true, marketing: false, 'analytics.replay': true }, source: 'public:org-test', ts: new Date().toISOString() } as { tenantId: string; subjectKey: string });
+    expect(await isAllowed(t, 'visitor:legacy', 'analytics.replay')).toBe(true); // the boolean alone
+    await expect(putReplayChunk(row(t, { subjectKey: 'visitor:legacy' }), 0, CHUNK)).rejects.toMatchObject({ httpStatus: 409 });
+    expect(Object.keys(visitorConsent)).not.toContain('visitorReplayAllowed');
   });
 });
 
@@ -217,7 +265,11 @@ describe('ADR 0951 D4 — DSAR erasure', () => {
     delete process.env.OPENWOP_REPLAY_ALLOW_MEMORY_BLOB; // storage now "not configured": chunks unreachable
     await expect(eraseSubjectReplays(t, 'visitor:stuck')).rejects.toThrow(/not deleted/);
     allowMemoryBlob();
-    expect(await getReplaySession(t, r.orgId, r.sessionId), 'the row stays so a retry finds it').not.toBeNull();
+    // The durable retry receipt remains internal; a failed erase must not keep
+    // withdrawn content readable. The next erase still finds and removes it.
+    expect(await getReplaySession(t, r.orgId, r.sessionId)).toBeNull();
+    await eraseSubjectReplays(t, 'visitor:stuck');
+    expect(await chunkKeys(r)).toEqual([]);
   });
 });
 
@@ -227,9 +279,9 @@ describe('ADR 0951 D3/D4 — retention', () => {
   it('the default window deletes recordings older than 30 days on a default posture', async () => {
     allowMemoryBlob();
     const t = T();
-    const stale = row(t, { updatedAt: old(REPLAY_DEFAULT_RETENTION_DAYS + 1) });
-    const fresh = row(t, { updatedAt: old(1) });
-    await record(stale); await record(fresh);
+    const stale = row(t, { startedAt: old(REPLAY_DEFAULT_RETENTION_DAYS + 1), updatedAt: old(REPLAY_DEFAULT_RETENTION_DAYS + 1) });
+    const fresh = row(t, { startedAt: old(1), updatedAt: old(1) });
+    await recordAtStart(stale); await recordAtStart(fresh);
     const results = await runDefaultWindowSweeps();
     expect(results.find((r) => r.feature === 'analytics-replay')?.ok).toBe(true);
     expect(await getReplaySession(t, stale.orgId, stale.sessionId)).toBeNull();
@@ -240,8 +292,8 @@ describe('ADR 0951 D3/D4 — retention', () => {
   it('a legal hold keeps the tenant\'s recordings', async () => {
     allowMemoryBlob();
     const t = T();
-    const stale = row(t, { updatedAt: old(40) });
-    await record(stale);
+    const stale = row(t, { startedAt: old(40), updatedAt: old(40) });
+    await recordAtStart(stale);
     await setRetentionHold(t, 'litigation');
     try {
       await sweepExpiredReplays();
@@ -252,12 +304,43 @@ describe('ADR 0951 D3/D4 — retention', () => {
   it('the governance purger never keeps a recording longer than the default (stricter cutoff wins)', async () => {
     allowMemoryBlob();
     const t = T();
-    const r = row(t, { updatedAt: old(35) });
-    await record(r);
+    const r = row(t, { startedAt: old(35), updatedAt: old(35) });
+    await recordAtStart(r);
     // A 365-day tenant window would keep it; the replay default still removes it.
     const results = await purgeRetained(t, 'confidential-pii', old(365));
     expect(results.find((x) => x.feature === 'analytics-replay')).toMatchObject({ ok: true, deleted: 1 });
     expect(await getReplaySession(t, r.orgId, r.sessionId)).toBeNull();
+  });
+
+  it('a recent chunk cannot extend the default recording window', async () => {
+    allowMemoryBlob();
+    const t = T();
+    const now = Date.now();
+    const stale = row(t, { startedAt: new Date(now - 30 * 86_400_000 - 10 * 60_000).toISOString() });
+    const fresh = row(t, { startedAt: new Date(now - 29 * 86_400_000).toISOString() });
+    await recordAtStart(stale, 1); await recordAtStart(fresh, 1);
+    await chunkLater(stale, 1); await chunkLater(fresh, 1);
+    expect((await getReplaySession(t, stale.orgId, stale.sessionId))?.updatedAt).not.toBe(stale.startedAt);
+    expect(await sweepExpiredReplays(now)).toEqual({ deleted: 1, failed: 0 });
+    expect(await getReplaySession(t, stale.orgId, stale.sessionId)).toBeNull();
+    expect(await chunkKeys(stale)).toEqual([]);
+    expect(await getReplaySession(t, fresh.orgId, fresh.sessionId)).not.toBeNull();
+    expect(await chunkKeys(fresh)).toHaveLength(2);
+  });
+
+  it('a recent chunk cannot extend a stricter governance window', async () => {
+    allowMemoryBlob();
+    const t = T();
+    const stale = row(t, { startedAt: new Date(Date.parse(old(7)) - 10 * 60_000).toISOString() });
+    const fresh = row(t, { startedAt: old(6) });
+    await recordAtStart(stale, 1); await recordAtStart(fresh, 1);
+    await chunkLater(stale, 1); await chunkLater(fresh, 1);
+    expect((await getReplaySession(t, stale.orgId, stale.sessionId))?.updatedAt).not.toBe(stale.startedAt);
+    const results = await purgeRetained(t, 'confidential-pii', old(7));
+    expect(results.find((x) => x.feature === 'analytics-replay')).toMatchObject({ ok: true, deleted: 1 });
+    expect(await getReplaySession(t, stale.orgId, stale.sessionId)).toBeNull();
+    expect(await chunkKeys(stale)).toEqual([]);
+    expect(await getReplaySession(t, fresh.orgId, fresh.sessionId)).not.toBeNull();
   });
 });
 

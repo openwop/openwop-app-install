@@ -35,6 +35,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { stripComments } from './helpers/stripComments.js';
 
 const SRC_ROOT = join(__dirname, '..', 'src');
 
@@ -78,9 +79,6 @@ function walk(dir: string): string[] {
  * instead of behaviour is red on a correct tree and, worse, could be made green
  * by editing a comment.
  */
-function stripComments(src: string): string {
-  return src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
-}
 
 /** Every `registerSubjectEraser(<arg…` call site, with the first ~160 chars of
  *  the argument — enough to classify its shape without parsing TypeScript.

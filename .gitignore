@@ -46,6 +46,8 @@ playwright-report/
 
 # white-label distributable (scripts/build-whitelabel-zip.sh)
 dist-whitelabel/
+# ADR 1015 the tenant site runtime build (frontend/react; built into the image)
+dist-site-runtime/
 
 # ── secrets / credentials — NEVER commit (this repo is public) ──
 # Private keys, certs, key material

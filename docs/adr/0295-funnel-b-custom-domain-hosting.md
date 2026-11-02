@@ -80,3 +80,16 @@ tenant onboarding to deploy-project IAM.
   subdomains-only).
 - Whether the white-label bundle (ADR 0052) documents this as adopter-operated infra
   with their own proxy credentials (it must — the steward's cert map is not shared).
+
+> **CORRECTION 2026-11-01 (ADR 1015 pilot): the P3 per-domain budget let one scanner take a customer domain offline.**
+>
+> **What happened.** One IP sent about 1,240 probe requests (`.env`, `.git-credentials`, `phpinfo.php`) to a newly certified domain in a single minute. Every request, 404s included, was charged to the ONE per-host bucket, so real visitors got 429 on `/`.
+>
+> **What changed.**
+> - A path the host doesn't serve is now charged only to the client's own miss bucket (60/min per IP), so a prober throttles only itself.
+> - A served request is charged to the client's share of the host first (120/min), then to the unchanged host ceiling (600/min). So one IP can't spend the host's budget, and a distributed flood is still capped.
+> - The ADR 1015 beacon lanes get the same per-IP share.
+> - The client is `host/clientIp.ts`. The custom-domain load balancer (`OPENWOP_CUSTOM_DOMAIN_LB_IP`) is now a trusted hop there. Before this, every visitor behind it resolved to the load balancer's own address and shared one per-IP bucket, in this guard and in the global limiter.
+>
+> **Witness:** `test/custom-domain-rate-buckets.test.ts`. Charging misses to the page bucket, or dropping the per-IP share, turns it red.
+

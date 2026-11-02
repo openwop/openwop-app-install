@@ -1,14 +1,25 @@
 /**
- * Entity localization (ADR 0406 Phases 2–3) — route-level coverage: the
- * `localizable` flag (string-only), overlay writes fail-closed behind the
+ * Entity localization (ADR 0406 Phases 2–3) — TST-DAA-1. Route-level coverage:
+ * the `localizable` flag (string-only), overlay writes fail-closed behind the
  * `entities-localization` toggle, overlay validation (locale shape, field
- * allowlist, one-validator values), locale-negotiated public delivery
- * (Accept-Language, explicit ?locale wins, Content-Language + Vary, overlays
- * never leak), and the NDJSON round-trip with per-row toggle errors.
+ * allowlist), locale-negotiated public delivery (Accept-Language, explicit
+ * ?locale wins, Content-Language + Vary, overlays never leak), and the NDJSON
+ * round-trip with per-row toggle errors.
+ *
+ * Each case seeds its own type, so the file passes alone and shuffled; the
+ * global toggle is set in `beforeEach` and every flip restores in `finally`.
+ *
+ * Red when (sabotage-witnessed, wave 70): the customFields string-only check is
+ * dropped; the route's write gate (`requireLocalizationForWrite`) is dropped;
+ * the overlay locale check or the non-localizable-field check is dropped;
+ * `toPublicEntity` stops resolving overlays; the single-entity route stops
+ * setting `Vary: Accept-Language`; an explicit `?locale` stops winning; the
+ * public read ignores the toggle; NDJSON import stops refusing overlay rows
+ * while the toggle is off.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { getSetCookies } from './headerCookies.js';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
@@ -18,6 +29,8 @@ import { updateContentLanguageSettings } from '../src/host/contentLocales.js';
 
 let BASE: string;
 let server: http.Server;
+
+interface ErrorBody { error?: string; message?: string }
 
 interface Client {
   get: (path: string, headers?: Record<string, string>) => Promise<Response>;
@@ -60,9 +73,36 @@ const setToggle = async (id: string, status: 'on' | 'off'): Promise<void> => {
   await saveConfig({ ...d, status }, 'test');
 };
 
+/** A refusal must be THIS refusal: same status, same code, the named message. */
+async function expectRefusal(res: Response, message: string): Promise<void> {
+  expect(res.status).toBe(400);
+  const body = (await res.json()) as ErrorBody;
+  expect(body.error).toBe('validation_error');
+  expect(body.message).toContain(message);
+}
+
 const B = '/host/openwop-app/entities';
 const P = '/host/openwop-app/public-entities';
 const T = 'tenant-loc';
+
+const STORY_FIELDS = [
+  { key: 'title', label: 'Title', type: 'string', required: true, localizable: true },
+  { key: 'body', label: 'Body', type: 'string', required: false, localizable: true },
+  { key: 'rank', label: 'Rank', type: 'number', required: false },
+];
+
+/** Create + publish + publicRead a localizable type, owned by this case. */
+async function seedType(owner: Client, name: string): Promise<void> {
+  expect((await owner.post(`${B}/types`, { name, fields: STORY_FIELDS })).status).toBe(201);
+  expect((await owner.patch(`${B}/types/${name}`, { status: 'published' })).status).toBe(200);
+  expect((await owner.patch(`${B}/types/${name}`, { publicRead: true })).status).toBe(200);
+}
+
+async function owner(subject = 'owner-loc', tenantId = T): Promise<Client> {
+  const c = client();
+  await c.login(subject, tenantId);
+  return c;
+}
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -86,55 +126,61 @@ beforeAll(async () => {
   await updateContentLanguageSettings(T, org.orgId, { baseLocale: 'en', supportedLocales: ['es', 'pt-BR'] }, 'test');
 });
 
+beforeEach(async () => { await setToggle('entities-localization', 'on'); });
+
 afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
 describe('entity localization (ADR 0406)', () => {
   it('localizable is string-only and closed-world at type save', async () => {
-    const owner = client();
-    await owner.login('owner-loc', T);
-    const bad = await owner.post(`${B}/types`, {
+    const o = await owner();
+    const bad = await o.post(`${B}/types`, {
       name: 'bad-type',
       fields: [{ key: 'count', label: 'Count', type: 'number', required: false, localizable: true }],
     });
-    expect(bad.status).toBe(400);
-    const ok = await owner.post(`${B}/types`, {
-      name: 'story',
-      fields: [
-        { key: 'title', label: 'Title', type: 'string', required: true, localizable: true },
-        { key: 'body', label: 'Body', type: 'string', required: false, localizable: true },
-        { key: 'rank', label: 'Rank', type: 'number', required: false },
-      ],
+    await expectRefusal(bad, '`localizable` is only valid for a `string` field');
+    // The same type with the flag on a STRING field saves (positive control).
+    const ok = await o.post(`${B}/types`, {
+      name: 'bad-type',
+      fields: [{ key: 'count', label: 'Count', type: 'string', required: false, localizable: true }],
     });
     expect(ok.status).toBe(201);
-    expect((await owner.patch(`${B}/types/story`, { status: 'published' })).status).toBe(200);
-    expect((await owner.patch(`${B}/types/story`, { publicRead: true })).status).toBe(200);
   });
 
   it('overlay writes fail closed while the entities-localization toggle is OFF', async () => {
+    const o = await owner();
+    await seedType(o, 'story-off');
     await setToggle('entities-localization', 'off');
-    const owner = client();
-    await owner.login('owner-loc', T);
-    const res = await owner.post(`${B}/types/story/entities`, {
-      values: { title: 'Hello', rank: 1 },
-      localizations: { es: { title: 'Hola' } },
-    });
-    expect(res.status).toBe(400);
-    // Without overlays the write is untouched by the toggle.
-    expect((await owner.post(`${B}/types/story/entities`, { entityId: 'st-plain', values: { title: 'Plain' } })).status).toBe(201);
+    try {
+      const res = await o.post(`${B}/types/story-off/entities`, {
+        values: { title: 'Hello', rank: 1 },
+        localizations: { es: { title: 'Hola' } },
+      });
+      await expectRefusal(res, 'Entity localization is not enabled');
+      // Without overlays the write is untouched by the toggle.
+      expect((await o.post(`${B}/types/story-off/entities`, { entityId: 'st-plain', values: { title: 'Plain' } })).status).toBe(201);
+    } finally {
+      await setToggle('entities-localization', 'on');
+    }
   });
 
   it('validates overlays closed-world and serves locale-negotiated public reads', async () => {
-    await setToggle('entities-localization', 'on');
-    const owner = client();
-    await owner.login('owner-loc', T);
+    const o = await owner();
+    await seedType(o, 'story-read');
+    const S = 'story-read';
 
-    // Bad locale key / non-localizable field → 400.
-    expect((await owner.post(`${B}/types/story/entities`, { values: { title: 'X' }, localizations: { nope_x: { title: 'Y' } } })).status).toBe(400);
-    expect((await owner.post(`${B}/types/story/entities`, { values: { title: 'X' }, localizations: { es: { rank: 2 } } })).status).toBe(400);
+    // Bad locale key / non-localizable field → the NAMED 400.
+    await expectRefusal(
+      await o.post(`${B}/types/${S}/entities`, { values: { title: 'X' }, localizations: { nope_x: { title: 'Y' } } }),
+      'Invalid overlay locale `nope_x`',
+    );
+    await expectRefusal(
+      await o.post(`${B}/types/${S}/entities`, { values: { title: 'X' }, localizations: { es: { rank: 2 } } }),
+      'Field `rank` is not localizable',
+    );
 
-    const created = await owner.post(`${B}/types/story/entities`, {
+    const created = await o.post(`${B}/types/${S}/entities`, {
       entityId: 'st-hello',
       values: { title: 'Hello', body: 'World', rank: 1 },
       localizations: { es: { title: 'Hola', body: 'Mundo' }, 'pt-BR': { title: 'Olá' } },
@@ -145,78 +191,81 @@ describe('entity localization (ADR 0406)', () => {
 
     const a = client(); // anonymous
     // Accept-Language negotiation → es values + headers.
-    const es = await a.get(`${P}/${T}/types/story/entities/st-hello`, { 'accept-language': 'es, en;q=0.5' });
+    const es = await a.get(`${P}/${T}/types/${S}/entities/st-hello`, { 'accept-language': 'es, en;q=0.5' });
     expect(es.status).toBe(200);
     expect(es.headers.get('content-language')).toBe('es');
-    expect(es.headers.get('vary')).toContain('Accept-Language');
+    const vary = (es.headers.get('vary') ?? '').split(',').map((t) => t.trim().toLowerCase());
+    expect(vary).toContain('accept-language');
     const esBody = (await es.json()) as { values: Record<string, unknown>; localizations?: unknown };
     expect(esBody.values.title).toBe('Hola');
     expect(esBody.values.rank).toBe(1); // non-localized fields ride along
     expect(esBody.localizations).toBeUndefined(); // the overlay map never leaks
 
     // Explicit ?locale wins over the header (non-normative surface — D5).
-    const pt = await a.get(`${P}/${T}/types/story/entities/st-hello?locale=pt-BR`, { 'accept-language': 'es' });
+    const pt = await a.get(`${P}/${T}/types/${S}/entities/st-hello?locale=pt-BR`, { 'accept-language': 'es' });
     expect(((await pt.json()) as { values: Record<string, unknown> }).values.title).toBe('Olá');
     // pt-BR overlay is partial → body falls back to base.
-    expect(((await a.get(`${P}/${T}/types/story/entities/st-hello?locale=pt-BR`).then((r) => r.json())) as { values: Record<string, unknown> }).values.body).toBe('World');
+    expect(((await a.get(`${P}/${T}/types/${S}/entities/st-hello?locale=pt-BR`).then((r) => r.json())) as { values: Record<string, unknown> }).values.body).toBe('World');
 
-    // Unsupported negotiation → base; malformed explicit locale → 400.
-    const de = await a.get(`${P}/${T}/types/story/entities/st-hello`, { 'accept-language': 'de' });
+    // Unsupported negotiation → base; malformed explicit locale → the NAMED 400.
+    const de = await a.get(`${P}/${T}/types/${S}/entities/st-hello`, { 'accept-language': 'de' });
     expect(((await de.json()) as { values: Record<string, unknown> }).values.title).toBe('Hello');
-    expect((await a.get(`${P}/${T}/types/story/entities/st-hello?locale=not!valid`)).status).toBe(400);
+    await expectRefusal(await a.get(`${P}/${T}/types/${S}/entities/st-hello?locale=not!valid`), 'Invalid locale `not!valid`');
 
     // List path resolves too.
-    const list = await a.get(`${P}/${T}/types/story/entities?sortKey=title&sortDir=asc`, { 'accept-language': 'es' });
+    const list = await a.get(`${P}/${T}/types/${S}/entities?sortKey=title&sortDir=asc`, { 'accept-language': 'es' });
     expect(list.headers.get('content-language')).toBe('es');
     const rows = ((await list.json()) as { entities: Array<{ entityId: string; values: Record<string, unknown> }> }).entities;
     expect(rows.find((r) => r.entityId === 'st-hello')?.values.title).toBe('Hola');
 
     // Toggle OFF ⇒ base values, no negotiation headers (byte-identical).
     await setToggle('entities-localization', 'off');
-    const off = await a.get(`${P}/${T}/types/story/entities/st-hello`, { 'accept-language': 'es' });
-    expect(off.headers.get('content-language')).toBeNull();
-    expect(((await off.json()) as { values: Record<string, unknown> }).values.title).toBe('Hello');
-    await setToggle('entities-localization', 'on');
+    try {
+      const off = await a.get(`${P}/${T}/types/${S}/entities/st-hello`, { 'accept-language': 'es' });
+      expect(off.headers.get('content-language')).toBeNull();
+      expect(((await off.json()) as { values: Record<string, unknown> }).values.title).toBe('Hello');
+    } finally {
+      await setToggle('entities-localization', 'on');
+    }
   });
 
   it('round-trips overlays through NDJSON export/import; toggle-off rows error per-row', async () => {
-    const owner = client();
-    await owner.login('owner-loc', T);
-    const exported = await owner.get(`${B}/types/story/export`);
+    const o = await owner();
+    await seedType(o, 'story-nd');
+    expect((await o.post(`${B}/types/story-nd/entities`, {
+      entityId: 'nd-1',
+      values: { title: 'Hello', body: 'World', rank: 1 },
+      localizations: { es: { title: 'Hola', body: 'Mundo' } },
+    })).status).toBe(201);
+    const exported = await o.get(`${B}/types/story-nd/export`);
     expect(exported.status).toBe(200);
     const ndjson = await exported.text();
-    expect(ndjson).toContain('"localizations"');
-
-    // Import into a second tenant WITHOUT localization → per-row errors.
-    const owner2 = client();
-    await owner2.login('owner-loc2', 'tenant-loc2');
-    expect((await owner2.post(`${B}/types`, {
-      name: 'story',
-      fields: [
-        { key: 'title', label: 'Title', type: 'string', required: true, localizable: true },
-        { key: 'body', label: 'Body', type: 'string', required: false, localizable: true },
-        { key: 'rank', label: 'Rank', type: 'number', required: false },
-      ],
-    })).status).toBe(201);
     const rows = ndjson.trim().split('\n').filter((l) => l.includes('"localizations"'));
-    expect(rows.length).toBeGreaterThan(0);
+    expect(rows).toHaveLength(1);
 
-    // Toggle OFF ⇒ overlay-carrying rows error PER-ROW (never a silent drop).
+    // Import into a second tenant.
+    const o2 = await owner('owner-loc2', 'tenant-loc2');
+    expect((await o2.post(`${B}/types`, { name: 'story-nd', fields: STORY_FIELDS })).status).toBe(201);
+
+    // Toggle OFF ⇒ the overlay-carrying row errors PER-ROW (never a silent drop).
     await setToggle('entities-localization', 'off');
-    const blocked = await owner2.post(`${B}/types/story/import`, { ndjson: rows.join('\n') });
-    expect(blocked.status).toBe(200);
-    const blockedResult = (await blocked.json()) as { created: number; errors: Array<{ message: string }> };
-    expect(blockedResult.errors.length).toBeGreaterThan(0);
-    expect(blockedResult.errors[0]?.message).toContain('entities-localization');
-    expect(blockedResult.created).toBe(0);
+    try {
+      const blocked = await o2.post(`${B}/types/story-nd/import`, { ndjson: rows.join('\n') });
+      expect(blocked.status).toBe(200);
+      const blockedResult = (await blocked.json()) as { created: number; errors: Array<{ line: number; message: string }> };
+      expect(blockedResult.errors).toHaveLength(1);
+      expect(blockedResult.errors[0]?.message).toContain('entities-localization');
+      expect(blockedResult.created).toBe(0);
+    } finally {
+      await setToggle('entities-localization', 'on');
+    }
 
-    // Toggle ON ⇒ the same rows import with overlays intact.
-    await setToggle('entities-localization', 'on');
-    const ok = await owner2.post(`${B}/types/story/import`, { ndjson: rows.join('\n') });
+    // Toggle ON ⇒ the same row imports with overlays intact.
+    const ok = await o2.post(`${B}/types/story-nd/import`, { ndjson: rows.join('\n') });
     const okResult = (await ok.json()) as { created: number; errors: Array<{ message: string }> };
-    expect(okResult.errors.length).toBe(0);
-    expect(okResult.created).toBeGreaterThan(0);
-    const reread = await owner2.get(`${B}/types/story/entities/st-hello`);
+    expect(okResult.errors).toHaveLength(0);
+    expect(okResult.created).toBe(1);
+    const reread = await o2.get(`${B}/types/story-nd/entities/nd-1`);
     expect(reread.status).toBe(200);
     expect((((await reread.json()) as { localizations?: Record<string, unknown> }).localizations)?.es).toEqual({ title: 'Hola', body: 'Mundo' });
   });

@@ -7,8 +7,8 @@
  *
  * Wave 30 (grade-tests): fixtures are full typed rows (no casts); the node set is
  * pinned to the pack MANIFEST (module ↔ pack.json parity), not a hand list. Two
- * product defects are pinned as `it.fails` (CB-SEEDS-1, CB-KERNEL-1) — each flips
- * red when the product is fixed.
+ * product defects were pinned as `it.fails` (CB-SEEDS-1, CB-KERNEL-1); both are
+ * fixed by ADR 1020 and now assert the correct behaviour.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -79,7 +79,7 @@ describe('feature.campaign-brief.nodes — node pack', () => {
     // Module ↔ manifest parity: every declared node has a handler and vice versa.
     const manifest = JSON.parse(readFileSync(join(REPO_ROOT, 'packs', 'feature.campaign-brief.nodes', 'pack.json'), 'utf8')) as { nodes: Array<{ typeId: string }> };
     const declared = manifest.nodes.map((n) => n.typeId).sort();
-    expect(declared).toHaveLength(13);
+    expect(declared).toHaveLength(14); // + promote-kernel (ADR 1020 D8)
     expect(Object.keys(nodePack).sort()).toEqual(declared);
   });
 
@@ -121,15 +121,12 @@ describe('feature.campaign-brief.nodes — node pack', () => {
   });
 });
 
-// CB-SEEDS-1 (BLOCKED-ON-PRODUCT, wave 30) — extract-seeds returns
-// `status:'success'` with `proposals: {}` when the model returns NOTHING: invalid
-// model output reported as success-with-empty (CLAUDE.md non-negotiable). Correct:
-// a typed failure (ideally after ONE error-fed repair, the extract-voc pattern).
-// Fix direction: in packs/feature.campaign-brief.nodes/index.mjs extractBriefSeeds,
-// return `{ status:'failed', error:{ code:'generation_empty' } }` when `data` is not
-// an object; then drop `.fails`.
+// CB-SEEDS-1 (wave 30; CLOSED by ADR 1020 D12) — extract-seeds returned
+// `status:'success'` with `proposals: {}` when the model returned NOTHING: invalid
+// model output reported as success-with-empty (CLAUDE.md non-negotiable). It is now
+// a typed `generation_empty` after ONE error-fed repair.
 describe('CB-SEEDS-1 — extract-seeds never reports an empty model reply as success', () => {
-  it.fails('an empty model reply is a typed failure', async () => {
+  it('an empty model reply is a typed failure', async () => {
     const callAI = async () => ({ data: undefined });
     const kb = { rag: async () => ({ augmentedPrompt: '[0] FlashPick buyers are ops directors.', citations: [{ documentId: 'd1' }], coverage: 'ok' }) };
     const out = await nodePack['feature.campaign-brief.nodes.extract-seeds']({ features: { kb }, callAI, inputs: { orgId: 'o1', collectionId: 'c1' } });
@@ -138,21 +135,17 @@ describe('CB-SEEDS-1 — extract-seeds never reports an empty model reply as suc
   });
 });
 
-// CB-KERNEL-1 (BLOCKED-ON-PRODUCT, wave 30) — surface.setKernel persists
-// `args.kernel as MessagingKernel` with NO validation, so any surface caller can
-// write a malformed kernel onto the brief (and it advances status when the brief
-// validates). Model output must reach durable state only through closed-world
-// validation. Correct: a typed 422 and the stored brief untouched. Fix direction:
-// validate the kernel shape (string headline/supportingStatement/primaryCta/tone,
-// string[] proofPoints, bounded lengths) in surface.setKernel / briefService.setKernel;
-// then drop `.fails`.
+// CB-KERNEL-1 (wave 30; CLOSED by ADR 1020, `cleanKernel`) — surface.setKernel
+// persisted `args.kernel as MessagingKernel` with NO validation, so any surface
+// caller could write a malformed kernel onto the brief (and advance its status).
+// It is now a typed 422 and the stored brief is untouched.
 describe('CB-KERNEL-1 — the kernel write is closed-world', () => {
   beforeEach(async () => {
     initHostExtPersistence(openSqliteStorage(':memory:'));
     await __clearBriefs();
   });
 
-  it.fails('a malformed kernel is refused and never persisted', async () => {
+  it('a malformed kernel is refused and never persisted', async () => {
     const brief = await createBrief(TENANT, 'o1', 'u1', { name: 'Camp', productName: 'FlashPick' });
     const surface = buildCampaignBriefSurface({ tenantId: TENANT });
     await expect(surface.setKernel!({ briefId: brief.id, kernel: { headline: 42, proofPoints: 'not-an-array' } }))
@@ -242,5 +235,142 @@ describe('vendor.openwop-app.campaign-brief.agents — agent pack', () => {
       'openwop:campaign-brief.research.run',
       'openwop:campaign-brief.validate',
     ]);
+  });
+});
+
+describe('ADR 1020 P2 — the kernel is saved only after its approval', () => {
+  beforeEach(async () => {
+    initHostExtPersistence(openSqliteStorage(':memory:'));
+    await __clearBriefs();
+  });
+  const GOOD = { headline: 'Pick faster', supportingStatement: 'Save hours', proofPoints: ['40%'], primaryCta: 'Demo', tone: 'confident' };
+  const asmOf = (extra: Record<string, unknown> = {}) => ({ found: true, brief: { id: 'b1', orgId: 'o1', productName: 'FlashPick' }, contextText: 'CONTEXT', valid: true, enabledChannels: [], briefVersion: 3, ...extra });
+
+  it('D8: with config.stageKernel, generate-kernel saves NOTHING and hands the kernel + its brief revision to the approval', async () => {
+    let saved = 0;
+    const features = { 'campaign-brief': { assembleContext: async () => asmOf(), setKernel: async () => { saved += 1; return { brief: { id: 'b1' } }; } } };
+    const out = await nodePack['feature.campaign-brief.nodes.generate-kernel']({ features, config: { stageKernel: true }, callAI: async () => ({ data: GOOD }), inputs: { briefId: 'b1' } });
+    expect(out).toMatchObject({ status: 'success', outputs: { staged: true, briefVersion: 3, priorKernelAt: null, kernel: { headline: 'Pick faster' } } });
+    expect(saved).toBe(0);
+  });
+
+  it('CS70WF-19: a kernel with an empty field or no proof point is repaired once, then a typed failure', async () => {
+    let calls = 0;
+    const features = { 'campaign-brief': { assembleContext: async () => asmOf(), setKernel: async () => ({ brief: { id: 'b1' } }) } };
+    const out = await nodePack['feature.campaign-brief.nodes.generate-kernel']({ features, config: { stageKernel: true }, callAI: async () => { calls += 1; return { data: { ...GOOD, proofPoints: [] } }; }, inputs: { briefId: 'b1' } });
+    expect(calls).toBe(2);
+    expect(out).toMatchObject({ status: 'failed', error: { code: 'generation_empty' } });
+    expect(out.error?.message).toContain('no proof points');
+  });
+
+  it('D11: promote-kernel saves the approved kernel through the REAL surface, and refuses brief_changed when the brief was edited meanwhile', async () => {
+    const brief = await createBrief(TENANT, 'o1', 'u1', { name: 'Camp', productName: 'FlashPick', messaging: { primaryValueProp: 'v' } });
+    const surface = buildCampaignBriefSurface({ tenantId: TENANT });
+    const kernel = { ...GOOD, secondaryCta: '', channelTones: {}, sourceDocIds: [], generatedAt: '2026-10-31T00:00:00Z' };
+    const promote = nodePack['feature.campaign-brief.nodes.promote-kernel'];
+    const v = (await getBrief(TENANT, brief.id))!.version ?? 1;
+    // An edit lands while the kernel is out for review: the revision moves.
+    await updateBrief(TENANT, brief.id, { productName: 'FlashPick Pro' });
+    const stale = await promote({ features: { 'campaign-brief': surface }, inputs: { briefId: brief.id, kernel, briefVersion: v, priorKernelAt: null } });
+    expect(stale).toMatchObject({ status: 'failed', error: { code: 'brief_changed' } });
+    expect((await getBrief(TENANT, brief.id))!.kernel).toBeUndefined();
+    // Against the current revision it saves, and clears stale.
+    const now = (await getBrief(TENANT, brief.id))!.version ?? 1;
+    const ok = await promote({ features: { 'campaign-brief': surface }, inputs: { briefId: brief.id, kernel, briefVersion: now, priorKernelAt: null } });
+    expect(ok.status).toBe('success');
+    expect((await getBrief(TENANT, brief.id))!.kernel?.headline).toBe('Pick faster');
+  });
+
+  it('grade-code M2: promote-kernel refuses a kernel that arrives without its brief revision (never saves unconditioned)', async () => {
+    let saved = 0;
+    const features = { 'campaign-brief': { setKernel: async () => { saved += 1; return { brief: { id: 'b1', status: 'validated' } }; }, assembleContext: async () => ({ found: true }) } };
+    const out = await nodePack['feature.campaign-brief.nodes.promote-kernel']({ features, inputs: { briefId: 'b1', kernel: GOOD } });
+    expect(out).toMatchObject({ status: 'failed', error: { code: 'validation_error' } });
+    expect(saved).toBe(0);
+  });
+
+  it('grade-code M3: two kernels generated from the same state cannot both be approved — the second refuses instead of replacing the first', async () => {
+    const brief = await createBrief(TENANT, 'o1', 'u1', { name: 'Camp', productName: 'FlashPick' });
+    const v = (await getBrief(TENANT, brief.id))!.version ?? 1;
+    const k = (headline: string, at: string) => ({ ...GOOD, headline, secondaryCta: '', channelTones: {}, sourceDocIds: [], generatedAt: at });
+    // Both were generated when the brief had NO kernel (priorKernelAt null).
+    await setKernel(TENANT, brief.id, k('First approved', '2026-10-31T00:00:01Z'), 'system', { expectedVersion: v, expectedPriorKernelAt: null });
+    await expect(setKernel(TENANT, brief.id, k('Second, same state', '2026-10-31T00:00:02Z'), 'system', { expectedVersion: v, expectedPriorKernelAt: null }))
+      .rejects.toMatchObject({ details: { reason: 'brief_changed' } });
+    const after = (await getBrief(TENANT, brief.id))!;
+    expect(after.kernel?.headline).toBe('First approved');
+    expect(after.version ?? 1).toBe(v); // a kernel save is not a content revision
+  });
+
+  it('promote-kernel refuses when the workflow does not say which kernel it replaces', async () => {
+    let saved = 0;
+    const features = { 'campaign-brief': { setKernel: async () => { saved += 1; return { brief: { id: 'b1', status: 'validated' } }; }, assembleContext: async () => ({ found: true }) } };
+    const out = await nodePack['feature.campaign-brief.nodes.promote-kernel']({ features, inputs: { briefId: 'b1', kernel: GOOD, briefVersion: 1 } });
+    expect(out).toMatchObject({ status: 'failed', error: { code: 'validation_error' } });
+    expect(saved).toBe(0);
+  });
+
+  it('a stale kernel makes angles fail kernel_stale (not "generate the kernel")', async () => {
+    const features = { 'campaign-brief': { assembleContext: async () => ({ ...asmOf(), kernel: null, kernelStale: true }), listVocEvidence: async () => ({ evidence: [] }) } };
+    const out = await nodePack['feature.campaign-brief.nodes.generate-angles']({ features, callAI: async () => ({}), inputs: { briefId: 'b1' } });
+    expect(out).toMatchObject({ status: 'failed', error: { code: 'kernel_stale' } });
+  });
+
+  it('D8: a STALE kernel is not a usable kernel — assembleContext hands readers null and says why', async () => {
+    const brief = await createBrief(TENANT, 'o1', 'u1', { name: 'Camp', productName: 'FlashPick' });
+    await setKernel(TENANT, brief.id, { ...GOOD, secondaryCta: '', channelTones: {}, sourceDocIds: [], generatedAt: '2026-10-31T00:00:00Z' });
+    await updateBrief(TENANT, brief.id, { productName: 'Changed' });
+    const surface = buildCampaignBriefSurface({ tenantId: TENANT });
+    const asm = as<{ kernel: unknown; kernelStale: boolean; briefVersion: number }>(await surface.assembleContext!({ briefId: brief.id }));
+    expect(asm).toMatchObject({ kernel: null, kernelStale: true });
+    expect(asm.briefVersion).toBe((await getBrief(TENANT, brief.id))!.version);
+  });
+
+  it('D12: extract-seeds repairs an empty reply once, and maps each persona\'s [n] sources to the retrieved documents', async () => {
+    let calls = 0;
+    const kb = { rag: async () => ({
+      augmentedPrompt: '[1] (A) ops directors\n\n[2] (B) store managers',
+      contexts: [{ documentId: 'doc-a', text: 'ops directors' }, { documentId: 'doc-b', text: 'store managers' }],
+      citations: [{ documentId: 'doc-a' }, { documentId: 'doc-b' }],
+      coverage: 'ok',
+    }) };
+    const callAI = async () => {
+      calls += 1;
+      return calls === 1 ? { data: {} } : { data: { personas: [{ name: 'Ops Director', sources: [2, 9, 1] }], productSummary: '', competitors: [] } };
+    };
+    const out = await nodePack['feature.campaign-brief.nodes.extract-seeds']({ features: { kb }, callAI, inputs: { orgId: 'o1', collectionId: 'c1' } });
+    expect(calls).toBe(2);
+    expect(out.status).toBe('success');
+    const persona = (out.outputs?.proposals as { personas: Array<Record<string, unknown>> }).personas[0]!;
+    expect(persona.sourceDocIds).toEqual(['doc-b', 'doc-a']); // [9] names no retrieved block and is dropped
+    expect(persona).not.toHaveProperty('sources');
+  });
+});
+
+describe('ADR 1020 D11 (CS70WF-15) — a brief edit and a kernel save never drop each other', () => {
+  it('an edit whose compare-and-swap loses to a concurrent kernel save re-reads and keeps BOTH writes', async () => {
+    const base = openSqliteStorage(':memory:');
+    let injected = false;
+    // A storage whose FIRST brief swap loses: a concurrent writer saves a kernel on
+    // the same row between the edit's read and its swap. The plain get-then-put
+    // this replaces would have overwritten that kernel.
+    const racing = Object.assign(Object.create(Object.getPrototypeOf(base)), base, {
+      kvCompareAndSwap: async (key: string, expected: string | null, next: string) => {
+        if (!injected && key.includes('campaign-brief:brief:') && expected !== null) {
+          injected = true;
+          const row = JSON.parse(expected) as Record<string, unknown>;
+          await base.kvSet(key, JSON.stringify({ ...row, kernel: { headline: 'Concurrent' }, updatedAt: 'concurrent' }));
+        }
+        return base.kvCompareAndSwap(key, expected, next);
+      },
+    });
+    initHostExtPersistence(racing);
+    await __clearBriefs();
+    const brief = await createBrief(TENANT, 'o1', 'u1', { name: 'Camp', productName: 'FlashPick' });
+    await updateBrief(TENANT, brief.id, { objective: 'Leads' });
+    expect(injected).toBe(true);
+    const after = (await getBrief(TENANT, brief.id))!;
+    expect(after.objective).toBe('Leads'); // the edit landed…
+    expect((after.kernel as { headline: string } | undefined)?.headline).toBe('Concurrent'); // …and did not erase the other write
   });
 });

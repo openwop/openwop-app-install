@@ -9,6 +9,10 @@
  *    vectors (same model, same text hash) are NOT reused, else the rebuild changes nothing;
  *  - OpenAI and Cohere signatures are byte-identical to before (their document side did
  *    not change, so they are not rebuilt); Google gains `:q1`.
+ * Tracker TST-DHK-2 (wave 71): red when the search embeds as a document
+ * (`w71g3-kqa-query`), the cache ignores `embedVersion` (`kqa-cache`), the
+ * signature drops `:q1` (`kqa-sig`), or the Google / Cohere bodies lose the
+ * input type (`kqa-google`, `kqa-cohere`).
  */
 import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import { mkdtempSync } from 'node:fs';

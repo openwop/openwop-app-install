@@ -65,13 +65,16 @@ vi.mock('../src/providers/dispatch.js', async (importOriginal) => {
 });
 import { dispatchManagedChat } from '../src/providers/managedProvider.js';
 import { llmExtractFacts } from '../src/features/memory-auto-extract/memoryExtractor.js';
+import { stripComments } from './helpers/stripComments.js';
 
 /**
  * file → why a managed dispatch there legitimately carries no subject.
  * SHRINK-ONLY. Each is a measured claim about that lane, not a convenience.
  */
 const EXEMPT: ReadonlyMap<string, string> = new Map([
-  ['features/chat-widget/publicGateway.ts',
+  // 2026-10-31 (ADR 1018 D8): MOVED, not added — the widget's two managed doors left
+  // `publicGateway.ts` for the one credential resolver's module, which the gateway calls.
+  ['features/chat-widget/widgetCredential.ts',
     'the public chat widget is ANONYMOUS by design (ADR 0693 OQ1) — there is no subject, and a '
     + 'design that required one would break the widget. The pooled tenant bucket is the correct '
     + 'meter here: the operator is paying for visitors they cannot identify. Covers BOTH doors in '
@@ -80,28 +83,12 @@ const EXEMPT: ReadonlyMap<string, string> = new Map([
   //  - `host/headlessAi.ts` now forwards `options.actingSubject` into its managed
   //    dispatch, so the walker sees it pass (the anti-rot leg below demanded removal).
   //  - `features/chat-autotitle/titleGenerator.ts` no longer calls the managed door
-  //    at all — it routes through `resolveHeadlessAi`. The gap that row RECORDED is
-  //    still real and now invisible to this walker: auto-title passes no subject
-  //    (its injected `generate?` seam carries none), so its managed draw stays on
-  //    the pooled bucket. Bounded (one short title per conversation); closing it is
-  //    still the small seam change the old row described.
+  //    at all — it routes through `resolveHeadlessAi`. The gap that row RECORDED
+  //    (auto-title passed no subject, so its managed draw stayed on the pooled
+  //    bucket) was CLOSED by ADR 1019 D3 (2026-10-31): the binding passes the acting
+  //    user into `resolveHeadlessAiForConversation`, witnessed by
+  //    `chat-autotitle-conversation-credential.test.ts` ("metered to the acting person").
 ]);
-
-/**
- * Blank out comments while preserving line structure.
- *
- * Needed in BOTH directions, and I introduced one of them: widening the matcher to the
- * sibling entry point immediately produced a false POSITIVE on
- * `conversationToolLoop.ts:324`, a prose line reading "dispatchManagedToolsRound (daily
- * caps …)" — the word followed by a paren. The mirror hazard is a false NEGATIVE from a
- * comment like `// TODO: thread actingSubject`. Matching against code only removes both,
- * which a wider window or a cleverer regex would not.
- */
-function stripComments(src: string): string {
-  return src
-    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
-    .replace(/(^|[^:])\/\/[^\n]*/g, (m, p1: string) => p1 + ' '.repeat(m.length - p1.length));
-}
 
 function walk(dir: string): string[] {
   const out: string[] = [];

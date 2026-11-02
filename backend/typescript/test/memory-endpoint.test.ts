@@ -6,11 +6,17 @@
  * caller's principal (not the query) per CTI-1.
  */
 
-import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import { describe, expect, it, beforeAll, afterAll, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import { bareRunId } from './support/bareRunId.js';
+import { writeMemoryEntry } from '../src/host/inMemorySurfaces.js';
+
+/** A unique marker per seeded row, so every case reads back ITS OWN rows and no
+ *  case depends on what another case wrote (shuffle-safe). */
+let seq = 0;
+const uniq = (label: string): string => `${label}-${Date.now()}-${seq++}`;
 
 let server: http.Server;
 let BASE: string;
@@ -65,6 +71,7 @@ describe('memory ledger read-side', () => {
   it('requires auth', async () => {
     const res = await fetch(`${BASE}/host/openwop-app/memory`);
     expect(res.status).toBe(401);
+    expect(((await res.json()) as { error?: string }).error).toBe('unauthenticated');
   });
 
   it('returns the run-summary the host writes on completion', async () => {
@@ -81,12 +88,12 @@ describe('memory ledger read-side', () => {
     expect(create.status).toBe(201);
     const { runId } = create.body;
 
-    // Poll for terminal status (the run-summary is written on completion).
-    for (let i = 0; i < 20; i++) {
-      await new Promise((r) => setTimeout(r, 50));
+    // Wait for the terminal status (the run-summary is written on completion),
+    // and assert it: a poll that gave up early would read an empty ledger.
+    await vi.waitFor(async () => {
       const snap = await jsonFetch<{ status: string }>(`/runs/${runId}`);
-      if (['completed', 'failed', 'cancelled'].includes(snap.body.status)) break;
-    }
+      expect(snap.body.status).toBe('completed');
+    }, { timeout: 10_000, interval: 25 });
 
     const mem = await jsonFetch<MemoryListBody>('/host/openwop-app/memory');
     expect(mem.status).toBe(200);
@@ -98,16 +105,24 @@ describe('memory ledger read-side', () => {
   });
 
   it('filters by tag', async () => {
+    // Seed BOTH sides of the filter, so the case cannot pass over an empty list
+    // (the old loop iterated zero times when this case ran first).
+    const tagged = await writeMemoryEntry('default', 'tenant-memory', { content: uniq('tagged'), tags: ['run-summary'] });
+    const untagged = await writeMemoryEntry('default', 'tenant-memory', { content: uniq('untagged'), tags: ['other-tag'] });
     const mem = await jsonFetch<MemoryListBody>('/host/openwop-app/memory?tag=run-summary');
     expect(mem.status).toBe(200);
+    const ids = mem.body.entries.map((e) => e.id);
+    expect(ids).toContain(tagged.id);
+    expect(ids).not.toContain(untagged.id);
     for (const e of mem.body.entries) expect(e.tags).toContain('run-summary');
   });
 
   it('deletes a tenant-scoped entry (demo DELETE route)', async () => {
-    // Grab an existing entry, delete it, and confirm it's gone.
+    // Seed this case's OWN row (it used to take entries[0] written by another
+    // case, so it reddened whenever it ran first), delete it, confirm it's gone.
+    const target = await writeMemoryEntry('default', 'tenant-memory', { content: uniq('doomed'), tags: [] });
     const before = await jsonFetch<MemoryListBody>('/host/openwop-app/memory');
-    expect(before.body.entries.length).toBeGreaterThan(0);
-    const target = before.body.entries[0]!;
+    expect(before.body.entries.map((e) => e.id)).toContain(target.id);
 
     const del = await jsonFetch<{ memoryRef: string; memoryId: string; removed: boolean }>(
       `/host/openwop-app/memory/${target.id}`,
@@ -132,6 +147,7 @@ describe('memory ledger read-side', () => {
   it('requires auth to delete', async () => {
     const res = await fetch(`${BASE}/host/openwop-app/memory/whatever`, { method: 'DELETE' });
     expect(res.status).toBe(401);
+    expect(((await res.json()) as { error?: string }).error).toBe('unauthenticated');
   });
 });
 
@@ -151,8 +167,10 @@ describe('memory ledger read-side', () => {
  */
 describe('AGMEM-1 — a foreign memoryRef is refused', () => {
   it('a foreign `user:` scope is 404, not a read of that person\'s memory', async () => {
-    const res = await jsonFetch<{ error?: string }>('/host/openwop-app/memory?memoryRef=user:someone-else');
+    const res = await jsonFetch<{ error?: string; entries?: unknown }>('/host/openwop-app/memory?memoryRef=user:someone-else');
     expect(res.status).toBe(404);
+    expect(res.body.error).toBe('not_found');
+    expect(res.body.entries).toBeUndefined();
   });
 
   it('DELETE against a foreign `user:` scope is refused BEFORE the store is touched', async () => {
@@ -167,17 +185,22 @@ describe('AGMEM-1 — a foreign memoryRef is refused', () => {
       method: 'DELETE',
     });
     expect(res.status).toBe(404);
+    expect(res.body.error).toBe('not_found');
     expect(await listMemoryEntries('default', 'user:someone-else')).toHaveLength(1);
   });
 
   it('an `agent:` scope for a non-existent agent is 404 (no existence leak)', async () => {
-    const res = await jsonFetch<{ error?: string }>('/host/openwop-app/memory?memoryRef=agent:no-such-agent');
+    const res = await jsonFetch<{ error?: string; entries?: unknown }>('/host/openwop-app/memory?memoryRef=agent:no-such-agent');
     expect(res.status).toBe(404);
+    expect(res.body.error).toBe('not_found');
+    expect(res.body.entries).toBeUndefined();
   });
 
   it('an arbitrary non-demo namespace is refused', async () => {
-    const res = await jsonFetch<{ error?: string }>('/host/openwop-app/memory?memoryRef=project:some-project');
+    const res = await jsonFetch<{ error?: string; entries?: unknown }>('/host/openwop-app/memory?memoryRef=project:some-project');
     expect(res.status).toBe(404);
+    expect(res.body.error).toBe('not_found');
+    expect(res.body.entries).toBeUndefined();
   });
 
   it('the single-entry GET is gated too (the third handler, not just the two obvious ones)', async () => {
@@ -188,14 +211,18 @@ describe('AGMEM-1 — a foreign memoryRef is refused', () => {
       `/host/openwop-app/memory/${row.id}?memoryRef=user:someone-else-2`,
     );
     expect(res.status).toBe(404);
+    expect(res.body.error).toBe('not_found');
     expect(res.body.entry).toBeUndefined();
   });
 
   it('ANTI-ROT: the tenant\'s OWN demo namespace still reads 200 — this is not "refuse everything"', async () => {
+    const own = await writeMemoryEntry('default', 'tenant-memory', { content: uniq('own'), tags: [] });
     const explicit = await jsonFetch<MemoryListBody>('/host/openwop-app/memory?memoryRef=tenant-memory');
     expect(explicit.status).toBe(200);
+    expect(explicit.body.entries.map((e) => e.id)).toContain(own.id);
     const defaulted = await jsonFetch<MemoryListBody>('/host/openwop-app/memory');
     expect(defaulted.status).toBe(200);
+    expect(defaulted.body.entries.map((e) => e.id)).toContain(own.id);
   });
 });
 

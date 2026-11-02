@@ -38,7 +38,8 @@ import { ArrowLeftIcon, CheckIcon, SearchIcon } from '../../../ui/icons/index.js
 import { RenderSections } from '../../cms/SectionRenderer.js';
 import type { Section } from '../../cms/cmsClient.js';
 import { fetchPublicPageResult } from '../../site/siteClient.js';
-import { getVisitorKey, consentTokenFor, useVisitorConsent } from '../../site/visitorConsent.js';
+import { getVisitorKey, consentTokenFor } from '../../site/visitorConsent.js';
+import { useVisitorConsent } from '../../site/useVisitorConsent.js';
 import { VisitorConsentBanner } from '../../site/VisitorConsentBanner.js';
 import { FormEmbedProvider } from '../../forms/render/embedContext.js';
 import { FunnelCheckoutPanel, FunnelOneClickPanel, waitForPaid, type Purchase, type StepOffer } from './FunnelOfferPanel.js';

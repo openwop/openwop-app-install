@@ -1,9 +1,17 @@
 /**
- * ADR 0413 host-side delta — the client-support handshake. Proves the advertise-only
- * min-supported-build endpoint: default floor 0 ⇒ everything supported; a per-platform
- * floor overrides the global one; a build below the floor is unsupported + carries the
- * platform upgrade URL; an UNKNOWN build is never gated (no lock-out); the route is
- * public (no auth) and makes zero writes.
+ * ADR 0413 host-side delta — the client-support handshake (TST-CFB-1). Proves the
+ * advertise-only min-supported-build endpoint: default floor 0 ⇒ everything supported;
+ * a build AT the floor is supported and one below it is not, and carries the upgrade URL;
+ * a per-platform floor and upgrade URL override the global ones; an UNKNOWN build is
+ * never gated (no lock-out); an unrecognised platform reads `unknown` and takes the
+ * global floor; build and platform are read from headers too.
+ *
+ * Not claimed here: whether the route is public and write-free for an anonymous
+ * caller (it is not in `PUBLIC_PATH_PREFIXES`; that question is a grade-code row).
+ *
+ * Red when: an unknown build is compared as 0; the floor test becomes `>`; the
+ * per-platform floor or URL is ignored; the header fallback is dropped; an
+ * unrecognised platform passes through.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';

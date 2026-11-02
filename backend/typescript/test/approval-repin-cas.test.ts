@@ -8,8 +8,14 @@
  * pending, erased `resolvedAt`/`decidedBy`, and left it indexed under BOTH statuses because
  * `indexApproval` was called with no `prevStatus` (and it only deletes the old entry when
  * one is supplied).
+ *
+ * TST-BZA-8 (grade-tests w66). Red when: repin drops its `status !== 'pending'` refusal
+ * (leg 1); repin's compare-and-swap is replaced by a blind write (leg 2 — FORCED: the
+ * repin's read is served a stale PENDING snapshot of a row that is already APPROVED, the
+ * cross-instance interleave the CAS exists for; the in-process lock cannot help there);
+ * setApprovalProposal drops its pending refusal (leg 4).
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { initHostExtPersistence, DurableCollection } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
 import {
@@ -22,14 +28,15 @@ const ix = new DurableCollection<{ ixId: string; approvalId: string }>('approval
 
 const queue = async (pageId: string): Promise<string> =>
   (await createContentApproval({
-    tenantId: T, orgId: 'org-1', pageId, slug: pageId, title: `T ${pageId}`,
-    proposal: `Publish CMS page "${pageId}"`, requestedBy: 'u-author', pageVersion: 1,
-  } as never)).approvalId;
+    tenantId: T, orgId: 'org-1', pageId, pageTitle: `T ${pageId}`,
+    proposal: `Publish CMS page "${pageId}"`, pageVersion: 1,
+  })).approvalId;
 
 beforeEach(async () => {
   const storage = await openStorage('memory://');
   initHostExtPersistence(storage);
 });
+afterEach(() => { vi.restoreAllMocks(); });
 
 describe('ADR 0672 D4 — repin cannot resurrect a decided row', () => {
   it('leg 1: a repin AFTER a decide refuses — the row stays approved with its attribution', async () => {
@@ -48,8 +55,27 @@ describe('ADR 0672 D4 — repin cannot resurrect a decided row', () => {
 
   it('leg 2: the row is never indexed under TWO statuses', async () => {
     const id = await queue('p2');
+    // The snapshot another instance would still hold: read while PENDING.
+    const stale = await getApproval(id);
+    expect(stale?.status).toBe('pending');
     await resolveApproval(id, { status: 'approved', decidedBy: 'u-reviewer' });
-    await repinContentApproval(id, { pageVersion: 99 });
+
+    // Serve the repin's read that stale snapshot — once, for this row only.
+    const realGet = DurableCollection.prototype.get;
+    let served = 0;
+    vi.spyOn(DurableCollection.prototype, 'get').mockImplementation(async function (this: DurableCollection<unknown>, key: string) {
+      if (key === id && served === 0) { served += 1; return structuredClone(stale); }
+      return realGet.call(this, key);
+    });
+    const out = await repinContentApproval(id, { pageVersion: 99 });
+    vi.restoreAllMocks();
+    expect(served, 'the repin read the stale snapshot — otherwise the CAS was never in play').toBe(1);
+    expect(out, 'a CAS against the stale PENDING row must refuse').toBeNull();
+
+    const row = await getApproval(id);
+    expect(row?.status, 'the stale repin must not revert the decision').toBe('approved');
+    expect(row?.decidedBy).toBe('u-reviewer');
+    expect(row?.pageVersion).toBe(1);
 
     const rows = await ix.listByPrefix(`${T}:`);
     const forThis = rows.filter((r) => r.approvalId === id);

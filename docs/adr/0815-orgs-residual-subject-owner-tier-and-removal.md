@@ -446,6 +446,12 @@ var.
     org's missing id reaching the brief POST, not a route deriving an org from
     the union), `capability-firewall-route`, and `webinars-bind-form-route`
     (tenant `default` itself).
+
+    > **CORRECTION 2026-10-29 (/grade-tests wave 66):** `ambient-work-graph-route`
+    > has since been deleted as redundant. Its route-lifecycle and owner-404
+    > breaks are caught by `ambient-work-graph-r2.test.ts` (sabotage probes
+    > `w66g1-rt-404-r2` and `w66g1-rt-get-r2` both witnessed). The other four files
+    > named here are unchanged.
   - `csm-authz-http` had a workspace EDITOR create a sub-org over HTTP. That is
     the door itself, so the sub-org is now minted directly with that editor as
     its owner.

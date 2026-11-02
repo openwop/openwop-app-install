@@ -13,6 +13,16 @@
  *        the log stream, so "who turned this off" had no durable answer.
  *  - S5  the admin PUT blind-replaced the stored row, so an editor holding a
  *        stale read wiped a per-tenant override written in between.
+ *
+ * Tracker TST-DCA-3. Sabotage witnesses (grade-tests w70):
+ *  - S1 red when `featureRoute` skips the entitlement check, when the agent-tool
+ *    kit resolves through `resolveToggle`, or when `ctx.features` does.
+ *  - S4 red when `actorOf` names the tenant, or the audit row copies `betaCohort`.
+ *  - S5 red when `saveConfig` drops its revision comparison.
+ *  - S2 has NO in-tree sabotage: ADR 0819 §2 REMOVED the `feature-toggles`
+ *    environments config domain (`features/environments/feature.ts`), so these
+ *    cases witness an ABSENCE. They are regression witnesses (honest ceiling);
+ *    each asserts its apply SUCCEEDED so the final assertion is never vacuous.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -111,6 +121,9 @@ describe('S1 — the plan paywall holds at the agent-tool exit, not only the HTT
     await c.login('oidc:adr0819-s1', 'user:adr0819-s1');
     const res = await c.get('/host/openwop-app/strategy');
     expect(res.status).toBe(403);
+    const body = (await res.json()) as { error?: string; message?: string };
+    expect(body.error).toBe('forbidden');
+    expect(body.message).toContain('does not include this feature');
   });
 
   it('a sellable feature\'s read tools refuse the same tenant', async () => {
@@ -131,11 +144,11 @@ describe('S1 — the plan paywall holds at the agent-tool exit, not only the HTT
   });
 
   it('a workflow node reaching the feature through ctx.features is refused the same way', async () => {
-    const surfaces = buildFeatureSurfaces({ tenantId: 'user:adr0819-s1' } as Parameters<typeof buildFeatureSurfaces>[0]);
+    const surfaces = buildFeatureSurfaces({ tenantId: 'user:adr0819-s1' });
     const listLists = surfaces['priority-matrix']?.listLists;
     expect(listLists).toBeDefined();
     await expect(listLists!({})).rejects.toMatchObject({ code: 'host_capability_disabled' });
-    const entitled = buildFeatureSurfaces({ tenantId: OPERATOR_TENANT } as Parameters<typeof buildFeatureSurfaces>[0]);
+    const entitled = buildFeatureSurfaces({ tenantId: OPERATOR_TENANT });
     await expect(entitled['priority-matrix']!.listLists!({})).resolves.toBeDefined();
   });
 });
@@ -194,6 +207,11 @@ describe('S4 — every flip is durably audited with the acting PERSON', () => {
   it('a superadmin PUT and DELETE each append an audit row naming the principal', async () => {
     const op = client();
     await op.login(OPERATOR_SUBJECT, OPERATOR_TENANT);
+    // The session's PERSON id, as the assignments route echoes it (a different
+    // code path from the admin route's `actorOf`).
+    const me = (await (await op.get('/host/openwop-app/feature-toggles/assignments')).json()) as { caller: { tenantId: string; principalId?: string } };
+    expect(me.caller.principalId).toBeTruthy();
+    expect(me.caller.principalId).not.toBe(me.caller.tenantId);
     const cur = (await (await op.get(`${ADMIN}/webinars`)).json()) as Record<string, unknown>;
     expect((await op.put(`${ADMIN}/webinars`, { ...cur, status: 'beta', betaCohort: ['oidc:cohort-person-0819'] })).status).toBe(200);
     expect((await op.del(`${ADMIN}/webinars`)).status).toBe(200);
@@ -202,8 +220,7 @@ describe('S4 — every flip is durably audited with the acting PERSON', () => {
     expect(save, JSON.stringify(rows)).toBeDefined();
     // The PERSON (the session's principal), not the workspace they acted in.
     // On origin/main `updatedBy` was the tenant id, and no row existed at all.
-    expect(save?.principalId).toBeTruthy();
-    expect(save?.principalId).not.toBe(OPERATOR_TENANT);
+    expect(save?.principalId).toBe(me.caller.principalId);
     const revert = rows.find((r) => r.action === 'feature-toggle.reverted');
     expect(revert?.principalId).toBe(save?.principalId);
     // audit_log is global and never erased: a cohort member's id must not land in it.

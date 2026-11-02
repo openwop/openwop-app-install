@@ -10,7 +10,7 @@
  *
  * Sabotage (run 2026-10-20): counting `not_evaluable` as a pass reds 2's
  * no-winner case; dropping the sample leg of G2 reds 3; sorting nothing in
- * cellsHash reds 1.
+ * cellsHash reds 1 (re-run w73: pg-allpass, pg-sample, pg-hash witnessed).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -39,7 +39,7 @@ beforeAll(async () => {
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   for (const id of ['experiments', 'analytics']) { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); }
-});
+}, 120_000);
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 // ── fixtures ──────────────────────────────────────────────────────────────────
@@ -92,7 +92,7 @@ describe('ADR 0950 P0 — 1/2. the gates (pure)', () => {
     expect(g(report(exp({ plan: { ...plan, mde: 0.05 } }), steady(0.14)), 'G5')).toMatchObject({ status: 'fail', reason: 'below_mde' });
     // Novelty: a strong early lift that has faded in the last week.
     const fading = steady(0.14).map((c) => (c.arm === 'b' && c.day >= '2026-10-23' ? { ...c, sum: Math.round(c.n * 0.105) } : c));
-    expect(g(report(exp(), fading), 'G7')).toMatchObject({ status: 'fail' });
+    expect(g(report(exp(), fading), 'G7')).toMatchObject({ status: 'fail', reason: 'novelty_fade' });
     expect(g(report(exp(), steady(0.14), { ok: false, reason: 'publish_blocked' }), 'G8')).toMatchObject({ status: 'fail', reason: 'publish_blocked' });
   });
 
@@ -107,34 +107,35 @@ describe('ADR 0950 P0 — 1/2. the gates (pure)', () => {
 });
 
 describe('ADR 0950 P0 — 3. over the real routes', () => {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- JSON boundary
-  async function call(cookie: { v: string }, method: string, path: string, body?: unknown): Promise<{ status: number; body: any }> {
+  async function call<T>(cookie: { v: string }, method: string, path: string, body?: unknown): Promise<{ status: number; body: T }> {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie.v ? { cookie: cookie.v } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m?.[1]) cookie.v = m[1]; }
-    return { status: res.status, body: await res.json().catch(() => undefined) };
+    const decoded: unknown = await res.json().catch(() => ({}));
+    return { status: res.status, body: decoded as T }; // the one JSON-boundary narrowing
   }
 
   it('promoting a 3-session arm shows a red G2 (the P0 exit); the experiments route serves the same report', async () => {
     const tenantId = `org:g0-${Date.now()}-${n++}`;
     const jar = { v: '' };
-    await call(jar, 'POST', '/host/openwop-app/test/login', { email: `g0-${n++}@acme.test`, tenantId });
-    const orgId = (await call(jar, 'POST', '/host/openwop-app/orgs', { name: 'Client' })).body.orgId as string;
+    await call<unknown>(jar, 'POST', '/host/openwop-app/test/login', { email: `g0-${n++}@acme.test`, tenantId });
+    const orgId = (await call<{ orgId: string }>(jar, 'POST', '/host/openwop-app/orgs', { name: 'Client' })).body.orgId;
     const page = await createPage({ tenantId, orgId, title: 'LP', createdBy: 'u', sections: [{ type: 'hero', data: { heading: 'Hi' } }] });
     const legacy = await createLegacy({ tenantId, orgId, pageId: page.pageId, name: 'Old', variants: [{ key: 'a', versionId: null, weight: 50 }, { key: 'b', versionId: null, weight: 50 }], createdBy: 'u' });
     await startExperiment(tenantId, orgId, page.pageId, legacy.experimentId, 'u');
     for (const [arm, i] of [['a', 0], ['a', 1], ['b', 2]] as const) {
       await __putRawEventForTests({ eventId: `ev-${n++}`, tenantId, orgId, type: 'pageview', ts: new Date().toISOString(), sessionKey: `s-${i}`, experiment: { id: legacy.experimentId, variant: arm, derived: true } });
     }
-    const cms = await call(jar, 'GET', `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(page.pageId)}/experiments/${encodeURIComponent(legacy.experimentId)}/gates`);
+    const cms = await call<GateReport>(jar, 'GET', `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(page.pageId)}/experiments/${encodeURIComponent(legacy.experimentId)}/gates`);
     expect(cms.status).toBe(200);
-    const g2 = (cms.body as GateReport).gates.find((g) => g.id === 'G2')!;
+    const g2 = cms.body.gates.find((g) => g.id === 'G2')!;
     expect(g2).toMatchObject({ status: 'fail', reason: 'too_short_and_below_sample', value: { smallestArm: 1, minSamplePerArm: 30, floors: 'default_floors' } });
-    expect((cms.body as GateReport).gates.find((g) => g.id === 'G1')).toMatchObject({ status: 'fail', reason: 'legacy_experiment' });
-    const viaEngine = await call(jar, 'GET', `/host/openwop-app/experiments/orgs/${encodeURIComponent(orgId)}/experiments/${encodeURIComponent(legacy.experimentId)}/gates`);
+    expect(cms.body.gates.find((g) => g.id === 'G1')).toMatchObject({ status: 'fail', reason: 'legacy_experiment' });
+    const viaEngine = await call<GateReport>(jar, 'GET', `/host/openwop-app/experiments/orgs/${encodeURIComponent(orgId)}/experiments/${encodeURIComponent(legacy.experimentId)}/gates`);
     expect(viaEngine.status).toBe(200);
-    expect((viaEngine.body as GateReport).gates.map((g) => [g.id, g.status])).toEqual((cms.body as GateReport).gates.map((g) => [g.id, g.status]));
+    expect(viaEngine.body.gates.map((g) => [g.id, g.status])).toEqual(cms.body.gates.map((g) => [g.id, g.status]));
     // Another org: the same 404 as a missing experiment.
-    const other = (await call(jar, 'POST', '/host/openwop-app/orgs', { name: 'Other' })).body.orgId as string;
-    expect((await call(jar, 'GET', `/host/openwop-app/experiments/orgs/${encodeURIComponent(other)}/experiments/${encodeURIComponent(legacy.experimentId)}/gates`)).status).toBe(404);
+    const other = (await call<{ orgId: string }>(jar, 'POST', '/host/openwop-app/orgs', { name: 'Other' })).body.orgId;
+    const foreign = await call<{ error?: string }>(jar, 'GET', `/host/openwop-app/experiments/orgs/${encodeURIComponent(other)}/experiments/${encodeURIComponent(legacy.experimentId)}/gates`);
+    expect([foreign.status, foreign.body.error]).toEqual([404, 'not_found']);
   });
 });

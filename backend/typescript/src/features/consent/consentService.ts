@@ -17,7 +17,7 @@
  * > caller without `opts.visitor` is unchanged.
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { OpenwopError } from '../../types.js';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { resolveToggle } from '../../host/featureToggles/service.js';
@@ -62,7 +62,7 @@ export function registerConsentWithdrawalHook(category: ConsentCategory, name: s
  * form sink or a CRM merge may record a refusal but never a grant. A GRANT is a
  * transition to `true` from anything else, and it must arrive on the public consent
  * lane (`source` `public:<orgId>`, set server-side by that route). A write that
- * merely carries an already-stored `true` forward (the merge fallthrough) is not a
+ * merely carries an already-stored `true` forward (an unrelated category edit) is not a
  * grant.
  */
 /** One stored category's value, by the category id (the record's keys ARE the ids). */
@@ -113,17 +113,20 @@ async function afterConsentWrite(prev: ConsentRecord | null, rec: ConsentRecord,
  * posture read lists the offered ones so the banner can ask. Consent stays the
  * owner of the question; the data owner answers "is it on here".
  */
-export type VisitorChoiceProvider = (tenantId: string) => Promise<boolean>;
+/** `orgId` is the site's organization when the caller knows it (the public
+ *  posture lane, the org settings view). A provider that needs it must offer
+ *  nothing without it. */
+export type VisitorChoiceProvider = (tenantId: string, orgId?: string) => Promise<boolean>;
 const visitorChoiceProviders = new Map<ConsentCategory, VisitorChoiceProvider>();
 export function registerVisitorChoiceProvider(category: ConsentCategory, fn: VisitorChoiceProvider): void {
   visitorChoiceProviders.set(category, fn);
 }
 /** The optional categories this tenant's visitors are asked about. Fail-closed:
  *  a provider that throws is treated as not offering (the recorder never loads). */
-export async function offeredVisitorChoices(tenantId: string): Promise<ConsentCategory[]> {
+export async function offeredVisitorChoices(tenantId: string, orgId?: string): Promise<ConsentCategory[]> {
   const out: ConsentCategory[] = [];
   for (const [category, fn] of visitorChoiceProviders) {
-    if (await fn(tenantId).catch(() => false)) out.push(category);
+    if (await fn(tenantId, orgId).catch(() => false)) out.push(category);
   }
   return out;
 }
@@ -204,6 +207,14 @@ export interface ConsentRecord {
   /** ADR 0849 (grade-code CN2CD-4) — how many entries the bound dropped from between
    *  the pinned origin and the rest, so the UI shows the gap instead of diffing across it. */
   historyDropped?: number;
+  /** ADR 0951 P2: visitor-minted generations for strict optional grants. A
+   * withdrawal removes the generation; a fresh grant never revives the old one.
+   * Legacy boolean grants have none until the visitor affirms them again. */
+  strictGrantGenerations?: Partial<Record<OptionalStrictCategory, string>>;
+  /** Revision of each explicit strict-purpose decision, including refusals.
+   * Preserved after withdrawal so an older in-flight grant cannot win an ABA
+   * race (false → true → false) merely because the boolean matches again. */
+  strictConsentRevisions?: Partial<Record<OptionalStrictCategory, string>>;
 }
 
 /** ADR 0849 D3 — one written consent state. */
@@ -217,6 +228,8 @@ export interface ConsentChange {
   /** grade-code CN2CD-2 — the state a pre-ADR-0849 row carried when its history began:
    *  real evidence (its own `ts` + `source`), but NOT the first-ever consent. */
   legacy?: true;
+  strictGrantGenerations?: Partial<Record<OptionalStrictCategory, string>>;
+  strictConsentRevisions?: Partial<Record<OptionalStrictCategory, string>>;
 }
 
 /** ADR 0849 D3 — the history bound. Far above any real person's number of consent
@@ -229,16 +242,58 @@ function changeOf(rec: ConsentRecord): ConsentChange {
     ...(rec.region ? { region: rec.region } : {}),
     ...(rec.legalBasis ? { legalBasis: rec.legalBasis } : {}),
     ...(rec.purposes !== undefined ? { purposes: [...rec.purposes] } : {}),
+    ...(rec.strictGrantGenerations ? { strictGrantGenerations: { ...rec.strictGrantGenerations } } : {}),
+    ...(rec.strictConsentRevisions ? { strictConsentRevisions: { ...rec.strictConsentRevisions } } : {}),
   };
 }
 
-/** Same consent STATE (not same write): categories, region, basis and purposes. */
+/** Same consent state, including the identity of strict-purpose decisions. */
 function sameState(a: ConsentChange, b: ConsentChange): boolean {
   const cats = (c: ConsentCategories): string => JSON.stringify(Object.entries(c).sort(([x], [y]) => x.localeCompare(y)));
   return cats(a.categories) === cats(b.categories)
     && (a.region ?? '') === (b.region ?? '')
     && (a.legalBasis ?? '') === (b.legalBasis ?? '')
-    && JSON.stringify(a.purposes ?? null) === JSON.stringify(b.purposes ?? null);
+    && JSON.stringify(a.purposes ?? null) === JSON.stringify(b.purposes ?? null)
+    && OPTIONAL_STRICT_CATEGORIES.every((category) => a.strictGrantGenerations?.[category] === b.strictGrantGenerations?.[category]
+      && a.strictConsentRevisions?.[category] === b.strictConsentRevisions?.[category]);
+}
+
+/** The consent owner mints these ids, never the recorder or a caller-supplied
+ * field. Existing grants survive unrelated edits; only an explicit visitor
+ * affirmation may create a missing generation. */
+function withGrantGenerations(cur: ConsentRecord | null, rec: ConsentRecord, sent: unknown): ConsentRecord {
+  const requested = (sent ?? {}) as Record<string, unknown>;
+  const generations: Partial<Record<OptionalStrictCategory, string>> = {};
+  const revisions: Partial<Record<OptionalStrictCategory, string>> = { ...cur?.strictConsentRevisions };
+  for (const category of OPTIONAL_STRICT_CATEGORIES) {
+    if (typeof requested[category] === 'boolean' || categoryValue(cur?.categories ?? rec.categories, category) !== categoryValue(rec.categories, category)) {
+      revisions[category] = randomUUID();
+    }
+    if (categoryValue(rec.categories, category) !== true) continue;
+    const prior = cur && categoryValue(cur.categories, category) === true ? cur.strictGrantGenerations?.[category] : undefined;
+    if (prior) generations[category] = prior;
+    else if (rec.source.startsWith('public:') && requested[category] === true) generations[category] = randomUUID();
+  }
+  return { ...rec,
+    ...(Object.keys(generations).length ? { strictGrantGenerations: generations } : {}),
+    ...(Object.keys(revisions).length ? { strictConsentRevisions: revisions } : {}),
+  };
+}
+
+const consentWriteContended = (): OpenwopError => new OpenwopError(
+  'conflict', 'Consent changed concurrently. Retry the choice against its current state.', 409, { reason: 'consent_write_contended' },
+);
+
+/** A fresh HTTP choice may grant again; a retry of an older in-flight choice
+ * may not overtake a subsequent decision. Unrelated category edits may retry. */
+function assertAffirmationStillCurrent(first: ConsentRecord | null, current: ConsentRecord | null, sent: unknown): void {
+  const requested = (sent ?? {}) as Record<string, unknown>;
+  for (const category of OPTIONAL_STRICT_CATEGORIES) {
+    if (requested[category] !== true) continue;
+    if (first?.strictConsentRevisions?.[category] !== current?.strictConsentRevisions?.[category]
+      || first?.categories[category] !== current?.categories[category]
+      || first?.strictGrantGenerations?.[category] !== current?.strictGrantGenerations?.[category]) throw consentWriteContended();
+  }
 }
 
 /**
@@ -394,7 +449,8 @@ function normCategories(input: unknown): ConsentCategories {
 }
 
 /**
- * Upsert a visitor's consent (latest-wins per tenant+subject).
+ * Replace a visitor's consent categories, with bounded CAS and grant-authority
+ * rechecks. ADR 0951 P2 corrected the former blind latest-wins write.
  *
  * ADR 0302 — when the caller supplies OPAQUE permitted-purpose codes, they run
  * through the CAPTURE hook (`assertPurposesAtCapture`), which fails closed (400)
@@ -421,37 +477,37 @@ function assertSubjectKey(subjectKey: string): void {
   }
 }
 
-export async function recordConsent(input: { tenantId: string; subjectKey: string; categories: unknown; region?: string; source: string; legalBasis?: LegalBasis; purposes?: readonly string[];
-  /** CONS-28 — set ONLY by `mergeConsentCategories`' retries-exhausted fallthrough: the
-   *  caller-supplied purposes were asserted at merge entry, and STORED purposes are never
-   *  re-validated on a write (the contract at the top of this file) — so a revocation cannot
-   *  400 on the rare path after an operator removed a code. */
-  purposesAsserted?: boolean }): Promise<ConsentRecord> {
+export async function recordConsent(input: { tenantId: string; subjectKey: string; categories: unknown; region?: string; source: string; legalBasis?: LegalBasis; purposes?: readonly string[] }): Promise<ConsentRecord> {
   assertSubjectKey(input.subjectKey);
-  // ADR 0849 B3 — bound the CALLER's payload. The merge fallthrough (`purposesAsserted`)
-  // re-sends the STORED purposes, already bounded at their own write (grade-code CN2CD-8):
-  // a revocation under contention must never 400 on a row it did not author.
-  if (!input.purposesAsserted) assertWriteBounds(input);
-  if (input.purposes !== undefined && !input.purposesAsserted) await assertPurposesAtCapture(input.tenantId, input.purposes); // fail-closed only in strict mode
+  assertWriteBounds(input);
+  if (input.purposes !== undefined) await assertPurposesAtCapture(input.tenantId, input.purposes);
   await assertNotErased(input.tenantId, input.subjectKey); // D10
-  // ADR 0849 D3 (architect H3) — read for the history carry-over. This path is a blind
-  // latest-wins put by design (the merge's retries-exhausted fallthrough + the demo
-  // seeder are its only callers), so under contention a concurrent writer's history
-  // entry can be lost exactly as its record can — stated, not hidden.
-  const cur = await records.get(`${input.tenantId}:${input.subjectKey}`);
-  assertVisitorOnlyGrants(cur, input.categories, input.source); // ADR 0951 D1
-  const base: ConsentRecord = {
-    tenantId: input.tenantId,
-    subjectKey: input.subjectKey,
-    categories: normCategories(input.categories),
-    source: input.source,
-    ts: new Date().toISOString(),
-    ...(input.region ? { region: input.region } : {}),
-    ...(input.legalBasis ? { legalBasis: input.legalBasis } : {}),
-    ...(input.purposes !== undefined ? { purposes: [...input.purposes] } : {}),
-  };
-  const rec = withHistory(cur, base);
-  await records.put(rec);
+  // ADR 0951 P2 correction: replacement semantics do not permit a blind put.
+  // Recheck grant authority on every CAS retry: a stale carried `true` cannot
+  // overwrite a refusal that another connection recorded after our read.
+  let previous: ConsentRecord | null = null;
+  let first: ConsentRecord | null = null;
+  let rec: ConsentRecord | undefined;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const cur = await records.get(`${input.tenantId}:${input.subjectKey}`);
+    assertVisitorOnlyGrants(cur, input.categories, input.source);
+    if (attempt === 0) first = cur;
+    else assertAffirmationStillCurrent(first, cur, input.categories);
+    if (cur === null && attempt > 0) await assertNotErased(input.tenantId, input.subjectKey);
+    const base: ConsentRecord = {
+      tenantId: input.tenantId,
+      subjectKey: input.subjectKey,
+      categories: normCategories(input.categories),
+      source: input.source,
+      ts: new Date().toISOString(),
+      ...(input.region ? { region: input.region } : {}),
+      ...(input.legalBasis ? { legalBasis: input.legalBasis } : {}),
+      ...(input.purposes !== undefined ? { purposes: [...input.purposes] } : {}),
+    };
+    const candidate = withHistory(cur, withGrantGenerations(cur, base, input.categories));
+    if (await records.compareAndSwap(cur, candidate)) { previous = cur; rec = candidate; break; }
+  }
+  if (!rec) throw consentWriteContended();
   // D10 post-write re-check: a DSAR that tombstoned between the barrier and the put
   // deletes the record AFTER writing the tombstone, so if we see the tombstone now the
   // DSAR's delete may already have run — remove what we just wrote and refuse.
@@ -477,7 +533,7 @@ export async function recordConsent(input: { tenantId: string; subjectKey: strin
   } catch (err) {
     log.warn('audit_chain_append_failed', { tenantId: rec.tenantId, kind: AUDIT_KIND_CONSENT_CHANGE, error: String(err) });
   }
-  await afterConsentWrite(cur, rec, (input.categories ?? {}) as Record<string, unknown>); // ADR 0951 D4
+  await afterConsentWrite(previous, rec, (input.categories ?? {}) as Record<string, unknown>); // ADR 0951 D4
   return rec;
 }
 
@@ -495,6 +551,27 @@ export async function isPermittedForPurpose(tenantId: string, subjectKey: string
 
 export async function getConsent(tenantId: string, subjectKey: string): Promise<ConsentRecord | null> {
   return records.get(`${tenantId}:${subjectKey}`);
+}
+
+/** ADR 0951 P2: a private recording must stay bound to a CURRENT explicit
+ * generation. A boolean from a legacy row is not one. Read the generation on
+ * both sides of the existing erasure checks: a withdrawal/re-grant cannot hide
+ * in that interval because generations are never reused. This is a consent
+ * snapshot, not a transaction with a consuming store. Consumers must recheck
+ * at finalization AND every read; a persisted "ready" bit is not authority.
+ * Storage errors propagate, never becoming permission. */
+export async function getStrictGrantGeneration(
+  tenantId: string, subjectKey: string, category: OptionalStrictCategory, linkedSubjectKey?: string,
+): Promise<string | null> {
+  if (!tenantId || !subjectKey) return null;
+  const first = await getConsent(tenantId, subjectKey);
+  const generation = first?.categories[category] === true ? first.strictGrantGenerations?.[category] : undefined;
+  if (!generation) return null;
+  if (await isErasureTombstoned(tenantId, subjectKey)) return null;
+  if (linkedSubjectKey && linkedSubjectKey !== subjectKey && await isErasureTombstoned(tenantId, linkedSubjectKey)) return null;
+  const current = await getConsent(tenantId, subjectKey);
+  return current?.categories[category] === true && current.strictGrantGenerations?.[category] === generation
+    ? generation : null;
 }
 
 /**
@@ -549,8 +626,8 @@ export function fullMarketingOptOut(): Partial<ConsentCategories> {
 /**
  * GRADE-DATA 2026-07-17 (ADR 0394 keyword ladder) — CAS-merge a PARTIAL
  * category update into the subject's record so a STOP/START keyword can never
- * be silently overwritten by a racing consent write (recordConsent is
- * latest-wins by design; a compliance revocation must not lose that race).
+ * be silently overwritten by a racing consent write. ADR 0951 P2 also moved
+ * replacement writes onto CAS and removed the retries-exhausted blind put.
  * Stays inside the ONE consent owner — callers never touch the store.
  *
  * CONS-3 — this is now the DEFAULT write path, not the WhatsApp special case.
@@ -559,6 +636,8 @@ export function fullMarketingOptOut(): Partial<ConsentCategories> {
  * (previously only the stored value survived, which made this unusable for the
  * public capture lane and is why that lane kept using the wholesale write).
  */
+/** CAS attempts for a merge that revokes anything (backed off after the first five). */
+export const MERGE_REVOKE_ATTEMPTS = 25;
 export async function mergeConsentCategories(input: {
   tenantId: string;
   subjectKey: string;
@@ -572,9 +651,23 @@ export async function mergeConsentCategories(input: {
   assertWriteBounds(input); // ADR 0849 B3
   if (input.purposes !== undefined) await assertPurposesAtCapture(input.tenantId, input.purposes); // fail-closed only in strict mode
   await assertNotErased(input.tenantId, input.subjectKey); // D10 — the barrier, at entry
-  for (let attempt = 0; attempt < 5; attempt++) {
+  let first: ConsentRecord | null = null;
+  // A write that REVOKES anything must not be lost to contention: a STOP keyword
+  // or an unsubscribe has no client retrying it, and a banner choice ("analytics
+  // yes, recording no") carries its refusal beside a grant (ADR 0951 P2 review
+  // #7: it used to get the grant budget, so the refusal was lost). Any write
+  // that contains a `false` gets the longer, backed-off CAS budget. A grant in
+  // it is still re-checked on every retry (`assertAffirmationStillCurrent`).
+  // It never falls back to a blind put, which could carry a stale strict grant
+  // over a newer refusal (ADR 0951 P2).
+  const revokes = Object.values(input.categories).some((v) => v === false);
+  const attempts = revokes ? MERGE_REVOKE_ATTEMPTS : 5;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (attempt >= 5) await new Promise((resolve) => setTimeout(resolve, 5 + Math.floor(Math.random() * 20 * (attempt - 4))));
     const cur = await records.get(`${input.tenantId}:${input.subjectKey}`);
     assertVisitorOnlyGrants(cur ?? null, input.categories, input.source); // ADR 0951 D1
+    if (attempt === 0) first = cur;
+    else assertAffirmationStillCurrent(first, cur, input.categories);
     // D10 — a null read on a retry is exactly the DSAR interleaving (CONS-25): re-check
     // the barrier before a swap that would RE-INSERT the record after its erasure.
     if (cur === null && attempt > 0) await assertNotErased(input.tenantId, input.subjectKey);
@@ -582,7 +675,7 @@ export async function mergeConsentCategories(input: {
     const legalBasis = input.legalBasis ?? cur?.legalBasis;
     const purposes = input.purposes ?? cur?.purposes;
     // ADR 0849 D3 — the history rides the same CAS: a change and its receipt land together.
-    const rec = withHistory(cur ?? null, {
+    const rec = withHistory(cur ?? null, withGrantGenerations(cur, {
       tenantId: input.tenantId,
       subjectKey: input.subjectKey,
       categories: normCategories({ ...(cur?.categories ?? {}), ...input.categories }),
@@ -591,7 +684,7 @@ export async function mergeConsentCategories(input: {
       ...(region ? { region } : {}),
       ...(legalBasis ? { legalBasis } : {}),
       ...(purposes !== undefined ? { purposes: [...purposes] } : {}),
-    });
+    }, input.categories));
     if (await records.compareAndSwap(cur ?? null, rec)) {
       if (await isErasureTombstoned(rec.tenantId, rec.subjectKey)) { // D10 post-swap re-check
         await records.delete(`${rec.tenantId}:${rec.subjectKey}`);
@@ -606,24 +699,9 @@ export async function mergeConsentCategories(input: {
       return rec;
     }
   }
-  // Exhausted retries under pathological contention: fall through to the
-  // latest-wins path rather than dropping the compliance write entirely. It
-  // still merges over the freshest read, so no specific is DROPPED — only a
-  // concurrent writer's newer value can be lost, which is the trade the CAS
-  // exists to minimise and cannot eliminate.
-  const cur = await records.get(`${input.tenantId}:${input.subjectKey}`);
-  return recordConsent({
-    tenantId: input.tenantId,
-    subjectKey: input.subjectKey,
-    categories: normCategories({ ...(cur?.categories ?? {}), ...input.categories }),
-    source: input.source,
-    ...(input.region ?? cur?.region ? { region: (input.region ?? cur?.region)! } : {}),
-    ...(input.legalBasis ?? cur?.legalBasis ? { legalBasis: (input.legalBasis ?? cur?.legalBasis)! } : {}),
-    ...(input.purposes ?? cur?.purposes ? { purposes: [...(input.purposes ?? cur!.purposes!)] } : {}),
-    // Review F8 — carry the flag across the fallthrough, or a non-consent write
-    // would clear the tombstone under contention and not on the fast path.
-    purposesAsserted: true, // CONS-28 — asserted at entry; stored purposes are never re-validated
-  });
+  // ADR 0951 P2: never silently overwrite a concurrent consent decision after
+  // the bounded retry budget. A conflict is explicit and safe to retry.
+  throw consentWriteContended();
 }
 
 /**

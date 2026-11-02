@@ -34,6 +34,7 @@ const confirmMock = vi.fn<(o: ConfirmOptions) => Promise<boolean>>();
 const getSyncStatus = vi.fn();
 const listConversions = vi.fn();
 const dispatchConversions = vi.fn();
+const syncNow = vi.fn();
 
 vi.mock('../campaignConnectorsClient.js', async (orig) => {
   const actual = await orig<Record<string, unknown>>();
@@ -47,6 +48,7 @@ vi.mock('../campaignConnectorsClient.js', async (orig) => {
     getSyncStatus: (..._a: unknown[]) => getSyncStatus(),
     listConversions: (..._a: unknown[]) => listConversions(),
     dispatchConversions: (...a: unknown[]) => dispatchConversions(...a),
+    syncNow: (...a: unknown[]) => syncNow(...a),
     getCatalogFeed: vi.fn(async () => ({ enabled: false, version: 1, contentLanguage: 'en', feedLabel: 'US', items: 0, excluded: [] })),
     getConnectorSettings: vi.fn(async () => ({ orgId: 'org-1', platform: 'meta', syncScope: 'dispatched', adAccountIds: [], updatedAt: '' })),
     getPlatformStatus: vi.fn(async () => ({ liveSync: ['meta', 'google'], liveConversions: ['meta'] })),
@@ -232,11 +234,52 @@ describe('R2 CC-SP-6/13 — the new surfaces have real coverage (review m4)', ()
     expect((screen.getByRole('button', { name: /Dispatch to platforms/ }) as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it('the last-synced freshness line renders from the sync-status read', async () => {
+  // ADR 1022 D7 — freshness is when data last ARRIVED, with its date, and a
+  // failed last attempt is said; never the cooldown claim time (CP71UX-1/-2).
+  it('the freshness line shows the last successful sync with its date, and a failed last attempt', async () => {
+    getSyncStatus.mockResolvedValue([{ platform: 'meta', lastSyncAt: '2026-08-12T09:00:00.000Z', lastSuccessAt: '2026-08-09T10:00:00.000Z', lastAttempt: { at: '2026-08-12T09:00:00.000Z', outcome: 'failed', reason: 'no_connection' } }]);
+    render(<CampaignConnectorsPage />);
+    await act(async () => {});
+    const line = await screen.findByText(/Sync status —/);
+    // The success time carries its DATE (a six-day-old sync must not read as today).
+    expect(line.textContent).toMatch(/Meta Ads: last successful sync [^(]*(2026|Aug)[^(]*\(last attempt failed at/);
+  });
+
+  it('a row from before ADR 1022 says when the last sync started, never "none yet"', async () => {
     getSyncStatus.mockResolvedValue([{ platform: 'meta', lastSyncAt: '2026-08-09T10:00:00.000Z' }]);
     render(<CampaignConnectorsPage />);
     await act(async () => {});
-    const line = await screen.findByText(/Last live sync:/);
-    expect(line.textContent).toMatch(/Meta/);
+    const line = await screen.findByText(/Sync status —/);
+    expect(line.textContent).toMatch(/Meta Ads: last sync started/);
+    expect(line.textContent).not.toMatch(/no successful sync yet/);
+  });
+
+  it('an org with no data rows still sees that its syncs fail (CP71UX-5)', async () => {
+    getKpi.mockResolvedValue({ ...kpi('USD'), recordCount: 0, byPlatform: [], dateRange: null });
+    getSyncStatus.mockResolvedValue([{ platform: 'google', lastSyncAt: '2026-08-12T09:00:00.000Z', lastAttempt: { at: '2026-08-12T09:00:00.000Z', outcome: 'failed', reason: 'http_401' } }]);
+    render(<CampaignConnectorsPage />);
+    await act(async () => {});
+    const line = await screen.findByText(/Sync status —/);
+    expect(line.textContent).toMatch(/Google Ads: no successful sync yet \(last attempt failed at/);
+  });
+
+  it('a sync where no account answered is an error notice with advice that fits the reason', async () => {
+    getSyncStatus.mockResolvedValue([]);
+    syncNow.mockResolvedValueOnce({ outcome: 'sync_failed', platform: 'meta', reason: 'no_connection', failures: [{ adAccountId: 'act_1', reason: 'http_401' }] });
+    render(<CampaignConnectorsPage />);
+    await act(async () => {});
+    fireEvent.click(await screen.findByRole('button', { name: /Sync Meta/ }));
+    const notice = await screen.findByText(/No Meta Ads account returned data/);
+    expect(notice.textContent).toMatch(/Check the ad-platform sign-in in Connections/);
+    // A 401 reads as the sign-in problem it is, not a raw code.
+    expect((await screen.findByText('act_1')).parentElement?.textContent).toMatch(/not connected \(sign in/);
+    syncNow.mockResolvedValueOnce({ outcome: 'sync_failed', platform: 'meta', reason: 'rate_limited', failures: [{ adAccountId: 'act_1', reason: 'Some provider English text' }] });
+    fireEvent.click(screen.getByRole('button', { name: /Sync Meta/ }));
+    await screen.findByText(/Wait a few minutes/);
+    expect((await screen.findByText('act_1')).parentElement?.textContent).toMatch(/the platform rejected the request \(Some provider English text\)/);
+    // A setup problem is not a sign-in problem (CP71UX-15).
+    syncNow.mockResolvedValueOnce({ outcome: 'sync_failed', platform: 'google', reason: 'no_developer_token', failures: [{ adAccountId: '123', reason: 'no_developer_token' }] });
+    fireEvent.click(screen.getByRole('button', { name: /Sync Google/ }));
+    await screen.findByText(/ask your workspace admin/);
   });
 });

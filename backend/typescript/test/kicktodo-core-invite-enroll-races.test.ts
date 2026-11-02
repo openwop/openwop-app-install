@@ -17,6 +17,12 @@
  *    (second case) or `retireOne` drops its revoke (first case asserts the row).
  *  - KTC-10: the enrol create-CAS loses with NO winner row. Breaks if `enroll`
  *    falls through again: it would return an enrollment that was never stored.
+ *
+ * TST-DJD-2 (grade-tests wave 71). DOUBLE GUARD (inviteService.ts `mintInvite`): the
+ * one-live rule is held by the index CAS AND the post-write re-check; the wave-71
+ * re-probe breaks both in one edit (index put + no re-check) and the KTCORE-3 case is
+ * red. The KTC-10 fake swap returns the real `{ swapped, actual }` shape — `actual:
+ * null` is the "row is gone by the re-read" state the case describes.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -128,7 +134,7 @@ describe('KTC-10 — a lost enrol CAS with no winner is a typed failure', () => 
     const original = storage.kvCompareAndSwap.bind(storage);
     let forced = 0;
     const spy = vi.spyOn(storage, 'kvCompareAndSwap').mockImplementation(async (k, exp, next) => {
-      if (k === enrollKey && exp === null && forced === 0) { forced += 1; return { swapped: false } as Awaited<ReturnType<Storage['kvCompareAndSwap']>>; }
+      if (k === enrollKey && exp === null && forced === 0) { forced += 1; return { swapped: false, actual: null }; }
       return original(k, exp, next);
     });
     restore.push(() => spy.mockRestore());

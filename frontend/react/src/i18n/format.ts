@@ -53,8 +53,24 @@ function listFmt(options?: Intl.ListFormatOptions): Intl.ListFormat {
   return keyed('list', options, () => new Intl.ListFormat(activeLocale, options));
 }
 
+/**
+ * A bare `YYYY-MM-DD` is a CALENDAR DATE, not an instant. `new Date('2026-10-30')`
+ * parses it as UTC midnight, so in any negative-offset zone every date-only label
+ * rendered a day early (KickTodo Plan showed TODAY as "29 THU" for a server
+ * `dateLocal` of 2026-10-30, in America/Detroit). Timestamps keep `new Date`.
+ */
+const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
+
 function toDate(value: Date | string | number): Date {
-  return value instanceof Date ? value : new Date(value);
+  if (value instanceof Date) return value;
+  const m = typeof value === 'string' ? DATE_ONLY.exec(value) : null;
+  if (!m) return new Date(value);
+  // Local midnight: the calendar date the user means, for arithmetic and for
+  // the time/date-time formatters. An out-of-range part ('2026-13-45') stays
+  // invalid, as `new Date` left it, instead of rolling into a real date.
+  const y = Number(m[1]), mo = Number(m[2]) - 1, d = Number(m[3]);
+  const local = new Date(y, mo, d);
+  return local.getFullYear() === y && local.getMonth() === mo && local.getDate() === d ? local : new Date(Number.NaN);
 }
 
 /**
@@ -162,6 +178,14 @@ export function formatPercent(ratio: number, options?: Intl.NumberFormatOptions)
 
 /** Date only (medium by default), locale-ordered. `UNDATED` if unparseable. */
 export function formatDate(value: Date | string | number, options?: Intl.DateTimeFormatOptions): string {
+  const m = typeof value === 'string' ? DATE_ONLY.exec(value) : null;
+  if (m) {
+    // A calendar date renders as itself in every zone. It has no zone of its
+    // own, so a caller's `timeZone` (e.g. the `'UTC'` some callers passed to
+    // dodge the UTC-midnight parse) cannot move it to a neighbouring day.
+    const at = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+    return guardDate(value, () => dateFmt({ ...(options ?? { dateStyle: 'medium' }), timeZone: 'UTC' }).format(at));
+  }
   return guardDate(value, () => dateFmt(options ?? { dateStyle: 'medium' }).format(toDate(value)));
 }
 

@@ -14,7 +14,8 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
-import { makeAdsAdapter, authorizeBudgetOps } from '../src/host/adsAdapter.js';
+import { makeAdsAdapter, authorizeBudgetOps, setAdsCapIncreaseChecker, __putDispatchRecordForTests, type AdsCapIncreaseChecker } from '../src/host/adsAdapter.js';
+import { capBlocksIncrease } from '../src/features/campaign-intel/spendCaps.js';
 import { setGovernancePolicy } from '../src/host/governanceService.js';
 import { createCampaignSpendApproval, resolveApproval } from '../src/host/approvalService.js';
 import { __resetConnectionsStore, createSecretConnection } from '../src/features/connections/connectionsService.js';
@@ -144,3 +145,62 @@ describe('ADR 0952 P3 — authorizeBudgetOps', () => {
     await expect(authorizeBudgetOps('other-tenant', plan.approvalId, [op])).rejects.toThrow(/not approved/);
   });
 });
+
+// ADR 1022 D5 — every budget change meets the caps. Before, only launches and
+// reallocation asked; `/recommendations/apply` and the core budget node went
+// straight to the spend gate, so a breached cap's campaign could be raised.
+// Sabotage: drop the checker call in `updateBudget` and the first case writes.
+describe('ADR 1022 D5 — updateBudget asks the cap checker', () => {
+  const withChecker = async (fn: AdsCapIncreaseChecker, body: () => Promise<void>): Promise<void> => {
+    setAdsCapIncreaseChecker(fn);
+    try { await body(); } finally { setAdsCapIncreaseChecker((t, target, to) => capBlocksIncrease(t, target, to)); }
+  };
+
+  it('a blocking cap refuses an increase, allows a decrease, and an unreadable budget or checker refuses', async () => {
+    // A threshold far above these amounts, so the spend gate never stands in for
+    // the cap check this case is about (an earlier case set 1000).
+    await setGovernancePolicy(T, { adSpend: { approvalThresholdMinor: 10_000_000 } }, 'test');
+    meta['31'] = '5000';
+    const asked: Array<{ toDailyMinor: number; campaignId: string }> = [];
+    await withChecker(async (_t, target, to) => { asked.push({ toDailyMinor: to, campaignId: target.campaignId }); return { capId: 'cap-1', reason: 'cap_enforcing' }; }, async () => {
+      expect(await adapter().updateBudget({ platform: 'meta', adAccountId: 'act_1', campaignId: '31', dailyBudgetMinor: 6000 })).toEqual({ outcome: 'failed', error: 'cap_enforcing:cap-1' });
+      expect(writes).toHaveLength(0);
+      // A dry run reports the refusal it would get, not a preview that will fail.
+      expect(await adapter().updateBudget({ platform: 'meta', adAccountId: 'act_1', campaignId: '31', dailyBudgetMinor: 6000, dryRun: true })).toEqual({ outcome: 'failed', error: 'cap_enforcing:cap-1' });
+      // Lowering spend under a breached cap is the safe direction: it goes through.
+      expect(await adapter().updateBudget({ platform: 'meta', adAccountId: 'act_1', campaignId: '31', dailyBudgetMinor: 4000 })).toMatchObject({ outcome: 'updated', dailyBudgetMinor: 4000 });
+      expect(writes).toEqual([{ path: '/meta/31', body: { daily_budget: 4000 } }]);
+      // No live budget to compare with ⇒ refused, never assumed a decrease.
+      writes = [];
+      meta['32'] = undefined; adsetsOf['32'] = ['320', '321']; meta['320'] = '1'; meta['321'] = '2';
+      expect(await adapter().updateBudget({ platform: 'meta', adAccountId: 'act_1', campaignId: '32', dailyBudgetMinor: 1 })).toEqual({ outcome: 'failed', error: 'budget_unreadable' });
+      expect(writes).toHaveLength(0);
+    });
+    expect(asked[0]).toEqual({ toDailyMinor: 6000, campaignId: '31' });
+    await withChecker(async () => { throw new Error('caps store down'); }, async () => {
+      expect(await adapter().updateBudget({ platform: 'meta', adAccountId: 'act_1', campaignId: '31', dailyBudgetMinor: 100 })).toEqual({ outcome: 'failed', error: 'cap_unreadable' });
+    });
+    // No covering cap ⇒ the change proceeds as before.
+    writes = [];
+    await withChecker(async () => null, async () => {
+      expect(await adapter().updateBudget({ platform: 'meta', adAccountId: 'act_1', campaignId: '31', dailyBudgetMinor: 7000 })).toMatchObject({ outcome: 'updated', dailyBudgetMinor: 7000 }); // an increase
+    });
+  });
+
+  // CP71CD-10 / M1 — the org a cap check asks about comes from the stamped
+  // ledger row, never the adapter's own org (the chain lane's is the tenant).
+  it('the checker is asked with the ledger\'s org (verified), else the adapter\'s (unverified)', async () => {
+    await setGovernancePolicy(T, { adSpend: { approvalThresholdMinor: 10_000_000 } }, 'test');
+    meta['33'] = '5000';
+    await __putDispatchRecordForTests({ tenantId: T, platform: 'meta', platformCampaignId: '33', platformAdSetId: 's', platformAdId: 'a33', createdAt: '2026-07-01T00:00:00Z', campaignId: 'mc-33', orgId: 'org-client-b', adAccountId: 'act_1' });
+    const seen: Array<Record<string, unknown>> = [];
+    await withChecker(async (_t, target) => { seen.push({ ...target }); return null; }, async () => {
+      await adapter().updateBudget({ platform: 'meta', adAccountId: 'act_1', campaignId: '33', dailyBudgetMinor: 4000, dryRun: true });
+      await adapter().updateBudget({ platform: 'meta', adAccountId: 'act_1', campaignId: '31', dailyBudgetMinor: 4000, dryRun: true });
+    });
+    expect(seen[0]).toMatchObject({ campaignId: '33', orgId: 'org-client-b', orgVerified: true });
+    expect(seen[1]).toMatchObject({ campaignId: '31', orgId: T });
+    expect(seen[1]!.orgVerified).toBeUndefined();
+  });
+});
+

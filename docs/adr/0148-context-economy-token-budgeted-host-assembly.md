@@ -91,6 +91,11 @@ cumulative `O(turns²)` → ≈ `O(turns)`.
 > verifier per this ADR's quality guardrails; Phase 3 ships deterministic last-`k`
 > windowing only.
 
+> **Correction note (2026-10-29, ADR 1003).** The window as shipped slides by one turn on
+> every exchange once full, and its elision count lives in the system message, so the cached
+> prefix changes on every turn. On a provider with prefix caching that can make A1 cost MORE
+> than unbounded history. ADR 1003 D2 makes it move in steps.
+
 ### A2 — Provider context caching (highest leverage, zero quality risk)
 Front-load a **byte-identical, stable prefix** (system prompt + tool surface +
 pinned memory) and mark it `cache_control: { type: "ephemeral" }` on the
@@ -99,6 +104,15 @@ hint for other providers that support it. This neutralizes most of the A1
 transcript cost **without any summarization** — it is the one lever with no
 context-loss trade-off, so **it ships first**. Requires the prefix to be
 assembled deterministically and ordered stable→volatile (volatile turns last).
+
+> **Correction note (2026-10-29, ADR 1003).** "This neutralizes most of the A1 transcript
+> cost" was never true of what shipped. The breakpoints sit on the tool block and the system
+> block only, so no transcript is cached, and each round of a tool loop re-bills the whole
+> conversation. Prod, 7 days to 2026-10-27: 12 managed tools rounds had about 2.8% of prompt
+> tokens served from cache (a small sample). That figure is the MiniMax automatic cache, which
+> this lever does not drive. `OPENWOP_CONTEXT_ECONOMY_PROVIDER_CACHE=true` is set in prod, and
+> it acts without the master (`lever = envBool(name) ?? master`), so A2 is live on every
+> Anthropic lane. ADR 1003 D3 adds a conversation breakpoint for tool-loop rounds.
 
 ### A3 — Tool-surface diet
 Sub-allowlist tools **per task/agent** (the allowlist already filters by name;
@@ -169,6 +183,10 @@ Compaction is the only risk surface. Therefore, by construction:
 3. **Budgets are configurable and observable** — emit the per-iteration budget
    spend (verbatim vs summarized vs cached-read token split) to the existing
    usage emitter so regressions are visible, not silent.
+   > **Correction note (2026-10-29, ADR 1003).** Guardrail 3 was not implemented: nothing
+   > recorded what any lever did. ADR 1003 D4 adds `context_economy_applied` (counts only)
+   > for the transcript, memory and tool-diet levers. Cache tokens were already reported, on
+   > `provider.usage` for BYOK and in the `managed_prompt_cache` log for the managed tier.
 4. **Off by default until measured.** Land instrumentation first; flip the
    toggle on per-lever once the answer-quality delta is shown ≈ neutral.
 

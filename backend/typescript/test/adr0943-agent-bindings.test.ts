@@ -125,7 +125,7 @@ async function clientRun(orgId: string | undefined, workflowId: string, extra: R
     metadata: { ...(orgId ? { [CAMPAIGN_OPS_RUN_STAMP]: { orgId } } : {}), ...extra },
     configurable: {}, createdAt: now, updatedAt: now,
   };
-  await insertRunWithStartContext(storage, run, { definition: definition(workflowId) });
+  await insertRunWithStartContext(storage, run, { admission: { plan: 'exempt:test-fixture' }, definition: definition(workflowId) });
   return (await storage.getRun(run.runId))!;
 }
 const bindingsOf = (run: RunRecord): unknown => (run.metadata as Record<string, unknown> | undefined)?.[RUN_AGENT_BINDINGS_KEY];

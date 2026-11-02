@@ -8,6 +8,11 @@
  * its request and suspension and the fork must supply the resolution. A
  * re-deciding host re-raises the gate and waits; a deriving host takes the
  * source's decision.
+ *
+ * Tracker TST-DCD-4. Red when the executor stops deriving (`deriveRecordedResolutions` returns []),
+ * treats a recorded reject as an accept, or skips appending the derived
+ * `interrupt.resolved` (grade-tests w70 probes `frd-*`).
+ * The 20 ms status poll is an honest ceiling: no settle hook exists over HTTP.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -25,14 +30,15 @@ beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  registerWorkflow({
+  const def: WorkflowDefinition = {
     workflowId: 'wf.derive',
     nodes: [
       { nodeId: 'gate', typeId: 'core.approvalGate', config: { title: 'Derive?', actions: ['accept', 'reject'], rejectionPolicy: 'single-veto' } },
       { nodeId: 'after', typeId: 'core.noop', config: {} },
     ],
     edges: [{ edgeId: 'g-a', sourceNodeId: 'gate', targetNodeId: 'after' }],
-  } as unknown as WorkflowDefinition);
+  };
+  registerWorkflow(def);
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });

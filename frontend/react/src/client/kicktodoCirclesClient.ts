@@ -1,8 +1,14 @@
 /**
  * KickTodo accountability FE client (ADR 0419 P5) — React-free (the ADR 0413
- * shared-contract posture). Rides /host/openwop-app/circles/*.
+ * shared-contract posture). Rides /host/openwop-app/kicktodo/circles/*.
  */
 import { authedHeaders, config, fetchOpts } from './config.js';
+
+/** The backend's `KICKTODO_CIRCLES_PREFIX` (kicktodo-accountability/routes.ts).
+ *  The participant PAGE lives at `/circles`; the API stays under `/kicktodo/`.
+ *  The two were conflated once (548c41f79) and every circles call 404'd.
+ *  `kicktodo-circles-client-prefix-parity.test.ts` pins this to the mount. */
+export const KICKTODO_CIRCLES_PATH = '/host/openwop-app/kicktodo/circles';
 
 export interface Circle {
   id: string;
@@ -26,7 +32,7 @@ export interface CircleFeed {
   actions?: Array<{ title: string; completed: boolean; note?: string }>;
 }
 
-const B = () => `${config.baseUrl}/host/openwop-app/circles`;
+const B = () => `${config.baseUrl}${KICKTODO_CIRCLES_PATH}`;
 
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) throw new Error(`circles request failed: ${res.status}`);

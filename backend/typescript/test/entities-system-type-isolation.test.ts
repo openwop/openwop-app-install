@@ -4,6 +4,11 @@
  * `workspace:read` + the `entities` toggle on could query `crm.company` via the
  * generic routes and read companies ACROSS ALL ORGS, bypassing the CRM façade's
  * per-org RBAC. Pinned at the HTTP boundary (routes) + the workflow surface.
+ *
+ * TST-DAA-8. Red when (sabotage-witnessed, wave 70): `requireEntitiesScope`
+ * stops 404ing a system type; the `/types` list or the surface `listTypes`
+ * stops filtering `system`; surface `getType`/`query` serve a system type;
+ * `assertNotSystemWrite` stops refusing a delete.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -12,7 +17,8 @@ import { getSetCookies } from './headerCookies.js';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
-import { createCompany } from '../src/features/crm/entities/companies.js';
+import { createCompany, getCompany } from '../src/features/crm/entities/companies.js';
+import type { BundleScope } from '../src/host/inMemorySurfaces.js';
 import { buildEntitiesSurface } from '../src/features/entities/surface.js';
 
 let BASE: string;
@@ -40,6 +46,16 @@ function client() {
 }
 
 const T = 'tenant-sys-iso';
+const SCOPE: BundleScope = { tenantId: T, runId: 'r1' };
+let COMPANY_ID = '';
+
+/** The system-type refusal: the uniform 404, not a toggle-off 404. */
+async function expectTypeNotFound(res: Response): Promise<void> {
+  expect(res.status).toBe(404);
+  const body = (await res.json()) as { error?: string; message?: string };
+  expect(body.error).toBe('not_found');
+  expect(body.message).toBe('Entity type not found.');
+}
 const E = '/host/openwop-app/entities';
 
 beforeAll(async () => {
@@ -52,7 +68,7 @@ beforeAll(async () => {
   const d = getToggleDefault('entities');
   if (d) await saveConfig({ ...d, status: 'on' }, 'test');
   // A company exists (a crm.company system-type kernel row).
-  await createCompany({ tenantId: T, orgId: 'org-secret', name: 'Confidential Co', createdBy: 'u1' });
+  COMPANY_ID = (await createCompany({ tenantId: T, orgId: 'org-secret', name: 'Confidential Co', createdBy: 'u1' })).companyId;
 });
 
 afterAll(async () => { await new Promise<void>((resolve) => server.close(() => resolve())); });
@@ -70,13 +86,13 @@ describe('ADR 0409 — system types are invisible to the generic entities API', 
   it('the generic query/get routes 404 a system type (no cross-org RBAC bypass)', async () => {
     const c = client();
     await c.login('owner-sys', T);
-    expect((await c.post(`${E}/types/crm.company/query`, { filters: [] })).status).toBe(404);
-    expect((await c.get(`${E}/types/crm.company`)).status).toBe(404);
-    expect((await c.get(`${E}/types/crm.company/entities`)).status).toBe(404);
+    await expectTypeNotFound(await c.post(`${E}/types/crm.company/query`, { filters: [] }));
+    await expectTypeNotFound(await c.get(`${E}/types/crm.company`));
+    await expectTypeNotFound(await c.get(`${E}/types/crm.company/entities`));
   });
 
   it('the workflow surface read verbs refuse a system type', async () => {
-    const surface = buildEntitiesSurface({ tenantId: T, runId: 'r1' } as never);
+    const surface = buildEntitiesSurface(SCOPE);
     const types = (await surface.listTypes!({})) as { types: Array<{ name: string }> };
     expect(types.types.map((t) => t.name)).not.toContain('crm.company');
     expect((await surface.getType!({ typeName: 'crm.company' })) as { type: unknown }).toEqual({ type: null });
@@ -87,8 +103,10 @@ describe('ADR 0409 — system types are invisible to the generic entities API', 
     // Without the deleteEntity system-write guard, a workflow node could delete
     // a crm.company kernel row straight out from under the CRM façade — skipping
     // the cascade (dangling companyId on deals) and the org scope.
-    const surface = buildEntitiesSurface({ tenantId: T, runId: 'r1' } as never);
-    await expect((surface.delete!({ typeName: 'crm.company', entityId: 'cmp:anything' })) as Promise<unknown>)
-      .rejects.toThrow(/system type/);
+    const surface = buildEntitiesSurface(SCOPE);
+    await expect((surface.delete!({ typeName: 'crm.company', entityId: COMPANY_ID })) as Promise<unknown>)
+      .rejects.toThrow(/`crm\.company` is a system type/);
+    // The REAL company row survives — the refusal is not a no-op on an absent id.
+    expect((await getCompany(T, 'org-secret', COMPANY_ID))?.name).toBe('Confidential Co');
   });
 });

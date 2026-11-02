@@ -5,16 +5,25 @@
  * provider, BEFORE any credential is resolved — but is permissive to GET/POST (a
  * read POST like BigQuery jobs.query must pass). Plus the config invariant: a
  * readOnly provider must not declare a write scope group.
+ *
+ * TST-CKA-1. Red when: the gate is skipped (case 3), PUT drops out of the deny list
+ * (case 3), POST is added to it (case 4), the absent-method default stops being GET
+ * (case 5), or the invariant's `> 0` becomes `> 1` (case 2). The two "ALLOWS" cases
+ * prove "past the gate" by the DOWNSTREAM throw: a denied verb RESOLVES
+ * `{ok:false,error:'connector_read_only'}`, so reaching the broker (which throws with
+ * persistence uninitialized) can only happen when the gate let the verb through.
  */
 
 import { describe, expect, it } from 'vitest';
 import { getProvider, assertReadOnlyConsistent, type ProviderManifest } from '../src/features/connections/providerRegistry.js';
 import { createConnectorInvoker } from '../src/host/connectorInvoker.js';
+import { openStorage } from '../src/storage/index.js';
 
-// Minimal storage stub — the gate returns before any storage access on a denied verb,
-// and a read POST fails earlier at connection resolution (no connection) which proves
-// the gate did NOT block it.
-const storage = {} as Parameters<typeof createConnectorInvoker>[0]['storage'];
+// A real (in-memory) storage. Host-ext persistence is deliberately NOT initialized:
+// the gate returns before any storage access on a denied verb, and an allowed verb
+// proceeds into the broker, which throws `persistence not initialized` — proof the
+// gate did NOT block it.
+const storage = await openStorage('memory://');
 const invoker = createConnectorInvoker({ storage });
 const ctx = { tenantId: 'demo', runId: 'r1', actingUserId: 'u1', orgId: 'demo' };
 

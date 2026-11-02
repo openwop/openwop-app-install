@@ -14,6 +14,10 @@
  *
  * Note the asymmetry this deliberately keeps: the corpus copy is the oracle,
  * NOT a second opinion. When these disagree the corpus is right by definition.
+ *
+ * Tracker TST-BEF-2 (w66). Red when the passthrough set, hex case, `~`
+ * validation, UTF-8 fatality, lower-case acceptance or `looksProjected`
+ * drift from the oracle / RFC 0184 §A.1.
  */
 import { describe, it, expect } from 'vitest';
 import { projectBoundId as oracleProject, unprojectBoundId as oracleUnproject } from '@openwop/openwop-conformance/src/lib/bound-id.js';

@@ -20,6 +20,7 @@ import { toast } from '../../ui/toast.js';
 import { confirm } from '../../ui/confirm.js';
 import { getDlqSummary, getHealthSummary, getOutboxSummary, getSloSummary, redriveOutboxIntent, replayDlqMessage, OperationsRequestError, type DlqSummary, type HealthSummary, type OutboxSummary, type SloRow, type SloSummary } from '../../client/operationsClient.js';
 import { AdminPageHeader } from '../../chrome/AdminPageHeader.js';
+import { AdmissionPanel } from './AdmissionPanel.js';
 
 const REFRESH_MS = 30_000;
 
@@ -102,8 +103,12 @@ export function OperationsHubPage(): JSX.Element {
   const [slo, setSlo] = useState<SloSummary | null>(null);
   const [sloForbidden, setSloForbidden] = useState(false);
   const [sloFailed, setSloFailed] = useState(false);
+  // ADR 0987 D6 — the admission panel owns its read and its outcome state; the
+  // hub only tells it when to re-read.
+  const [refreshToken, setRefreshToken] = useState(0);
 
   const load = useCallback(async () => {
+    setRefreshToken((n) => n + 1);
     // UX-OPS-1 — these are two INDEPENDENT reads, and `Promise.all` made either
     // one poison the other. Two concrete failures:
     //   • DLQ 500s while health is fine → the catch runs, `health` is never set,
@@ -259,6 +264,8 @@ export function OperationsHubPage(): JSX.Element {
           </article>
         )}
       </section>
+
+      <AdmissionPanel refreshToken={refreshToken} />
 
       <section>
         <h2>{t('dlqHeading')}</h2>

@@ -12,6 +12,11 @@
  * the one membership-aware visibility predicate (`isVisibleToAsync`), fail-closed
  * 404 masking existence. Legacy/unowned conversations stay tenant-visible so
  * conformance + anon/demo flows are unchanged.
+ *
+ * TST-CKB-9. Red when the visibility deny in `authorizeConversationResolve` is
+ * skipped (stranger + forged cases), or the meta is read by the gate id instead of
+ * the stamped chatSessionId (forged case). Each refusal asserts the masked
+ * `interrupt_not_found` code AND that no turn landed in the run's event log.
  */
 import { mintAnonSession, signSession } from '../src/middleware/cookieSession.js';
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
@@ -89,6 +94,17 @@ async function createConversationRun(call: Client, chatSessionId?: string): Prom
 const exchange = (call: Client, runId: string, content: string) =>
   call('POST', `/runs/${runId}/interrupts/gate`, { resumeValue: { operation: 'exchange', turn: { content } } });
 
+/** The user-turn texts recorded on a run (read by a caller who may read it). */
+async function userTurnTexts(call: Client, runId: string): Promise<string[]> {
+  const { body } = await call('GET', `/runs/${runId}/debug-bundle`);
+  const events = (body.events ?? []) as Array<{ type?: string; payload?: { turn?: { role?: string; content?: unknown } } }>;
+  // Positive control: the log was actually read (an unreadable bundle is not "no turn").
+  if (!events.some((e) => e.type === 'conversation.opened')) throw new Error(`no readable event log for ${runId}`);
+  return events
+    .filter((e) => e.type === 'conversation.exchanged' && e.payload?.turn?.role === 'user')
+    .map((e) => String(e.payload?.turn?.content));
+}
+
 describe('CS-BE-1 — conversation resolve is caller-visibility gated', () => {
   let alice: { call: Client; userId: string };
   let mallory: { call: Client; userId: string };
@@ -120,16 +136,22 @@ describe('CS-BE-1 — conversation resolve is caller-visibility gated', () => {
     const runId = await createConversationRun(alice.call, 'conv-owned-by-alice');
     const ex = await exchange(mallory.call, runId, 'injected');
     expect(ex.status).toBe(404);
+    expect(ex.body.error).toBe('interrupt_not_found');
     const close = await mallory.call('POST', `/runs/${runId}/interrupts/gate`, { resumeValue: { operation: 'close' } });
     expect(close.status).toBe(404);
-    // The owner is unaffected afterwards.
+    expect(close.body.error).toBe('interrupt_not_found');
+    // The owner is unaffected afterwards — and the stranger's turn never landed.
     expect((await exchange(alice.call, runId, 'still mine')).status).toBe(200);
+    expect(await userTurnTexts(alice.call, runId)).toEqual(['still mine']);
   });
 
   it("a FORGED chatSessionId at run-create (vector B) cannot inject into the victim's thread", async () => {
     // Mallory creates her OWN run pointing at Alice's conversation.
     const runId = await createConversationRun(mallory.call, 'conv-owned-by-alice');
-    expect((await exchange(mallory.call, runId, 'forged injection')).status).toBe(404);
+    const forged = await exchange(mallory.call, runId, 'forged injection');
+    expect(forged.status).toBe(404);
+    expect(forged.body.error).toBe('interrupt_not_found');
+    expect(await userTurnTexts(mallory.call, runId), 'no forged turn was persisted').toEqual([]);
   });
 
   it('an ANONYMOUS caller (an anon session) is 404ed on an owned conversation — fail-soft caller resolution stays fail-closed', async () => {

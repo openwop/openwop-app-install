@@ -14,13 +14,17 @@
  * the finding arm (does it see a real `RUN npm install`?) and the
  * REQUIRED-floor arm (does it refuse to pass when it scanned nothing?). Each
  * negative case is paired with the positive that proves it could have failed.
+ *
+ * Tracker TST-DFA-1. Red when (w71g1, witnessed): the OFFENDING pattern stops
+ * matching `npm install` or drops its `-g` exemption; comments stop being
+ * stripped; the walk resolves `.github/`/`deploy/` paths against the subdirectory
+ * instead of the walked root; the line number is off by one; `missing` is not
+ * computed; or `*.Dockerfile` stops counting as a build config (the real-repo floor).
  */
 import { describe, it, expect } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-// eslint-disable-next-line @typescript-eslint/ban-ts-comment
-// @ts-ignore — plain .mjs repo script, no types
 import { scan, REQUIRED } from '../../../scripts/check-build-installs.mjs';
 
 function tree(files: Record<string, string>): string {
@@ -74,7 +78,7 @@ describe('check-build-installs — the finding arm', () => {
     });
     try {
       const { findings } = scan({ root, required: ['Dockerfile'] });
-      expect(findings.map((f: { file: string }) => f.file)).toEqual(['.github/workflows/ci.yml']);
+      expect(findings.map((f) => f.file)).toEqual(['.github/workflows/ci.yml']);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

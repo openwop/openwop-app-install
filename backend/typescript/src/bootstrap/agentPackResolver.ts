@@ -10,10 +10,11 @@
  * 0003 §ImplNotes).
  */
 
+import { archivedVersionDir } from '../packs/agentPackArchive.js';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { setAgentPackResolver } from '../executor/agentRegistry.js';
-import { hydrateUserAgentIntoRegistry } from '../routes/userAgents.js';
+import { getAgentRegistry, setAgentArchiveResolver, setAgentPackResolver, setUserAgentRevisionResolver } from '../executor/agentRegistry.js';
+import { hydrateUserAgentIntoRegistry, projectUserAgent } from '../routes/userAgents.js';
 import { loadAgentsFromManifest } from '../packs/agentLoader.js';
 import { resolveDefaultPackDir } from '../packs/registryInstaller.js';
 import { isParkedPackDirName } from './mountLocalPacks.js';
@@ -21,6 +22,7 @@ import { createLogger } from '../observability/logger.js';
 import { agentsCapability, stripSupported } from '../routes/discovery.js';
 import { storageFamilyFacets, v2AdvertisedStorageFamilies } from '../host/storageFamilyAdvert.js';
 import type { Storage } from '../storage/storage.js';
+import { getRevision } from '../host/userAgentRevisions.js';
 
 const log = createLogger('bootstrap.agentPackResolver');
 const PACK_DIR = resolveDefaultPackDir();
@@ -139,6 +141,19 @@ export function ensureAgentPackResolverInstalled(storage: Storage): void {
         });
       }
     }
+    return null;
+  });
+  // ADR 1014 D2 — an archived version, loaded on demand beside the head.
+  setAgentArchiveResolver(async (_agentId, version, packName) => {
+    const dir = archivedVersionDir(PACK_DIR, packName, version);
+    if (dir === null || !existsSync(join(dir, 'pack.json'))) return null;
+    loadAgentsFromManifest(dir, { hostSatisfies, archived: true });
+    return null;
+  });
+  // ADR 1014 P5 — a user agent's stored revision, loaded on demand beside its head.
+  setUserAgentRevisionResolver(async (tenant, agentId, revision) => {
+    const record = await getRevision(tenant, agentId, revision);
+    if (record) getAgentRegistry().registerVersion(projectUserAgent(record, revision));
     return null;
   });
   // Eager pass so agent-only packs + the inventory route are populated now.

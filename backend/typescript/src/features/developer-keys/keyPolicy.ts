@@ -17,15 +17,16 @@
  * which declare their own scopes and lifetimes.
  */
 import { DELEGABLE_HOST_SCOPES, MANAGEMENT_SCOPES, PROTOCOL_SCOPES } from '../../host/accessControlService.js';
-import { PROPOSAL_KEY_SCOPES, SCOPES_SUPPORTED } from '../../host/protocolAuthorization.js';
+import { DEPLOY_KEY_SCOPES, PROPOSAL_KEY_SCOPES, SCOPES_SUPPORTED } from '../../host/protocolAuthorization.js';
 import { OpenwopError } from '../../types.js';
 
 /** Every scope a key may declare: the RBAC vocabulary a resolver can grant, the
  *  protocol and key-lane scopes a route can refuse a key for, and `*`. The RFC 0249
  *  proposal scopes are mintable before the wire switches on (ADR 0972 D9), so the
- *  evidence cut's low-scope key can carry them on either side of the pin. */
+ *  evidence cut's low-scope key can carry them on either side of the pin. The RFC
+ *  0082 deploy scopes likewise (ADR 1005 D6). */
 export const MINTABLE_KEY_SCOPES: readonly string[] = [
-  ...new Set<string>([...PROTOCOL_SCOPES, ...MANAGEMENT_SCOPES, ...DELEGABLE_HOST_SCOPES, ...SCOPES_SUPPORTED, ...PROPOSAL_KEY_SCOPES, '*']),
+  ...new Set<string>([...PROTOCOL_SCOPES, ...MANAGEMENT_SCOPES, ...DELEGABLE_HOST_SCOPES, ...SCOPES_SUPPORTED, ...PROPOSAL_KEY_SCOPES, ...DEPLOY_KEY_SCOPES, '*']),
 ];
 
 /**

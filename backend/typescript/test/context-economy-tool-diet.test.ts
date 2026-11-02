@@ -102,4 +102,33 @@ describe('compactToolSchema', () => {
     expect(at(out, 'anyOf', '0')).toEqual({ type: 'string' });
     expect(at(out, 'anyOf', '1')).toEqual({ type: 'number' });
   });
+
+  // ADR 1003 D1 — an annotation keyword is stripped only where it IS a keyword.
+  // The first version stripped it at every depth, so a PARAMETER named `title`
+  // vanished from `properties` while `required` still named it. Sabotage:
+  // restoring the depth-blind walk reds both cases below.
+  it('keeps a PARAMETER named title/examples/deprecated/$id (ADR 1003 D1)', () => {
+    const s = {
+      type: 'object',
+      required: ['title'],
+      properties: {
+        title: { type: 'string', title: 'Title', description: 'The title.' },
+        examples: { type: 'array', items: { type: 'string' } },
+        deprecated: { type: 'boolean' },
+        $id: { type: 'string' },
+      },
+    };
+    const out = compactToolSchema(s, true);
+    expect(Object.keys(at(out, 'properties') as object).sort()).toEqual(['$id', 'deprecated', 'examples', 'title']);
+    expect(at(out, 'properties', 'title')).toEqual({ type: 'string', description: 'The title.' });
+    expect(at(out, 'required')).toEqual(['title']);
+  });
+
+  it('copies VALUE positions verbatim: an enum/default of objects keeps its title key', () => {
+    const s = { type: 'object', enum: [{ title: 'a' }], default: { title: 'b' }, const: { $id: 'c' } };
+    const out = compactToolSchema(s, true);
+    expect(at(out, 'enum')).toEqual([{ title: 'a' }]);
+    expect(at(out, 'default')).toEqual({ title: 'b' });
+    expect(at(out, 'const')).toEqual({ $id: 'c' });
+  });
 });

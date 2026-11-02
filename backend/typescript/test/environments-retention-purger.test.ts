@@ -4,24 +4,28 @@
  * passes the per-tenant window in; no window ⇒ never purge); what was missing
  * was the MECHANISM. Floor: a snapshot ANY environment currently pins is never
  * purged; `env:promotion` (the audit ledger) is never touched.
+ *
+ * TST-DAC-5. Each case uses its own tenant, so the file passes shuffled.
+ * Red when (sabotage-witnessed, wave 70): the pinned-snapshot floor is dropped;
+ * the purger runs for a non-`internal` classification; the age sweep is handed
+ * no rows.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import {
-  snapshotLiveConfig, listSnapshots, createEnvironment, movePointer,
+  snapshotLiveConfig, listSnapshots, createEnvironment, movePointer, listPromotions,
 } from '../src/features/environments/environmentsService.js';
 import { registerConfigDomain } from '../src/host/configDomains.js';
 import { purgeRetained } from '../src/host/retentionPurger.js';
 
-const T = 'tenant-env-retention';
 let server: http.Server;
 
 // A test-owned domain whose live value the cases mutate between captures, so two
 // snapshots differ. (These cases used to mutate per-tenant TOGGLE overrides,
 // which ADR 0819 §2 removed from the snapshot: they are operator state.)
 const live = new Map<string, Record<string, string>>();
-const setLive = (key: string, value: string): void => { live.set(T, { ...(live.get(T) ?? {}), [key]: value }); };
+const setLive = (tenantId: string, key: string, value: string): void => { live.set(tenantId, { ...(live.get(tenantId) ?? {}), [key]: value }); };
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -42,29 +46,35 @@ const FUTURE = '2099-01-01T00:00:00.000Z';
 
 describe('R3 — retention reaches snapshot HISTORY; the pinned snapshot never ages away', () => {
   it('purges dormant snapshots; the currently-pinned one survives any cutoff; promotions untouched', async () => {
+    const T = 'tenant-env-retention-1';
     // Two distinct snapshots: mutate live config between captures so the hashes differ.
     const s1 = await snapshotLiveConfig({ tenantId: T, sourceEnv: null, createdBy: 'op' });
-    setLive('csm', 'on');
+    setLive(T, 'csm', 'on');
     const s2 = await snapshotLiveConfig({ tenantId: T, sourceEnv: null, createdBy: 'op' });
     expect(s1.hash).not.toBe(s2.hash);
     // Pin s2 on an environment (movePointer with fromEnvName: null = the rollback/pin path).
     await createEnvironment({ tenantId: T, name: 'prod' });
     await movePointer({ tenantId: T, fromEnvName: null, toEnvName: 'prod', snapshotHash: s2.hash, actor: 'op' });
 
+    const ledgerBefore = await listPromotions(T);
+    expect(ledgerBefore).toHaveLength(1); // the prod pin
+
     const results = await purgeRetained(T, 'internal', FUTURE);
     const env = results.find((r) => r.feature === 'environments');
     expect(env?.ok).toBe(true);
-    expect(env!.deleted).toBeGreaterThanOrEqual(1);
+    expect(env?.deleted).toBe(1); // exactly the one dormant snapshot
     const hashes = (await listSnapshots(T)).map((s) => s.hash);
-    expect(hashes).not.toContain(s1.hash);  // dormant history purged
-    expect(hashes).toContain(s2.hash);      // the PINNED snapshot survives any cutoff
+    expect(hashes).toEqual([s2.hash]); // dormant s1 purged; the PINNED snapshot survives any cutoff
+    // The audit ledger is untouched by the sweep.
+    expect(await listPromotions(T)).toEqual(ledgerBefore);
   });
 
   it('a PII-classification sweep purges NOTHING here (this feature is internal-classified)', async () => {
     // Seed a FRESH dormant snapshot: the first version of this test reused the
     // drained state from the previous case, so removing the classification
     // guard still deleted zero rows — a vacuous probe, caught and rewritten.
-    setLive('entities', 'off');
+    const T = 'tenant-env-retention-2';
+    setLive(T, 'entities', 'off');
     const dormant = await snapshotLiveConfig({ tenantId: T, sourceEnv: null, createdBy: 'op' });
     const results = await purgeRetained(T, 'confidential-pii', FUTURE);
     const env = results.find((r) => r.feature === 'environments');

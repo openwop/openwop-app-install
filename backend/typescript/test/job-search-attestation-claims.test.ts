@@ -6,6 +6,13 @@
  * application sent tomorrow would silently change a claim an employer relied on
  * today — which is not a stale number, it is a different statement made under
  * the same signature.
+ *
+ * TST-DGF-2. Red when a tampered audit hash still verifies, when another
+ * campaign's consumptions are counted, and when `issuedAt` ignores the injected
+ * clock (sabotage-witnessed, wave 71). The STORED freeze — a later application
+ * never changes an issued token — is witnessed in
+ * job-search-attestation-token.test.ts ('later applications do not change what
+ * an issued token says'); the case here only shows a ClaimSet is a plain value.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -43,11 +50,15 @@ describe('ADR 0544 D1 — only facts the host can prove', () => {
     const g = await mint();
     for (let i = 0; i < 3; i += 1) await consumeSubmit(TENANT, g.grantId, Date.now(), `deal:${i}`);
     const set = await buildClaimSet(TENANT, CAMPAIGN, Date.now());
-    const count = set.claims.find((c) => c.type === 'applications-in-window');
-    expect((count as Extract<Claim, { type: 'applications-in-window' }>).count).toBe(3);
+    const count = set.claims.find((c): c is Extract<Claim, { type: 'applications-in-window' }> => c.type === 'applications-in-window');
+    expect(count?.count).toBe(3);
     // Scoped to the campaign window, never a lifetime total (D2): a figure that
-    // only grows is a countdown, not a signal.
-    expect((count as Extract<Claim, { type: 'applications-in-window' }>).windowStart).toBeTruthy();
+    // only grows is a countdown, not a signal. The window is read off the chain
+    // rows themselves, never recomputed here.
+    const consumed = (await listChain(TENANT)).filter((e) => e.kind === 'job-search.grant.consumed');
+    expect(consumed).toHaveLength(3);
+    expect(count?.windowStart).toBe(consumed[0]!.at);
+    expect(count?.windowEnd).toBe(consumed[2]!.at);
   });
 
   it('every claim carries a SOURCE that still resolves', async () => {
@@ -129,7 +140,7 @@ describe('ADR 0544 D1 — fabrication is unrepresentable', () => {
 describe('ADR 0544 matrix row 9 — counts are FROZEN at issuance', () => {
   beforeEach(() => { __resetHostExtPersistence(); initHostExtPersistence(openSqliteStorage(':memory:')); });
 
-  it('a later application does not change an already-issued set', async () => {
+  it('a built ClaimSet is a plain value — later applications do not mutate it (stored freeze: see the token test)', async () => {
     const g = await mint();
     await consumeSubmit(TENANT, g.grantId, Date.now(), 'deal:1');
     const issued = await buildClaimSet(TENANT, CAMPAIGN, Date.now());

@@ -100,6 +100,7 @@ const ERASED = new Map<string, string>([
   ['subject-knowledge', 'subject-scoped binding rows deleted (subjectKnowledge eraser)'],
   ['workflow-proposal-autoapprove', 'createdBy-owned auto-approve policies DELETED on erasure (the pair reverts to manual — fail-safe; workflowProposalPolicy eraser, ADR 0473 store)'],
   ['runner-dispatch-result', 'subject-owned dispatch dedup rows DELETED via subject-scoped walk — the store has no tenant dimension (RFC 0122 wire carries none); deletes only the erased subject\'s own residue (selfHostedRunner eraser)'],
+  ['user-agent-revisions', 'eraseSubjectUserAgentRevisions (ADR 1014 D8) — a revision the subject authored (`authoredBy`) is DELETED with its prompt, persona, label and description, unless the agent serves it (the head, or a deployment-pinned revision): those keep their text and `authoredBy` → [erased], since deleting them would break a live agent. The live user-agent row has no author field and is not reached; rows written before D8 carry no author and are not reached either.'],
   ['workflow:revision', 'createdBy → [erased] across the tenant\'s revision rows; the definition content is tenant work-product so redaction, not deletion, preserves history (workflowRevisions eraser, ADR 0474 store)'],
   ['workflow:debug-pin', 'subject-created pins DELETED — the pinned OUTPUT may itself quote the subject, so createdBy-only redaction would under-erase; pins are disposable debug state (workflowDebugPins eraser, ADR 0475 store)'],
   ['workflow:eval-set', 'createdBy → [erased] AND fixture payloads (cases[].pins/inputs — run-output content users paste) deep-scrubbed of subject-key forms (grade-data H3); suite STRUCTURE is tenant work-product (workflowEvalSets eraser, ADR 0477 store)'],
@@ -302,6 +303,9 @@ const REVIEWED_EXEMPT = new Map<string, Exemption>([
   ['workforce-status', { reason: 'no-subject: a tenant\'s workforce cutover decision {tenantId, workforceId, status, updatedAt} — no person or agent id; purged with the tenant (ADR 0775 D2)' }],
   ['ads:dispatch', { reason: 'no-subject: ad-platform dispatch records (external campaign/ad ids)' }],
   ['ads:spend-approval', { reason: 'no-subject: spend-approval pointer (spendKey→approvalId)' }],
+  // ADR 1014 P5 — the revision HEAD of a user-authored agent: a pointer with no
+  // author and no text. The revisions themselves moved to ERASED with ADR 1014 D8.
+  ['user-agent-revision-heads', { reason: 'no-subject: ADR 1014 P5 pointer {tenantId, agentId, revision, contentKey hash}; no free text; purged with the agent\'s revisions and on ADR 0284 teardown', tenantTeardownClaim: true }],
   ['agent-profile', { reason: 'agent profile/identity config — excluded agent identity; the ONE subject-bearing corner (twin.userId/linkedBy) is redacted by the agentProfileService eraser' }],
   ['approval:by-tenant-status', { reason: 'no-subject: approval index rows (ixId→approvalId pointers)' }],
 ]);

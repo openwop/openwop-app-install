@@ -1,10 +1,14 @@
 /**
- * ADR 0130 Phase 5 — client for the rule-based model-router config (admin).
- * Backend is authority (toggle + `requireOrgScope`); a 404 means the feature is off.
- * Wraps the existing `/host/openwop-app/model-router/orgs/:orgId/config` GET/PUT
- * + `/enable` surface (Phase 2). No new backend.
+ * ADR 0130 Phase 5 / ADR 1016 — client for the model-router config (admin).
+ *
+ * ONE config per WORKSPACE (ADR 1016 D1): the active workspace's
+ * `/host/openwop-app/model-router/config` GET/PUT + `/enable` + `/preview`. It used
+ * to be per organization, and a config saved for any org but the workspace root
+ * was never read by a chat. The backend is the authority (toggle + plan, then
+ * BYOK-manage for writes); `canManage` says whether this caller may write.
  *
  * @see docs/adr/0130-rule-based-model-router.md
+ * @see docs/adr/1016-model-router-workspace-per-turn-routing.md
  */
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
 
@@ -28,7 +32,8 @@ export interface RoutingRule { when: RuleCondition; target: RoutingTarget }
 
 export interface ModelRouterConfig {
   rules: RoutingRule[];
-  fallback: RoutingTarget;
+  /** ADR 1016 D5 — optional: absent ⇒ a message no rule matches keeps its own model. */
+  fallback?: RoutingTarget;
   cooldownMs?: number;
 }
 
@@ -40,10 +45,27 @@ export interface StoredRouterConfig {
   updatedAt?: string;
 }
 
-export interface Org { orgId: string; name: string }
+/** `GET …/config` — the workspace's config (null when none saved yet) and
+ *  whether this caller may change it. */
+export interface RouterConfigView {
+  stored: StoredRouterConfig | null;
+  canManage: boolean;
+}
 
-const baseFor = (orgId: string): string =>
-  `${config.baseUrl}/host/openwop-app/model-router/orgs/${encodeURIComponent(orgId)}/config`;
+/** `POST …/config/preview` — what a message would be routed to. */
+export interface RoutePreviewInput {
+  text: string;
+  provider: string;
+  hasAttachment?: boolean;
+  conversationKind?: 'group' | 'workspace' | 'channel';
+}
+export interface RoutePreview {
+  enabled: boolean;
+  decision: { target: RoutingTarget; reason: 'rule' | 'fallback' | 'cooldown'; ruleIndex?: number } | null;
+  why: 'no_config' | 'no_match' | 'routed';
+}
+
+const BASE = (): string => `${config.baseUrl}/host/openwop-app/model-router/config`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {
@@ -55,25 +77,27 @@ async function asJson<T>(res: Response, ctx: string): Promise<T> {
   return (await res.json()) as T;
 }
 
-export async function listOrgs(): Promise<Org[]> {
-  const res = await fetch(`${config.baseUrl}/host/openwop-app/orgs`, fetchOpts({ headers: authedHeaders() }));
-  return (await asJson<{ orgs: Org[] }>(res, 'listOrgs')).orgs;
+/** GET the workspace's router config + the caller's write authority. */
+export async function getRouterConfig(): Promise<RouterConfigView> {
+  const res = await fetch(BASE(), fetchOpts({ headers: authedHeaders() }));
+  const body = await asJson<{ config: StoredRouterConfig | null; canManage?: boolean }>(res, 'getRouterConfig');
+  return { stored: body.config, canManage: body.canManage === true };
 }
 
-/** GET the org's router config (null when none set yet). */
-export async function getRouterConfig(orgId: string): Promise<StoredRouterConfig | null> {
-  const res = await fetch(baseFor(orgId), fetchOpts({ headers: authedHeaders() }));
-  return (await asJson<{ config: StoredRouterConfig | null }>(res, 'getRouterConfig')).config;
-}
-
-/** PUT the rules + fallback (server validates). Preserves `enabled`. */
-export async function setRouterConfig(orgId: string, cfg: ModelRouterConfig): Promise<StoredRouterConfig> {
-  const res = await fetch(baseFor(orgId), fetchOpts({ method: 'PUT', headers: jsonHeaders(), body: JSON.stringify(cfg) }));
+/** PUT the rules + optional fallback (server validates). Preserves `enabled`. */
+export async function setRouterConfig(cfg: ModelRouterConfig): Promise<StoredRouterConfig> {
+  const res = await fetch(BASE(), fetchOpts({ method: 'PUT', headers: jsonHeaders(), body: JSON.stringify(cfg) }));
   return (await asJson<{ config: StoredRouterConfig }>(res, 'setRouterConfig')).config;
 }
 
-/** Enable/disable routing for the org (404 if no config exists yet). */
-export async function setRouterEnabled(orgId: string, enabled: boolean): Promise<StoredRouterConfig> {
-  const res = await fetch(`${baseFor(orgId)}/enable`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ enabled }) }));
+/** Enable/disable routing for the workspace (404 if no config exists yet). */
+export async function setRouterEnabled(enabled: boolean): Promise<StoredRouterConfig> {
+  const res = await fetch(`${BASE()}/enable`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ enabled }) }));
   return (await asJson<{ config: StoredRouterConfig }>(res, 'setRouterEnabled')).config;
+}
+
+/** Ask the server which model a message would get — the same decision a chat makes. */
+export async function previewRoute(input: RoutePreviewInput): Promise<RoutePreview> {
+  const res = await fetch(`${BASE()}/preview`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify(input) }));
+  return asJson<RoutePreview>(res, 'previewRoute');
 }

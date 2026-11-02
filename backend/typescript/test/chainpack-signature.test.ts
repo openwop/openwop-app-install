@@ -6,6 +6,12 @@
  *  - unset, the same pack loads (observable warn — today's behavior)
  *  - the exemption boundary holds: non-registry roots (operator override /
  *    in-tree vendored) load unsigned even under the flag (the R7 posture)
+ *
+ * Tracker TST-CEA-3. Red when (w67g3, witnessed): the flag is read as always on
+ * (the flag-unset case); the registry-root check is dropped (exemption
+ * boundary); `requireSignatures` stops failing closed (every refusal case); the
+ * v2 shape is routed to `verifyPinned`; the v2 branch skips the keyring
+ * revocation; a v2 marker mismatch is treated as trusted.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { __setUnpinnedChainPackWaiversForTests } from '../src/host/unpinnedChainPackAllowlist.js';

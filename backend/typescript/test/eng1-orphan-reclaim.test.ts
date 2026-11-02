@@ -16,7 +16,13 @@
  * Everything runs against the in-memory sqlite Storage (`memory://`), the
  * same backend the multi-instance code paths use; the claim is required to
  * be multi-instance-safe (single write txn on sqlite), so the once-only
- * guarantee is observable here.
+ * guarantee is observable here. The "two racing workers" claims run one after
+ * the other (a better-sqlite3 write txn is synchronous); the second worker's
+ * scan excluding the lease the first just set is what is witnessed.
+ *
+ * Tracker TST-CXF-2. Red when (sqlite selectOrphanedRunIds): the lease clause,
+ * the pending/running status filter or the grace cutoff is dropped; or the
+ * sweeper stops abandoning a run older than its re-dispatch ceiling.
  */
 
 import { describe, expect, it, beforeEach } from 'vitest';
@@ -25,16 +31,14 @@ import { setEventLogBackend } from '../src/executor/eventLog.js';
 import { setSuspendBackend } from '../src/executor/suspendManager.js';
 import type { Storage } from '../src/storage/storage.js';
 import type { RunRecord } from '../src/types.js';
-import { sweepOrphanedRuns, type RunSweeperDeps } from '../src/host/runDispatchSweeper.js';
+import { GRACE_MS, sweepOrphanedRuns, type RunSweeperDeps } from '../src/host/runDispatchSweeper.js';
 import { RUN_DISPATCH_LEASE_MS } from '../src/executor/executor.js';
 import { createHostAdapterSuite } from '../src/host/index.js';
 
 let storage: Storage;
 
-/** Mirror of the sweeper's internal grace window (runs younger than this are
- *  never swept). Kept in sync with runDispatchSweeper.GRACE_MS. */
-const GRACE_MS = 120_000;
-/** Mirror of MAX_REDISPATCH_AGE_MS — older orphans are abandoned, not re-run. */
+/** Mirror of MAX_REDISPATCH_AGE_MS (not exported) — older orphans are
+ *  abandoned, not re-run. */
 const MAX_REDISPATCH_AGE_MS = 3_600_000;
 
 beforeEach(async () => {
@@ -208,10 +212,17 @@ describe('ENG-1 sweepOrphanedRuns — re-dispatch decision logic', () => {
 
   it('a sweep with no orphans is a no-op', async () => {
     const now = Date.now();
-    await seedRun({ status: 'completed' }); // terminal ⇒ never an orphan
+    // OLD (past the grace window) with an expired lease, so only the TERMINAL
+    // status keeps it out — a fresh run would be excluded by grace first.
+    const oldIso = new Date(now - 10 * 60_000).toISOString();
+    const done = await seedRun({ status: 'completed', createdAt: oldIso, updatedAt: oldIso });
+    await storage.setRunDispatchLease(done.runId, 'crashed', now - 1_000);
     const deps = makeDeps(async () => {
       throw new Error('getWorkflow must not be called when nothing is orphaned');
     });
     expect(await sweepOrphanedRuns(deps, 'worker-sweep', now)).toBe(0);
+    const after = (await storage.getRun(done.runId))!;
+    expect(after.status).toBe('completed');
+    expect(after.dispatchOwner).toBe('crashed'); // never claimed
   });
 });

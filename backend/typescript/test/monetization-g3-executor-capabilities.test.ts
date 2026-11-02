@@ -68,8 +68,9 @@ describe('G3 — ctx.callVideoGenerator is creative-video (creative-briefs for i
     const op = await runNode(OPERATOR_TENANT, 'test.mzb1.video-op', (ctx) => ctx.callVideoGenerator(req));
     // No provider is configured in the test host, so the call fails AFTER the
     // gate — what matters is that it was not refused by it.
-    expect(op).not.toEqual({ ok: false, code: 'host_capability_disabled' });
-    expect(op).not.toEqual({ ok: false, code: 'node_never_ran' });
+    // Exactly the downstream "no provider configured" refusal — past the gate,
+    // which would have answered `host_capability_disabled` (measured, w72).
+    expect(op).toEqual({ ok: false, code: 'host_capability_missing' });
   });
 });
 

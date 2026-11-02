@@ -74,7 +74,7 @@ schedule, integration, public route, or admin surface:
   declared output contract, a typed failure (never success-with-empty), and —
   where the model can act on errors — one bounded error-fed repair. Pick the
   right lane (see "AI information-exchange architecture" below): provider-native
-  tools for chat turns, RFC 0021 envelopes for in-run structured intents, MCP
+  tools for chat turns, structured outputs and tools for in-run intent, MCP
   for external integrations. Tracked in `docs/steward/LLM-EXCHANGE-AUDIT.md` at the repo
   root — a new model-facing surface should land with its row and tripwire.
 - **Record non-trivial decisions.** New architecture, cross-cutting seams,
@@ -156,7 +156,7 @@ New work should normally enter through one of these seams:
 | Closed-world validation a pack node can call (and repair against) | a feature-surface `validate` op wrapping the feature's ONE validator (`validateAppDoc`, `validateSlidesDoc`, `wa.validateDraft`) — the node feeds the errors back for one bounded repair before failing typed |
 | Let ANY agent ask "what schemas exist?" at turn time | `openwop:schema.lookup` builtin (`host/agentToolProvider.ts`) — node typeIds, canvas component catalogs, artifact types; its output is compaction-exempt (`SCHEMA_READ_EXEMPT_TOOLS`, `host/toolResultTransform.ts`) |
 | Run an agent with the live-dispatch composition from somewhere other than `POST /agents/:agentId/dispatch` (an eval trial, a future lane) | _implemented, ADR 0889 D3_ — `host/liveDispatchLane.ts` `buildLiveDispatchLane(...)` composes identity, the ADR 0830 scoped tool provider, memory, knowledge, borrowed recall, compaction and the lane firewall ONCE; the dispatch route and the eval runner both call it. A caller changes behaviour only through its override seams (`wrapExecuteTool`, `memory`, `modelOptions`, `emit`), never by copying the body. **Agent evals** (RFC 0081 / RFC 0244) ride it: `POST /runs {mode:"eval"}` (`host/evals/createEvalRun.ts`, inside the shared idempotency claim) → `host/evals/agentEvalRun.ts` (fixture-intercepting `executeTool`, ephemeral per-trial memory, events only through `getEventLog().append`). Suites resolve through ONE resolver (`resolveEvalSuite`: tenant store `agent:eval-suite` → conformance fixtures → the agent's pack `evalSuiteRef`, `host/evals/packSuites.ts`) and are enumerated through ONE lister (`listResolvableSuites`). Access is ONE predicate (`host/evals/access.ts`) shared by the routes, the runs branch, the chat tools and resume. Grading lives in the pure `host/evals/{trajectory,trialStats,regressionVerdict,efficiency,outputGrade}.ts`. *(CORRECTED 2026-10-15, ADR 0889 §Grade remediation / WF-EV-12: this row said "the ADR 0477 workflow-eval lane reuses `trajectory.ts` rather than growing a second grader". It does not: `workflowEvalRunner.ts` and `workflowEvalSets.ts` import nothing from `host/evals/`, workflow eval sets have no trajectory assertion, and a chain pack cannot ship an eval set. ADR 0477 eval sets remain the chain-evaluation path; closing that gap is a separate ADR, not ADR 0889.)* A WORKFLOW reaches agent evals through `ctx.features.evals` (`host/evals/surface.ts`, the same create/read/cancel code as the chat tools) from the `feature.evals.nodes.run-suite` node. Do NOT add an in-tree eval workflow or a second run model for evals. |
-| In-run structured intent from the model (RFC 0021) | the envelope acceptor (`host/envelopeAcceptor.ts`) + the live `schema.request` loop in `host/agentDispatch.ts` `runChatToolLoop` (payload `{ envelopeType }`, answered out-of-band, capped at the advertised `schemaRounds`); a new envelope KIND is wire → OpenWOP RFC first |
+| In-run structured intent from the model | `responseSchema` on `ctx.callAI`, or a tool in the run's loop; a clarification is `openwop:ask-user` (ADR 1006). No envelope lane exists (ADR 1007) |
 | Pin a prompt's hand-carried vocabulary to its SSoT | a `promptCatalogParity.test.ts` in the owning feature's `__tests__/` (readFileSync the pack prompt; the `catalogParity.test.ts` precedent — inverted tripwires for tool-first prompts), plus the repo-wide phantom-tool-id lint `test/agent-prompt-tool-ids.test.ts` |
 | Public content | CMS, Media, Publishing, Sharing, Forms, Consent, and Analytics public-route patterns |
 | Governance / policy / audit | governance service and `storage.listAudit` |
@@ -251,18 +251,11 @@ at the repo root; re-runs of `/grade-ai-exchange` update that file):
    ride read tools that share their HTTP route's access predicate. Tool-first
    prompts keep NO hand-copied catalog (inverted tripwires pin the absence).
 
-2. **RFC 0021 AI Envelopes (in-run structured intent)** — typed JSON the model
-   emits in completion text (`{type, envelopeId, correlationId, payload, meta}`),
-   validated by `host/envelopeAcceptor.ts` against per-kind schemas
-   (`schemas/envelopes/*.schema.json`), round-capped, trust-attributed
-   (`meta.source` routes LLM-emitted mutations through approval gates),
-   correlation-deduped (replay/fork reads recorded outcomes verbatim), and
-   BYOK-canary-redacted. The managed chat loop answers `schema.request`
-   ({ envelopeType } — an ENVELOPE KIND's schema, injected out-of-band;
-   `schema.response` is the MODEL's ack, never the host's delivery vehicle).
-   This lane is normative OpenWOP wire: `/.well-known/openwop` advertises
-   `supportedEnvelopes` + `schemaVersions` + `limits`, so a new kind or field
-   is an OpenWOP RFC before host work.
+2. **Structured outputs and tool calls (in-run structured intent)** — a
+   `responseSchema` on `ctx.callAI`, retried through `dispatchStructured`
+   (`aiProviders.reliability` advertises its events), or a tool in the run's
+   loop. A clarification is the reserved `openwop:ask-user` tool (ADR 1006).
+   RFC 0255 deleted the AI Envelope; ADR 1007 is this host's record.
 
 3. **MCP (external integrations)** — transport to/from OTHER processes: the
    outbound client (`host/mcpClient.ts`, RFC 0020, approval-ledger +

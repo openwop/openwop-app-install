@@ -34,6 +34,7 @@ import {
   localScrapeEnabled,
   localScrapeStartedAt,
   localScrapeCardinalityLimit,
+  lastEmissionMap,
   _resetMetricsForTest,
 } from '../src/observability/metrics.js';
 import { flattenSnapshot } from '../src/observability/sloProjection.js';
@@ -78,6 +79,8 @@ describe('ADR 0556 P2 — the profile is OFF by default and says so', () => {
     // which is exactly what lets the projection tell a no-op instrument apart
     // from a quiet host.
     expect(localScrapeEnabled()).toBe(false);
+    expect(lastEmissionMap().has('openwop.effect.blocked'), 'the measurement was not recorded').toBe(true);
+    expect(lastEmissionMap().has('openwop.sandbox.execution'), 'positive control: an unrecorded metric has no stamp').toBe(false);
   });
 });
 
@@ -182,12 +185,21 @@ describe('ADR 0556 P2 — the profile ON, alongside the OTLP exporter', () => {
     expect(http.labels).toContain('stream');
     process.env.OPENWOP_METRICS_LOCAL_SCRAPE = 'true';
     createMetrics({ serviceName: 'test', serviceVersion: '0.0.1' });
-    for (let i = 0; i < 50; i += 1) {
-      addCount('openwop.effect.blocked', 1, { effect_kind: 'network-egress' });
+    // The default, as a literal (never the exported constant, which would move
+    // with a sabotage of it).
+    expect(localScrapeCardinalityLimit()).toBe(20_000);
+    // 2,100 DISTINCT series — past the SDK's own 2000 default. The first version
+    // of this case recorded 50 points on ONE label set (one series), so any
+    // ceiling of 2 or more passed and the headroom claim could not fail. Label
+    // VALUES are not guarded (only keys are), so each value is its own series.
+    for (let i = 0; i < 2_100; i += 1) {
+      addCount('openwop.effect.blocked', 1, { effect_kind: `kind-${i}` });
     }
     const rm = await collectLocalScrape();
     const points = flattenSnapshot(rm!).flatMap((s) => s.points);
-    // No overflow sentinel at this scale.
+    // No overflow sentinel at this scale, and every series kept its own point.
     expect(points.some((p) => p.attributes['otel.metric.overflow'] === 'true')).toBe(false);
+    expect(points).toHaveLength(2_100);
+    expect(points.reduce((n, p) => n + (p.value ?? 0), 0)).toBe(2_100);
   });
 });

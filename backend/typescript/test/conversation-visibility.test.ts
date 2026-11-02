@@ -10,6 +10,12 @@
  *    owner/participant; anon always denied)
  *  - rail-list narrowing (public channel readable ≠ rail-listed)
  *  - isVisibleToAsync fallback to the sync predicate when no subject resolver
+ *
+ * Tracker TST-CQA-1 (w68). Sabotage-witnessed (round-1 probes): red when the
+ * owned-conversation anon check returns true, when the public-channel branch
+ * keys on 'private', when the channel anon check returns true, when the
+ * unowned rule becomes `!meta` only, when the participant match returns false,
+ * and when isRailListed skips its channel branch.
  */
 import { describe, expect, it } from 'vitest';
 import { isVisibleTo, isRailListed, isVisibleToAsync } from '../src/host/conversationVisibility.js';
@@ -21,7 +27,7 @@ function meta(over: Partial<ConversationMeta>): ConversationMeta {
     conversationId: 'c1', tenantId: 't1', type: 'agent',
     participants: [], createdAt: ts, updatedAt: ts,
     ...over,
-  } as ConversationMeta;
+  };
 }
 
 describe('isVisibleTo — ownership predicate', () => {
@@ -55,7 +61,7 @@ describe('isVisibleTo — ownership predicate', () => {
 describe('isVisibleTo — channel semantics', () => {
   const channel = (visibility: 'public' | 'private') => meta({
     type: 'channel', ownerUserId: 'alice',
-    channel: { visibility } as NonNullable<ConversationMeta['channel']>,
+    channel: { name: 'general', visibility },
     participants: [{ subjectRef: userRef('bob'), role: 'member', addedAt: ts }],
   });
   it('public channel: any AUTHENTICATED tenant caller reads; anon denied', () => {
@@ -74,7 +80,7 @@ describe('isRailListed — display is narrower than read', () => {
   it('a public channel is readable by a non-member but NOT rail-listed for them', () => {
     const m = meta({
       type: 'channel', ownerUserId: 'alice',
-      channel: { visibility: 'public' } as NonNullable<ConversationMeta['channel']>,
+      channel: { name: 'general', visibility: 'public' },
       participants: [{ subjectRef: userRef('bob'), role: 'member', addedAt: ts }],
     });
     expect(isVisibleTo(m, 'carol')).toBe(true);

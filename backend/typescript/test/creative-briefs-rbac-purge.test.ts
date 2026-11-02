@@ -8,6 +8,19 @@
  *       PATCH twin of the existing moodboard-demotion test;
  *   (c) version-cap pruning — versions per brief are capped at 50; the oldest
  *       snapshots are pruned, newest kept (service-level, the CAS-test idiom).
+ *
+ * Tracker TST-CQD-1 (w68). Sabotage-witnessed: red when approval is scoped
+ * `workspace:write`, when a content edit no longer demotes an approved brief,
+ * and when the version prune keeps 51.
+ *
+ * DOUBLE GUARD on (b), named on purpose: the share link goes dark through TWO
+ * independent guards — `routes.ts` PATCH calls `purgeLinksForResource` on the
+ * demotion, AND `sharingService.ts` `creative_brief.load` returns null for any
+ * non-approved brief. Either alone makes `GET /shared/:token` 404, so that read
+ * cannot tell them apart (w68 round 1: each single-guard probe stayed green).
+ * The case therefore ALSO asserts the link ROW is gone from the org's link list
+ * (red when the route purge is skipped), and the w68 r2 probe that breaks both
+ * guards at once reds the public 404.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -35,14 +48,22 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res { status: number; body: any }
+/** Every response field this file reads (briefs, links, login, ErrorEnvelope). */
+interface Body {
+  error?: string; details?: { requiredScope?: string }; status?: string; briefId: string; orgId: string; token: string;
+  user: { userId: string }; links: Array<{ resourceType: string; resourceId: string }>;
+}
+interface Res { status: number; body: Body }
 interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> }
 function client(): Client {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    for (const ck of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
+    // JSON.parse is the typing boundary (every route here answers JSON, or 204 with no body).
+    const text = await res.text();
+    const parsed: Body = JSON.parse(text === '' ? '{}' : text);
+    return { status: res.status, body: parsed };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), del: (p) => call('DELETE', p) };
 }
@@ -67,7 +88,7 @@ async function ownerWithEditor(): Promise<{ owner: Client; editor: Client; orgId
   const editorUser = await signup(editor, tenantId);
   const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  const orgId = org.body.orgId as string;
+  const orgId = org.body.orgId;
   const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'E', subject: editorUser.userId, roles: ['editor'] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   return { owner, editor, orgId };
@@ -105,13 +126,16 @@ describe('creative-briefs — CB-CODE-8 negative RBAC + share-purge + version ca
 
     const mint = await owner.post(SHARE(orgId), { resourceType: 'creative_brief', resourceId: id });
     expect(mint.status, JSON.stringify(mint.body)).toBe(201);
-    const token = mint.body.token as string;
+    const token = mint.body.token;
     expect((await owner.get(`/host/openwop-app/shared/${token}`)).status).toBe(200); // live before
+    const linksFor = async (): Promise<number> => (await owner.get(SHARE(orgId))).body.links.filter((l) => l.resourceType === 'creative_brief' && l.resourceId === id).length;
+    expect(await linksFor()).toBe(1); // positive control: the list sees the minted row
 
     const edited = await owner.patch(CB(orgId, `/briefs/${id}`), { sceneDescription: 'Rewritten after approval' });
     expect(edited.status, JSON.stringify(edited.body)).toBe(200);
     expect(edited.body.status).toBe('draft'); // demoted
-    expect((await owner.get(`/host/openwop-app/shared/${token}`)).status).toBe(404); // link purged — no drift
+    expect((await owner.get(`/host/openwop-app/shared/${token}`)).status).toBe(404); // dark — either guard
+    expect(await linksFor()).toBe(0); // the ROW is purged (the route guard), not merely darkened
   });
 
   it('version snapshots are capped at 50 per brief — oldest pruned, newest kept', async () => {

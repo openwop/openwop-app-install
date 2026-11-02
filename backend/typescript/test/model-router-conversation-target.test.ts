@@ -6,7 +6,8 @@
  * user's cheap default tier because the inline path had no tier notion — and
  * the tool loop read RAW run inputs, ignoring even a tenant-authored group
  * router rule AND the in-chat model override. Pins:
- *  - precedence: exchange override > stamped route > class-tier bump > inputs
+ *  - precedence: exchange override > this turn's route (ADR 1016) > legacy
+ *    stamp the conversation can call > class-tier bump > inputs
  *  - the bump is SAME-provider only (providers.json classDefaults), group +
  *    reasoning only, and never fires when a stamp/override chose the model
  *  - tool-loop eligibility judges the RESOLVED provider (stamp/override aware)
@@ -29,7 +30,7 @@ import { describe, expect, it, beforeAll, afterAll, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
-import { resolveConversationModelTarget } from '../src/features/model-router/applyRoute.js';
+import { resolveConversationModelTarget, unchosenModelTarget } from '../src/features/model-router/applyRoute.js';
 import { getClassDefault } from '../src/providers/catalog.js';
 import { conversationToolTurnEligible } from '../src/host/conversationToolLoop.js';
 import { ensureConversationMeta } from '../src/host/conversationStore.js';
@@ -68,7 +69,9 @@ afterAll(async () => {
 const GROUP_REASONING = { conversationType: 'group', agentModelClass: 'reasoning' } as const;
 
 describe('resolveConversationModelTarget — precedence + the same-provider bump', () => {
-  const inputs = { provider: 'anthropic', model: 'claude-haiku-4-5' };
+  // A BYOK anthropic key: since ADR 1016 (architect L4) a stamp is honoured only
+  // when the conversation can call it, and a run with no ref dispatches managed.
+  const inputs = { provider: 'anthropic', model: 'claude-haiku-4-5', credentialRef: 'anthropic' };
 
   it('group + reasoning + no stamp/override → bumps to the provider OWN class default', () => {
     const want = getClassDefault('anthropic', 'reasoning'); // providers.json classDefaults
@@ -103,6 +106,35 @@ describe('resolveConversationModelTarget — precedence + the same-provider bump
     expect(o).toEqual({ provider: 'anthropic', model: 'claude-haiku-4-5' });
   });
 
+  it('ADR 1016 D4b — this turn\'s ROUTE beats a legacy stamp and the bump; the override beats the route', () => {
+    const route = { provider: 'anthropic', model: 'claude-opus-5-5' };
+    const stamp = { modelRoute: { provider: 'anthropic', model: 'claude-sonnet-4-6' } };
+    expect(resolveConversationModelTarget({ runInputs: inputs, metadata: stamp, tier: GROUP_REASONING, route }))
+      .toEqual(route);
+    expect(resolveConversationModelTarget({ runInputs: inputs, metadata: stamp, tier: GROUP_REASONING, route, override: { model: 'claude-haiku-4-5' } }))
+      .toEqual({ provider: 'anthropic', model: 'claude-haiku-4-5' });
+  });
+
+  it('ADR 1016 D4b — the degrade target is the selection WITHOUT the route and WITHOUT the bump', () => {
+    const route = { provider: 'anthropic', model: 'claude-opus-5-5' };
+    const input = { runInputs: inputs, metadata: {}, tier: GROUP_REASONING, route };
+    const chosen = resolveConversationModelTarget(input);
+    expect(unchosenModelTarget(input, chosen)).toEqual({ provider: 'anthropic', model: 'claude-haiku-4-5' });
+    // Nothing chose the model ⇒ nothing distinct to fall back to.
+    const plain = { runInputs: inputs, metadata: {} };
+    expect(unchosenModelTarget(plain, resolveConversationModelTarget(plain))).toBeNull();
+  });
+
+  it('ADR 1016 L4 — a legacy stamp the conversation cannot call is IGNORED', () => {
+    const stamp = { modelRoute: { provider: 'openai', model: 'gpt-5.5' } };
+    // An anthropic-keyed conversation: the openai stamp would 422 every turn.
+    expect(resolveConversationModelTarget({ runInputs: inputs, metadata: stamp }).model).toBe('claude-haiku-4-5');
+    // A managed conversation: dispatch ignores the stamp, so provenance must too (MRC-4).
+    expect(resolveConversationModelTarget({ runInputs: { ...inputs, credentialRef: 'managed:openwop-free' }, metadata: stamp }).model).toBe('claude-haiku-4-5');
+    // CONTROL: an openai-keyed conversation still honours it.
+    expect(resolveConversationModelTarget({ runInputs: { provider: 'openai', model: 'gpt-5.4-mini', credentialRef: 'openai' }, metadata: stamp }).model).toBe('gpt-5.5');
+  });
+
   it('no bump outside group rooms, for non-reasoning agents, or unknown providers', () => {
     expect(resolveConversationModelTarget({ runInputs: inputs, metadata: {}, tier: { conversationType: 'agent', agentModelClass: 'reasoning' } }).model).toBe('claude-haiku-4-5');
     expect(resolveConversationModelTarget({ runInputs: inputs, metadata: {}, tier: { conversationType: 'group', agentModelClass: 'chat' } }).model).toBe('claude-haiku-4-5');
@@ -125,8 +157,11 @@ describe('CS-GB-1 — tool-loop eligibility judges the RESOLVED provider', () =>
     expect(conversationToolTurnEligible(run('mock'), agent, { provider: 'anthropic' })).toBe(true);
   });
 
-  it('a stamped route reaches eligibility too', () => {
-    expect(conversationToolTurnEligible(run('mock', { modelRoute: { provider: 'anthropic', model: 'claude-sonnet-4-6' } }), agent)).toBe(true);
+  it('this turn\'s route reaches eligibility too (ADR 1016 D4b)', () => {
+    expect(conversationToolTurnEligible(run('mock'), agent, undefined, { provider: 'anthropic', model: 'claude-sonnet-4-6' })).toBe(true);
+    // A legacy STAMP on a mock conversation no longer reaches it: a mock
+    // conversation cannot call anthropic, so the stamp is ignored (ADR 1016 L4).
+    expect(conversationToolTurnEligible(run('mock', { modelRoute: { provider: 'anthropic', model: 'claude-sonnet-4-6' } }), agent)).toBe(false);
   });
 });
 

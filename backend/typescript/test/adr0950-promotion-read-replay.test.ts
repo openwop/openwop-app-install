@@ -1,6 +1,10 @@
 /** ADR 0950: later allocations cannot rewrite the checks a promotion executed.
  * Exercise the real metadata CAS, including a committed write whose ack is lost;
- * caller stamps and unclaimed runs must never fabricate safety evidence. */
+ * caller stamps and unclaimed runs must never fabricate safety evidence.
+ * w73: pr-inherit, pr-replay, pr-claimed, pr-op, pr-strip witnessed; the client
+ * leg was missing (pr-org vacuous) and is now asserted. The node binding is held
+ * by the per-node metadata key AND the frame's `nodeId` (double guard): another
+ * node finds no recorded evidence and is refused `promotion_read_missing`. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
@@ -77,6 +81,12 @@ describe('as-executed promotion checks', () => {
     await run('fork', (await storage.getRun('source'))!.metadata);
     const compute = vi.fn(async () => original);
     await expect(read('fork', true, compute, { ...experiment, experimentId: 'other' })).rejects.toMatchObject({ details: { reason: 'promotion_read_mismatch' } });
+    // Same experiment id, another client org: still not this evidence.
+    await expect(read('fork', true, compute, { ...experiment, orgId: 'another-client' })).rejects.toMatchObject({ details: { reason: 'promotion_read_mismatch' } });
+    // Another node reads its OWN key: the source recorded nothing there.
+    await expect(runWithEffectContext({ runId: 'fork', nodeId: 'monitor-stage-1', tenantId, replaying: true }, () =>
+      promotionRead({ tenantId, runId: 'fork' }, experiment, workflowId, 'gates', compute)))
+      .rejects.toMatchObject({ details: { reason: 'promotion_read_missing' } });
     await expect(runWithEffectContext({ runId: 'fork', nodeId, replaying: true }, () =>
       promotionRead({ tenantId, runId: 'fork' }, experiment, workflowId, 'monitor', compute)))
       .rejects.toMatchObject({ details: { reason: 'promotion_read_mismatch' } });

@@ -11,6 +11,12 @@
  *      SAME stamped variant + bindings VERBATIM — the variant is carried, never
  *      recomputed. (If it were recomputed, an off toggle would yield no variant
  *      and break fork/replay.)
+ *
+ * Tracker: TST-DBE-6. Red when: the fork's metadata copy drops
+ * `featureVariant` (probe w70g2-ff-meta), or the crm pack leaves the boot install
+ * set (w70g2-ff-pack). `featurePackRefs()` is synchronous and reads no toggle, so
+ * the on/off flips in case 1 document the claim; only removing the pack from the
+ * static set can red it.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -46,7 +52,9 @@ describe('feature variant — replay/fork safety', () => {
     });
     // A real catalog workflow id — fork 404s on an unknown workflow.
     const disco = await jf<{ fixtures?: string[] }>('/.well-known/openwop');
-    workflowId = disco.body.fixtures?.[0] ?? 'openwop-app.uppercase';
+    const first = disco.body.fixtures?.[0];
+    if (!first) throw new Error('discovery lists no fixture workflows — fork needs a real catalog workflow');
+    workflowId = first;
   });
 
   afterAll(async () => {
@@ -56,7 +64,7 @@ describe('feature variant — replay/fork safety', () => {
   async function jf<T = unknown>(path: string, init: RequestInit = {}): Promise<{ status: number; body: T }> {
     const res = await fetch(`${BASE}${path}`, {
       ...init,
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}`, ...(init.headers as Record<string, string> ?? {}) },
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
     });
     const raw = res.status === 204 ? undefined : await res.json();
     return { status: res.status, body: raw as T };

@@ -1,7 +1,14 @@
 /**
  * ADR 0115 Phase 1 — ctx.callImageGenerator adapter.
  * The deterministic test-seam mock persists a Media asset; validation + honest
- * unsupported errors for the real path (no provider wired yet).
+ * errors for a real provider with no credential (this host has no managed
+ * image key, so a provider without a BYOK credentialRef is refused).
+ *
+ * TST-DGC-5. Red when the mock returns raw bytes instead of a Media asset URL,
+ * when an empty prompt is accepted, when `n` is not clamped to 4, and when the
+ * BYOK-required refusal is removed. That refusal and the final honest-off throw
+ * share the code `host_capability_missing`, so the case pins the BYOK message
+ * (sabotage-witnessed, wave 71).
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import http from 'node:http';
@@ -39,11 +46,14 @@ describe('ctx.callImageGenerator', () => {
   });
 
   it('fails honest (host_capability_missing) for a real provider with no credential', async () => {
-    await expect(adapter.callImageGenerator({ prompt: 'a cat', provider: 'openai' })).rejects.toMatchObject({ code: 'host_capability_missing' });
+    const err: unknown = await adapter.callImageGenerator({ prompt: 'a cat', provider: 'openai' }).then(() => null, (e: unknown) => e);
+    expect(err).toMatchObject({ code: 'host_capability_missing' });
+    expect(err instanceof Error ? err.message : '').toMatch(/requires a BYOK credential/);
   });
 
   it('clamps n to the host max', async () => {
     const r = await adapter.callImageGenerator({ prompt: 'x', provider: 'mock', n: 99 });
-    expect(r.images.length).toBeLessThanOrEqual(4);
+    expect(r.images).toHaveLength(4);
+    expect(r.usage?.images).toBe(4);
   });
 });

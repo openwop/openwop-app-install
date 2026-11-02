@@ -74,6 +74,24 @@ COPY backend/typescript/scripts ./scripts
 
 RUN npm run build
 
+# ── Site runtime stage (ADR 1015) ─────────────────────────────────────────
+# The tenant site visitor runtime: a small script the prerendered pages on a
+# workspace's custom domain load (consent banner, beacons, heat, replay). Built
+# HERE, from the SPA's own visitor modules, so it ships in the same image as the
+# prerender that references it and the two cannot skew. The backend serves only
+# the files its manifest names (features/publishing/siteRuntime.ts).
+# `--ignore-scripts`: the build needs no install hook (no browsers, no codegen),
+# and env files are not in the build context (.dockerignore), so the bundle bakes
+# no platform base URL (vite.site-runtime.config.ts pins it to '').
+FROM node:22-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS site-runtime
+WORKDIR /fe
+COPY frontend/react/package.json frontend/react/package-lock.json ./
+RUN npm ci --include=dev --ignore-scripts
+COPY frontend/react/tsconfig.json frontend/react/vite.site-runtime.config.ts ./
+COPY frontend/react/src ./src
+RUN node node_modules/vite/bin/vite.js build -c vite.site-runtime.config.ts \
+ && test -s dist-site-runtime/manifest.json
+
 # ── Runtime stage ────────────────────────────────────────────────────────
 FROM node:22-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS runtime
 
@@ -102,6 +120,9 @@ RUN npm ci --omit=dev
 # `/app/providers.json` (sibling of lib/, parent of lib/index.js).
 COPY --chown=node:node --from=builder /app/lib ./lib
 COPY --chown=node:node providers.json ./providers.json
+# ADR 1015 — the tenant site runtime (manifest + hashed files), served at
+# /host/openwop-app/public/:orgId/_rt/:file. OPENWOP_SITE_RUNTIME_DIR defaults here.
+COPY --chown=node:node --from=site-runtime /fe/dist-site-runtime ./site-runtime
 
 # Conformance fixtures, vendored at `conformance-fixtures/` (kept in sync from
 # the canonical `conformance/fixtures/` via `scripts/sync-fixtures.sh`). Used by

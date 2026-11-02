@@ -31,18 +31,30 @@ beforeAll(async () => {
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   const u = getToggleDefault('users');
   if (u) await saveConfig({ ...u, status: 'on' }, 'test');
-});
+}, 120_000);
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+/** Every field a case reads, typed at this one boundary (no `any`). */
+interface Prefs { globalMute: boolean; types: Array<{ type: string; muted?: boolean; desktop?: boolean }>; quietHours: { enabled: boolean; start: string; end: string } }
+interface Row { notificationId: string; status: string }
+interface Body {
+  error?: string;
+  user?: { userId: string };
+  preferences?: Prefs;
+  updated?: number;
+  notifications?: Row[];
+}
+interface Res { status: number; body: Body }
 interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; put: (p: string, b?: unknown) => Promise<Res>; snapshot: () => string }
+const prefsOf = (r: Res): Prefs => { if (!r.body.preferences) throw new Error(`no preferences in ${JSON.stringify(r.body)}`); return r.body.preferences; };
+const rowsOf = (r: Res): Row[] => { if (!r.body.notifications) throw new Error(`no notifications in ${JSON.stringify(r.body)}`); return r.body.notifications; };
 function client(initialCookie = ''): Client {
   let cookie = initialCookie;
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     const sc = getSetCookies(res.headers);
     for (const ck of sc as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = res.status === 204 ? {} : ((await res.json().catch(() => ({}))) as Body);
     return { status: res.status, body: out };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), put: (p, b) => call('PUT', p, b), snapshot: () => cookie };
@@ -51,9 +63,9 @@ function client(initialCookie = ''): Client {
 let n = 0;
 // ADR 0026: real sign-in is Firebase OIDC; tests mint an authenticated user via
 // the env-gated auth test seam.
-async function signedIn(): Promise<Client> {
+async function signedIn(tenantId?: string): Promise<Client> {
   const c = client();
-  const r = await c.post('/host/openwop-app/test/login', { email: `notif-${Date.now()}-${n++}@acme.test` });
+  const r = await c.post('/host/openwop-app/test/login', { email: `notif-${Date.now()}-${n++}@acme.test`, ...(tenantId ? { tenantId } : {}) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return c;
 }
@@ -79,9 +91,9 @@ describe('notifications feature — durable preferences (Phase 2)', () => {
     const c = await signedIn();
     const r = await c.get(`${BASE_PATH}/preferences`);
     expect(r.status).toBe(200);
-    expect(r.body.preferences.globalMute).toBe(false);
-    expect(Array.isArray(r.body.preferences.types)).toBe(true);
-    expect(r.body.preferences.quietHours.enabled).toBe(false);
+    expect(prefsOf(r).globalMute).toBe(false);
+    expect(Array.isArray(prefsOf(r).types)).toBe(true);
+    expect(prefsOf(r).quietHours.enabled).toBe(false);
   });
 
   it('PUT validates, persists, and round-trips across requests', async () => {
@@ -92,31 +104,47 @@ describe('notifications feature — durable preferences (Phase 2)', () => {
       quietHours: { enabled: true, start: '23:00', end: '07:30', days: [1, 2, 3], allowUrgent: false },
     });
     expect(put.status, JSON.stringify(put.body)).toBe(200);
-    expect(put.body.preferences.globalMute).toBe(true);
+    expect(prefsOf(put).globalMute).toBe(true);
     // Durable: a fresh GET (same user) sees the saved blob.
     const got = await c.get(`${BASE_PATH}/preferences`);
-    expect(got.body.preferences.globalMute).toBe(true);
-    expect(got.body.preferences.quietHours.start).toBe('23:00');
-    expect(got.body.preferences.types[0]).toMatchObject({ type: 'workflow.failed', muted: true, desktop: false });
+    expect(prefsOf(got).globalMute).toBe(true);
+    expect(prefsOf(got).quietHours.start).toBe('23:00');
+    expect(prefsOf(got).types[0]).toMatchObject({ type: 'workflow.failed', muted: true, desktop: false });
   });
 
   it('is per-(tenant, user): a second user does NOT inherit the first user\'s prefs', async () => {
-    const a = await signedIn();
-    await a.put(`${BASE_PATH}/preferences`, { globalMute: true, types: [], quietHours: { enabled: false, start: '22:00', end: '08:00', days: [], allowUrgent: true } });
-    const b = await signedIn();
-    expect((await b.get(`${BASE_PATH}/preferences`)).body.preferences.globalMute).toBe(false);
+    // BOTH users in ONE org tenant, so the case shows per-USER scoping, not just
+    // two personal tenants that could never share a row anyway.
+    const tenantId = `org:prefs-${Date.now()}-${n++}`;
+    const a = await signedIn(tenantId);
+    const saved = await a.put(`${BASE_PATH}/preferences`, { globalMute: true, types: [], quietHours: { enabled: false, start: '22:00', end: '08:00', days: [], allowUrgent: true } });
+    expect(saved.status, JSON.stringify(saved.body)).toBe(200);
+    // Positive control: A's own fresh read shows the save landed.
+    expect(prefsOf(await a.get(`${BASE_PATH}/preferences`)).globalMute).toBe(true);
+    const b = await signedIn(tenantId);
+    expect(prefsOf(await b.get(`${BASE_PATH}/preferences`)).globalMute).toBe(false);
   });
 
   it('rejects malformed bodies with 400', async () => {
     const c = await signedIn();
-    expect((await c.put(`${BASE_PATH}/preferences`, { globalMute: 'yes', types: [], quietHours: { enabled: false, start: '22:00', end: '08:00', days: [], allowUrgent: true } })).status).toBe(400);
-    expect((await c.put(`${BASE_PATH}/preferences`, { globalMute: false, types: [], quietHours: { enabled: false, start: '25:00', end: '08:00', days: [], allowUrgent: true } })).status).toBe(400);
-    expect((await c.put(`${BASE_PATH}/preferences`, { globalMute: false, types: [], quietHours: { enabled: false, start: '22:00', end: '08:00', days: [9], allowUrgent: true } })).status).toBe(400);
+    for (const body of [
+      { globalMute: 'yes', types: [], quietHours: { enabled: false, start: '22:00', end: '08:00', days: [], allowUrgent: true } },
+      { globalMute: false, types: [], quietHours: { enabled: false, start: '25:00', end: '08:00', days: [], allowUrgent: true } },
+      { globalMute: false, types: [], quietHours: { enabled: false, start: '22:00', end: '08:00', days: [9], allowUrgent: true } },
+    ]) {
+      const r = await c.put(`${BASE_PATH}/preferences`, body);
+      expect(r.status, JSON.stringify(body)).toBe(400);
+      expect(r.body.error).toBe('validation_error');
+    }
+    // Nothing invalid was stored: the user still reads the seeded defaults.
+    expect(prefsOf(await c.get(`${BASE_PATH}/preferences`)).globalMute).toBe(false);
   });
 
   it('requires sign-in (anonymous cannot read prefs)', async () => {
     const anon = client();
-    expect((await anon.get(`${BASE_PATH}/preferences`)).status).toBe(401);
+    const r = await anon.get(`${BASE_PATH}/preferences`);
+    expect(r.status).toBe(401);
+    expect(r.body.error).toBe('sign_in_required');
   });
 });
 
@@ -127,10 +155,11 @@ describe('R3 IB-R2-2 — scoped bulk verbs (:archive-read / :bulk-read), one req
     const c = client();
     const login = await c.post('/host/openwop-app/test/login', { email: `blk-${Date.now()}@acme.test`, tenantId });
     expect(login.status, JSON.stringify(login.body)).toBe(201);
-    const me = login.body.user.userId as string;
+    const me = login.body.user!.userId;
     const other = client();
     const olog = await other.post('/host/openwop-app/test/login', { email: `blk-o-${Date.now()}@acme.test`, tenantId });
-    const otherId = olog.body.user.userId as string;
+    expect(olog.status, JSON.stringify(olog.body)).toBe(201);
+    const otherId = olog.body.user!.userId;
 
     const emit = (recipientUserId: string, status: 'unread' | 'read' | 'archived', title: string) =>
       getNotificationEmitter().emit({
@@ -148,12 +177,12 @@ describe('R3 IB-R2-2 — scoped bulk verbs (:archive-read / :bulk-read), one req
     expect(ar.status).toBe(200);
     expect(ar.body.updated).toBe(1);
     const mine = await c.get(`${BASE_PATH}?includeArchived=true`);
-    const byId = new Map((mine.body.notifications as { notificationId: string; status: string }[]).map((r) => [r.notificationId, r.status]));
+    const byId = new Map(rowsOf(mine).map((r) => [r.notificationId, r.status]));
     expect(byId.get(mineRead.notificationId)).toBe('archived');
     expect(byId.get(mineUnread.notificationId)).toBe('unread'); // unread untouched
     // The other user's READ row survived the caller's sweep.
     const theirs = await other.get(`${BASE_PATH}?includeArchived=true`);
-    const tById = new Map((theirs.body.notifications as { notificationId: string; status: string }[]).map((r) => [r.notificationId, r.status]));
+    const tById = new Map(rowsOf(theirs).map((r) => [r.notificationId, r.status]));
     expect(tById.get(otherRead.notificationId)).toBe('read');
 
     // :bulk-read — explicit ids; a foreign id and a missing id are SKIPPED,
@@ -162,14 +191,17 @@ describe('R3 IB-R2-2 — scoped bulk verbs (:archive-read / :bulk-read), one req
     expect(br.status).toBe(200);
     expect(br.body.updated).toBe(1);
     const mine2 = await c.get(`${BASE_PATH}?includeArchived=true`);
-    const b2 = new Map((mine2.body.notifications as { notificationId: string; status: string }[]).map((r) => [r.notificationId, r.status]));
+    const b2 = new Map(rowsOf(mine2).map((r) => [r.notificationId, r.status]));
     expect(b2.get(mineUnread.notificationId)).toBe('read');
     const theirs2 = await other.get(`${BASE_PATH}`);
-    const t2 = new Map((theirs2.body.notifications as { notificationId: string; status: string }[]).map((r) => [r.notificationId, r.status]));
+    const t2 = new Map(rowsOf(theirs2).map((r) => [r.notificationId, r.status]));
     expect(t2.get(otherUnread.notificationId)).toBe('unread'); // foreign row untouched
 
     // Validation: empty / non-array ids → 400.
-    expect((await c.post(`${BASE_PATH}:bulk-read`, { ids: [] })).status).toBe(400);
-    expect((await c.post(`${BASE_PATH}:bulk-read`, {})).status).toBe(400);
+    for (const body of [{ ids: [] }, {}]) {
+      const r = await c.post(`${BASE_PATH}:bulk-read`, body);
+      expect(r.status).toBe(400);
+      expect(r.body.error).toBe('validation_error');
+    }
   });
 });

@@ -4,9 +4,15 @@
  * been failing on existed, and no instance could boot. The call site in
  * `index.ts` main() is only reachable as the process entry point, so the bound
  * is pinned here and the call site by a source check.
+ *
+ * Tracker TST-BEF-1 (w66). Red when: the budget timer stops firing at
+ * `budgetMs` (fake clock advanced exactly 50 ms); a rejection is swallowed as
+ * "unsettled"; `main()` awaits the seed without `withinBootBudget`.
+ * Ceiling: the call-site cases are source checks, because `main()` runs only
+ * as the process entry point and no test can reach it.
  */
 import { readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { withinBootBudget } from '../src/host/bootBudget.js';
 
 describe('withinBootBudget', () => {
@@ -15,10 +21,17 @@ describe('withinBootBudget', () => {
   });
 
   it('returns unsettled at the budget when the step never finishes', async () => {
-    const t0 = Date.now();
-    const out = await withinBootBudget(new Promise<never>(() => {}), 50);
-    expect(out).toEqual({ settled: false });
-    expect(Date.now() - t0).toBeLessThan(1_000);
+    vi.useFakeTimers();
+    try {
+      let out: { settled: boolean } | undefined;
+      void withinBootBudget(new Promise<never>(() => {}), 50).then((v) => { out = v; });
+      await vi.advanceTimersByTimeAsync(49);
+      expect(out).toBeUndefined(); // not before the budget
+      await vi.advanceTimersByTimeAsync(1);
+      expect(out).toEqual({ settled: false });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('propagates a rejection that lands inside the budget (the caller logs it)', async () => {

@@ -30,6 +30,28 @@ describe('chat-widget config service', () => {
     await expect(provisionWidget(T, ORG, 'u1', { agentId: 'support', allowedDomains: ['  ', ''] })).rejects.toMatchObject({ code: 'validation_error' });
   });
 
+  // ADR 1018 D5 — a bare label would admit every site under that TLD through the
+  // suffix match, so the write path refuses it by name; a pasted URL keeps its host.
+  it('refuses a non-host entry by name and reduces a pasted URL to its host', async () => {
+    await expect(provisionWidget(T, ORG, 'u1', { agentId: 'support', allowedDomains: ['acme.com', 'com'] }))
+      .rejects.toMatchObject({ code: 'validation_error', details: { field: 'allowedDomains', entry: 'com' } });
+    await expect(provisionWidget(T, ORG, 'u1', { agentId: 'support', allowedDomains: ['*.acme.com'] })).rejects.toMatchObject({ code: 'validation_error' });
+    const w = await provisionWidget(T, ORG, 'u1', { agentId: 'support', allowedDomains: ['https://Acme.com/pricing', 'acme.com'] });
+    expect(w.allowedDomains).toEqual(['acme.com']);
+  });
+
+  // Row 68 follow-up — the turn ceiling is refused at WRITE with the field named, on
+  // create and on PATCH, so the operator never believes a value that does not run.
+  it('refuses a maxTurnsPerSession above the ceiling, on create and on PATCH', async () => {
+    await expect(provisionWidget(T, ORG, 'u1', { agentId: 'support', allowedDomains: ['acme.com'], caps: { maxTurnsPerSession: 101 } }))
+      .rejects.toMatchObject({ code: 'validation_error', httpStatus: 400, details: { field: 'caps.maxTurnsPerSession', max: 100 } });
+    const w = await provisionWidget(T, ORG, 'u1', { agentId: 'support', allowedDomains: ['acme.com'], caps: { maxTurnsPerSession: 100 } });
+    expect(w.caps.maxTurnsPerSession).toBe(100);
+    await expect(patchWidget(T, ORG, w.widgetId, { caps: { maxTurnsPerSession: 5000 } }))
+      .rejects.toMatchObject({ code: 'validation_error', details: { field: 'caps.maxTurnsPerSession' } });
+    expect((await getWidget(T, ORG, w.widgetId))!.caps.maxTurnsPerSession).toBe(100);
+  });
+
   it('requires an agentId', async () => {
     await expect(provisionWidget(T, ORG, 'u1', { allowedDomains: ['x.com'] })).rejects.toMatchObject({ code: 'validation_error' });
   });

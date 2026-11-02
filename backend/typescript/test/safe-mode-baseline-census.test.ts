@@ -148,6 +148,7 @@ const READS: readonly string[] = [
   'openwop:campaign-studio.get-design',
   'openwop:cdp.identity.resolve',
   'openwop:channels.list',
+  'openwop:ask-user', // ADR 1001 D7: ends the turn with questions to the acting person; no off-host send
   'openwop:cms.get-draft-page',
   'openwop:cms.get-page',
   'openwop:cms.list-pages',

@@ -17,6 +17,7 @@
  * into a sandboxed dir. The verification logic is the same.
  */
 
+import { archiveOutgoingAgentPack, notifyAgentPackInstalled, pruneAgentPackArchive } from './agentPackArchive.js';
 import { resolveRegistry, templateFor, expandEndpoint, legacyPathsEnabled, type EndpointKey } from './registryEndpoints.js';
 import { PROTOCOL_VERSION_V2 } from '../middleware/protocolVersion.js';
 import { createHash, createPublicKey, verify as verifySig } from 'node:crypto';
@@ -66,6 +67,9 @@ export interface InstallOptions {
   registry?: string;
   /** Local fallback directory for signing keys (registry/keys/). */
   trustedKeysDir?: string;
+  /** ADR 1014 — install into this directory instead of `<packDir>/<name>/`: the
+   *  archive fetch (`installLane.fetchArchivedVersion`) never touches the head. */
+  destDir?: string;
 }
 
 /** A version manifest's `signing` block. Its shape depends on the TREE it came
@@ -158,7 +162,7 @@ export async function installPackFromRegistry(
   opts: InstallOptions,
 ): Promise<{ installed: boolean; reason?: string }> {
   const registry = opts.registry ?? DEFAULT_REGISTRY;
-  const destDir = join(opts.packDir, target.name);
+  const destDir = opts.destDir ?? join(opts.packDir, target.name);
 
   // Idempotent: skip if already installed at the requested version.
   if (existsSync(join(destDir, MARKER))) {
@@ -341,6 +345,16 @@ export async function installPackFromRegistry(
     if (stagedPackJsonSha !== createHash('sha256').update(packJsonBytes).digest('hex')) {
       throw new Error('pack_integrity_mismatch: the installed pack.json is not the bytes that were verified');
     }
+    // ADR 1014 D1 — an agent pack's outgoing version is archived, not deleted, so
+    // a deployment can keep running it until the new one is promoted. Best-effort:
+    // a failed move falls back to today's replace, never fails the install.
+    if (opts.destDir === undefined) {
+      try {
+        archiveOutgoingAgentPack(opts.packDir, target.name, manifest.version);
+      } catch (err) {
+        log.warn('archive of outgoing agent pack failed; replacing it as before', { name: target.name, error: err instanceof Error ? err.message : String(err) });
+      }
+    }
     if (existsSync(destDir)) {
       rmSync(destDir, { recursive: true, force: true });
     }
@@ -378,6 +392,12 @@ export async function installPackFromRegistry(
   // ADR 0826 /architect A4 — a verdict cached for this dir before the (re)install
   // would otherwise outlive the bytes it judged.
   invalidatePackTrustVerdict(destDir);
+  // ADR 1014 Q3 — newest ten plus every version a deployment row names.
+  await pruneAgentPackArchive(opts.packDir, target.name).catch((err: unknown) => {
+    log.warn('archive prune failed', { name: target.name, error: err instanceof Error ? err.message : String(err) });
+  });
+  // ADR 1014 D4 — a new HEAD version of a deployed agent arrives as a draft.
+  if (opts.destDir === undefined) await notifyAgentPackInstalled(opts.packDir, target.name, manifest.version);
 
   log.info('pack installed and verified', {
     name: manifest.name,

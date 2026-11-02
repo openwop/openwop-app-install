@@ -18,14 +18,15 @@ import { confirm } from '../../ui/confirm.js';
 import { toast } from '../../ui/toast.js';
 import { TextField, TextareaField, SelectField } from '../../ui/Field.js';
 import { ActivityIcon, PlusIcon } from '../../ui/icons/index.js';
-import { formatNumber, formatCurrency, formatTime } from '../../i18n/format.js';
+import { formatNumber, formatCurrency, formatTime, formatDateTime } from '../../i18n/format.js';
 import {
   importCsv, getKpi, listOrgs, syncNow, AD_PLATFORMS, FeatureDisabledError,
   listPixels, upsertPixel, removePixel, PIXEL_PLATFORMS, type PixelConfig, type PixelPlatform,
   getSyncStatus, listConversions, dispatchConversions, getPlatformStatus, getConversionHealth, type LiveSyncPlatform, type ConversionHealth,
-  type KpiSummary, type AdPlatform, type ImportResult, type OrgRef, type SyncResult,
+  type KpiSummary, type AdPlatform, type ImportResult, type OrgRef, type SyncResult, type SyncStatus,
 } from './campaignConnectorsClient.js';
 import { SyncSettingsCard } from './SyncSettingsCard.js';
+import { syncReasonText, syncFailureHint } from './syncReason.js';
 import { CatalogFeedCard } from './CatalogFeedCard.js';
 
 type TFn = ReturnType<typeof useTranslation>['t'];
@@ -67,6 +68,31 @@ export function CampaignConnectorsPage(): JSX.Element {
       .catch(() => { setLivePlatforms(['meta', 'google']); setLiveConversions(['meta']); });
   }, []);
 
+  /** ADR 1022 D7 — when data last ARRIVED (date and time, CP71UX-2) and how
+   *  the last attempt went. A row from before ADR 1022 has neither field and
+   *  says only when the last sync started (CP71CD-7), never "none yet". */
+  const freshness = (st: SyncStatus): string => {
+    const name = t(`platform_${st.platform}`, { defaultValue: st.platform });
+    const when = st.lastSuccessAt ? t('syncLastSuccess', { at: formatDateTime(st.lastSuccessAt) })
+      : st.lastAttempt ? t('syncNeverSucceeded') : t('syncStartedAt', { at: formatDateTime(st.lastSyncAt) });
+    const note = st.lastAttempt?.outcome === 'failed' ? ` (${t('syncLastAttemptFailed', { at: formatDateTime(st.lastAttempt.at) })})`
+      : st.lastAttempt?.outcome === 'partial' ? ` (${t('syncLastAttemptPartial', { at: formatDateTime(st.lastAttempt.at) })})` : '';
+    return `${name}: ${when}${note}`;
+  };
+  const platformName = (p: string | undefined): string => t(`platform_${p ?? ''}`, { defaultValue: p ?? '' });
+  /** One sentence for the last manual sync, also what a screen reader hears. */
+  const syncNoticeText = (r: SyncResult): string => {
+    if (r.outcome === 'synced') return t('syncSummary', { since: r.since ?? r.date ?? '', until: r.until ?? r.date ?? '', campaigns: r.campaigns ?? 0, imported: r.imported ?? 0, deduped: r.deduped ?? 0, failures: r.failures?.length ?? 0 });
+    // ADR 1022 D7 + CP71UX-4 — the advice follows the reason: wait, or fix the sign-in.
+    if (r.outcome === 'sync_failed') {
+      const hint = syncFailureHint(r.reason);
+      return `${t('syncFailed', { platform: platformName(r.platform) })} ${t(hint === 'wait' ? 'syncFailedHintWait' : hint === 'setup' ? 'syncFailedHintSetup' : 'syncFailedHintSignIn')}`;
+    }
+    if (r.outcome === 'cooldown') return t('syncCooldown', { retryAt: r.retryAtIso ? formatTime(r.retryAtIso) : '' });
+    if (r.outcome === 'no_accounts') return t('syncNoAccounts');
+    if (r.outcome === 'not_verified') return t('syncNotVerified');
+    return t('syncNoDispatches');
+  };
   const runSync = async (platform: LiveSyncPlatform): Promise<void> => {
     if (!orgId || syncBusy) return;
     setSyncBusy(platform);
@@ -87,7 +113,7 @@ export function CampaignConnectorsPage(): JSX.Element {
   const [kpiFailed, setKpiFailed] = useState(false);
   // R2 CC-SP-13 — when each platform's live sync last landed (absent = never;
   // failure keeps it absent rather than claiming freshness).
-  const [syncStatus, setSyncStatus] = useState<Array<{ platform: string; lastSyncAt: string }>>([]);
+  const [syncStatus, setSyncStatus] = useState<SyncStatus[]>([]);
   const seqRef = useRef(0);
   const refresh = useCallback(async (org: string) => {
     const seq = ++seqRef.current;
@@ -130,28 +156,23 @@ export function CampaignConnectorsPage(): JSX.Element {
             <Button variant="primary" size="sm" onClick={() => setImportOpen(true)}><PlusIcon size={13} /> {t('importCsv')}</Button>
           </div>
         ) : undefined} />
-      {error ? <Notice variant="error">{error}</Notice> : null}
+      {error ? <Notice variant="error" announce={error}>{error}</Notice> : null}
       {lastSync ? (
-        <Notice variant={lastSync.outcome === 'synced' ? ((lastSync.failures?.length ?? 0) > 0 ? 'warning' : 'success') : 'info'}>
-          {lastSync.outcome === 'synced'
-            ? t('syncSummary', { since: lastSync.since ?? lastSync.date ?? '', until: lastSync.until ?? lastSync.date ?? '', campaigns: lastSync.campaigns ?? 0, imported: lastSync.imported ?? 0, deduped: lastSync.deduped ?? 0, failures: lastSync.failures?.length ?? 0 })
-            : lastSync.outcome === 'cooldown'
-              ? t('syncCooldown', { retryAt: lastSync.retryAtIso ? formatTime(lastSync.retryAtIso) : '' })
-              : lastSync.outcome === 'no_accounts' ? t('syncNoAccounts')
-                : lastSync.outcome === 'not_verified' ? t('syncNotVerified') : t('syncNoDispatches')}
+        <Notice announce={syncNoticeText(lastSync)} variant={lastSync.outcome === 'sync_failed' ? 'error' : lastSync.outcome === 'synced' ? ((lastSync.failures?.length ?? 0) > 0 ? 'warning' : 'success') : 'info'}>
+          {syncNoticeText(lastSync)}
           {lastSync.outcome === 'synced' && lastSync.truncated ? <p className="u-m-0 u-mt-1 u-fs-13">{t('syncTruncated')}</p> : null}
           {/* R2 CC-SP-5 — the failure REASONS were fetched and dropped; a
               count alone gives the operator nothing to act on. */}
           {(lastSync.failures?.length ?? 0) > 0 ? (
             <ul className="u-m-0 u-mt-1 u-fs-13">
-              {lastSync.failures!.slice(0, 5).map((f, i) => <li key={`${f.adAccountId ?? f.platformCampaignId ?? ''}-${i}`}><code>{f.adAccountId ?? f.platformCampaignId}</code>: {f.reason}</li>)}
+              {lastSync.failures!.slice(0, 5).map((f, i) => <li key={`${f.adAccountId ?? f.platformCampaignId ?? ''}-${i}`}><code>{f.adAccountId ?? f.platformCampaignId}</code>: {syncReasonText(t, f.reason)}</li>)}
               {lastSync.failures!.length > 5 ? <li>{t('syncMoreFailures', { count: lastSync.failures!.length - 5 })}</li> : null}
             </ul>
           ) : null}
         </Notice>
       ) : null}
       {lastImport ? (
-        <Notice variant={lastImport.invalid > 0 ? 'warning' : 'success'}>
+        <Notice variant={lastImport.invalid > 0 ? 'warning' : 'success'} announce={t('importedSummary', { imported: lastImport.imported, deduped: lastImport.deduped, invalid: lastImport.invalid })}>
           {t('importedSummary', { imported: lastImport.imported, deduped: lastImport.deduped, invalid: lastImport.invalid })}
           {/* R2 CC-SP-4 — the per-row reasons were fetched and DISCARDED: a
               partial import said only "N skipped", leaving the operator to
@@ -235,17 +256,15 @@ export function CampaignConnectorsPage(): JSX.Element {
                 </table>
                 </div>
                 {kpi.dateRange ? <p className="u-fs-13 muted u-mt-3">{t('dateRange', { start: kpi.dateRange.start, end: kpi.dateRange.end, count: kpi.recordCount })}</p> : null}
-                {/* R2 CC-SP-13 — freshness: a broken sync must not look active. */}
-                {syncStatus.length > 0 ? (
-                  <p className="u-fs-13 muted u-mt-1 u-mb-0">
-                    {t('lastSyncedLine', { platforms: syncStatus.map((s) => `${t(`platform_${s.platform}`, { defaultValue: s.platform })} ${formatTime(s.lastSyncAt)}`).join(' · ') })}
-                  </p>
-                ) : null}
               </section>
 
               <PixelsCard orgId={orgId} liveConversions={liveConversions} />
             </>
           )}
+          {/* R2 CC-SP-13 + ADR 1022 D7 — freshness, OUTSIDE the KPI branch
+              (CP71UX-5): an org whose syncs never succeeded has no rows, and
+              is exactly the one that must see "last attempt failed". */}
+          {syncStatus.length > 0 ? <p className="u-fs-13 muted u-mt-1 u-mb-0">{t('lastSyncedLine', { platforms: syncStatus.map(freshness).join(' · ') })}</p> : null}
           {/* ADR 0907 D3 — outside the KPI branch: an org with no rows yet is
               exactly the one that needs to point the sync at its ad account. */}
           {kpi !== null || kpiFailed ? <SyncSettingsCard orgId={orgId} platforms={livePlatforms} onSynced={() => void refresh(orgId)} /> : null}

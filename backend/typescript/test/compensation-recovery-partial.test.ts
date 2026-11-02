@@ -22,6 +22,15 @@
  * lists `failed -> failed`, so two concurrent waives are BOTH legal transitions
  * and the table would let both through. The first leg pins that fact directly,
  * so the reason for the design cannot quietly stop being true.
+ *
+ * Tracker: TST-CGF-2. RECORDED DOUBLE GUARD: the stale-view precondition lives in
+ * the applier (compensationRecovery.ts, BEFORE the audit append) AND in the ledger
+ * (`resolveObligation`). Dropping the applier copy alone is caught here because the
+ * ledger copy then refuses AFTER the append — two audit entries for one action.
+ * Red when: the applier precondition, the run-tree check, the resume call or the
+ * audit-first ordering is broken; or the ledger stops raising a stale view.
+ * "Racing" cases run in ONE process, where the per-obligation critical section
+ * serialises them — the titles say so; this is not a forced interleaving.
  */
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -63,6 +72,7 @@ import {
   recordObligation,
   resolveObligation,
   CompensationStaleViewError,
+  CompensationTransitionError,
 } from '../src/host/compensationLedger.js';
 
 const T = 'tenant-p3-partial';
@@ -112,7 +122,7 @@ describe('the state machine alone would NOT stop a duplicate waive', () => {
 });
 
 describe('concurrent duplicate operator actions on ONE obligation', () => {
-  it('applies EXACTLY ONE of two simultaneous waives; the loser gets version_conflict', async () => {
+  it('applies EXACTLY ONE of two racing waives (serialised in-process); the loser gets version_conflict', async () => {
     const o = await commit();
 
     const results = await Promise.allSettled([
@@ -144,7 +154,7 @@ describe('concurrent duplicate operator actions on ONE obligation', () => {
     expect(await auditCount(o.inverseActionId)).toBe(1);
   });
 
-  it('applies EXACTLY ONE resume when two retries race — counting INVOCATIONS, not rows', async () => {
+  it('applies EXACTLY ONE resume when two retries race (serialised in-process) — counting INVOCATIONS, not rows', async () => {
     const o = await commit();
     let resumes = 0;
 
@@ -246,7 +256,7 @@ describe('retry after a PARTIAL unwind (RFC 0151 §C identity rule)', () => {
       tenantId: T, runId: R, obligationId: done.inverseActionId,
       action: 'retry', actor: 'user:admin', expectedState: 'completed',
       resume: async () => { invoked.push(done.inverseActionId); },
-    })).rejects.toBeTruthy();
+    })).rejects.toThrow(CompensationTransitionError);
     expect(invoked).not.toContain(done.inverseActionId);
   });
 

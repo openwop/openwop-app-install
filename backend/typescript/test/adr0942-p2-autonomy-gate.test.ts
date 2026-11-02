@@ -75,7 +75,7 @@ async function gateRun(opts: { tagged?: boolean; actingUserId?: string; extra?: 
     },
     configurable: {}, createdAt: now, updatedAt: now,
   };
-  await insertRunWithStartContext(storage, run);
+  await insertRunWithStartContext(storage, run, { admission: { plan: 'exempt:test-fixture' } });
   const def = (await hostSuite.workflowCatalog.getWorkflow(WF))?.definition;
   if (!def) throw new Error('gate workflow not registered');
   const stored = (await storage.getRun(run.runId)) ?? run;

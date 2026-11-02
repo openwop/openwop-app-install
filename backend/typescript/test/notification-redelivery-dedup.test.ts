@@ -23,6 +23,12 @@
  *
  * `resetLogicalInvocationOrdinals()` models the re-dispatch: a re-executing
  * node begins its ordinal sequence again from 0.
+ *
+ * DOUBLE GUARD (w73 g4): the suppression is held twice in `emitter.ts` — the
+ * memo read (`readNotificationMemo`) AND the ADR 0618 claim, whose loser
+ * re-reads the memo and returns it. Removing the memo read alone is an
+ * equivalent mutant (probe nr-memo read vacuous); disabling the effect
+ * identity, which feeds both, reds the first case (probe nr-identity).
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';

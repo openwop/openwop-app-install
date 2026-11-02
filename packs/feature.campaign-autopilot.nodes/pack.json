@@ -1,6 +1,6 @@
 {
   "name": "feature.campaign-autopilot.nodes",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "kind": "node",
   "description": "Campaign autopilot node pack (ADR 0961). `preflight` reads the typed checklist of what the run's campaign still needs; `start-stage` starts a stage (v0.1: the drafting stage) as its own campaign run. Both go through ctx.features['campaign-autopilot'], which takes the campaign only from the run's own tag, never an input. While a blocking preflight item is missing the run waits on a checklist card (a clarification interrupt) until \"Check again\" finds it ready (1.1.0, ADR 0961 P1).",
   "author": "OpenWOP App",

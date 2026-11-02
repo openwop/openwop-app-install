@@ -23,7 +23,7 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 const PATH = '/host/openwop-app/feature-toggles/admin/env-governed';
 const ADMIN = { authorization: 'Bearer dev-token' };
 
-interface Lever { id: string; envVar: string; enabled: boolean }
+interface Lever { id: string; envVar: string; enabled: boolean; note?: string }
 interface Capability { id: string; label: string; envVar: string; enabled: boolean; levers: Lever[] }
 
 describe('env-governed capabilities (ADR 0434)', () => {
@@ -51,18 +51,21 @@ describe('env-governed capabilities (ADR 0434)', () => {
     return { status: res.status, capabilities: body.capabilities };
   };
 
-  it('reports context-economy with its owning env var and all five levers', async () => {
+  it('reports context-economy with its owning env var and all six levers', async () => {
     const { status, capabilities } = await get();
     expect(status).toBe(200);
     const ce = capabilities.find((c) => c.id === 'context-economy');
     expect(ce, 'context-economy must remain visible to an operator').toBeTruthy();
     expect(ce!.envVar).toBe('OPENWOP_CONTEXT_ECONOMY');
     expect(ce!.levers.map((l) => l.id).sort()).toEqual(
-      ['memoryBudget', 'providerCache', 'toolDiet', 'transcriptBudget', 'transport'],
+      ['conversationCache', 'memoryBudget', 'providerCache', 'toolDiet', 'transcriptBudget', 'transport'],
     );
     // Every lever names the env var that actually owns it — the whole point of
     // the projection is telling the operator WHERE the real switch lives.
     for (const l of ce!.levers) expect(l.envVar).toMatch(/^OPENWOP_CONTEXT_ECONOMY/);
+    // ADR 1003 D7 — the voice seed is windowed whatever the transcript lever
+    // says, so the projection must not let "off" read as "never bounded".
+    expect(ce!.levers.find((l) => l.id === 'transcriptBudget')?.note).toMatch(/voice/i);
   });
 
   it('REFLECTS the env rather than a stored row (the anti-lying-switch property)', async () => {

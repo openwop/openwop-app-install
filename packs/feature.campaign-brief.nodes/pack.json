@@ -1,6 +1,6 @@
 {
   "name": "feature.campaign-brief.nodes",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "kind": "node",
   "description": "Personas & Campaign Brief node pack \u2014 validate a brief (compute the enabled channel set) and generate the messaging kernel (the shared strategic foundation every channel echoes), grounding it in the knowledge base (kb.rag) + brand voice (ctx.features.brand) via the run-scoped provider. Drives the Campaign Studio orchestration.",
   "author": "OpenWOP App",
@@ -37,47 +37,56 @@
     },
     {
       "typeId": "feature.campaign-brief.nodes.generate-kernel",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "label": "Brief: Generate Messaging Kernel",
-      "description": "Generates the messaging kernel (headline, supporting statement, proof points, CTAs, tone) for a brief \u2014 grounded in the KB (kb.rag citations) and the brand voice (ctx.features.brand.resolve-voice), via the run-scoped ctx.callAI \u2014 then persists it on the brief. Inputs: { briefId, provider?, model? }. Output: { kernel }.",
+      "description": "Generates the messaging kernel (headline, supporting statement, proof points, CTAs, tone) for a brief \u2014 grounded in the KB (kb.rag citations) and the brand voice (ctx.features.brand.resolve-voice), via the run-scoped ctx.callAI \u2014 then persists it on the brief. Inputs: { briefId, provider?, model? }. Output: { kernel }. ADR 1020 D8: with config.stageKernel the kernel is NOT saved here; it is returned (with briefVersion) for the approval, and promote-kernel saves it afterwards. Without the flag (older chains) it is saved as before. The kernel must carry a non-empty headline, supporting statement, primary CTA, tone and at least one proof point, after one repair.",
       "category": "integration",
       "role": "action",
       "capabilities": []
     },
     {
-      "typeId": "feature.campaign-brief.nodes.extract-seeds",
+      "typeId": "feature.campaign-brief.nodes.promote-kernel",
       "version": "1.0.0",
+      "label": "Brief: Promote Kernel",
+      "description": "ADR 1020 D8: saves an APPROVED messaging kernel onto the brief, after the approval (a rejection never reaches it). Inputs: { briefId, kernel, briefVersion }. Refuses brief_changed when the brief was edited after the kernel was generated. Output: { kernel, briefStatus }. role:\"side-effect\": a replay fork serves the recorded outcome instead of writing an old kernel over the current one.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-brief.nodes.extract-seeds",
+      "version": "1.1.0",
       "label": "Brief: Extract Seeds from KB",
-      "description": "Proposes personas/product/competitors from the bound knowledge collection with source citations (PROPOSALS \u2014 user confirms; ADR 0356 P3). Inputs: { orgId, collectionId, query?, provider?, model? }.",
+      "description": "Proposes personas/product/competitors from the bound knowledge collection with source citations (PROPOSALS \u2014 user confirms; ADR 0356 P3). Inputs: { orgId, collectionId, query?, provider?, model? }. ADR 1020 D12: empty proposals fail generation_empty after one repair; each persona's sources map to sourceDocIds.",
       "category": "integration",
       "role": "action",
       "capabilities": []
     },
     {
       "typeId": "feature.campaign-brief.nodes.extract-voc",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "label": "Brief: Extract VOC Evidence",
-      "description": "Extracts verbatim voice-of-customer quotes (pain/desire/objection/praise) from the brief's bound KB collection and persists them as citation-carrying evidence \u2014 the node builds every sourceRef from the retrieved chunk (documentId + locator + sha256 contentHash) and verifies quotes verbatim; ungrounded candidates are dropped with findings and an all-dropped extraction is a typed failure (ADR 0403 P1). Inputs: { briefId, collectionId?, query?, topK?, provider?, model? }.",
+      "description": "Extracts verbatim voice-of-customer quotes (pain/desire/objection/praise) from the brief's bound KB collection and persists them as citation-carrying evidence \u2014 the node builds every sourceRef from the retrieved chunk (documentId + locator + sha256 contentHash) and verifies quotes verbatim; ungrounded candidates are dropped with findings and an all-dropped extraction is a typed failure (ADR 0403 P1). Inputs: { briefId, collectionId?, query?, topK?, provider?, model? }. ADR 1020 D9: role side-effect, because it writes the brief's research. It is held on the AI invocation log, not served: a replay fork re-runs it with the model call answered from the log, so its write runs again. Evidence and angle ids are content-derived (put-if-absent), so the repeat adds no duplicate, but it can bring back an item deleted while curating; the targeting pack is an upsert per platform, so a fork re-writes it (CS70WF-37).",
       "category": "integration",
-      "role": "action",
+      "role": "side-effect",
       "capabilities": []
     },
     {
       "typeId": "feature.campaign-brief.nodes.generate-angles",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "label": "Brief: Generate Ad Angles",
-      "description": "Generates positioning angles from the messaging kernel + the brief's stored VOC evidence \u2014 the model cites evidence by index, the node maps indexes to stored evidence ids, and the surface re-validates every proofRef closed-world; an angle with no resolvable proof is dropped with a finding and an all-dropped generation is a typed failure. Hook variants project into the ORG hook bank as candidate hooks (deterministic ids, idempotent, never demoting). Requires a kernel + stored evidence (ADR 0403 P2). Inputs: { briefId, personaId?, provider?, model? }.",
+      "description": "Generates positioning angles from the messaging kernel + the brief's stored VOC evidence \u2014 the model cites evidence by index, the node maps indexes to stored evidence ids, and the surface re-validates every proofRef closed-world; an angle with no resolvable proof is dropped with a finding and an all-dropped generation is a typed failure. Hook variants project into the ORG hook bank as candidate hooks (deterministic ids, idempotent, never demoting). Requires a kernel + stored evidence (ADR 0403 P2). Inputs: { briefId, personaId?, provider?, model? }. ADR 1020 D9: role side-effect, because it writes the brief's research. It is held on the AI invocation log, not served: a replay fork re-runs it with the model call answered from the log, so its write runs again. Evidence and angle ids are content-derived (put-if-absent), so the repeat adds no duplicate, but it can bring back an item deleted while curating; the targeting pack is an upsert per platform, so a fork re-writes it (CS70WF-37).",
       "category": "integration",
-      "role": "action",
+      "role": "side-effect",
       "capabilities": []
     },
     {
       "typeId": "feature.campaign-brief.nodes.build-targeting",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "label": "Brief: Build Targeting Pack",
-      "description": "Builds THE platform targeting pack (meta|google|linkedin|tiktok) for a brief \u2014 audiences, interests, keywords with a rationale citing the VOC evidence they derive from (model cites indexes, node maps to ids, surface re-validates). Deterministic brief+platform upsert: a re-run replaces, never duplicates. Requires stored evidence (ADR 0403 P3). Inputs: { briefId, platform, provider?, model? }.",
+      "description": "Builds THE platform targeting pack (meta|google|linkedin|tiktok) for a brief \u2014 audiences, interests, keywords with a rationale citing the VOC evidence they derive from (model cites indexes, node maps to ids, surface re-validates). Deterministic brief+platform upsert: a re-run replaces, never duplicates. Requires stored evidence (ADR 0403 P3). Inputs: { briefId, platform, provider?, model? }. ADR 1020 D9: role side-effect, because it writes the brief's research. It is held on the AI invocation log, not served: a replay fork re-runs it with the model call answered from the log, so its write runs again. Evidence and angle ids are content-derived (put-if-absent), so the repeat adds no duplicate, but it can bring back an item deleted while curating; the targeting pack is an upsert per platform, so a fork re-writes it (CS70WF-37).",
       "category": "integration",
-      "role": "action",
+      "role": "side-effect",
       "capabilities": []
     },
     {

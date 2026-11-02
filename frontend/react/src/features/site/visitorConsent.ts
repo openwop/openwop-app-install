@@ -25,8 +25,7 @@
  * Storage can throw (private mode, blocked site data): the choice is also held in
  * memory for the tab, so a visitor is never re-asked within one session.
  */
-import { useEffect, useSyncExternalStore } from 'react';
-import { config } from '../../client/config.js';
+import { visitorApiBase } from './visitorApi.js';
 
 export type ConsentRegime = 'opt-in' | 'opt-out';
 export type ConsentDecision = 'allowed' | 'denied' | 'unknown';
@@ -40,7 +39,7 @@ export const REPLAY_CATEGORY = 'analytics.replay';
 const CHOICES_KEY = 'owp:consent';
 const LEGACY_VK = 'owp:vk';
 const vkKey = (orgId: string): string => `owp:vk:${orgId}`;
-const LANE = (orgId: string): string => `${config.baseUrl}/host/openwop-app/public-consent/${encodeURIComponent(orgId)}`;
+const LANE = (orgId: string): string => `${visitorApiBase()}/host/openwop-app/public-consent/${encodeURIComponent(orgId)}`;
 
 const memChoices = new Map<string, StoredChoice>();
 const postures = new Map<string, Promise<ConsentRegime | null>>();
@@ -175,6 +174,13 @@ async function postChoice(orgId: string, analytics: boolean, replay: boolean | u
   });
 }
 
+async function isContended(res: Response): Promise<boolean> {
+  try {
+    const body = (await res.clone().json()) as { error?: { details?: { reason?: unknown } }; details?: { reason?: unknown } };
+    return (body.error?.details?.reason ?? body.details?.reason) === 'consent_write_contended';
+  } catch { return false; }
+}
+
 /**
  * Record a choice on the consent lane, then remember it. A refusal is remembered
  * (and the key removed) even when the POST fails — failing closed is always safe —
@@ -197,6 +203,12 @@ export async function recordChoice(orgId: string, analytics: boolean, opts: { re
     if (r.status === 400 && token) {
       token = undefined;
       r = await postChoice(orgId, analytics, replay ?? prior?.replay, undefined);
+    }
+    // ADR 0951 P2 review #7: a choice that lost a race with another consent
+    // write is refused with `consent_write_contended` and is safe to resend;
+    // without this a refusal sent beside a grant was simply lost. Once.
+    if (r.status === 409 && await isContended(r)) {
+      r = await postChoice(orgId, analytics, token ? replay : replay ?? prior?.replay, token);
     }
     if (!r.ok) throw new Error(String(r.status));
     const body = (await r.json()) as { subjectToken?: unknown };
@@ -249,13 +261,9 @@ export function subscribeVisitorConsent(fn: () => void): () => void {
   return () => { listeners.delete(fn); };
 }
 
-/** React binding: re-renders on any choice or posture change, and loads the
- *  posture for `orgId` once. */
-export function useVisitorConsent(orgId: string): { decision: ConsentDecision; regime: ConsentRegime | null | undefined; choice: StoredChoice | null } {
-  useSyncExternalStore(subscribeVisitorConsent, () => version, () => version);
-  useEffect(() => { if (orgId) void loadPosture(orgId); }, [orgId]);
-  return { decision: decisionFor(orgId), regime: regimeFor(orgId), choice: storedChoice(orgId) };
-}
+/** A change counter for subscribers (the React binding lives in
+ *  `useVisitorConsent.ts`, so this core stays React-free — ADR 1015 D2). */
+export function visitorConsentVersion(): number { return version; }
 
 /** Test seam — module state is per page load. */
 export function __resetVisitorConsentForTests(): void {

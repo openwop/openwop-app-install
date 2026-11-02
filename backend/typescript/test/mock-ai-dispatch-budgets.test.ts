@@ -13,7 +13,12 @@ import type { DispatchRequest } from '../src/providers/dispatch.js';
 const NODE = 'dispatch-budgets-probe';
 
 function call(maxTokens: number | undefined): Promise<unknown> {
-  const req = { provider: 'mock', model: 'mock-mini', messages: [{ role: 'user', content: 'x' }], maxTokens, nodeId: NODE } as unknown as DispatchRequest & { nodeId: string };
+  // Typed against the real request shape (no cast): the mock reads `nodeId`
+  // off the request, which `aiProvidersHost.ts` extends inline for 'mock'.
+  const req: DispatchRequest & { nodeId: string } = {
+    provider: 'mock', model: 'mock-mini', apiKey: '', messages: [{ role: 'user', content: 'x' }], nodeId: NODE,
+    ...(maxTokens !== undefined ? { maxTokens } : {}),
+  };
   return dispatchMock(req);
 }
 

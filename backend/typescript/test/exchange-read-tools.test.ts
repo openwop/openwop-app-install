@@ -8,10 +8,32 @@
  *  - tasks.deck — the route's IDOR ownership filter (own runs + children)
  *  - conversations.search — the ADR 0043 visibility predicate
  *  - documents.get / documents.list-templates — org RBAC read
+ *
+ * Tracker: TST-DBB-1. Isolation and visibility claims are asserted against a
+ * caller who reaches the rule under test: projects.list uses a SAME-ORG member
+ * with read scope (an outsider is refused at the org level before the
+ * visibility rule runs — round-1 probe w70g2-xr-proj-private was vacuous), and
+ * the intent-ledger stranger reads a conversation that HAS a ledger (without
+ * one, `getLedger` answered not_found whatever the visibility check said —
+ * w70g2-xr-il-visible was vacuous).
+ *
+ * Double guard (recorded, same feature): projects.list without an acting user
+ * fails empty in the tool (`!scope.actingUserId`) AND in `levelFor`
+ * (`callerSubject === undefined → 'none'`, ADR 0839 D1); a probe on either
+ * alone stays green by design.
+ *
+ * Toggle cases set their toggle explicitly and restore it afterwards, so the
+ * file passes in any order.
+ *
+ * Red when: org-visible-only filtering admits a private project to a reader,
+ * the intent-ledger visibility check is dropped, a fail-empty branch is
+ * removed, media admits a write-only role or leaks storageRef/serveToken, cdp
+ * unmasks PII, a toggle check is dropped, or hasOutputSchema is misreported
+ * (probes w70g2-xr-*).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { createAgentToolProvider, builtinAgentToolIds } from '../src/host/agentToolProvider.js';
 import { GOALS_LIST_TOOL_ID } from '../src/features/goals/agentTools.js';
@@ -29,6 +51,8 @@ import { createProject, setProjectVisibility } from '../src/features/projects/pr
 import { createOrg, createCustomRole, createMember } from '../src/host/accessControlService.js';
 import { createAsset } from '../src/features/media/mediaService.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
+import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import { createTemplate } from '../src/features/documents/documentsService.js';
 import { createContact } from '../src/features/crm/contactsService.js';
 import { ensureConversationMeta } from '../src/host/conversationStore.js';
 import { saveLedger } from '../src/features/intent-ledger/ledgerStore.js';
@@ -47,6 +71,13 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 const run = (name: string, input: Record<string, unknown> = {}, scope: { actingUserId?: string } = {}) =>
   createAgentToolProvider({ tenantId: TENANT, runId: 'run-xch-w4', ...scope }).executeTool({ name, input });
 const parse = (r: { content: string }) => JSON.parse(r.content) as Record<string, unknown>;
+/** Set a toggle on/off for this file's tenant-bucketed default config. */
+const setToggle = (id: string, status: 'on' | 'off') => saveConfig({ id, status, bucketUnit: 'tenant', salt: 'xch-r3' }, 'test');
+/** Put a toggle back to its registered default. */
+const restoreToggle = async (id: string): Promise<void> => {
+  const d = getToggleDefault(id);
+  if (d) await saveConfig(d, 'test');
+};
 
 describe('the Wave 4 read tools are registered (ADR 0308 seam)', () => {
   it('all seven ids resolve as builtin agent tools', () => {
@@ -57,14 +88,16 @@ describe('the Wave 4 read tools are registered (ADR 0308 seam)', () => {
   });
 });
 
-describe('tenant-scoped reads return honest shapes', () => {
-  it('goals.list returns a goals array (empty workspace)', async () => {
-    const out = parse(await run(GOALS_LIST_TOOL_ID));
-    expect(Array.isArray(out.goals)).toBe(true);
+describe('tenant-scoped reads fail EMPTY without an acting user', () => {
+  it('goals.list without an acting user returns exactly {goals: []} (fail EMPTY, never open)', async () => {
+    const res = await run(GOALS_LIST_TOOL_ID);
+    expect(res.isError).toBeFalsy();
+    expect(parse(res)).toEqual({ goals: [] });
   });
-  it('proposals.list returns a proposals array', async () => {
-    const out = parse(await run(PROPOSALS_LIST_TOOL_ID));
-    expect(Array.isArray(out.proposals)).toBe(true);
+  it('proposals.list without an acting user returns exactly {proposals: []} (fail EMPTY, never open)', async () => {
+    const res = await run(PROPOSALS_LIST_TOOL_ID);
+    expect(res.isError).toBeFalsy();
+    expect(parse(res)).toEqual({ proposals: [] });
   });
 });
 
@@ -98,11 +131,20 @@ describe('projects.list honors private visibility (ADR 0054 D5)', () => {
     expect(ownerNames).toContain('Org-visible project');
     expect(ownerNames).toContain('Private project');
 
+    // A SAME-ORG member with read scope (not a project member) reaches the
+    // visibility rule: the org-visible project, never the private one.
+    const readRole = await createCustomRole({ orgId: org.orgId, tenantId: TENANT, name: 'xch-reader', scopes: ['workspace:read'] });
+    await createMember({ orgId: org.orgId, tenantId: TENANT, displayName: 'Reader', subject: 'u-xch-reader', roles: [readRole.roleId] });
+    const reader = parse(await run(PROJECTS_LIST_TOOL_ID, {}, { actingUserId: 'u-xch-reader' }));
+    const readerIds = (reader.projects as Array<{ id: string }>).map((p) => p.id);
+    expect(readerIds).toContain(pOrg.id);
+    expect(readerIds).not.toContain(pPriv.id);
+
     // A NON-MEMBER outsider sees neither (no org access at all → 'none').
     const outsider = parse(await run(PROJECTS_LIST_TOOL_ID, {}, { actingUserId: 'u-outsider' }));
-    const outsiderNames = (outsider.projects as Array<{ name: string }>).map((p) => p.name);
-    expect(outsiderNames).not.toContain('Private project');
-    void pOrg;
+    const outsiderIds = (outsider.projects as Array<{ id: string }>).map((p) => p.id);
+    expect(outsiderIds).not.toContain(pOrg.id);
+    expect(outsiderIds).not.toContain(pPriv.id);
   });
 });
 
@@ -126,11 +168,17 @@ describe('documents read tools (XCH-DOCS-1)', () => {
 
   it('documents.list-templates reports hasOutputSchema honestly', async () => {
     const org = await createOrg({ tenantId: TENANT, createdBy: 'u-writer4', name: 'Tmpl Org', ownerSubject: 'u-writer4' });
+    const withSchema = await createTemplate({
+      tenantId: TENANT, orgId: org.orgId, name: 'Structured brief', kind: 'brief', promptBody: 'Write a brief.',
+      outputSchema: { type: 'object', properties: { title: { type: 'string' } } }, createdBy: 'u-writer4',
+    });
+    const freeForm = await createTemplate({
+      tenantId: TENANT, orgId: org.orgId, name: 'Free memo', kind: 'memo', promptBody: 'Write a memo.', createdBy: 'u-writer4',
+    });
     const out = parse(await run(DOCUMENTS_LIST_TEMPLATES_TOOL_ID, { orgId: org.orgId }, { actingUserId: 'u-writer4' }));
-    expect(Array.isArray(out.templates)).toBe(true);
-    for (const t of out.templates as Array<{ hasOutputSchema: boolean }>) {
-      expect(typeof t.hasOutputSchema).toBe('boolean');
-    }
+    const byId = new Map((out.templates as Array<{ templateId: string; hasOutputSchema: boolean }>).map((t) => [t.templateId, t.hasOutputSchema]));
+    expect(byId.get(withSchema.templateId)).toBe(true);
+    expect(byId.get(freeForm.templateId)).toBe(false);
   });
 });
 
@@ -179,6 +227,7 @@ describe('media.list (org RBAC + safe summary)', () => {
     await createMember({ orgId: org.orgId, tenantId: TENANT, displayName: 'Write Only', subject: 'u-write-only', roles: [role.roleId] });
     const out = await run(MEDIA_LIST_TOOL_ID, { orgId: org.orgId }, { actingUserId: 'u-write-only' });
     expect(out.isError).toBe(true); // requireOrgScope('workspace:read') would 403 this caller; the tool must not be laxer
+    expect(parse(out).error).toBe('not_found');
   });
 });
 
@@ -195,13 +244,15 @@ describe('channels.list (viewer-scoped by the SAME service predicate as the rout
 });
 
 describe('creative-briefs.list (toggle-in-run fail-closed)', () => {
-  it('reports feature_disabled while the toggle is off (the default)', async () => {
+  afterEach(async () => { await restoreToggle('creative-briefs'); });
+  it('creative-briefs: reports feature_disabled while the toggle is off', async () => {
+    await setToggle('creative-briefs', 'off');
     const out = await run(CREATIVE_BRIEFS_LIST_TOOL_ID, {}, { actingUserId: 'u-cb' });
     expect(out.isError).toBe(true);
     expect(parse(out).error).toBe('feature_disabled');
   });
   it('lists briefs once the toggle is on (org RBAC read)', async () => {
-    await saveConfig({ id: 'creative-briefs', status: 'on', bucketUnit: 'tenant', salt: 'xch-r3' }, 'test');
+    await setToggle('creative-briefs', 'on');
     const org = await createOrg({ tenantId: TENANT, createdBy: 'u-cb2', name: 'CB Org', ownerSubject: 'u-cb2' });
     const out = parse(await run(CREATIVE_BRIEFS_LIST_TOOL_ID, { orgId: org.orgId }, { actingUserId: 'u-cb2' }));
     expect(Array.isArray(out.briefs)).toBe(true);
@@ -221,6 +272,14 @@ describe('intent-ledger.get (the route\'s visibility predicate, IDOR-safe not_fo
     expect(unknown.isError).toBe(true);
     expect(parse(unknown).error).toBe('not_found');
     await ensureConversationMeta(TENANT, 'conv-il-private', { type: 'person', ownerUserId: 'u-il-owner' });
+    // The private conversation HAS a ledger, so only the visibility check can hide it.
+    await saveLedger({
+      ledgerId: 'il-private', tenantId: TENANT, conversationId: 'conv-il-private',
+      goal: 'Owner-only mission', allowed: [], forbidden: [], requireApproval: [], successCriteria: [],
+      status: 'approved', proposedBy: 'user', createdAt: '2026-07-01T00:00:00.000Z',
+    });
+    const owner = parse(await run(INTENT_LEDGER_GET_TOOL_ID, { conversationId: 'conv-il-private' }, { actingUserId: 'u-il-owner' }));
+    expect((owner.ledger as { goal: string }).goal).toBe('Owner-only mission'); // positive control
     const stranger = await run(INTENT_LEDGER_GET_TOOL_ID, { conversationId: 'conv-il-private' }, { actingUserId: 'u-il-stranger' });
     expect(stranger.isError).toBe(true);
     expect(parse(stranger).error).toBe('not_found');
@@ -230,7 +289,7 @@ describe('intent-ledger.get (the route\'s visibility predicate, IDOR-safe not_fo
     await saveLedger({
       ledgerId: 'il-1', tenantId: TENANT, conversationId: 'conv-il-mine',
       goal: 'Ship the Q3 launch page', allowed: ['core.openwop.http.*'], forbidden: ['core.email.*'],
-      requireApproval: [], successCriteria: ['page is live'], status: 'approved', proposedBy: 'user', createdAt: 'x',
+      requireApproval: [], successCriteria: ['page is live'], status: 'approved', proposedBy: 'user', createdAt: '2026-07-01T00:00:00.000Z',
     });
     const out = parse(await run(INTENT_LEDGER_GET_TOOL_ID, { conversationId: 'conv-il-mine' }, { actingUserId: 'u-il-me' }));
     expect((out.ledger as { goal: string }).goal).toBe('Ship the Q3 launch page');
@@ -239,13 +298,15 @@ describe('intent-ledger.get (the route\'s visibility predicate, IDOR-safe not_fo
 });
 
 describe('cdp.identity.resolve (ALWAYS masked; toggle-in-run fail-closed)', () => {
-  it('reports feature_disabled while the toggle is off (the default)', async () => {
+  afterEach(async () => { await restoreToggle('cdp'); });
+  it('cdp: reports feature_disabled while the toggle is off', async () => {
+    await setToggle('cdp', 'off');
     const out = await run(CDP_IDENTITY_RESOLVE_TOOL_ID, { type: 'email', value: 'x@y.z' }, { actingUserId: 'u-cdp' });
     expect(out.isError).toBe(true);
     expect(parse(out).error).toBe('feature_disabled');
   });
   it('never returns unmasked PII — the agent is a scope-limited caller by construction', async () => {
-    await saveConfig({ id: 'cdp', status: 'on', bucketUnit: 'tenant', salt: 'xch-r3' }, 'test');
+    await setToggle('cdp', 'on');
     await createContact({ tenantId: TENANT, name: 'Ada Lovelace', email: 'ada.lovelace@example.com' });
     const res = await run(CDP_IDENTITY_RESOLVE_TOOL_ID, { type: 'email', value: 'ada.lovelace@example.com' }, { actingUserId: 'u-cdp' });
     const out = parse(res);
@@ -256,6 +317,8 @@ describe('cdp.identity.resolve (ALWAYS masked; toggle-in-run fail-closed)', () =
     expect(res.content).not.toContain('Ada Lovelace');
   });
   it('requires an acting user (structured deny, by-value GET convention)', async () => {
+    // The toggle check runs FIRST, so the acting-user check is only reachable with cdp on.
+    await setToggle('cdp', 'on');
     const out = await run(CDP_IDENTITY_RESOLVE_TOOL_ID, { type: 'email', value: 'x@y.z' });
     expect(out.isError).toBe(true);
     expect(parse(out).error).toBe('acting_user_required');

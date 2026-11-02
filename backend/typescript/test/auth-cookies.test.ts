@@ -2,9 +2,16 @@
  * Coverage for the P0.2 cookie-mode auth path:
  *   - First request without a cookie mints an anonymous session.
  *   - Subsequent requests carrying the cookie hit the same tenant.
- *   - Tampered signatures reject with 401 → cookie reissued.
+ *   - A tampered signature is not a session: the request is answered 200 as
+ *     a fresh anonymous visitor, with a NEW cookie whose tenant is not the
+ *     forged one.
  *   - Tenant id derives from the cookie, not from request body, so
  *     body.tenantId = "someone-elses-tenant" can't impersonate.
+ *
+ * Tracker TST-BEC-1 (w66). Red when: the anon mint stops setting the cookie;
+ * `verifySession` ignores a valid cookie (the session is not preserved); the
+ * HMAC length/compare checks are removed (the forged tenant is accepted); the
+ * principal authorizer allows any tenant (impersonation case).
  */
 
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
@@ -114,7 +121,7 @@ describe('cookie-mode auth (P0.2)', () => {
     // Principal's tenants is [cookie.tenantId]; authorizer rejects.
     expect(runRes.status).toBe(403);
     const body = (await runRes.json()) as { error: string };
-    expect(body.error).toMatch(/forbidden/);
+    expect(body.error).toBe('openwop-app.forbidden_tenant');
   });
 
   it('rejects a tampered signature → new cookie minted', async () => {
@@ -127,5 +134,10 @@ describe('cookie-mode auth (P0.2)', () => {
     const reissued = extractCookie(res.headers.get('set-cookie'));
     expect(reissued).toBeTruthy();
     expect(reissued).not.toBe(forged);
+    // The new session is a fresh one, never the forged payload's tenant/sid.
+    const value = reissued!.slice('__session='.length);
+    const payload = JSON.parse(Buffer.from(value.slice(0, value.indexOf('.')), 'base64url').toString('utf8')) as { tenantId: string; sid: string };
+    expect(payload.tenantId).not.toBe('anon:X');
+    expect(payload.sid).not.toBe('X');
   });
 });

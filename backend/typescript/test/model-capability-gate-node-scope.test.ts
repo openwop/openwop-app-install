@@ -14,6 +14,15 @@
  * looked like a guard and protected nothing.
  *
  * `nodeRef.config` was already in scope at the call site; it was simply never read.
+ *
+ * WHAT IS AND IS NOT PROVEN HERE (grade-tests w72, TST-DNH-P1). The first describe
+ * drives the REAL gate, but its input comes from `gateInputFor`, a copy of the
+ * executor's expression — so those cases prove the gate refuses by the ACTIVE
+ * provider's capabilities, not that the executor picks the node's pin. The second
+ * describe ties the copy to the executor by pinning the EXACT ternary in
+ * `executor.ts` (both branches; a looser regex stayed green when the true branch
+ * was swapped to the host default). A behavioural proof needs the gate-input
+ * builder exported from the executor — BLOCKED-ON-PRODUCT, recorded as TST-DNH-P1.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -30,7 +39,7 @@ const gateInputFor = (nodeConfig: Record<string, unknown> | undefined, hostDefau
   supportedProviders: ['anthropic', 'openai', 'google', 'minimax', 'openwop-free'],
 });
 
-describe('the capability gate sees the node, not the host default', () => {
+describe('the capability gate refuses by the ACTIVE provider (input built as the executor builds it)', () => {
   it('REFUSES a node pinned to a provider that advertises no capabilities', () => {
     // The case the old code could not see: host default is Anthropic (which HAS
     // structured-output), but the node runs on the managed tier (which advertises
@@ -41,7 +50,7 @@ describe('the capability gate sees the node, not the host default', () => {
 
   it('ALLOWS a node pinned to a provider that does advertise the capability', () => {
     const outcome = evaluateModelCapabilityGate(gateInputFor({ provider: 'anthropic' }, 'anthropic'));
-    expect(outcome.route).not.toBe('refuse');
+    expect(outcome.route).toBe('dispatch');
   });
 
   it('is not fooled by a capable HOST default when the node pin is incapable', () => {
@@ -49,18 +58,18 @@ describe('the capability gate sees the node, not the host default', () => {
     const viaNode = evaluateModelCapabilityGate(gateInputFor({ provider: 'minimax' }, 'anthropic'));
     const viaHostOnly = evaluateModelCapabilityGate(gateInputFor(undefined, 'anthropic'));
     expect(viaNode.route).toBe('refuse');
-    expect(viaHostOnly.route, 'with no node pin the host default still governs').not.toBe('refuse');
+    expect(viaHostOnly.route, 'with no node pin the host default still governs').toBe('dispatch');
   });
 
   it('falls back to the host default when the node pins nothing', () => {
     // Non-chain nodes carry no provider in config and must be unaffected.
-    expect(evaluateModelCapabilityGate(gateInputFor({}, 'anthropic')).route).not.toBe('refuse');
+    expect(evaluateModelCapabilityGate(gateInputFor({}, 'anthropic')).route).toBe('dispatch');
     expect(evaluateModelCapabilityGate(gateInputFor(undefined, 'openwop-free')).route).toBe('refuse');
   });
 
   it('ignores a non-string provider rather than coercing it', () => {
     // Defensive: pack config is JSON and could carry anything.
-    expect(evaluateModelCapabilityGate(gateInputFor({ provider: 42 }, 'anthropic')).route).not.toBe('refuse');
+    expect(evaluateModelCapabilityGate(gateInputFor({ provider: 42 }, 'anthropic')).route).toBe('dispatch');
   });
 });
 
@@ -73,7 +82,14 @@ describe('the EXECUTOR actually feeds the node config to the gate', () => {
     // guard, and it fails loudly if someone reverts to `gateConfig.defaultProvider`.
     const { readFile } = await import('node:fs/promises');
     const src = await readFile(new URL('../src/executor/executor.ts', import.meta.url), 'utf8');
-    expect(src, 'the gate input must derive activeProvider from the NODE').toMatch(/activeProvider:[\s\S]{0,200}nodeRef\.config\?\.provider/);
-    expect(src, 'and activeModel likewise').toMatch(/activeModel:[\s\S]{0,200}nodeRef\.config\?\.model/);
+    // The WHOLE ternary, both branches — the node pin when it is a non-empty
+    // string, the host default otherwise. (`[\s\S]{0,200}` matched a swapped
+    // true branch too: probe w72g4-mcg-exec-host-only stayed green.)
+    expect(src, 'the gate input must derive activeProvider from the NODE').toMatch(
+      /activeProvider: typeof nodeRef\.config\?\.provider === 'string' && nodeRef\.config\.provider\s*\?\s*nodeRef\.config\.provider\s*:\s*gateConfig\.defaultProvider,/,
+    );
+    expect(src, 'and activeModel likewise').toMatch(
+      /activeModel: typeof nodeRef\.config\?\.model === 'string' && nodeRef\.config\.model\s*\?\s*nodeRef\.config\.model\s*:\s*gateConfig\.defaultModel,/,
+    );
   });
 });

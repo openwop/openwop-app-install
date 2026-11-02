@@ -8,6 +8,12 @@
  * order), so last-in-mergeOrder = wf-a wins → parent `result === 'A'`. If the code wrongly applied
  * in dispatch/array order, `result` would be 'B'. mergeOrder is recorded on the core.dispatch.join
  * event so a :fork re-applies in the same order, never recomputed from wall-clock.
+ *
+ * TST-CVH-20. The completion order is forced by a GATE, not a sleep: wf-a's fake
+ * run waits until wf-b has marked itself completed. Red when: outputMapping is
+ * applied in dispatch order or reversed (`bootstrap/nodes.ts` finishWave),
+ * `foldJoin` stops recording observed terminal order as mergeOrder, or the join
+ * event loses its causation link to the fanOut event.
  */
 import { describe, expect, it, beforeAll } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -19,27 +25,48 @@ import { setRunVariable } from '../src/host/variablesRuntime.js';
 import { insertRunWithStartContext } from '../src/host/runInsert.js';
 import type { Storage } from '../src/storage/storage.js';
 import type { RunRecord } from '../src/types.js';
+import type { NodeContext } from '../src/executor/types.js';
+import { createHostAdapterSuite, type HostAdapterSuite } from '../src/host/index.js';
 
 const storage: Storage = await openStorage('memory://');
 setEventLogBackend(storage);
 ensureNodesRegistered();
 
-const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
-// Each child's terminal `out` value; wf-a is delayed so it terminates LAST.
+// Each child's terminal `out` value; wf-a is GATED so it terminates LAST.
 const CHILD_OUT: Record<string, string> = { 'wf-a': 'A', 'wf-b': 'B' };
 
-// Controlled child executor: seed the child's `out` var, then mark it completed. wf-a waits so the
-// FIRST-dispatched child finishes LAST → exercises mergeOrder vs dispatch order.
+// wf-a's fake run waits on this gate; wf-b opens it once it has completed. A fresh
+// gate per parent run (keyed by the child's parent) so each case is self-contained.
+const gates = new Map<string, { opened: Promise<void>; open: () => void }>();
+function gateFor(parentRunId: string): { opened: Promise<void>; open: () => void } {
+  let g = gates.get(parentRunId);
+  if (!g) {
+    let open!: () => void;
+    const opened = new Promise<void>((r) => { open = r; });
+    g = { opened, open };
+    gates.set(parentRunId, g);
+  }
+  return g;
+}
+
+// Controlled child executor: seed the child's `out` var, then mark it completed. wf-a waits for
+// wf-b → the FIRST-dispatched child finishes LAST → exercises mergeOrder vs dispatch order.
 const fakeExecuteRun = async (_s: Storage, childRun: RunRecord): Promise<unknown> => {
-  if (childRun.workflowId === 'wf-a') await delay(30);
+  const gate = gateFor(String(childRun.parentRunId ?? ''));
+  if (childRun.workflowId === 'wf-a') await gate.opened;
   setRunVariable(childRun.runId, 'out', CHILD_OUT[childRun.workflowId] ?? '?');
   await storage.updateRun(childRun.runId, { status: 'completed', updatedAt: new Date().toISOString() });
+  if (childRun.workflowId === 'wf-b') gate.open();
   return undefined;
 };
 
-const fakeSuite = {
-  workflowCatalog: { getWorkflow: async (_id: string) => ({ definition: { variables: [], nodes: [], edges: [] } }) },
-} as never;
+const realSuite = createHostAdapterSuite({ storage });
+const fakeSuite: HostAdapterSuite = {
+  ...realSuite,
+  workflowCatalog: {
+    getWorkflow: async (id: string) => ({ workflowId: id, definition: { workflowId: id, nodes: [], edges: [] } }),
+  },
+};
 
 function varsBag() {
   const m = new Map<string, unknown>();
@@ -52,15 +79,16 @@ async function insertParent(runId: string): Promise<void> {
     runId, workflowId: 'parent-wf', tenantId: 'tenant-fan', status: 'running',
     inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now,
   };
-  await insertRunWithStartContext(storage, parent);
+  await insertRunWithStartContext(storage, parent, { admission: { plan: 'exempt:test-fixture' } });
 }
 
-function ctx(runId: string, vars: ReturnType<typeof varsBag>): unknown {
+function ctx(runId: string, vars: ReturnType<typeof varsBag>): NodeContext {
   return {
     runId, nodeId: 'dispatch-node', tenantId: 'tenant-fan',
     inputs: { input: { agentId: 'orchestrator.fanout.test', decisions: [{ kind: 'next-worker', nextWorkerIds: ['wf-a', 'wf-b'] }] } },
     config: { fanOutPolicy: 'parallel', joinPolicy: { mode: 'wait-all', onChildFailure: 'collect' }, outputMapping: { result: 'out' } },
-    configurable: {}, variables: vars,
+    configurable: {}, variables: vars, attempt: 1, secrets: {},
+    emit: async () => ({ eventId: '', sequence: 0 }),
   };
 }
 
@@ -74,7 +102,7 @@ describe('RFC 0118 — core.dispatch parallel fan-out (executor arm)', () => {
     await insertParent('run-fan-1');
     const vars = varsBag();
     const node = getNodeRegistry().get('core.dispatch')!;
-    const res = await node.execute(ctx('run-fan-1', vars) as never);
+    const res = await node.execute(ctx('run-fan-1', vars));
 
     expect(res.status).toBe('success');
     const out = (res as { outputs: { joinOutcome?: string; children?: Array<{ workflowId: string; childRunId: string; childStatus: string }> } }).outputs;
@@ -97,7 +125,7 @@ describe('RFC 0118 — core.dispatch parallel fan-out (executor arm)', () => {
     await insertParent('run-fan-2');
     const vars = varsBag();
     const node = getNodeRegistry().get('core.dispatch')!;
-    await node.execute(ctx('run-fan-2', vars) as never);
+    await node.execute(ctx('run-fan-2', vars));
 
     // wf-a (dispatched FIRST) terminates LAST → last-in-mergeOrder → its 'A' wins the collision.
     // A wall-clock/array-order bug would yield 'B'.

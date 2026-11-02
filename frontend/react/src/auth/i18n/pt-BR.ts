@@ -126,4 +126,13 @@ export const messages = {
   sessionRefused_session_revoked: 'Você foi desconectado. Entre novamente para continuar.',
   sessionRefused_session_expired: 'Sua sessão terminou, então você foi desconectado. Entre novamente para continuar.',
   sessionRefused_self_revoked: 'Você saiu de todos os dispositivos, incluindo este. Entre de novo para continuar.',
+
+  // ReauthDialog — confirm it's you after auth/requires-recent-login (reauth.ts)
+  reauthTitle: 'Confirme que é você',
+  reauthLede: 'Para sua segurança, entre novamente para fazer esta alteração. Você continuará nesta página e a alteração será concluída.',
+  reauthLoading: 'Verificando como você entrou…',
+  reauthConfirm: 'Confirmar',
+  reauthMfaLede: 'Digite o código de 6 dígitos do seu aplicativo autenticador para confirmar que é você.',
+  reauthUnsupported: 'Não é possível confirmar seu método de login aqui. Saia, entre novamente e tente a alteração de novo.',
+  reauthSignOutAgain: 'Sair e entrar novamente',
 } as const;

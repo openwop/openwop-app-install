@@ -15,6 +15,14 @@
  * `bootstrap/nodes.ts`) reds the first case at "parent waits"; dropping the
  * `registerDispatchWaitAll` boot line reds it at "parent completes"; dropping
  * the `isDispatchWaitInterrupt` guard in `resolveAndResume` reds the second.
+ *
+ * The 5 s run-dispatch daemon (`reconcileDispatchWaits`) is a second joiner, so
+ * the boot-line sabotage could in principle be absorbed by it. Measured (w73
+ * probe w73g1-b-dwa-boot-hook): dropping the boot line reds four cases (the
+ * approval-gate join, the rejected gate, the early terminal hint, the fresh
+ * storage recovery), because `waitStatus` fails before the daemon's tick joins.
+ * `waitStatus` throws when its 300 polls run out, so a stuck run fails with its
+ * last status instead of reading as a wrong one.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -27,7 +35,7 @@ import { join } from 'node:path';
 import type { Storage } from '../src/storage/storage.js';
 import type { HostAdapterSuite } from '../src/host/index.js';
 import { openStorage } from '../src/storage/index.js';
-import { appendDispatchWaitResolution, claimDispatchWaitResume, DISPATCH_WAIT_EVENT_TYPE, isDispatchWaitInterrupt, reconcileDispatchWaits, storedDispatchWave, type WaveCorrelation, type WaveJoinResolution } from '../src/host/dispatchWaitAll.js';
+import { appendDispatchWaitResolution, claimDispatchWaitResume, DISPATCH_WAIT_EVENT_TYPE, isDispatchWaitInterrupt, reconcileDispatchWaits, storedDispatchWave, type WaveChild, type WaveCorrelation, type WaveJoinResolution } from '../src/host/dispatchWaitAll.js';
 import { __resetAllRunVariablesForTests, snapshotRunVariables } from '../src/host/variablesRuntime.js';
 import { randomUUID } from 'node:crypto';
 import type { InterruptRecord, RunRecord } from '../src/types.js';
@@ -55,28 +63,57 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 afterEach(() => vi.restoreAllMocks());
 
 type Json = Record<string, unknown>;
-async function api<T = Json>(path: string, init: RequestInit = {}): Promise<{ status: number; body: T }> {
+const isRec = (v: unknown): v is Json => typeof v === 'object' && v !== null && !Array.isArray(v);
+const strs = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
+/** Responses are read as `unknown` and narrowed per field below — no cast at the JSON boundary. */
+async function api(path: string, init: RequestInit = {}): Promise<{ status: number; body: Json }> {
   const res = await fetch(`${BASE}${path}`, { ...init, headers: { ...H, ...(init.headers ?? {}) } });
   const text = await res.text();
-  return { status: res.status, body: (text ? JSON.parse(text) : {}) as T };
+  const parsed: unknown = text ? JSON.parse(text) : {};
+  return { status: res.status, body: isRec(parsed) ? parsed : { value: parsed } };
+}
+async function runStatus(runId: string): Promise<string> {
+  const s = (await api(`/runs/${runId}`)).body['status'];
+  return typeof s === 'string' ? s : '';
+}
+/** The wave a dispatch-wait interrupt records, read field by field; a malformed row throws. */
+function waveOf(data: unknown): WaveCorrelation {
+  const c = isRec(data) ? data['correlation'] : undefined;
+  if (!isRec(c) || typeof c.fanOutEventId !== 'string' || typeof c.decisionIndex !== 'number' || !Array.isArray(c.children)) {
+    throw new Error(`not a dispatch-wait correlation: ${JSON.stringify(data)}`);
+  }
+  const children = c.children.map((x): WaveChild => {
+    if (!isRec(x) || typeof x.childRunId !== 'string' || typeof x.workflowId !== 'string' || typeof x.status !== 'string') throw new Error(`malformed wave child: ${JSON.stringify(x)}`);
+    return { childRunId: x.childRunId, workflowId: x.workflowId, status: x.status };
+  });
+  const prior = Array.isArray(c.priorChildren)
+    ? c.priorChildren.filter(isRec).map((x) => ({ childRunId: String(x.childRunId), childWorkflowId: String(x.childWorkflowId), childStatus: String(x.childStatus) }))
+    : undefined;
+  return { fanOutEventId: c.fanOutEventId, decisionIndex: c.decisionIndex, children, settledOrder: strs(c.settledOrder), ...(prior ? { priorChildren: prior } : {}) };
 }
 const TERMINAL = ['completed', 'failed', 'cancelled'];
 async function waitStatus(runId: string, pred: (s: string) => boolean): Promise<string> {
   let status = '';
   for (let i = 0; i < 300; i++) {
-    status = (await api<{ status: string }>(`/runs/${runId}`)).body.status;
+    status = await runStatus(runId);
     if (pred(status)) return status;
     await new Promise((r) => setTimeout(r, 20));
   }
-  return status;
+  throw new Error(`run ${runId} did not reach the awaited status within 300 polls (last status: ${status || 'none'})`);
 }
 type Ev = { sequence: number; type: string; nodeId?: string; payload?: Json };
 async function events(runId: string): Promise<Ev[]> {
-  return (await api<{ events: Ev[] }>(`/runs/${runId}/events/poll?fromSeq=-1&limit=1000`)).body.events ?? [];
+  const raw = (await api(`/runs/${runId}/events/poll?fromSeq=-1&limit=1000`)).body['events'];
+  return (Array.isArray(raw) ? raw : []).filter(isRec).flatMap((e): Ev[] => (typeof e.type === 'string' && typeof e.sequence === 'number'
+    ? [{ sequence: e.sequence, type: e.type, ...(typeof e.nodeId === 'string' ? { nodeId: e.nodeId } : {}), ...(isRec(e.payload) ? { payload: e.payload } : {}) }]
+    : []));
 }
 type Open = { token: string; nodeId: string; kind: string; data?: Json };
 async function openInterrupts(runId: string): Promise<Open[]> {
-  return (await api<{ interrupts: Open[] }>(`/host/openwop-app/runs/${bareRunId(runId)}/interrupts`)).body.interrupts ?? [];
+  const raw = (await api(`/host/openwop-app/runs/${bareRunId(runId)}/interrupts`)).body['interrupts'];
+  return (Array.isArray(raw) ? raw : []).filter(isRec).flatMap((i): Open[] => (typeof i.token === 'string' && typeof i.nodeId === 'string' && typeof i.kind === 'string'
+    ? [{ token: i.token, nodeId: i.nodeId, kind: i.kind, ...(isRec(i.data) ? { data: i.data } : {}) }]
+    : []));
 }
 async function register(def: Json): Promise<void> {
   const r = await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify(def) });
@@ -114,16 +151,17 @@ async function startWave(twoWaves = false): Promise<{ parentId: string; gateChil
       { edgeId: 'e2', sourceNodeId: 'dispatch', sourcePort: 'dispatched', targetNodeId: 'after' },
     ],
   });
-  const create = await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId: parent }) });
+  const create = await api('/runs', { method: 'POST', body: JSON.stringify({ workflowId: parent }) });
   expect(create.status, JSON.stringify(create.body)).toBe(201);
-  const parentId = create.body.runId;
+  const parentId = create.body['runId'];
+  if (typeof parentId !== 'string') throw new Error(`run create returned no runId: ${JSON.stringify(create.body)}`);
   // The gated child suspends; the parent must too.
   const parentStatus = await waitStatus(parentId, (st) => st.startsWith('waiting') || TERMINAL.includes(st));
   expect(parentStatus, 'parent waits for its waiting child (RFC 0118 wait-all)').toMatch(/^waiting/);
-  const dispatched = (await events(parentId)).filter((e) => e.type === 'node.dispatched').map((e) => e.payload as { childRunId: string; childWorkflowId: string });
-  const gateChildId = dispatched.find((d) => d.childWorkflowId === gated)?.childRunId;
-  expect(gateChildId).toBeDefined();
-  return { parentId, gateChildId: gateChildId! };
+  const dispatched = (await events(parentId)).filter((e) => e.type === 'node.dispatched').map((e) => e.payload ?? {});
+  const gateChildId = dispatched.find((d) => d['childWorkflowId'] === gated)?.['childRunId'];
+  if (typeof gateChildId !== 'string') throw new Error(`no dispatched gated child: ${JSON.stringify(dispatched)}`);
+  return { parentId, gateChildId };
 }
 
 describe('ADR 0935 — a parallel wave waits for a child at its approval gate', () => {
@@ -142,7 +180,7 @@ describe('ADR 0935 — a parallel wave waits for a child at its approval gate', 
     expect(joins).toHaveLength(1);
     expect(joins[0]!.payload).toMatchObject({ joinOutcome: 'satisfied', completedCount: 2, failedCount: 0 });
     // The late child is last in the recorded terminal order.
-    const mergeOrder = (joins[0]!.payload as { mergeOrder: string[] }).mergeOrder;
+    const mergeOrder = strs(joins[0]!.payload?.['mergeOrder']);
     expect(mergeOrder).toHaveLength(2);
     expect(mergeOrder[1]).toBe(bareRunId(gateChildId));
     // Decisions before the wave are not re-emitted on the re-invoke.
@@ -156,13 +194,15 @@ describe('ADR 0935 — a parallel wave waits for a child at its approval gate', 
     const { parentId } = await startWave();
     const [wait] = await openInterrupts(parentId);
     expect(wait?.kind).toBe('external-event');
+    const visible = wait?.data?.['correlation'];
+    if (!isRec(visible)) throw new Error('the wait interrupt shows no correlation');
     const forged = await api(`/interrupts/${wait!.token}`, { method: 'POST', body: JSON.stringify({ resumeValue: {
       // Everything a reader of the interrupt can see — the route's own correlation check passes.
-      ...(wait!.data?.['correlation'] as Json),
+      ...visible,
       terminals: [],
     } }) });
     expect(forged.status, JSON.stringify(forged.body)).toBe(403);
-    expect((await api<{ status: string }>(`/runs/${parentId}`)).body.status).toMatch(/^waiting/);
+    expect(await runStatus(parentId)).toMatch(/^waiting/);
     expect(await openInterrupts(parentId)).toHaveLength(1);
     await api(`/runs/${parentId}/cancel`, { method: 'POST', body: '{}' });
   });
@@ -191,7 +231,7 @@ describe('ADR 0935 — a parallel wave waits for a child at its approval gate', 
     vi.spyOn(storage, 'insertInterrupt').mockImplementation(async (record) => {
       if (isDispatchWaitInterrupt(record)) {
         publishingParent = record.runId;
-        const wave = (record.data as { correlation: WaveCorrelation }).correlation;
+        const wave = waveOf(record.data);
         const child = wave.children.find((c) => !TERMINAL.includes(c.status));
         if (!child) throw new Error('fixture wave has no waiting child');
         const [gate] = await openInterrupts(child.childRunId);
@@ -203,7 +243,7 @@ describe('ADR 0935 — a parallel wave waits for a child at its approval gate', 
     });
     const { parentId } = await startWave();
     expect(observedEmpty).toBe(true);
-    expect((await api<{ status: string }>(`/runs/${parentId}`)).body.status).toBe('waiting-external');
+    expect(await runStatus(parentId)).toBe('waiting-external');
     await reconcileDispatchWaits(storage, hostSuite);
     expect(await waitStatus(parentId, (s) => TERMINAL.includes(s))).toBe('completed');
     expect((await events(parentId)).filter((e) => e.type === 'dispatch.joined')).toHaveLength(1);
@@ -228,7 +268,7 @@ describe('ADR 0935 — a parallel wave waits for a child at its approval gate', 
     expect(await waitStatus(gateChildId, (s) => TERMINAL.includes(s))).toBe('completed');
     await suppressedHook;
     suppress.mockRestore();
-    const wave = (wait.data as { correlation: WaveCorrelation }).correlation;
+    const wave = waveOf(wait.data);
     expect(wave.priorChildren).toHaveLength(2);
     const ordered = [...wave.settledOrder, ...wave.children.map((c) => c.childRunId).filter((id) => !wave.settledOrder.includes(id))];
     const resolution: WaveJoinResolution = { fanOutEventId: wave.fanOutEventId, terminals: ordered.map((childRunId) => ({ childRunId, status: 'completed' })) };
@@ -263,7 +303,8 @@ describe('ADR 0935 — a parallel wave waits for a child at its approval gate', 
     expect(log.filter((e) => e.type === 'dispatch.joined')).toHaveLength(2);
     expect(log.filter((e) => e.type === 'orchestrator.decided' && e.nodeId === 'dispatch')).toHaveLength(3);
     const completed = log.find((e) => e.type === 'node.completed' && e.nodeId === 'dispatch');
-    expect((completed?.payload?.outputs as { dispatched?: unknown[] })?.dispatched).toHaveLength(4);
+    const outputs = completed?.payload?.['outputs'];
+    expect(isRec(outputs) ? outputs['dispatched'] : undefined).toHaveLength(4);
     expect(snapshotRunVariables(parent)?.prefixValue).toBe('kept-from-first-wave');
     expect(log.filter((e) => e.type === 'interrupt.resolved'
       && e.payload?.interruptId === toWireBoundId(wait.interruptId, parentRow.tenantId!))).toHaveLength(1);
@@ -282,7 +323,7 @@ describe('ADR 0935 — durable generation and history fences', () => {
     await storage.insertRun(row);
     return row;
   }
-  async function seedResolved(parent: RunRecord, nodeId: string): Promise<InterruptRecord> {
+  async function seedResolved(parent: RunRecord, nodeId: string): Promise<{ interrupt: InterruptRecord; wave: WaveCorrelation; value: WaveJoinResolution }> {
     const id = randomUUID();
     const childRunId = randomUUID();
     const wave: WaveCorrelation = { fanOutEventId: randomUUID(), decisionIndex: 0,
@@ -294,13 +335,13 @@ describe('ADR 0935 — durable generation and history fences', () => {
     await storage.insertInterrupt(interrupt);
     await storage.appendEvent({ eventId: randomUUID(), runId: parent.runId, nodeId, type: 'node.suspended', timestamp: parent.createdAt,
       payload: { kind: interrupt.kind, interruptId: id } });
-    return interrupt;
+    return { interrupt, wave, value };
   }
 
   it('independent storage handles contend for one parent generation; an identical snapshot with a later suspension gets a new claim', async () => {
     const parent = await seedParent();
-    const a = await seedResolved(parent, 'a');
-    const b = await seedResolved(parent, 'b');
+    const { interrupt: a } = await seedResolved(parent, 'a');
+    const { interrupt: b } = await seedResolved(parent, 'b');
     const other = await openStorage(DSN); reopened.push(other);
     const result = await Promise.all([
       claimDispatchWaitResume(storage, a, a.resolvedValue, RUN_DISPATCH_LEASE_MS),
@@ -310,16 +351,16 @@ describe('ADR 0935 — durable generation and history fences', () => {
     const winner = result[0] ? a : b;
     // Same createdAt, same parent snapshot bytes, same node; event SEQUENCE is
     // the only reliable distinction from the preceding wave.
-    const next = await seedResolved(parent, winner.nodeId);
+    const { interrupt: next, value: nextValue } = await seedResolved(parent, winner.nodeId);
     expect(await claimDispatchWaitResume(other, winner, winner.resolvedValue, RUN_DISPATCH_LEASE_MS)).toBeNull();
     expect((await claimDispatchWaitResume(other, next, next.resolvedValue, RUN_DISPATCH_LEASE_MS))?.runId).toBe(parent.runId);
     expect((await storedDispatchWave(parent.tenantId, parent.runId, winner.nodeId))?.fanOutEventId)
-      .toBe((next.resolvedValue as WaveJoinResolution).fanOutEventId);
+      .toBe(nextValue.fanOutEventId);
   });
 
   it('concurrent resolution history writes and a lost commit acknowledgement leave exactly one verified event', async () => {
     const parent = await seedParent();
-    const wait = await seedResolved(parent, 'a');
+    const { interrupt: wait } = await seedResolved(parent, 'a');
     const find = storage.findFirstEventByPayload.bind(storage);
     const append = storage.appendEvent.bind(storage);
     let arrivals = 0; let release!: () => void;
@@ -344,9 +385,7 @@ describe('ADR 0935 — durable generation and history fences', () => {
 
   it('malformed wave identity and incomplete/duplicate joins never acquire execution authority', async () => {
     const parent = await seedParent();
-    const good = await seedResolved(parent, 'a');
-    const wave = (good.data as { correlation: WaveCorrelation }).correlation;
-    const value = good.resolvedValue as WaveJoinResolution;
+    const { interrupt: good, wave, value } = await seedResolved(parent, 'a');
     const variants = [
       { correlation: { ...wave, decisionIndex: undefined }, value },
       { correlation: { ...wave, children: [...wave.children, ...wave.children] }, value },
@@ -368,7 +407,7 @@ describe('ADR 0935 — durable generation and history fences', () => {
 
   it.each(['out-of-range', 'wrong-kind', 'wrong-workers'] as const)('refuses a resolved wave with %s decision before folding or dispatching', async (variant) => {
     const parent = await seedParent();
-    const original = await seedResolved(parent, 'a');
+    const { interrupt: original } = await seedResolved(parent, 'a');
     const id = randomUUID();
     const wave: WaveCorrelation = { fanOutEventId: randomUUID(), decisionIndex: variant === 'out-of-range' ? 999 : 0,
       children: ['child-a', 'child-b'].map((workflowId) => ({ childRunId: randomUUID(), workflowId, status: 'waiting-approval' })), settledOrder: [] };

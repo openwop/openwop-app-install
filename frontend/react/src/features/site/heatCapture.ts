@@ -18,7 +18,7 @@
  * The visitor withdrawing analytics stops capture: every flush re-reads the
  * decision, and a non-`allowed` decision drops the queue and detaches.
  */
-import { config } from '../../client/config.js';
+import { visitorApiBase } from './visitorApi.js';
 import { consentTokenFor, decisionFor } from './visitorConsent.js';
 
 const FLUSH_MS = 10_000;
@@ -45,7 +45,7 @@ const clamp01 = (n: number): number => Math.min(1, Math.max(0, Number.isFinite(n
 
 async function heatmapsOn(orgId: string): Promise<boolean> {
   try {
-    const r = await fetch(`${config.baseUrl}/host/openwop-app/public-analytics/${encodeURIComponent(orgId)}/capture-config`);
+    const r = await fetch(`${visitorApiBase()}/host/openwop-app/public-analytics/${encodeURIComponent(orgId)}/capture-config`);
     if (!r.ok) return false;
     return ((await r.json()) as { heatmaps?: unknown }).heatmaps === true;
   } catch { return false; }
@@ -72,7 +72,7 @@ export async function startHeatCapture(opts: HeatCaptureOptions): Promise<() => 
     if (events.length === 0) return;
     for (let i = 0; i < events.length; i += BATCH_MAX) {
       const token = consentTokenFor(opts.orgId);
-      void fetch(`${config.baseUrl}/host/openwop-app/public-analytics/${encodeURIComponent(opts.orgId)}/heat`, {
+      void fetch(`${visitorApiBase()}/host/openwop-app/public-analytics/${encodeURIComponent(opts.orgId)}/heat`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         keepalive: true,

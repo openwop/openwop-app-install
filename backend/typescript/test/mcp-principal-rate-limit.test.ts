@@ -10,13 +10,13 @@ import { enforceMcpPrincipalRateLimit, _resetRateLimitState } from '../src/middl
 /** Minimal Express Response capturing the rate-limit envelope. */
 function mockRes() {
   const r: { statusCode?: number; body?: unknown; headers: Record<string, string> } = { headers: {} };
-  return {
-    res: {
-      set: (k: string, v: string) => { r.headers[k] = v; },
-      status: (c: number) => { r.statusCode = c; return { json: (b: unknown) => { r.body = b; } }; },
-    } as unknown as import('express').Response,
-    captured: r,
+  // Only `set` and `status(..).json` are reached by the limiter; the single cast is
+  // the honest ceiling (the function takes a full Express Response).
+  const partial = {
+    set: (k: string, v: string) => { r.headers[k] = v; },
+    status: (c: number) => { r.statusCode = c; return { json: (b: unknown) => { r.body = b; } }; },
   };
+  return { res: partial as Partial<import('express').Response> as import('express').Response, captured: r };
 }
 
 describe('enforceMcpPrincipalRateLimit (MCP-1)', () => {
@@ -37,7 +37,7 @@ describe('enforceMcpPrincipalRateLimit (MCP-1)', () => {
     expect(body.details.scope).toBe('tenant');
     expect(body.details.reason).toBe('mcp_principal_rate');
     expect(body.details.retryAfterMs).toBeGreaterThanOrEqual(1000);
-    expect(captured.headers['Retry-After']).toBeTruthy();
+    expect(Number(captured.headers['Retry-After'])).toBeGreaterThanOrEqual(1);
   });
 
   it('budgets each principal independently', () => {
@@ -49,10 +49,15 @@ describe('enforceMcpPrincipalRateLimit (MCP-1)', () => {
   });
 
   it('is disabled when OPENWOP_RATELIMIT_DISABLED=true', () => {
+    const prior = process.env.OPENWOP_RATELIMIT_DISABLED;
     process.env.OPENWOP_RATELIMIT_DISABLED = 'true';
-    const { res } = mockRes();
-    for (let i = 0; i < 10; i++) expect(enforceMcpPrincipalRateLimit(res, 'user:a')).toBe(false);
-    delete process.env.OPENWOP_RATELIMIT_DISABLED;
+    try {
+      const { res } = mockRes();
+      for (let i = 0; i < 10; i++) expect(enforceMcpPrincipalRateLimit(res, 'user:a')).toBe(false);
+    } finally {
+      if (prior === undefined) delete process.env.OPENWOP_RATELIMIT_DISABLED;
+      else process.env.OPENWOP_RATELIMIT_DISABLED = prior;
+    }
   });
 
   it('a budget of 0 disables the limiter (unbounded)', () => {

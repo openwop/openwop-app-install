@@ -13,8 +13,6 @@ import type { BackendFeature } from '../types.js';
 import { registerBillingRoutes } from './routes.js';
 import { setManagedBalanceProvider } from '../../host/managedBalanceHook.js';
 import { registerPlanLimitsResolver } from '../../host/planLimitsSeam.js';
-import { registerRunLimitReserver } from '../../host/runLimitSeam.js';
-import { reservePlanRun } from '../../host/planRunLimit.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
 import { getBalance, drawFromBalance, resolveEntitlements, warnCheckoutConfigAtBoot } from './billingService.js';
 
@@ -43,15 +41,9 @@ export const billingFeature: BackendFeature = {
     // No limits configured ⇒ `{}` without a subscription read, so the per-call
     // and per-run hot paths cost nothing on an unpriced host.
     registerPlanLimitsResolver(billingPlanLimitsResolver);
-    // ADR 0821 P5 follow-up — the ~10 run-minting sites OUTSIDE `startWorkflowRun`
-    // (`POST /v1/runs`, `:fork`, debug, redrive, triggers, kanban, MCP, CRM,
-    // workflow-author, creative-briefs) call `host/runLimitSeam.ts` `withRunLimit`,
-    // a no-op until this registration. The reserver is the SAME durable counter
-    // `startWorkflowRun` calls directly (`host/planRunLimit.ts`), so every new run
-    // draws from one monthly count. It inherits that counter's postures: exempt
-    // tenants and tenants with no `workflowRuns` limit are a no-op (no write), and
-    // each site reserves only after its own refusals, releasing on a failed insert.
-    registerRunLimitReserver(reservePlanRun);
+    // ADR 0987 D3 — the plan's monthly run limit is charged at the one run-insert
+    // seam (`host/runInsert.ts`, `reservePlanRun`), which reads the plan limits
+    // through the resolver registered above. There is no second reserver to wire.
     // ADR 0890 — a `managed` checkout on a pinned API version that predates
     // Managed Payments' GA is worth one line in the boot log.
     warnCheckoutConfigAtBoot();

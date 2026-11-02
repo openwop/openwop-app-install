@@ -48,7 +48,9 @@ import { ORCHESTRATION_ID } from './orchestrationWorkflow.js';
 import { readableCampaignAutonomy } from './autonomyAccess.js';
 import { autonomyTogglesOn } from './autonomyStamp.js';
 import { projectPolicyForModel } from '../../host/autonomyPolicy/index.js';
-import { untrustedToolError } from '../../host/agentToolKit.js';
+import { untrustedToolError, launchRefusalResult } from '../../host/agentToolKit.js';
+import { assertWorkflowFeatureLaunchable, WorkflowFeatureRefusedError } from '../../host/workflowFeatureGate.js';
+import { CHANNEL_WORKFLOW_IDS } from '../campaign-channels/channelWorkflows.js';
 
 const log = createLogger('campaign-orchestration.strategist-tools');
 
@@ -212,6 +214,24 @@ export async function runOrchestrationRunTool(deps: StartRunDeps, input: Record<
   // Guard before BOTH the ignition reservation and campaign creation.
   assertEffectAllowed('dispatch', 'campaign-orchestration ignition');
 
+  // ADR 1020 D4 / CS70WF-4 — the five channel children are gated on their own
+  // feature (`campaign-channels`). Refuse HERE, before the claim (a refusal after
+  // it would latch the dedup window) and before the first model call, instead of
+  // failing every child after the user has approved the kernel. Subject `{}` is
+  // what the dispatcher evaluates (`subWorkflowDispatcher.ts`). Advisory: the
+  // gate runs again at dispatch, so a toggle or plan change in between still
+  // ends the run with `subworkflow_feature_refused`.
+  const childRefusal = await firstChildRefusal(scope.tenantId);
+  if (childRefusal?.reason === 'not_entitled') {
+    return toolError('forbidden', 'Campaign Studio generates its channels with Campaign Channels, which this workspace\'s plan does not include, so the campaign was not started. Upgrade the plan or ask an admin.', { reason: childRefusal.reason, feature: childRefusal.featureId });
+  }
+  if (childRefusal?.reason === 'feature_unavailable') {
+    return toolError('forbidden', 'Campaign Studio could not check whether Campaign Channels is available right now, so the campaign was not started. Try again shortly.', { reason: childRefusal.reason, feature: childRefusal.featureId });
+  }
+  if (childRefusal) {
+    return toolError('forbidden', 'Campaign Studio generates its channels with Campaign Channels, which is turned off for this workspace, so the campaign was not started. Ask an admin to turn it on.', { reason: childRefusal.reason, feature: childRefusal.featureId });
+  }
+
   // HIGH-1 ignition dedup — a repeated identical run call inside the window
   // reuses the run already started rather than igniting the spine again.
   const key = ignitionKey('campaign-orchestration.run', briefId);
@@ -233,6 +253,7 @@ export async function runOrchestrationRunTool(deps: StartRunDeps, input: Record<
   }
   const campaign = ensured.campaign;
 
+  let startError: unknown;
   const runId = await startWorkflowRun(deps, {
     tenantId: scope.tenantId,
     workflowId: ORCHESTRATION_ID,
@@ -247,18 +268,35 @@ export async function runOrchestrationRunTool(deps: StartRunDeps, input: Record<
     // DATA-4 — a startWorkflowRun THROW (not just a null return) must also release
     // the claim; coerce it to null so the shared failure handler below runs.
     log.warn('campaign_orchestration_dispatch_threw', { tenantId: scope.tenantId, briefId, error: err instanceof Error ? err.message : String(err) });
+    startError = err;
     return null;
   });
   if (!runId) {
     // CFPT-2 / DATA-4 — the run never started (null OR a throw); release the claim
     // so an honest retry isn't blocked for the dedup window by a latch over a failure.
     await releaseIgnition(scope.tenantId, key);
+    // ADR 1020 D5 — a plan, budget or run-limit refusal keeps its code.
+    const refused = launchRefusalResult(startError);
+    if (refused) return refused;
     return toolError('dispatch_failed', 'The campaign orchestration workflow could not start.');
   }
   await recordIgnitionRun(scope.tenantId, key, runId);
   await surfaceDispatchedRun(scope, deps.storage, { runId, agentId: scope.agentProfileId ?? STRATEGIST_AGENT_ID, workflowId: ORCHESTRATION_ID, workflowName: 'Campaign orchestration' }, 'campaign-orchestration-run');
   log.info('campaign_orchestration_dispatched', { tenantId: scope.tenantId, briefId, runId });
   return { content: JSON.stringify({ runId, briefId, campaignId: campaign.id, workflowId: ORCHESTRATION_ID }) };
+}
+
+/** ADR 1020 D4 — the first channel child this tenant may not launch, or null. */
+async function firstChildRefusal(tenantId: string): Promise<{ featureId: string; reason: string } | null> {
+  for (const id of CHANNEL_WORKFLOW_IDS) {
+    try {
+      await assertWorkflowFeatureLaunchable(tenantId, id, null, {});
+    } catch (err) {
+      if (err instanceof WorkflowFeatureRefusedError) return { featureId: err.featureId, reason: String(err.details?.reason ?? 'feature_disabled') };
+      throw err;
+    }
+  }
+  return null;
 }
 
 /**

@@ -1,0 +1,20 @@
+/* ADR 1015 D3 — the public visitor consent banner's rules, in their own file so
+   the SPA (index.css) and the tenant site runtime (site-runtime/runtime.css)
+   load ONE source. Moved verbatim from global.css. */
+/* ADR 0860 D6 — the public visitor consent region. Non-modal, pinned to the bottom
+   of the viewport; Accept and Reject share one button style (equal prominence). */
+.visitor-consent { position: fixed; inset: auto 0 0 0; z-index: 40; padding: var(--space-3); pointer-events: none; }
+.visitor-consent__inner { pointer-events: auto; max-width: 720px; margin: 0 auto; padding: var(--space-4); background: var(--paper); color: var(--ink); border: 1px solid var(--rule); border-radius: var(--radius-lg); box-shadow: 0 8px 24px var(--ink-shadow); display: grid; gap: var(--space-2); }
+.visitor-consent__title { margin: 0; font-size: var(--text-body); font-weight: var(--weight-head); }
+.visitor-consent__body, .visitor-consent__state { margin: 0; font-size: var(--text-sm); line-height: 1.5; color: var(--ink-2); }
+.visitor-consent__actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.visitor-consent__replay { display: flex; align-items: flex-start; gap: var(--space-2); margin: 0; font-size: var(--text-sm); line-height: 1.5; color: var(--ink-2); }
+.visitor-consent__replay input { margin-top: 3px; }
+.visitor-consent__replay-label { color: var(--ink); font-weight: var(--weight-head); }
+.visitor-consent__actions > button { flex: 1 1 8rem; }
+.visitor-consent__actions > .visitor-consent__close { flex: 0 0 auto; }
+.visitor-consent__footer-btn { min-height: 24px; background: none; border: 0; padding: 0; font: inherit; color: inherit; letter-spacing: inherit; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+.visitor-consent__title:focus { outline: none; }
+.visitor-consent__title:focus-visible { outline: 2px solid var(--clay-text); outline-offset: 2px; }
+.visitor-consent__footer-btn:hover { color: var(--ink); }
+.visitor-consent__inline-footer { text-align: center; padding: var(--space-3); font-family: var(--mono); font-size: var(--text-sm); color: var(--ink-3); }

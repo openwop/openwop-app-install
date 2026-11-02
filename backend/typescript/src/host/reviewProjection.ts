@@ -324,6 +324,12 @@ const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : und
 
 /** The answer-form fields for an open interrupt, by kind. Each field is named
  *  explicitly; nothing else in `data` reaches the projection. */
+function firstQuestion(qs: unknown): string | undefined {
+  if (!Array.isArray(qs)) return undefined;
+  const q = (qs[0] ?? {}) as { question?: unknown };
+  return typeof q.question === 'string' && q.question ? q.question : undefined;
+}
+
 export function interruptAnswerForm(it: InterruptRecord): ReviewAnswerForm | undefined {
   if (it.resolvedAt) return undefined;
   const data = (it.data ?? {}) as Record<string, unknown>;
@@ -331,7 +337,8 @@ export function interruptAnswerForm(it: InterruptRecord): ReviewAnswerForm | und
     const conn = data.connection && typeof data.connection === 'object' ? data.connection as Record<string, unknown> : undefined;
     const ref = str(conn?.ref);
     return {
-      ...(str(data.question) ? { question: str(data.question) } : {}),
+      // An agent's ask (ADR 1001) carries `questions[]`; the row shows the first.
+      ...((str(data.question) ?? firstQuestion(data.questions)) ? { question: str(data.question) ?? firstQuestion(data.questions) } : {}),
       ...(str(data.profile) ? { profile: str(data.profile) } : {}),
       ...(conn && ref ? {
         connection: {

@@ -80,7 +80,7 @@ async function insertCampaignRun(extraMeta: Record<string, unknown> = {}, extra:
     metadata: { campaignOrchestration: stampCampaignRun(campaign, { role: 'spine' }), ...extraMeta }, configurable: {},
     createdAt: now, updatedAt: now, ...extra,
   };
-  await insertRunWithStartContext(storage, run);
+  await insertRunWithStartContext(storage, run, { admission: { plan: 'exempt:test-fixture' } });
   await getEventLog().append({ runId: run.runId, type: 'log.message', payload: { message: 'adr0942 fork point' } });
   return run;
 }
@@ -133,7 +133,7 @@ describe('ADR 0942 D4 — the stamp at run start', () => {
   it('a non-campaign run is not bound and gets no stamp', async () => {
     const now = new Date().toISOString();
     const run: RunRecord = { runId: `r942-plain-${n++}`, workflowId: fixtureWorkflowId, tenantId: TENANT, status: 'completed', inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now };
-    await insertRunWithStartContext(storage, run);
+    await insertRunWithStartContext(storage, run, { admission: { plan: 'exempt:test-fixture' } });
     expect(await stampOf(run.runId)).toBeUndefined();
     expect(runAutonomyOf(await runRow(run.runId)).bound).toBe(false);
   });
@@ -145,7 +145,7 @@ describe('ADR 0942 D4 — the stamp at run start', () => {
       runId: `r942-ghost-${n++}`, workflowId: fixtureWorkflowId, tenantId: TENANT, status: 'completed', inputs: {},
       metadata: { campaignOrchestration: stampCampaignRun(ghost, { role: 'spine' }) }, configurable: {}, createdAt: now, updatedAt: now,
     };
-    await insertRunWithStartContext(storage, run);
+    await insertRunWithStartContext(storage, run, { admission: { plan: 'exempt:test-fixture' } });
     expect(await stampOf(run.runId)).toMatchObject({ policyId: 'preset:review-everything', source: 'default', dangling: true });
   });
 
@@ -225,7 +225,7 @@ describe('ADR 0942 D4/D10.4 — fork, redrive and children', () => {
         // Exactly the dispatcher's shape: the reserved-stripped handoff + the inherited keys from the PARENT ROW.
         metadata: { ...inheritedRunMetadata(p.metadata as Record<string, unknown>) }, configurable: {}, parentRunId: p.runId, createdAt: now, updatedAt: now,
       };
-      await insertRunWithStartContext(storage, run);
+      await insertRunWithStartContext(storage, run, { admission: { plan: 'exempt:test-fixture' } });
       return run.runId;
     };
     expect(await stampOf(await child(await runRow(parent.runId)))).toEqual(await stampOf(parent.runId));

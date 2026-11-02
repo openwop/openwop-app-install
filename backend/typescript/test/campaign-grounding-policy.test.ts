@@ -25,7 +25,9 @@ import { nodes as briefNodes } from '../../../packs/feature.campaign-brief.nodes
 import { nodes as channelNodes } from '../../../packs/feature.campaign-channels.nodes/index.mjs';
 
 const OK_AI = async () => ({ data: { headline: 'H', supportingStatement: 'S', proofPoints: ['P'], primaryCta: 'C', tone: 't' } });
-const CHANNEL_AI = async () => ({ data: { headline: 'H', heroSubhead: 'S', sections: [], seoTitle: 'T', seoDescription: 'D', primaryCta: 'C' } });
+// ADR 1020 D13 — a landing-page draft that matches its channel schema (the node now
+// refuses an empty or off-schema draft as generation_invalid).
+const CHANNEL_AI = async () => ({ data: { title: 'H', sections: [{ type: 'hero', heading: 'H', body: 'S' }] } });
 
 // File-level so every describe has the surfaces under --sequence.shuffle.
 beforeAll(() => {

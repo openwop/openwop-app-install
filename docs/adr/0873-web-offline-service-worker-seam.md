@@ -204,6 +204,8 @@ so every rule below holds for every feature by construction.
 - **Never HTML for a script.** The worker never answers a script or style request
   with HTML. On a miss it passes the request to the network unchanged.
 
+> **CORRECTED 2026-11-01 (OFF-PROD-1, found by Book AI P39 / bookai-ea):** the atomic install held every precache `Response` with its body unread until all of them arrived. Over HTTP/2 the requests share one connection, the unread bodies filled its flow-control window, and install hung on bookai-prod (119 requested, 6 answered). localhost over HTTP/1.1 hid it. Install now reads each body as it arrives (after the HTML check) and stores the buffered copies all at once, so it is still all-or-nothing. Pinned by the HTTP/2-window case in `scripts/__tests__/offlineEngine.test.ts`.
+
 **D7 — Keep `skipWaiting()` + `clients.claim()`.** Push already depends on immediate
 activation (`sw-push.js` does both today). The previous-version cache (D6) is what
 makes an immediate takeover safe for tabs still running the old build.

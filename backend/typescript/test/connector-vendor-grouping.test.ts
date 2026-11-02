@@ -3,6 +3,9 @@
  * host-only `vendor` (commercial ecosystem) so the Connections catalog can group by
  * the vendors a company uses. Guards the BUILTIN_VENDOR map: presentational only,
  * never the auth key (RFC 0095 `provider.id` still resolves).
+ *
+ * TST-CKA-2. Red when: gmail leaves the Google group (case 1), Microsoft Graph's
+ * label changes (case 2), or any built-in provider is left without a vendor (case 3).
  */
 import { describe, expect, it } from 'vitest';
 import { getProvider, listProviders } from '../src/features/connections/providerRegistry.js';

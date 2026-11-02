@@ -5,8 +5,14 @@
  * resolve appends the user turn + a (mock) agent reply as conversation.exchanged
  * events and leaves the run suspended; `close` emits conversation.closed and
  * completes the run. Proves the host now backs `capabilities.conversationPrimitive`.
+ *
+ * TST-CKB-4. Red when: a committed exchangeKey re-dispatches (idempotent case),
+ * streamed deltas are persisted unredacted (SR-1 case), the empty-turn validator is
+ * skipped (empty + multimodal cases), or the async flag stops acking early (async
+ * case — which now WAITS for the background turns instead of reading the log 20 ms
+ * after the ack).
  */
-import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import { describe, expect, it, beforeAll, afterAll, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
@@ -158,11 +164,15 @@ describe('core.conversationGate — open/exchange/close', () => {
     expect(mixedStored[0]?.text).not.toContain('sk-abcdefghijklmnop1234');
 
     // Emptiness is still enforced: a parts array with NO payload → the same 422.
-    const empty = await api(`/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: [{ type: 'text', text: '   ' }] } } }) });
+    const empty = await api<{ error?: string }>(`/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: [{ type: 'text', text: '   ' }] } } }) });
     expect(empty.status).toBe(422);
-    // And the plain-string regression guard: blank text still 422s.
-    const blank = await api(`/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: '   ' } } }) });
+    expect(empty.body.error).toBe('validation_error');
+    // And the plain-string regression guard: blank text still 422s — here AFTER two
+    // accepted multimodal turns (the standalone empty-turn case below covers a fresh
+    // gate and asserts nothing was persisted).
+    const blank = await api<{ error?: string }>(`/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: '   ' } } }) });
     expect(blank.status).toBe(422);
+    expect(blank.body.error).toBe('validation_error');
   });
 
   it('streams the reply as output.chunk events before the final conversation.exchanged (ADR 0079 §Phase 1)', async () => {
@@ -254,7 +264,12 @@ describe('core.conversationGate — open/exchange/close', () => {
       expect(ex.status).toBe(200);
       expect(ex.body.conversation?.turns).toBe(1); // ack-early: just the open turn
 
-      // The background finishes: the user+agent turns + streamed deltas appear.
+      // The background finishes: the user+agent turns + streamed deltas appear. Wait
+      // for them — the run is already `waiting` before the background turn lands, so
+      // a single poll would race it.
+      await vi.waitFor(async () => {
+        expect(conv((await poll(runId)).events, 'conversation.exchanged')).toHaveLength(2);
+      }, { timeout: 4000, interval: 25 });
       const after = await poll(runId);
       expect(after.status.startsWith('waiting')).toBe(true); // still suspended
       const exchanged = conv(after.events, 'conversation.exchanged');
@@ -331,8 +346,9 @@ describe('core.conversationGate — open/exchange/close', () => {
     }) });
     const runId = (await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs: { provider: 'mock', model: 'mock-1' }, tenantId: TENANT }) })).body.runId;
     await poll(runId);
-    const bad = await api(`/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: '   ' } } }) });
+    const bad = await api<{ error?: string }>(`/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: '   ' } } }) });
     expect(bad.status).toBe(422);
+    expect(bad.body.error).toBe('validation_error');
     const after = await poll(runId);
     expect(conv(after.events, 'conversation.exchanged')).toHaveLength(0); // nothing persisted
     expect(after.status.startsWith('waiting')).toBe(true); // conversation still open

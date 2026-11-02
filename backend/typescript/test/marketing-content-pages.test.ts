@@ -5,11 +5,16 @@
  * group has real destinations. Asserts: they seed, are publicly delivered at
  * /p/{about,roadmap}, carry real (non-placeholder) content, and appear in the
  * public nav list.
+ *
+ * The boot seed is fire-and-forget (`registerAllRoutes.ts`), so `beforeAll`
+ * awaits the seed's own (memoized) promise with a bounded, failing timeout —
+ * otherwise a shuffled order could read the pages before they exist.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { createApp } from '../src/index.js';
+import { ensureMarketingContentPages } from '../src/host/marketingContentPages.js';
 
 let BASE: string;
 const ADMIN = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
@@ -19,8 +24,15 @@ beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
+  // Not the demo deployment: the white-label page must be absent (ADR 0843).
+  delete process.env.OPENWOP_DEMO_MODE;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    ensureMarketingContentPages(),
+    new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('marketing content seed did not complete in 10 s')), 10_000); }),
+  ]).finally(() => clearTimeout(timer));
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
@@ -38,6 +50,11 @@ describe('marketing content pages — real + published (ADR 0486 follow-up)', ()
     expect(steps.some((s) => s.id === 'marketing-content-pages')).toBe(true);
     const run = await admin('POST', '/host/openwop-app/example-data/run', { steps: ['marketing-content-pages'] });
     expect(run.status).toBe(200);
+    // The dashboard count is the seeder's own read of the pages it owns: the five
+    // non-demo pages (white-label is demo-only).
+    const after = await admin('GET', '/host/openwop-app/example-data/status');
+    const step = (await after.json() as { steps: { id: string; count: number }[] }).steps.find((s) => s.id === 'marketing-content-pages');
+    expect(step?.count).toBe(5);
   });
 
   it('publicly delivers About/Roadmap/Changelog/Support with real (non-placeholder) content', async () => {

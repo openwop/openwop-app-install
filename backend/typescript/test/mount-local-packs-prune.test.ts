@@ -18,7 +18,7 @@
  * assertions below are therefore about what it must NOT touch.
  */
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, existsSync, rmSync, lstatSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, existsSync, rmSync, lstatSync, readlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ensureLocalPacksMounted } from '../src/bootstrap/mountLocalPacks.js';
@@ -89,8 +89,12 @@ describe('ensureLocalPacksMounted — dangling-mount prune', () => {
     symlinkSync(liveSrc, join(destDir, 'vendor.other.alive'), 'dir');
 
     const res = mount(localDir, destDir);
-    expect(res.pruned ?? []).not.toContain('vendor.other.alive');
-    expect(existsSync(join(destDir, 'vendor.other.alive'))).toBe(true);
+    expect(res.pruned).not.toContain('vendor.other.alive');
+    // Untouched, not merely present: still the SAME symlink to the SAME target
+    // (a re-created link or a copied directory would also "exist").
+    const link = join(destDir, 'vendor.other.alive');
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(link)).toBe(liveSrc);
   });
 
   it('does NOT touch a REAL directory — a registry install is not a mount', () => {
@@ -102,7 +106,7 @@ describe('ensureLocalPacksMounted — dangling-mount prune', () => {
     pack(destDir, 'core.openwop.registry-installed');
 
     const res = mount(localDir, destDir);
-    expect(res.pruned ?? []).not.toContain('core.openwop.registry-installed');
+    expect(res.pruned).not.toContain('core.openwop.registry-installed');
     expect(existsSync(join(destDir, 'core.openwop.registry-installed', 'pack.json'))).toBe(true);
   });
 

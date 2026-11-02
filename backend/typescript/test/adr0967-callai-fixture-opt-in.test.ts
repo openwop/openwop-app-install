@@ -15,14 +15,26 @@
  *
  * Sabotage: ignoring the auth posture reds the refusal case; dropping `runId`
  * from the lookup reds both keying cases; counting run-scoped programs as
- * divergence injections reds the replay case.
+ * divergence injections reds the replay case. (w73 probes fx67-*.)
+ *
+ * The concurrent case FORCES the interleave (wave 73, TST-DRX): two `Promise.all`
+ * runs otherwise execute one after the other, so a node-keyed lookup could not be
+ * told from a run-keyed one. A one-shot hold parks the first `dispatchMock` call
+ * until the second run has programmed its script, and the case asserts both
+ * arrivals happened; the hold's bounded fallback REJECTS (the case then fails),
+ * it never sleeps. The refusal case parks a sentinel module under the fixture's
+ * typeId and asserts the auth posture leaves the sentinel in place (positive
+ * control: the allowed posture replaces it), so it does not depend on whether
+ * the executor block's `createApp` registered the node first. (A spy on
+ * `register` cannot work: `getNodeRegistry()` returns a new wrapper per call.)
  */
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import {
-  CALLAI_ECHO_ATTEMPTS_TYPE_ID, callAiFixtureEnabled, registerCallAiFixtureNode, resetCallAiFixtureRegistrationForTests,
+  CALLAI_ECHO_ATTEMPTS_TYPE_ID, callAiEchoAttemptsNode, callAiFixtureEnabled, registerCallAiFixtureNode, resetCallAiFixtureRegistrationForTests,
 } from '../src/bootstrap/conformanceCallAiFixture.js';
+import * as mockModule from '../src/providers/dispatchMock.js';
 import { dispatchMock, programMockForRun, receivedMaxTokens, RUN_SCOPED_PROGRAM_CAP, hasPendingDivergenceProgram, hasPendingMockProgram, programMock, resetMockPrograms } from '../src/providers/dispatchMock.js';
 import { getNodeRegistry } from '../src/executor/nodeRegistry.js';
 import { bareRunId } from './support/bareRunId.js';
@@ -51,11 +63,28 @@ describe('ADR 0967 — the switch', () => {
   });
 
   it('the auth posture refuses the opt-in, and the node is not registered', () => {
-    setEnv({ NODE_ENV: 'production', OPENWOP_DEPLOY_POSTURE: 'auth', OPENWOP_CONFORMANCE_CALLAI_FIXTURE: 'true' });
-    expect(callAiFixtureEnabled()).toBe(false);
-    resetCallAiFixtureRegistrationForTests();
-    registerCallAiFixtureNode();
-    expect(getNodeRegistry().isResolvable(CALLAI_ECHO_ATTEMPTS_TYPE_ID)).toBe(false);
+    // Observe the registration itself, independent of block order: the global
+    // registry has no unregister, and getNodeRegistry() hands out a fresh wrapper
+    // per call (a spy on one never sees the product's call). So park a SENTINEL
+    // module under the fixture's typeId and check whether the real node replaced it.
+    const sentinel = { ...callAiEchoAttemptsNode };
+    getNodeRegistry().register(sentinel);
+    try {
+      setEnv({ NODE_ENV: 'production', OPENWOP_DEPLOY_POSTURE: 'auth', OPENWOP_CONFORMANCE_CALLAI_FIXTURE: 'true' });
+      expect(callAiFixtureEnabled()).toBe(false);
+      resetCallAiFixtureRegistrationForTests();
+      registerCallAiFixtureNode();
+      expect(getNodeRegistry().get(CALLAI_ECHO_ATTEMPTS_TYPE_ID)).toBe(sentinel);
+      // Positive control: the same observation sees the registration once the posture allows it.
+      setEnv({ NODE_ENV: 'production', OPENWOP_DEPLOY_POSTURE: 'cookie-per-visitor', OPENWOP_CONFORMANCE_CALLAI_FIXTURE: 'true' });
+      resetCallAiFixtureRegistrationForTests();
+      registerCallAiFixtureNode();
+      expect(getNodeRegistry().get(CALLAI_ECHO_ATTEMPTS_TYPE_ID)).toBe(callAiEchoAttemptsNode);
+    } finally {
+      // Leave the real module registered (what a boot with the opt-in does), never the sentinel.
+      getNodeRegistry().register(callAiEchoAttemptsNode);
+      resetCallAiFixtureRegistrationForTests();
+    }
   });
 });
 
@@ -95,6 +124,9 @@ describe('ADR 0967 — through the real executor', () => {
   const SCHEMA = { type: 'object', required: ['line'], properties: { line: { type: 'string' } } };
   type Json = Record<string, unknown>;
   type Ev = { type: string; nodeId?: string; payload?: Json };
+  const isRecord = (v: unknown): v is Json => typeof v === 'object' && v !== null && !Array.isArray(v);
+  const field = (v: unknown, key: string): unknown => (isRecord(v) ? v[key] : undefined);
+  const savedBootEnv = { dsn: process.env.OPENWOP_STORAGE_DSN, cookies: process.env.OPENWOP_AUTH_DISABLE_COOKIES };
 
   beforeAll(async () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -104,27 +136,48 @@ describe('ADR 0967 — through the real executor', () => {
     const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
     await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   }, 120_000);
-  afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+  afterAll(async () => {
+    await new Promise<void>((res) => server.close(() => res()));
+    if (savedBootEnv.dsn === undefined) delete process.env.OPENWOP_STORAGE_DSN; else process.env.OPENWOP_STORAGE_DSN = savedBootEnv.dsn;
+    if (savedBootEnv.cookies === undefined) delete process.env.OPENWOP_AUTH_DISABLE_COOKIES; else process.env.OPENWOP_AUTH_DISABLE_COOKIES = savedBootEnv.cookies;
+  });
 
-  async function api<T = Json>(path: string, init: RequestInit = {}): Promise<{ status: number; body: T }> {
+  async function api(path: string, init: RequestInit = {}): Promise<{ status: number; body: unknown }> {
     const res = await fetch(`${BASE}${path}`, { ...init, headers: { ...H, ...(init.headers ?? {}) } });
     const text = await res.text();
-    return { status: res.status, body: (text ? JSON.parse(text) : {}) as T };
+    const body: unknown = text ? JSON.parse(text) : {};
+    return { status: res.status, body };
   }
-  async function waitTerminal(runId: string): Promise<string> {
-    let status = '';
-    for (let i = 0; i < 300; i++) {
-      status = (await api<{ status: string }>(`/runs/${runId}`)).body.status;
-      if (['completed', 'failed', 'cancelled'].includes(status)) return status;
+  function runIdOf(res: { status: number; body: unknown }): string {
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    const id = field(res.body, 'runId');
+    if (typeof id !== 'string') throw new Error(`no runId: ${JSON.stringify(res.body)}`);
+    return id;
+  }
+  /** Poll a run until terminal. A timeout THROWS; it never returns a non-terminal status. */
+  async function waitTerminal(runId: string, ms = 30_000): Promise<string> {
+    const end = Date.now() + ms;
+    let status: unknown;
+    for (;;) {
+      status = field((await api(`/runs/${runId}`)).body, 'status');
+      if (typeof status === 'string' && ['completed', 'failed', 'cancelled'].includes(status)) return status;
+      if (Date.now() > end) throw new Error(`waitTerminal: run ${runId} still ${String(status)} after ${ms} ms`);
       await new Promise((r) => setTimeout(r, 20));
     }
-    return status;
   }
   const attemptsOf = async (runId: string): Promise<Json | undefined> => {
-    const evs = (await api<{ events: Ev[] }>(`/runs/${runId}/events/poll?fromSeq=-1&limit=1000`)).body.events ?? [];
-    return (evs.find((e) => e.type === 'node.completed' && e.nodeId === 'callai-echo')?.payload?.['outputs'] as { attempts?: Json } | undefined)?.attempts;
+    const res = await api(`/runs/${runId}/events/poll?fromSeq=-1&limit=1000`);
+    const list = field(res.body, 'events');
+    if (!Array.isArray(list)) throw new Error(`no events list: ${JSON.stringify(res.body)}`);
+    const evs: Ev[] = list.filter(isRecord).map((e) => ({
+      type: typeof e.type === 'string' ? e.type : '',
+      ...(typeof e.nodeId === 'string' ? { nodeId: e.nodeId } : {}),
+      ...(isRecord(e.payload) ? { payload: e.payload } : {}),
+    }));
+    const attempts = field(evs.find((e) => e.type === 'node.completed' && e.nodeId === 'callai-echo')?.payload?.['outputs'], 'attempts');
+    return isRecord(attempts) ? attempts : undefined;
   };
-  const start = (script: Json[]) => api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({
+  const start = (script: Json[]) => api('/runs', { method: 'POST', body: JSON.stringify({
     workflowId: 'conformance-callai-attempt-accounting',
     inputs: { request: { prompt: 'conformance', responseSchema: SCHEMA, maxTokens: 256 }, script },
   }) });
@@ -146,28 +199,65 @@ describe('ADR 0967 — through the real executor', () => {
   });
 
   it('two concurrent runs of the fixture each count their own script', async () => {
-    const [one, two] = await Promise.all([
-      start([{ kind: 'valid', outputTokens: 5 }]),
-      start([{ kind: 'invalid-json', outputTokens: 10 }, { kind: 'invalid-json', outputTokens: 10 }, { kind: 'valid', outputTokens: 20 }]),
-    ]);
-    expect(one.status, JSON.stringify(one.body)).toBe(201);
-    expect(two.status, JSON.stringify(two.body)).toBe(201);
-    expect(await waitTerminal(one.body.runId)).toBe('completed');
-    expect(await waitTerminal(two.body.runId)).toBe('completed');
-    expect(await attemptsOf(one.body.runId)).toMatchObject({ count: 1, outputTokens: 5 });
-    expect(await attemptsOf(two.body.runId)).toMatchObject({ count: 3, outputTokens: 40 });
+    // Force the window: the FIRST fixture request is parked until the SECOND run
+    // has programmed its script, so both scripts are live when either is read.
+    const realProgram = mockModule.programMockForRun;
+    const realDispatch = mockModule.dispatchMock;
+    let programmed = 0;
+    let releaseHeld: () => void = () => undefined;
+    const secondProgrammed = new Promise<void>((res) => { releaseHeld = res; });
+    let held = false;
+    let holdTimedOut = false;
+    const program = vi.spyOn(mockModule, 'programMockForRun').mockImplementation((runId, nodeId, prog) => {
+      realProgram(runId, nodeId, prog);
+      if (nodeId === 'callai-echo' && ++programmed === 2) releaseHeld();
+    });
+    const dispatch = vi.spyOn(mockModule, 'dispatchMock').mockImplementation(async (req) => {
+      if (!held && req.nodeId === 'callai-echo') {
+        held = true;
+        let timer: NodeJS.Timeout | undefined;
+        try {
+          await Promise.race([
+            secondProgrammed,
+            new Promise<never>((_, rej) => { timer = setTimeout(() => { holdTimedOut = true; rej(new Error('hold: the second run never programmed its script')); }, 10_000); }),
+          ]);
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
+      }
+      return realDispatch(req);
+    });
+    try {
+      const [one, two] = await Promise.all([
+        start([{ kind: 'valid', outputTokens: 5 }]),
+        start([{ kind: 'invalid-json', outputTokens: 10 }, { kind: 'invalid-json', outputTokens: 10 }, { kind: 'valid', outputTokens: 20 }]),
+      ]);
+      const oneId = runIdOf(one);
+      const twoId = runIdOf(two);
+      expect(await waitTerminal(oneId)).toBe('completed');
+      expect(await waitTerminal(twoId)).toBe('completed');
+      // The window really opened: one request was held while BOTH scripts were programmed.
+      expect(held).toBe(true);
+      expect(holdTimedOut).toBe(false);
+      expect(programmed).toBe(2);
+      expect(await attemptsOf(oneId)).toMatchObject({ count: 1, outputTokens: 5 });
+      expect(await attemptsOf(twoId)).toMatchObject({ count: 3, outputTokens: 40 });
+    } finally {
+      program.mockRestore();
+      dispatch.mockRestore();
+    }
   });
 
   it('a replay fork reads the recorded invocation: no request reaches the mock, same attempts', async () => {
-    const src = await start([{ kind: 'invalid-json', outputTokens: 10 }, { kind: 'valid', outputTokens: 20 }]);
-    expect(await waitTerminal(src.body.runId)).toBe('completed');
-    expect(receivedMaxTokens('callai-echo', bareRunId(src.body.runId))).toHaveLength(2);
-    const f = await api<{ runId: string }>(`/runs/${src.body.runId}:fork`, { method: 'POST', body: JSON.stringify({ mode: 'replay', fromSeq: 0 }) });
-    expect(f.status, JSON.stringify(f.body)).toBe(201);
-    expect(await waitTerminal(f.body.runId)).toBe('completed');
+    const srcId = runIdOf(await start([{ kind: 'invalid-json', outputTokens: 10 }, { kind: 'valid', outputTokens: 20 }]));
+    expect(await waitTerminal(srcId)).toBe('completed');
+    expect(receivedMaxTokens('callai-echo', bareRunId(srcId))).toHaveLength(2);
+    const forkId = runIdOf(await api(`/runs/${srcId}:fork`, { method: 'POST', body: JSON.stringify({ mode: 'replay', fromSeq: 0 }) }));
+    expect(await waitTerminal(forkId)).toBe('completed');
     // A re-dispatch would have served the run's script again and recorded both
     // requests here; the recorded invocation sends none.
-    expect(receivedMaxTokens('callai-echo', bareRunId(f.body.runId))).toEqual([]);
-    expect(await attemptsOf(f.body.runId)).toEqual(await attemptsOf(src.body.runId));
+    expect(receivedMaxTokens('callai-echo', bareRunId(forkId))).toEqual([]);
+    expect(await attemptsOf(srcId)).toMatchObject({ count: 2, outputTokens: 30 });
+    expect(await attemptsOf(forkId)).toEqual(await attemptsOf(srcId));
   });
 });

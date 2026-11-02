@@ -343,9 +343,15 @@ export async function listDispatchRecords(tenantId: string, briefId: string): Pr
  *  A row written before the back-link (no `campaignId`) is matched by the
  *  campaign's brief, and only when it names no other org. */
 export async function listCampaignDispatchRecords(tenantId: string, orgId: string, campaignId: string, briefId?: string): Promise<DispatchLedgerRow[]> {
-  return (await listTenantDispatchRecords(tenantId)).filter((r) => r.campaignId !== undefined
+  return (await listTenantDispatchRecords(tenantId)).filter((r) => dispatchBelongsToCampaign(r, orgId, campaignId, briefId));
+}
+
+/** The pure predicate behind {@link listCampaignDispatchRecords}, for a caller
+ *  that already holds the ledger (ADR 1022: the spend-cap pause path). */
+export function dispatchBelongsToCampaign(r: Pick<DispatchLedgerRow, 'campaignId' | 'orgId' | 'briefId'>, orgId: string, campaignId: string, briefId?: string): boolean {
+  return r.campaignId !== undefined
     ? r.campaignId === campaignId && r.orgId === orgId
-    : briefId !== undefined && r.briefId === briefId && (r.orgId === undefined || r.orgId === orgId));
+    : briefId !== undefined && r.briefId === briefId && (r.orgId === undefined || r.orgId === orgId);
 }
 
 /** Test-only: seed a ledger row a real dispatch would write (the AdMap and
@@ -434,9 +440,40 @@ export function setAdsComplianceChecker(fn: AdsComplianceChecker | null): void {
 export type AdsCapVerdict =
   | { verdict: 'ok'; ceiling?: { limitMinor: number; currency: string; capId: string }; noCeiling?: 'period_not_lifetime' | 'multi_target' | 'client_scope' }
   | { verdict: 'cap_exceeded' | 'cap_unenforceable'; capId: string };
-export type AdsCapChecker = (tenantId: string, target: { platform: AdPlatform; adAccountId: string; campaignId: string; orgId?: string }) => Promise<AdsCapVerdict>;
+/** `orgVerified`: `orgId` came from a stamped ledger row, not from the adapter's
+ *  own org (ADR 1022 D5a only trusts a verified org to skip another org's cap). */
+export type AdsCapChecker = (tenantId: string, target: { platform: AdPlatform; adAccountId: string; campaignId: string; orgId?: string; orgVerified?: boolean }) => Promise<AdsCapVerdict>;
 let capChecker: AdsCapChecker | null = null;
 export function setAdsCapChecker(fn: AdsCapChecker | null): void { capChecker = fn; }
+
+// ADR 1022 D5 — may a budget change go ahead under the caps? The checker
+// (campaign-intel's `capBlocksIncrease`) answers null (no covering cap stops
+// it) or the cap and reason that would. It cannot tell an increase from a
+// decrease, so `updateBudget` reads the live budget only when it blocks.
+export type AdsCapIncreaseChecker = (tenantId: string, target: { platform: AdPlatform; adAccountId: string; campaignId: string; orgId?: string; orgVerified?: boolean }, toDailyMinor: number) => Promise<{ capId: string; reason: string } | null>;
+let capIncreaseChecker: AdsCapIncreaseChecker | null = null;
+export function setAdsCapIncreaseChecker(fn: AdsCapIncreaseChecker | null): void { capIncreaseChecker = fn; }
+
+/** ADR 1022 D1 — the ONE "does this dispatch belong to org O" rule (was a
+ *  private copy in spend caps). A row stamped with its campaign (ADR 0941 P2)
+ *  belongs to its own `orgId`. An older row with no campaign belongs to O when
+ *  its brief is one of O's campaigns' briefs (`orgBriefIds`, which the caller
+ *  reads: core cannot import the campaigns feature) and it names no other org. */
+export function dispatchBelongsToOrg(row: Pick<DispatchLedgerRow, 'campaignId' | 'orgId' | 'briefId'>, orgId: string, orgBriefIds: ReadonlySet<string | undefined>): boolean {
+  return row.campaignId !== undefined
+    ? row.orgId === orgId
+    : row.briefId !== undefined && orgBriefIds.has(row.briefId) && (row.orgId === undefined || row.orgId === orgId);
+}
+
+/** ADR 1022 D5 (M1) — the org a cap check asks about. The ledger's stamped org
+ *  wins: the chain lane builds the adapter with `orgId: run.tenantId`, which
+ *  is not the client org of the campaign it touches. An unledgered campaign
+ *  falls back to the adapter's org, as before. */
+async function capTargetOrg(deps: BrokeredEgressDeps, platform: AdPlatform, campaignId: string): Promise<{ orgId?: string; orgVerified?: true }> {
+  const row = (await listTenantDispatchRecords(deps.tenantId)).find((r) => r.platform === platform && r.platformCampaignId === campaignId && r.orgId !== undefined);
+  if (row?.orgId) return { orgId: row.orgId, orgVerified: true };
+  return deps.orgId ? { orgId: deps.orgId } : {};
+}
 
 /** ADR 0357 P6 — is a strategy failure a TRANSPORT failure the circuit breaker
  *  should count? Matches the adapter's own error vocabulary: `request_failed`,
@@ -2200,6 +2237,23 @@ export function makeAdsAdapter(deps: BrokeredEgressDeps): AdsAdapter {
       if (!Number.isSafeInteger(args.dailyBudgetMinor) || args.dailyBudgetMinor < 0) return { outcome: 'failed', error: 'invalid_budget' };
       let effective = args;
       let notice: EnforceVerdict | undefined;
+      // ADR 1022 D5 — caps first, dry run or not, before the spend gate opens an
+      // approval for a change a cap refuses. Every caller meets it: the
+      // recommendations route, reallocation's applyOp and the core node.
+      if (capIncreaseChecker) {
+        let block: { capId: string; reason: string } | null;
+        try {
+          block = await capIncreaseChecker(deps.tenantId, { platform: args.platform, adAccountId: args.adAccountId, campaignId: args.campaignId, ...(await capTargetOrg(deps, args.platform, args.campaignId)) }, args.dailyBudgetMinor);
+        } catch { return { outcome: 'failed', error: 'cap_unreadable' }; }
+        if (block) {
+          // A cap stops increases only. A decrease needs the live budget to
+          // prove it is one; an unreadable budget refuses (pausing is the
+          // never-gated safe-direction door).
+          const live = await adapter.getCampaignBudget({ platform: args.platform, adAccountId: args.adAccountId, campaignId: args.campaignId });
+          if (live.outcome !== 'ok') return { outcome: 'failed', error: 'budget_unreadable' };
+          if (args.dailyBudgetMinor >= live.dailyBudgetMinor) return { outcome: 'failed', error: `${block.reason}:${block.capId}` };
+        }
+      }
       if (!effective.dryRun) {
         const accountCurrency = memoAccountCurrency(deps, effective.platform, effective.adAccountId);
         const gate = await evaluateSpendGate(deps, 'ads.budget', budgetSpendKey(deps, effective), effective.dailyBudgetMinor, {
@@ -2288,7 +2342,9 @@ export function makeAdsAdapter(deps: BrokeredEgressDeps): AdsAdapter {
         // the launch before any approval is opened for it.
         if (capChecker) {
           let cap: AdsCapVerdict;
-          try { cap = await capChecker(deps.tenantId, { platform: args.platform, adAccountId: args.adAccountId, campaignId: args.campaignId, ...(deps.orgId ? { orgId: deps.orgId } : {}) }); } catch { return { outcome: 'refused', error: 'policy_unreadable' }; }
+          try {
+            cap = await capChecker(deps.tenantId, { platform: args.platform, adAccountId: args.adAccountId, campaignId: args.campaignId, ...(await capTargetOrg(deps, args.platform, args.campaignId)) });
+          } catch { return { outcome: 'refused', error: 'policy_unreadable' }; }
           if (cap.verdict !== 'ok') return { outcome: 'refused', error: cap.verdict, capId: cap.capId };
           launchCeiling = cap.ceiling;
           ceilingNote = cap.ceiling ? 'pending' : cap.noCeiling ? `not_set:${cap.noCeiling}` : undefined;

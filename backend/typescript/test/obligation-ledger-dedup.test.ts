@@ -14,8 +14,17 @@
  * false` is an explicit first-write-wins guard. Rather than keep inferring from
  * a caller two layers up, this asserts BOTH halves directly at the ledger, where
  * the invariant actually lives.
+ *
+ * The row key is deterministic, so a replay that OVERWROTE the row would still
+ * leave one row: "a replay writes nothing" is asserted by the stored row keeping
+ * its first `createdAt` (Date faked so the two writes are a second apart).
+ *
+ * Sabotage witnessed (grade-tests w74, TST-DVA-6): first-write-wins removed,
+ * `lineId` dropped from the row key, the reversal not negated, the reversal's
+ * insert-once ignored, and a reversal invented for a source with no accrual —
+ * each reds its case.
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { createObligationLedger } from '../src/host/obligationLedger.js';
@@ -34,13 +43,22 @@ beforeEach(async () => { initHostExtPersistence(await openStorage('memory://'));
 
 describe('PROBE-KT445-2 (executable) — accrual dedup + reversal has an accrual sibling', () => {
   it('no two accrual rows share (sourceId, lineId) — a replay writes nothing', async () => {
-    expect(await ledger.accrue(accrual('ord-1', 'prod-a')), 'the first accrual did not write — the rest is vacuous').toBe(true);
-    expect(await ledger.accrue(accrual('ord-1', 'prod-a')), 'a replay wrote a SECOND accrual — double-pay').toBe(false);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-01-02T00:00:00.000Z'));
+      expect(await ledger.accrue(accrual('ord-1', 'prod-a')), 'the first accrual did not write — the rest is vacuous').toBe(true);
+      vi.setSystemTime(new Date('2026-01-02T00:00:01.000Z'));
+      expect(await ledger.accrue(accrual('ord-1', 'prod-a')), 'a replay wrote a SECOND accrual — double-pay').toBe(false);
+    } finally { vi.useRealTimers(); }
 
     const rows = (await ledger.listForTenant(T)).filter((r) => r.kind === 'accrual');
     expect(rows).toHaveLength(1);
     const pairs = rows.map((r) => `${r.sourceId}::${r.lineId}`);
     expect(new Set(pairs).size, 'duplicate (sourceId, lineId) accruals — exactly what PROBE-KT445-2 counts').toBe(pairs.length);
+    // The key is deterministic, so the count above holds even for an overwrite: the
+    // stored row must still be the FIRST write.
+    expect(rows[0]!.createdAt, 'the replay rewrote the accrual').toBe('2026-01-02T00:00:00.000Z');
+    expect(rows[0]!.amountMinor).toBe(580);
   });
 
   it('distinct lines of the same order each accrue — dedup is per LINE, not per order', async () => {
@@ -68,7 +86,8 @@ describe('PROBE-KT445-2 (executable) — accrual dedup + reversal has an accrual
         `reversal for line ${r.lineId} has no accrual sibling — a clawback against nothing`,
       ).toBe(true);
     }
-    expect(rev[0].amountMinor, 'the reversal did not mirror-negate its accrual').toBe(-acc[0].amountMinor);
+    expect(rev[0]!.amountMinor, 'the reversal did not mirror-negate its accrual').toBe(-580);
+    expect(rev[0]!.basisMinor, 'the reversal did not mirror-negate its basis').toBe(-2900);
   });
 
   it('reverses NOTHING for a source that never accrued', async () => {

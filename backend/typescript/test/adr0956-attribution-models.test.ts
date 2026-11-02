@@ -10,7 +10,18 @@
  *   - the report: `sessionLastClick` beside the unchanged converting-hit
  *     column, the model report summing exactly, the sub-toggle refusal;
  *   - erasure: paths are read from analytics rows, so erasing a session's
- *     events removes its touches from every path (no derived store to miss).
+ *     events removes its touches from every path (no derived store to miss);
+ *     the org's settings row is kept and its editor tombstoned.
+ *
+ * Every stateful case seeds its OWN tenant + org (`seed()`), so the file passes
+ * in any order (wave 73 found the cases chained through one shared org). The
+ * multi-touch sub-toggle is a global config row: the case that flips it
+ * restores the registry default (`off`) in `finally`. Refusals assert the exact
+ * `error` + `details` (field / reason / requiredScope), never a bare status.
+ *
+ * Probes (wave 73, all witnessed): w73g3-att-remainder-first, -remainder-drop,
+ * -position, -lookback, -collapse, -link, -session-last, -subtoggle-route,
+ * -cas, -erase.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -23,7 +34,7 @@ import { ATTRIBUTION_MODELS, CONVERSION_UNITS, allocate, creditPath, modelWeight
 import { buildTouchPaths } from '../src/features/campaign-intel/touchPaths.js';
 import { buildAttribution, buildModelReport } from '../src/features/campaign-intel/attribution.js';
 import { buildCampaignIntelSurface } from '../src/features/campaign-intel/surface.js';
-import { MULTI_TOUCH_TOGGLE, setAttributionSettings, parseAttributionSettings } from '../src/features/campaign-intel/attributionSettings.js';
+import { MULTI_TOUCH_TOGGLE, getAttributionSettings, setAttributionSettings, parseAttributionSettings } from '../src/features/campaign-intel/attributionSettings.js';
 import { eraseCampaignIntelSubject } from '../src/features/campaign-intel/erasure.js';
 import { __putRawEventForTests, deleteSubjectEvents, type AnalyticsEvent } from '../src/features/analytics/analyticsService.js';
 import { linkSession } from '../src/features/analytics/identityLinkService.js';
@@ -83,7 +94,8 @@ function ev(o: Partial<AnalyticsEvent> & { eventId: string; ts: string }): Analy
 }
 
 describe('ADR 0956 D1 — buildTouchPaths (pure)', () => {
-  const resolveCampaign = (k: string): string | null => ({ spring: 'c-spring', summer: 'c-summer' } as Record<string, string>)[k] ?? null;
+  const CAMPAIGN_BY_UTM: Record<string, string> = { spring: 'c-spring', summer: 'c-summer' };
+  const resolveCampaign = (k: string): string | null => CAMPAIGN_BY_UTM[k] ?? null;
   const base = { lookbackDays: 30, resolveCampaign, currencyExponent: () => 2 };
 
   it('a session that landed from a campaign and converted later without UTMs is credited to it; re-sent UTMs collapse', () => {
@@ -130,7 +142,9 @@ describe('ADR 0956 D1 — buildTouchPaths (pure)', () => {
   });
 });
 
-interface Res { status: number; body: Record<string, unknown> }
+interface Res { status: number; body: unknown }
+/** Read one string field of an untyped JSON body without a cast. */
+const strField = (b: unknown, k: string): string | undefined => { const v: unknown = typeof b === 'object' && b !== null ? Reflect.get(b, k) : undefined; return typeof v === 'string' ? v : undefined; };
 let BASE = '';
 let server: http.Server;
 function client(): { call: (method: string, path: string, body?: unknown) => Promise<Res> } {
@@ -138,8 +152,9 @@ function client(): { call: (method: string, path: string, body?: unknown) => Pro
   return {
     call: async (method, path, body) => {
       const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-      for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-      return { status: res.status, body: ((await res.json().catch(() => ({}))) ?? {}) as Record<string, unknown> };
+      for (const ck of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(ck); if (m?.[1]) cookie = m[1]; }
+      const parsed: unknown = await res.json().catch(() => ({}));
+      return { status: res.status, body: parsed ?? {} };
     },
   };
 }
@@ -149,19 +164,50 @@ const KERNEL = {
   tone: 'warm', channelTones: {}, sourceDocIds: [], generatedAt: '2026-07-01T00:00:00Z',
 };
 async function makeCampaign(tenantId: string, orgId: string, name: string, utmCampaign: string): Promise<string> {
-  const utm = { campaign: utmCampaign };
   const brief = await createBrief(tenantId, orgId, 'test', {
     name, objective: 'o', productName: 'p', personaIds: ['x'], messaging: { primaryValueProp: 'v' },
-    channels: [{ type: 'ad_variants', enabled: true, config: {} }], utm,
+    channels: [{ type: 'ad_variants', enabled: true, config: {} }], utm: { campaign: utmCampaign },
   });
   await setKernel(tenantId, brief.id, KERNEL);
-  await updateBrief(tenantId, brief.id, { status: 'confirmed' }, 'test');
-  return (await finalizeFromBrief(tenantId, { ...brief, kernel: KERNEL, status: 'confirmed' as const, utm }, 'test')).id;
+  // Finalize the brief AS STORED (kernel + confirmed status read back), never a hand-rebuilt copy.
+  const confirmed = await updateBrief(tenantId, brief.id, { status: 'confirmed' }, 'test');
+  if (!confirmed || confirmed.status !== 'confirmed' || !confirmed.kernel) throw new Error(`brief ${brief.id} did not confirm`);
+  return (await finalizeFromBrief(tenantId, confirmed, 'test')).id;
 }
 async function setToggle(id: string, status: 'on' | 'off'): Promise<void> {
   const d = getToggleDefault(id);
   if (!d) throw new Error(`toggle default missing: ${id}`);
   await saveConfig({ ...d, status }, 'test');
+}
+
+interface Seeded { tenantId: string; orgId: string; owner: ReturnType<typeof client>; peer: ReturnType<typeof client>; spring: string; summer: string }
+let seq = 0;
+/** A FRESH tenant + org per case (order-independent under shuffle): an owner, a same-tenant
+ *  zero-scope peer (a second `test/login`), two campaigns, session A (lands from Spring, converts
+ *  later on a page without UTMs) and a contact whose session B came from Summer and session C from
+ *  Spring, converting in C. */
+async function seed(): Promise<Seeded> {
+  const tag = `${Date.now().toString(36)}-${++seq}`;
+  const tenantId = `mt-${tag}`;
+  const owner = client();
+  const peer = client();
+  expect((await owner.call('POST', '/host/openwop-app/test/login', { email: `mt-o-${tag}@acme.test`, tenantId })).status).toBe(201);
+  const org = await owner.call('POST', '/host/openwop-app/orgs', { name: `Client M ${tag}` });
+  const orgId = strField(org.body, 'orgId');
+  if (!orgId) throw new Error(`org create failed: ${org.status}`);
+  expect((await peer.call('POST', '/host/openwop-app/test/login', { email: `mt-p-${tag}@acme.test`, tenantId })).status).toBe(201);
+  const spring = await makeCampaign(tenantId, orgId, 'Spring', 'spring');
+  const summer = await makeCampaign(tenantId, orgId, 'Summer', 'summer');
+  const now = Date.now();
+  const put = (o: Partial<AnalyticsEvent> & { eventId: string; ts: string }): Promise<void> => __putRawEventForTests({ tenantId, orgId, type: 'pageview', ...o });
+  await put({ eventId: `evt:a1-${tag}`, ts: iso(now - 2 * DAY), sessionKey: 'sessA', utm: { campaign: 'spring', source: 'meta', medium: 'cpc' } });
+  await put({ eventId: `evt:a2-${tag}`, ts: iso(now - DAY), sessionKey: 'sessA', type: 'conversion', props: { valueMinor: 1000, currency: 'USD' } });
+  await put({ eventId: `evt:b1-${tag}`, ts: iso(now - 5 * DAY), sessionKey: 'sessB', utm: { campaign: 'summer' } });
+  await put({ eventId: `evt:c1-${tag}`, ts: iso(now - 3 * DAY), sessionKey: 'sessC', utm: { campaign: 'spring' } });
+  await put({ eventId: `evt:c2-${tag}`, ts: iso(now - 3 * DAY + 60_000), sessionKey: 'sessC', type: 'conversion', utm: { campaign: 'spring' } });
+  await linkSession(tenantId, 'sessB', 'crm:buyer', 'email-click');
+  await linkSession(tenantId, 'sessC', 'crm:buyer', 'email-click');
+  return { tenantId, orgId, owner, peer, spring, summer };
 }
 
 describe('ADR 0956 P1 — report, settings routes, sub-toggle, erasure', () => {
@@ -172,36 +218,19 @@ describe('ADR 0956 P1 — report, settings routes, sub-toggle, erasure', () => {
     const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
     await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
     await setToggle('campaign-intel', 'on');
-  });
+  }, 120_000);
   afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-  const tenantId = `mt-${Date.now()}`;
-  let orgId = '';
-  const owner = client();
-  const peer = client();
-  let spring = '';
-  let summer = '';
-
   it('setup: org, two campaigns, a landing-then-convert session and a two-session contact', async () => {
-    expect((await owner.call('POST', '/host/openwop-app/test/login', { email: `mt-o-${Date.now()}@acme.test`, tenantId })).status).toBe(201);
-    orgId = String((await owner.call('POST', '/host/openwop-app/orgs', { name: 'Client M' })).body.orgId);
-    expect((await peer.call('POST', '/host/openwop-app/test/login', { email: `mt-p-${Date.now()}@acme.test`, tenantId })).status).toBe(201);
-    spring = await makeCampaign(tenantId, orgId, 'Spring', 'spring');
-    summer = await makeCampaign(tenantId, orgId, 'Summer', 'summer');
-    const now = Date.now();
-    const put = (o: Partial<AnalyticsEvent> & { eventId: string; ts: string }): Promise<void> => __putRawEventForTests({ tenantId, orgId, type: 'pageview', ...o });
-    // Session A: lands from Spring, converts later on a page without UTMs.
-    await put({ eventId: 'evt:a1', ts: iso(now - 2 * DAY), sessionKey: 'sessA', utm: { campaign: 'spring', source: 'meta', medium: 'cpc' } });
-    await put({ eventId: 'evt:a2', ts: iso(now - DAY), sessionKey: 'sessA', type: 'conversion', props: { valueMinor: 1000, currency: 'USD' } });
-    // Contact: session B from Summer, session C from Spring, converts in C.
-    await put({ eventId: 'evt:b1', ts: iso(now - 5 * DAY), sessionKey: 'sessB', utm: { campaign: 'summer' } });
-    await put({ eventId: 'evt:c1', ts: iso(now - 3 * DAY), sessionKey: 'sessC', utm: { campaign: 'spring' } });
-    await put({ eventId: 'evt:c2', ts: iso(now - 3 * DAY + 60_000), sessionKey: 'sessC', type: 'conversion', utm: { campaign: 'spring' } });
-    await linkSession(tenantId, 'sessB', 'crm:buyer', 'email-click');
-    await linkSession(tenantId, 'sessC', 'crm:buyer', 'email-click');
+    const { tenantId, orgId, spring, summer } = await seed();
+    expect(spring).not.toBe(summer);
+    // The seeded shape the other cases rely on: two conversions, one through the linked contact
+    // (sessions B + C) and one on its own session (A).
+    expect((await buildAttribution(tenantId, orgId)).pathCoverage).toEqual({ conversions: 2, contactPaths: 1, sessionPaths: 1, noTouch: 0 });
   });
 
   it('report: sessionLastClick credits the landing campaign; the converting-hit column is unchanged', async () => {
+    const { tenantId, orgId, spring, summer } = await seed();
     const r = await buildAttribution(tenantId, orgId);
     const row = (id: string) => r.rows.find((x) => x.campaignId === id)!;
     expect(row(spring).webConversions).toBe(1); // only c2 carried the key on its own hit
@@ -212,42 +241,63 @@ describe('ADR 0956 P1 — report, settings routes, sub-toggle, erasure', () => {
   });
 
   it('model report: refused while the sub-toggle is off; when on, every model sums exactly and linear splits the contact path', async () => {
+    const { tenantId, orgId, owner, peer, spring, summer } = await seed();
     const path = `/host/openwop-app/campaign-intel/orgs/${orgId}/attribution/models`;
-    await setToggle(MULTI_TOUCH_TOGGLE, 'off');
-    expect((await owner.call('GET', path)).status).toBe(404);
-    await expect(buildCampaignIntelSurface({ tenantId }).attributionModels({ orgId })).rejects.toMatchObject({ code: 'host_capability_disabled' });
-    await setToggle(MULTI_TOUCH_TOGGLE, 'on');
-    await expect(buildCampaignIntelSurface({ tenantId }).attributionModels({ orgId, model: 'linaer' })).rejects.toMatchObject({ code: 'validation_error' });
-    expect((await peer.call('GET', path)).status).toBe(403);
-    expect((await owner.call('GET', `${path}?model=bogus`)).status).toBe(400);
-    const linear = await owner.call('GET', `${path}?model=linear`);
-    expect(linear.status).toBe(200);
-    for (const m of ATTRIBUTION_MODELS) {
-      const rep = await buildModelReport(tenantId, orgId, m);
-      const sum = rep.rows.reduce((s, x) => s + x.units, 0) + rep.unmapped.units;
-      expect(sum).toBe(rep.creditedPaths * CONVERSION_UNITS);
-      expect(rep.basis).toBe('modelled_web_conversions');
-    }
-    const lin = await buildModelReport(tenantId, orgId, 'linear');
-    // Session A: all to Spring. Contact path: Summer, then Spring (c1; c2 re-sends it and collapses).
-    expect(lin.rows.find((x) => x.campaignId === summer)?.units).toBe(500_000);
-    expect(lin.rows.find((x) => x.campaignId === spring)?.units).toBe(1_500_000);
-    expect(lin.rows.find((x) => x.campaignId === spring)?.value).toEqual([{ currency: 'USD', minor: 1000 }]);
-    expect(lin.model).toBe('linear');
-    expect((await buildModelReport(tenantId, orgId)).model).toBe('last_click'); // the org default
+    try {
+      await setToggle(MULTI_TOUCH_TOGGLE, 'off');
+      const off = await owner.call('GET', path);
+      expect(off.status).toBe(404);
+      expect(off.body).toMatchObject({ error: 'not_found', details: { feature: MULTI_TOUCH_TOGGLE } });
+      await expect(buildCampaignIntelSurface({ tenantId }).attributionModels({ orgId })).rejects.toMatchObject({ code: 'host_capability_disabled' });
+      await setToggle(MULTI_TOUCH_TOGGLE, 'on');
+      await expect(buildCampaignIntelSurface({ tenantId }).attributionModels({ orgId, model: 'linaer' })).rejects.toMatchObject({ code: 'validation_error' });
+      const denied = await peer.call('GET', path);
+      expect(denied.status).toBe(403);
+      expect(denied.body).toMatchObject({ error: 'forbidden_scope', details: { requiredScope: 'workspace:read', orgId } });
+      const bogus = await owner.call('GET', `${path}?model=bogus`);
+      expect(bogus.status).toBe(400);
+      expect(bogus.body).toMatchObject({ error: 'validation_error', details: { field: 'model' } });
+      const linear = await owner.call('GET', `${path}?model=linear`);
+      expect(linear.status).toBe(200);
+      expect(linear.body).toMatchObject({ model: 'linear' });
+      for (const m of ATTRIBUTION_MODELS) {
+        const rep = await buildModelReport(tenantId, orgId, m);
+        const sum = rep.rows.reduce((s, x) => s + x.units, 0) + rep.unmapped.units;
+        expect(sum).toBe(rep.creditedPaths * CONVERSION_UNITS);
+        expect(rep.basis).toBe('modelled_web_conversions');
+      }
+      const lin = await buildModelReport(tenantId, orgId, 'linear');
+      // Session A: all to Spring. Contact path: Summer, then Spring (c1; c2 re-sends it and collapses).
+      expect(lin.rows.find((x) => x.campaignId === summer)?.units).toBe(500_000);
+      expect(lin.rows.find((x) => x.campaignId === spring)?.units).toBe(1_500_000);
+      expect(lin.rows.find((x) => x.campaignId === spring)?.value).toEqual([{ currency: 'USD', minor: 1000 }]);
+      expect(lin.model).toBe('linear');
+      expect((await buildModelReport(tenantId, orgId)).model).toBe('last_click'); // the org default
+    } finally { await setToggle(MULTI_TOUCH_TOGGLE, 'off'); }
   });
 
   it('settings: default v0, CAS, closed-world, write needs workspace:write; the default model follows', async () => {
+    const { tenantId, orgId, owner, peer, spring, summer } = await seed();
     const path = `/host/openwop-app/campaign-intel/orgs/${orgId}/attribution-settings`;
     expect((await owner.call('GET', path)).body).toMatchObject({ version: 0, isDefault: true, settings: { lookbackDays: 30, halfLifeDays: 7, defaultModel: 'last_click' } });
-    expect((await owner.call('PUT', path, { defaultModel: 'linear' })).status).toBe(400);
-    expect((await owner.call('PUT', path, { defaultModel: 'shapley', expectedVersion: 0 })).status).toBe(400);
-    expect((await owner.call('PUT', path, { lookbackDays: 91, expectedVersion: 0 })).status).toBe(400);
-    expect((await peer.call('PUT', path, { defaultModel: 'linear', expectedVersion: 0 })).status).toBe(403);
+    const noVersion = await owner.call('PUT', path, { defaultModel: 'linear' });
+    expect(noVersion.status).toBe(400);
+    expect(noVersion.body).toMatchObject({ error: 'validation_error', details: { field: 'expectedVersion' } });
+    const unknownModel = await owner.call('PUT', path, { defaultModel: 'shapley', expectedVersion: 0 });
+    expect(unknownModel.status).toBe(400);
+    expect(unknownModel.body).toMatchObject({ error: 'validation_error', details: { reason: 'attribution_settings_invalid', field: 'defaultModel' } });
+    const tooLong = await owner.call('PUT', path, { lookbackDays: 91, expectedVersion: 0 });
+    expect(tooLong.status).toBe(400);
+    expect(tooLong.body).toMatchObject({ error: 'validation_error', details: { reason: 'attribution_settings_invalid', field: 'lookbackDays' } });
+    const denied = await peer.call('PUT', path, { defaultModel: 'linear', expectedVersion: 0 });
+    expect(denied.status).toBe(403);
+    expect(denied.body).toMatchObject({ error: 'forbidden_scope', details: { requiredScope: 'workspace:write', orgId } });
     const ok = await owner.call('PUT', path, { defaultModel: 'linear', lookbackDays: 1, expectedVersion: 0 });
     expect(ok.status).toBe(200);
     expect(ok.body).toMatchObject({ version: 1 });
-    expect((await owner.call('PUT', path, { defaultModel: 'first_touch', expectedVersion: 0 })).status).toBe(409);
+    const stale = await owner.call('PUT', path, { defaultModel: 'first_touch', expectedVersion: 0 });
+    expect(stale.status).toBe(409);
+    expect(stale.body).toMatchObject({ error: 'conflict', details: { reason: 'attribution_settings_stale', version: 1 } });
     const rep = await buildModelReport(tenantId, orgId);
     expect(rep.model).toBe('linear');
     // A 1-day lookback drops the contact's Summer touch (2 days before c2);
@@ -267,6 +317,7 @@ describe('ADR 0956 P1 — report, settings routes, sub-toggle, erasure', () => {
   });
 
   it('erasure: deleting a session\'s analytics rows removes its touches from every path; settings keep, editor tombstoned', async () => {
+    const { tenantId, orgId, spring } = await seed();
     const before = await buildModelReport(tenantId, orgId, 'linear');
     expect(before.creditedPaths).toBe(2);
     const out = await deleteSubjectEvents(tenantId, 'sessA');
@@ -275,8 +326,12 @@ describe('ADR 0956 P1 — report, settings routes, sub-toggle, erasure', () => {
     expect(after.creditedPaths).toBe(1); // no derived copy still credits session A
     expect((await buildAttribution(tenantId, orgId)).rows.find((x) => x.campaignId === spring)?.sessionLastClick).toBe(1);
 
-    const T = `mt-erase-${Date.now()}`;
+    const T = `mt-erase-${Date.now().toString(36)}-${++seq}`;
     await setAttributionSettings(T, 'org-e', parseAttributionSettings({ halfLifeDays: 3 }), 0, 'user:alice');
     expect((await eraseCampaignIntelSubject(T, 'user:alice')).rowsTouched).toBe(1);
+    // Settings keep: the org's row is still there with its value and version.
+    expect(await getAttributionSettings(T, 'org-e')).toEqual({ isDefault: false, version: 1, settings: { lookbackDays: 30, halfLifeDays: 3, defaultModel: 'last_click' } });
+    // Editor tombstoned: alice is no longer on the row, so a second erase finds nothing of hers.
+    expect((await eraseCampaignIntelSubject(T, 'user:alice')).rowsTouched).toBe(0);
   });
 });

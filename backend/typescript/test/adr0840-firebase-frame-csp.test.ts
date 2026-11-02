@@ -10,7 +10,8 @@
  *
  * Pinned here, against the backend's own builders (one source):
  *  - every path the SPA loads a frame from carries `pluginFrameCsp()` verbatim;
- *  - the entry path the SPA actually uses carries the deny-egress policy;
+ *  - the entry path carries the same sandboxing policy as a frame (ADR 1021: it had
+ *    no `sandbox`, so a top-level load ran plugin script as the app's own origin);
  *  - no rule names a `/api/v1/…` plugin path (the stale shape);
  *  - no installed plugin declares `connectSrc`: a Firebase rule cannot vary per
  *    plugin, so one that did would be served a policy that is wrong for it. Allowing
@@ -20,7 +21,7 @@
  * versus append). That is measured live (ADR 0840 P3, `verify-deploy.sh`).
  *
  * TST-BWB-4 (grade-tests w62): red when a frame/entry rule's source is renamed or moved
- * under `/api/v1/`, when `pluginIframeCsp()` changes without firebase.json, or when an
+ * under `/api/v1/`, when `pluginFrameCsp()` changes without firebase.json, or when an
  * installed frontend-plugin pack declares `connectSrc`. The connectSrc scan must see at
  * least the 3 frontend-plugin packs measured in packs/ (a scan of nothing would pass).
  */
@@ -28,7 +29,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { pluginFrameCsp, pluginIframeCsp } from '../src/host/uiPluginRpc.js';
+import { pluginFrameCsp } from '../src/host/uiPluginRpc.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 type HeaderRule = { source?: string; headers: { key: string; value: string }[] };
@@ -46,8 +47,8 @@ describe('ADR 0840 D3 — Firebase plugin header rules', () => {
     expect(csp(source)).toBe(pluginFrameCsp());
   });
 
-  it('the entry path the SPA calls carries the deny-egress policy', () => {
-    expect(csp('/api/host/openwop-app/ui-plugin/packs/**/entry')).toBe(pluginIframeCsp());
+  it('the entry path carries the frame policy, sandbox included (ADR 1021)', () => {
+    expect(csp('/api/host/openwop-app/ui-plugin/packs/**/entry')).toBe(pluginFrameCsp());
   });
 
   it('no rule names a stale /api/v1 plugin path', () => {

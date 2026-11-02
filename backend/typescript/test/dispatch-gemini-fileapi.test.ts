@@ -2,6 +2,10 @@
  * dispatchGoogle long-form audio via the Gemini File API (ADR 0111 Phase 1). Mocks the
  * network only: asserts that audio OVER the inline limit is uploaded (start → finalize) and
  * referenced as `fileData` in the generateContent request, while small audio stays inline.
+ *
+ * TST-CVG-23. An unmatched URL throws (never a real network call). Red when: the
+ * inline limit moves either way, the chunk size or the resumable offset changes,
+ * or the uploaded file is no longer deleted after transcription.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { dispatchChat } from '../src/providers/dispatch.js';
@@ -33,7 +37,7 @@ describe('dispatchGoogle long-audio File API (ADR 0111)', () => {
       }
       if (url.includes('streamGenerateContent')) { genBody = JSON.parse(String(init?.body)) as GenBody; return sse('the transcript'); }
       if (url.endsWith('/v1beta/files/abc') && init?.method === 'DELETE') { deleted = true; return new Response('{}', { status: 200 }); }
-      return realFetch(input, init);
+      throw new Error(`unexpected fetch: ${url}`);
     });
     global.fetch = mock as typeof fetch;
     const r = await dispatchChat({ provider: 'google', model: 'gemini-2.5-flash', apiKey: 'k', messages: [{ role: 'user', content: [{ type: 'audio', mimeType: 'audio/mpeg', dataBase64: big }] }], maxTokens: 64 });
@@ -54,7 +58,7 @@ describe('dispatchGoogle long-audio File API (ADR 0111)', () => {
       const url = urlOf(input);
       if (url.includes('/upload/v1beta/files')) { uploadCalled = true; return new Response('{}', { status: 200, headers: { 'x-goog-upload-url': 'x' } }); }
       if (url.includes('streamGenerateContent')) { genBody = JSON.parse(String(init?.body)) as GenBody; return sse('ok'); }
-      return realFetch(input, init);
+      throw new Error(`unexpected fetch: ${url}`);
     });
     global.fetch = mock as typeof fetch;
     await dispatchChat({ provider: 'google', model: 'gemini-2.5-flash', apiKey: 'k', messages: [{ role: 'user', content: [{ type: 'audio', mimeType: 'audio/mpeg', dataBase64: small }] }], maxTokens: 64 });

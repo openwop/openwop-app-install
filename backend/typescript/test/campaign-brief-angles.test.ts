@@ -137,6 +137,22 @@ describe('surface.persistAngles — closed-world + hook emission', () => {
   });
 });
 
+describe('ADR 1020 D10 (CS70WF-14) — angle ids are content-derived, so a re-run never duplicates', () => {
+  it('persisting the same claim + proof twice (a retry, a fork, a second research run) stores ONE angle', async () => {
+    const { briefId, evidence } = await briefWithEvidence();
+    const surface = buildCampaignBriefSurface({ tenantId: TENANT });
+    const cand = { claim: 'Fastest  picks', positioningLens: 'speed', proofRefs: [evidence[0].id], hookVariants: [] };
+    const first = as<{ angles: Array<{ id: string }> }>(await surface.persistAngles({ briefId, candidates: [cand] }));
+    // Whitespace and case in the claim do not make a new angle.
+    const second = as<{ angles: Array<{ id: string }> }>(await surface.persistAngles({ briefId, candidates: [{ ...cand, claim: 'fastest picks' }] }));
+    expect(second.angles.map((a) => a.id)).toEqual(first.angles.map((a) => a.id));
+    expect(await listAngles(TENANT, briefId)).toHaveLength(1);
+    // A different proof set IS a different angle.
+    await surface.persistAngles({ briefId, candidates: [{ ...cand, proofRefs: [evidence[1].id] }] });
+    expect(await listAngles(TENANT, briefId)).toHaveLength(2);
+  });
+});
+
 describe('hook transitions — the promotion lattice', () => {
   it('candidate→tested→retired; illegal moves are typed 422s', async () => {
     const { briefId, evidence } = await briefWithEvidence();

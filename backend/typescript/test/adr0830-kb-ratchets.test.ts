@@ -28,20 +28,22 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { TENANT_SCOPED_KB_ORGS } from '../src/features/kb/kbService.js';
+import { stripComments } from './helpers/stripComments.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SRC = join(HERE, '../src');
 const REPO = join(HERE, '../../..');
-const code = (p: string): string => readFileSync(p, 'utf8')
-  .replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:'"`\\])\/\/[^\n]*/g, '$1'); // comments are not code
+const code = (p: string): string => stripComments(readFileSync(p, 'utf8')); // comments are not code
 
 /** ADR 0832 residue S-A — surfaces with a method where an ABSENT `orgId` reads
  *  every org in the tenant (`optStr(args.orgId)` into a service filtering
  *  `!orgId || row.orgId === orgId`). The seam floor checks an org that is
  *  named; it cannot check one that is missing. No-growth: a new surface with
  *  this shape must require its org (or filter by the run's orgs) instead. */
+// ADR 1022 D3 — campaign-connectors and campaign-intel left the list: both now
+// require the org (the performance store refuses '').
 const ABSENT_ORG_IS_TENANT_WIDE_PINNED = new Set([
-  'campaign-brief', 'campaign-connectors', 'campaign-intel', 'campaign-orchestration', 'priority-matrix',
+  'campaign-brief', 'campaign-orchestration', 'priority-matrix',
 ]);
 
 /** Surfaces whose org-less read is narrowed by `runOrgScopeFilter` (the cure). */

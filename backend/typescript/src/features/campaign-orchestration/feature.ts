@@ -145,10 +145,12 @@ export const campaignOrchestrationFeature: BackendFeature = {
     bucketUnit: 'tenant',
     salt: 'campaign-orchestration',
   },
-  // ADR 0200 Phase 1 — SOFT deps (advisory, never a lock): the orchestration ties
-  // the Campaign Studio chain together, composing the brief (getBrief) + the channel
-  // workflows. Both are toggle-decoupled (services/workflows resolve regardless of
-  // the sub-toggle — the imports bypass it), so orchestration DEGRADES rather than
-  // orphans without them; the console suggests enabling them to complete the chain.
+  // ADR 0200 Phase 1 — SOFT deps (advisory, never a lock). Corrected by ADR 1020
+  // D4: these were described as "toggle-decoupled", and the channels are NOT — the
+  // five channel children are feature-gated on `campaign-channels`, so with it off
+  // every child was refused after the user approved the kernel. The Strategist's
+  // run tool now refuses up front, naming the feature. Kept soft rather than
+  // `dependsOn`: a disable-lock would not stop enabling orchestration with channels
+  // off, and would lock tenants who use the channels without the spine.
   recommends: ['campaign-brief', 'campaign-channels'],
 };

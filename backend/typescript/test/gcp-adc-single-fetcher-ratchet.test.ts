@@ -3,7 +3,8 @@
  * fetch the GCP metadata server independently (gcsBlob, certificationEvidence — the only
  * one that cached — the app-builder deploy adapter, runtime-posture); they now all go
  * through `host/gcpAdc.ts`. A fifth fails here. Sabotage: restore any caller's own
- * `computeMetadata/` URL ⇒ red.
+ * `computeMetadata/` URL ⇒ red. Tracker: TST-DEC-3 (witnessed wave 70: a
+ * `computeMetadata/` string added to host/blob/gcsBlob.ts reds it).
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';

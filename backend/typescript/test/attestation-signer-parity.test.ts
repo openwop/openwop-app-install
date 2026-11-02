@@ -13,8 +13,16 @@
  * verify with the host implementation. It is not two serializers compared to
  * each other in the abstract — it is the actual signing path checked by the
  * actual verifying path, which is the only thing that matters at deploy time.
+ *
+ * Tracker TST-BEB-1 (w66). Red when: either canonicalization stops sorting or
+ * changes its spacing (ROUND TRIP + IDENTICAL bytes); `readEvidence` stops
+ * requiring all four counts, or hashes a re-serialisation instead of the raw
+ * file bytes (the fixture is pretty-printed so the two differ); the SLO parse
+ * double-counts, loses its zero floor, or `attests` changes.
+ * Ceiling: the signer is a pipeline `.mjs` with no type declarations, so its
+ * dynamic import is typed by the local `SignerModule` shape.
  */
-import { generateKeyPairSync, sign as edSign } from 'node:crypto';
+import { createHash, generateKeyPairSync, sign as edSign } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -81,7 +89,15 @@ describe('attestation signer/verifier parity (ADR 0550 P3)', () => {
   it('the two canonicalizations produce IDENTICAL bytes, key order notwithstanding', async () => {
     const signer = (await import(SIGNER)) as SignerModule;
     const p = payload();
-    const reordered = Object.fromEntries(Object.entries(p).reverse()) as unknown as DeploymentAttestationPayload;
+    // The same payload written with its keys in reverse order (top level and `build`).
+    const reordered: DeploymentAttestationPayload = {
+      signerKeyId: p.signerKeyId, expiresAt: p.expiresAt, issuedAt: p.issuedAt, evidence: p.evidence, runtime: p.runtime,
+      discoveryDigest: p.discoveryDigest, telemetry: p.telemetry, profiles: p.profiles, versions: p.versions,
+      environmentClass: p.environmentClass,
+      build: { deployRevision: p.build.deployRevision, containerDigest: p.build.containerDigest, commitSource: p.build.commitSource, commit: p.build.commit },
+      kind: p.kind,
+    };
+    expect(JSON.stringify(reordered)).not.toBe(JSON.stringify(p)); // the fixture really is reordered
 
     expect(signer.canonicalPayloadBytes(p).toString('hex')).toBe(verifierCanonical(p).toString('hex'));
     // and the reorder must not change either
@@ -97,12 +113,15 @@ describe('attestation signer/verifier parity (ADR 0550 P3)', () => {
       expect(() => signer.readEvidence(bad)).toThrow(/counts\.failed/);
 
       const good = join(dir, 'good.json');
-      const body = JSON.stringify({ counts: { collected: 418, passed: 2541, failed: 0, skipped: 87 }, suiteVersion: '1.73.0' });
+      // Pretty-printed, so the raw bytes differ from a re-serialization of the parse.
+      const body = `${JSON.stringify({ counts: { collected: 418, passed: 2541, failed: 0, skipped: 87 }, suiteVersion: '1.73.0' }, null, 2)}\n`;
       writeFileSync(good, body);
       const read = signer.readEvidence(good);
       expect(read.counts.passed).toBe(2541);
       // digest is over the ACTUAL file bytes, not a re-serialization of the parse
-      expect(read.artifactDigest).toBe(signer.sha256Hex(Buffer.from(body)));
+      const sha = (s: string): string => createHash('sha256').update(s).digest('hex');
+      expect(read.artifactDigest).toBe(sha(body));
+      expect(read.artifactDigest).not.toBe(sha(JSON.stringify(JSON.parse(body))));
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

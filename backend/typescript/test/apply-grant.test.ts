@@ -6,6 +6,22 @@
  * that prove it cannot be turned into an unbounded authority: a grant with no
  * ceiling is refused, a purchase is never grantable, and the ceiling holds under
  * concurrency rather than on average.
+ *
+ * Overlaps and double guards, named: tier C is refused twice (the up-front
+ * `tier === 'C'` check AND `g.tiers.includes`, since `ApplyTier` cannot hold 'C'),
+ * so dropping either alone stays green (w66 ag-tierC). "A forked run consumes ZERO
+ * budget" re-reads the replay refusal that "a REPLAYED consult is refused" also
+ * asserts; it stays as the budget-side statement of the replay rule.
+ *
+ * TST-BXG-1. Red when: a zero ceiling, an empty origin list, a missing grantor
+ * or a non-A default tier is accepted (w66 ag-ceiling/origins/attrib/default-tier);
+ * a non-submit class, an unopted tier B, an out-of-scope origin, an expired or a
+ * revoked grant is allowed (ag-class/tierB/scope/expired/revoked); the total,
+ * pace, pace-reset or prepared ceiling stops binding, or the CAS becomes a blind
+ * write (ag-total/pace/pacereset-r2/prepared/cas); a listing can be claimed twice
+ * (ag-claim); erasure misses the grantor or the claims, or over-reaches
+ * (ag-erase-*); a replay is consulted (ag-replay); a spend writes no audit row
+ * (ag-audit); or a revoke ignores the org (ag-revoke-org).
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -18,7 +34,7 @@ import { listChain } from '../src/host/auditChainService.js';
 
 const TENANT = 'user:t-grant';
 const BASE = {
-  tenantId: TENANT, orgId: 'org-1', subjectId: 'subj-1', grantedBy: 'user-1',
+  tenantId: TENANT, orgId: 'org-1', subjectId: 'subj-1', grantedBy: 'subj-1', // DG-SEC-1: self-consent
   campaignId: 'camp-1', maxSubmits: 5, maxPrepared: 3, ratePerHour: 4,
   origins: ['boards.example.com'], resumePolicy: 'default',
 };
@@ -36,13 +52,13 @@ const consult = (over: Partial<Parameters<typeof consultApplyGrant>[0]> = {}) =>
 describe('ADR 0541 D1 — every field is a bound; the schema refuses a non-grant', () => {
   beforeEach(() => { __resetHostExtPersistence(); initHostExtPersistence(openSqliteStorage(':memory:')); });
 
-  it.each([
+  it.each<[string, Partial<Parameters<typeof createApplyGrant>[0]>]>([
     ['maxSubmits 0', { maxSubmits: 0 }],
     ['maxSubmits negative', { maxSubmits: -1 }],
     ['maxPrepared 0', { maxPrepared: 0 }],
     ['ratePerHour 0', { ratePerHour: 0 }],
   ])('refuses %s — a grant without a ceiling is the gate turned off', async (_l, over) => {
-    await expect(mint(over as never)).rejects.toThrow(/ceiling|positive/i);
+    await expect(mint(over)).rejects.toThrow(/ceiling|positive/i);
   });
 
   it('refuses an UNSCOPED grant (no origins)', async () => {
@@ -166,16 +182,24 @@ describe('ADR 0541 D3 — the ceiling is a TRUE ceiling', () => {
   });
 
   it('the pace window RESETS on the next epoch-hour; the total ceiling still binds', async () => {
-    const g = await mint({ maxSubmits: 3, ratePerHour: 2 });
+    // The new hour must get its FULL rate back (2 more, not 1): a window that
+    // kept counting across the boundary would refuse the second hour-1 submit.
+    // (The first version stopped at 3 total, which hid exactly that — w66
+    // ag-pacereset read vacuous.)
+    const g = await mint({ maxSubmits: 5, ratePerHour: 2 });
     const hour0 = 7_200_000_000;
     expect(await consumeSubmit(TENANT, g.grantId, hour0)).toBe(true);
     expect(await consumeSubmit(TENANT, g.grantId, hour0 + 1)).toBe(true);
     expect(await consumeSubmit(TENANT, g.grantId, hour0 + 2)).toBe(false); // paced
     const hour1 = hour0 + 3_600_000;
     expect(await consumeSubmit(TENANT, g.grantId, hour1)).toBe(true); // window reset
-    // maxSubmits (3) is now exhausted — the TOTAL ceiling outranks a fresh window.
-    expect(await consumeSubmit(TENANT, g.grantId, hour1 + 1)).toBe(false);
-    expect((await applyGrants.get(`${TENANT}:${g.grantId}`))?.submitsUsed).toBe(3);
+    expect(await consumeSubmit(TENANT, g.grantId, hour1 + 1)).toBe(true); // the full rate is back
+    expect(await consumeSubmit(TENANT, g.grantId, hour1 + 2)).toBe(false); // paced again
+    const hour2 = hour1 + 3_600_000;
+    expect(await consumeSubmit(TENANT, g.grantId, hour2)).toBe(true); // the 5th
+    // maxSubmits (5) is now exhausted — the TOTAL ceiling outranks a fresh window.
+    expect(await consumeSubmit(TENANT, g.grantId, hour2 + 1)).toBe(false);
+    expect((await applyGrants.get(`${TENANT}:${g.grantId}`))?.submitsUsed).toBe(5);
   });
 
   it('pace holds under CONCURRENCY — racing consumers cannot share the last slot', async () => {
@@ -260,9 +284,11 @@ describe('ADR 0464 — subject erasure actually erases', () => {
   });
 
   it('leaves OTHER subjects untouched — erasure must not over-reach', async () => {
-    const mine = await mint({ subjectId: 'subj-keep', campaignId: 'camp-keep' });
+    const mine = await mint({ subjectId: 'subj-keep', grantedBy: 'subj-keep', campaignId: 'camp-keep' });
+    const erased = await mint(); // subj-1's own grant: the positive control
     await eraseSubjectApplyGrants(TENANT, 'subj-1');
-    expect(await applyGrants.get(`${TENANT}:${mine.grantId}`)).toBeTruthy();
+    expect((await applyGrants.get(`${TENANT}:${mine.grantId}`))?.grantId).toBe(mine.grantId);
+    expect(await applyGrants.get(`${TENANT}:${erased.grantId}`)).toBeNull();
   });
 });
 
@@ -297,7 +323,7 @@ describe('ADR 0541 D4/D5 — replay spends nothing; every spend is attributable'
     const p = rows[0]!.payload as Record<string, unknown>;
     expect(p.grantId).toBe(g.grantId);
     expect(p.subjectId).toBe('subj-1');
-    expect(p.grantedBy, 'WHO authorised it must be on the row').toBe('user-1');
+    expect(p.grantedBy, 'WHO authorised it must be on the row').toBe('subj-1');
     expect(p.dealId).toBe('deal:app-1');
     expect(p.submitsUsed).toBe(1);
   });

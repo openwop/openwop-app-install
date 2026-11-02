@@ -2,6 +2,12 @@
  * ADR 0115 Phase 6 — the Image Generator agent pack.
  * The persona must surface under its exact agentId with the image-generate node in
  * its toolAllowlist (so chat can drive text-to-image).
+ *
+ * CORRECTED (wave 71): the allowlist is now EMPTY (CFP-1, see case 2), and this
+ * file loads the pack ITSELF (`loadAgentsFromManifest` below). So it pins the
+ * pack's listing through the real agents route and its empty allowlist — not
+ * that the app mounts the pack at boot. TST-DGC-3. Red when the pack's label
+ * changes (sabotage-witnessed, wave 71).
  */
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -30,10 +36,12 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 
 describe('ADR 0115 Phase 6 — Image Generator agent pack', () => {
   it('surfaces in GET /v1/agents under its agentId', async () => {
-    const list = await (await fetch(`${BASE}/agents`, { headers: H })).json() as { agents?: Array<{ agentId?: string; label?: string }> };
+    const list = await (await fetch(`${BASE}/agents`, { headers: H })).json() as { agents?: Array<{ agentId?: string; label?: string; persona?: string; modelClass?: string }> };
     const agent = (list.agents ?? []).find((a) => a.agentId === AGENT);
     expect(agent, `agent ${AGENT} must be in the inventory`).toBeDefined();
     expect(agent?.label).toBe('Image Generator');
+    expect(agent?.persona).toBe('Image Generator');
+    expect(agent?.modelClass).toBe('general');
   });
 
   it('resolves at GET /v1/agents/{id} + carries no phantom chat tools (manifest)', async () => {

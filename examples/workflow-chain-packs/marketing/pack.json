@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.marketing",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "kind": "workflow-chain",
   "description": "Real-work workflow pack (RFC 0013, ADR 0149) — the Marketing & Advertising cluster: Full Campaign Launch, Ad Performance Optimization Loop, Content Brief Generator, and Content Repurposing. Reasons with core.ai.chatCompletion over real tenant data (feature.crm / feature.kb / feature.cms / feature.email); reads/optimizes the ad platforms provider-agnostically via the core.openwop.connectors.ad-* capability nodes (Meta or Google, whichever the tenant connected — ADR 0186). The optimization loop routes within-guardrail changes to auto-apply and out-of-guardrail changes to a core.chat.approvalGate via a core.flow.if conditional node (ADR 0149 open-question resolution: a flow conditional, not a new primitive). Every launch/publish/apply is approval- or guardrail-gated; all tenant values are run parameters (replay-deterministic). Published under core.openwop.workflows.* (openwop-team key).",
   "author": "openwop",
@@ -55,7 +55,7 @@
     },
     {
       "chainId": "marketing.ad-optimization",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "label": "Ad Performance Optimization Loop",
       "description": "Read ad metrics from whichever platform the tenant connected (provider-agnostic core.openwop.connectors.ad-metrics — Meta or Google, not hard-coded), diagnose anomalies and recommend a bid/budget shift, then a core.flow.if guardrail routes within-guardrail changes straight to a budget recommendation and out-of-guardrail changes through approval first — finally log the learnings. Budget changes are RECOMMENDED by default (the ad-budget-update node dry-runs unless you set config.dryRun:false); a deliberate opt-in applies the change live via ctx.ads.updateBudget behind the same guardrail + approval gate (ADR 0186 slice 4b). Pair with an hourly scheduled trigger.",
       "parameters": {
@@ -89,8 +89,8 @@
         "edges": [
           { "from": "fetch", "to": "diagnose" },
           { "from": "diagnose.content", "to": "guard.value" },
-          { "from": "guard", "to": "autoApply", "condition": {"type": "equals", "left": "branch", "right": "then"} },
-          { "from": "guard", "to": "review", "condition": {"type": "equals", "left": "branch", "right": "else"} },
+          { "from": "guard", "to": "autoApply", "condition": {"type": "equals", "left": "branch", "right": "else"} },
+          { "from": "guard", "to": "review", "condition": {"type": "equals", "left": "branch", "right": "then"} },
           { "from": "review", "to": "applyReviewed", "condition": { "type": "truthy", "left": "approved" } },
           { "from": "review", "to": "gate-reject", "condition": { "type": "falsy", "left": "approved" } },
           { "from": "autoApply", "to": "log.autoApply" },

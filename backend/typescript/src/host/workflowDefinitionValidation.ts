@@ -16,8 +16,9 @@
  */
 
 import { OpenwopError } from '../types.js';
+import { agentDeploymentEnabled } from './agentDeploymentFlag.js';
 import { parseNodeRef } from './chainPinRule.js';
-import type { EdgeDef, WorkflowDefinition } from '../executor/types.js';
+import type { AgentRef, EdgeDef, WorkflowDefinition } from '../executor/types.js';
 import { resolveCapabilityFlag, subWorkflowInputMappingHonoured } from './capabilityOverlay.js';
 import { dispatchCapability, fanOutAdmissionRefusal, validateDispatchFanOutConfig } from './dispatchFanOut.js';
 import { normalizeEdgeCondition } from './edgeConditionMapping.js';
@@ -546,6 +547,7 @@ export function validateWorkflowDefinition(raw: unknown): WorkflowDefinition {
       ...(node.outputRole !== undefined ? { outputRole: node.outputRole as 'primary' | 'secondary' } : {}),
       ...(compensation ? { compensation } : {}),
       ...(node.irreversibleEffect !== undefined ? { irreversibleEffect: node.irreversibleEffect as boolean } : {}),
+      ...(node.agent !== undefined ? { agent: validateNodeAgent(node.agent, i) } : {}),
     };
   });
   // RFC 0022 §C capability-gate refusal check.
@@ -692,4 +694,34 @@ export function assertDispatchFanOutAdmitted(
       );
     }
   }
+}
+
+const AGENT_REF_STRINGS = ['agentId', 'name', 'modelClass', 'memoryRef', 'version', 'channel', 'sourceManifestId'] as const;
+
+/**
+ * ADR 1005 D5 (architect finding 2) — a node's `agent` binding survives
+ * registration. It was dropped whole before, so a channel bound in a
+ * user-registered or chain-instantiated workflow never reached the executor, and
+ * a host without `agents.deployment` accepted a channel ref instead of refusing
+ * it as `agent-ref.schema.json` requires. Unknown members are dropped, as for
+ * the node itself.
+ */
+function validateNodeAgent(raw: unknown, i: number): AgentRef {
+  const fieldPath = `nodes[${i}].agent`;
+  const bad = (message: string, field = fieldPath): OpenwopError => new OpenwopError('validation_error', message, 400, { field });
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw bad(`${fieldPath} MUST be an object.`);
+  const a = raw as Record<string, unknown>;
+  for (const k of AGENT_REF_STRINGS) {
+    if (a[k] !== undefined && (typeof a[k] !== 'string' || (a[k] as string).length === 0)) throw bad(`${fieldPath}.${k} MUST be a non-empty string.`, `${fieldPath}.${k}`);
+  }
+  if (typeof a.agentId !== 'string') throw bad(`${fieldPath}.agentId is required.`, `${fieldPath}.agentId`);
+  if (a.version !== undefined && a.channel !== undefined) {
+    throw bad(`${fieldPath} binds by at most one of \`version\` and \`channel\` (RFC 0082 §A).`);
+  }
+  if (a.channel !== undefined && !agentDeploymentEnabled()) {
+    throw bad(`${fieldPath}.channel needs capabilities.agents.deployment, which this host does not advertise.`, `${fieldPath}.channel`);
+  }
+  const out: AgentRef = { agentId: a.agentId };
+  for (const k of AGENT_REF_STRINGS) if (k !== 'agentId' && typeof a[k] === 'string') out[k] = a[k] as string;
+  return out;
 }

@@ -4,6 +4,11 @@
  * sniffed bytes); SVG rejected on this path (no sanitizer dependency — §2);
  * byte cap; the returned capability URL serves ANONYMOUSLY (the public-logo
  * requirement); slot replacement frees the previous copy (old URL 404s).
+ *
+ * TST-BXE-2. Red when: the superadmin check is dropped from the publish route
+ * (w66 as-su), an undeclared type (SVG) gets a sniffer (as-svg), the magic-byte
+ * sniff is skipped (as-sniff), the byte cap loosens (as-cap), an unknown slot is
+ * accepted (as-slot), or replacement stops freeing the old copy (as-free).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -74,6 +79,7 @@ describe('app-brand assets (ADR 0511)', () => {
     const big = Buffer.concat([Buffer.from(PNG_1PX, 'base64'), Buffer.alloc(600 * 1024)]).toString('base64');
     const res = await publish({ slot: 'mark', contentBase64: big, contentType: 'image/png' });
     expect(res.status).toBe(413);
+    expect(((await res.json()) as { error: string }).error).toBe('too_large');
   });
 
   it('rejects an unknown slot (400)', async () => {
@@ -91,5 +97,8 @@ describe('app-brand assets (ADR 0511)', () => {
     for (const ck of getSetCookies(login.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
     const res = await publish({ slot: 'mark', contentBase64: PNG_1PX, contentType: 'image/png' }, { 'content-type': 'application/json', cookie });
     expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: string; message: string };
+    expect(body.error).toBe('forbidden');
+    expect(body.message).toMatch(/requires a superadmin principal/);
   });
 });

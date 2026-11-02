@@ -130,6 +130,7 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { stripComments } from './helpers/stripComments.js';
 
 const SRC_ROOT = join(__dirname, '..', 'src');
 
@@ -154,19 +155,6 @@ function walk(dir: string): string[] {
 const rel = (file: string): string => file.slice(SRC_ROOT.length + 1).split('\\').join('/');
 
 const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-/**
- * Strip comments BEFORE scanning. This repo has been bitten by ratchet gates that
- * counted comments as code — and this one would have been the next: the very
- * docblock that explains a migration away from `registerWorkflow({...})` quotes the
- * call, so the fixed module kept reading as a pin site. Block comments first, then
- * line comments (guarded against `://` in a URL literal).
- */
-export function stripComments(src: string): string {
-  return src
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')
-    .replace(/(^|[^:'"`\\])\/\/[^\n]*/g, '$1');
-}
 
 /**
  * Index of the closing quote of the string literal starting at `i`.

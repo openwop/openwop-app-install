@@ -5,8 +5,18 @@
  * the oldest MAX) closes it: the persisted count NEVER exceeds the cap, and the
  * overflowing renders fail typed. Direct-service test (no HTTP) so the parallel
  * race is exercised cheaply.
+ *
+ * Tracker TST-CQD-2 (w68). Sabotage-witnessed: red when the post-write recheck
+ * is skipped (both cases) and when the eviction takes the OLDEST rows instead of
+ * the newest overflow (both cases).
+ *
+ * Determinism (w68): the eviction sorts by `createdAt`, then the random
+ * `renderId`. A racer stamped in the same millisecond as the last pre-filled row
+ * could out-sort it and evict a "kept" row. Only `Date` is faked, and each
+ * pre-filled render gets its own second, so every kept row is strictly older
+ * than every racer.
  */
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
 import { createBrief, __clearCreativeBriefs } from '../src/features/creative-briefs/creativeBriefsService.js';
@@ -29,6 +39,16 @@ beforeAll(async () => {
 });
 afterAll(() => { restoreCap(); });
 beforeEach(async () => { await __clearCreativeRenders(); await __clearCreativeBriefs(); });
+afterEach(() => { vi.useRealTimers(); });
+
+/** Fake only `Date`, starting at the real (possibly clock-shifted) now. */
+function stampClock(): (second: number) => void {
+  const base = Date.now();
+  vi.useFakeTimers({ toFake: ['Date'] });
+  return (second) => vi.setSystemTime(base + second * 1000);
+}
+const isRejected = (r: PromiseSettledResult<unknown>): r is PromiseRejectedResult => r.status === 'rejected';
+const isFulfilled = <T>(r: PromiseSettledResult<T>): r is PromiseFulfilledResult<T> => r.status === 'fulfilled';
 
 async function seedBrief(): Promise<string> {
   const b = await createBrief(TENANT, ORG, 'tester', { title: 'Cap brief', assetType: 'image', sceneDescription: 'Scene.' });
@@ -51,17 +71,19 @@ describe('render cap — convergent post-write recheck (R0399-2)', () => {
     // convergent recheck left the old assertions green. With one slot free, all
     // three read `cap-1 < cap`, all three pass pre-flight and write, and only
     // the post-write recheck can bring the total back down to the cap.
-    for (let i = 0; i < cap - 1; i++) await render(briefId, i);
+    const at = stampClock();
+    for (let i = 0; i < cap - 1; i++) { at(i); await render(briefId, i); }
     expect((await listRenders(TENANT, ORG, briefId)).length).toBe(cap - 1);
 
+    at(cap);
     const results = await Promise.allSettled([render(briefId, 1001), render(briefId, 1002), render(briefId, 1003)]);
 
     // 3 writers raced for 1 slot ⇒ exactly one survives, the other two are
     // pruned and fail typed. (Without the recheck the store would hold cap+2.)
-    const rejected = results.filter((r) => r.status === 'rejected');
+    const rejected = results.filter(isRejected);
     expect(rejected.length).toBe(2);
     for (const r of rejected) {
-      expect(String((r as PromiseRejectedResult).reason?.message ?? '')).toMatch(/Render cap reached/);
+      expect(r.reason).toMatchObject({ message: `Render cap reached for this brief (${TEST_CAP}) — delete old renders first.` });
     }
     expect((await listRenders(TENANT, ORG, briefId)).length).toBe(cap);
   }, 30_000);
@@ -75,11 +97,13 @@ describe('render cap — convergent post-write recheck (R0399-2)', () => {
     // FULL brief is refused by the pre-flight check, so it proves nothing about
     // WHICH rows the eviction picks. Racing two writers for the last slot forces
     // the overflow through the recheck, where delete-old-first is decided.
+    const at = stampClock();
     const kept: string[] = [];
-    for (let i = 0; i < cap - 1; i++) kept.push((await render(briefId, i)).renderId);
+    for (let i = 0; i < cap - 1; i++) { at(i); kept.push((await render(briefId, i)).renderId); }
 
+    at(cap);
     const results = await Promise.allSettled([render(briefId, 9998), render(briefId, 9999)]);
-    expect(results.filter((r) => r.status === 'rejected').length).toBe(1);
+    expect(results.filter(isRejected).length).toBe(1);
 
     const surviving = new Set((await listRenders(TENANT, ORG, briefId)).map((r) => r.renderId));
     expect(surviving.size).toBe(cap);
@@ -87,8 +111,8 @@ describe('render cap — convergent post-write recheck (R0399-2)', () => {
     // older row.
     for (const id of kept) expect(surviving.has(id), id).toBe(true);
     // …and the one winner of the race is the remaining member.
-    const winner = results.find((r) => r.status === 'fulfilled');
-    expect(winner).toBeDefined();
-    expect(surviving.has((winner as PromiseFulfilledResult<{ renderId: string }>).value.renderId)).toBe(true);
+    const winners = results.filter(isFulfilled);
+    expect(winners.length).toBe(1);
+    expect(surviving.has(winners[0]!.value.renderId)).toBe(true);
   }, 30_000);
 });

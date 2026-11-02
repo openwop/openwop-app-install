@@ -93,7 +93,8 @@ describe('end-to-end through the REAL loader, registry and revision store', () =
     // (all 55 shipped that way), plus metadata only a tenant would have.
     const expanded = expandChain(chain, { deferred: true });
     const workflowId = seedWorkflowId(chain.chainId);
-    const notifyNodeId = expanded.nodes.find((n) => n.typeId === NOTIFY)!.nodeId;
+    const expandedNotify = expanded.nodes.find((n) => n.typeId === NOTIFY)!;
+    const notifyNodeId = expandedNotify.nodeId;
     await registerWorkflowDurable({
       ...expanded,
       workflowId,
@@ -111,7 +112,12 @@ describe('end-to-end through the REAL loader, registry and revision store', () =
     const repaired = after!.nodes.find((n) => n.nodeId === notifyNodeId);
     expect(repaired, 'the node id changed — replay would lose its checkpoints').toBeDefined();
     expect(repaired!.typeId).toBe(NOTIFY);
+    // The PACK's authored config + inputs, exactly — read from the fresh
+    // expansion (the source of truth the migration copies), never from the
+    // migration's own output.
     expect(repaired!.config).toHaveProperty('audience');
+    expect(repaired!.config).toEqual(expandedNotify.config);
+    expect(repaired!.inputs).toEqual(expandedNotify.inputs);
     expect(after!.nodes).toHaveLength(expanded.nodes.length);
     // The two metadata keys a wholesale rebuild would have destroyed.
     expect(after!.metadata?.name).toBe('Tenant renamed this');

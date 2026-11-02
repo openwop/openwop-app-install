@@ -14,6 +14,10 @@
  * every imperative `registerToggleDefault({ … })` call in src (read from
  * source — they run inside route registrars a boot-free test cannot run), and
  * the user-visible bundle labels in `distributions/bundles.json`.
+ *
+ * Tracker: TST-DBE-1. Red when: a declared or imperative toggle label /
+ * description, or a bundle label, cites an ADR/RFC; or a description claims a
+ * default state (probes w70g2-fc-*).
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -65,10 +69,13 @@ describe('feature copy cites no ADR / RFC numbers', () => {
   const bundles = JSON.parse(readFileSync(BUNDLES, 'utf8')) as { bundles: Record<string, { label?: string }> };
 
   it('non-vacuity: the registry, the imperative registrars and the catalog are all read', () => {
-    expect(declared.length).toBeGreaterThan(50);
+    // Floors at ~95% of the truth, measured 2026-10-30 (w70): 94 `toggleDefault`
+    // declarations in src/features, 10 imperative registrars, 16 bundles. A floor
+    // far below the truth (it was 50 / 5) let most of the registry go unread.
+    expect(declared.length).toBeGreaterThanOrEqual(89);
     expect(declared.filter((t) => t.description).length).toBeGreaterThan(50);
     expect(imperative.length).toBeGreaterThanOrEqual(10);
-    expect(Object.keys(bundles.bundles).length).toBeGreaterThan(5);
+    expect(Object.keys(bundles.bundles).length).toBeGreaterThanOrEqual(15);
   });
 
   it('positive control: the matcher flags the copy this ratchet exists for', () => {

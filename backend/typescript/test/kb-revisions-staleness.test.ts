@@ -92,8 +92,8 @@ describe('kernel staleness propagation', () => {
   it('flags only citing briefs; idempotent', async () => {
     const citing = await createBrief(T, ORG, 'u1', { name: 'Cites', productName: 'X', messaging: { primaryValueProp: 'v' } });
     const other = await createBrief(T, ORG, 'u1', { name: 'Other', productName: 'X', messaging: { primaryValueProp: 'v' } });
-    await setKernel(T, citing.id, { headline: 'H', supportingStatement: 'S', proofPoints: [], primaryCta: 'C', secondaryCta: '', tone: 't', channelTones: {}, sourceDocIds: ['doc-9'], generatedAt: new Date().toISOString() });
-    await setKernel(T, other.id, { headline: 'H', supportingStatement: 'S', proofPoints: [], primaryCta: 'C', secondaryCta: '', tone: 't', channelTones: {}, sourceDocIds: ['doc-OTHER'], generatedAt: new Date().toISOString() });
+    await setKernel(T, citing.id, { headline: 'H', supportingStatement: 'S', proofPoints: ['P'], primaryCta: 'C', secondaryCta: '', tone: 't', channelTones: {}, sourceDocIds: ['doc-9'], generatedAt: new Date().toISOString() });
+    await setKernel(T, other.id, { headline: 'H', supportingStatement: 'S', proofPoints: ['P'], primaryCta: 'C', secondaryCta: '', tone: 't', channelTones: {}, sourceDocIds: ['doc-OTHER'], generatedAt: new Date().toISOString() });
 
     const affected = await markKernelsStaleForDoc(T, 'doc-9');
     expect(affected.map((b) => b.id)).toEqual([citing.id]);

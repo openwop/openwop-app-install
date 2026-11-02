@@ -30,7 +30,11 @@ beforeAll(async () => {
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+const PRIOR_SUPERADMINS = process.env.OPENWOP_SUPERADMIN_TENANTS;
+afterAll(async () => {
+  if (PRIOR_SUPERADMINS === undefined) delete process.env.OPENWOP_SUPERADMIN_TENANTS; else process.env.OPENWOP_SUPERADMIN_TENANTS = PRIOR_SUPERADMINS;
+  await new Promise<void>((res) => server.close(() => res()));
+});
 
 interface WidgetBody {
   widgetId: string;
@@ -73,6 +77,9 @@ async function addMember(owner: Client, tenantId: string, orgId: string, role: s
 }
 async function ownerWithMember(role: string): Promise<{ owner: Client; member: Client; orgId: string; tenantId: string }> {
   const tenantId = `org:wg-${Date.now()}-${n++}`;
+  // ADR 1018 D8 — these widgets answer on the managed key, which only a listed
+  // superadmin tenant may use.
+  process.env.OPENWOP_SUPERADMIN_TENANTS = [process.env.OPENWOP_SUPERADMIN_TENANTS, tenantId].filter(Boolean).join(',');
   const owner = client();
   await signup(owner, tenantId);
   const member = client();
@@ -107,7 +114,7 @@ describe('ADR 0469 Phase B — widget grant editor routes', () => {
 
   it('a read-only member cannot SAVE a grant (workspace:write); an editor can, and it persists', async () => {
     const { owner, member, orgId, tenantId } = await ownerWithMember('editor');
-    const created = await owner.post(widgetsBase(orgId), { agentId: 'support', allowedDomains: ['acme.com'] });
+    const created = await owner.post(widgetsBase(orgId), { agentId: 'vendor.openwop-app.code-exec.agents.default', allowedDomains: ['acme.com'] });
     expect(created.status).toBe(201);
     const widgetId = created.body!.widget!.widgetId;
 
@@ -133,7 +140,7 @@ describe('ADR 0469 Phase B — widget grant editor routes', () => {
 
   it('a write grant WITHOUT a control is rejected (OD1 — no uncontrolled anon write)', async () => {
     const { owner, orgId } = await ownerWithMember('editor');
-    const created = await owner.post(widgetsBase(orgId), { agentId: 'support', allowedDomains: ['acme.com'] });
+    const created = await owner.post(widgetsBase(orgId), { agentId: 'vendor.openwop-app.code-exec.agents.default', allowedDomains: ['acme.com'] });
     const widgetId = created.body!.widget!.widgetId;
     const bad = await owner.patch(`${widgetsBase(orgId)}/${widgetId}`, { anonToolGrant: { write: ['openwop:kanban.add-todo'] } });
     expect(bad.status).toBe(400);

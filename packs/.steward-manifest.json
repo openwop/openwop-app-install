@@ -4,7 +4,7 @@
     "community.openwop.artifact-viewer": {
       "version": "1.0.0",
       "files": 4,
-      "digest": "96b17663c6a9d3edaa41a909cfb0b0bed1d6f526261e916f2c9aa3163b754839"
+      "digest": "c3e0ba0e5f2eb30ff06c06b3116b84545b09e16cb65ff85332c77ec4a96bc5f9"
     },
     "community.openwop.canvas-checklist": {
       "version": "1.0.0",
@@ -297,9 +297,9 @@
       "digest": "42cd3ac75e6a353cb280768b8748f4e46881441412845ad9b10ee50b4ecbc33e"
     },
     "feature.assistant.nodes": {
-      "version": "2.0.1",
+      "version": "2.1.0",
       "files": 2,
-      "digest": "a35555fd5c73c219756d7cda6cdea1db976649d83952da6c02a95ccf2113156f"
+      "digest": "16d26a745b5602377826836face0f8a83eb82075f15e52dae2a51f2bc4b61d60"
     },
     "feature.bi.nodes": {
       "version": "1.0.1",
@@ -317,9 +317,9 @@
       "digest": "de337885ef410e4593b5518cac7014eb2b57946f306ecbacd5567947c7a0e749"
     },
     "feature.campaign-autopilot.nodes": {
-      "version": "1.1.0",
+      "version": "1.2.0",
       "files": 2,
-      "digest": "24e6ee5ba2021a3792357099d411a3d254d5d4f6665b798c921f474bfc30c3af"
+      "digest": "5e47bbfe96511d4e30d77e28c451e228d67d828d7ef886e53e43f24e6ebdcca9"
     },
     "feature.campaign-brief.artifact-types": {
       "version": "1.0.0",
@@ -327,24 +327,24 @@
       "digest": "3f3dcee36f596797314bf9a514d1663016d992051e7d38d3f7893bb795fc9410"
     },
     "feature.campaign-brief.nodes": {
-      "version": "1.6.0",
-      "files": 2,
-      "digest": "18ef378c20a4e30da8535e0331b5d18ba11af7089263527337a5bdbb3348a135"
-    },
-    "feature.campaign-channels.nodes": {
-      "version": "1.16.0",
-      "files": 4,
-      "digest": "6d4abd44d561cc36fa62f4c019c977fa11cace6eb2b6f78247fb797830f7f4c8"
-    },
-    "feature.campaign-connectors.nodes": {
-      "version": "1.6.0",
-      "files": 2,
-      "digest": "caf6395ad20a8d1efaa114e78fc239608cd20a9e391a214206d5da9756ffd0d2"
-    },
-    "feature.campaign-intel.nodes": {
       "version": "1.7.0",
       "files": 2,
-      "digest": "637b4efe5989193718ed596600973d9a30f5ed59abf1a5969a5f1f8884d5afb4"
+      "digest": "9ade47d2445a4d53c637b0edc495bd111c76b1c819c8ef3046a6d371f341497b"
+    },
+    "feature.campaign-channels.nodes": {
+      "version": "1.19.0",
+      "files": 4,
+      "digest": "a0bb2dce81ee4eb3aaee1cb5ec52e3e8a53c0aee32b8b1f7f6c404fee206f9b2"
+    },
+    "feature.campaign-connectors.nodes": {
+      "version": "1.7.0",
+      "files": 2,
+      "digest": "7893a2146d7033f4ef8739053b0c35ee52467c9e0cf5760c5159659fcbd93b5f"
+    },
+    "feature.campaign-intel.nodes": {
+      "version": "1.8.0",
+      "files": 2,
+      "digest": "a3f0e320d7d5be74c5c5db5cf1b37fbacae3192ef034b779a8a7e2c3ff9cfdfe"
     },
     "feature.campaign-journeys.nodes": {
       "version": "1.9.0",
@@ -357,9 +357,9 @@
       "digest": "6ea8a1217335b4adb294b83ad033d58ffb14f18a3a4852a3047235acfa68b600"
     },
     "feature.campaign-orchestration.nodes": {
-      "version": "1.7.0",
+      "version": "1.8.0",
       "files": 2,
-      "digest": "a03712a8b08de96e241b86fa624fed8bc9428bd87f32888a9dbee9e49f60b244"
+      "digest": "e14a57aed5ab4c83e450145e2504203bf9267c0f8094573357709aa709a27fa5"
     },
     "feature.campaign-playbooks.nodes": {
       "version": "1.0.0",
@@ -367,9 +367,9 @@
       "digest": "15adb03bdbf7c92750aca7654983ff53dbc4d3709b0de88e5af517ec52e461e4"
     },
     "feature.campaign-studio.nodes": {
-      "version": "1.0.2",
+      "version": "1.1.0",
       "files": 2,
-      "digest": "21e9bbcf9373f7c002bacb5b535b6cf330103e76cf6fb99fc21ab5bfeb31d293"
+      "digest": "554b42c28cf534631f3cabdffb3aba354d75cfe8be8bf6a84ab60319c2882366"
     },
     "feature.cdp.nodes": {
       "version": "1.1.1",
@@ -502,9 +502,9 @@
       "digest": "27c22aef2e9a1a2fd666be28324068068653471804ceb7257b017dc2d9981770"
     },
     "feature.interactive-artifacts.nodes": {
-      "version": "1.0.1",
+      "version": "1.0.2",
       "files": 2,
-      "digest": "1e472b194cb5875a9a2c296073d714d08347e1be7c085e43ce86e09264e550a8"
+      "digest": "293de357c3100dd934fc0107b4e814959aac6407f99f6248ae9ff54680735b9c"
     },
     "feature.job-search.nodes": {
       "version": "1.1.1",
@@ -517,9 +517,9 @@
       "digest": "ca41927367c91b458374dc6ade87ee8ee58b3ae8b9f2c8ab173eca6473d8ed7b"
     },
     "feature.kicktodo.nodes": {
-      "version": "1.38.0",
+      "version": "1.39.0",
       "files": 41,
-      "digest": "f85944364ee130d4098a4d369cda27e773922397108412b49bd2db12dc6c99e6"
+      "digest": "aac2f7f8aa51b2d5c811ce91f152997d65b7ae74998e22dce6f65b53b9f410fc"
     },
     "feature.knowledge-sync.nodes": {
       "version": "1.0.1",
@@ -716,15 +716,10 @@
       "files": 40,
       "digest": "3db46b693ab14710c26335adf037417fdb71c22eb61a4fecfebe37c819d4db4d"
     },
-    "vendor.myndhyve.ai": {
-      "version": "1.0.2",
-      "files": 13,
-      "digest": "193bc9ee657acb2aa4f7485c06b1fa2f8f0367816b561487cbf6a8b7107a0634"
-    },
     "vendor.myndhyve.brand": {
-      "version": "1.1.2",
-      "files": 46,
-      "digest": "780e8fd331c5e7b305429429d1328ac406be1178e85b1ace3d0d58946cee87f5"
+      "version": "2.0.0",
+      "files": 25,
+      "digest": "544a134fe3da072b10441e0b773d0b5e8eb9b04d37a2affaad629f28362b95db"
     },
     "vendor.myndhyve.canvas": {
       "version": "1.0.2",
@@ -747,9 +742,9 @@
       "digest": "9420daaf657bc142b5a065a44e2545f9caafd70280c6d702c9dc7214620e7258"
     },
     "vendor.myndhyve.kanban": {
-      "version": "1.0.2",
-      "files": 25,
-      "digest": "fe9e630f1432c0c9434096129a92afc1b8ab686f75d222bf26f5599d951c04b8"
+      "version": "2.0.0",
+      "files": 22,
+      "digest": "66c59c9169f62f4627881203fbdbb019e0fa736773fa0bcaab175650777d11f3"
     },
     "vendor.myndhyve.knowledge-tools": {
       "version": "1.0.3",
@@ -822,9 +817,9 @@
       "digest": "5eb55e7afb412eefa94f300c7314f5239b64c2668c13e9b2e453383ac28162ba"
     },
     "vendor.myndhyve.web-research": {
-      "version": "1.0.2",
-      "files": 16,
-      "digest": "281ed7fe1c572f751945a54ab4bbcc0df7a450b66e2ac89dcc412e1d5f692249"
+      "version": "2.0.0",
+      "files": 13,
+      "digest": "9f0a534777646713e28fd94f74bc61955194bfa71d7877953a6c141562570b25"
     },
     "vendor.myndhyve.wop-refinement": {
       "version": "1.0.2",
@@ -867,9 +862,9 @@
       "digest": "744c68d48b3dc2fa77abc838eb984d145f6cc50837b23eb9b71eaac681d53449"
     },
     "vendor.openwop-app.campaign-brief.agents": {
-      "version": "1.3.3",
+      "version": "1.3.4",
       "files": 2,
-      "digest": "08694cc1e288870de0b6e7ccf6187bcc1566f911df8e2e32b5c9c44ca28ff53c"
+      "digest": "940cbdc5b8ce2678923706cae2b521286fe2e6f128dd751e3f94ff2b5cd58df9"
     },
     "vendor.openwop-app.campaign-channels.agents": {
       "version": "1.2.2",
@@ -982,9 +977,9 @@
       "digest": "d811a747de6fc77d60532506bc402b2a2dedd498aa576aed1587540175031a9a"
     },
     "vendor.openwop-app.interactive-artifacts.agents": {
-      "version": "1.0.2",
+      "version": "1.0.3",
       "files": 2,
-      "digest": "006f4d730ee80264d07e285e9fbf6f393e525bad17871f8b2a48ea0e31a7d6d1"
+      "digest": "37b60ecc2ce2b91716bc9931db5eac12819940f0ee7841f478e9a6316fde0a7b"
     },
     "vendor.openwop-app.kb.agents": {
       "version": "1.0.3",

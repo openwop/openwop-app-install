@@ -240,7 +240,7 @@ export function registerDurabilitySeam(app: Express, deps: DurabilitySeamDeps): 
         ...(personalTenant ? { personalTenant } : {}),
         owner: ownerStampFromRequest(req),
       });
-      await insertRunWithStartContext(storage, run, { enqueueDispatch: parsed.effectUrl === undefined, definition: wf.definition });
+      await insertRunWithStartContext(storage, run, { enqueueDispatch: parsed.effectUrl === undefined, definition: wf.definition, admission: { plan: 'exempt:conformance-seam' } });
 
       if (parsed.mode === DUPLICATE_DELIVERY_MODE) {
         // TWO REAL DELIVERIES of the one accepted run, CONCURRENTLY — the

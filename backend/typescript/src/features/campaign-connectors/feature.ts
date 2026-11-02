@@ -12,7 +12,7 @@
 
 import type { BackendFeature } from '../types.js';
 import { registerCampaignConnectorsRoutes } from './routes.js';
-import { buildCampaignConnectorsSurface } from './surface.js';
+import { buildCampaignConnectorsSurface, CAMPAIGN_CONNECTORS_SURFACE_POLICY } from './surface.js';
 import { registerCampaignConnectorsErasure } from './erasure.js';
 import { SCHEDULED_CONVERSIONS_TOGGLE } from './conversionDelivery.js';
 
@@ -23,7 +23,7 @@ export const campaignConnectorsFeature: BackendFeature = {
     registerCampaignConnectorsErasure();
     registerCampaignConnectorsRoutes(deps);
   },
-  surface: { id: 'campaign-connectors', build: buildCampaignConnectorsSurface },
+  surface: { id: 'campaign-connectors', build: buildCampaignConnectorsSurface, orgPolicy: CAMPAIGN_CONNECTORS_SURFACE_POLICY },
   // ADR 0907 D7 (lead amendment) — the SCHEDULED conversions delivery
   // (`campaign-sync.conversions-dispatch`) is OFF until switched on per
   // workspace: turning it on starts sending queued conversions to Meta (and to
@@ -45,7 +45,7 @@ export const campaignConnectorsFeature: BackendFeature = {
     id: 'campaign-connectors',
     label: 'Campaign Connectors & Performance',
     description:
-      'Bring real ad-performance data into Campaign Studio — import platform CSV exports (Google / Meta / LinkedIn and more) onto a unified metric schema (spend, impressions, clicks, conversions, ROAS) with dedup + computed fields, and see KPI rollups per platform. Live OAuth sync (Google / Meta / LinkedIn Ads) is honest-off until the connector is brokered.',
+      'Bring real ad-performance data into Campaign Studio — import platform CSV exports (Google / Meta / LinkedIn and more) onto a unified metric schema (spend, impressions, clicks, conversions, ROAS) with dedup + computed fields, and see KPI rollups per platform. Live sync reads Meta and Google Ads through your connected accounts (TikTok and LinkedIn once verified).',
     category: 'Marketing',
     status: 'off',
     bucketUnit: 'tenant',

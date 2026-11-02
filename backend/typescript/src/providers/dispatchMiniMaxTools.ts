@@ -125,7 +125,9 @@ export async function dispatchMiniMaxWithTools(req: ToolsDispatchRequest): Promi
     }
 
     const toolCalls = choice.message.tool_calls ?? [];
-    if (toolCalls.length === 0 || finishReason === 'stop') {
+    // ADR 1011 — a round cut off by the output limit or a safety stop runs nothing:
+    // its last call may be incomplete, and `''` below would parse as no arguments.
+    if (toolCalls.length === 0 || finishReason === 'stop' || finishReason === 'length' || finishReason === 'content_filter') {
       break;
     }
 

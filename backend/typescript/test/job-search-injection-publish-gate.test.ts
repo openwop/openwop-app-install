@@ -11,6 +11,13 @@
  * observed no call would pass equally well on a build that had simply not
  * reached the call yet; a module with no network capability cannot make one at
  * all.
+ *
+ * Tracker TST-DHB-3 (wave 71). Red when: `upsertListing` stops screening
+ * (`w71g3-ij-screen`); the process.env pattern goes (`ij-procenv`); the persona
+ * pattern widens onto ordinary copy (`ij-fp`); listings read public by default
+ * (`ij-default`); publishing ignores the requested flag (`ij-setpub`). The
+ * `fetchListingPage.ts` egress scan is duplicated in job-search-jsonld-tier2
+ * (dedupe row TST-DHB-3b — both kept, SSRF-protected).
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -19,6 +26,7 @@ import { screenPostingText } from '../src/features/job-search/boards/screening.j
 import { upsertListing, listListings, setListingsPublic, listingsArePublic } from '../src/features/job-search/boards/listing.js';
 import { __resetHostExtPersistence, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
+import { stripComments } from './helpers/stripComments.js';
 
 const TENANT = 'user:t-inject';
 const ACTOR = 'user-1';
@@ -73,7 +81,6 @@ describe('ADR 0542 D3 — the injection fixture', () => {
 
 describe('ADR 0542 D3 — ZERO EGRESS, structurally', () => {
   const srcOf = (f: string) => readFileSync(join(process.cwd(), 'src', 'features', 'job-search', 'boards', f), 'utf8');
-  const stripComments = (s: string): string => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
 
   it.each(['screening.ts', 'jsonLd.ts'])('%s has NO network capability at all', (file) => {
     // Stronger than "did not call out": a module that cannot import a client
@@ -113,6 +120,7 @@ describe('ADR 0542 D4 — publishing is a deliberate, gated act', () => {
     await upsertListing(TENANT, ACTOR, base);
     await upsertListing('user:t-other', ACTOR, base);
     await setListingsPublic(TENANT, true, ACTOR);
+    expect(await listingsArePublic(TENANT), 'positive control: the publish landed').toBe(true);
     expect(await listingsArePublic('user:t-other')).toBe(false);
   });
 

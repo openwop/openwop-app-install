@@ -46,7 +46,8 @@ import {
   selectMcpCodec,
   servesMcpVersion,
 } from '../src/host/mcpProfile.js';
-import { dispatch } from '../src/host/mcpServerRouter.js';
+import { dispatch, type RouterDeps } from '../src/host/mcpServerRouter.js';
+import { stripComments } from './helpers/stripComments.js';
 
 const SRC = join(__dirname, '..', 'src', 'host');
 
@@ -125,7 +126,8 @@ describe('ADR 0553 P2 — codec selection fails closed on an explicit unserved r
 
 describe('ADR 0553 P1 — initialize reads the peer version instead of discarding it', () => {
   const init = async (params: Record<string, unknown>) =>
-    (await dispatch({ jsonrpc: '2.0', id: 1, method: 'initialize', params }, {} as never)) as {
+    // `initialize` reads no deps; the single cast from a Partial is the honest ceiling.
+    (await dispatch({ jsonrpc: '2.0', id: 1, method: 'initialize', params }, {} as Partial<RouterDeps> as RouterDeps)) as {
       result?: { protocolVersion?: string };
     };
 
@@ -196,6 +198,3 @@ describe('ADR 0553 P1 — no MCP version literal survives in source', () => {
 /** Comments legitimately cite version dates (that is the reasoning trail); only
  *  executable code may not pin one. Without this the guard would force the
  *  history out of the files, which is the opposite of what is wanted. */
-function stripComments(code: string): string {
-  return code.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
-}

@@ -14,6 +14,11 @@
  * a generic eraser guessing at keys would either miss (false completeness) or
  * destroy business data. Erasing a person who exists AS an entity is the
  * tenant's kernel-level record deletion.
+ *
+ * TST-DAA-7. Red when (sabotage-witnessed, wave 70): the eraser stops
+ * tombstoning type `createdBy` or record `updatedBy`; it clears `values`; it
+ * reads records across tenants instead of the tenant index; `feature.ts` stops
+ * registering it with the host fan-out.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import http from 'node:http';
@@ -48,7 +53,7 @@ const aRow = (createdBy: string, values: Record<string, unknown> = { full_name: 
 describe('ENT2-M1 — erasure reaches entity attribution, and STOPS at values', () => {
   it('anonymizes createdBy/updatedBy on records and createdBy on the type', async () => {
     const row = await aRow(SUBJECT);
-    await updateEntity({ tenantId: TENANT, typeName: 'customers', entityId: row.entityId, values: { full_name: 'Ada L.' }, actor: SUBJECT } as never);
+    await updateEntity({ tenantId: TENANT, typeName: 'customers', entityId: row.entityId, values: { full_name: 'Ada L.' }, actor: SUBJECT });
 
     await eraseEntitiesSubject(TENANT, SUBJECT);
 
@@ -81,11 +86,25 @@ describe('ENT2-M1 — erasure reaches entity attribution, and STOPS at values', 
   });
 
   it('is idempotent and tenant-scoped', async () => {
+    // The same person authored a row in ANOTHER tenant: out of this erasure's scope.
+    const OTHER_TENANT = 'org:ent-erase-other';
+    await createEntityType({
+      tenantId: OTHER_TENANT, name: 'customers', displayName: 'Customers',
+      fields: [{ key: 'full_name', label: 'Full name', type: 'string', required: true }],
+      createdBy: SUBJECT,
+    });
+    const foreign = await createEntity({ tenantId: OTHER_TENANT, typeName: 'customers', entityId: `f-${++n}`, values: { full_name: 'Elsewhere' }, createdBy: SUBJECT });
+
     const row = await aRow(SUBJECT);
     await eraseEntitiesSubject(TENANT, SUBJECT);
     const once = await getEntity({ tenantId: TENANT, typeName: 'customers', entityId: row.entityId });
+    expect(once?.createdBy, 'positive control: the in-tenant row IS erased').toBe(ERASED);
     await eraseEntitiesSubject(TENANT, SUBJECT);
     expect(await getEntity({ tenantId: TENANT, typeName: 'customers', entityId: row.entityId })).toEqual(once);
+
+    const foreignAfter = await getEntity({ tenantId: OTHER_TENANT, typeName: 'customers', entityId: foreign.entityId });
+    expect(foreignAfter?.createdBy, 'another tenant\'s row is out of scope').toBe(SUBJECT);
+    expect((await getEntityType(OTHER_TENANT, undefined, 'customers'))?.createdBy).toBe(SUBJECT);
   });
 
   it('is WIRED — the host fan-out reaches this feature', async () => {

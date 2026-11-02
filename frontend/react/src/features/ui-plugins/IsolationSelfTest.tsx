@@ -2,8 +2,9 @@
  * ADR 0493 — the isolation self-test: turn `/ui-plugins`' four prose claims into
  * machine-checked results where that is honestly possible.
  *
- * The page has always listed four falsifiable legs — isolated · egress-denied ·
- * allowlist-bound · no-BYOK — as PROSE beside a mounted plugin, with nothing
+ * The page listed four falsifiable legs — isolated · egress-denied · allowlist-bound
+ * · no-BYOK (ADR 1021 renamed the second "requests blocked", which is what its
+ * check covers) — as PROSE beside a mounted plugin, with nothing
  * verifying any of them. #2559 made the page stop *hiding* when the witness
  * couldn't mount. This makes the witness actually witness.
  *
@@ -133,7 +134,7 @@ export function IsolationSelfTest({ plugin }: { plugin: ServedPlugin | undefined
 
   const LEGS: Array<{ id: LegResult['id']; label: string }> = [
     { id: 'isolated', label: t('legIsolation') },
-    { id: 'egress', label: t('legEgress') },
+    { id: 'egress', label: t('selfTestEgressLabel') },
     { id: 'allowlist', label: t('legAllowlist') },
     { id: 'nobyok', label: t('legNoByok') },
   ];

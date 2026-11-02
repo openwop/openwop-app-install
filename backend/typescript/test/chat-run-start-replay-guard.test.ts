@@ -11,6 +11,16 @@
  * stubbed starter — the stub is exactly how the prior deep-investigation test
  * could not see this), inside the same ambient context the executor wraps every
  * node execution in.
+ *
+ * Tracker TST-CEC-10. Red when (w67g3, witnessed): `startWorkflowRun` drops its
+ * `assertEffectAllowed` (the replay-fork case); the tool provider swallows a
+ * `LeaseLostError` (CHATCD-3); the manifest stops classifying runStarter as
+ * `queue.run-start`.
+ * Recorded double guard: the agent-tool case is held by TWO refusals in two
+ * files — `workflowComposeTool.ts` asserts before writing the draft, and
+ * `runStarter.ts` asserts again at the start. Removing either alone leaves the
+ * other refusing with the same code (w67 round 1: the compose-only probe was
+ * green; the runStarter probe reds the replay-fork case).
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { mkdtempSync } from 'node:fs';

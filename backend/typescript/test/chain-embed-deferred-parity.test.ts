@@ -20,6 +20,11 @@
  * like, both modes must produce the same thing for the same absent param. A test
  * pinned to `[missing: x]` would pass if someone changed the marker in one mode
  * only, which is the exact defect being fixed.
+ *
+ * TST-CCC-6. Red when: `materializeInputs` or `deferredConfig` stops passing the
+ * required-param names to `substituteTokensDeep` (the inputs / config rows), the
+ * non-deferred freeze loses the marker (every control), or expansion stops letting a
+ * supplied param override its default.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { join } from 'node:path';
@@ -27,6 +32,7 @@ import {
   loadWorkflowChainPacks, listChains, expandChain, _resetChainRegistryForTest,
 } from '../src/host/workflowChainPackLoader.js';
 import { MISSING_REQUIRED_MARKER } from '../src/host/tokenSubstitution.js';
+import type { WorkflowDefinition } from '../src/executor/types.js';
 
 const PACK_ROOT = join(import.meta.dirname, '../../../examples/workflow-chain-packs');
 beforeAll(() => { _resetChainRegistryForTest(); loadWorkflowChainPacks({ roots: [PACK_ROOT] }); });
@@ -65,11 +71,10 @@ const chainById = (id: string) => {
 
 /** The value at one authored position. Expansion PREFIXES node ids, so match on
  *  the authored suffix rather than equality. */
-function valueAt(def: unknown, nodeId: string, bucket: 'config' | 'inputs', key: string): unknown {
-  const nodes = (def as { nodes?: Array<Record<string, any>> }).nodes ?? [];
-  const node = nodes.find((n) => String(n.nodeId).endsWith(`_${nodeId}`));
+function valueAt(def: WorkflowDefinition, nodeId: string, bucket: 'config' | 'inputs', key: string): unknown {
+  const node = def.nodes.find((n) => n.nodeId.endsWith(`_${nodeId}`));
   expect(node, `node '*_${nodeId}' not in the expansion — id scheme changed?`).toBeDefined();
-  return (node as any)[bucket]?.[key];
+  return node?.[bucket]?.[key];
 }
 
 describe('ADR 0616 — deferred expansion marks a missing REQUIRED embedded param', () => {
@@ -115,16 +120,16 @@ describe('ADR 0616 — deferred expansion marks a missing REQUIRED embedded para
 
   it('the KV-key case: the fix makes the shared key VISIBLE, it does not un-share it', () => {
     // Honest scope. `config.key` is a KV key, so a missing `feedUrl` gives every
-    // deferred instantiation the SAME key — one tenant's seen-set is another's.
-    // Marking it does not separate them: the position is frozen, so no run-time
-    // value can arrive. Two instantiations still collide. What changes is that the
+    // deferred instantiation the SAME key. Marking it does not separate them: the
+    // position is frozen, so no run-time value can arrive. What changes is that the
     // key is now greppably wrong instead of looking like a valid namespace prefix.
+    // (w67 TST-CCX-3: this case used to ASSERT the sharing too, which would have
+    // turned red on the fix that un-shares the key. The sharing is a grade-code row,
+    // not a property this test defends.)
     const chain = chainById('content.feed-watch');
     const missingKey = (): string =>
       String(valueAt(expandChain(chain, { deferred: true, params: {} }), 'seen', 'config', 'key'));
 
-    expect(missingKey(), 'still shared — this is the documented limit of ADR 0616, not a regression')
-      .toBe(missingKey());
     expect(missingKey(), 'but it must no longer look like a valid key')
       .toContain(MISSING_REQUIRED_MARKER('feedUrl'));
 

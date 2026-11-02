@@ -23,6 +23,12 @@
  *   - `registerPlanLinkHooks()` removed: "canvas delete and campaign delete…";
  *   - `assertCampaignRef` in `addAsset` removed: "campaign-ops…";
  *   - the channel tool's tag spread removed: "a standalone channel run…".
+ * Every refusal is asserted by the `details.reason` the ONE campaign guard
+ * (`assertCampaignRef`, `host/campaignRefs.ts`) writes, `campaign_not_found`,
+ * so a 404 from the plan/canvas lookup or a toggle cannot stand in for it. The
+ * plan PUT is a recorded DOUBLE GUARD (the route's own `assertCampaignRef` and
+ * the one inside `setPlanLink`); both call the same function, so w73 probe
+ * w73g1-b-bl-orgref breaks both in one edit and is witnessed.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -72,29 +78,41 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Body {
-  user: { userId: string };
-  orgId: string;
-  marketingCampaignId?: string;
-  campaignId?: string | null;
-  links: Record<string, { status: string; items?: Array<Record<string, unknown>> }>;
+/** Read a nested field of a JSON body without a cast (`undefined` when any step is missing). */
+function at(v: unknown, ...path: string[]): unknown {
+  let cur = v;
+  for (const k of path) {
+    if (typeof cur !== 'object' || cur === null || Array.isArray(cur)) return undefined;
+    cur = Object.getOwnPropertyDescriptor(cur, k)?.value;
+  }
+  return cur;
+}
+function str(v: unknown, what: string): string {
+  if (typeof v !== 'string') throw new Error(`expected a string for ${what}, got ${JSON.stringify(v)}`);
+  return v;
 }
 function client() {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: Body }> => {
+  const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: unknown }> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m?.[1]) cookie = m[1]; }
-    return { status: res.status, body: (await res.json().catch(() => undefined)) as Body }; // JSON boundary
+    for (const ck of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(ck); if (m?.[1]) cookie = m[1]; }
+    return { status: res.status, body: await res.json().catch(() => undefined) };
   };
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b), put: (p: string, b?: unknown) => call('PUT', p, b), del: (p: string) => call('DELETE', p) };
+}
+
+/** `createDraftCampaign` returns the surface's untyped result; read its ids without a cast. */
+function campaignIdsOf(out: unknown): string[] {
+  if (typeof out !== 'object' || out === null || !('campaignIds' in out) || !Array.isArray(out.campaignIds)) throw new Error(`createDraftCampaign returned no campaignIds: ${JSON.stringify(out)}`);
+  return out.campaignIds.filter((id): id is string => typeof id === 'string');
 }
 
 async function setup() {
   const tenantId = `org:bl-${Date.now()}-${n++}`;
   const owner = client();
-  const userId = (await owner.post('/host/openwop-app/test/login', { email: `bl-${n++}@acme.test`, tenantId })).body.user.userId;
-  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Client A' })).body.orgId;
-  const otherOrgId = (await owner.post('/host/openwop-app/orgs', { name: 'Client B' })).body.orgId;
+  const userId = str(at((await owner.post('/host/openwop-app/test/login', { email: `bl-${n++}@acme.test`, tenantId })).body, 'user', 'userId'), 'userId');
+  const orgId = str(at((await owner.post('/host/openwop-app/orgs', { name: 'Client A' })).body, 'orgId'), 'orgId');
+  const otherOrgId = str(at((await owner.post('/host/openwop-app/orgs', { name: 'Client B' })).body, 'orgId'), 'otherOrgId');
   const brief = await createBrief(tenantId, orgId, userId, { name: `Launch ${n}`, channels: [{ type: 'email_sequence', enabled: true, config: {} }] });
   const { campaign } = await ensureDraftCampaign(tenantId, brief, userId);
   const otherBrief = await createBrief(tenantId, otherOrgId, userId, { name: `Other ${n}`, channels: [{ type: 'email_sequence', enabled: true, config: {} }] });
@@ -107,14 +125,18 @@ describe('ADR 0941 P2 — email sends', () => {
     const s = await setup();
     const tpl = await createTemplate({ tenantId: s.tenantId, orgId: s.orgId, name: 'T', subject: 'S', body: 'B', createdBy: s.userId });
     const route = `/host/openwop-app/email/orgs/${s.orgId}/campaigns`;
-    expect((await s.owner.post(route, { templateId: tpl.templateId, marketingCampaignId: 'cmp_missing' })).status).toBe(404);
-    expect((await s.owner.post(route, { templateId: tpl.templateId, marketingCampaignId: s.otherCampaign.id })).status).toBe(404);
+    const missing = await s.owner.post(route, { templateId: tpl.templateId, marketingCampaignId: 'cmp_missing' });
+    expect(missing.status).toBe(404);
+    expect(missing.body, JSON.stringify(missing.body)).toMatchObject({ error: 'not_found', message: 'Campaign not found.', details: { reason: 'campaign_not_found', campaignId: 'cmp_missing' } });
+    const foreign = await s.owner.post(route, { templateId: tpl.templateId, marketingCampaignId: s.otherCampaign.id });
+    expect(foreign.status).toBe(404);
+    expect(foreign.body, JSON.stringify(foreign.body)).toMatchObject({ error: 'not_found', message: 'Campaign not found.', details: { reason: 'campaign_not_found', campaignId: s.otherCampaign.id } });
     const ok = await s.owner.post(route, { templateId: tpl.templateId, marketingCampaignId: s.campaign.id });
     expect(ok.status).toBe(201);
-    expect(ok.body.marketingCampaignId).toBe(s.campaign.id);
+    expect(at(ok.body, 'marketingCampaignId')).toBe(s.campaign.id);
     // The service is the exit every caller shares.
     await expect(createCampaign({ tenantId: s.tenantId, orgId: s.orgId, templateId: tpl.templateId, createdBy: 'x', marketingCampaignId: s.otherCampaign.id }))
-      .rejects.toMatchObject({ httpStatus: 404 });
+      .rejects.toMatchObject({ httpStatus: 404, details: { reason: 'campaign_not_found', campaignId: s.otherCampaign.id } });
   });
 
   it('the publish surface takes the campaign from the run tag, else the brief, never from an argument', async () => {
@@ -123,10 +145,10 @@ describe('ADR 0941 P2 — email sends', () => {
     await storage.insertRun({ runId: `run-tag-${n}`, workflowId: 'w', tenantId: s.tenantId, status: 'pending', inputs: null, metadata: { campaignOrchestration: stampCampaignRun(s.campaign, { role: 'stage' }) }, configurable: {}, createdAt: now, updatedAt: now });
     const emails = [{ position: 1, subjectLines: ['Hi'], body: 'Body' }];
     // A forged argument names the other org's campaign; it is ignored.
-    const tagged = await buildEmailSurface({ tenantId: s.tenantId, runId: `run-tag-${n}` }).createDraftCampaign({ orgId: s.orgId, name: 'Seq', emails, marketingCampaignId: s.otherCampaign.id }) as { campaignIds: string[] };
-    expect((await getEmailSend(s.tenantId, s.orgId, tagged.campaignIds[0] ?? ''))?.marketingCampaignId).toBe(s.campaign.id);
-    const byBrief = await buildEmailSurface({ tenantId: s.tenantId, runId: 'run-without-tag' }).createDraftCampaign({ orgId: s.orgId, name: 'Seq2', emails, sourceBriefId: s.brief.id }) as { campaignIds: string[] };
-    expect((await getEmailSend(s.tenantId, s.orgId, byBrief.campaignIds[0] ?? ''))?.marketingCampaignId).toBe(s.campaign.id);
+    const tagged = await buildEmailSurface({ tenantId: s.tenantId, runId: `run-tag-${n}` }).createDraftCampaign({ orgId: s.orgId, name: 'Seq', emails, marketingCampaignId: s.otherCampaign.id });
+    expect((await getEmailSend(s.tenantId, s.orgId, campaignIdsOf(tagged)[0] ?? ''))?.marketingCampaignId).toBe(s.campaign.id);
+    const byBrief = await buildEmailSurface({ tenantId: s.tenantId, runId: 'run-without-tag' }).createDraftCampaign({ orgId: s.orgId, name: 'Seq2', emails, sourceBriefId: s.brief.id });
+    expect((await getEmailSend(s.tenantId, s.orgId, campaignIdsOf(byBrief)[0] ?? ''))?.marketingCampaignId).toBe(s.campaign.id);
   });
 });
 
@@ -136,13 +158,18 @@ describe('ADR 0941 P2 — plan links', () => {
   it('a plan links to a campaign of its org; a missing or other-org campaign is a 404', async () => {
     const s = await setup();
     const canvas = await createCanvasForTenant(s.tenantId, { canvasTypeId: 'canvas.campaign', name: 'Plan', initialState: { name: 'Plan', channels: [{ name: 'c', type: 'email' }] } });
-    expect((await s.owner.put(planRoute(s.orgId, canvas.canvasId), { campaignId: 'cmp_missing' })).status).toBe(404);
-    expect((await s.owner.put(planRoute(s.orgId, canvas.canvasId), { campaignId: s.otherCampaign.id })).status).toBe(404);
+    const missing = await s.owner.put(planRoute(s.orgId, canvas.canvasId), { campaignId: 'cmp_missing' });
+    expect(missing.status).toBe(404);
+    expect(missing.body, JSON.stringify(missing.body)).toMatchObject({ error: 'not_found', message: 'Campaign not found.', details: { reason: 'campaign_not_found', campaignId: 'cmp_missing' } });
+    const foreign = await s.owner.put(planRoute(s.orgId, canvas.canvasId), { campaignId: s.otherCampaign.id });
+    expect(foreign.status).toBe(404);
+    expect(foreign.body, JSON.stringify(foreign.body)).toMatchObject({ error: 'not_found', message: 'Campaign not found.', details: { reason: 'campaign_not_found', campaignId: s.otherCampaign.id } });
+    expect(await getPlanLink(s.tenantId, canvas.canvasId), 'a refused link writes nothing').toBeNull();
     const ok = await s.owner.put(planRoute(s.orgId, canvas.canvasId), { campaignId: s.campaign.id });
     expect(ok.status).toBe(200);
-    expect((await s.owner.get(planRoute(s.orgId, canvas.canvasId))).body.campaignId).toBe(s.campaign.id);
+    expect(at((await s.owner.get(planRoute(s.orgId, canvas.canvasId))).body, 'campaignId')).toBe(s.campaign.id);
     const links = await s.owner.get(`/host/openwop-app/campaign-orchestration/campaigns/${s.campaign.id}/links`);
-    expect(links.body.links.plans).toEqual({ status: 'ok', items: [{ canvasId: canvas.canvasId, linkedAt: expect.any(String) }] });
+    expect(at(links.body, 'links', 'plans')).toEqual({ status: 'ok', items: [{ canvasId: canvas.canvasId, linkedAt: expect.any(String) }] });
   });
 
   it.each(['manual-clear', 'campaign-delete'] as const)('a stale %s cannot clear a concurrent replacement', async (kind) => {
@@ -237,7 +264,12 @@ describe('ADR 0941 P2 — plan links', () => {
     const good = await createCanvasForTenant(s.tenantId, { canvasTypeId: 'canvas.campaign', projectId: sameOrg.id, initialState: state });
     const bad = await createCanvasForTenant(s.tenantId, { canvasTypeId: 'canvas.campaign', projectId: otherOrg.id, initialState: state });
     expect((await s.owner.put(planRoute(s.orgId, good.canvasId), { campaignId: s.campaign.id })).status).toBe(200);
-    expect((await s.owner.put(planRoute(s.orgId, bad.canvasId), { campaignId: s.campaign.id })).status).toBe(404);
+    const refused = await s.owner.put(planRoute(s.orgId, bad.canvasId), { campaignId: s.campaign.id });
+    expect(refused.status).toBe(404);
+    // The plan's own lookup refuses it (the project is another org's), not the campaign guard.
+    expect(refused.body, JSON.stringify(refused.body)).toMatchObject({ error: 'not_found', message: 'Canvas not found.' });
+    expect(at(refused.body, 'details', 'reason'), 'not the campaign guard').toBeUndefined();
+    expect(await getPlanLink(s.tenantId, bad.canvasId), 'nothing is written for the refused plan').toBeNull();
   });
 
   it('with email, campaign-studio or campaign-ops OFF, its links section is unavailable, never read', async () => {
@@ -247,12 +279,12 @@ describe('ADR 0941 P2 — plan links', () => {
     try {
       const res = await s.owner.get(route);
       expect(res.status).toBe(200);
-      for (const k of ['emailSends', 'plans', 'opsAssets']) expect(res.body.links[k]).toEqual({ status: 'unavailable', reason: 'feature_off' });
-      expect(res.body.links.runs?.status).toBe('ok');
+      for (const k of ['emailSends', 'plans', 'opsAssets']) expect(at(res.body, 'links', k)).toEqual({ status: 'unavailable', reason: 'feature_off' });
+      expect(at(res.body, 'links', 'runs', 'status')).toBe('ok');
     } finally {
       for (const id of ['email', 'campaign-studio', 'campaign-ops']) await setToggle(id, 'on');
     }
-    for (const k of ['emailSends', 'plans', 'opsAssets']) expect((await s.owner.get(route)).body.links[k]?.status).toBe('ok');
+    for (const k of ['emailSends', 'plans', 'opsAssets']) expect(at((await s.owner.get(route)).body, 'links', k, 'status')).toBe('ok');
   });
 
   it('canvas delete and campaign delete both clear the link', async () => {
@@ -283,11 +315,12 @@ describe('ADR 0941 P2 — campaign-ops and channel runs', () => {
     await transitionPage(tenantId, orgA, page.pageId, 'publish', 'seed');
     const field = `sections[${page.sections[0]?.sectionId ?? ''}].data.heading`;
     const asset = (campaignId?: string) => addAsset({ tenantId, orgId: orgA, destination: 'openwop.cms.page', locator: { pageId: page.pageId }, label: 'LP', editableFields: [field], createdBy: 'seed', ...(campaignId ? { campaignId } : {}) });
-    await expect(asset('cmp_missing')).rejects.toMatchObject({ httpStatus: 404 });
-    await expect(asset(theirs.id)).rejects.toMatchObject({ httpStatus: 404 });
+    await expect(asset('cmp_missing')).rejects.toMatchObject({ httpStatus: 404, details: { reason: 'campaign_not_found', campaignId: 'cmp_missing' } });
+    await expect(asset(theirs.id)).rejects.toMatchObject({ httpStatus: 404, details: { reason: 'campaign_not_found', campaignId: theirs.id } });
     const ok = await asset(mine.id);
     expect(ok.campaignId).toBe(mine.id);
-    await expect(createRequest({ tenantId, orgId: orgA, text: 'Change it', assetIds: [ok.assetId], createdBy: 'seed', campaignId: theirs.id })).rejects.toMatchObject({ httpStatus: 404 });
+    await expect(createRequest({ tenantId, orgId: orgA, text: 'Change it', assetIds: [ok.assetId], createdBy: 'seed', campaignId: theirs.id }))
+      .rejects.toMatchObject({ httpStatus: 404, details: { reason: 'campaign_not_found', campaignId: theirs.id } });
     expect((await createRequest({ tenantId, orgId: orgA, text: 'Change it', assetIds: [ok.assetId], createdBy: 'seed', campaignId: mine.id })).campaignId).toBe(mine.id);
   });
 
@@ -298,8 +331,9 @@ describe('ADR 0941 P2 — campaign-ops and channel runs', () => {
     const { campaign } = await ensureDraftCampaign(tenantId, brief, 'u-ch');
     const out = await createAgentToolProvider({ tenantId, actingUserId: 'u-ch' }).executeTool({ name: CAMPAIGN_CHANNELS_GENERATE_TOOL_ID, input: { briefId: brief.id, channel: 'email_sequence' } });
     expect(out.isError).toBeFalsy();
-    const runId = (JSON.parse(out.content) as { runId: string }).runId;
-    const run = await storage.getRun(bareRunId(runId));
-    expect(readCampaignRunTag(run?.metadata as Record<string, unknown> | undefined)).toMatchObject({ campaignId: campaign.id, orgId, role: 'stage' });
+    const parsed: unknown = JSON.parse(out.content);
+    if (typeof parsed !== 'object' || parsed === null || !('runId' in parsed) || typeof parsed.runId !== 'string') throw new Error(`channel tool returned no runId: ${out.content}`);
+    const run = await storage.getRun(bareRunId(parsed.runId));
+    expect(readCampaignRunTag(run?.metadata)).toMatchObject({ campaignId: campaign.id, orgId, role: 'stage' });
   });
 });

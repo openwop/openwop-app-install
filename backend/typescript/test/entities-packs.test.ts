@@ -1,7 +1,18 @@
 /**
- * feature.entities.nodes pack pins (ADR 0386 Phase 6) — manifest↔impl↔feature
- * lockstep: version pin, node typeIds, executor behavior over a fake
- * ctx.features.entities, and the deterministic-id (ADR 0162) convention.
+ * feature.entities.nodes pack pins (ADR 0386 Phase 6) — TST-DAA-3.
+ * manifest↔impl↔feature lockstep: version pin, node typeIds, executor behavior
+ * over a fake ctx.features.entities, and the deterministic-id (ADR 0162)
+ * convention a replay/`:fork` relies on (a re-run never double-creates).
+ *
+ * The expected version and typeIds are READ from pack.json (one side of each
+ * comparison), never hand-copied, so a pack bump is a one-file change.
+ * Dedupe-needs-human-ask: the pin leg overlaps `pack-pin-parity.test.ts` and the
+ * export leg overlaps `pack-manifest-impl-parity.test.ts`; kept (protected).
+ *
+ * Red when (sabotage-witnessed, wave 70): the `packPins.ts` pin drifts from
+ * pack.json; `create` drops the runId from `entity:<runId>:<nodeId>`; the
+ * config/input merge stops letting inputs win; the missing-surface error stops
+ * carrying `host_capability_missing`.
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -17,20 +28,16 @@ const manifest = JSON.parse(readFileSync(join(packDir, 'pack.json'), 'utf8')) as
   nodes: Array<{ typeId: string; role: string }>;
 };
 
-const EXPECTED_TYPE_IDS = [
-  'feature.entities.nodes.types-read',
-  'feature.entities.nodes.query',
-  'feature.entities.nodes.get',
-  'feature.entities.nodes.create',
-  'feature.entities.nodes.update',
-  'feature.entities.nodes.delete',
-];
+// The verbs the executors below drive; typeIds come from the manifest.
+const MANIFEST_TYPE_IDS = manifest.nodes.map((n) => n.typeId).sort();
+const DRIVEN_VERBS = ['types-read', 'query', 'get', 'create', 'update', 'delete'];
 
 describe('feature.entities.nodes pack', () => {
   it('manifest pins name/version and exactly the six node typeIds', () => {
     expect(manifest.name).toBe('feature.entities.nodes');
-    expect(manifest.version).toBe('1.1.1');
-    expect(manifest.nodes.map((n) => n.typeId).sort()).toEqual([...EXPECTED_TYPE_IDS].sort());
+    expect(manifest.version).toMatch(/^\d+\.\d+\.\d+$/);
+    // Six nodes, one per driven verb, each namespaced under the pack.
+    expect(MANIFEST_TYPE_IDS).toEqual(DRIVEN_VERBS.map((v) => `feature.entities.nodes.${v}`).sort());
     for (const n of manifest.nodes) expect(n.role).toBe('action');
   });
 
@@ -41,14 +48,14 @@ describe('feature.entities.nodes pack', () => {
     );
     // ADR 0919: the descriptor names the pack; the version lives in packPins.ts.
     expect(featureSrc).toContain("'feature.entities.nodes'");
-    expect(pinnedPackRef('feature.entities.nodes').version).toBe('1.1.1');
+    expect(pinnedPackRef('feature.entities.nodes').version).toBe(manifest.version);
   });
 
   it('impl exports exactly the manifest nodes; executors drive the surface; create uses the ADR 0162 id', async () => {
     const mod = (await import(pathToFileURL(join(packDir, 'index.mjs')).href)) as {
       nodes: Record<string, (ctx: unknown) => Promise<{ status: string; outputs: Record<string, unknown> }>>;
     };
-    expect(Object.keys(mod.nodes).sort()).toEqual([...EXPECTED_TYPE_IDS].sort());
+    expect(Object.keys(mod.nodes).sort()).toEqual(MANIFEST_TYPE_IDS);
 
     const calls: Array<{ op: string; args: Record<string, unknown> }> = [];
     const fakeSurface = {

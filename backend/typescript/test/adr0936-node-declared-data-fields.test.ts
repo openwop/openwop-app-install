@@ -7,9 +7,18 @@
  * thriller scene to `<<redacted:credential-shape>>`, and the free-text pass
  * turned a 32-hex run into `***`.
  *
- * Sabotage: making `stripSecretsKeepingData` ignore `dataKeys` reds the output
- * case; making `scrubResumeValue` ignore them reds the resume case; dropping the
- * Tier 1 call on a data key reds the known-secret legs.
+ * Sabotage (each run, w74 grade-tests): making `stripSecretsKeepingData` ignore
+ * `dataKeys` reds the output, resume and NFR-7 cases; making `scrubResumeValue` ignore
+ * them reds the resume case; dropping Tier 1 from `stripSecretsKeepingData` on a
+ * data key reds the NFR-7 unit case; a `readNodeDataFields` that keeps duplicates
+ * or returns `{}` for nothing declared reds the last case.
+ *
+ * DOUBLE GUARD (recorded): Tier 1 on a declared data key is applied twice on the
+ * resume path — to the resume value (`scrubResumeValue`, executor.ts) AND again
+ * when the node's declared output port is written (`stripSecretsKeepingData`,
+ * ephemeralRunSecrets.ts). Dropping only the resume-side Tier 1 stays green
+ * (measured). Breaking the shared `stripKnownRunSecrets` reds the replay-fork leg
+ * of the resume case and the unit case.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -138,9 +147,11 @@ describe('ADR 0936 — the pieces', () => {
   it('a secret a run resolved is still redacted inside a data field (NFR-7)', () => {
     const key = 'sk-test-adr0936-resolved-key-value';
     setRunSecrets('adr0936-run', { anthropic: key });
-    const out = stripSecretsKeepingData({ scene: `she typed ${key}`, other: key }, ['scene']);
-    expect(out.scene).toBe('she typed <<redacted:anthropic>>');
-    expect(out.other).not.toContain(key);
+    try {
+      const out = stripSecretsKeepingData({ scene: `she typed ${key}`, other: key }, ['scene']);
+      expect(out.scene).toBe('she typed <<redacted:anthropic>>');
+      expect(out.other).not.toContain(key);
+    } finally { clearRunSecrets('adr0936-run'); }
   });
 
   it('readNodeDataFields keeps well-formed names only, and absent means nothing declared', () => {

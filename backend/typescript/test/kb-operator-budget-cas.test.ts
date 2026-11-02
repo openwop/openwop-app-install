@@ -1,6 +1,12 @@
-/** ADR 0904 P6/P7: both operator APIs reserve their existing daily counters
- * before dispatch. Independent SQLite connections witness last-slot contention
- * and lost commit acknowledgements, including unsuccessful paid attempts. */
+/** ADR 0904 P6/P7: both operator APIs (Document AI pages, Vertex ranking queries)
+ * reserve their existing daily counters before dispatch. Independent SQLite
+ * connections witness last-slot contention (both counter reads are FORCED to land
+ * before either CAS, and exactly one call is made), lost commit acknowledgements,
+ * unsuccessful paid attempts that keep their slot, the replay refusal, and the
+ * unreadable-counter and anonymous-tenant refusals.
+ * Sabotage-witnessed per lane (w74): a blind put for the CAS, a lost ack read as success,
+ * the cap compare removed, a refund on an HTTP failure or on a thrown/malformed answer,
+ * the replay refusal removed, and the anonymous-tenant check removed. */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -52,13 +58,30 @@ for (const lane of lanes) describe(lane.name, () => {
   const counterKey = (tenant: string) => `hostext:${lane.namespace}:${tenant}:${date}`;
   it('two independent writers authorize only one call for the last daily slot', async () => {
     let reads = 0; let writes = 0; let calls = 0;
+    // Force the race: the first counter read is held (after it has read) until the second
+    // writer's read arrives, so both read the empty counter before either CAS (2 s fallback).
+    let arrivals = 0; let firstParked = false; let releasedWithBoth = false;
+    let release: () => void = () => {};
+    const parked = new Promise<void>(r => { release = r; });
+    const fallback = setTimeout(() => release(), 2000);
     initHostExtPersistence(new Proxy(a, { get(target, prop) {
-      if (prop === 'kvGet') return (...args: Parameters<Storage['kvGet']>) => (reads++ % 2 ? a : b).kvGet(...args);
+      if (prop === 'kvGet') return async (...args: Parameters<Storage['kvGet']>) => {
+        const value = await (reads++ % 2 ? a : b).kvGet(...args);
+        if (args[0] === counterKey('last-slot')) {
+          arrivals += 1;
+          if (arrivals === 1) { firstParked = true; await parked; firstParked = false; }
+          else if (arrivals === 2) { releasedWithBoth = firstParked; release(); }
+        }
+        return value;
+      };
       if (prop === 'kvCompareAndSwap') return (...args: Parameters<Storage['kvCompareAndSwap']>) => (writes++ % 2 ? a : b).kvCompareAndSwap(...args);
       return bind(target, prop);
     } }));
     const fetchImpl: Fetch = async () => { calls++; return { ok: true, status: 200, text: async () => JSON.stringify(lane.answer) }; };
-    expect((await Promise.all([lane.invoke('last-slot', fetchImpl), lane.invoke('last-slot', fetchImpl)])).filter(Boolean)).toHaveLength(1);
+    const outcomes = await Promise.all([lane.invoke('last-slot', fetchImpl), lane.invoke('last-slot', fetchImpl)]);
+    clearTimeout(fallback);
+    expect(releasedWithBoth, 'both writers read the counter before either CAS').toBe(true);
+    expect(outcomes.filter(Boolean)).toHaveLength(1);
     expect(calls).toBe(1);
     const row = await b.kvGet(counterKey('last-slot')); if (!row) throw new Error('missing durable reservation');
     expect(JSON.parse(row)[lane.field]).toBe(1);

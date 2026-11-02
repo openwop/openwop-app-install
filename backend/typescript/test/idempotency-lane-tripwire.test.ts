@@ -33,7 +33,10 @@ import { IDEMPOTENT_ENDPOINTS } from '../src/host/idempotentResponse.js';
 const SRC = join(__dirname, '..', 'src');
 
 /** The mutex lane's API — host-generated keys only. */
-const MUTEX_CALLS = /\b(?:storage|deps\.storage)\??\.(claimOnce|putOnce|pruneOnceByPrefix)\s*\(/;
+// Whitespace (incl. a newline) is allowed between the handle and the method:
+// `storage\n  .pruneOnceByPrefix(` is a live shape (connections/refreshDaemon.ts)
+// and `deps.storage .claimOnce(` used to dodge a single-line pattern.
+const MUTEX_CALLS = /\b(?:storage|deps\.storage)\s*\??\.\s*(claimOnce|putOnce|pruneOnceByPrefix)\s*\(/;
 
 /** Reading the caller-supplied header. */
 const READS_HEADER = /req\.header\(\s*['"]idempotency-key['"]\s*\)/i;
@@ -150,7 +153,10 @@ describe('ADR 0549 — idempotency lane separation', () => {
     // `src/features/*/routes.ts` returns ZERO files, so this adds no false
     // positives and no quarantine; it only removes a blind spot.
     const offenders = FILES.filter(
-      (f) => isRouteModule(f.rel) && MUTEX_CALLS.test(f.text) && !MUTEX_ALLOWLIST.has(f.rel),
+      // No allowlist exemption here: a route can never be allowlisted into the
+      // mutex lane (with the exemption this case was the next one restricted to
+      // routes and could not fail on its own).
+      (f) => isRouteModule(f.rel) && MUTEX_CALLS.test(f.text),
     ).map((f) => f.rel);
     expect(offenders).toEqual([]);
   });

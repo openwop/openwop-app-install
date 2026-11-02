@@ -12,6 +12,10 @@
  * projection passes while proving less, so this asserts on derived values
  * (display name, export facets, resolved-schema keys) rather than on echoed
  * input.
+ *
+ * TST-BZD-17 (grade-tests w66). Red when an unrecognised extension body leaks into a
+ * derived value (displayName) or dooms acceptance. Rejection symmetry is asserted on the
+ * error MESSAGES, not just their presence.
  */
 import { describe, expect, it, beforeEach } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
@@ -62,7 +66,7 @@ function install(extensions: Record<string, unknown>) {
   const root = pack(extensions);
   try {
     const out = loadArtifactTypePacks({ roots: [root] });
-    return { registered: [...out.registered].sort(), errors: out.errors.length, projection: project() };
+    return { registered: [...out.registered].sort(), errors: out.errors.map((e) => e.message), projection: project() };
   } finally { rmSync(root, { recursive: true, force: true }); }
 }
 
@@ -96,9 +100,11 @@ describe('RFC 0139 — unrecognised extensions are opaque', () => {
   it('rejection is symmetric — both fail for the same reason, or neither', () => {
     // A manifest broken the same way must fail identically with and without an
     // extension; an extension must not rescue OR doom a pack.
-    const brokenPlain = install({ schemaRef: undefined as unknown as string });
-    const brokenExt = install({ schemaRef: undefined as unknown as string, 'x-noise': 1 });
+    const brokenPlain = install({ schemaRef: undefined });
+    const brokenExt = install({ schemaRef: undefined, 'x-noise': 1 });
+    expect(brokenPlain.registered, 'the broken manifest must actually be rejected').toEqual([]);
     expect(brokenExt.registered).toEqual(brokenPlain.registered);
-    expect(brokenExt.errors > 0).toBe(brokenPlain.errors > 0);
+    expect(brokenPlain.errors.length).toBeGreaterThan(0);
+    expect(brokenExt.errors, 'same reason, with or without the extension').toEqual(brokenPlain.errors);
   });
 });

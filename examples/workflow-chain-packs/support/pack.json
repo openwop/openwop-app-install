@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.support",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "kind": "workflow-chain",
   "description": "Real-work workflow pack (RFC 0013, ADR 0190) — the Customer Support cluster, the #1 surveyed agent use case the gallery previously had zero templates for: KB-grounded answering, email triage (draft-only — the human sends), customer-ticket routing, sentiment/brand-risk escalation, and CSAT follow-up. Authored entirely over node typeIds shipped with this host (feature.kb + core.ai.chatCompletion + core.flow.if + core.chat.approvalGate + core.email.draft + core.openwop.connectors.ticket-create + core.openwop.integration.*). Every external SEND waits on a human approval gate (core.email.draft creates a draft and never sends — the draft itself is the human gate). Distinct from core.openwop.workflows.it-support: that pack routes IT incidents by severity; this one serves customer-facing support (intent, queues, CSAT). All tenant values are run parameters (replay-deterministic).",
   "author": "openwop",
@@ -133,7 +133,7 @@
     },
     {
       "chainId": "support.sentiment-escalation",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "label": "Sentiment & Brand-Risk Watch",
       "description": "Score an inbound message (review, social mention, reply) for sentiment and brand risk. Normal messages are logged as a notification; high-risk ones route to a human-approved Slack escalation. A watch on what customers say ABOUT you — inbox triage lives in Support Email Triage.",
       "parameters": {
@@ -150,7 +150,7 @@
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
-          { "id": "score", "typeId": "core.ai.chatCompletion@1.0.0", "name": "Score sentiment & risk", "position": { "x": 0, "y": 80 }, "config": { "systemPrompt": "You are a CX analyst. Score this message: sentiment (positive / neutral / negative), brand risk (none / low / high — high means churn threat, public escalation, legal or safety language), and the single best next action. Message: {{params.message}}",
+          { "id": "score", "typeId": "core.ai.chatCompletion@1.0.0", "name": "Score sentiment & risk", "position": { "x": 0, "y": 80 }, "config": { "systemPrompt": "You are a CX analyst. Score this message: sentiment (positive / neutral / negative), brand risk (none / low / high — high means churn threat, public escalation, legal or safety language), and the single best next action. End with exactly one line: 'BRAND RISK: none', 'BRAND RISK: low' or 'BRAND RISK: high'. Message: {{params.message}}",
             "provider": "{{params.provider}}",
             "model": "{{params.model}}"
           }, "inputs": {} },
@@ -161,8 +161,8 @@
         ],
         "edges": [
           { "from": "score.content", "to": "route.value" },
-          { "from": "route.value", "to": "log.message", "condition": { "type": "equals", "left": "branch", "right": "then" } },
-          { "from": "route.value", "to": "approveEscalation.artifact", "condition": { "type": "equals", "left": "branch", "right": "else" } },
+          { "from": "route.value", "to": "log.message", "condition": { "type": "equals", "left": "branch", "right": "else" } },
+          { "from": "route.value", "to": "approveEscalation.artifact", "condition": { "type": "equals", "left": "branch", "right": "then" } },
           { "from": "approveEscalation.artifact", "to": "escalate.text", "condition": { "type": "truthy", "left": "approved" } }
         ]
       },

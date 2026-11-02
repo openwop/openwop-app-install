@@ -11,6 +11,9 @@
  * one must be used; without it the ladder's prefix rung takes the first. That
  * pair is what makes ADR 0706 §3.1 item 1 load-bearing: without passing the ref
  * explicitly, a tenant bound to `google:two` would dispatch on `google:one`.
+ *
+ * Tracker TST-CQE-4 (w68). Sabotage-witnessed: red when the ladder ignores an
+ * explicit ref, and when an absent explicit ref falls through to the prefix rung.
  */
 import { createHash } from 'node:crypto';
 import { mkdtempSync } from 'node:fs';

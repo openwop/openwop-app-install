@@ -10,6 +10,11 @@
  *  2. INCREMENTAL DRAIN: a second fold after new events lists only the delta
  *     (observed via a listEvents spy), yet returns exactly what a cold fold
  *     of the full log returns — the cache is an optimization, never an owner.
+ *
+ * TST-DKE-4 (grade-tests wave 72). Red when (w72 probes): the drain stops after
+ * one page (lt-batch), a fresh cursor starts at 0 and skips the run's first
+ * event (lt-cursor), or the cache is bypassed so a warm fold re-lists the log
+ * (lt-cache).
  */
 import { describe, expect, it, beforeEach } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -24,12 +29,9 @@ const RUN = 'run-fold-1';
 async function appendTurnEvents(storage: Storage, runId: string, from: number, to: number): Promise<void> {
   const batch = [];
   for (let n = from; n < to; n++) {
-    if (n % 5 === 0) {
-      batch.push({
-        eventId: `evt-noise-${n}`, runId, type: 'node.completed',
-        payload: { outputs: { n } }, timestamp: new Date().toISOString(),
-      });
-    }
+    // The TURN comes first, so the run's very first event (sequence 0) is the
+    // `conversation.opened` turn — the event a cursor that starts at 0 instead of
+    // -1 skips (w72 probe lt-cursor was vacuous while a noise event held seq 0).
     batch.push({
       eventId: `evt-turn-${n}`, runId,
       type: n === from && from === 0 ? 'conversation.opened' : 'conversation.exchanged',
@@ -38,6 +40,12 @@ async function appendTurnEvents(storage: Storage, runId: string, from: number, t
         : { conversationId: CONV, turn: { turnIndex: n, role: n % 2 ? 'assistant' : 'user', content: `turn ${n}` } },
       timestamp: new Date().toISOString(),
     });
+    if (n % 5 === 0) {
+      batch.push({
+        eventId: `evt-noise-${n}`, runId, type: 'node.completed',
+        payload: { outputs: { n } }, timestamp: new Date().toISOString(),
+      });
+    }
   }
   await storage.appendEventsBatch(batch);
 }
@@ -56,7 +64,7 @@ describe('GC-CHAT-1 — loadTurns fold cache (CS-BE-2 characterization)', () => 
     expect(turns[1399]!.turnIndex).toBe(1399);
     expect(new Set(turns.map((t) => t.turnIndex)).size).toBe(1400);
     // The OLDEST turn (the pre-fix truncation victim) is intact.
-    expect((turns[0] as { content?: string }).content).toBe('turn 0');
+    expect(turns[0]!.content).toBe('turn 0');
   });
 
   it('drains only the delta on a warm fold, matching a cold fold byte-for-byte', async () => {

@@ -20,14 +20,16 @@ const surfaceInterrupt: Pick<OpenInterrupt, 'kind' | 'nodeId' | 'data'> = {
   kind: 'clarification',
   nodeId: 'n1',
   data: {
-    question: 'When should the kickoff be?',
-    catalogVersion: A2UI_CATALOG_VERSION,
-    surface: {
-      title: 'Schedule the kickoff',
-      components: [
-        { component: 'field.date', id: 'date', label: 'Date', required: true },
-        { component: 'action.button', id: 'confirm', label: 'Confirm', action: { target: 'resume' } },
-      ],
+    questions: [{ id: 'date', question: 'When should the kickoff be?' }],
+    form: {
+      catalogVersion: A2UI_CATALOG_VERSION,
+      surface: {
+        title: 'Schedule the kickoff',
+        components: [
+          { component: 'field.date', id: 'date', label: 'Date', required: true },
+          { component: 'action.button', id: 'confirm', label: 'Confirm', action: { target: 'resume' } },
+        ],
+      },
     },
   },
 };
@@ -38,7 +40,7 @@ describe('a2uiInterruptCard', () => {
     expect(card).not.toBeNull();
     expect(card?.cardType).toBe('ui.a2ui-surface');
     // The payload is a union since ADR 0749 (0.9.1 tree | v0.9); this is the tree arm.
-    // Pinned literally: the surface is carried unchanged and `question` is dropped.
+    // Pinned literally: the form is carried unchanged and `questions` is dropped.
     expect(card?.payload).toEqual({
       catalogVersion: '0.9.1',
       surface: {
@@ -53,18 +55,22 @@ describe('a2uiInterruptCard', () => {
     expect(parseSurface(card?.payload).ok).toBe(true);
   });
 
+  it('reads no form from the root of data (ADR 1013 D5)', () => {
+    expect(a2uiInterruptCard(interrupt('clarification', { catalogVersion: '0.9.1', surface: { components: [] } }))).toBeNull();
+  });
+
   it('falls back (null) for a plain clarification with no surface', () => {
     expect(a2uiInterruptCard(interrupt('clarification', { question: 'Clarify?' }))).toBeNull();
   });
 
   it('falls back (null) when catalogVersion is present but surface is missing or not an object', () => {
-    expect(a2uiInterruptCard(interrupt('approval', { prompt: 'OK?', catalogVersion: '0.9.1' }))).toBeNull();
-    expect(a2uiInterruptCard(interrupt('clarification', { catalogVersion: '0.9.1', surface: [] }))).toBeNull();
-    expect(a2uiInterruptCard(interrupt('refinement', { catalogVersion: '0.9.1', surface: 'x' }))).toBeNull();
+    expect(a2uiInterruptCard(interrupt('approval', { prompt: 'OK?', form: { catalogVersion: '0.9.1' } }))).toBeNull();
+    expect(a2uiInterruptCard(interrupt('clarification', { form: { catalogVersion: '0.9.1', surface: [] } }))).toBeNull();
+    expect(a2uiInterruptCard(interrupt('refinement', { form: { catalogVersion: '0.9.1', surface: 'x' } }))).toBeNull();
   });
 
   it('falls back (null) when surface is present but catalogVersion is missing', () => {
-    expect(a2uiInterruptCard(interrupt('clarification', { surface: { components: [] } }))).toBeNull();
+    expect(a2uiInterruptCard(interrupt('clarification', { form: { surface: { components: [] } } }))).toBeNull();
   });
 
   it('tolerates null/undefined/empty interrupts', () => {

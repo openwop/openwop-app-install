@@ -3,7 +3,15 @@
  * round-trip instead of N). The replay-safety contract (architect-flagged): it
  * MUST assign the exact same monotonic per-(runId) `sequence` that N
  * `appendEvent` calls would, continuing from each run's current max, so the
- * event log stays replay/fork-deterministic (`replay.md`).
+ * event log stays replay/fork-deterministic (`replay.md`, RFC 0171 §A.3:
+ * the first event of a run is sequence 0).
+ *
+ * TST-BXH-1. Red when: the batch is applied out of array order, an event's own
+ * eventId is replaced, or the per-run MAX(sequence)+1 step changes (w66 probes
+ * aeb-order / aeb-eventid / aeb-seq). The empty-batch case is an honest
+ * ceiling: the `length === 0` early return is a fast path, and removing it is
+ * an equivalent mutant (the transaction maps `[]` to `[]`, w66 aeb-empty).
+ * Postgres `appendEventsBatch` is not exercised here (sqlite lane only).
  */
 import { describe, expect, it } from 'vitest';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';

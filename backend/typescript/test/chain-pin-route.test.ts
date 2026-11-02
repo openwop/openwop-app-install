@@ -12,11 +12,16 @@
  * report, never a refusal. The unit test cannot see either route's wiring — a
  * `chainRequirements` that supports pins is inert if the route never passes it
  * the installed versions — so this drives the real app.
+ *
+ * TST-CCP-3. Red when: the gallery route stops passing installed versions to
+ * `chainRequirements`; from-chain stops returning `pinMismatches`; or the mismatch
+ * label stops coming from the installed node (the fixture pins a node whose label
+ * differs from its typeId, so a typeId fallback is visible).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../src/index.js';
@@ -28,6 +33,9 @@ let PORT: number;
 let pinnedRef = '';
 let expected: { typeId: string; label: string; pinned: string; installed: string };
 const CHAIN_ID = 'vendor.test.pin-route.chain';
+const ENV_KEYS = ['OPENWOP_STORAGE_DSN', 'OPENWOP_AUTH_DISABLE_COOKIES', 'OPENWOP_WORKFLOW_CHAIN_PACKS_DIR'] as const;
+const savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
+let root = '';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -37,11 +45,13 @@ beforeAll(async () => {
   PORT = (server.address() as AddressInfo).port;
 
   // Pin a node type this host HAS, at a version it does not.
-  const installed = buildNodeCatalog().find((n) => typeof n.version === 'string' && n.version.length > 0);
-  if (!installed) throw new Error('the node catalog is empty — nothing to pin against');
+  // A node whose label is NOT its typeId: a local-registry node is labelled with its
+  // typeId, which would make a "label = typeId" fallback indistinguishable.
+  const installed = buildNodeCatalog().find((n) => typeof n.version === 'string' && n.version.length > 0 && n.label !== n.typeId);
+  if (!installed) throw new Error('no labelled, versioned node in the catalog — nothing to pin against');
   pinnedRef = `${installed.typeId}@999.0.0`;
   expected = { typeId: installed.typeId, label: installed.label, pinned: '999.0.0', installed: installed.version as string };
-  const root = mkdtempSync(join(tmpdir(), 'owp-chain-pin-route-'));
+  root = mkdtempSync(join(tmpdir(), 'owp-chain-pin-route-'));
   mkdirSync(join(root, 'p'), { recursive: true });
   writeFileSync(join(root, 'p', 'pack.json'), JSON.stringify({
     name: 'vendor.test.pin-route', version: '1.0.0', kind: 'workflow-chain', engines: { openwop: '>=1.0.0 <3.0.0' },
@@ -58,9 +68,10 @@ beforeAll(async () => {
   }
 });
 afterAll(async () => {
-  delete process.env.OPENWOP_WORKFLOW_CHAIN_PACKS_DIR;
+  for (const k of ENV_KEYS) { const v = savedEnv[k]; if (v === undefined) delete process.env[k]; else process.env[k] = v; }
   reloadWorkflowChainPacks();
   await new Promise<void>((res) => server.close(() => res()));
+  if (root) rmSync(root, { recursive: true, force: true });
 });
 
 const url = (p: string) => `http://127.0.0.1:${PORT}/host/openwop-app${p}`;

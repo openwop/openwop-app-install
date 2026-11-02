@@ -39,6 +39,7 @@ import { ensurePersonalBoard } from '../host/kanbanService.js';
 import { resolveCallerUser } from '../features/users/usersGuards.js';
 import { getUser, sessionEpochOf } from '../features/users/usersService.js';
 import { createLogger } from '../observability/logger.js';
+import { declaredDefaultWorkspaceTargets } from '../host/workspaceJoinLedger.js';
 
 const wsLog = createLogger('routes.workspaces');
 
@@ -58,6 +59,8 @@ interface WorkspaceSummary {
   roles: string[];
   kind: 'personal' | 'shared';
   active: boolean;
+  /** ADR 0975 D12 — a feature-declared default workspace's chat agent. Absent elsewhere. */
+  chatAgent?: string;
 }
 
 export function registerWorkspaceTenancyRoutes(app: Express): void {
@@ -103,9 +106,11 @@ export function registerWorkspaceTenancyRoutes(app: Express): void {
       // Shared workspaces the caller is a member of.
       for (const ws of await listWorkspacesForSubject(subject)) {
         if (ws.orgId === personal) continue; // already listed as personal
+        const chatAgent = declaredDefaultWorkspaceTargets().find((t) => t.tenantId === ws.orgId)?.chatAgent;
         out.push({
           workspaceId: ws.orgId, name: ws.name, slug: ws.slug,
           roles: ws.roles, kind: 'shared', active: active === ws.orgId,
+          ...(chatAgent ? { chatAgent } : {}),
         });
       }
 

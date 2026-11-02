@@ -3,11 +3,10 @@
  * Postgres (S03-T1). P0 reproduced the double admit (`it.fails`); P1's D2
  * (count-in-insert) makes it hold.
  *
- * The session concurrency cap (`OPENWOP_RATELIMIT_SESSION_CONCURRENT`, 5) lives in
- * a per-process map (`middleware/rateLimit.ts` `sessionInflightRuns`). So one signed-
- * in user who sends 3 long runs to instance A and 3 to instance B has 6 running: each
- * instance sees 3, under its cap of 5. The cap the user is promised is per user, not
- * per instance.
+ * The session concurrency cap (`OPENWOP_RATELIMIT_SESSION_CONCURRENT`, 5) lived in
+ * a per-process map until P1 (deleted in P2). So one signed-in user who sent 3 long
+ * runs to instance A and 3 to instance B had 6 running: each instance saw 3, under its
+ * cap of 5. The cap the user is promised is per user, not per instance.
  *
  * Each instance is its own OS process (`test/support/appProcess.ts`). The session
  * cookie is signed with a shared secret, so the same user is the same session key on

@@ -161,8 +161,14 @@ describe('AgentEvalsPanel (ADR 0889 P6)', () => {
     vi.mocked(getEvalProgress).mockResolvedValue(completed);
     renderPanel();
 
-    const baseline = await screen.findByLabelText('Compare with');
+    const baseline = await screen.findByLabelText<HTMLSelectElement>('Compare with');
+    // Load race (seen in gate 283's +365d sweep): the select mounts before
+    // listEvalRuns/listEvalSuites resolve. A change fired then finds no `run-1`
+    // option, and the reset effect clears the value, so the run starts with no
+    // baseline. Wait for the option, then confirm the value held.
+    await waitFor(() => expect(baseline.querySelector('option[value="run-1"]')).not.toBeNull());
     fireEvent.change(baseline, { target: { value: 'run-1' } });
+    await waitFor(() => expect(baseline.value).toBe('run-1'));
     fireEvent.click(screen.getByRole('button', { name: /Run suite/ }));
     // No model picked ⇒ no `ai` (the agent's own model).
     await waitFor(() => expect(startEvalRun).toHaveBeenCalledWith({ evalSuiteRef: suite.ref, agentId: AGENT, baselineRunId: 'run-1' }));

@@ -6,6 +6,11 @@
  * fail-closed contract is the whole point of not silently dropping an
  * attachment a model can't read. Locked in here so a refactor can't quietly
  * break a provider block or remove a throw.
+ *
+ * TST-CVG-19. Red when: a text file stops inlining as the exact labelled block,
+ * an image/PDF stops failing closed on a string-only provider or on OpenAI,
+ * Anthropic stops emitting `document` for a PDF, an unresolved part stops
+ * throwing, OpenAI stops emitting a data URI, or Gemini stops inlining a PDF.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -24,16 +29,15 @@ const HELLO_B64 = Buffer.from('hello, world').toString('base64');
 const imagePart: ContentPart = { type: 'image', mimeType: 'image/png', dataBase64: PNG_B64, alt: 'pixel' };
 const pdfPart: ContentPart = { type: 'file', mimeType: 'application/pdf', dataBase64: PNG_B64, name: 'doc.pdf' };
 const textFilePart: ContentPart = { type: 'file', mimeType: 'text/plain', dataBase64: HELLO_B64, name: 'note.txt' };
+/** The exact inlined text block, written out by hand (not built by the converter). */
+const INLINED_NOTE = '\n\n[Attached file "note.txt" (text/plain)]\nhello, world\n';
 
 describe('contentToText (string-only providers: Anthropic system, MiniMax)', () => {
   it('passes a plain string through unchanged', () => {
     expect(contentToText('hi', 'MiniMax')).toBe('hi');
   });
   it('inlines a text-file part as decoded text', () => {
-    const out = contentToText([{ type: 'text', text: 'see:' }, textFilePart], 'MiniMax');
-    expect(out).toContain('see:');
-    expect(out).toContain('hello, world');
-    expect(out).toContain('note.txt');
+    expect(contentToText([{ type: 'text', text: 'see:' }, textFilePart], 'MiniMax')).toBe('see:' + INLINED_NOTE);
   });
   it('throws fail-closed on an image part', () => {
     expect(() => contentToText([imagePart], 'MiniMax')).toThrow(/can't accept/i);
@@ -56,9 +60,7 @@ describe('contentToAnthropicBlocks', () => {
     expect(blocks[0]).toEqual({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: PNG_B64 } });
   });
   it('inlines a text file as a text block', () => {
-    const blocks = contentToAnthropicBlocks([textFilePart]) as Array<Record<string, unknown>>;
-    expect(blocks[0]!.type).toBe('text');
-    expect(String(blocks[0]!.text)).toContain('hello, world');
+    expect(contentToAnthropicBlocks([textFilePart])).toEqual([{ type: 'text', text: INLINED_NOTE }]);
   });
   it('throws when an image part reaches dispatch unresolved (no bytes)', () => {
     expect(() => contentToAnthropicBlocks([{ type: 'image', mimeType: 'image/png', url: '/host/openwop-app/assets/x' }]))
@@ -75,9 +77,7 @@ describe('contentToOpenAIBlocks', () => {
     expect(() => contentToOpenAIBlocks([pdfPart])).toThrow(/can't accept/i);
   });
   it('inlines a text file as a text part', () => {
-    const blocks = contentToOpenAIBlocks([textFilePart]) as Array<Record<string, unknown>>;
-    expect(blocks[0]!.type).toBe('text');
-    expect(String(blocks[0]!.text)).toContain('hello, world');
+    expect(contentToOpenAIBlocks([textFilePart])).toEqual([{ type: 'text', text: INLINED_NOTE }]);
   });
 });
 
@@ -91,7 +91,6 @@ describe('contentToGeminiParts', () => {
     expect(parts[0]).toEqual({ inlineData: { mimeType: 'application/pdf', data: PNG_B64 } });
   });
   it('inlines a text file as a text part', () => {
-    const parts = contentToGeminiParts([textFilePart]);
-    expect(String(parts[0]!.text)).toContain('hello, world');
+    expect(contentToGeminiParts([textFilePart])).toEqual([{ text: INLINED_NOTE }]);
   });
 });

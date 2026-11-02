@@ -18,6 +18,9 @@
  * Runs the REAL script as a child process against fixture dists. The shell
  * half is skipped (`OPENWOP_SKIP_SHELL_BRANDING=1`) — it scans repo files, not
  * the dist, and is not under test here.
+ *
+ * Tracker TST-CED-2. Red when (w67g3, witnessed): §5 flags every build; §5 never
+ * flags; a missing brand-info.json is not a hard exit 2.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { execFileSync } from 'node:child_process';

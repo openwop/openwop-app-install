@@ -430,9 +430,14 @@ export function elicitationPlan(interrupt: InterruptRecord, clientCapabilities: 
   }
   return {
     mode: 'form',
-    message: pickString(data.prompt, data.message, data.question) ?? 'Additional input is required to continue.',
+    message: pickString(data.prompt, data.message, data.question, firstQuestion(data.questions)) ?? 'Additional input is required to continue.',
     requestedSchema,
   };
+}
+
+function firstQuestion(questions: unknown): unknown {
+  const first: unknown = Array.isArray(questions) ? questions[0] : undefined;
+  return first && typeof first === 'object' ? (first as { question?: unknown }).question : undefined;
 }
 
 const FORM_PRIMITIVES = new Set(['string', 'number', 'integer', 'boolean']);

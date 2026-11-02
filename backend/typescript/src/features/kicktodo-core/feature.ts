@@ -23,7 +23,7 @@ import { registerKicktodoArtifactTypes } from './artifactSchemas.js';
 import { registerChallengeCatalogSection } from './challengeCatalogSection.js';
 import { buildKicktodoCoreSurface } from './surface.js';
 import { KICKTODO_RUN_PRINCIPAL_BINDING_TOGGLE } from './surfaceBinding.js';
-import { registerKickbotLifecycleHooks } from './kickbotService.js';
+import { KICKBOT_AGENT_ID, registerKickbotLifecycleHooks } from './kickbotService.js';
 import { seedKicktodoConveneTurnWorkflow } from './conveneTurnWorkflow.js';
 import { registerKicktodoCoreCompliance } from './compliance.js';
 import { registerKicktodoApprovalsExceptionSource } from './exceptionSources.js';
@@ -54,6 +54,9 @@ export const kicktodoCoreFeature: BackendFeature = {
     // ADR's §3 note for why the colon form made the workspace unenterable.
     id: 'host-kicktodo',
     name: 'KickTodo',
+    // ADR 0975 D12 — a participant's new chat here opens on KickBot, the one agent
+    // a viewer may chat with (D11). The generic assistant is refused `runs:create`.
+    chatAgent: KICKBOT_AGENT_ID,
   },
   registerRoutes: (deps) => {
     registerKicktodoLoopWorkflows(); // ADR 0472 P4

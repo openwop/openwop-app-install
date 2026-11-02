@@ -97,7 +97,11 @@ const log = createLogger('run-dispatch');
 // redrive. A caller who could supply either would choose its own HITL level.
 // ADR 0957: a report's calendar period is resolved by the host at insertion;
 // callers cannot supply that decision, while forks retain the stored value.
-const RESERVED_RUN_METADATA_KEYS = ['definitionRevision', 'definitionResolvedFrom', 'launchResolved', 'costUsd', 'costTokens', 'costByNode', 'debug', 'eval', 'redriveOf', 'onlineEvalScored', 'compaction', 'personalTenant', 'owner', 'traceContext', 'nodePinMismatches', 'teamLedger', 'orgScopeSubject', 'intentLedger', 'intentLedgerApprovals', 'campaignGoal', 'campaignAutonomy', 'campaignForkPosture', 'openwop-app.experiments', 'openwop-app.agentBindings', 'clientContext', 'openwop-app.playbook', 'openwop-app.clientReportPeriod'] as const;
+// `openwop-app.agentClarification` (ADR 1001 D5) lets an agent node pause the run
+// to ask a person a question. Only the agent-clarification run-start contributor
+// writes it, from the tenant's toggle; a caller who could set it would turn the
+// feature on for their own run.
+const RESERVED_RUN_METADATA_KEYS = ['definitionRevision', 'definitionResolvedFrom', 'launchResolved', 'costUsd', 'costTokens', 'costByNode', 'debug', 'eval', 'redriveOf', 'onlineEvalScored', 'compaction', 'personalTenant', 'owner', 'traceContext', 'nodePinMismatches', 'teamLedger', 'orgScopeSubject', 'intentLedger', 'intentLedgerApprovals', 'campaignGoal', 'campaignAutonomy', 'campaignForkPosture', 'openwop-app.experiments', 'openwop-app.agentBindings', 'clientContext', 'openwop-app.playbook', 'openwop-app.clientReportPeriod', 'openwop-app.agentClarification'] as const;
 /**
  * The run-attribution blocks (`heartbeat`/`schedule`/`kanban`/`approval`) are
  * host-written: the scheduler, the kanban trigger, the heartbeat and approval

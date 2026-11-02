@@ -27,9 +27,10 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
+import { OpenwopError } from '../../types.js';
 import { createLogger } from '../../observability/logger.js';
 import { createCampaignSpendApproval, getApproval } from '../../host/approvalService.js';
-import { authorizeBudgetOps, listTenantDispatchRecords, type AdPlatform, type AdsAdapter, type UpdateBudgetResult } from '../../host/adsAdapter.js';
+import { authorizeBudgetOps, dispatchBelongsToOrg, listTenantDispatchRecords, type AdPlatform, type AdsAdapter, type UpdateBudgetResult } from '../../host/adsAdapter.js';
 import { listRecords } from '../campaign-connectors/performanceService.js';
 import { listCampaigns } from '../campaign-orchestration/campaignService.js';
 import { optimizeBudget } from './intelligence.js';
@@ -127,11 +128,16 @@ interface Target { platform: AdPlatform; adAccountId: string; campaignId: string
 
 /** The org's dispatched platform campaigns, joined by brief id (never by name). */
 async function orgTargets(tenantId: string, orgId: string, campaignId?: string): Promise<Target[]> {
-  const briefIds = new Set((await listCampaigns(tenantId, orgId)).filter((c) => !campaignId || c.id === campaignId).map((c) => c.briefId));
+  const campaigns = await listCampaigns(tenantId, orgId);
+  const orgBriefIds = new Set(campaigns.map((c) => c.briefId));
+  const wantedBriefIds = new Set(campaigns.filter((c) => !campaignId || c.id === campaignId).map((c) => c.briefId));
   const seen = new Set<string>();
   const out: Target[] = [];
   for (const r of await listTenantDispatchRecords(tenantId)) {
-    if (!r.briefId || !briefIds.has(r.briefId) || !r.adAccountId || !REALLOC_PLATFORMS.includes(r.platform)) continue;
+    // ADR 1022 (CP71WF-17) — the one ownership rule: a row stamped with another
+    // org's campaign never joins this org's plan through a shared brief id.
+    if (!dispatchBelongsToOrg(r, orgId, orgBriefIds) || !r.adAccountId || !REALLOC_PLATFORMS.includes(r.platform)) continue;
+    if (campaignId && (r.campaignId !== undefined ? r.campaignId !== campaignId : r.briefId === undefined || !wantedBriefIds.has(r.briefId))) continue;
     const k = `${r.platform}:${r.platformCampaignId}`;
     if (seen.has(k)) continue;
     seen.add(k);
@@ -191,7 +197,7 @@ export async function proposeReallocation(adapter: AdsAdapter, tenantId: string,
     if (Math.abs(to - from) < Math.max(1, from * 0.01)) continue; // no material change
     if (to > from) {
       let block: Awaited<ReturnType<typeof capBlocksIncrease>>;
-      try { block = await capBlocksIncrease(tenantId, { ...target, orgId }, to, now); }
+      try { block = await capBlocksIncrease(tenantId, { ...target, orgId, orgVerified: true }, to, now); }
       catch { dropped.push({ ...target, toDailyMinor: to, reason: 'cap_unreadable' }); continue; }
       if (block) { dropped.push({ ...target, toDailyMinor: to, reason: `${block.reason}:${block.capId}` }); continue; }
     }
@@ -254,6 +260,10 @@ async function ensureApproval(plan: ReallocationPlan): Promise<ReallocationPlan>
     dailyBudgetMinor: plan.ops.filter(isIncrease).reduce((s, o) => s + (o.toDailyMinor - (o.fromDailyMinor ?? 0)), 0),
     spendIdemKey: `realloc:${plan.planHash}`,
     proposal: planTable(plan),
+    // ADR 1022 (CP71WF-23) — approvers come from the client org, and the person
+    // who proposed the plan (a chat user, or a schedule's owner) cannot approve it.
+    orgId: plan.orgId,
+    ...(plan.createdBy ? { submitters: [plan.createdBy] } : {}),
   });
   const next: ReallocationPlan = { ...plan, approvalId: approval.approvalId, version: plan.version + 1 };
   if (await plans.compareAndSwap(plan, next)) return next;
@@ -323,7 +333,7 @@ async function applyOp(adapter: AdsAdapter, tenantId: string, orgId: string, op:
   // unenforceable or out of headroom refuses), the same bar a launch meets.
   if (isIncrease(op)) {
     let block: Awaited<ReturnType<typeof capBlocksIncrease>>;
-    try { block = await capBlocksIncrease(tenantId, { ...target, orgId }, op.toDailyMinor, now); }
+    try { block = await capBlocksIncrease(tenantId, { ...target, orgId, orgVerified: true }, op.toDailyMinor, now); }
     catch { return { opIx, outcome: 'failed', error: 'cap_unreadable', at }; }
     if (block) return { opIx, outcome: 'failed', error: `${block.reason}:${block.capId}`, at };
   }
@@ -382,7 +392,16 @@ export async function erasePlanCreators(tenantId: string, forms: ReadonlySet<str
   let touched = 0;
   for (const p of await plans.listByPrefix(`${tenantId}::`)) {
     if (p.tenantId !== tenantId || !p.createdBy || !forms.has(p.createdBy)) continue;
-    if (await plans.compareAndSwap(p, { ...p, createdBy: tombstone })) touched += 1;
+    // ADR 1022 (CP71WF-28) — retry a lost CAS (a concurrent apply moves the
+    // plan); a skipped row would keep the erased person's id. The caps loop.
+    const key = `${p.tenantId}::${p.orgId}::${p.planId}`;
+    let done = false;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const current = await plans.get(key);
+      if (!current || current.tenantId !== tenantId || !current.createdBy || !forms.has(current.createdBy)) { done = true; break; }
+      if (await plans.compareAndSwap(current, { ...current, createdBy: tombstone })) { touched += 1; done = true; break; }
+    }
+    if (!done) throw new OpenwopError('conflict', 'Reallocation-plan creator erasure lost concurrent updates; retry.', 409);
   }
   return touched;
 }

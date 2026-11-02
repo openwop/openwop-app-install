@@ -12,6 +12,25 @@
  *    (the cascade's crash backstop); grace-window and live-deal polarities.
  *  - campaign-day age-out — old counters purge under confidential-pii with
  *    a true cutoff; fresh rows and wrong-classification sweeps are no-ops.
+ *
+ * Owning decisions: ADR 0546 (funnel position + pipeline binding, grade-trio
+ * findings 4/9), ADR 0579 (the reference-absence orphan doctrine), JS-DATA-6
+ * (campaign-day age-out). Tracker TST-DHC-6 (wave 71). Red when: the funnel
+ * re-scores past moves by today's index (`w71g3-rs-snapshot`); resolve drops the
+ * id binding (`rs-bind`); the binding CAS becomes a blind put
+ * (`rs-convergecas-r2`) or the loser keeps its duplicate (`rs-loserdel`); the
+ * orphan sweep ignores grace or liveness (`rs-grace`, `rs-alive`) or skips the
+ * pii window (`rs-pii`) — its falsy-tenant guard is a recorded ceiling (see the
+ * case); the day-counter purger ignores its
+ * classification (`rs-dayclass`) or purges today (`rs-dayguard`).
+ * DOUBLE GUARD (recorded): `ensureApplicationPipeline`'s early `if (resolved)`
+ * return and the binding CAS both converge repeated calls, so dropping the early
+ * return alone is an equivalent mutant (`rs-seqconv`).
+ * The concurrent cases FORCE the race: a storage proxy parks every caller's
+ * first binding read until all have arrived (asserted), so each reads "no
+ * binding" and creates before any CAS.
+ * Overlap (dedupe row TST-DHC-6b, kept — protected file): "a tenant with NO
+ * pipeline at all…" repeats job-search-phase2 "a genuinely ABSENT pipeline…".
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { buildFunnelReport } from '../src/features/job-search/lifecycle/funnel.js';
@@ -51,9 +70,43 @@ async function apply(id: string) {
   if (!r.deal) throw new Error('fixture failed: ineligible');
 }
 
+/** One-shot rendezvous: the first `n` reads of a matching key wait until all `n`
+ *  have arrived (2 s fallback), then the gate disarms for every later read. */
+function raceGate(matches: (key: string) => boolean, n: number) {
+  let arrivals = 0;
+  let armed = true;
+  let release: () => void = () => undefined;
+  const all = new Promise<void>((r) => { release = r; });
+  const fallback = setTimeout(() => { armed = false; release(); }, 2000);
+  return {
+    arrivals: () => arrivals,
+    async hold(key: string): Promise<void> {
+      if (!armed || !matches(key)) return;
+      arrivals += 1;
+      if (arrivals >= n) { armed = false; clearTimeout(fallback); release(); }
+      await all;
+    },
+  };
+}
+let gate: ReturnType<typeof raceGate> | null = null;
+
 beforeEach(async () => {
+  gate = null;
   __resetHostExtPersistence();
-  initHostExtPersistence(openSqliteStorage(':memory:'));
+  const base = openSqliteStorage(':memory:');
+  // Every kvGet passes through the (usually absent) race gate; nothing else changes.
+  initHostExtPersistence(new Proxy(base, {
+    get(target, prop, receiver) {
+      if (prop === 'kvGet') {
+        return async (key: string) => {
+          if (gate) await gate.hold(key);
+          return target.kvGet(key);
+        };
+      }
+      const v: unknown = Reflect.get(target, prop, receiver);
+      return typeof v === 'function' ? v.bind(target) : v;
+    },
+  }));
   await ensureApplicationPipeline(T, ORG);
 });
 
@@ -101,19 +154,29 @@ describe('pipeline binding — resolved by ID', () => {
   });
 
   it('ensureApplicationPipeline converges on ONE pipeline across repeated calls', async () => {
-    const a = await ensureApplicationPipeline(T, ORG);
-    const b = await ensureApplicationPipeline(T, ORG);
-    expect(b.pipelineId).toBe(a.pipelineId);
+    // Three FORCED-concurrent first runs on a virgin tenant, then a later call:
+    // all four must serve the one bound pipeline.
+    const t3 = 'user:t-race3';
+    gate = raceGate((k) => k.includes('pipeline-binding') && k.includes(t3), 3);
+    const [a, b, c] = await Promise.all([1, 2, 3].map(() => ensureApplicationPipeline(t3, ORG)));
+    expect(gate.arrivals(), 'the race was forced: all three read "unbound" together').toBe(3);
+    gate = null;
+    expect(new Set([a.pipelineId, b.pipelineId, c.pipelineId]).size).toBe(1);
+    const later = await ensureApplicationPipeline(t3, ORG);
+    expect(later.pipelineId).toBe(a.pipelineId);
   });
 
   it('CONCURRENT first-runs settle on one pipeline — the loser deletes its duplicate (the TOCTOU pin)', async () => {
     // A virgin tenant so both ensures genuinely race the first bind (the
     // sequential test above passes trivially — the re-grade called that out).
     const t2 = 'user:t-race';
+    gate = raceGate((k) => k.includes('pipeline-binding') && k.includes(t2), 2);
     const [a, b] = await Promise.all([
       ensureApplicationPipeline(t2, ORG),
       ensureApplicationPipeline(t2, ORG),
     ]);
+    expect(gate.arrivals(), 'the race was forced: both read "unbound" together').toBe(2);
+    gate = null;
     expect(b.pipelineId).toBe(a.pipelineId); // both serve the binding winner
     const named = (await listPipelines(t2, ORG)).filter((p) => p.name === APPLICATION_PIPELINE_NAME);
     expect(named.length).toBe(1); // the loser's duplicate is GONE, not just unbound
@@ -140,7 +203,14 @@ describe('orphan sweep — reference-absence re-prunes what a crashed cascade le
   });
 
   it('fail-closed on a falsy tenant', async () => {
+    // CEILING, recorded: the store refuses an empty-tenant row (hostext's
+    // tenantOf invariant), so no row exists that the `:` prefix could reach and
+    // the sweep's own guard is defence in depth behind it (`rs-falsy` was an
+    // equivalent mutant). What IS asserted: the falsy call is a no-op and does
+    // not touch the real tenant's old orphan.
+    await followUps.put({ tenantId: T, dealId: 'deal:kept-orphan', stage: 'applied', subjectId: 'me', dueAt: OLD, createdAt: OLD });
     expect(await sweepOrphanedJobSearchRows('')).toBe(0);
+    expect((await followUps.listByPrefix(`${T}:`)).some((r) => r.dealId === 'deal:kept-orphan')).toBe(true);
   });
 
   it('the backstop fires under the confidential-pii window too — a PII-only tenant is not left with manual recovery', async () => {

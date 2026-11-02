@@ -49,6 +49,7 @@ import {
   type RemoteFile, type SyncFileState,
 } from '../src/features/knowledge-sync/knowledgeSyncService.js';
 import type { KnowledgeFetchDeps } from '../src/host/knowledgeSourceFetch.js';
+import { stripComments } from './helpers/stripComments.js';
 
 const mFetch = vi.mocked(brokeredFetch);
 type Brokered = Awaited<ReturnType<typeof brokeredFetch>>;
@@ -356,12 +357,6 @@ describe('ADR 0605 R1 — Box may not infer completeness from its own page size'
 describe('ADR 0605 R1 — only `diffFolderListing` may call `diffFolder`', () => {
   /** Strip comments, preserving line counts — a ratchet that counts a mention
    *  inside a docblock polices a spelling rather than the invariant. */
-  const stripComments = (src: string): string =>
-    src
-      .replace(/\/\*[\s\S]*?\*\//g, (m) => '\n'.repeat((m.match(/\n/g) ?? []).length))
-      .split('\n')
-      .map((l) => (l.trimStart().startsWith('//') ? '' : l))
-      .join('\n');
 
   const walk = (dir: string): string[] =>
     readdirSync(dir).flatMap((n) => {

@@ -59,7 +59,7 @@ async function insertRun(metadata: Record<string, unknown>): Promise<RunRecord> 
     runId: `r942b-${Date.now()}-${n++}`, workflowId: 'openwop-app.uppercase', tenantId: TENANT, status: 'running', inputs: {},
     metadata, configurable: {}, createdAt: now, updatedAt: now,
   };
-  await insertRunWithStartContext(storage, run);
+  await insertRunWithStartContext(storage, run, { admission: { plan: 'exempt:test-fixture' } });
   const stored = await storage.getRun(run.runId);
   if (!stored) throw new Error('run not stored');
   return stored;

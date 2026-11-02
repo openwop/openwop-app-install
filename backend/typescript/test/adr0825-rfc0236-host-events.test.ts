@@ -61,6 +61,7 @@ import { KB_EVENT_TYPES } from '../src/features/kb/emit.js';
 import { OpenwopError } from '../src/types.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import { stripComments } from './helpers/stripComments.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const SRC = join(here, '..', 'src');
@@ -118,7 +119,7 @@ describe('RFC 0236 host-event types — the SSOT', () => {
   });
 
   it('is complete against the emit sites: every literal emitted name is listed, every computed family is covered', () => {
-    const strip = (s: string): string => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`])\/\/.*$/gm, '$1');
+    const strip = (s: string): string => stripComments(s);
     const walk = (d: string, out: string[] = []): string[] => {
       for (const f of readdirSync(d)) { const p = join(d, f); if (statSync(p).isDirectory()) walk(p, out); else if (p.endsWith('.ts')) out.push(p); }
       return out;

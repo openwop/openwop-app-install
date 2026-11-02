@@ -22,7 +22,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { runQuotaMiddleware, reserveConcurrentSlot, _resetRateLimitState } from '../src/middleware/rateLimit.js';
+import { refuseRunAdmission, runAdmissionFor, runQuotaMiddleware, _resetRateLimitState } from '../src/middleware/rateLimit.js';
+import { openStorage } from '../src/storage/index.js';
+import { AdmissionRefusedError, type Storage } from '../src/storage/storage.js';
+import { chargedAdmission, insertRunWithStartContext } from '../src/host/runInsert.js';
 
 const ENV_KEYS = ['OPENWOP_API_KEYS', 'OPENWOP_API_KEY', 'OPENWOP_RATELIMIT_SESSION_RUNS_PER_DAY', 'OPENWOP_RATELIMIT_SESSION_RUNS_PER_MIN', 'OPENWOP_RATELIMIT_SESSION_CONCURRENT', 'OPENWOP_RATELIMIT_KEY_RUNS_PER_DAY', 'OPENWOP_RATELIMIT_KEY_CONCURRENT', 'OPENWOP_FORCE_RATE_LIMIT', 'OPENWOP_RATELIMIT_DISABLED'] as const;
 const saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
@@ -37,7 +40,7 @@ beforeEach(() => {
 
 /** A principal + tenant as authMiddleware would stamp them, driven by test headers.
  *  `x-fail` makes the route refuse, to prove a refused run is never charged. */
-function synthetic(): express.Express {
+function synthetic(store: Storage): express.Express {
   const app = express();
   app.use((req, _res, next) => {
     const kind = req.header('x-kind'); const token = req.header('x-token');
@@ -45,11 +48,21 @@ function synthetic(): express.Express {
     (req as { tenantId?: string }).tenantId = req.header('x-tenant') ?? 'tenant-a';
     next();
   });
-  app.post('/runs', runQuotaMiddleware(), (req, res) => {
+  app.post('/runs', runQuotaMiddleware(), async (req, res) => {
     if (req.header('x-fail')) { res.status(404).json({ error: 'not_found' }); return; }
-    // `x-hold`: the run takes a concurrency slot and never reaches terminal,
-    // like a waiting or interrupted run left behind by an earlier scenario.
-    if (req.header('x-hold')) reserveConcurrentSlot(req, `run-${Math.random()}`);
+    // `x-hold`: the run is inserted `running` under the caller's concurrency scope
+    // and never reaches terminal, like a waiting or interrupted run left behind by
+    // an earlier scenario. The store counts the scope inside the insert (ADR 0987).
+    if (req.header('x-hold')) {
+      const now = new Date().toISOString();
+      try {
+        await insertRunWithStartContext(store, { runId: `run-${Math.random()}`, workflowId: 'wf', tenantId: req.tenantId ?? 't', status: 'running', inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now },
+          { admission: chargedAdmission(runAdmissionFor(req)) });
+      } catch (err) {
+        if (err instanceof AdmissionRefusedError) { refuseRunAdmission(req, res); return; }
+        throw err;
+      }
+    }
     res.status(201).json({ ok: true });
   });
   return app;
@@ -75,7 +88,7 @@ describe('ADR 0771 addendum — the keyed run budget', () => {
     process.env.OPENWOP_RATELIMIT_SESSION_CONCURRENT = '0';
     process.env.OPENWOP_RATELIMIT_KEY_RUNS_PER_DAY = '4';
     process.env.OPENWOP_API_KEYS = 'configured-key-aaaa:*';
-    srv = await listen(synthetic());
+    srv = await listen(synthetic(await openStorage('memory://')));
   });
   afterEach(async () => { await srv.close(); });
 
@@ -127,7 +140,7 @@ describe('ADR 0771 addendum 2: the keyed concurrency budget', () => {
     process.env.OPENWOP_RATELIMIT_KEY_RUNS_PER_DAY = '0';
     process.env.OPENWOP_RATELIMIT_KEY_CONCURRENT = '8';
     process.env.OPENWOP_API_KEYS = 'configured-key-aaaa:*';
-    srv = await listen(synthetic());
+    srv = await listen(synthetic(await openStorage('memory://')));
   });
   afterEach(async () => { await srv.close(); });
 

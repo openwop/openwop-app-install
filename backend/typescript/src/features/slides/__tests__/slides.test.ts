@@ -3,6 +3,11 @@
  * registered artifact type whose schema is what gates the `artifact.created` event
  * (ADR 0055 validateArtifact). A well-formed deck validates; a malformed one is
  * rejected with errors (so a bad deck never persists as a silent empty render).
+ *
+ * Each rejection asserts the exact AJV line, so a fixture that drifts into a SECOND
+ * error cannot pass on the wrong rule. Sabotage that turns it red (w74 probes): skipping
+ * registration (every case); `minItems: 0`; an open layout enum; `additionalProperties:
+ * true` at the top level or per slide; untyped bullet items.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { registerSlidesArtifactType } from '../artifactTypes.js';
@@ -32,31 +37,37 @@ describe('canvas.slides artifact type', () => {
   it('accepts a well-formed deck', () => {
     const r = validateArtifact('canvas.slides', validDeck);
     expect(r).toMatchObject({ registered: true, valid: true });
+    expect(r.errors).toBeUndefined();
   });
 
   it('rejects an empty deck (no slides)', () => {
     const r = validateArtifact('canvas.slides', { slides: [] });
     expect(r.registered).toBe(true);
     expect(r.valid).toBe(false);
+    expect(r.errors).toContain('/slides must NOT have fewer than 1 items');
   });
 
   it('rejects an unknown slide layout', () => {
     const r = validateArtifact('canvas.slides', { slides: [{ layout: 'carousel', title: 'x' }] });
     expect(r.valid).toBe(false);
+    expect(r.errors).toContain('/slides/0/layout must be equal to one of the allowed values');
   });
 
   it('rejects unknown top-level properties (closed schema)', () => {
     const r = validateArtifact('canvas.slides', { slides: [{ layout: 'blank' }], script: 'alert(1)' });
     expect(r.valid).toBe(false);
+    expect(r.errors).toContain('/ must NOT have additional properties');
   });
 
   it('rejects unknown per-slide properties (closed schema)', () => {
     const r = validateArtifact('canvas.slides', { slides: [{ layout: 'blank', onclick: 'x' }] });
     expect(r.valid).toBe(false);
+    expect(r.errors).toContain('/slides/0 must NOT have additional properties');
   });
 
   it('rejects a non-string bullet', () => {
     const r = validateArtifact('canvas.slides', { slides: [{ layout: 'title-bullets', bullets: [1, 2] }] });
     expect(r.valid).toBe(false);
+    expect(r.errors).toContain('/slides/0/bullets/0 must be string');
   });
 });

@@ -1,15 +1,13 @@
 /**
- * ADR 0363 P4 — the accessibility-preferences control. A compact icon button in
- * the Sidebar footer (beside ThemeToggle/LanguageSwitcher) opening a small Modal
- * with two segmented groups: reduce-motion and increased-contrast overrides that
- * layer over the OS media queries. Persisted + applied via `ui/a11yPrefs`.
+ * ADR 0363 P4 — the accessibility-preferences fields: reduce-motion and
+ * increased-contrast overrides that layer over the OS media queries, plus the ADR
+ * 0396 depth prefs. Persisted + applied via `ui/a11yPrefs`. The Sidebar footer's
+ * icon button (`chrome/A11yPrefsButton`) loads this module only when its modal
+ * opens, so the form stays out of the entry chunk.
  */
 import { Button } from '../ui/Button.js';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { IconButton } from './IconButton.js';
-import { Modal } from './Modal.js';
-import { EyeIcon } from './icons/index.js';
 import {
   applyA11yPrefs,
   applyA11yDepthPrefs,
@@ -109,20 +107,5 @@ export function A11yPrefsFields(): JSX.Element {
       </fieldset>
       <p className="u-label-sm u-text-muted">{t('prefsHint')}</p>
     </div>
-  );
-}
-
-export function A11yPrefsControl(): JSX.Element {
-  const { t } = useTranslation('a11y');
-  const [open, setOpen] = useState(false);
-  return (
-    <>
-      <IconButton label={t('prefsButton')} icon={<EyeIcon />} className="btn-ghost" onClick={() => setOpen(true)} />
-      {open ? (
-        <Modal onClose={() => setOpen(false)} label={t('prefsTitle')} showClose>
-          <A11yPrefsFields />
-        </Modal>
-      ) : null}
-    </>
   );
 }

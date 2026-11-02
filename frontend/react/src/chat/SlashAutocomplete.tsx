@@ -177,7 +177,7 @@ export function SlashAutocomplete({ text, onPick, onDismiss, combobox }: Props):
       >
         {loadFailed
           ? t('workflowsLoadFailed')
-          : <Trans i18nKey="noCommandsMatch" ns="chat" values={{ query: trimmed }} components={{ 1: <code />, 3: <code /> }} />}
+          : <Trans i18nKey="noCommandsMatch" ns="chat" values={{ query: trimmed }} components={[<></>, <code />, <></>, <code />]} />}
       </div>
     );
   }

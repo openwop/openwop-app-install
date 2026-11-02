@@ -17,8 +17,14 @@
  *   - no declared input is outside `email-send.input.json` (which is
  *     `additionalProperties:false`) — `from` is a CONFIG field, and declaring
  *     it as an input reads like it works.
+ *
+ * The allowed-input set is READ from `email-send.input.json` (the closed schema),
+ * never hand-copied, so a schema change cannot leave this list behind.
+ *
+ * TST-CCC-5. Red when: a shipped email-send node loses its `.to` edge, its `subject`,
+ * or authors its body as `body` instead of `text`/`html`.
  */
-import { readdirSync, existsSync } from 'node:fs';
+import { readdirSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { readPackManifest } from './helpers/readPackManifest.js';
@@ -27,8 +33,11 @@ const ROOT = join(__dirname, '..', '..', '..');
 const PACK_DIRS = ['examples/workflow-chain-packs', 'packs'];
 const TYPE_ID = 'core.openwop.integration.email-send';
 
-/** The impl's destructure in `packs/core.openwop.integration/index.mjs`. */
-const ALLOWED_INPUTS = new Set(['to', 'cc', 'bcc', 'subject', 'text', 'html']);
+/** The closed input schema the node is validated against (additionalProperties:false). */
+const INPUT_SCHEMA = JSON.parse(readFileSync(join(ROOT, 'packs', 'core.openwop.integration', 'schemas', 'email-send.input.json'), 'utf8')) as {
+  additionalProperties?: unknown; properties?: Record<string, unknown>;
+};
+const ALLOWED_INPUTS = new Set(Object.keys(INPUT_SCHEMA.properties ?? {}));
 const BODY_KEYS = ['text', 'html'];
 
 interface Node { id: string; typeId?: string; inputs?: Record<string, unknown> }
@@ -73,7 +82,10 @@ function populated(s: { node: Node; inboundPorts: string[] }, port: string): boo
 
 describe('the scan reaches real email-send nodes (a vacuous scan passes forever)', () => {
   it('finds at least one', () => {
-    expect(SENDS.length, 'no email-send nodes found — the ratchet is scanning nothing').toBeGreaterThan(0);
+    expect(SENDS.length, 'no email-send nodes found — the ratchet is scanning nothing').toBeGreaterThanOrEqual(18); // measured 18 (2026-10-29)
+    // The schema really is closed and still names the keys the impl destructures.
+    expect(INPUT_SCHEMA.additionalProperties).toBe(false);
+    for (const k of ['to', 'subject', 'text', 'html']) expect(ALLOWED_INPUTS.has(k), `email-send.input.json lost "${k}"`).toBe(true);
   });
 });
 

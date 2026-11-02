@@ -1,6 +1,6 @@
 # ADR 1000 — Fence tool errors by PROVENANCE, not by tool trust
 
-Status: Accepted (implemented on `fix/toc2cd-11-fence-tool-errors`; flips to `implemented` when merged)
+Status: implemented (merged #5358 `38ef13b03`, 2026-10-29, after #5359 `780f82d02`; live, verified 2026-10-29 on rev `01084-bm8` at `f382e70d1`)
 Date: 2026-10-28
 Gap: `TOC2CD-11` (filed by the feature-loop row 64 pass on tool-output compaction). Amends the RFC 0137 §F1 fence policy in `host/toModelToolResult.ts`.
 

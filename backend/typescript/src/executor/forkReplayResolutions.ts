@@ -66,7 +66,7 @@ function isDerivedValue(v: unknown, parentRunId: string): boolean {
   return !!v && typeof v === 'object' && (v as Record<string, unknown>)[DERIVED_MARKER] === parentRunId;
 }
 
-function unwrapDerived(v: unknown): unknown {
+export function unwrapDerived(v: unknown): unknown {
   return v && typeof v === 'object' && DERIVED_MARKER in v ? (v as Record<string, unknown>)['value'] : v;
 }
 
@@ -98,7 +98,7 @@ async function firstResolvedAfter(
  * live re-creation.
  */
 export async function deriveRecordedResolutions(input: {
-  storage: Pick<Storage, 'listEvents' | 'getInterrupt' | 'getInterruptByNode' | 'resolveInterrupt'>;
+  storage: Pick<Storage, 'listEvents' | 'getInterrupt' | 'getInterruptByNode' | 'resolveInterrupt' | 'getResolvedInterruptByKey'>;
   suspend: ReturnType<typeof getSuspendManager>;
   run: RunRecord;
   suspendedNodeIds: readonly string[];
@@ -110,11 +110,19 @@ export async function deriveRecordedResolutions(input: {
   const cut = (run.parentSeq ?? 0) - 1;
   const out: DerivedResolution[] = [];
   for (const nodeId of suspendedNodeIds) {
-    const recorded = await firstResolvedAfter(storage, run.parentRunId, cut, nodeId);
+    // ADR 1001 D3.5 — a node that suspends more than once (a clarification's
+    // rounds) has several resolutions; "the first resolution after the cut" is
+    // the NEXT round's when the cut falls right after one round resolved. For a
+    // durable suspend, take the resolution of the round the prefix last
+    // REQUESTED, matched by its resume key.
+    const keyed = await durableRoundAtCut(storage, run, nodeId);
+    const recorded = keyed ? (keyed.resolvedPayload ?? { interruptId: keyed.row.interruptId }) : await firstResolvedAfter(storage, run.parentRunId, cut, nodeId);
     if (!recorded) continue;
-    const sourceRow = typeof recorded['interruptId'] === 'string'
-      ? await storage.getInterrupt(recorded['interruptId'])
-      : await storage.getInterruptByNode(run.parentRunId, nodeId);
+    const sourceRow = keyed
+      ? keyed.row
+      : typeof recorded['interruptId'] === 'string'
+        ? await storage.getInterrupt(recorded['interruptId'])
+        : await storage.getInterruptByNode(run.parentRunId, nodeId);
     const kind = (sourceRow?.kind ?? (typeof recorded['kind'] === 'string' ? recorded['kind'] : 'approval')) as InterruptRecord['kind'];
     // The fork's own row. It is INSERTED ALREADY RESOLVED: never open, so no
     // human path can decide it and no notification surfaces it (the first cut
@@ -154,7 +162,8 @@ export async function deriveRecordedResolutions(input: {
         if (!row) throw err;
       }
     }
-    const alreadyRecorded = !conflict && (await firstResolvedAfter(storage, run.runId, cut, nodeId)) !== null;
+    // A keyed round resolved INSIDE the prefix is already in the fork's log.
+    const alreadyRecorded = !conflict && (keyed?.inPrefix === true || (await firstResolvedAfter(storage, run.runId, cut, nodeId)) !== null);
     const sourceData = sourceRow?.data && typeof sourceRow.data === 'object' && !Array.isArray(sourceRow.data)
       ? sourceRow.data as Record<string, unknown> : null;
     out.push({
@@ -176,4 +185,86 @@ export async function deriveRecordedResolutions(input: {
 /** A recorded resolution that REJECTED the gate (a decided reject, or a timeout). */
 export function isRecordedRejection(payload: Record<string, unknown>): boolean {
   return payload['decision'] === 'rejected' || payload['action'] === 'reject' || payload['action'] === 'timeout';
+}
+
+/** A resolved value marked as DERIVED from `parentRunId` (see `DERIVED_MARKER`). */
+export function derivedResolvedValue(parentRunId: string, value: unknown): Record<string, unknown> {
+  return { [DERIVED_MARKER]: parentRunId, value: value ?? null };
+}
+
+/**
+ * ADR 1001 D3.5 — for a node re-executing on a `replay` fork, the PARENT run's
+ * resolution of a `durable` suspend key, and whether that resolution sits
+ * inside the fork's copied prefix.
+ *
+ *  - `inPrefix` (its `interrupt.resolved` precedes `parentSeq`): the fork's own
+ *    log already holds the request and the resolution, so the node may be
+ *    SERVED the answer inline. No event is written, and the fork's sequence
+ *    still matches the source's.
+ *  - otherwise the node SUSPENDS like the source did, and the executor resolves
+ *    the fork's own row from this record (the derived-row pattern above), so
+ *    the fork's log gains the same `interrupt.resolved` the source has.
+ *
+ * Keyed on `__resumeKey` (a clarification's round + question digest), not the
+ * node's FIRST resolution: one node may hold several. A replay never re-decides.
+ * Rows are read only for the fork's own parent run, never another run.
+ */
+export async function parentResolutionForKey(input: {
+  storage: Pick<Storage, 'getResolvedInterruptByKey' | 'listEvents'>;
+  run: RunRecord;
+  nodeId: string;
+  resumeKey: string;
+}): Promise<{ row: InterruptRecord; resolvedPayload: Record<string, unknown> | null; inPrefix: boolean } | null> {
+  const { storage, run, nodeId, resumeKey } = input;
+  if (run.forkMode !== 'replay' || !run.parentRunId) return null;
+  const row = await storage.getResolvedInterruptByKey(run.parentRunId, nodeId, resumeKey);
+  if (!row) return null;
+  let fromSeq = -1;
+  for (;;) {
+    const page = await storage.listEvents(run.parentRunId, { fromSeq, limit: PAGE, contract: 1 });
+    for (const e of page) {
+      const p = (e.payload && typeof e.payload === 'object' ? e.payload : {}) as Record<string, unknown>;
+      if (e.type === 'interrupt.resolved' && e.nodeId === nodeId && p['interruptId'] === row.interruptId) {
+        return { row, resolvedPayload: p, inPrefix: e.sequence < (run.parentSeq ?? 0) };
+      }
+    }
+    if (page.length < PAGE) break;
+    fromSeq = page[page.length - 1]!.sequence;
+  }
+  // A resolved row with no event: treat it as after the cut (derive, and
+  // record the event the fork's log is missing).
+  return { row, resolvedPayload: null, inPrefix: false };
+}
+
+/**
+ * ADR 1001 D3.5 — the round of a DURABLE suspend that the fork's copied prefix
+ * last requested, with the source's resolution of it (in the prefix or after).
+ * `null` when the node's last request is not a durable suspend, so every other
+ * gate keeps the first-resolution-after-the-cut rule above.
+ */
+async function durableRoundAtCut(
+  storage: Pick<Storage, 'listEvents' | 'getResolvedInterruptByKey'>,
+  run: RunRecord,
+  nodeId: string,
+): Promise<{ row: InterruptRecord; resolvedPayload: Record<string, unknown> | null; inPrefix: boolean } | null> {
+  if (!run.parentRunId) return null;
+  const parentSeq = run.parentSeq ?? 0;
+  let lastKey: string | undefined;
+  let fromSeq = -1;
+  for (;;) {
+    const page = await storage.listEvents(run.parentRunId, { fromSeq, limit: PAGE, contract: 1 });
+    for (const e of page) {
+      if (e.sequence >= parentSeq) break;
+      const k = (e.payload as { key?: unknown } | null | undefined)?.key;
+      if (e.type === 'interrupt.requested' && e.nodeId === nodeId && typeof k === 'string') lastKey = k;
+    }
+    if (page.length < PAGE || (page.at(-1)?.sequence ?? 0) >= parentSeq) break;
+    fromSeq = page[page.length - 1]!.sequence;
+  }
+  const prefix = `${run.parentRunId}:${nodeId}:`;
+  if (!lastKey?.startsWith(prefix)) return null;
+  const resumeKey = lastKey.slice(prefix.length);
+  const p = await parentResolutionForKey({ storage, run, nodeId, resumeKey });
+  if (!p || (p.row.data as { __durable?: unknown } | null)?.__durable !== true) return null;
+  return p;
 }

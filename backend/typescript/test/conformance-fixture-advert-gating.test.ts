@@ -15,7 +15,7 @@
  * a fresh instance; the pre-existing `core.conformance.mock-agent` fixtures had
  * it already and are covered by the same predicate.
  */
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -24,6 +24,11 @@ import { join } from 'node:path';
 // `ensureNodesRegistered()` boot runs. Registered once, with the conformance
 // nodes ON: registration is a boot snapshot, and the env-flip legs below
 // exercise the per-call posture predicate on top of it.
+const PRIOR_CONFORMANCE_NODES = process.env.OPENWOP_ENABLE_CONFORMANCE_NODES;
+afterAll(() => {
+  if (PRIOR_CONFORMANCE_NODES === undefined) delete process.env.OPENWOP_ENABLE_CONFORMANCE_NODES;
+  else process.env.OPENWOP_ENABLE_CONFORMANCE_NODES = PRIOR_CONFORMANCE_NODES;
+});
 beforeAll(async () => {
   process.env.OPENWOP_ENABLE_CONFORMANCE_NODES = 'true';
   const { ensureNodesRegistered } = await import('../src/bootstrap/nodes.js');
@@ -374,6 +379,13 @@ describe('conformance fixture advert — every advertised fixture\'s nodes RESOL
     expect(listed.has('conformance-replay-side-effect')).toBe(true);
   });
 
+  // HONEST CEILING (w73 g4, A†): this leg can only show the closure when some
+  // advertised-eligible parent has a WITHHELD child. On the vendored corpus at
+  // 9f4cca7d4 none does, so deleting the child recursion in
+  // `fixtureIsAdvertisable` leaves it green (probe cf-child read vacuous, as
+  // predicted). It still pins the other direction: every advertised parent's
+  // child is advertised. Making it bite needs a fixture the corpus does not ship;
+  // inventing one here would assert more than this header claims. TST-DTE-2.
   it('a fixture whose CHILD fixture is withheld is withheld with it', async () => {
     const { listLoadedConformanceFixtures } = await import('../src/host/index.js');
     const { getNodeRegistry } = await import('../src/executor/nodeRegistry.js');

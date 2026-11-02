@@ -2,12 +2,20 @@
  * ADR 0932 (Book AI P6) — clarification answers are validated, attributed and
  * scoped.
  *   1. A declared resumeSchema binds every external resume lane (interrupt.md MUST).
- *   2. The resolving Subject is a spec-valid `resolvedBy` (subject.schema.json).
+ *   2. The helper that builds the resolving Subject (`requestSubjectV2`, the value
+ *      `resolvedBy` carries) returns a subject.schema.json-valid Subject. This file
+ *      checks the helper; the emitted `resolvedBy` on the wire is asserted in
+ *      `approval-overridden-both-majors.test.ts`.
  *   3. A non-approval interrupt that declares an approver ACL hands its resume
  *      token only to a caller on that ACL (was: anyone with the base scope).
- * Red under: dropping the schema check, validating host-internal resumes,
- * a permissive fallback for a broken schema, a non-Subject resolvedBy, or the
- * projector returning `true` for every non-approval kind again.
+ * Sabotage-witnessed (w73, measured): dropping the schema check in
+ * `resolveAndResume`; a permissive fallback for a schema that does not compile;
+ * accepting an array as a schema; dropping the declaration check in
+ * `createInterrupt`; a non-session Subject lane; dropping the base-scope check; or
+ * the projector returning `true` for every non-approval kind again.
+ * Not claimed here: that host-internal resumes (a timer, a skip, a preclaimed
+ * expiry) bypass the schema. No case drives one, so validating those lanes too
+ * would stay green in this file.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -34,7 +42,7 @@ beforeAll(async () => {
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => res()); });
   storage = await openStorage('memory://');
   setSuspendBackend(storage);
-});
+}, 120_000);
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 const req = (userId: string, tenantId = 't-0932'): Request => ({ userId, tenantId, principal: { principalId: userId, auth: { kind: 'session' } } }) as unknown as Request;
@@ -68,7 +76,7 @@ describe('ADR 0932 (1) — resumeSchema is enforced', () => {
 
   it('a malformed legacy object declaration cannot consume a resume token', async () => {
     const now = new Date().toISOString();
-    await storage.insertRun({ runId: 'r-legacy-schema', workflowId: 'wf', tenantId: 't-0932', status: 'waiting-approval', inputs: null, metadata: {}, configurable: {}, createdAt: now, updatedAt: now } as never);
+    await storage.insertRun({ runId: 'r-legacy-schema', workflowId: 'wf', tenantId: 't-0932', status: 'waiting-approval', inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now });
     await Reflect.apply(storage.insertInterrupt, storage, [{ interruptId: 'i-legacy-schema', runId: 'r-legacy-schema', nodeId: 'n', kind: 'clarification', token: 'legacy-tok', data: {}, resumeSchema: [], createdAt: now }]);
     await expect(resolveAndResume(storage, {} as never, 'i-legacy-schema', 'anything', { subjectRef: 'u-author' }))
       .rejects.toMatchObject({ code: 'validation_error', details: { field: 'resumeSchema' } });
@@ -77,15 +85,15 @@ describe('ADR 0932 (1) — resumeSchema is enforced', () => {
 
   it('resolveAndResume refuses a mismatched answer on an external lane BEFORE claiming the interrupt', async () => {
     const now = new Date().toISOString();
-    await storage.insertRun({ runId: 'r-0932', workflowId: 'wf', tenantId: 't-0932', status: 'waiting-approval', inputs: null, metadata: {}, configurable: {}, createdAt: now, updatedAt: now } as never);
+    await storage.insertRun({ runId: 'r-0932', workflowId: 'wf', tenantId: 't-0932', status: 'waiting-approval', inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now });
     const rec: InterruptRecord = { interruptId: 'i-0932', runId: 'r-0932', nodeId: 'n', kind: 'clarification', token: 'tok', data: {}, resumeSchema: ANSWERS, createdAt: now };
     await storage.insertInterrupt(rec);
-    await expect(resolveAndResume(storage, {} as never, 'i-0932', { answers: 42 }, { subjectRef: 'u-author' })).rejects.toMatchObject({ code: 'validation_error' });
+    await expect(resolveAndResume(storage, {} as never, 'i-0932', { answers: 42 }, { subjectRef: 'u-author' })).rejects.toMatchObject({ code: 'validation_error', details: { field: 'resumeValue' } });
     expect((await storage.getInterrupt('i-0932'))?.resolvedAt).toBeUndefined();
   });
 });
 
-describe('ADR 0932 (2) — resolvedBy is a spec Subject', () => {
+describe('ADR 0932 (2) — the resolvedBy Subject helper is spec-valid', () => {
   it('a session caller maps to a subject.schema.json-valid Subject in the active tenant', () => {
     const root = join(process.cwd(), '..', '..', 'schemas', 'v2');
     const ajv = new Ajv2020({ strict: false });

@@ -56,7 +56,7 @@ async function newRun(metadata: Record<string, unknown>, derivedFromRun = false)
   await insertRunWithStartContext(hostExtStorage(), {
     runId, workflowId: 'w', tenantId: TENANT, status: 'running', inputs: null,
     metadata, configurable: {}, createdAt: now, updatedAt: now,
-  } as RunRecord, { tenantId: TENANT, ...(derivedFromRun ? { derivedFromRun: true } : {}) });
+  } as RunRecord, { admission: { plan: 'exempt:test-fixture' }, tenantId: TENANT, ...(derivedFromRun ? { derivedFromRun: true } : {}) });
   return runId;
 }
 

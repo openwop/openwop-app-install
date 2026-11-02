@@ -59,10 +59,17 @@ export function uiPluginsCapability(): {
 /**
  * The Content-Security-Policy the host applies to the plugin iframe document
  * (`frontend-plugin-egress`). `default-src 'none'` + the absence of any `connect-src`
- * means the sandboxed plugin can make NO network requests — its only channel to the
- * outside is the `ui-plugin/1` postMessage RPC, which is the whole point of the closed
- * allowlist. The Track-2 front-end loader sets this on the iframe; it is a pure host
- * primitive so the egress invariant is testable without a browser.
+ * blocks every request API and subresource the plugin could start (fetch, XHR,
+ * beacons, sockets, images, styles, frames, workers). It is a pure host primitive so
+ * the policy is testable without a browser.
+ *
+ * ADR 1021 — what it does NOT stop, measured in Chromium
+ * (`frontend/react/e2e/plugin-frame-egress.spec.ts`): the frame navigating ITSELF
+ * (CSP has no directive for that; only the EMBEDDER's `frame-src` limits where it can
+ * go), a meta refresh, and WebRTC. So a plugin can send what it reads to a server it
+ * chooses. `form-action` and `base-uri` do not fall back to `default-src`, so they are
+ * named: forms are also blocked by the sandbox (no `allow-forms`), and `form-action
+ * 'none'` keeps them blocked if a capability ever adds that token.
  */
 export function pluginIframeCsp(): string {
   return [
@@ -70,7 +77,8 @@ export function pluginIframeCsp(): string {
     "script-src 'unsafe-inline' 'unsafe-eval'", // the plugin's own bundle, no remote scripts
     "style-src 'unsafe-inline'",
     "img-src data: blob:",
-    // NO connect-src / form-action / frame-src → deny all egress.
+    "form-action 'none'",
+    "base-uri 'none'",
   ].join('; ');
 }
 

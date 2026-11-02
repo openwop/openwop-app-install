@@ -20,7 +20,7 @@
 import type { AgentKnowledgeRetrieve, AgentMemoryPort, KnowledgeSourceKind } from './agentDispatch.js';
 import { getAgentProfile } from './agentProfileService.js';
 import { PREAUTHORIZED_CALLER, type SubjectCaller } from './subjectAccess.js';
-import { contextEconomy } from './contextEconomy.js';
+import { contextEconomy, logContextEconomyApplied } from './contextEconomy.js';
 import { budgetByChars, memoryBudgetConfig } from './memoryBudget.js';
 import { getKnowledgeBackend } from './knowledgeSurface.js';
 import { neutralizeUntrusted, fenceUntrustedItems } from './untrustedContent.js';
@@ -470,6 +470,8 @@ export function resolveSubjectKnowledgeRetrieve(
     const composed = contextEconomy().memoryBudget
       ? budgetByChars(out, memoryBudgetConfig().maxChars, (i) => i.content.length)
       : out;
+    // ADR 1003 D4 — counts only (guardrail 3).
+    if (composed.length < out.length) logContextEconomyApplied('memory', tenantId, { memoryKept: composed.length, memoryDropped: out.length - composed.length });
 
     // GENERIC extra context (ADR 0084 T1): append the binding's caller-supplied
     // items as chunk-like entries so they flow through the SAME composition + fence

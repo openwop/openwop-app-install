@@ -1,15 +1,10 @@
 /**
  * vendor.myndhyve.brand — brand-workflow pack runtime.
  *
- * 14 nodes covering brand theme + persona workflows. Most route
- * through ctx.aiEnvelope.generate (AI-generative) or ctx.brand.*
- * (state mutation + validation + review).
+ * 7 nodes covering brand theme + persona workflows, routed through
+ * ctx.brand.* (state mutation + validation + review).
  *
  * Architectural patterns:
- *   - AI-generative nodes (analyze, discovery, generate, templates,
- *     persona.discover/generate/keywordStrategy): emit typed envelope
- *     via ctx.aiEnvelope.generate with envelopeType = `<scope>.create`
- *     (e.g., `theme.create`, `persona.create`, `brand.templates.create`).
  *   - State-mutation nodes (theme.implement, theme.publish,
  *     persona.publish): route through ctx.brand.* adapter; idempotency-
  *     keyed for replay safety.
@@ -30,12 +25,6 @@ function ensureBrand(ctx) {
   }
 }
 
-function ensureAi(ctx) {
-  if (!ctx.aiEnvelope || typeof ctx.aiEnvelope.generate !== 'function') {
-    throw Object.assign(new Error('host does not expose ctx.aiEnvelope'), { code: 'host_capability_missing' });
-  }
-}
-
 function deriveIdempotencyKey(parts) {
   const h = createHash('sha256');
   for (const p of parts) {
@@ -46,71 +35,6 @@ function deriveIdempotencyKey(parts) {
   }
   return 'openwop-' + h.digest('hex').slice(0, 16);
 }
-
-/**
- * Generic AI-generative node implementation. Used by 7 of the 14
- * nodes (analyze, discovery, generate, templates × theme + persona).
- */
-function makeAiGenerator(envelopeType, systemPrompt) {
-  return async function aiGen(ctx) {
-    ensureAi(ctx);
-    const { provider, model, temperature } = ctx.config;
-    const { brandId, context, answers } = ctx.inputs ?? {};
-    const idempotencyKey = deriveIdempotencyKey([
-      String(ctx.runId), String(ctx.nodeId), envelopeType,
-      brandId ?? '', context ?? null, answers ?? null,
-    ]);
-    const result = await ctx.aiEnvelope.generate({
-      systemPrompt,
-      envelopeType,
-      ...(provider !== undefined ? { provider } : {}),
-      ...(model !== undefined ? { model } : {}),
-      ...(temperature !== undefined ? { temperature } : {}),
-      context: { brandId, ...context, answers },
-      idempotencyKey,
-    });
-    return {
-      status: 'success',
-      outputs: {
-        envelopeType: result?.envelopeType ?? envelopeType,
-        payload: result?.payload ?? null,
-        ...(result?.envelopeId ? { envelopeId: result.envelopeId } : {}),
-        ...(result?.usage ? { usage: result.usage } : {}),
-        ...(result?.model ? { model: result.model } : {}),
-      },
-    };
-  };
-}
-
-// 7 AI-generative nodes — one factory call each
-export const themeAnalyze = makeAiGenerator(
-  'theme.analyze',
-  'Analyze the provided brand inputs (logo, colors, sample copy). Extract a candidate theme: palette, typography, voice. Return as a theme draft.'
-);
-export const themeDiscovery = makeAiGenerator(
-  'theme.discovery',
-  'Take the discovery-questionnaire answers and synthesize them into a draft brand theme. Honor the user\'s stated tone, audience, and constraints.'
-);
-export const themeGenerate = makeAiGenerator(
-  'theme.create',
-  'Generate a complete brand theme from a brief. Include palette (3-5 colors), typography (heading + body fonts), voice guidelines.'
-);
-export const themeTemplates = makeAiGenerator(
-  'brand.templates.create',
-  'Given a brand theme, generate reusable templates: 3 social-post variants, 2 email-banner variants, 1 web-hero variant. Honor the theme exactly.'
-);
-export const personaDiscover = makeAiGenerator(
-  'persona.discovery',
-  'Take the discovery-questionnaire answers and synthesize them into a draft customer persona.'
-);
-export const personaGenerate = makeAiGenerator(
-  'persona.create',
-  'Generate a customer persona from market signals + brand context. Include demographics, pain points, search intent, day-in-the-life snapshot.'
-);
-export const personaKeywordStrategy = makeAiGenerator(
-  'persona.keywordStrategy',
-  'Derive an SEO keyword strategy from the persona\'s pain points + search intent. Output: 5-10 primary keywords, 10-20 long-tail, with search-intent classification (informational / transactional / navigational).'
-);
 
 /* ─── State-mutation nodes (implement / publish) ────────── */
 
@@ -232,17 +156,10 @@ export const personaValidate = makeValidate('validatePersona');
 /* ─── Pack registry ───────────────────────────────────── */
 
 export const nodes = {
-  'brand.theme.analyze': themeAnalyze,
-  'brand.theme.discovery': themeDiscovery,
-  'brand.theme.generate': themeGenerate,
   'brand.theme.implement': themeImplement,
   'brand.theme.publish': themePublish,
   'brand.theme.review': themeReview,
-  'brand.theme.templates': themeTemplates,
   'brand.theme.validate': themeValidate,
-  'brand.persona.discover': personaDiscover,
-  'brand.persona.generate': personaGenerate,
-  'brand.persona.keywordStrategy': personaKeywordStrategy,
   'brand.persona.publish': personaPublish,
   'brand.persona.review': personaReview,
   'brand.persona.validate': personaValidate,

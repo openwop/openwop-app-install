@@ -12,6 +12,10 @@
  * the gate. Before, `verdict !== 'regressed'` passed a summary with no regression
  * block, so a baseline that could not be used read as "not regressed".
  * Sabotage-witnessed: dropping the `baselineRequested` branch reds both cases.
+ *
+ * TST-DAD-5. Also red when (sabotage-witnessed, wave 70): agents are matched by
+ * id prefix; an unreadable manifest throws instead of selecting nothing; a
+ * `baseline_unavailable` inconclusive verdict passes; a `regressed` verdict passes.
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';

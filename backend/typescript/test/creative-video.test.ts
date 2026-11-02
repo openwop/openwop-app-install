@@ -4,6 +4,14 @@
  * re-charges — the requestHash CAS), the ADR 0106 `video` budget cap, the
  * fork-stable request hash, and the adapterOnly governed-spend posture. Uses a
  * stub VideoAdapter so no real provider call / poll delay occurs.
+ *
+ * Tracker TST-CQD-4 (w68). Sabotage-witnessed: red when the request hash drops
+ * the org (cross-org dedup), when a host-denied download stops being terminal,
+ * when a FRESH submitting row counts as stale, when a retriable failure stops
+ * being re-claimable, when the budget gate is skipped, when the hash drops the
+ * model, and when the job id stops being derived from the request hash (replay
+ * re-submits). A completed job returns early in BOTH `runGeneration` and
+ * `finalize` (a recorded double guard), so the replay probe targets `jobIdFor`.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -13,6 +21,7 @@ import { join } from 'node:path';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { openStorage } from '../src/storage/index.js';
+import type { Storage } from '../src/storage/storage.js';
 import { configureMediaBudget, _resetMediaBudgetForTest } from '../src/aiProviders/mediaBudget.js';
 import { getProvider } from '../src/features/connections/providerRegistry.js';
 import { generateVideo, textToVideo, resolveVideoJob, getVideoJob, type GenerateOutput } from '../src/features/creative-video/videoService.js';
@@ -32,10 +41,21 @@ function stubAdapter(): VideoAdapter & { submitCalls: number } {
   return a;
 }
 
-const deps = (tenantId: string, orgId: string) => ({ storage: undefined as never, tenantId, runId: 'run-1', actingUserId: 'u1', orgId });
+let storage: Storage;
+const deps = (tenantId: string, orgId: string) => ({ storage, tenantId, runId: 'run-1', actingUserId: 'u1', orgId });
+
+/** Narrow a result to `completed` (a failed narrowing is a test failure, never a silent `undefined`). */
+function assetOf(out: GenerateOutput): string {
+  if (out.status !== 'completed') throw new Error(`expected completed, got ${JSON.stringify(out)}`);
+  return out.assetId;
+}
+function errorOf(out: GenerateOutput): string {
+  if (out.status !== 'failed') throw new Error(`expected failed, got ${JSON.stringify(out)}`);
+  return out.error;
+}
 
 beforeEach(async () => {
-  const storage = await openStorage('memory://');
+  storage = await openStorage('memory://');
   initHostExtPersistence(storage);
   initInMemorySurfaces({ dataDir: mkdtempSync(join(tmpdir(), 'owp-video-')) });
   configureMediaBudget({ storage });
@@ -68,12 +88,12 @@ describe('creative-video — replay/idempotency + budget', () => {
     const adapter = stubAdapter();
     const first = await generateVideo(deps('t1', 'o1'), { tenantId: 't1', orgId: 'o1', script: 'Hi there', avatarId: 'av1', createdBy: 'u1' }, adapter);
     expect(first.status).toBe('completed');
-    const assetId = (first as Extract<GenerateOutput, { status: 'completed' }>).assetId;
+    const assetId = assetOf(first);
     expect(assetId).toBeTruthy();
 
     const replay = await generateVideo(deps('t1', 'o1'), { tenantId: 't1', orgId: 'o1', script: 'Hi there', avatarId: 'av1', createdBy: 'u1' }, adapter);
     expect(replay.status).toBe('completed');
-    expect((replay as Extract<GenerateOutput, { status: 'completed' }>).assetId).toBe(assetId); // same asset
+    expect(assetOf(replay)).toBe(assetId); // same asset
     expect(adapter.submitCalls).toBe(1); // NEVER re-submitted / re-charged
   });
 
@@ -85,7 +105,7 @@ describe('creative-video — replay/idempotency + budget', () => {
     // A DIFFERENT generation the same day is over the 1-job cap → failed, not submitted.
     const denied = await generateVideo(deps('t2', 'o1'), { tenantId: 't2', orgId: 'o1', script: 'Second', avatarId: 'av1', createdBy: 'u1' }, adapter);
     expect(denied.status).toBe('failed');
-    expect((denied as Extract<GenerateOutput, { status: 'failed' }>).error).toBe('budget_exceeded');
+    expect(errorOf(denied)).toBe('budget_exceeded');
     expect(adapter.submitCalls).toBe(1); // the denied job never reached the provider
   });
 
@@ -96,6 +116,7 @@ describe('creative-video — replay/idempotency + budget', () => {
     expect(a.status).toBe('completed');
     expect(b.status).toBe('completed');
     expect(adapter.submitCalls).toBe(2); // each tenant submits its own
+    expect(assetOf(b)).not.toBe(assetOf(a)); // and gets its own asset (never another tenant's id)
   });
 
   it('isolates jobs by ORG within a tenant (grade-data CV-1 — no cross-org dedup)', async () => {
@@ -107,7 +128,7 @@ describe('creative-video — replay/idempotency + budget', () => {
     expect(a.status).toBe('completed');
     expect(b.status).toBe('completed');
     expect(adapter.submitCalls).toBe(2); // each org submits its own job
-    expect((b as Extract<GenerateOutput, { status: 'completed' }>).assetId).not.toBe((a as Extract<GenerateOutput, { status: 'completed' }>).assetId);
+    expect(assetOf(b)).not.toBe(assetOf(a));
   });
 
   it('a PRE-SUBMIT failure does NOT poison the requestHash (re-claimable)', async () => {
@@ -123,11 +144,11 @@ describe('creative-video — replay/idempotency + budget', () => {
     };
     const first = await generateVideo(deps('t5', 'o1'), { tenantId: 't5', orgId: 'o1', script: 'Retry me', avatarId: 'av1', createdBy: 'u1' }, adapter);
     expect(first.status).toBe('failed');
-    expect((first as Extract<GenerateOutput, { status: 'failed' }>).error).toBe('no_connection');
+    expect(errorOf(first)).toBe('no_connection');
     // Same inputs again — the hash was released, so it re-submits and completes.
     const second = await generateVideo(deps('t5', 'o1'), { tenantId: 't5', orgId: 'o1', script: 'Retry me', avatarId: 'av1', createdBy: 'u1' }, adapter);
     expect(second.status).toBe('completed');
-    expect((second as Extract<GenerateOutput, { status: 'completed' }>).assetId).toBeTruthy();
+    expect(assetOf(second)).toBeTruthy();
   });
 
   it('a permanent (host-denied) download is TERMINAL — no eternal pending, no re-charge on retry', async () => {
@@ -142,7 +163,7 @@ describe('creative-video — replay/idempotency + budget', () => {
     };
     const out = await generateVideo(deps('t8', 'o1'), { tenantId: 't8', orgId: 'o1', script: 'Denied', avatarId: 'av1', createdBy: 'u1' }, adapter);
     expect(out.status).toBe('failed');
-    expect((out as Extract<GenerateOutput, { status: 'failed' }>).error).toBe('video_result_url_host_denied:evil.example.com');
+    expect(errorOf(out)).toBe('video_result_url_host_denied:evil.example.com');
     // Retry: the terminal error is NOT reclaimable → returns failed, never re-submits.
     const retry = await generateVideo(deps('t8', 'o1'), { tenantId: 't8', orgId: 'o1', script: 'Denied', avatarId: 'av1', createdBy: 'u1' }, adapter);
     expect(retry.status).toBe('failed');
@@ -170,7 +191,7 @@ describe('creative-video — replay/idempotency + budget', () => {
   it('clearJobsForAsset prunes a completed job when its media asset is deleted (grade-data CV-2)', async () => {
     const adapter = stubAdapter();
     const gen = await generateVideo(deps('t12', 'o1'), { tenantId: 't12', orgId: 'o1', script: 'Asset', avatarId: 'av1', createdBy: 'u1' }, adapter);
-    const assetId = (gen as Extract<GenerateOutput, { status: 'completed' }>).assetId;
+    const assetId = assetOf(gen);
     const pruned = await clearJobsForAsset('t12', 'o1', assetId);
     expect(pruned).toBe(1);
     expect(await getVideoJob('t12', 'o1', gen.jobId)).toBeNull(); // gone → re-generatable
@@ -200,7 +221,7 @@ describe('creative-video — replay/idempotency + budget', () => {
     const b = await generateVideo(deps('t6', 'o1'), { tenantId: 't6', orgId: 'o1', script: 'Beta', avatarId: 'av1', createdBy: 'u1' }, adapter);
     expect(a.status).toBe('completed');
     expect(b.status).toBe('completed');
-    expect((b as Extract<GenerateOutput, { status: 'completed' }>).assetId).toBe((a as Extract<GenerateOutput, { status: 'completed' }>).assetId);
+    expect(assetOf(b)).toBe(assetOf(a));
   });
 });
 
@@ -217,6 +238,8 @@ describe('creative-video — text-to-video (ADR 0404 §P4)', () => {
     const t2v = requestHashFor({ provider: 'runway', kind: 't2v', script: 'Hello' });
     const t2vModelB = requestHashFor({ provider: 'runway', kind: 't2v', model: 'veo-2', script: 'Hello' });
     expect(avatar).not.toBe(t2v); // same script, different mode → distinct jobs
+    // Same provider, same script, only the KIND differs — isolates the kind field.
+    expect(requestHashFor({ provider: 'runway', kind: 'avatar', script: 'Hello' })).not.toBe(t2v);
     expect(t2v).not.toBe(t2vModelB); // same prompt, different model → distinct jobs
   });
 
@@ -224,10 +247,10 @@ describe('creative-video — text-to-video (ADR 0404 §P4)', () => {
     const adapter = stubAdapter();
     const first = await textToVideo(deps('t7', 'o1'), { tenantId: 't7', orgId: 'o1', prompt: 'A robot dances', createdBy: 'u1' }, adapter);
     expect(first.status).toBe('completed');
-    const assetId = (first as Extract<GenerateOutput, { status: 'completed' }>).assetId;
+    const assetId = assetOf(first);
     expect(assetId).toBeTruthy();
     const replay = await textToVideo(deps('t7', 'o1'), { tenantId: 't7', orgId: 'o1', prompt: 'A robot dances', createdBy: 'u1' }, adapter);
-    expect((replay as Extract<GenerateOutput, { status: 'completed' }>).assetId).toBe(assetId);
+    expect(assetOf(replay)).toBe(assetId);
     expect(adapter.submitCalls).toBe(1); // never re-submitted / re-charged
   });
 });

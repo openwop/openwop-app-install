@@ -19,6 +19,12 @@
  *
  * `resetLogicalInvocationOrdinals()` IS the kill: dropping the module-level Map
  * is exactly what a fresh process starts with.
+ *
+ * Tracker TST-CXC-1. Red when (effectIdentity.ts / effectEscapeLedger.ts): a
+ * fresh process does not restart the ordinal at the same base (two identities);
+ * the allocator hands out a repeated ordinal on the 2nd or 3rd call in one node;
+ * an effect outside a run is recorded; or a run context missing EITHER nodeId
+ * or tenantId is recorded (each input is checked on its own).
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -78,14 +84,17 @@ describe('ADR 0591 P2 — identity reproduction across a process kill', () => {
     const storage = await freshStorage();
     setEffectEscapeBackend(storage);
 
+    // THREE calls: the 2nd ordinal comes from the fresh-state branch, the 3rd
+    // from the running counter — a repeat at either point collapses two.
     await runWithEffectContext(CTX, async () => {
+      await recordDurableEffectEscape('notification:approval');
       await recordDurableEffectEscape('notification:approval');
       await recordDurableEffectEscape('notification:approval');
     });
 
     const rows = await storage.listEffectEscapes('run-1');
-    expect(rows).toHaveLength(2);
-    expect(rows.map((r) => r.count)).toEqual([1, 1]);
+    expect(rows).toHaveLength(3);
+    expect(rows.map((r) => r.count)).toEqual([1, 1, 1]);
   });
 
   it('records nothing outside a run — an effect from a route or sweep belongs to no identity', async () => {
@@ -102,10 +111,19 @@ describe('ADR 0591 P2 — identity reproduction across a process kill', () => {
     const storage = await freshStorage();
     setEffectEscapeBackend(storage);
 
-    await runWithEffectContext({ runId: 'run-1', replaying: false }, async () => {
-      await recordDurableEffectEscape('notification:approval');
+    // Each identity input is checked on its own: one missing is enough to refuse.
+    await runWithEffectContext({ runId: 'run-1', replaying: false, tenantId: 't1', attempt: 1 }, async () => {
+      await recordDurableEffectEscape('notification:approval'); // no nodeId
+    });
+    await runWithEffectContext({ runId: 'run-1', replaying: false, nodeId: 'notify', attempt: 1 }, async () => {
+      await recordDurableEffectEscape('notification:approval'); // no tenantId
     });
 
     expect(await storage.listEffectEscapes('run-1')).toEqual([]);
+    // Positive control: the same context WITH both inputs records.
+    await runWithEffectContext(CTX, async () => {
+      await recordDurableEffectEscape('notification:approval');
+    });
+    expect(await storage.listEffectEscapes('run-1')).toHaveLength(1);
   });
 });

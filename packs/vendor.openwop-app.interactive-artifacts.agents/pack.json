@@ -1,6 +1,6 @@
 {
  "name": "vendor.openwop-app.interactive-artifacts.agents",
- "version": "1.0.2",
+ "version": "1.0.3",
   "kind": "node",
  "description": "Visualizer agent. Turns a request into an interactive diagram / chart / HTML canvas rendered in the EXISTING chat artifact workbench \u2014 composes the existing AI chat + the feature.interactive-artifacts.nodes pack; no new chat surface. Pure-agent pack.",
  "author": "OpenWOP App",

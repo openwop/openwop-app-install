@@ -175,7 +175,15 @@ export function registerCampaignBriefRoutes(deps: RouteDeps): void {
   app.get(`${BASE}/briefs/:briefId`, async (req, res, next) => {
     try {
       await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
-      res.json({ brief: await loadBriefScoped(req, 'workspace:read') });
+      const brief = await loadBriefScoped(req, 'workspace:read');
+      // ADR 1020 D8 — a generated kernel waiting for approval is reported only
+      // while its run still waits (a rejected or finished run leaves no claim).
+      let pendingKernelRunId: string | undefined;
+      if (brief.kernelReview?.runId) {
+        const run = await deps.storage.getRun(brief.kernelReview.runId).catch(() => null);
+        if (run && run.tenantId === brief.tenantId && run.status === 'waiting-approval') pendingKernelRunId = run.runId;
+      }
+      res.json({ brief, ...(pendingKernelRunId ? { pendingKernelRunId } : {}) });
     } catch (err) { next(err); }
   });
 

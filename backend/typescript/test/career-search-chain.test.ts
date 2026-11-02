@@ -12,11 +12,23 @@
  * The last part is what these mostly check, because it is the failure that would
  * otherwise be found at RUN time by a user: a chain that references a node typeId
  * nothing implements looks perfectly valid sitting in the gallery.
+ *
+ * grade-tests w67 (TST-CBK-3): red when a declared parameter goes dead, an
+ * edge names a missing node, the verdict outputs change, the run-campaign node
+ * loses its `side-effectful` declaration, or the job-search surface stops
+ * treating an ABSENT applicant constraint as "needs nothing". The EXECUTOR
+ * side-effect classification is a DOUBLE GUARD (the manifest-derived fast path
+ * from the pack's `side-effectful` capability, plus the `SIDE_EFFECTING_TYPE_PATTERNS`
+ * regex in executor/sideEffects.ts); either one alone keeps that case green.
+ * The parameter-liveness case overlaps workflow-chain-knowledge-inbox's
+ * repo-wide liveness check (both red on a dead param); kept as the pack's own
+ * witness.
  */
 import { describe, expect, it } from 'vitest';
 import { join } from 'node:path';
 import { loadWorkflowChainPacks, defaultWorkflowChainPackRoots, getChain } from '../src/host/workflowChainPackLoader.js';
 import { readPackManifest } from './helpers/readPackManifest.js';
+import { buildJobSearchSurface } from '../src/features/job-search/surface.js';
 
 const ROOT = join(process.cwd(), '..', '..');
 const CHAIN_PACK = join(ROOT, 'examples', 'workflow-chain-packs', 'career-search', 'pack.json');
@@ -61,19 +73,25 @@ describe('ADR 0543 P2 — the chain is a valid, loadable pack', () => {
   });
 
   it('every EDGE (if any) connects real nodes in dotted `<nodeId>.<key>` form', () => {
-    // This chain currently has NO edges, and that is deliberate: scoring reads
+    // career.search has NO edges, and that is deliberate: scoring reads
     // (digest, profile) and eligibility reads (digest, applicant), so nothing
     // flows between them. An earlier draft had `score.score →
     // eligibility.matchScore`, which pointed at an input the node does not read
     // — a DECORATIVE edge, worse than none, because it implies a dependency the
-    // engine will not honour.
-    const ids = new Set(chain.dag.nodes.map((n) => n.id));
-    for (const e of chain.dag.edges) {
-      expect(ids.has(e.from.split('.')[0]!), `edge from unknown node`).toBe(true);
-      expect(ids.has(e.to.split('.')[0]!), `edge to unknown node`).toBe(true);
-      expect(e.from).toContain('.');
-      expect(e.to).toContain('.');
+    // engine will not honour. So the check walks EVERY chain in the pack;
+    // career.apply's `guard.ok → session.guardOk` keeps it non-vacuous.
+    let checked = 0;
+    for (const c of manifest.chains) {
+      const ids = new Set(c.dag.nodes.map((n) => n.id));
+      for (const e of c.dag.edges) {
+        expect(e.from, `${c.chainId} edge from must be <nodeId>.<key>`).toMatch(/^[^.]+\.[^.]+$/);
+        expect(e.to, `${c.chainId} edge to must be <nodeId>.<key>`).toMatch(/^[^.]+\.[^.]+$/);
+        expect(ids.has(e.from.split('.')[0]!), `${c.chainId} edge from unknown node ${e.from}`).toBe(true);
+        expect(ids.has(e.to.split('.')[0]!), `${c.chainId} edge to unknown node ${e.to}`).toBe(true);
+        checked += 1;
+      }
     }
+    expect(checked, 'non-vacuity: the pack really does carry edges').toBeGreaterThanOrEqual(1);
   });
 
   it('every declared PARAMETER is actually consumed by a node', () => {
@@ -146,13 +164,29 @@ describe('ADR 0543 P2 — what the chain deliberately does NOT do', () => {
     }
   });
 
-  it('an absent applicant cannot produce a FALSE verdict', () => {
+  it('an absent applicant cannot produce a FALSE verdict', async () => {
     // The reason dropping `required` is safe rather than sloppy: the eligibility
     // node treats absent constraints as "needs nothing", and only a bar the
-    // POSTING STATES can disqualify. With no posting there is no stated bar, so
-    // no applicant's verdict can leak onto another's.
-    const applicant = chain.parameters.properties?.applicant as { description?: string } | undefined;
-    expect(applicant?.description).toMatch(/needs nothing|STATES/i);
+    // POSTING STATES can disqualify. Asserted on the surface the chain's
+    // eligibility node calls, fed the chain's OWN default applicant.
+    const defaults = chain.parameters.properties as Record<string, { default?: unknown }>;
+    const absentApplicant = defaults.applicant?.default;
+    expect(absentApplicant).toEqual({});
+    const check = buildJobSearchSurface({ tenantId: 'user:t-career-search' }).checkEligibility!;
+    // No posting, no applicant: nothing is stated, so nothing disqualifies.
+    expect(await check({ digest: defaults.digest?.default, applicant: absentApplicant }))
+      .toEqual({ eligible: true, ruleId: null, reason: '', quote: null });
+    // Even a posting that STATES a citizenship and a clearance bar cannot
+    // disqualify an applicant who never said they fail it.
+    const stated = {
+      citizenshipRequirementQuote: 'Must be a U.S. citizen.',
+      clearanceRequirementQuote: 'Active TS/SCI clearance required.',
+    };
+    expect(await check({ digest: stated, applicant: absentApplicant }))
+      .toEqual({ eligible: true, ruleId: null, reason: '', quote: null });
+    // Control: the same posting DOES disqualify an applicant who says they fail it.
+    expect(await check({ digest: stated, applicant: { meetsCitizenshipRequirement: false } }))
+      .toMatchObject({ eligible: false, ruleId: 'stated-citizenship-bar', quote: 'Must be a U.S. citizen.' });
   });
 });
 

@@ -6,6 +6,11 @@
  *  - a segment-targeted placement is INERT for an anonymous caller (the public
  *    IDOR invariant's service-level shadow — no contact ⇒ no targeted recs);
  *  - placement CRUD validates its closed vocabulary.
+ *
+ * Sabotage that turns it red (w74 probes): inverting the affinity score; `>=` on the
+ * upsell price; never entering control; a random (session-blind) bucket; matching a
+ * segment placement for an anonymous caller; coercing an unknown slot/source; an
+ * update or delete that does not persist.
  */
 import { describe, it, expect, beforeEach, beforeAll } from 'vitest';
 import { initHostExtPersistence } from '../../../host/hostExtPersistence.js';
@@ -16,7 +21,8 @@ import {
   resolveRecommendations, rebuildAffinity, __resetRecommendations,
 } from '../recommendationsService.js';
 
-const T = 'default';
+// File-unique tenant (REC-FLAKE-1): `'default'` is shared with other files' rows.
+const T = 'tenant-reco-r1';
 const ORG = 'org-reco';
 const mk = (name: string, price: number): Promise<Product> =>
   createProduct({ tenantId: T, orgId: ORG, createdBy: 'u', type: 'digital', name, price, currency: 'USD', categories: ['photo'], tags: ['gear'] });
@@ -68,12 +74,21 @@ describe('MERCH-A recommendations', () => {
   it('holdout control cohort sees no recs, deterministically (sticky by sessionKey)', async () => {
     const { a } = await seed();
     await rebuildAffinity(T, ORG);
-    await createPlacement({ tenantId: T, orgId: ORG, createdBy: 'u', slot: 'pdp', source: 'bought_together', holdoutPct: 100 });
-    const r1 = await resolveRecommendations({ tenantId: T, orgId: ORG, slot: 'pdp', productId: a.productId, sessionKey: 'sess-1' });
-    const r2 = await resolveRecommendations({ tenantId: T, orgId: ORG, slot: 'pdp', productId: a.productId, sessionKey: 'sess-1' });
-    expect(r1.variant).toBe('control');
-    expect(r1.products).toHaveLength(0);
-    expect(r2.variant).toBe('control'); // deterministic
+    // 50%, not 100%: at 100% every bucket is control, so a session-blind (random)
+    // bucketer passed too (w74 probe rec-holdout-sticky read vacuous).
+    await createPlacement({ tenantId: T, orgId: ORG, createdBy: 'u', slot: 'pdp', source: 'bought_together', holdoutPct: 50 });
+    const seen = new Set<string>();
+    for (let i = 0; i < 40; i++) {
+      const sessionKey = `sess-${i}`;
+      const r1 = await resolveRecommendations({ tenantId: T, orgId: ORG, slot: 'pdp', productId: a.productId, sessionKey });
+      const r2 = await resolveRecommendations({ tenantId: T, orgId: ORG, slot: 'pdp', productId: a.productId, sessionKey });
+      expect(r2.variant, sessionKey).toBe(r1.variant); // sticky
+      if (r1.variant === 'control') expect(r1.products, sessionKey).toHaveLength(0);
+      else expect(r1.products.length, sessionKey).toBeGreaterThan(0);
+      seen.add(String(r1.variant));
+    }
+    // Positive control: the 40 sessions really split, so stickiness was tested on both arms.
+    expect([...seen].sort()).toEqual(['control', 'treatment']);
   });
 
   it('segment-targeted placement is inert for an anonymous caller (IDOR-safe)', async () => {
@@ -88,10 +103,11 @@ describe('MERCH-A recommendations', () => {
   it('placement CRUD validates the closed slot/source vocabulary', async () => {
     const p = await createPlacement({ tenantId: T, orgId: ORG, createdBy: 'u', slot: 'cart', source: 'cross_sell' });
     expect(await listPlacements(T, ORG)).toHaveLength(1);
-    await expect(createPlacement({ tenantId: T, orgId: ORG, createdBy: 'u', slot: 'nope', source: 'cross_sell' })).rejects.toThrow();
-    await expect(createPlacement({ tenantId: T, orgId: ORG, createdBy: 'u', slot: 'cart', source: 'nope' })).rejects.toThrow();
+    await expect(createPlacement({ tenantId: T, orgId: ORG, createdBy: 'u', slot: 'nope', source: 'cross_sell' })).rejects.toThrow(/Invalid slot/);
+    await expect(createPlacement({ tenantId: T, orgId: ORG, createdBy: 'u', slot: 'cart', source: 'nope' })).rejects.toThrow(/Invalid source/);
     const upd = await updatePlacement(T, ORG, p.placementId, { active: false });
     expect(upd?.active).toBe(false);
+    expect((await listPlacements(T, ORG))[0]?.active).toBe(false); // persisted, not just returned
     expect(await deletePlacement(T, ORG, p.placementId)).toBe(true);
     expect(await listPlacements(T, ORG)).toHaveLength(0);
   });

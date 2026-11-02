@@ -1,10 +1,18 @@
 /**
  * Wall-clock cron evaluator (host/cronSchedule.ts) — parsing + next-fire.
  *
- * Covers the four UI cadence presets, the union day rule, step/range/list
- * tokens, timezone-aware evaluation, malformed-expression rejection, and the
- * missed-window collapse (a far-past `afterMs` still yields the NEXT slot, not a
- * backlog).
+ * Covers the four UI cadence presets (parsed field sets AND next fire), the union
+ * day rule, step/range/list tokens, timezone-aware evaluation, and
+ * malformed-expression rejection.
+ *
+ * Tracker TST-CQF-3 (w68). Sabotage-witnessed: red when the union rule becomes
+ * AND, when dow 7 is not folded to 0, when the first candidate is not strictly
+ * after the anchor, when an out-of-range hi bound is accepted, when the timezone
+ * is ignored, when a match is returned one minute late, and when dowRestricted is
+ * hard-wired false. w68 cut "a far-past anchor yields the next future slot": the
+ * function has no collapse logic (that is the daemon's), so the case was the
+ * hourly case on another date — the same sabotage (a match returned a minute
+ * late) reddened both, and 'hourly fires at the top of the next hour' remains.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -16,11 +24,19 @@ function iso(ms: number | null): string | null {
 }
 
 describe('parseCron', () => {
-  it('parses the four UI presets', () => {
-    expect(parseCron('0 * * * *')).not.toBeNull(); // hourly
-    expect(parseCron('0 9 * * *')).not.toBeNull(); // daily 09:00
-    expect(parseCron('0 9 * * 1-5')).not.toBeNull(); // weekdays 09:00
-    expect(parseCron('0 9 * * 1')).not.toBeNull(); // weekly Mon 09:00
+  it('parses the four UI presets into their exact field sets', () => {
+    const fields = (expr: string) => {
+      const c = parseCron(expr);
+      return c && { minute: [...c.minute], hour: [...c.hour].length, dow: [...c.dow] };
+    };
+    // hourly: minute 0 of every hour, every day
+    expect(fields('0 * * * *')).toEqual({ minute: [0], hour: 24, dow: [0, 1, 2, 3, 4, 5, 6] });
+    // daily 09:00
+    expect([...(parseCron('0 9 * * *')?.hour ?? [])]).toEqual([9]);
+    // weekdays 09:00 — the range expands to EXACTLY Mon..Fri
+    expect(fields('0 9 * * 1-5')).toEqual({ minute: [0], hour: 1, dow: [1, 2, 3, 4, 5] });
+    // weekly Mon 09:00
+    expect(fields('0 9 * * 1')).toEqual({ minute: [0], hour: 1, dow: [1] });
   });
 
   it('rejects malformed expressions', () => {
@@ -103,15 +119,5 @@ describe('computeNextFire — timezone', () => {
   it('the same expression in UTC fires at 09:00Z', () => {
     const after = Date.parse('2026-06-02T05:00:00Z');
     expect(iso(computeNextFire('0 9 * * *', after, 'UTC'))).toBe('2026-06-02T09:00:00.000Z');
-  });
-});
-
-describe('computeNextFire — missed-window collapse', () => {
-  it('a far-past anchor yields the next future slot, not a backlog', () => {
-    // Anchor a week in the past; hourly cadence. The function returns ONE next
-    // slot just past the anchor — the daemon advances from there, so a long
-    // downtime collapses to a single recovery fire rather than N.
-    const longAgo = Date.parse('2026-05-26T10:15:00Z');
-    expect(iso(computeNextFire('0 * * * *', longAgo))).toBe('2026-05-26T11:00:00.000Z');
   });
 });

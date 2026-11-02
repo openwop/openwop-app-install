@@ -17,6 +17,14 @@
  *   - ratchet: free-form members (OBJECT without properties, untyped `{}`, ARRAY without
  *     items — no faithful Gemini spelling, so passed through) may not grow;
  *   - hard: the default-on baseline and the real default session payloads have NONE.
+ *
+ * TST-DEC-4 — red when: an OBJECT without properties stops being reported
+ * free-form, the converter keeps an unsupported format / non-string enum /
+ * undeclared `required` / drops `nullable`, `walkthroughs.register-draft` loses its
+ * `steps.items` properties (the 2026-10-08 incident), the empty-tools payload
+ * keeps a `tools` key, or KNOWN_FREE_FORM goes stale (TWO-SIDED since wave 70:
+ * a listed tool that no longer exists, or a listed path no longer free-form,
+ * must be removed — the list only shrinks).
  */
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import http from 'node:http';
@@ -118,23 +126,37 @@ describe('every offerable tool projects to a valid Gemini FunctionDeclaration', 
     const ids = builtinAgentToolIds();
     expect(ids.length).toBeGreaterThan(50); // the universe is real, not an empty pass
     const failures: string[] = [];
+    const unresolved: string[] = [];
     for (const id of ids) {
       const def = resolveTool(id);
-      if (!def) continue;
+      if (!def) { unresolved.push(id); continue; }
       const decl = toGeminiFunctionDeclaration({ name: sanitizeToolName(def.name), description: def.description ?? '', parameters: def.inputSchema ?? { type: 'object' } });
       for (const v of geminiFunctionDeclarationViolations(decl, { allowFreeForm: true })) failures.push(`${id}: ${v}`);
     }
+    // Every id the registry lists must resolve — a silent skip is an unchecked tool.
+    expect(unresolved).toEqual([]);
     expect(failures).toEqual([]);
   });
 
   it('free-form members do not grow (KNOWN_FREE_FORM is a no-growth ratchet)', () => {
     const { resolveTool } = createAgentToolProvider({ tenantId: '_decls' });
+    const foundById = new Map<string, string[]>();
     for (const id of builtinAgentToolIds()) {
       const def = resolveTool(id);
       if (!def) continue;
       const found = geminiFreeFormPaths(toGeminiSchema(def.inputSchema ?? { type: 'object' }));
+      foundById.set(id, found);
       expect(KNOWN_FREE_FORM[id] ?? [], `${id} has a member Gemini cannot express: ${found.join(', ')} — give it a typed schema (an OBJECT needs properties, every value needs a type)`).toEqual(expect.arrayContaining(found));
     }
+    // Two-sided: every allowlisted entry must still be a live tool AND still be
+    // free-form at that path — a fixed or deleted member is removed (shrink-only).
+    const stale: string[] = [];
+    for (const [id, paths] of Object.entries(KNOWN_FREE_FORM)) {
+      const found = foundById.get(id);
+      if (!found) { stale.push(`${id}: not a builtin agent tool any more`); continue; }
+      for (const path of paths) if (!found.includes(path)) stale.push(`${id}: ${path} is no longer free-form`);
+    }
+    expect(stale, 'remove these KNOWN_FREE_FORM entries (shrink-only)').toEqual([]);
   });
 
   it('the ADR 0315 default-on baseline (offered to EVERY agent) has no free-form member', () => {
@@ -215,11 +237,16 @@ describe('validator + converter: each normalisable bad-value class is CAUGHT raw
       type: 'object',
       properties: { when: { type: 'string', format: 'date-time' }, n: { type: ['integer', 'null'], format: 'int32' }, op: { type: 'string', enum: ['eq', 'neq'] } },
       required: ['op'],
-    }) as Record<string, any>;
-    expect(out.properties.when.format).toBe('date-time');
-    expect(out.properties.n).toEqual({ type: 'integer', format: 'int32', nullable: true });
-    expect(out.properties.op.enum).toEqual(['eq', 'neq']);
-    expect(out.required).toEqual(['op']);
+    });
+    expect(out).toEqual({
+      type: 'object',
+      properties: {
+        when: { type: 'string', format: 'date-time' },
+        n: { type: 'integer', format: 'int32', nullable: true },
+        op: { type: 'string', enum: ['eq', 'neq'] },
+      },
+      required: ['op'],
+    });
   });
 
   it('free-form members are REPORTED, never silently dropped (a required render payload must survive)', () => {

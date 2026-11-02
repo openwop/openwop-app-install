@@ -521,6 +521,13 @@ function MessageBubbleInner({ message, onRegenerate, onFeedback, onBranchFrom, b
             {t('contextDegradedNotice', { blocks: voiceCtxBlockLabels((k) => t(k), message.meta?.degradedBlocks ?? []) })}
           </div>
         )}
+        {/* ADR 1003 D5 — the transcript window left earlier turns out of what
+            the model saw. Informational, settled with the reply, no action. */}
+        {!isUser && !message.isStreaming && (message.meta?.contextOmittedTurns ?? 0) > 0 && (
+          <span className="msgbubble-voicemark muted" role="note">
+            {t('contextBudgetedNotice', { count: message.meta?.contextOmittedTurns ?? 0 })}
+          </span>
+        )}
         {/* ADR 0195 D5 — multi-party affordances (reaction chips + hover bar
             with the curated picker and own-message Edit/Delete). The feedback
             thumbs never render alongside these (the D3b boundary ruling). */}

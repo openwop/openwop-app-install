@@ -15,6 +15,11 @@
  * The scope constants are read from `BUILT_IN_ROLES` / `scopesForRoles`, i.e.
  * DERIVED from the registration rather than restated, so a copied predicate
  * cannot agree with a bug for as long as the bug exists.
+ *
+ * Tracker: TST-CGF-3. Red when: a waive accepts a whitespace reason; `substitute`
+ * is filed under `:retry`; the effective waive value lets an explicit `false` lower
+ * a policy escalation; or a pre-S36 row (no stamp) stops falling back to
+ * `requiresApproval` (compensationRecovery.ts / compensationUnwind.ts).
  */
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -275,11 +280,11 @@ describe('RFC 0151 §B (S36) — waiveRequiresApproval', () => {
    */
   it('a PRE-S36 row (no stamp) falls back to requiresApproval rather than un-gating', async () => {
     const o = await commit({ requiresApproval: true });
-    // Exactly the shape of a durable row written before the field existed.
-    const legacy = { ...o } as Record<string, unknown>;
-    delete legacy['waiveRequiresApproval'];
-    expect(legacy['waiveRequiresApproval']).toBeUndefined();
-    expect(isHighRiskWaive(legacy as unknown as typeof o, 'skip')).toBe(true);
+    // Exactly the shape of a durable row written before the field existed: the
+    // same row with the stamp REMOVED (typed — the field is optional on the row).
+    const { waiveRequiresApproval: _stamp, ...legacy } = o;
+    expect('waiveRequiresApproval' in legacy).toBe(false);
+    expect(isHighRiskWaive(legacy, 'skip')).toBe(true);
   });
 
   it('never gates SUBSTITUTE, whatever the field says — it is still an attempt to UNDO', async () => {

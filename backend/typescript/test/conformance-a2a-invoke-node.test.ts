@@ -15,6 +15,11 @@
  * unstarted for months is precisely how these two projections went unmeasured
  * (`conformance/run.ts` never set `OPENWOP_A2A_FAKE_PEER`). A leg that returns
  * early is not a leg that passes.
+ *
+ * Tracker: TST-CGK-1. Red when (bootstrap/conformanceA2aInvokeNode.ts): AUTH_REQUIRED
+ * stops suspending on a `clarification` interrupt with `subkind: 'auth'`; REJECTED
+ * stops failing `rejected_by_remote`; a missing peer stops failing TYPED; or the node
+ * stops being side-effecting.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -78,8 +83,7 @@ afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
-const ctx = (): NodeContext =>
-  ({
+const ctx = (): NodeContext => ({
     runId: 'run-a2a-invoke',
     nodeId: 'a2a-invoke',
     tenantId: 'default',
@@ -94,7 +98,7 @@ const ctx = (): NodeContext =>
     async emit() {
       return { eventId: 'e1', sequence: 1 };
     },
-  } as NodeContext);
+  });
 
 const invoke = (typeId = CONFORMANCE_A2A_INVOKE_TYPE_ID) => {
   const mod = getNodeRegistry().get(typeId);
@@ -126,34 +130,27 @@ describe('core.conformance.a2a-invoke — reverse state projection', () => {
     process.env.OPENWOP_A2A_CONFORMANCE_PEER_URL = baseUrl;
     nextState = 'auth-required';
     const out = await invoke();
-    expect(out.status).toBe('suspended');
-    if (out.status !== 'suspended') return;
     // `clarification` is what `executor.ts inferWaitingKind` maps to
     // `waiting-input`; `approval` would land on `waiting-approval` and
     // `external-event` on `waiting-external`, neither of which is the
     // documented projection.
-    expect(out.interrupt.kind).toBe('clarification');
-    expect(out.interrupt.data).toMatchObject({ subkind: 'auth' });
+    expect(out).toMatchObject({ status: 'suspended', interrupt: { kind: 'clarification', data: { subkind: 'auth' } } });
   });
 
   it('drift point #4 — REJECTED fails with rejected_by_remote, attributing it to the peer', async () => {
     process.env.OPENWOP_A2A_CONFORMANCE_PEER_URL = baseUrl;
     nextState = 'rejected';
     const out = await invoke();
-    expect(out.status).toBe('failure');
-    if (out.status !== 'failure') return;
     // The CODE is the assertion, not just the terminal status: a bare `failed`
     // leaves an observer unable to tell a peer refusal from a host defect.
-    expect(out.error.code).toBe('rejected_by_remote');
+    expect(out).toMatchObject({ status: 'failure', error: { code: 'rejected_by_remote' } });
   });
 
   it('a completed peer task succeeds, carrying the peer task id', async () => {
     process.env.OPENWOP_A2A_CONFORMANCE_PEER_URL = baseUrl;
     nextState = 'completed';
     const out = await invoke();
-    expect(out.status).toBe('success');
-    if (out.status !== 'success') return;
-    expect(out.outputs).toMatchObject({ state: 'COMPLETED', taskId: 'peer-task-1' });
+    expect(out).toMatchObject({ status: 'success', outputs: { state: 'COMPLETED', taskId: 'peer-task-1' } });
   });
 
   it('with NO peer configured it fails TYPED — never success-with-empty', async () => {
@@ -161,8 +158,6 @@ describe('core.conformance.a2a-invoke — reverse state projection', () => {
     // reverse projection no peer ever produced.
     delete process.env.OPENWOP_A2A_CONFORMANCE_PEER_URL;
     const out = await invoke();
-    expect(out.status).toBe('failure');
-    if (out.status !== 'failure') return;
-    expect(out.error.code).toBe('a2a_peer_not_configured');
+    expect(out).toMatchObject({ status: 'failure', error: { code: 'a2a_peer_not_configured' } });
   });
 });

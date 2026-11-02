@@ -77,7 +77,7 @@ async function insertParent(runId: string): Promise<void> {
   await insertRunWithStartContext(storage, {
     runId, workflowId: 'parent-wf', tenantId: TENANT, status: 'running',
     inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now,
-  });
+  }, { admission: { plan: 'exempt:test-fixture' } });
 }
 
 function dispatchCtx(runId: string, supervisor: Record<string, unknown>, config: Record<string, unknown> = {}): NodeContext {

@@ -10,15 +10,18 @@
  *   (reviewed via /architect, security focus):
  *     • fail-closed at every gate — unknown/disabled token → uniform 404; absent/
  *       mismatched Origin → 403; caps exceeded → 429; unknown agent → uniform 404.
- *     • HOST-OWNED key ONLY — dispatch rides `dispatchManagedChat` with the managed
- *       `openwop-free` provider charged to the widget's tenant. A visitor can NEVER
- *       supply or influence which key/provider runs; the key/tenantId never leave.
+ *     • the OWNER's key — ADR 1018 D8: the turn runs on the credential
+ *       `resolveWidgetCredential` names (the workspace's own BYOK key; the platform's
+ *       managed key only for a listed superadmin tenant), and stops — fail-closed, no
+ *       managed fallback — when it names none. A visitor can NEVER supply or influence
+ *       which key/provider runs; the key/tenantId never leave.
  *     • the untrusted visitor message is FENCED (ADR 0027) and placed as the USER
  *       turn, so it cannot override the agent persona (the system turn).
- *     • STATELESS single-turn (no per-visitor run/conversation accumulation) + a
- *       bounded reply + the per-session/day caps (2c) bound the abuse blast radius.
- *       The global per-IP rateLimit middleware also applies. Multi-turn sessions +
- *       tool-enabled dispatch are deferred follow-ons (each its own security pass).
+ *     • a bounded reply + the per-session/day caps (2c) bound the abuse blast radius;
+ *       the global per-IP rateLimit middleware also applies. ADR 1018 D2 added a
+ *       BOUNDED server-held visitor thread (the last 8 stored messages, re-fenced,
+ *       `visitorThreads.ts`); the anon tool lane (RFC 0132 §C) shipped in ADR 0469.
+ *       (This used to say "STATELESS single-turn … multi-turn deferred".)
  *
  * Tenant is derived from the resource. The response is a PUBLIC projection only.
  *
@@ -27,29 +30,28 @@
 import type { Request } from 'express';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { resolveWidgetByToken, type WidgetConfig } from './widgetService.js';
-import { originAllowed } from './originAllowlist.js';
+import { hostOf, originAllowed } from './originAllowlist.js';
+import { visitorSessionKeys, threadContext, appendExchange, THREAD_TTL_DAYS } from './visitorThreads.js';
 import { checkWidgetTurn, checkAnonWrite, checkAnonAutoWrite } from './capsTracker.js';
 import { createAnonSurfaceWriteApproval } from '../../host/approvalService.js';
-import { getAgentRegistry } from '../../executor/agentRegistry.js';
 import { fenceUntrustedBlock } from '../../host/untrustedContent.js';
-import { dispatchManagedChat, dispatchManagedToolsRound } from '../../providers/managedProvider.js';
+import { resolveWidgetCredential, widgetChat, widgetToolsRound, WIDGET_REFUSAL_LOG_CODE } from './widgetCredential.js';
 import { meterPlatformUnits } from '../../host/managedCredits.js';
 import { sanitizeFreeText } from '../../byok/textRedaction.js';
 import { createLogger } from '../../observability/logger.js';
 import type { ChatMessage } from '../../providers/dispatch.js';
 import type { AiToolCallRequest, AiToolCallResult } from '../../executor/types.js';
+import { toolRoundResult } from '../../aiProviders/aiProvidersHost.js';
 import { anonymousActorEnabled, anonGrantHasTools, resolveAnonGrant, runAnonReadTurn } from '../../host/anonymousActor.js';
 import { OpenwopError } from '../../types.js';
 import { resolveToggle } from '../../host/featureToggles/service.js';
 import { ownerPublicRuntimeLapsed } from '../../host/publicLapse.js';
+import { resolveServedAgent } from '../../host/agentServing.js';
 
 // PUB-2: structured abuse/enumeration visibility on the UNAUTHENTICATED widget surface
 // (no operator signal otherwise). Never logs the token or visitor message — coarse only.
 const log = createLogger('features.chat-widget.public');
 
-/** The host-managed (host-owned key) provider a public widget dispatches through —
- *  NEVER a visitor key, NEVER the operator's key on the wire. */
-const MANAGED_PROVIDER = 'openwop-free';
 /** Bound the untrusted visitor input + the reply (DoS/abuse guard). */
 const MAX_VISITOR_MSG_CHARS = 4000;
 const MAX_REPLY_TOKENS = 512;
@@ -73,7 +75,9 @@ async function gateWidget(req: Request): Promise<WidgetConfig> {
   }
   const origin = (typeof req.headers.origin === 'string' && req.headers.origin) || (typeof req.headers.referer === 'string' ? req.headers.referer : undefined);
   if (!originAllowed(origin, widget.allowedDomains)) {
-    log.info('widget_origin_rejected', { widgetId: widget.widgetId, origin }); // PUB-2
+    // ADR 1018 D6 — the HOST only. A Referer is the visitor's full page URL, query
+    // string included, and has no business in the log.
+    log.info('widget_origin_rejected', { widgetId: widget.widgetId, originHost: origin ? hostOf(origin) : null }); // PUB-2
     throw new OpenwopError('forbidden', 'This domain is not allowed to embed this widget.', 403, {});
   }
   // ADR 0820 §8.2 — the tenant's `chat-widget` switch. A VISITOR lane: the tenant
@@ -102,13 +106,15 @@ export function registerChatWidgetPublicGateway(deps: RouteDeps): void {
       // (privacyUrl is http(s)-validated at write time; the embed re-checks).
       res.json({
         widgetId: widget.widgetId, agentId: widget.agentId, caps: widget.caps,
+        // ADR 1018 D3 — the visitor notice states the real retention, from the one constant.
+        retentionDays: THREAD_TTL_DAYS,
         ...(widget.businessName ? { businessName: widget.businessName } : {}),
         ...(widget.privacyUrl ? { privacyUrl: widget.privacyUrl } : {}),
       });
     } catch (err) { next(err); }
   });
 
-  // Phase 2d — visitor dispatch (stateless single-turn, managed key, fenced input).
+  // Phase 2d — visitor dispatch (the owner's key, fenced input; ADR 1018 bounded thread).
   deps.app.post('/host/openwop-app/public/widget/message', async (req, res, next) => {
     try {
       const widget = await gateWidget(req);
@@ -134,7 +140,18 @@ export function registerChatWidgetPublicGateway(deps: RouteDeps): void {
       // first half of the bound did nothing and rotation was held only by the per-IP
       // limit. `checkWidgetTurn` now applies a secure default, so the bound above holds
       // for an unconfigured widget too.
-      const sessionId = typeof body.sessionId === 'string' && body.sessionId.length > 0 && body.sessionId.length <= 128 ? body.sessionId : 'anon';
+      //
+      // ADR 1018 / grade-code `CW68C-2` — the counters key on a HASH of the client id
+      // (`visitorSessionKeys`); the raw id is a thread credential and is stored nowhere.
+      const { sessionKey: sessionId, threadId } = visitorSessionKeys(widget.widgetId, body.sessionId);
+      // ADR 1018 D8 — which key answers, asked BEFORE a cap is claimed. Refused ⇒ the
+      // widget stops answering (the embed's generic "could not respond"); it never
+      // falls back to the platform's managed key. The log names the reason.
+      const cred = await resolveWidgetCredential(widget.tenantId);
+      if (cred.kind === 'refused') {
+        log.warn('widget_credential_refused', { widgetId: widget.widgetId, reasonCode: WIDGET_REFUSAL_LOG_CODE[cred.reason] });
+        throw new OpenwopError('service_unavailable', 'This widget cannot respond right now.', 503, {});
+      }
       const day = new Date().toISOString().slice(0, 10);
       const cap = await checkWidgetTurn(widget, sessionId, day);
       if (!cap.allowed) {
@@ -149,7 +166,7 @@ export function registerChatWidgetPublicGateway(deps: RouteDeps): void {
         if (cap.newSession) await meterPlatformUnits({ tenantId: widget.tenantId, unit: 'widgetConversation', quantity: 1, featureId: 'chat-widget' });
       };
 
-      const agent = await getAgentRegistry().resolve(widget.agentId, widget.tenantId);
+      const agent = await resolveServedAgent(widget.agentId, widget.tenantId, widget.widgetId); // ADR 1014 D4
       // A misconfigured (deleted) agent → uniform 404, no existence oracle. PUB-4: a
       // user-authored agent owned by ANOTHER tenant must not run (its systemPrompt is
       // tenant-owned IP, agent-memory.md CTI-1) — built-in agents (no ownerTenant) are
@@ -162,6 +179,9 @@ export function registerChatWidgetPublicGateway(deps: RouteDeps): void {
       }
 
       const fenced = fenceUntrustedBlock(message, 'an anonymous website visitor');
+      // ADR 1018 D2 — the visitor's prior turns (bounded, re-fenced). Only a session id
+      // the embed minted threads; the shared `'anon'` fallback never does.
+      const history = await threadContext(widget, threadId);
 
       // RFC 0132 §C — anonymous-actor tool tiers. When the operator has enabled it
       // AND this surface grants ≥1 tool, dispatch a real anon TOOL turn (default-
@@ -171,21 +191,14 @@ export function registerChatWidgetPublicGateway(deps: RouteDeps): void {
       // default) keeps today's exact behavior.
       const anonGrant = resolveAnonGrant(widget);
       if (anonymousActorEnabled() && anonGrantHasTools(anonGrant)) {
-        // The managed (host-owned key) tool-round transport — the SAME daily caps +
-        // provider-hiding as the runless dispatch, but a single tool round. A visitor
-        // can NEVER supply or influence which key/provider runs.
+        // One tool round on the resolved credential (ADR 1018 D8). A visitor can NEVER
+        // supply or influence which key/provider runs.
         const callAIWithTools = async (r: AiToolCallRequest): Promise<AiToolCallResult> => {
-          const round = await dispatchManagedToolsRound({
-            userFacingProvider: MANAGED_PROVIDER,
-            tenantId: widget.tenantId,
-            featureId: 'chat-widget', // ADR 0821 D4 — anonymous visitor spend, billed to the owner
-            messages: [
-              { role: 'system', content: r.systemPrompt ?? '' },
-              ...r.messages.map((m): ChatMessage => ({ role: m.role, content: typeof m.content === 'string' ? m.content : '' })),
-            ],
-            tools: r.tools,
-          });
-          return { content: round.text, toolCalls: round.toolUses.map((t) => ({ id: t.id, name: t.name, input: t.input })) };
+          const round = await widgetToolsRound(widget.tenantId, cred, [
+            { role: 'system', content: r.systemPrompt ?? '' },
+            ...r.messages.map((m): ChatMessage => ({ role: m.role, content: typeof m.content === 'string' ? m.content : '' })),
+          ], r.tools);
+          return toolRoundResult(round);
         };
         const turn = await runAnonReadTurn({
           storage: deps.storage,
@@ -193,6 +206,7 @@ export function registerChatWidgetPublicGateway(deps: RouteDeps): void {
           agent: { agentId: agent.agentId, persona: agent.persona, systemPrompt: agent.systemPrompt },
           grant: anonGrant,
           surfaceSessionKey: `${widget.widgetId}:${sessionId}`,
+          history,
           fencedUserMessage: fenced,
           callAIWithTools,
           // ADR 0469 A2 — a GRANTED write is HELD for operator review, never executed
@@ -243,27 +257,27 @@ export function registerChatWidgetPublicGateway(deps: RouteDeps): void {
           },
         });
         await meterConversation();
+        const reply = sanitizeFreeText(turn.reply);
+        // grade-code `CW68C-5` — a failed or empty turn is not a conversation turn.
+        if (!turn.failed && reply.trim()) await appendExchange(widget, threadId, message, reply, new Date().toISOString());
         // PUBLIC projection — assistant text only; no token/tenantId/principal/secret.
-        res.json({ reply: sanitizeFreeText(turn.reply) });
+        res.json({ reply });
         return;
       }
 
       const messages: ChatMessage[] = [
         { role: 'system', content: agent.systemPrompt },
+        ...history,
         // ADR 0027 — untrusted external content. Fenced + placed as the USER turn so
         // it cannot override the persona/system turn above.
         { role: 'user', content: fenced },
       ];
-      const result = await dispatchManagedChat({
-        userFacingProvider: MANAGED_PROVIDER,
-        tenantId: widget.tenantId,
-        featureId: 'chat-widget', // ADR 0821 D4
-        messages,
-        maxTokens: MAX_REPLY_TOKENS,
-      });
+      const completion = await widgetChat(widget.tenantId, cred, messages, MAX_REPLY_TOKENS);
       await meterConversation();
+      const reply = sanitizeFreeText(completion);
+      if (reply.trim()) await appendExchange(widget, threadId, message, reply, new Date().toISOString());
       // PUBLIC projection — only the assistant text, redacted; no token/tenantId/secret.
-      res.json({ reply: sanitizeFreeText(typeof result.completion === 'string' ? result.completion : '') });
+      res.json({ reply });
     } catch (err) { next(err); }
   });
 
@@ -307,44 +321,68 @@ const EMBED_JS = [
   "  base=base.replace(/^(https?:\\/\\/[^\\/]+(?:\\/api)?)\\/v[0-9]+(\\/host\\/)/,'$1$2');",
   "  var token=(s&&s.getAttribute('data-token'))||((src.match(/[?&]token=([^&]+)/)||[])[1])||'';",
   '  if(!token||!base){return;}',
-  '  var sid=(window.crypto&&crypto.randomUUID)?crypto.randomUUID():String(Date.now())+Math.random();',
+  // ADR 1018 D2 — the session id and this tab's transcript live in sessionStorage, so a
+  // visitor who navigates within the customer's site keeps one thread. Every access is
+  // guarded (a private window or blocked storage throws) and falls back to a per-page
+  // session. The key is per token, so two widgets on one site never share a thread. The
+  // fallback id is shaped to FAIL the server's thread grammar (dots), so a browser
+  // without crypto.randomUUID stays stateless rather than threading on a weak id.
+  "  var SK='owp-widget:'+token;",
+  "  function load(){try{var v=window.sessionStorage.getItem(SK);return v?JSON.parse(v):null;}catch(e){return null;}}",
+  "  function save(st){try{window.sessionStorage.setItem(SK,JSON.stringify(st));}catch(e){}}",
+  "  var st=load();if(!st||typeof st.sid!=='string'||!(st.log instanceof Array)){st={sid:(window.crypto&&crypto.randomUUID)?crypto.randomUUID():String(Date.now())+'.'+Math.random(),log:[]};}",
+  '  var sid=st.sid;',
   "  function el(tag){return document.createElement(tag);}",
   '  var open=false;',
-  "  var btn=el('button');btn.type='button';btn.textContent='Chat';btn.setAttribute('aria-label','Open chat');btn.setAttribute('aria-expanded','false');",
+  "  var btn=el('button');btn.type='button';btn.textContent='Chat';btn.setAttribute('aria-label','Open chat');btn.setAttribute('aria-expanded','false');btn.setAttribute('aria-haspopup','dialog');",
   "  btn.style.cssText='position:fixed;bottom:20px;right:20px;z-index:2147483000;min-height:44px;border-radius:9999px;padding:12px 20px;border:none;background:#1a1a17;color:#fff;cursor:pointer;font:14px sans-serif;';",
-  "  var panel=el('div');panel.setAttribute('role','dialog');panel.setAttribute('aria-label','Chat with our AI assistant');panel.style.cssText='position:fixed;bottom:74px;right:20px;z-index:2147483000;width:340px;max-width:92vw;height:460px;max-height:72vh;display:none;flex-direction:column;background:#fff;color:#1a1a17;border:1px solid #ddd;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,0.18);overflow:hidden;font:14px sans-serif;';",
+  "  var panel=el('div');panel.setAttribute('role','dialog');panel.setAttribute('aria-label','Chat with our AI assistant');panel.style.cssText='position:fixed;bottom:74px;right:20px;z-index:2147483000;width:340px;max-width:92vw;height:460px;max-height:calc(100vh - 96px);max-height:calc(100dvh - 96px);display:none;flex-direction:column;background:#fff;color:#1a1a17;border:1px solid #ddd;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,0.18);overflow:hidden;font:14px sans-serif;';",
+  // grade-ux CW68U-7 — on a phone the panel takes the width and stays above the launcher.
+  "  try{if(window.matchMedia&&window.matchMedia('(max-width:480px)').matches){panel.style.left='8px';panel.style.right='8px';panel.style.width='auto';panel.style.maxWidth='none';}}catch(e){}",
   // AI-disclosure + human-follow-up notice — always visible (privacy F2 notice-at-collection; competitive P9).
-  "  var hdr=el('div');hdr.style.cssText='padding:8px 12px;font:12px sans-serif;color:#5a5a54;background:#f7f7f5;border-bottom:1px solid #eee;';",
-  "  var note=el('span');note.textContent='AI assistant \\u00b7 a team member may follow up on what you share';hdr.appendChild(note);",
+  "  var hdr=el('div');hdr.style.cssText='display:flex;align-items:flex-start;gap:8px;padding:8px 12px;font:12px sans-serif;color:#5a5a54;background:#f7f7f5;border-bottom:1px solid #eee;';",
+  "  var info=el('div');info.style.cssText='flex:1;';hdr.appendChild(info);",
+  "  var note=el('span');note.textContent='AI assistant \\u00b7 a team member may follow up on what you share';info.appendChild(note);",
+  // grade-ux CW68U-6 — a labelled close control (Escape alone is not reachable by touch).
+  "  var closeBtn=el('button');closeBtn.type='button';closeBtn.textContent='\\u00d7';closeBtn.setAttribute('aria-label','Close chat');closeBtn.style.cssText='min-width:44px;min-height:44px;margin:-8px -8px -8px 0;border:none;background:transparent;color:#1a1a17;font:20px sans-serif;cursor:pointer;';hdr.appendChild(closeBtn);",
   // ADR 0470 OQ5 — enrich the disclosure from the widget's public config: the operator
   // business name + a notice-at-collection privacy LINK. The privacyUrl was http(s)-
   // validated server-side; re-check the scheme HERE before setting href (defense in
   // depth — never render a javascript:/data: href in the visitor's page).
-  "  function applyConfig(c){if(!c){return;}if(c.businessName){note.textContent=String(c.businessName)+' \\u00b7 AI assistant \\u00b7 a team member may follow up';}",
-  "    if(c.privacyUrl&&/^https?:\\/\\//i.test(String(c.privacyUrl))){var sep=el('span');sep.textContent=' \\u00b7 ';var a=el('a');a.textContent='Privacy';a.href=String(c.privacyUrl);a.target='_blank';a.rel='noopener noreferrer';a.style.cssText='color:#5a5a54;text-decoration:underline;';hdr.appendChild(sep);hdr.appendChild(a);}}",
-  "  fetch(base+'/widget/config?token='+encodeURIComponent(token)).then(function(r){return r.ok?r.json():null;}).then(applyConfig).catch(function(){});",
+  // ADR 1018 D3 / grade-ux CW68U-5 — the notice says the conversation is KEPT, for how
+  // long (the server's own TTL, from the config), and who can read it.
+  "  function applyConfig(c){if(!c){return;}var who=c.businessName?String(c.businessName):'our team';var keep=(typeof c.retentionDays==='number'&&c.retentionDays>0)?' \\u00b7 this chat is kept for '+c.retentionDays+' days and '+who+' can read it':' \\u00b7 a team member may follow up';note.textContent=(c.businessName?String(c.businessName)+' \\u00b7 ':'')+'AI assistant'+keep;",
+  "    if(c.privacyUrl&&/^https?:\\/\\//i.test(String(c.privacyUrl))){var sep=el('span');sep.textContent=' \\u00b7 ';var a=el('a');a.textContent='Privacy';a.href=String(c.privacyUrl);a.target='_blank';a.rel='noopener noreferrer';a.style.cssText='color:#5a5a54;text-decoration:underline;';info.appendChild(sep);info.appendChild(a);}}",
   "  var list=el('div');list.setAttribute('role','log');list.setAttribute('aria-live','polite');list.setAttribute('aria-atomic','false');list.setAttribute('aria-label','Conversation');list.style.cssText='flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px;';",
   "  var row=el('div');row.style.cssText='display:flex;gap:6px;border-top:1px solid #eee;padding:8px;';",
-  "  var input=el('input');input.type='text';input.setAttribute('aria-label','Type your message');input.style.cssText='flex:1;min-height:44px;border:1px solid #ccc;border-radius:8px;padding:8px 10px;font:14px sans-serif;';",
+  "  var input=el('input');input.type='text';input.setAttribute('aria-label','Type your message');input.maxLength=4000;input.style.cssText='flex:1;min-width:0;min-height:44px;border:1px solid #ccc;border-radius:8px;padding:8px 10px;font:16px sans-serif;';",
   "  var send=el('button');send.type='button';send.textContent='Send';send.setAttribute('aria-label','Send message');send.style.cssText='min-height:44px;min-width:44px;border:none;background:#1a1a17;color:#fff;border-radius:8px;padding:8px 14px;cursor:pointer;';",
   // ADR 0470 P3 — honeypot: a hidden decoy field a human never sees or fills (off-screen,
   // aria-hidden, not tabbable, autocomplete off). A form-scraper bot that fills every
   // field trips it; the server rejects a non-empty `hp`. Named to look fillable.
   "  var hp=el('input');hp.type='text';hp.name='contact_email_confirm';hp.tabIndex=-1;hp.setAttribute('aria-hidden','true');hp.autocomplete='off';hp.style.cssText='position:absolute;left:-9999px;width:1px;height:1px;opacity:0;';",
   '  row.appendChild(input);row.appendChild(send);panel.appendChild(hdr);panel.appendChild(list);panel.appendChild(hp);panel.appendChild(row);',
-  "  function add(role,text){var d=el('div');d.textContent=text;d.style.cssText='max-width:85%;padding:8px 10px;border-radius:10px;white-space:pre-wrap;word-break:break-word;'+(role==='user'?'align-self:flex-end;background:#1a1a17;color:#fff;':'align-self:flex-start;background:#f1f1ef;color:#1a1a17;');list.appendChild(d);list.scrollTop=list.scrollHeight;return d;}",
+  "  function add(role,text,keep){if(keep){st.log.push({r:role,t:String(text)});if(st.log.length>40){st.log=st.log.slice(-40);}save(st);}var d=el('div');d.textContent=text;d.style.cssText='max-width:85%;padding:8px 10px;border-radius:10px;white-space:pre-wrap;word-break:break-word;'+(role==='user'?'align-self:flex-end;background:#1a1a17;color:#fff;':'align-self:flex-start;background:#f1f1ef;color:#1a1a17;');list.appendChild(d);list.scrollTop=list.scrollHeight;return d;}",
   '  var busy=false;var typingEl=null;',
+  // Restore this tab's transcript through the same textContent-only add() (never kept again).
+  "  for(var i=0;i<st.log.length;i++){var e=st.log[i];if(e&&(e.r==='user'||e.r==='agent')&&typeof e.t==='string'){add(e.r,e.t,false);}}",
   // Reduced-motion-safe typing indicator: a static text bubble (no animation), announced politely via the log region.
   "  function showTyping(){if(typingEl){return;}typingEl=add('agent','Assistant is typing\\u2026');typingEl.setAttribute('aria-label','Assistant is typing');}",
   '  function hideTyping(){if(typingEl&&typingEl.parentNode){typingEl.parentNode.removeChild(typingEl);}typingEl=null;}',
-  '  function sendMsg(){var m=input.value.replace(/^\\s+|\\s+$/g,\"\");if(!m||busy){return;}busy=true;send.disabled=true;add(\"user\",m);input.value=\"\";showTyping();',
+  // grade-code CW68C-13 — the visitor's message joins the kept transcript only WITH its
+  // reply, matching what the server stored; a failed turn is shown but not restored.
+  '  function sendMsg(){var m=input.value.replace(/^\\s+|\\s+$/g,\"\");if(!m||busy){return;}busy=true;send.disabled=true;add(\"user\",m,false);input.value=\"\";showTyping();',
   "    fetch(base+'/widget/message',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({token:token,message:m,sessionId:sid,hp:hp.value})})",
-  "    .then(function(r){return r.ok?r.json():{reply:''};}).then(function(j){hideTyping();add('agent',(j&&j.reply)||'Sorry, I could not respond just now. Please try again.');}).catch(function(){hideTyping();add('agent','Sorry, something went wrong. Please try again.');}).then(function(){busy=false;send.disabled=false;});}",
+  "    .then(function(r){if(r.status===429){return {busy:true};}return r.ok?r.json():{reply:''};}).then(function(j){hideTyping();if(j&&j.reply){st.log.push({r:'user',t:m});add('agent',j.reply,true);}else if(j&&j.busy){add('agent','This chat is busy right now. Please come back later.');}else{add('agent','Sorry, I could not respond just now. Please try again.');}}).catch(function(){hideTyping();add('agent','Sorry, something went wrong. Please try again.');}).then(function(){busy=false;send.disabled=false;});}",
   "  send.onclick=sendMsg;input.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();sendMsg();}});",
-  "  function setOpen(v){open=v;panel.style.display=v?'flex':'none';btn.setAttribute('aria-expanded',v?'true':'false');if(v){input.focus();}else{btn.focus();}}",
-  '  btn.onclick=function(){setOpen(!open);};',
+  "  function setOpen(v){open=v;panel.style.display=v?'flex':'none';btn.setAttribute('aria-expanded',v?'true':'false');btn.setAttribute('aria-label',v?'Close chat':'Open chat');if(v){input.focus();}else{btn.focus();}}",
+  '  btn.onclick=function(){setOpen(!open);};closeBtn.onclick=function(){setOpen(false);};',
   "  panel.addEventListener('keydown',function(e){if(e.key==='Escape'){e.preventDefault();setOpen(false);}});",
   '  function mount(){document.body.appendChild(btn);document.body.appendChild(panel);}',
-  "  if(document.body){mount();}else{document.addEventListener('DOMContentLoaded',mount);}",
+  // grade-ux CW68U-3 — mount ONLY once the widget's own config answers. A wrong domain,
+  // a rotated token or a disabled widget used to mount a chat that could never reply;
+  // now the page shows nothing and the console says why, for the site owner.
+  "  fetch(base+'/widget/config?token='+encodeURIComponent(token)).then(function(r){if(!r.ok){if(window.console&&console.warn){console.warn('OpenWOP chat widget not shown: '+(r.status===403?'this site is not in the widget\\'s allowed domains':r.status===404?'unknown, disabled or rotated widget token':'HTTP '+r.status));}return null;}return r.json();})",
+  "  .then(function(c){if(!c){return;}applyConfig(c);if(document.body){mount();}else{document.addEventListener('DOMContentLoaded',mount);}}).catch(function(){});",
   '})();',
 ].join('\n');

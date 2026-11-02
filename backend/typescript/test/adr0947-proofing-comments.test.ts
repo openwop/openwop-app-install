@@ -21,7 +21,10 @@
  * editor-only custom role loses commenting); let a reply carry an anchor → red;
  * skip `checkAnchor` → red (stale version and out-of-range stored); route POST
  * back on `workspace:write` → red (the reviewer is refused); let `mayShare`
- * default true → red (the surface shares).
+ * default true → red (the surface shares). Re-probed in w73 (pc-reply,
+ * pc-anchor, pc-mayshare, pc-imply, pc-route-scope, pc-canwrite, pc-prune — all
+ * witnessed). Every refusal below is asserted by its code/reason, not its status
+ * alone: several guards here share a status.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -35,6 +38,7 @@ import { createMember, resolveEffectiveAccess, createCustomRole } from '../src/h
 import { buildCommentsSurface } from '../src/features/comments/surface.js';
 import { issueApiKey } from '../src/features/developer-keys/apiKeyService.js';
 import { createComment, __commentsForTenant, type Comment } from '../src/features/comments/commentsService.js';
+import { createCollection } from '../src/features/kb/kbService.js';
 
 const listThreadRaw = async (tenantId: string, assetId: string) => (await __commentsForTenant(tenantId)).filter((c) => c.resourceType === 'media_asset' && c.resourceId === assetId);
 
@@ -111,8 +115,9 @@ describe('ADR 0947 D2 — media_asset targets', () => {
     const thread = await w.owner.get<{ comments: Comment[] }>(`${w.C}?resourceType=media_asset&resourceId=${w.image.assetId}`);
     expect(thread.body.comments.map((x) => x.body)).toEqual(['Crop tighter.']);
     const cross = await w.owner.post<ErrBody>(w.C, { resourceType: 'media_asset', resourceId: w.other.assetId, body: 'x' });
-    expect(cross.status).toBe(404);
-    expect((await w.owner.get(`${w.C}?resourceType=media_asset&resourceId=${w.other.assetId}`)).status).toBe(404);
+    expect([cross.status, cross.body.error]).toEqual([404, 'not_found']);
+    const crossRead = await w.owner.get<ErrBody>(`${w.C}?resourceType=media_asset&resourceId=${w.other.assetId}`);
+    expect([crossRead.status, crossRead.body.error]).toEqual([404, 'not_found']);
   });
 });
 
@@ -174,11 +179,15 @@ describe('ADR 0947 D2 — anchors, intent, visibility', () => {
 
   it('a type that takes no anchor, and a reply, refuse one', async () => {
     const w = await workspace();
+    // A KB collection is commentable but has no `checkAnchor`.
+    const kb = await createCollection(w.tenantId, w.orgId, w.ownerId, { name: 'Brand guide' });
+    const onKb = await w.owner.post<ErrBody>(w.C, { resourceType: 'kb_collection', resourceId: kb.collectionId, body: 'x', anchor: { subjectVersion: HASH, target: { kind: 'point', x: 0.1, y: 0.1 } } });
+    expect([onKb.status, onKb.body.details?.reason]).toEqual([400, 'not_anchorable']);
     const root = await w.owner.post<Comment>(w.C, { resourceType: 'media_asset', resourceId: w.image.assetId, body: 'Root.' });
     const reply = await w.owner.post<ErrBody>(w.C, { resourceType: 'media_asset', resourceId: w.image.assetId, parentId: root.body.commentId, body: 'Reply.', anchor: { subjectVersion: HASH, target: { kind: 'point', x: 0.1, y: 0.1 } } });
     expect(reply.body.details?.reason).toBe('reply_not_anchorable');
     const replyIntent = await w.owner.post<ErrBody>(w.C, { resourceType: 'media_asset', resourceId: w.image.assetId, parentId: root.body.commentId, body: 'Reply.', intent: 'change-request' });
-    expect(replyIntent.status).toBe(400);
+    expect([replyIntent.status, replyIntent.body.details?.reason]).toEqual([400, 'reply_not_anchorable']);
   });
 
   it('only a person may share: a write without `mayShare` (the tool and surface lanes) is refused (Q2)', async () => {
@@ -202,13 +211,14 @@ describe('ADR 0947 D2 — host:comments:write', () => {
     expect((await w.reviewer.patch<Comment>(`${w.C}/${c.body.commentId}`, { status: 'resolved' })).status).toBe(200);
     const thread = await w.reviewer.get<{ viewer: { canWrite: boolean } }>(`${w.C}?resourceType=media_asset&resourceId=${w.image.assetId}`);
     expect(thread.body.viewer.canWrite).toBe(true);
-    const edit = await w.reviewer.post(`/host/openwop-app/cms/orgs/${w.orgId}/pages`, { title: 'Sneaky' });
-    expect([403, 404]).toContain(edit.status);
+    const edit = await w.reviewer.post<ErrBody>(`/host/openwop-app/cms/orgs/${w.orgId}/pages`, { title: 'Sneaky' });
+    expect([edit.status, edit.body.error]).toEqual([403, 'forbidden_scope']);
   });
 
   it('a viewer can read but neither annotate nor edit', async () => {
     const w = await workspace();
-    expect((await w.viewer.post(w.C, { resourceType: 'media_asset', resourceId: w.image.assetId, body: 'x' })).status).toBe(403);
+    const refused = await w.viewer.post<ErrBody>(w.C, { resourceType: 'media_asset', resourceId: w.image.assetId, body: 'x' });
+    expect([refused.status, refused.body.error]).toEqual([403, 'forbidden_scope']);
     const thread = await w.viewer.get<{ viewer: { canWrite: boolean } }>(`${w.C}?resourceType=media_asset&resourceId=${w.image.assetId}`);
     expect(thread.status).toBe(200);
     expect(thread.body.viewer.canWrite).toBe(false);
@@ -243,6 +253,6 @@ describe('ADR 0947 D2 — host:comments:write', () => {
   it('a custom role may carry the delegable scope, never a management scope', async () => {
     const w = await workspace();
     const bad = await w.owner.post<ErrBody>(`/host/openwop-app/orgs/${w.orgId}/roles`, { name: 'Sneaky', scopes: ['host:members:manage'] });
-    expect(bad.status).toBe(400);
+    expect([bad.status, bad.body.error]).toEqual([400, 'validation_error']);
   });
 });

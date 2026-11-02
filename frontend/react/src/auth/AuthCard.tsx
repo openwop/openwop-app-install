@@ -239,7 +239,7 @@ export function AuthCard({
                   t={t}
                   i18nKey="verifyBody"
                   values={{ email }}
-                  components={{ 0: <span className="auth-verify-email" /> }}
+                  components={[<span className="auth-verify-email" />]}
                 />
               </p>
               <div className="auth-verify-actions">

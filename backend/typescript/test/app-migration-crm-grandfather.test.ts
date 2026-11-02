@@ -6,6 +6,17 @@
  * CRM UI and API would vanish on upgrade (and any enabled CRM dependent would run
  * with CRM off). The migration writes the CRM default with status `on` only when
  * no `crm` row exists AND a CRM contact or an enabled dependent is present.
+ *
+ * "Never touches an existing row" is a DOUBLE GUARD inside migration 23: the
+ * row-exists early return AND the first-write-wins re-check just before the
+ * write. Either alone keeps the admin row, so a single-guard sabotage stays
+ * green (w66 crm-rowexists, vacuous by design); a probe cannot remove both in
+ * one substring edit.
+ *
+ * TST-BXB-4. Red when: contacts stop counting (crm-contacts), a killed
+ * dependent counts (crm-killed), a per-tenant override stops counting
+ * (crm-override), the not-in-use check is dropped (crm-fresh), or
+ * CRM_DEPENDENT_TOGGLES drifts from the dependsOn closure (crm-closure).
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -51,7 +62,7 @@ describe('app migration 23 — grandfather CRM on for installs that use it', () 
   it('an enabled dependent (globally or for one tenant) keeps CRM on', async () => {
     await storage.kvSet('hostext:feature-toggle:commerce', JSON.stringify({ id: 'commerce', status: 'off', tenantOverrides: { 'ws:shop': { status: 'on' } } }));
     await migration.run(storage);
-    expect((await row())?.status).toBe('on');
+    expect(await row()).toMatchObject({ id: 'crm', status: 'on', updatedBy: 'app-migration:23', overriddenDefaultStatus: 'off' });
   });
 
   it('a killed or off dependent does not', async () => {

@@ -37,8 +37,10 @@ export function validateCampaignDoc(state: Record<string, unknown>): CampaignVal
   const warnings: { path: string; message: string }[] = [];
   const warn = (path: string, message: string): void => { warnings.push({ path, message }); };
 
-  if (typeof state.name !== 'string' || !state.name || state.name.length > 200) {
+  if (typeof state.name !== 'string' || !state.name) {
     err('name', 'name is required (a string of 1–200 characters)');
+  } else if (state.name.length > 200) {
+    err('name', `name must be at most 200 characters (it has ${state.name.length})`);
   }
   if (state.objective !== undefined && !strCap(state.objective, 600)) err('objective', 'objective must be a string of at most 600 characters');
   if (state.audience !== undefined && !strCap(state.audience, 600)) err('audience', 'audience must be a string of at most 600 characters');
@@ -56,7 +58,10 @@ export function validateCampaignDoc(state: Record<string, unknown>): CampaignVal
       const path = `channels[${i}]`;
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) { err(path, 'each channel must be an object'); return; }
       const c = raw as Record<string, unknown>;
-      if (typeof c.name !== 'string' || !c.name || c.name.length > 120) err(`${path}.name`, 'channel name is required (1–120 characters)');
+      // ADR 1020 P3 (grade-ux M4) — too long is not "missing": now that the render
+      // node no longer truncates, say which it is.
+      if (typeof c.name !== 'string' || !c.name) err(`${path}.name`, 'channel name is required (1–120 characters)');
+      else if (c.name.length > 120) err(`${path}.name`, `channel name must be at most 120 characters (it has ${c.name.length})`);
       else channelNames.add(c.name);
       if (typeof c.type !== 'string' || !CHANNEL_TYPES.has(c.type)) err(`${path}.type`, `channel type must be one of: ${[...CHANNEL_TYPES].join(', ')}`);
       if (c.tactic !== undefined && !strCap(c.tactic, 400)) err(`${path}.tactic`, 'tactic must be a string of at most 400 characters');

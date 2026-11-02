@@ -69,7 +69,7 @@ async function campaignIn(orgId: string, owner = 'u-1'): Promise<MarketingCampai
 async function runWith(metadata: Record<string, unknown>): Promise<string> {
   const now = new Date().toISOString();
   const run: RunRecord = { runId: `r-p5-${n++}`, workflowId: 'w', tenantId: TENANT, status: 'running', inputs: {}, metadata, configurable: {}, createdAt: now, updatedAt: now };
-  await insertRunWithStartContext(storage, run);
+  await insertRunWithStartContext(storage, run, { admission: { plan: 'exempt:test-fixture' } });
   return run.runId;
 }
 

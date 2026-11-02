@@ -7,6 +7,27 @@
  *      whole-project delete; agent members + charter untouched).
  * D8 — service-desk ticket DSAR: requester/customer PII (message bodies + actor
  *      refs) redacted in place; the whole ticket survives.
+ *
+ * Owners: ADR 0077 (retention seam), ADR 0839 D4/D5 + PRJC-1/WF-PRJ-3 (projects
+ * DSAR), ADR 0878 D4 (service-desk DSAR). Tracker TST-CEC-2.
+ * Red when (w67g3, witnessed): the chat-widget purger ignores the classification
+ * or the row tenant or the age cutoff; `checkWidgetTurn` stops stamping the
+ * tenant; the projects matcher stops matching a `user:user:` stored ref; an
+ * `agent:`-keyed DSAR may peel a `user:` tag; `rowsTouched` counts refs; the
+ * ticket eraser stops scrubbing inbound messages, the contact link, the derived
+ * subject, the first-contact `wa:` sender or `createdBy`; or treats every
+ * thread (incl. an anonymous `visitor`) as the requester's.
+ *
+ * Recorded guards (each single-edit sabotage is green BY DESIGN, w67 round 1):
+ *  - Projects, wrong tenant: TWO guards — the eraser's own filter
+ *    (`projectsService.ts` `p.tenantId !== tenantId`) AND `mutateProject`'s
+ *    `current.tenantId !== tenantId` → `not_found`, caught. A probe that bypasses
+ *    BOTH in one edit reds the wrong-tenant case.
+ *  - Projects, double-prefixed ref: `subjectKeyForms(User.userId)` already holds
+ *    the `user:user:<hash>` spelling (`subjectErasureRedaction.ts` `user:${scope}`),
+ *    so the eraser's strip arm is a second path to the same match.
+ *  - Tickets, falsy tenant: the early `!tenantId` return AND
+ *    `ticketStore.listForTenant('')` returning nothing.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';

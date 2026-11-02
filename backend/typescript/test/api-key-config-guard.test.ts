@@ -5,6 +5,11 @@
  * credential at all (no API key + no OIDC) — it must NOT fire for a plain
  * NODE_ENV=production cookie-per-visitor deploy, which legitimately has no API
  * keys (else /readiness would wrongly 503 the live demo).
+ *
+ * TST-BXC-1. Red when: the guard fires without OPENWOP_AUTH_ENFORCE_BEARER (or
+ * keys off NODE_ENV=production), a real key or OIDC stops satisfying it, an
+ * all-whitespace key list counts as a key, or the unconfigured case stops
+ * returning its message (w66 probes akg-prod/key/oidc/trim/flag).
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { apiKeyConfigError } from '../src/middleware/auth.js';
@@ -19,7 +24,7 @@ afterEach(() => {
 });
 
 describe('apiKeyConfigError', () => {
-  it('is null in local dev even with no keys configured', () => {
+  it('is null in local dev (no NODE_ENV, no enforce flag) even with no keys configured', () => {
     delete process.env.NODE_ENV;
     delete process.env.OPENWOP_AUTH_ENFORCE_BEARER;
     delete process.env.OPENWOP_API_KEYS;
@@ -46,6 +51,7 @@ describe('apiKeyConfigError', () => {
   it('is null under enforce-bearer when a real API key is configured', () => {
     process.env.OPENWOP_AUTH_ENFORCE_BEARER = 'true';
     process.env.OPENWOP_API_KEYS = 'real-key-123';
+    for (const k of OIDC_KEYS) delete process.env[k]; // the KEY, not OIDC, must be what satisfies it
     expect(apiKeyConfigError()).toBeNull();
   });
 
@@ -63,6 +69,6 @@ describe('apiKeyConfigError', () => {
     process.env.OPENWOP_AUTH_ENFORCE_BEARER = 'true';
     process.env.OPENWOP_API_KEYS = ' , , ';
     for (const k of OIDC_KEYS) delete process.env[k];
-    expect(apiKeyConfigError()).not.toBeNull();
+    expect(apiKeyConfigError()).toMatch(/no bearer credential is configured/);
   });
 });

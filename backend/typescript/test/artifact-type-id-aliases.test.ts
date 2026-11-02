@@ -11,6 +11,9 @@
  * typed.
  *
  * So the alias resolves on READ only and is permanent, not transitional.
+ *
+ * TST-BZD-18 (grade-tests w66). Red when getArtifactType / isRegisteredArtifactType /
+ * validateArtifact stop resolving the alias, or a dangling alias shadows a real miss.
  */
 import { describe, expect, it, beforeEach } from 'vitest';
 import {

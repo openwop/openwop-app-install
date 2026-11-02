@@ -25,6 +25,12 @@
  * chain pack reds leg 2; adding `get-app-identity` to the campaign-orchestration
  * chain reds leg 3a; importing `host/systemBrand` from campaign-intel reds 3b.
  * Each scanner also has an in-file negative control (a planted offender is found).
+ *
+ * Denominators MEASURED at w73 (2026-11-01, `w73g1-b-measure-p4.mjs`): 75
+ * workflow-chain packs (the floor below asserts > 20), 42 campaign chains, and a
+ * forbidden set of 3 (`ads.publish.google|meta|tiktok`). The 20 floor is slack by
+ * 55; raising it is a ratchet decision for its owner (floor-slack human-ask row
+ * TST-DPN-H1), so it is left as is.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -43,7 +49,14 @@ import { PLATFORM_PROVIDER } from '../src/host/adsAdapter.js';
 const REPO = join(process.cwd(), '..', '..');
 const SRC = join(process.cwd(), 'src');
 type Json = Record<string, unknown>;
-const readJson = (p: string): Json => JSON.parse(readFileSync(p, 'utf8')) as Json;
+const isJson = (v: unknown): v is Json => typeof v === 'object' && v !== null && !Array.isArray(v);
+/** The JSON objects in `v` when it is an array; anything else reads as none. */
+const records = (v: unknown): Json[] => (Array.isArray(v) ? v.filter(isJson) : []);
+function readJson(p: string): Json {
+  const v: unknown = JSON.parse(readFileSync(p, 'utf8'));
+  if (!isJson(v)) throw new Error(`${p} is not a JSON object`);
+  return v;
+}
 
 const ADS_PACKS = ['meta-ads', 'google-ads', 'tiktok-ads', 'linkedin-ads'] as const;
 const adsPack = (id: string): Json => readJson(join(REPO, 'examples', 'connection-packs', id, 'pack.json'));
@@ -89,20 +102,24 @@ describe('ADR 0941 P4 — 1. the ad platforms are adapter-only', () => {
     const loaded = getProvider('meta-ads');
     if (!loaded) throw new Error('meta-ads did not load');
     registerProvider({ ...loaded, apiHosts: ['127.0.0.1'] });
-    registerProvider({ ...loaded, id: 'p4-ungoverned-twin', adapterOnly: false, apiHosts: ['127.0.0.1'] });
-    for (const provider of ['meta-ads', 'p4-ungoverned-twin']) {
-      await createSecretConnection({ tenantId: 'tp4', provider, kind: 'bearer', secret: `TOKEN-${provider}`, scope: 'user', userId: 'u1' });
+    try {
+      registerProvider({ ...loaded, id: 'p4-ungoverned-twin', adapterOnly: false, apiHosts: ['127.0.0.1'] });
+      for (const provider of ['meta-ads', 'p4-ungoverned-twin']) {
+        await createSecretConnection({ tenantId: 'tp4', provider, kind: 'bearer', secret: `TOKEN-${provider}`, scope: 'user', userId: 'u1' });
+      }
+      const now = new Date().toISOString();
+      await storage.insertRun({ runId: 'run-p4', workflowId: 'w', tenantId: 'tp4', status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: now, updatedAt: now });
+      const fetchVia = (provider: string) => makeConnectionSafeFetch({ storage, tenantId: 'tp4', runId: 'run-p4', allowedProviders: [provider], actingUserId: 'u1' });
+      lastAuth = undefined;
+      await (await fetchVia('p4-ungoverned-twin')(`http://127.0.0.1:${port}/act_1/campaigns`)).body?.cancel();
+      expect(lastAuth).toBe('Bearer TOKEN-p4-ungoverned-twin');
+      lastAuth = undefined;
+      await (await fetchVia('meta-ads')(`http://127.0.0.1:${port}/act_1/campaigns`)).body?.cancel();
+      expect(lastAuth).toBeUndefined();
+    } finally {
+      // Restore the real pack even when an assert fails, so later cases see facebook.com, not loopback.
+      installConnectionPackManifest(adsPack('meta-ads'));
     }
-    await storage.insertRun({ runId: 'run-p4', workflowId: 'w', tenantId: 'tp4', status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: 'x', updatedAt: 'x' });
-    const fetchVia = (provider: string) => makeConnectionSafeFetch({ storage, tenantId: 'tp4', runId: 'run-p4', allowedProviders: [provider], actingUserId: 'u1' });
-    lastAuth = undefined;
-    await (await fetchVia('p4-ungoverned-twin')(`http://127.0.0.1:${port}/act_1/campaigns`)).body?.cancel();
-    expect(lastAuth).toBe('Bearer TOKEN-p4-ungoverned-twin');
-    lastAuth = undefined;
-    await (await fetchVia('meta-ads')(`http://127.0.0.1:${port}/act_1/campaigns`)).body?.cancel();
-    expect(lastAuth).toBeUndefined();
-    // Restore the real pack so later suites see facebook.com, not loopback.
-    installConnectionPackManifest(adsPack('meta-ads'));
   });
 
   it('c. the policy covers every platform the ads adapter writes to', () => {
@@ -135,9 +152,8 @@ const bare = (typeId: string): string => typeId.replace(/@[^@]+$/, '');
 
 /** typeIds used by each chain of a pack: [chainId, typeIds]. */
 function chainsOf(pack: Json): Array<{ chainId: string; typeIds: string[] }> {
-  const chains = Array.isArray(pack.chains) ? (pack.chains as Json[]) : [];
-  return chains.map((c) => {
-    const nodes = ((c.dag as Json | undefined)?.nodes as Json[] | undefined) ?? [];
+  return records(pack.chains).map((c) => {
+    const nodes = isJson(c.dag) ? records(c.dag.nodes) : [];
     return { chainId: String(c.chainId), typeIds: nodes.map((n) => (typeof n.typeId === 'string' ? bare(n.typeId) : '')).filter(Boolean) };
   });
 }
@@ -146,7 +162,7 @@ function chainsOf(pack: Json): Array<{ chainId: string; typeIds: string[] }> {
 function myndhyveAdPublishTypeIds(): Set<string> {
   const ids = new Set<string>();
   for (const name of readdirSync(join(REPO, 'packs')).filter((n) => n.startsWith('vendor.myndhyve.ads-publish-'))) {
-    for (const node of (readJson(join(REPO, 'packs', name, 'pack.json')).nodes as Json[] | undefined) ?? []) {
+    for (const node of records(readJson(join(REPO, 'packs', name, 'pack.json')).nodes)) {
       if (typeof node.typeId === 'string') ids.add(node.typeId);
     }
   }

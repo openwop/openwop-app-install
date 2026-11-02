@@ -1,7 +1,21 @@
 /**
- * Grade pass 2026-07-10 — the pptx import's hostile-input posture: zip-bomb
- * caps (per-entry + whole-file budget), linear scanning on unbalanced XML,
- * entity decoding, and the non-pptx rejection.
+ * ADR 0328 Phase 7 / GC-SL-1 — the pptx import's hostile-input posture: the
+ * per-entry zip-bomb cap, linear scanning on unbalanced XML, entity decoding,
+ * and the non-pptx rejection. (The whole-file `MAX_TOTAL_BYTES` budget is NOT
+ * exercised here: one 8 MB entry is under it.)
+ *
+ * DOUBLE GUARD: the per-entry cap is enforced twice in pptxImport.ts — before
+ * decompression (jszip's `_data.uncompressedSize`) and after (`text.length`).
+ * Disabling either one alone stays green by design; disabling BOTH turns the
+ * bomb case red (w74 probe pi-bomb-both). The jszip-internals tripwire for the
+ * first guard lives in test/slides-editor-routes.test.ts.
+ *
+ * CEILING: "linear time" is a wall-clock bound (< 2 s). No terminating sabotage
+ * can make the scan quadratic without hanging the case, so only its honest
+ * fallback (`layout: 'title'`) is probe-witnessed.
+ *
+ * Other sabotage that turns it red: the fallback layout; accepting a zip with no
+ * slide parts; not decoding `&amp;` or numeric entities; dropping speaker notes.
  */
 import { describe, it, expect } from 'vitest';
 import JSZip from 'jszip';

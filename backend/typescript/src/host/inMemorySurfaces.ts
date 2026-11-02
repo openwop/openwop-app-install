@@ -23,6 +23,7 @@
  *   `HostSurfaceBundle`. NodeContext typing doesn't change.
  */
 
+import type { ChatClarificationSink } from './clarificationChat.js';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, normalize, resolve, sep } from 'node:path';
 import { randomUUID, randomBytes } from 'node:crypto';
@@ -329,6 +330,15 @@ export interface BundleScope {
    *  out-of-band. Present only on the conversation transport; absent ⇒ the
    *  tool falls back to a direct append. See `host/turnRunDispatch.ts`. */
   onRunDispatched?: TurnRunDispatchSink;
+  /** ADR 1001 D7 — the turn-scoped sink `openwop:ask-user` records its ask
+   *  on. Present only on the CHAT transport; absent (voice, the run lane) ⇒
+   *  the tool refuses, so it can never end a turn that cannot show the card. */
+  onClarificationAsk?: ChatClarificationSink;
+  /** ADR 1017 D2 — the wire message id of the agent turn this tool call belongs to
+   *  (the exchange reserves it before dispatch). A chat tool that saves an artifact
+   *  stamps it on the row so the chat can show the artifact under that turn. Chat
+   *  only; never model text. */
+  turnMessageId?: string;
 }
 
 // ───────────────────────────────────────────────────────────────────

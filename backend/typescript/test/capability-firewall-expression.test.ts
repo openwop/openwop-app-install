@@ -1,6 +1,14 @@
 /**
  * ADR 0135 Phase 6 — the bounded expression parser/evaluator + Phase 5/6 rule-store
  * validation (exactly-one-predicate + fail-closed on a bad expression / fan-out class).
+ *
+ * Tracker TST-CBF-3 (security: a rule set fails CLOSED at save time). Each invalid
+ * expression is asserted with the error that refuses it, so a refusal that only happens
+ * by accident (a TypeError mapped to "malformed expression") goes red.
+ * Red when: trailing tokens are accepted; an unknown egress value or kind is accepted;
+ * the comparison-number check is dropped; `&&`/`||` swap or gain precedence; `!` is
+ * ignored; `==` misbehaves; validateRules accepts a threshold < 1, a non-turn window,
+ * an unparseable expression or two predicate kinds (w67g1-xp-* probes, wave 67).
  */
 import { describe, it, expect } from 'vitest';
 import { parseExpression, evalExpression } from '../src/features/capability-firewall/expressionEvaluator.js';
@@ -37,21 +45,24 @@ describe('parseExpression — valid grammar', () => {
 });
 
 describe('parseExpression — invalid grammar (fail-closed)', () => {
-  const bad = [
-    '',                                   // empty
-    'seen.read &&',                       // dangling operator
-    '&& seen.read',                       // leading operator
-    'seen.read next.exec',                // missing operator between terms
-    'count.egress:host-mediated >=',      // comparison without a number
-    'seen.bogus',                         // unknown fact namespace class body
-    'seen.egress:not-a-thing',            // unknown egress value
-    'unknown.read',                       // unknown fact prefix
-    'seen.read >= foo',                   // non-numeric comparison operand
-    'seen.kind:whatever',                 // unknown kind
+  // [source, the error that must refuse it]
+  const bad: ReadonlyArray<readonly [string, string]> = [
+    ['', 'empty expression'],                                                       // empty
+    ['seen.read &&', 'expected a fact'],                                            // dangling operator
+    ['&& seen.read', 'expected a fact'],                                            // leading operator
+    ['seen.read next.exec', 'trailing tokens after a complete expression'],         // missing operator between terms
+    ['count.egress:host-mediated >=', 'a comparison must be followed by a number'], // comparison without a number
+    ['seen.bogus', 'unknown fact: seen.bogus'],                                     // unknown fact namespace class body
+    ['seen.egress:not-a-thing', 'unknown fact: seen.egress:not-a-thing'],           // unknown egress value
+    ['unknown.read', 'unexpected token at position 0'],                             // unknown fact prefix
+    ['seen.read >= foo', 'unexpected token at position 13'],                        // non-numeric operand: refused by the tokenizer
+    ['seen.kind:whatever', 'unknown fact: seen.kind:whatever'],                     // unknown kind
   ];
-  for (const src of bad) {
+  for (const [src, error] of bad) {
     it(`rejects ${JSON.stringify(src)}`, () => {
-      expect(parseExpression(src).ok).toBe(false);
+      const p = parseExpression(src);
+      if (p.ok) throw new Error(`expected ${JSON.stringify(src)} to be refused`);
+      expect(p.error).toContain(error);
     });
   }
 });
@@ -82,6 +93,11 @@ describe('evalExpression — semantics', () => {
     expect(evalOk(src, ctx({ seen: ['safetyTier:read'] }))).toBe(false);
   });
   it('&& and || fold left-to-right over the flat term sequence', () => {
+    // each operator keeps its own meaning
+    expect(evalOk('seen.read || next.exec', ctx({ seen: ['safetyTier:read'] }))).toBe(true);
+    expect(evalOk('seen.read && next.exec', ctx({ seen: ['safetyTier:read'] }))).toBe(false);
+    // no &&-over-|| precedence: (true || false) && false == false (precedence would give true)
+    expect(evalOk('seen.read || next.exec && seen.write', ctx({ seen: ['safetyTier:read'] }))).toBe(false);
     // false || true && false  ==  ((false || true) && false)  ==  false
     expect(evalOk('seen.read || next.exec && seen.write', ctx({ next: ['safetyTier:exec'] }))).toBe(false);
     // true || anything (first two) then && true
@@ -103,12 +119,12 @@ describe('validateRules — Phase 5/6', () => {
   });
 
   it('rejects a non-positive / non-integer threshold', () => {
-    expect(() => validateRules([{ ...base, when: { countAtLeast: { class: { kind: 'fan-out' }, threshold: 0, window: 'turn' } } }])).toThrow(OpenwopError);
-    expect(() => validateRules([{ ...base, when: { countAtLeast: { class: { kind: 'fan-out' }, threshold: 1.5, window: 'turn' } } }])).toThrow(OpenwopError);
+    expect(() => validateRules([{ ...base, when: { countAtLeast: { class: { kind: 'fan-out' }, threshold: 0, window: 'turn' } } }])).toThrow(/threshold MUST be a positive integer/);
+    expect(() => validateRules([{ ...base, when: { countAtLeast: { class: { kind: 'fan-out' }, threshold: 1.5, window: 'turn' } } }])).toThrow(/threshold MUST be a positive integer/);
   });
 
   it('rejects a window other than turn', () => {
-    expect(() => validateRules([{ ...base, when: { countAtLeast: { class: { kind: 'fan-out' }, threshold: 2, window: 'run' } } }])).toThrow(OpenwopError);
+    expect(() => validateRules([{ ...base, when: { countAtLeast: { class: { kind: 'fan-out' }, threshold: 2, window: 'run' } } }])).toThrow(/window MUST be 'turn'/);
   });
 
   it('accepts a valid expression rule', () => {
@@ -118,6 +134,7 @@ describe('validateRules — Phase 5/6', () => {
 
   it('fails CLOSED on an unparseable expression', () => {
     expect(() => validateRules([{ ...base, when: { expression: 'seen.bogus &&' } }])).toThrow(OpenwopError);
+    expect(() => validateRules([{ ...base, when: { expression: 'seen.bogus &&' } }])).toThrow(/when\.expression is invalid: unknown fact: seen\.bogus/);
   });
 
   it('enforces exactly-one-predicate-kind (rejects presence + countAtLeast)', () => {

@@ -10,6 +10,16 @@
  *   - the device's own key cannot decide (D7), nor can a co-tenant human; the card
  *     is invisible to that co-tenant (owner-only audience);
  *   - the stored card holds a summary + digest, never the raw input.
+ *
+ * TST-CFA-2. Red when: the claude-code-permission eligibility check is dropped
+ * (`approvalPolicy.ts`); a timed-out card is not closed; `on_timeout:'defer'` loses
+ * `timedOut`; ALLOW stops echoing the input; DENY drops the note; the summary
+ * bound grows; the raw input lands on the card.
+ *
+ * DOUBLE GUARD (named, both in `approvalPolicy.ts`): a device key is refused both by
+ * `decidedBy.startsWith('apikey:')` AND by `decidedBy !== owner` (its principal is
+ * never the owner's subject). Breaking either alone keeps the 403; breaking the
+ * whole predicate reds the key case (probe `perm-eligibility`).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -41,7 +51,14 @@ beforeAll(async () => {
 afterAll(async () => { delete process.env[CLAUDE_CODE_OPERATOR_ENV]; await new Promise<void>((res) => server.close(() => res())); });
 afterEach(() => { __setPermissionWaitForTest(null); });
 
-interface Res { status: number; body: any }
+interface PermBody {
+  result?: { isError?: boolean; content: Array<{ text: string }> };
+  items?: Array<{ approvalId: string; claudeCodePermission: Record<string, string> }>;
+  token?: string; userCode?: string; deviceCode?: string;
+  error?: string; message?: string;
+}
+interface Res { status: number; body: PermBody }
+const OWNER_ONLY = 'Only the person who paired this Claude Code device can answer its permission prompts.';
 function client(bearer?: string) {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
@@ -51,7 +68,8 @@ function client(bearer?: string) {
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    const parsed = (res.status === 204 ? {} : await res.json().catch(() => ({}))) as PermBody;
+    return { status: res.status, body: parsed };
   };
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
 }
@@ -72,12 +90,12 @@ async function pairDevice(owner: ReturnType<typeof client>): Promise<string> {
 let rpcId = 0;
 const askPermission = (device: ReturnType<typeof client>, toolName: string, input: Record<string, unknown>) =>
   device.post(MCP, { jsonrpc: '2.0', id: ++rpcId, method: 'tools/call', params: { name: 'claude-code-permission', arguments: { tool_name: toolName, input, tool_use_id: 'tu_1' } } });
-const answer = (r: Res): { behavior: string; updatedInput?: unknown; message?: string } => JSON.parse(r.body.result.content[0].text);
+const answer = (r: Res): { behavior: string; updatedInput?: unknown; message?: string } => JSON.parse(r.body.result?.content[0]?.text ?? 'null');
 
 async function pendingCard(owner: ReturnType<typeof client>): Promise<{ approvalId: string; claudeCodePermission: Record<string, string> }> {
   for (let i = 0; i < 100; i += 1) {
     const list = await owner.get(`${APPROVALS}?status=pending&kind=claude-code-permission`);
-    const item = (list.body?.items ?? [])[0];
+    const item = (list.body.items ?? [])[0];
     if (item) return item;
     await new Promise((r) => setTimeout(r, 20));
   }
@@ -119,9 +137,10 @@ describe('ADR 0785 P4 — permission prompts as approval cards', () => {
     const device = client(await pairDevice(owner));
     const r = await askPermission(device, 'WebFetch', { url: 'https://example.com' });
     expect(answer(r).behavior).toBe('deny');
-    const closed = (await owner.get(`${APPROVALS}?status=rejected&kind=claude-code-permission`)).body.items[0];
-    expect((await getApproval(closed.approvalId))?.status).toBe('rejected');
-    expect((await owner.post(`${APPROVALS}/${closed.approvalId}/claim`)).status).toBe(409);
+    const closed = (await owner.get(`${APPROVALS}?status=rejected&kind=claude-code-permission`)).body.items?.[0];
+    expect(closed).toBeDefined();
+    expect((await getApproval(closed?.approvalId ?? ''))?.status).toBe('rejected');
+    expect((await owner.post(`${APPROVALS}/${closed?.approvalId ?? ''}/claim`)).status).toBe(409);
   });
 
   it('on_timeout:"defer" (the interactive hook) is told the prompt TIMED OUT — and the card is still closed', async () => {
@@ -145,8 +164,11 @@ describe('ADR 0785 P4 — permission prompts as approval cards', () => {
 
     const byKey = await device.post(`${APPROVALS}/${card.approvalId}/claim`);
     expect(byKey.status, 'a device key must never answer its own permission prompt').toBe(403);
+    expect(byKey.body.message).toBe(OWNER_ONLY);
     expect((await coTenant.get(`${APPROVALS}?status=pending&kind=claude-code-permission`)).body.items).toEqual([]);
-    expect((await coTenant.post(`${APPROVALS}/${card.approvalId}/claim`)).status).toBe(403);
+    const byCoTenant = await coTenant.post(`${APPROVALS}/${card.approvalId}/claim`);
+    expect(byCoTenant.status).toBe(403);
+    expect(byCoTenant.body.message).toBe(OWNER_ONLY);
 
     expect((await owner.post(`${APPROVALS}/${card.approvalId}/reject`)).status).toBe(200);
     expect(answer(await pending).behavior).toBe('deny');

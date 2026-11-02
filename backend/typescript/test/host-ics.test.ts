@@ -3,6 +3,15 @@
  *  - §3.3.11 text escaping incl. the Unicode line/para separators (injection guard);
  *  - §3.1 75-octet line folding (continuation = CRLF + space);
  *  - byte-exact output for both caller shapes (crm timed invite + kicktodo all-day feed).
+ *
+ * BLOCKED-ON-PRODUCT: ICS-FOLD-OCTETS. RFC 5545 §3.1 folds at 75 OCTETS; `foldIcsLine`
+ * counts JS string units, so multi-byte text yields longer lines and can split a
+ * surrogate pair. The fold case below asserts only what holds today, an ASCII line
+ * (where units == octets), until the product counts bytes.
+ *
+ * Tracker TST-DFD-2. Red when (w71g1, witnessed): backslash or the Unicode separators
+ * stop being escaped; the fold threshold moves off 75 (a 76-char line must fold, a 75-char line must not) or the 74-wide continuation changes; a
+ * `sequence: 0` is dropped; the trailing CRLF is dropped; the UTC stamp keeps millis.
  */
 import { describe, expect, it } from 'vitest';
 import { buildIcsCalendar, escapeIcsText, foldIcsLine, icsUtc } from '../src/host/ics.js';
@@ -24,8 +33,12 @@ describe('foldIcsLine (RFC 5545 §3.1)', () => {
     expect(foldIcsLine(s)).toBe(s);
   });
   it('folds a >75-octet line at 75 then 74, continuation = CRLF + space', () => {
-    const folded = foldIcsLine('B'.repeat(80));
-    expect(folded).toBe('B'.repeat(75) + '\r\n ' + 'B'.repeat(5));
+    // 160 ASCII chars fold TWICE: 75, then a 74-wide continuation, then the 11 left.
+    const folded = foldIcsLine('B'.repeat(160));
+    expect(folded).toBe('B'.repeat(75) + '\r\n ' + 'B'.repeat(74) + '\r\n ' + 'B'.repeat(11));
+    expect(folded.split('\r\n').map((l) => l.length)).toEqual([75, 75, 12]); // each line ≤ 75 incl. the leading space
+    // The boundary itself: 76 characters is the shortest line that must fold.
+    expect(foldIcsLine('C'.repeat(76))).toBe('C'.repeat(75) + '\r\n ' + 'C');
   });
 });
 

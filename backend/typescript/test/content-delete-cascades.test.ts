@@ -7,6 +7,11 @@
  *    campaign-connectors (perf) + campaign-intel (pacing) subscribe to — so those sibling
  *    features prune their own per-campaign rows without a reverse-import. Tested here at
  *    the seam-contract level (the boundary-correct mechanism).
+ *
+ * TST-CKA-5 — the RI/content-scout delete-cascade closure (#1927, d306732ce).
+ * Red when: deletePage skips its experiment loop (case 1), a throwing handler stops
+ * the remaining handlers from running (case 2), or registrations stop being keyed so
+ * a re-registered key stacks a duplicate (case 3).
  */
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';

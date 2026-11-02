@@ -9,6 +9,11 @@
  *   - partial coverage → still gated until EVERY required provider is active
  *   - full coverage → allConfigured, declared level preserved
  *   - a non-active (needs-reconsent) connection does NOT satisfy a requirement
+ *
+ * Tracker TST-CJB-11 (grade-tests w68). Red when: the gate passes the declared
+ * level through while a requirement is missing; `missing` drops a provider; a
+ * capability token is satisfied without a configured provider; or a non-active
+ * connection counts as configured.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -17,6 +22,7 @@ import { upsertAgentProfile, __resetAgentProfileStore } from '../src/host/agentP
 import {
   createSecretConnection,
   __resetConnectionsStore,
+  __setConnectionStatusForTests,
 } from '../src/features/connections/connectionsService.js';
 import {
   resolveConnectionReadiness,
@@ -100,6 +106,19 @@ describe('connectionReadiness — requiredConnections activation gate (ADR 0033 
     // Now the declared level passes through unchanged.
     expect(gateAutonomyByReadiness('auto', full)).toBe('auto');
     expect(gateAutonomyByReadiness('guided', full)).toBe('guided');
+  });
+
+  it('a non-active (needs-reconsent) connection does NOT satisfy a requirement', async () => {
+    await seedProfile(['sendgrid']);
+    const conn = await createSecretConnection({ tenantId: TENANT, provider: 'sendgrid', kind: 'api_key', secret: 'SG.x', scope: 'workspace' });
+    // Positive control: while active it satisfies the requirement.
+    expect((await resolveConnectionReadiness(TENANT, AGENT)).allConfigured).toBe(true);
+    await __setConnectionStatusForTests(conn.connectionId, 'needs-reconsent');
+    const r = await resolveConnectionReadiness(TENANT, AGENT);
+    expect(r.allConfigured).toBe(false);
+    expect(r.missing).toEqual(['sendgrid']);
+    expect(r.entries).toEqual([{ provider: 'sendgrid', configured: false, status: 'needs-reconsent' }]);
+    expect(gateAutonomyByReadiness('auto', r)).toBe('review');
   });
 
   it('does not leak a connection from another tenant', async () => {

@@ -73,7 +73,6 @@ const KNOWN_UNEMITTED_FAMILIES: Readonly<Record<string, string>> = {
   i18n: GATED,
   content: GATED,
   channelPresence: GATED,
-  envelopeContracts: UNDISPOSITIONED,
   nodePackRuntimes: UNDISPOSITIONED,
   selfHostedRunner: UNDISPOSITIONED,
   purposePropagation: UNDISPOSITIONED,
@@ -82,7 +81,6 @@ const KNOWN_UNEMITTED_FAMILIES: Readonly<Record<string, string>> = {
   nosql: UNDISPOSITIONED,
   heartbeat: UNDISPOSITIONED,
   toolHooks: UNDISPOSITIONED,
-  aiEnvelope: UNDISPOSITIONED,
   promptLibrary: UNDISPOSITIONED,
   agentRuntime: UNDISPOSITIONED,
   budget: UNDISPOSITIONED,
@@ -127,9 +125,9 @@ afterAll(() => {
 
 describe('ADR 0858 — every v2 family seat is emitted or ledgered', () => {
   it('reads a real seat list and a real document (non-vacuous)', () => {
-    expect(seats.length).toBeGreaterThanOrEqual(74);
+    expect(seats.length).toBeGreaterThanOrEqual(68);
     const emittedSeats = seats.filter((s) => emitted.has(s)).length;
-    expect(emittedSeats).toBeGreaterThanOrEqual(48);
+    expect(emittedSeats).toBeGreaterThanOrEqual(44);
     // Every seat is accounted for exactly once: emitted, or ledgered.
     expect(emittedSeats).toBe(seats.length - Object.keys(KNOWN_UNEMITTED_FAMILIES).length);
   });

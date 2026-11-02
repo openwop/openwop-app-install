@@ -32,12 +32,6 @@ export const SEAMS_PREFIX = '/conformance/seams';
 
 /** The inverse of the suite's `lib/seams.ts` prefix table. */
 const SEAM_ALIASES: ReadonlyArray<readonly [RegExp, string]> = [
-  // RFC 0209 (ADR 0749) — `emitA2uiSurface` is NOT the v1 emit seam at a new
-  // address: its body is `{runId, envelope}` where v1's is `{runId, surface}`,
-  // and it admits through the major-2 catalog. So this ONE path is routed to its
-  // own handler, ahead of the generic `sample/` rule that would otherwise land it
-  // on the v1 seam. Still under `/host/sample/`, so `guardSeam` applies.
-  [/^\/conformance\/seams\/sample\/a2ui\/emit-surface(?=$|\?)/, '/host/sample/a2ui/v2/emit-surface'],
   [/^\/conformance\/seams\/sample\//, '/host/sample/'],
   [/^\/conformance\/seams\/workspace\/files/, '/host/workspace/files'],
   [/^\/conformance\/seams\/packs-test\//, '/packs-test/'],
@@ -54,8 +48,6 @@ export interface SeamOperation {
 }
 
 export const SEAM_OPERATIONS: readonly SeamOperation[] = [
-  // RFC 0209 / ADR 0749 — admits through `host/a2uiSurfaceAdmission.ts`.
-  { operationId: 'emitA2uiSurface', method: 'post', v2Path: '/conformance/seams/sample/a2ui/emit-surface', served: true, floor: false },
   { operationId: 'getA2ATaskState', method: 'get', v2Path: '/conformance/seams/sample/a2a/tasks/{taskId}', served: true, floor: false },
   { operationId: 'listWorkspaceFiles', method: 'get', v2Path: '/conformance/seams/workspace/files', served: true, floor: false },
   { operationId: 'getWorkspaceFile', method: 'get', v2Path: '/conformance/seams/workspace/files/{path}', served: true, floor: false },
@@ -100,15 +92,9 @@ export const SEAM_OPERATIONS: readonly SeamOperation[] = [
   // `served: false` is not only bookkeeping: `registerConformanceSeamAlias`
   // answers 404 for these instead of rewriting them, because the generic
   // `sample/` prefix rule would otherwise land them on whatever v1 route shares
-  // the tail. `emitA2uiSurface` is the case that forced it — its v2 address
-  // rewrote onto the RFC 0114 `/v1/host/openwop-app/a2ui/emit-surface` handler,
-  // which takes `{runId, surface}` and answered 400 to the RFC 0209
-  // `{runId, envelope}` body. The corpus reads any non-404/405 as "seam wired",
-  // so the v2 scenario would have recorded FAILS against a seam this host never
-  // built, instead of `inapplicable`. The v1 route is untouched (its scenario is
-  // major-1-only). The RFC 0209 seam lands with WS5 and flips this to `true`.
-  // → DONE (ADR 0749): `emitA2uiSurface` is now served by its own handler and
-  //   listed at the top of this table; its alias is the first `SEAM_ALIASES` rule.
+  // the tail. The corpus reads any non-404/405 as "seam wired", so a v2 scenario
+  // would record FAILS against a seam this host never built, instead of
+  // `inapplicable`.
   // → DONE (ADR 0753 D12): both RFC 0199 OAuth seams are served by
   //   `features/connections/oauthConformanceSeams.ts`, which configures a provider
   //   the production way and calls the production `beginAuthorization` (R9).

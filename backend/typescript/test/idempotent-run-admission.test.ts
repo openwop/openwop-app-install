@@ -39,6 +39,14 @@
  * VERIFICATION SCOPE. SQLite (`memory://` IS the SQLite adapter — ADR 0549
  * CORRECTION 5). The Postgres half of the same transaction is asserted in
  * `storage-adapter-parity-testcontainers.test.ts` (real Postgres, Docker-gated).
+ *
+ * TST-DGA-4. Red when the route stops passing `idempotencyCommit` into the run
+ * insert (both windows mint a second run), when the SQLite transaction ignores
+ * a rejected ledger CAS (the run row survives), and when the major-2 in-flight
+ * 409 loses its Retry-After. That header has TWO writers — `routes/runs.ts`
+ * sets it, and `middleware/errorEnvelope.ts` derives it again from
+ * `details.retryAfter` of an `idempotency_in_flight` error — so a probe must
+ * remove both to red the header leg (sabotage-witnessed, wave 71).
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -49,7 +57,8 @@ import type { Express } from 'express';
 import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import type { HostAdapterSuite } from '../src/host/index.js';
-import { idempotencyLeaseMs } from '../src/host/idempotentResponse.js';
+import { canonicalRequestDigest, idempotencyLeaseMs } from '../src/host/idempotentResponse.js';
+import { buildRunRecord } from '../src/host/runDispatch.js';
 import { bareRunId } from './support/bareRunId.js';
 
 let app: Express;
@@ -150,7 +159,8 @@ describe('ADR 0549 H56 — window (a): holder dies after the run row commits, be
     suppressNextRelease();
     const first = await post<CreateRunBody>('/runs', BODY, { 'idempotency-key': key });
     // The client saw a failure (the process "died"), but a run row EXISTS.
-    expect(first.status).toBeGreaterThanOrEqual(500);
+    expect(first.status).toBe(500);
+    expect(first.body.error).toBe('internal_error');
     const afterCrash = await runsWithKey(key);
     expect(afterCrash).toHaveLength(1);
     const survivingRunId = afterCrash[0]!.runId;
@@ -181,7 +191,8 @@ describe('ADR 0549 H56 — window (b): a throw between the run insert and the le
     }) as typeof realRecord;
     try {
       const first = await post<CreateRunBody>('/runs', BODY, { 'idempotency-key': key });
-      expect(first.status).toBeGreaterThanOrEqual(500);
+      expect(first.status).toBe(500);
+      expect(first.body.error).toBe('internal_error');
     } finally {
       hostSuite.auditSink.record = realRecord;
     }
@@ -203,8 +214,6 @@ describe('ADR 0549 H56 — the ledger commit rides INSIDE the run insert (storag
   it('insertRun with idempotencyCommit lands the run row and the completed ledger row together', async () => {
     const key = `h56-atomic-${randomUUID()}`;
     const now = new Date().toISOString();
-    const { canonicalRequestDigest } = await import('../src/host/idempotentResponse.js');
-    const { buildRunRecord } = await import('../src/host/runDispatch.js');
     const claim = await storage.claimIdempotentResponse({
       tenantId: TENANT, endpoint: 'POST:/v1/runs', key,
       requestDigest: canonicalRequestDigest(BODY, 'POST:/v1/runs'), createdAt: now, leaseMs: 60_000,
@@ -230,8 +239,6 @@ describe('ADR 0549 H56 — the ledger commit rides INSIDE the run insert (storag
   it('a ledger commit the CAS rejects ROLLS BACK the run row — both or neither', async () => {
     const key = `h56-cas-${randomUUID()}`;
     const now = new Date().toISOString();
-    const { canonicalRequestDigest } = await import('../src/host/idempotentResponse.js');
-    const { buildRunRecord } = await import('../src/host/runDispatch.js');
     const claim = await storage.claimIdempotentResponse({
       tenantId: TENANT, endpoint: 'POST:/v1/runs', key,
       requestDigest: canonicalRequestDigest(BODY, 'POST:/v1/runs'), createdAt: now, leaseMs: 60_000,
@@ -264,7 +271,6 @@ describe('ADR 0549 H56 — the in-flight 409 carries the code the spec names', (
     // `Retry-After`).
     const key = `adr0744-inflight-${randomUUID()}`;
     const now = new Date().toISOString();
-    const { canonicalRequestDigest } = await import('../src/host/idempotentResponse.js');
     const held = await storage.claimIdempotentResponse({
       tenantId: TENANT, endpoint: 'POST:/v1/runs', key,
       requestDigest: canonicalRequestDigest(BODY, 'POST:/v1/runs'), createdAt: now, leaseMs: 60_000,
@@ -305,5 +311,8 @@ describe('ADR 0549 H56 — the in-flight 409 carries the code the spec names', (
     const divergent = await post<CreateRunBody>('/runs', { ...BODY, inputs: { text: 'DIFFERENT' } }, { 'idempotency-key': key });
     expect(divergent.status).toBe(409);
     expect(divergent.body.error).toBe('idempotency_key_mismatch');
+    // The admission half (distinct from the ledger-level 409 in
+    // idempotency-tenant-isolation): the refused body minted NO second run.
+    expect(await runsWithKey(key)).toHaveLength(1);
   });
 });

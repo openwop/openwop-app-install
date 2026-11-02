@@ -25,7 +25,7 @@
  * — do NOT delete the row to make this green.
  *
  * Tracker TST-BAA-12. Red when (sabotage-witnessed, wave 60): `demoMode` is
- * dropped from `extensions["openwop-app.host"]`; `envelopes` loses
+ * dropped from `extensions["openwop-app.host"]`; `aiProviders` loses
  * `tierOneSubsetCompliance`; the host-surfaces extension is renamed. A `null`
  * counts as absent: the SPA's optional chains treat it the same way.
  */
@@ -51,7 +51,7 @@ const CONSUMER_READS: readonly ConsumerRead[] = [
   { what: 'drives the model-capability inspector panel', consumer: 'builder/inspector/inspectorHelpers.ts', v2Path: 'modelCapabilities' },
   { what: 'drives the accepted-input-modalities display', consumer: 'discovery/CapabilitiesPanel.tsx', v2Path: 'aiProviders.input.modalities' },
   { what: 'drives the run memory-attribution panel', consumer: 'runs/RunMemoryPanel.tsx', v2Path: 'memory.attribution' },
-  { what: 'drives the Tier-1 structured-output posture note', consumer: 'prompts/PromptLibraryPage.tsx', v2Path: 'envelopes.tierOneSubsetCompliance' },
+  { what: 'drives the Tier-1 structured-output posture note', consumer: 'prompts/PromptLibraryPage.tsx', v2Path: 'aiProviders.tierOneSubsetCompliance' },
   { what: 'drives the builder host-limits banner', consumer: 'builder/builderShellHelpers.ts', v2Path: 'limits' },
 ];
 

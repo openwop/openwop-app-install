@@ -127,7 +127,7 @@ export function ProjectWorkflowsTab({ projectId, workflows, canWrite, onSaved }:
       ) : (
         <>
           <p className="muted u-fs-13 u-mt-0">
-            <Trans i18nKey="workflowsPortfolioIntro" ns="projects" components={{ 0: <strong />, 1: <strong /> }} />
+            <Trans i18nKey="workflowsPortfolioIntro" ns="projects" components={[<strong />, <strong />]} />
           </p>
           <div className="card-grid u-mb-4">
             {workflows.map((wfId) => {

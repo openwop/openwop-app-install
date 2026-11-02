@@ -40,6 +40,12 @@
 # backout rule: revert, don't fix forward), its PR is told why, and close runs
 # again, up to OPENWOP_BATCH_CLOSE_ROUNDS (default 2) times.
 #
+# The bisection assumes origin/main is green, so it PROBES that first (one gate,
+# reused while main stays at the same commit): a red main is reported as main's,
+# and no feature is reverted for it. Every claimed command, quick check, gate and
+# probe is timed into <git-common-dir>/batch/<name>/timing.tsv (ADR 0976 P2), so a
+# batch can be compared with merge-train runs.
+#
 # OPENWOP_BATCH_MAX (default 10) caps the features in one batch: if each PR has a
 # 10% chance of being red, a batch of 10 is red about 65% of the time.
 set -euo pipefail
@@ -76,6 +82,12 @@ say() { printf '\n\033[1m▶ %s\033[0m\n' "$*"; }
 # die <what happened> [<what to do next>] — the second line is for the agent driving this.
 die() { echo "batch: $1" >&2; [ -z "${2:-}" ] || echo "next: $2" >&2; exit 1; }
 G() { git -C "$ROOT" "$@"; }
+# mark <phase> <start|end> [<detail>] — one row of $PKT/timing.tsv (ADR 0976 P2).
+mark() {
+  mkdir -p "$PKT" 2>/dev/null || return 0
+  [ -s "$PKT/timing.tsv" ] || printf 'utc\tepoch\tphase\tevent\tdetail\n' > "$PKT/timing.tsv"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(date +%s)" "$1" "$2" "${3:-}" >> "$PKT/timing.tsv" || true
+}
 W() { git -C "$BWT" "$@"; }
 
 # ── one command per batch at a time: they share the batch worktree ───────────
@@ -89,7 +101,8 @@ claim() {
     rm -rf "$LOCK"; mkdir "$LOCK" 2>/dev/null || die "lost the race for $LOCK" "run this again"
   fi
   printf '%s\n%s\n' "$$" "$CMD $NAME${PR:+ $PR}" > "$LOCK/owner"
-  trap 'rm -rf "$LOCK"' EXIT
+  mark "$CMD" start "${PR:+pr=$PR}"
+  trap 'rc=$?; mark "$CMD" end "${PR:+pr=$PR }rc=$rc"; rm -rf "$LOCK"' EXIT
 }
 
 remote_tip() { G fetch -q origin; G rev-parse --verify -q "origin/$BRANCH" || die "no branch $BRANCH on origin" "scripts/batch.sh open $NAME"; }
@@ -118,7 +131,11 @@ quick_check() {
   if needs_install frontend/react; then ( cd "$BWT/frontend/react" && npm ci ); fi
   if [ ! -d "$BWT/node_modules" ] && [ -f "$BWT/package-lock.json" ]; then ( cd "$BWT" && npm ci ); fi
   say "quick checks on $(W rev-parse --short HEAD) (statics, typechecks, lint, builds; no suite)"
-  ( cd "$BWT" && npm run ci:quick )
+  local rc=0
+  mark quick start "$(W rev-parse --short HEAD)"
+  ( cd "$BWT" && npm run ci:quick ) || rc=$?
+  mark quick end "rc=$rc"
+  return "$rc"
 }
 
 # What quick checks cannot vouch for. Prints one reason per line; empty = low risk.
@@ -150,7 +167,7 @@ batch_pr() { gh pr list --head "$BRANCH" --base main --state open --json number 
 cmd_open() {
   G fetch -q origin
   G rev-parse --verify -q "origin/$BRANCH" >/dev/null && die "$BRANCH already exists on origin" "scripts/batch.sh status $NAME"
-  G push -q origin "origin/main:refs/heads/$BRANCH"
+  G push -q --no-verify origin "origin/main:refs/heads/$BRANCH"
   say "opened $BRANCH at $(G rev-parse --short origin/main)"
   echo "next: open feature PRs with 'gh pr create --base $BRANCH', then 'scripts/batch.sh merge $NAME <pr>' for each"
 }
@@ -184,8 +201,12 @@ cmd_merge() {
     gh pr edit "$PR" --base "$BRANCH" >/dev/null
   fi
   say "merging #$PR into $BRANCH"
-  gh pr merge "$PR" --merge >/dev/null 2>&1 || true   # its exit code is not the result (CLAUDE.md)
-  [ "$(gh pr view "$PR" --json state --jq .state)" = MERGED ] || die "#$PR is not MERGED after the merge" "gh pr view $PR, and merge it by hand only if it is green on quick checks"
+  # --match-head-commit: merge the head the quick checks saw, or nothing (ADR 0976 P2).
+  gh pr merge "$PR" --merge --match-head-commit "$oid" >/dev/null 2>&1 || true   # its exit code is not the result (CLAUDE.md)
+  if [ "$(gh pr view "$PR" --json state --jq .state)" != MERGED ]; then
+    if [ "$base" = main ]; then gh pr edit "$PR" --base main >/dev/null 2>&1 || true; fi
+    die "#$PR is not MERGED: its head moved after the quick checks passed ${oid:0:9}, or GitHub refused the merge${base:+ (left against $base)}" "gh pr view $PR; if it has new commits, merge again so they are checked"
+  fi
   if [ -n "$risk" ]; then
     gh pr comment "$PR" --body "$(printf 'Merged into `%s` on quick checks only, with the risk accepted (ADR 0976):\n\n> %s\n\nFlagged:\n%s\n' "$BRANCH" "$ACCEPT" "$(printf '%s\n' "$risk" | sed 's/^/- /')")" >/dev/null 2>&1 || true
   fi
@@ -206,7 +227,7 @@ do_sync() {
   if W merge-base --is-ancestor "$main" HEAD; then echo "$BRANCH already contains origin/main ${main:0:9}"; return 0; fi
   W merge -q --no-ff --no-edit -m "batch($NAME): sync origin/main ${main:0:9}" "$main" || { W merge --abort || true; die "origin/main does not merge cleanly into $BRANCH" "open a PR against $BRANCH that merges origin/main and resolves the conflicts, merge it with scripts/batch.sh merge, then sync again"; }
   quick_check || die "quick checks RED after syncing origin/main into $BRANCH — nothing pushed" "the batch and main disagree; fix it in a PR against $BRANCH (the errors are above)"
-  W push -q origin "HEAD:refs/heads/$BRANCH" || die "push to $BRANCH refused (it moved?)" "run sync again"
+  W push -q --no-verify origin "HEAD:refs/heads/$BRANCH" || die "push to $BRANCH refused (it moved?)" "run sync again"
   say "synced: $BRANCH now contains origin/main ${main:0:9}"
 }
 cmd_sync() { claim; do_sync; }
@@ -249,13 +270,42 @@ find_culprit() {
   while IFS= read -r line; do list+=("$line"); done < <(commits)
   hi=${#list[@]}   # list[hi-1] is the tip, which the close gate saw red
   [ "$hi" -gt 0 ] || return 1
+  baseline_green || return 2   # lo=0 means "origin/main alone is green": check it
   while [ $((hi - lo)) -gt 1 ]; do
     mid=$(( (lo + hi) / 2 ))
     sha="${list[mid-1]%% *}"
     say "bisect: probing ${sha:0:9} (${mid} of ${#list[@]}) — one full gate" >&2
-    if bash "$ROOT/scripts/merge-train.sh" "--gate-ref=$sha" 2>&1 | tee "$PKT/probe-$sha.log" >&2; then lo=$mid; else hi=$mid; fi
+    if probe "$sha"; then lo=$mid; else hi=$mid; fi
   done
   echo "${list[hi-1]}"
+}
+
+# probe <sha> — one full gate of origin/main plus <sha>, timed; log kept for the packet.
+probe() {
+  local rc=0
+  mark probe start "${1:0:9}"
+  bash "$ROOT/scripts/merge-train.sh" "--gate-ref=$1" 2>&1 | tee "$PKT/probe-$1.log" >&2 || rc=${PIPESTATUS[0]}
+  mark probe end "${1:0:9} rc=$rc"
+  return "$rc"
+}
+
+# baseline_green — is origin/main green on its own? The bisection blames the first
+# red commit, so without this a red main is pinned on the batch's first feature.
+# One gate per main commit: a green result is kept as $PKT/baseline-<sha>.green.
+baseline_green() {
+  local main; G fetch -q origin; main="$(G rev-parse origin/main)"
+  [ -f "$PKT/baseline-$main.green" ] && return 0
+  say "bisect: probing origin/main ${main:0:9} alone first — one full gate" >&2
+  if probe "$main"; then : > "$PKT/baseline-$main.green"; return 0; fi
+  echo "${main:0:9}" > "$PKT/baseline-red"
+  return 1
+}
+# Explain a find_culprit failure: rc 2 = main is red, else nothing reproduced.
+no_culprit() { # no_culprit <rc> <log to read>
+  if [ "$1" -eq 2 ]; then
+    die "origin/main itself is red at $(cat "$PKT/baseline-red" 2>/dev/null) — not the batch's fault, so nothing was reverted." "main must be fixed by its owner first (log: $PKT/probe-$(G rev-parse origin/main).log); then close again"
+  fi
+  die "no commit on $BRANCH is red on its own — the red was not reproducible (a flake?)." "read $2; if it is a known flake, close again to re-gate"
 }
 
 # The lines of a gate log an agent needs first: failures, then the end.
@@ -305,7 +355,7 @@ revert_culprit() {
   checkout_tip
   W revert --no-edit -m 1 "$sha" >/dev/null || { W revert --abort || true; echo "batch: #$pr does not revert cleanly — later features build on it." >&2; echo "next: fix forward: read $packet, fix it in a PR against $BRANCH, merge that, then close again." >&2; return 1; }
   quick_check || { echo "batch: quick checks RED after reverting #$pr — not pushed" >&2; echo "next: later features depend on #$pr; fix forward from $packet in a PR against $BRANCH." >&2; return 1; }
-  W push -q origin "HEAD:refs/heads/$BRANCH" || { echo "batch: push to $BRANCH refused" >&2; echo "next: scripts/batch.sh bisect $NAME" >&2; return 1; }
+  W push -q --no-verify origin "HEAD:refs/heads/$BRANCH" || { echo "batch: push to $BRANCH refused" >&2; echo "next: scripts/batch.sh bisect $NAME" >&2; return 1; }
   gh pr comment "$pr" --body "$(printf 'Reverted from `%s` (ADR 0976): the batch'"'"'s close gate was red, and bisection found the first red commit to be this PR'"'"'s merge (%s). Fix it and open a new PR against `%s` (or `main`).\n\n<details><summary>Failure packet</summary>\n\n%s\n\n</details>\n' "$BRANCH" "${sha:0:9}" "$BRANCH" "$(cat "$packet")")" >/dev/null 2>&1 || true
   say "reverted #$pr from $BRANCH"
 }
@@ -313,8 +363,18 @@ revert_culprit() {
 cmd_bisect() {
   claim
   mkdir -p "$PKT"
-  local c; c="$(find_culprit)" || die "no commit on $BRANCH is red on its own — the red was not reproducible (a flake?)." "read the red gate's log; if it is a known flake, close again to re-gate"
+  local c rc=0; c="$(find_culprit)" || rc=$?
+  [ "$rc" -eq 0 ] || no_culprit "$rc" "the red gate's log"
   revert_culprit "$c" || exit 1
+}
+
+# The last close's wall time and full-gate count, from timing.tsv.
+timing_summary() {
+  awk -F'\t' -v now="$(date +%s)" '
+    $3=="close" && $4=="start" { t=$2; g=0 }
+    ($3=="gate" || $3=="probe") && $4=="start" { g++ }
+    END { if (t) printf "timing: close took %ds over %d full gate(s)\n", now-t, g }' "$PKT/timing.tsv" 2>/dev/null || true
+  echo "  per-phase rows: $PKT/timing.tsv"
 }
 
 cmd_close() {
@@ -333,11 +393,22 @@ cmd_close() {
       [ -n "$bpr" ] || die "could not open the batch PR" "gh pr create --base main --head $BRANCH, then close again"
     fi
     say "closing $BRANCH through the merge train as #$bpr"
+    mark gate start "round=$round pr=$bpr features=$(feature_count)"
     rc=0; bash "$ROOT/scripts/merge-train.sh" "$bpr" 2>&1 | tee "$PKT/close.log" || rc=${PIPESTATUS[0]}
+    mark gate end "round=$round rc=$rc"
     if [ "$rc" -eq 0 ]; then
       [ "$(gh pr view "$bpr" --json state --jq .state)" = MERGED ] || die "the train was green but #$bpr is not MERGED" "gh pr view $bpr; do not merge by hand unless main is still the tree the train gated"
-      G push -q origin --delete "$BRANCH" 2>/dev/null || echo "batch: could not delete $BRANCH on origin — delete it by hand" >&2
+      # A PR opened against the batch during the gate would be auto-closed for good
+      # by deleting its base (CLAUDE.md). Keep the branch and say so.
+      open="$(open_children)"
+      if [ -n "$open" ]; then
+        echo "batch: NOT deleting $BRANCH: PRs opened against it during the gate still target it ($open). Deleting their base would close them for good." >&2
+        echo "next: retarget each to main (gh pr edit <pr> --base main), check its diff, then: git push --no-verify origin --delete $BRANCH" >&2
+      else
+        G push -q --no-verify origin --delete "$BRANCH" 2>/dev/null || echo "batch: could not delete $BRANCH on origin — delete it by hand" >&2
+      fi
       say "batch $NAME landed on main as #$bpr ($(G rev-parse --short origin/main))"
+      timing_summary
       echo "next: deploying is a release-queue slot (scripts/deploy.sh from a clean origin/main worktree, DEPLOY.md); then remove $BWT and run npm run packs:prune"
       return 0
     fi
@@ -345,7 +416,8 @@ cmd_close() {
     round=$((round + 1))
     [ "$round" -le "$ROUNDS" ] || die "still red after $ROUNDS bisect round(s) — stopping (OPENWOP_BATCH_CLOSE_ROUNDS)" "read the packets in $PKT and $PKT/close.log; fix in PRs against $BRANCH, then close again"
     say "close gate RED — bisecting $BRANCH (round $round of $ROUNDS)"
-    c="$(find_culprit)" || die "no commit on $BRANCH is red on its own — the red was not reproducible (a flake?)." "read $PKT/close.log; if it is a known flake, close again to re-gate"
+    rc=0; c="$(find_culprit)" || rc=$?
+    [ "$rc" -eq 0 ] || no_culprit "$rc" "$PKT/close.log"
     revert_culprit "$c" || exit 1
     [ "$(feature_count)" -gt 0 ] || die "every feature on $BRANCH has been reverted — nothing to land" "read the packets in $PKT"
   done

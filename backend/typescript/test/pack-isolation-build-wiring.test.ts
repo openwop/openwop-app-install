@@ -35,6 +35,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { stripComments } from './helpers/stripComments.js';
 
 /** Loaded dynamically because `scripts/` is plain `.mjs` outside `tsconfig`'s
  *  program — the same reason `workerEntry.ts` imports it by computed URL. The
@@ -52,8 +53,6 @@ const { ISOLATION_WORKER_BASENAME, ISOLATION_WORKER_ENTRY, isolationWorkerBuildO
 const pkgRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 /** Source text with block comments and whole-line `//` comments removed. A
  *  trailing `// …` after code is kept (it could sit inside a string). */
-const stripComments = (src: string): string =>
-  src.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
 const read = (rel: string): string => stripComments(readFileSync(join(pkgRoot, rel), 'utf-8'));
 
 describe('the production worker artifact is actually built', () => {

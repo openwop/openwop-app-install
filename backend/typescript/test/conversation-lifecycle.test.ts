@@ -5,6 +5,12 @@
  * feature-owned ones through the conversation-lifecycle seam (intent-ledger's
  * per-conversation row point-deleted; comments on the deleted messages pruned).
  * A bystander conversation's sidecars survive untouched.
+ *
+ * TST-CKB-7. Red when the cascade stops deleting feedback, reactions, or the
+ * exchange-idem claims, or stops firing the lifecycle seam (ledger + comments).
+ * Read-state is a DOUBLE GUARD: `deleteConversationCompletely` deletes it directly
+ * AND `deleteConversationMeta` (conversationStore.ts) cascades `deleteReadMarkersOf`,
+ * so removing either alone stays green — only removing both reds this case.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -44,8 +50,8 @@ async function jsonFetch<T = unknown>(path: string, init: RequestInit = {}): Pro
     ...init,
     headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}`, ...(init.headers ?? {}) },
   });
-  if (res.status === 204) return { status: 204, body: undefined as unknown as T };
-  return { status: res.status, body: (await res.json()) as T };
+  const text = await res.text();
+  return { status: res.status, body: (text ? JSON.parse(text) : null) as T };
 }
 
 async function makeConversation(title: string, msgId: string): Promise<{ sessionId: string; tenantId: string }> {
@@ -94,6 +100,10 @@ describe('conversation deletion cleans sidecars (ADR 0288 P2)', () => {
     expect((await listReactionsForConversation(T, keeper.sessionId)).size).toBe(1);
     expect(await getReadMarker(T, doomed.sessionId, 'user:u1')).toBeNull();
     expect(await getReadMarker(T, keeper.sessionId, 'user:u1')).not.toBeNull();
+    // exchange-idem: the doomed conversation's pending claim is GONE (a fresh claim
+    // succeeds); the keeper's pending claim survives (the same key is still held).
+    expect((await claimExchange(T, doomed.sessionId, 'ex-msg-doomed-1', Date.now())).outcome).toBe('claimed');
+    expect((await claimExchange(T, keeper.sessionId, 'ex-msg-keeper-1', Date.now())).outcome).toBe('in_progress');
 
     // Feature sidecars via the seam.
     expect(await getLedger(T, doomed.sessionId)).toBeNull();

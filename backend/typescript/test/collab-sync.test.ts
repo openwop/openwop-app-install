@@ -1,8 +1,13 @@
 /**
  * ADR 0335 Phase 1b-i — collaboration CRDT SYNC + snapshot persistence. Boots the
  * app + collab WS, then drives two real Yjs clients over the socket: an edit in
- * one converges to the other; and after a debounced save + room eviction, a fresh
+ * one converges to the other; and after the room-close save + eviction, a fresh
  * client restores the persisted state. Single-instance (fan-out = 1b-ii).
+ *
+ * TST-CFC-5. Red when: the room stops relaying an update to its other local
+ * sockets (both clients finish the sync handshake BEFORE the edit, so the edit can
+ * only arrive by relay); a fresh room stops restoring the stored snapshot.
+ * Not claimed: the 2 s debounce itself — a close flushes regardless.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -15,7 +20,7 @@ import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { attachCollabWebSocket, __resetCollabConns } from '../src/host/collab/collabServer.js';
-import { __resetCollabRooms, __stopCollabLeaseHeartbeat, __stopCollabUpdateSweep } from '../src/host/collab/collabRoom.js';
+import { __resetCollabRooms, __stopCollabLeaseHeartbeat, __stopCollabUpdateSweep, hasCollabSnapshot, listLiveRooms } from '../src/host/collab/collabRoom.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createCanvasForTenant } from '../src/host/canvasSurface.js';
@@ -52,7 +57,8 @@ const REMOTE = Symbol('test-remote');
 function toBytes(d: RawData): Uint8Array { return Array.isArray(d) ? Buffer.concat(d) : Buffer.isBuffer(d) ? d : Buffer.from(d as ArrayBuffer); }
 
 /** A minimal Yjs sync client mirroring the server protocol. */
-function client(cookie: string, canvasId: string): { doc: Y.Doc; ws: WebSocket } {
+function client(cookie: string, canvasId: string): { doc: Y.Doc; ws: WebSocket; synced: () => boolean } {
+  let gotStep2 = false;
   const doc = new Y.Doc();
   const ws = new WebSocket(`${WSBASE}/host/openwop-app/canvas-collab/${canvasId}`, { headers: { cookie, origin: ORIGIN } });
   ws.on('open', () => { const e = encoding.createEncoder(); encoding.writeVarUint(e, 0); writeSyncStep1(e, doc); ws.send(encoding.toUint8Array(e)); });
@@ -60,14 +66,14 @@ function client(cookie: string, canvasId: string): { doc: Y.Doc; ws: WebSocket }
     const dec = decoding.createDecoder(toBytes(data));
     if (decoding.readVarUint(dec) !== 0) return; // only sync in this test
     const e = encoding.createEncoder(); encoding.writeVarUint(e, 0);
-    readSyncMessage(dec, e, doc, REMOTE);
+    if (readSyncMessage(dec, e, doc, REMOTE) === 1) gotStep2 = true; // messageYjsSyncStep2: the server's state arrived
     if (encoding.length(e) > 1) ws.send(encoding.toUint8Array(e));
   });
   doc.on('update', (u: Uint8Array, origin: unknown) => {
     if (origin === REMOTE || ws.readyState !== ws.OPEN) return;
     const e = encoding.createEncoder(); encoding.writeVarUint(e, 0); writeUpdate(e, u); ws.send(encoding.toUint8Array(e));
   });
-  return { doc, ws };
+  return { doc, ws, synced: () => gotStep2 };
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -83,21 +89,26 @@ describe('collab CRDT sync (ADR 0335 Phase 1b-i)', () => {
     const { cookie, canvasId } = await loginAndDoc();
     const a = client(cookie, canvasId); const b = client(cookie, canvasId);
     await Promise.all([opened(a.ws), opened(b.ws)]);
+    // Both handshakes complete first, so the edit below can reach `b` only by relay.
+    expect(await waitFor(() => a.synced() && b.synced())).toBe(true);
     a.doc.getText('t').insert(0, 'hello collab');
     const ok = await waitFor(() => b.doc.getText('t').toString() === 'hello collab');
     expect(ok).toBe(true);
     a.ws.close(); b.ws.close();
   });
 
-  it('persists the snapshot and restores it into a fresh room', async () => {
+  it('persists the snapshot (on room close) and restores it into a fresh room', async () => {
     const { cookie, canvasId } = await loginAndDoc();
     const a = client(cookie, canvasId);
     await opened(a.ws);
+    expect(await waitFor(() => a.synced())).toBe(true);
     a.doc.getText('t').insert(0, 'durable text');
-    await sleep(2300);        // let the 2s debounced save fire
     a.ws.close();
-    await sleep(200);
-    __resetCollabRooms();     // drop the in-memory room; the snapshot remains
+    // The close's final flush persisted, and the eviction finished.
+    const deadline = Date.now() + 4000;
+    while (Date.now() < deadline && !((await hasCollabSnapshot(canvasId)) && !listLiveRooms().some((r) => r.canvasId === canvasId))) await sleep(25);
+    expect(await hasCollabSnapshot(canvasId)).toBe(true);
+    __resetCollabRooms();     // drop any in-memory room; the snapshot remains
     const c = client(cookie, canvasId);
     await opened(c.ws);
     const ok = await waitFor(() => c.doc.getText('t').toString() === 'durable text');

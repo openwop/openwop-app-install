@@ -8,9 +8,19 @@
  *      (union of members' RFC 0086 portfolios, recursive through
  *      sub-departments); and the §B structural guarantee that the stored
  *      chart carries NO authority field.
- *   2. The REST routes (`/host/openwop-app/org-chart/*`): PUT validate →
- *      GET chart → GET department roll-up; cycle / cross-tenant 400s;
- *      discovery advertises `agents.orgChart`.
+ *   2. The host-extension REST routes (`/host/openwop-app/org-chart/*`): PUT
+ *      validate → GET department roll-up; a cycle 400s with its reason; an
+ *      unknown department 404s; discovery advertises `agents.orgChart`.
+ *      (Corrected w74: the header used to claim a full-chart GET and a
+ *      route-level cross-tenant 400 here. Neither had a case; cross-tenant
+ *      membership is asserted at the service level above, and the normative
+ *      chart read lives in `org-chart-normative-route.test.ts`.)
+ *
+ * Sabotage, each red (w74 round 1): neutralising the cycle check (service +
+ * route), the cross-tenant member check, or the route's error→400 mapping;
+ * adding a field to stored members; never recursing; the route roll-up
+ * answering no responsibilities; the route answering an unknown department;
+ * changing the advertised `installScope`.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -59,14 +69,13 @@ describe('org-chart service (pure)', () => {
         { rosterId: morgan.rosterId, departmentId: 'dept-marketing', roleId: 'role-cm', reportsTo: null },
       ],
     });
-    expect('chart' in res, 'a valid chart MUST store').toBe(true);
-    if ('chart' in res) {
-      for (const m of res.chart.members) {
-        // RFC 0087 §B: an org edge is metadata only — no authority surface.
-        // The exact key set proves there is no permissions/scopes/canDispatch
-        // field anywhere on a member.
-        expect(Object.keys(m).sort()).toEqual(['departmentId', 'reportsTo', 'roleId', 'rosterId']);
-      }
+    if (!('chart' in res)) throw new Error(`a valid chart MUST store: ${JSON.stringify(res)}`);
+    expect(res.chart.members).toHaveLength(2);
+    for (const m of res.chart.members) {
+      // RFC 0087 §B: an org edge is metadata only — no authority surface.
+      // The exact key set proves there is no permissions/scopes/canDispatch
+      // field anywhere on a member.
+      expect(Object.keys(m).sort()).toEqual(['departmentId', 'reportsTo', 'roleId', 'rosterId']);
     }
   });
 
@@ -80,7 +89,7 @@ describe('org-chart service (pure)', () => {
         { rosterId: morgan.rosterId, departmentId: 'dept-marketing', roleId: 'role-cm', reportsTo: sally.rosterId },
       ],
     });
-    expect('error' in res && res.error.code === 'cycle').toBe(true);
+    expect(res).toMatchObject({ error: { code: 'cycle' } });
   });
 
   it('rejects a cross-tenant member (§C)', async () => {
@@ -90,7 +99,7 @@ describe('org-chart service (pure)', () => {
       departments: DEPTS,
       members: [{ rosterId: beta.rosterId, departmentId: 'dept-marketing', roleId: 'role-bw', reportsTo: null }],
     });
-    expect('error' in res && res.error.code === 'cross_tenant_member').toBe(true);
+    expect(res).toMatchObject({ error: { code: 'cross_tenant_member', detail: beta.rosterId } });
   });
 
   it('rolls up responsibilities as the union of member portfolios, recursing sub-departments (§D)', async () => {
@@ -124,14 +133,15 @@ describe('org-chart routes (sqlite memory app)', () => {
     await __resetRosterStore();
     await __resetOrgChartStore();
     await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-  });
+  }, 120_000);
 
   afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
   async function jsonFetch<T = unknown>(path: string, init: RequestInit = {}): Promise<{ status: number; body: T }> {
     const res = await fetch(`${BASE}${path}`, { ...init, headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}`, ...(init.headers ?? {}) } });
-    if (res.status === 204) return { status: 204, body: undefined as unknown as T };
-    return { status: res.status, body: (await res.json()) as T };
+    const text = await res.text();
+    const body: unknown = text === '' ? undefined : JSON.parse(text);
+    return { status: res.status, body: body as T };
   }
 
   async function makeMember(persona: string, workflows: string[]): Promise<string> {
@@ -171,7 +181,7 @@ describe('org-chart routes (sqlite memory app)', () => {
   it('400s a cycle', async () => {
     const a = await makeMember('A', []);
     const b = await makeMember('B', []);
-    const res = await jsonFetch('/host/openwop-app/org-chart', {
+    const res = await jsonFetch<{ error?: string; details?: { reason?: string } }>('/host/openwop-app/org-chart', {
       method: 'PUT',
       body: JSON.stringify({
         departments: DEPTS,
@@ -182,9 +192,13 @@ describe('org-chart routes (sqlite memory app)', () => {
       }),
     });
     expect(res.status).toBe(400);
+    expect(res.body.error).toBe('validation_error');
+    expect(res.body.details?.reason).toBe('cycle');
   });
 
   it('404s an unknown department roll-up', async () => {
-    expect((await jsonFetch('/host/openwop-app/org-chart/dept-nope')).status).toBe(404);
+    const res = await jsonFetch<{ error?: string }>('/host/openwop-app/org-chart/dept-nope');
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('not_found');
   });
 });

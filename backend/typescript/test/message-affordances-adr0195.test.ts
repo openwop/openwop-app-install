@@ -3,13 +3,17 @@
  * route-level coverage including the four gate-mandated cases: the
  * public-channel non-joined author (channel-aware visibility), the
  * edit-with-@channel mention pin, the tombstone-never-dispatches pin (by
- * construction: dispatch lives only on the channel POST path), and the
- * messageCount-immutability differencing pin.
+ * construction: dispatch lives only on the channel POST path — NOT asserted
+ * here, see below), and the messageCount-immutability differencing pin.
+ *
+ * (w72) The tombstone-never-dispatches property is structural — the DELETE
+ * handler has no dispatch call to reach — so no case in this file can fail on
+ * it; it is stated, not tested. Every other gate case is asserted.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import { createMember } from '../src/host/accessControlService.js';
 
@@ -30,14 +34,30 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+/** The response fields these cases read — typed at the boundary, not `any`. */
+interface Reaction { emoji: string; count: number; mine: boolean }
+interface Participant { subjectRef: string; mentionCount?: number }
+interface SessionRow { sessionId: string; messageCount: number; participants?: Participant[] }
+interface MessageRow { messageId: string; content: string; meta?: string; reactions?: Reaction[] }
+interface Body {
+  user?: { userId: string };
+  channel?: { conversationId: string };
+  messageId?: string;
+  meta?: string;
+  reactions?: Reaction[];
+  sessions?: SessionRow[];
+  messages?: MessageRow[];
+  error?: string;
+  message?: string;
+}
+interface Res { status: number; body: Body }
 function client() {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
     const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    return { status: res.status, body: (out ?? {}) as Body };
   };
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b), put: (p: string, b?: unknown) => call('PUT', p, b), del: (p: string) => call('DELETE', p) };
 }
@@ -52,23 +72,34 @@ async function login(name: string): Promise<{ c: Client; userId: string }> {
   // workspace for the FIRST login only), and channel writes now ask the ROLE. Make
   // every person a real Editor of the workspace, the production shape (idempotent: a
   // founder keeps their owner row).
-  await createMember({ orgId: TENANT, tenantId: TENANT, displayName: name, subject: r.body.user.userId as string, roles: ['editor'] });
-  return { c, userId: r.body.user.userId as string };
+  await createMember({ orgId: TENANT, tenantId: TENANT, displayName: name, subject: r.body.user!.userId, roles: ['editor'] });
+  return { c, userId: r.body.user!.userId };
 }
 
 async function makeChannel(c: Client, extra: Record<string, unknown> = {}): Promise<string> {
   const created = await c.post(CH, { name: `r-${Math.random().toString(36).slice(2, 8)}`, visibility: 'public', ...extra });
   expect(created.status).toBe(201);
-  return created.body.channel.conversationId as string;
+  return created.body.channel!.conversationId;
 }
 
 async function post(c: Client, id: string, text: string): Promise<string> {
   const r = await c.post(`${CH}/${id}/messages`, { content: text });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return r.body.messageId as string;
+  return r.body.messageId!;
 }
 
 const E = (emoji: string): string => encodeURIComponent(emoji);
+
+/** The refusal is the one this case means: code AND message, not any 4xx. */
+function refusedWith(r: Res, status: number, code: string, message: string): void {
+  expect(r.status).toBe(status);
+  expect(r.body.error).toBe(code);
+  expect(r.body.message).toContain(message);
+}
+
+const sessionRow = (r: Res, id: string): SessionRow | undefined => r.body.sessions?.find((s) => s.sessionId === id);
+const mentionsOf = (r: Res, id: string, userId: string): number | undefined =>
+  sessionRow(r, id)?.participants?.find((p) => p.subjectRef === `user:${userId}`)?.mentionCount;
 
 describe('ADR 0195 D1 — edit (server-derived editedAt, channel-aware authz)', () => {
   it('the author edits their own channel message; editedAt stamps only on real change', async () => {
@@ -78,14 +109,14 @@ describe('ADR 0195 D1 — edit (server-derived editedAt, channel-aware authz)', 
 
     const edit = await c.put(`${SESS}/${id}/messages/${mid}`, { content: 'second draft' });
     expect(edit.status, JSON.stringify(edit.body)).toBe(200);
-    const meta1 = JSON.parse(edit.body.meta as string) as { editedAt?: string };
+    const meta1 = JSON.parse(edit.body.meta!) as { editedAt?: string };
     expect(meta1.editedAt).toBeTruthy();
 
     // Same content + fresh caller meta → the prior editedAt is PRESERVED, not
     // dropped (a content-unchanged PUT is a meta touch-up, not an un-edit).
     const noop = await c.put(`${SESS}/${id}/messages/${mid}`, { content: 'second draft', meta: JSON.stringify({ keep: true }) });
     expect(noop.status).toBe(200);
-    const meta2 = JSON.parse(noop.body.meta as string) as { editedAt?: string; keep?: boolean };
+    const meta2 = JSON.parse(noop.body.meta!) as { editedAt?: string; keep?: boolean };
     expect(meta2.keep).toBe(true);
     expect(meta2.editedAt).toBe(meta1.editedAt); // carried forward, not re-stamped
   });
@@ -99,11 +130,11 @@ describe('ADR 0195 D1 — edit (server-derived editedAt, channel-aware authz)', 
 
     const { c: otherC } = await login('other');
     expect((await otherC.post(`${CH}/${id}/join`)).status).toBe(200);
-    expect((await otherC.put(`${SESS}/${id}/messages/${mid}`, { content: 'tampered' })).status).toBe(403);
+    refusedWith(await otherC.put(`${SESS}/${id}/messages/${mid}`, { content: 'tampered' }), 403, 'forbidden', 'Only the author may edit');
 
     // ADR 0879 D2 — the owner moderates by DELETE, never by rewriting a post that
     // keeps its author's name (this used to assert 200).
-    expect((await ownerC.put(`${SESS}/${id}/messages/${mid}`, { content: 'moderated' })).status).toBe(403);
+    refusedWith(await ownerC.put(`${SESS}/${id}/messages/${mid}`, { content: 'moderated' }), 403, 'forbidden', 'Only the author may edit');
     expect((await ownerC.del(`${SESS}/${id}/messages/${mid}`)).status).toBe(204);
   });
 
@@ -124,20 +155,17 @@ describe('ADR 0195 D1 — edit (server-derived editedAt, channel-aware authz)', 
     const id = await makeChannel(ownerC);
     expect((await memberC.post(`${CH}/${id}/join`)).status).toBe(200);
     const mid = await post(ownerC, id, '@channel heads up');
-    await new Promise((r) => setTimeout(r, 150));
-
-    const before = await memberC.get(SESS);
-    const row = (before.body.sessions as any[]).find((s) => s.sessionId === id);
-    const mentionBefore = (row.participants as any[]).find((p) => p.subjectRef === `user:${memberId}`)?.mentionCount;
-    expect(mentionBefore).toBe(1);
+    // The bump lands asynchronously after the POST: wait for the real condition.
+    await vi.waitFor(async () => { expect(mentionsOf(await memberC.get(SESS), id, memberId)).toBe(1); }, { timeout: 5_000, interval: 20 });
 
     // Author edits the SAME @channel message twice — counters must not move.
     expect((await ownerC.put(`${SESS}/${id}/messages/${mid}`, { content: '@channel heads up (edited)' })).status).toBe(200);
     expect((await ownerC.put(`${SESS}/${id}/messages/${mid}`, { content: '@channel heads up (edited again)' })).status).toBe(200);
-    await new Promise((r) => setTimeout(r, 150));
-    const after = await memberC.get(SESS);
-    const rowAfter = (after.body.sessions as any[]).find((s) => s.sessionId === id);
-    expect((rowAfter.participants as any[]).find((p) => p.subjectRef === `user:${memberId}`)?.mentionCount).toBe(1);
+    // A NEGATIVE assertion ("did not move"): a bump would land after the PUT the
+    // same way the POST's did, so give it a positive control in the SAME window —
+    // a fresh @channel POST that MUST move the counter to 2, and only 2.
+    await post(ownerC, id, '@channel second announcement');
+    await vi.waitFor(async () => { expect(mentionsOf(await memberC.get(SESS), id, memberId)).toBe(2); }, { timeout: 5_000, interval: 20 });
   });
 });
 
@@ -149,18 +177,18 @@ describe('ADR 0195 D2 — tombstone delete', () => {
     await post(c, id, 'keep me');
     expect((await c.put(`${SESS}/${id}/messages/${mid}/reactions/${E('🎉')}`)).status).toBe(200);
 
-    const beforeCount = ((await c.get(SESS)).body.sessions as any[]).find((s) => s.sessionId === id).messageCount;
+    const beforeCount = sessionRow(await c.get(SESS), id)!.messageCount;
     expect((await c.del(`${SESS}/${id}/messages/${mid}`)).status).toBe(204);
 
-    const messages = (await c.get(`${CH}/${id}/messages`)).body.messages as any[];
-    const tomb = messages.find((m) => m.messageId === mid);
+    const messages = (await c.get(`${CH}/${id}/messages`)).body.messages ?? [];
+    const tomb = messages.find((m) => m.messageId === mid)!;
     expect(tomb.content).toBe('{"deleted":true}');
-    const meta = JSON.parse(tomb.meta as string) as { deletedAt?: string; deletedBy?: string };
+    const meta = JSON.parse(tomb.meta!) as { deletedAt?: string; deletedBy?: string };
     expect(meta.deletedAt).toBeTruthy();
     expect(meta.deletedBy).toBe(`user:${userId}`);
     expect(tomb.reactions).toBeUndefined(); // cascade
 
-    const afterCount = ((await c.get(SESS)).body.sessions as any[]).find((s) => s.sessionId === id).messageCount;
+    const afterCount = sessionRow(await c.get(SESS), id)!.messageCount;
     expect(afterCount).toBe(beforeCount); // ADR 0192 D6 unread differencing pin
   });
 
@@ -169,8 +197,8 @@ describe('ADR 0195 D2 — tombstone delete', () => {
     const id = await makeChannel(c);
     const mid = await post(c, id, 'frozen');
     expect((await c.post(`${CH}/${id}/archive`)).status).toBe(204);
-    expect((await c.put(`${SESS}/${id}/messages/${mid}`, { content: 'thaw?' })).status).toBe(400);
-    expect((await c.del(`${SESS}/${id}/messages/${mid}`)).status).toBe(400);
+    refusedWith(await c.put(`${SESS}/${id}/messages/${mid}`, { content: 'thaw?' }), 400, 'validation_error', 'Channel is archived.');
+    refusedWith(await c.del(`${SESS}/${id}/messages/${mid}`), 400, 'validation_error', 'Channel is archived.');
   });
 
   it('a tombstoned message is immutable: edit + react reject, re-delete is idempotent', async () => {
@@ -178,9 +206,16 @@ describe('ADR 0195 D2 — tombstone delete', () => {
     const id = await makeChannel(c);
     const mid = await post(c, id, 'delete me');
     expect((await c.del(`${SESS}/${id}/messages/${mid}`)).status).toBe(204);
-    expect((await c.put(`${SESS}/${id}/messages/${mid}`, { content: 'undelete?' })).status).toBe(400);
+    refusedWith(await c.put(`${SESS}/${id}/messages/${mid}`, { content: 'undelete?' }), 400, 'validation_error', 'A deleted message cannot be edited.');
     expect((await c.put(`${SESS}/${id}/messages/${mid}/reactions/${E('👍')}`)).status).toBe(400);
+    const tombMeta = async (): Promise<string | undefined> =>
+      ((await c.get(`${CH}/${id}/messages`)).body.messages ?? []).find((m) => m.messageId === mid)?.meta;
+    const first = await tombMeta();
+    expect(first).toContain('deletedAt');
     expect((await c.del(`${SESS}/${id}/messages/${mid}`)).status).toBe(204); // idempotent
+    // …and idempotent in EFFECT, not just status: a re-delete that re-stamped
+    // deletedAt also answered 204 (w72 probe maf-redelete).
+    expect(await tombMeta()).toBe(first);
   });
 });
 
@@ -199,11 +234,11 @@ describe('ADR 0195 D3 — reactions', () => {
     expect(memberAdd.body.reactions).toEqual([{ emoji: '👍', count: 2, mine: true }]);
 
     // Channels projection carries the aggregate; `mine` is viewer-relative.
-    const ownerView = ((await ownerC.get(`${CH}/${id}/messages`)).body.messages as any[]).find((m) => m.messageId === mid);
-    expect(ownerView.reactions).toEqual([{ emoji: '👍', count: 2, mine: true }]);
+    const ownerView = ((await ownerC.get(`${CH}/${id}/messages`)).body.messages ?? []).find((m) => m.messageId === mid);
+    expect(ownerView?.reactions).toEqual([{ emoji: '👍', count: 2, mine: true }]);
     // Generic (paginated) projection too.
-    const generic = ((await memberC.get(`${SESS}/${id}/messages?limit=10`)).body.messages as any[]).find((m) => m.messageId === mid);
-    expect(generic.reactions).toEqual([{ emoji: '👍', count: 2, mine: true }]);
+    const generic = ((await memberC.get(`${SESS}/${id}/messages?limit=10`)).body.messages ?? []).find((m) => m.messageId === mid);
+    expect(generic?.reactions).toEqual([{ emoji: '👍', count: 2, mine: true }]);
 
     // Remove restores the count; removing again is a no-op.
     const rm = await memberC.del(`${SESS}/${id}/messages/${mid}/reactions/${E('👍')}`);
@@ -216,7 +251,7 @@ describe('ADR 0195 D3 — reactions', () => {
     const { c } = await login('owner');
     const id = await makeChannel(c, { visibility: 'private' });
     const mid = await post(c, id, 'private');
-    expect((await c.put(`${SESS}/${id}/messages/${mid}/reactions/${E('💩')}`)).status).toBe(400);
+    refusedWith(await c.put(`${SESS}/${id}/messages/${mid}/reactions/${E('💩')}`), 400, 'validation_error', 'emoji MUST be one of the supported set');
     // A different tenant-member can't even see a PRIVATE channel → 404 mask.
     const { c: other } = await login('outsider');
     expect((await other.put(`${SESS}/${id}/messages/${mid}/reactions/${E('👍')}`)).status).toBe(404);
@@ -233,9 +268,9 @@ describe('ADR 0195 — rail-list scope vs channel-aware visibility', () => {
     expect((await browser.get(`${SESS}/${id}/messages`)).status).toBe(200);
     // …but not in the rail list (membership display rule).
     const list = await browser.get(SESS);
-    expect((list.body.sessions as any[]).some((s) => s.sessionId === id)).toBe(false);
+    expect(sessionRow(list, id)).toBeUndefined();
     // Members still see it listed.
     const ownerList = await ownerC.get(SESS);
-    expect((ownerList.body.sessions as any[]).some((s) => s.sessionId === id)).toBe(true);
+    expect(sessionRow(ownerList, id)).toBeDefined();
   });
 });

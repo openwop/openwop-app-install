@@ -57,12 +57,20 @@ let cached: { key: string; list: BlockList } | undefined;
 function trustedList(): BlockList {
   const extra = process.env.OPENWOP_TRUSTED_PROXY_CIDRS ?? '';
   const defaults = process.env.OPENWOP_TRUSTED_PROXY_DEFAULTS === 'private' ? 'private' : 'google';
-  const key = `${defaults}|${extra}`;
+  // The custom-domain load balancer (ADR 0906) is OUR proxy, but its address is
+  // a GCP customer IP, so the Google ranges above do not cover it. It appends
+  // `<client>, <lb-ip>` to X-Forwarded-For; without this, every custom-domain
+  // visitor resolved to the LB and shared ONE per-IP bucket (ADR 1015 pilot).
+  const lb = process.env.OPENWOP_CUSTOM_DOMAIN_LB_IP ?? '';
+  const key = `${defaults}|${extra}|${lb}`;
   if (cached?.key === key) return cached.list;
   const list = new BlockList();
   for (const c of PRIVATE_CIDRS) addCidr(list, c);
   if (defaults === 'google') for (const c of GOOGLE_FRONT_END_CIDRS) addCidr(list, c);
   for (const c of extra.split(',')) if (c.trim()) addCidr(list, c);
+  for (const ip of lb.split(',').map((v) => normaliseAddress(v)).filter(Boolean)) {
+    addCidr(list, `${ip}/${isIP(ip) === 6 ? 128 : 32}`);
+  }
   cached = { key, list };
   return list;
 }

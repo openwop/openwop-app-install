@@ -18,15 +18,16 @@
  * response, holding the dispatch lease (A1).
  */
 import type { Request } from 'express';
+import { randomUUID } from 'node:crypto';
 import { OpenwopError } from '../../types.js';
 import type { Storage } from '../../storage/storage.js';
 import type { HostAdapterSuite } from '../index.js';
 import { buildRunRecord } from '../runDispatch.js';
-import { insertRunWithStartContext } from '../runInsert.js';
-import { withRunLimit } from '../runLimitSeam.js';
+import { chargedAdmission, insertRunWithStartContext } from '../runInsert.js';
 import { ownerStampFromRequest } from '../runOwner.js';
 import { personalTenantOf } from '../requestSubject.js';
 import { resolveAgentForTenant } from '../agentVisibility.js';
+import { servingVersion } from '../agentServing.js';
 import { mockProviderEnabled } from '../../aiProviders/aiProvidersHost.js';
 import { tenantEvalJudge } from '../workflowEvalJudge.js';
 import { requestOrigin } from '../requestOrigin.js';
@@ -45,6 +46,7 @@ const storedSources = (sets: Record<string, FrozenFixtureSet>): Record<string, s
   Object.fromEntries(Object.entries(sets).map(([taskId, f]) => [taskId, f.sourceRunId]));
 import { canonicalRequestDigest, idempotencyLeaseMs, RUNS_IDEMPOTENT_ENDPOINT, type IdempotentEndpoint } from '../idempotentResponse.js';
 import { runWireUrls } from '../runWireUrls.js';
+import { getAgentRegistry } from '../../executor/agentRegistry.js';
 
 
 function bad(field: string, message: string, reason?: string, params?: Record<string, unknown>): never {
@@ -56,7 +58,7 @@ function bad(field: string, message: string, reason?: string, params?: Record<st
  * timeouts, budgets, …) was accepted with a 201 and silently ignored; it is now
  * refused by name, never success-with-nothing.
  */
-const EVAL_CONFIGURABLE_KEYS: ReadonlySet<string> = new Set(['evalModes', 'baselineRunId', 'ai', 'mockProvider']);
+const EVAL_CONFIGURABLE_KEYS: ReadonlySet<string> = new Set(['evalModes', 'baselineRunId', 'ai', 'mockProvider', 'agentVersion']);
 
 /** Who is creating the run — from an HTTP request (`callerFromRequest`) or a chat tool's scope. */
 export interface EvalRunCaller {
@@ -162,6 +164,20 @@ export async function createAgentEvalRun(input: CreateEvalRunInput): Promise<Cre
   for (const k of Object.keys(configurable)) {
     if (!EVAL_CONFIGURABLE_KEYS.has(k)) bad(`configurable.${k}`, `configurable.${k} is not supported on an eval run (supported: ${[...EVAL_CONFIGURABLE_KEYS].join(', ')}).`, 'unsupported_configurable');
   }
+  // ADR 1014 D5 — `configurable.agentVersion` names the agent version to evaluate (a
+  // host extension, like `baselineRunId` once was): it must be loadable here.
+  const namedVersion = typeof configurable.agentVersion === 'string' && configurable.agentVersion.length > 0 ? configurable.agentVersion : undefined;
+  if (configurable.agentVersion !== undefined && namedVersion === undefined) bad('configurable.agentVersion', 'configurable.agentVersion must be a non-empty string.');
+  if (namedVersion !== undefined && !(await getAgentRegistry().resolve(agentId, tenantId, namedVersion))) {
+    throw new OpenwopError('not_found', `${agentId} ${namedVersion} is not available on this host.`, 404, { agentId, reason: 'agent_version_unavailable' });
+  }
+  // ADR 1014 M6 — unnamed, with versions served: what `stable` serves, resolved ONCE
+  // here and recorded, so every trial and a resume run it (never a per-trial draw,
+  // never the head stamped while another version runs).
+  const servedVersion = namedVersion === undefined ? await servingVersion(tenantId, agent.agentId, `eval|${randomUUID()}`) : undefined;
+  if (servedVersion === null || (servedVersion !== undefined && servedVersion !== agent.packVersion && !(await getAgentRegistry().resolve(agentId, tenantId, servedVersion)))) {
+    throw new OpenwopError('conflict', `${agentId} has no version this host can serve right now.`, 409, { agentId, reason: 'agent_version_unavailable', ...(servedVersion ? { version: servedVersion } : {}) });
+  }
   // ADR 0983 D1/D2 — RFC 0251 puts both on the body ROOT. Under major 2 the old
   // `configurable` spelling was a bypass of the closed v2 body, so it is refused;
   // major 1 (open `configurable`) and the in-host callers keep it, with its old rules.
@@ -265,6 +281,10 @@ export async function createAgentEvalRun(input: CreateEvalRunInput): Promise<Cre
     ...(source === 'pack' ? { suitePack: resolved.pack } : {}),
     suiteDigest: digest,
     agentId,
+    // ADR 1014 D5 — record the version this eval runs; a named one is held to.
+    ...(namedVersion !== undefined ? { agentVersion: namedVersion, agentVersionPinned: true }
+      : servedVersion !== undefined ? { agentVersion: servedVersion, agentVersionServed: true }
+        : agent.packVersion ? { agentVersion: agent.packVersion } : {}),
     ...(baselineRunId ? { baselineRunId } : {}),
     ...(fixtureRuns ? { fixtureRuns, recordedFixtures } : {}),
     ...(storedFixtures ? { recordedFixturesStored: storedSources(storedFixtures) } : {}),
@@ -311,8 +331,10 @@ export async function createAgentEvalRun(input: CreateEvalRunInput): Promise<Cre
   try {
     // Frozen BEFORE the row exists, so the trial (started after the insert) finds them.
     if (storedFixtures) await freezeRecordedFixtures(tenantId, run.runId, storedFixtures);
-    await withRunLimit(tenantId, () => insertRunWithStartContext(storage, run, {
-      ...(input.admission ? { admission: input.admission } : {}),
+    // ADR 0987 D3 — an eval-mode run is a real run under the plan limit, and the
+    // caller's concurrency scope is counted in the insert.
+    await insertRunWithStartContext(storage, run, {
+      admission: chargedAdmission(input.admission),
       ...(input.idempotency
         ? {
             idempotencyCommit: {
@@ -326,7 +348,7 @@ export async function createAgentEvalRun(input: CreateEvalRunInput): Promise<Cre
             },
           }
         : {}),
-    }));
+    });
   } catch (err) {
     // EVD-9 — a refused insert (run limit, quota) must not leave a draft locked forever.
     if (ourLock) await unlockEvalSuite(ourLock);

@@ -8,6 +8,9 @@
  * Witnesses: the derived row is inserted already resolved with NO notification;
  * and a decision interleaved on an open fork row makes the derivation REFUSE
  * (`conflict`), never report the recorded decision as applied.
+ *
+ * Tracker TST-DCD-3. Red when the derivation inserts the fork's row open, or
+ * ignores a lost CAS on an open row (grade-tests w70 probes `frr-*`).
  */
 import { randomUUID } from 'node:crypto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';

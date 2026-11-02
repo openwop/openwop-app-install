@@ -20,6 +20,8 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Storage } from '../src/storage/storage.js';
+import type { WorkflowDefinition } from '../src/executor/types.js';
+import { openStorage } from '../src/storage/index.js';
 
 const RETIRED = 'core.openwop.integration.notification-push';
 const NOTIFY = 'feature.notifications.nodes.notify';
@@ -32,14 +34,16 @@ const PREFIX = `${CHAIN_ID.replace(/\./g, '_')}_${EXPANSION_ID}_`;
 let WORKFLOW_ID = '';
 
 /** The definition as a tenant actually holds it: customized, with real metadata. */
-const seededDefinition = () => ({
+const seededDefinition = (): WorkflowDefinition => ({
   workflowId: WORKFLOW_ID,
   nodes: [
     { nodeId: `${PREFIX}draft`, typeId: 'core.ai.chatCompletion', config: { provider: 'anthropic' } },
     { nodeId: `${PREFIX}notify`, typeId: RETIRED, config: {}, inputs: {} },
     { nodeId: `${PREFIX}userAdded`, typeId: 'core.flow.noop', config: { note: 'a tenant edit' } },
   ],
-  edges: [{ from: `${PREFIX}draft`, to: `${PREFIX}notify` }],
+  // EdgeDef-shaped (the untyped fixture used `{from, to}`, which no real edge has —
+  // found when the laundering casts came out, grade-tests w72).
+  edges: [{ edgeId: `${PREFIX}e1`, sourceNodeId: `${PREFIX}draft`, targetNodeId: `${PREFIX}notify` }],
   metadata: {
     name: 'A tenant-renamed workflow',
     chainId: CHAIN_ID,
@@ -50,12 +54,12 @@ const seededDefinition = () => ({
   },
 });
 
-const registered = new Map<string, ReturnType<typeof seededDefinition>>();
-const registerWorkflowDurable = vi.fn(async (def: ReturnType<typeof seededDefinition>) => {
+const registered = new Map<string, WorkflowDefinition>();
+const registerWorkflowDurable = vi.fn(async (def: WorkflowDefinition) => {
   registered.set(def.workflowId, def);
 });
 /** When set, the durable re-read returns this instead — the concurrent-save racer. */
-let concurrentEdit: ReturnType<typeof seededDefinition> | null | undefined;
+let concurrentEdit: WorkflowDefinition | null | undefined;
 /** When set, the fresh expansion's notify node carries these inputs instead. */
 let refBearingReplacement: Record<string, unknown> | null = null;
 let recordRevisionResult: string | null = 'rev-1';
@@ -79,7 +83,7 @@ vi.mock('../src/host/workflowChainPackLoader.js', () => ({
 }));
 let reads = 0;
 vi.mock('../src/host/workflowsRegistry.js', () => ({
-  registerWorkflowDurable: (d: unknown) => registerWorkflowDurable(d as never),
+  registerWorkflowDurable: (d: WorkflowDefinition) => registerWorkflowDurable(d),
   // The migration reads TWICE: once to decide, once to rebase immediately before
   // the write. `concurrentEdit` simulates a builder save landing in between.
   getRegisteredWorkflowStrict: async (id: string) => {
@@ -93,7 +97,9 @@ vi.mock('../src/host/workflowRevisions.js', () => ({
   HOST_REVISION_TENANT: 'host',
 }));
 
-const storage = {} as unknown as Storage;
+// A real in-memory Storage (the migration ignores it by design — node ids are
+// preserved, so no run history is consulted) rather than a cast stub.
+let storage: Storage;
 
 async function runMigration() {
   const { retargetSeededNotifyNodes } = await import('../src/host/seedWorkflows.js');
@@ -102,6 +108,7 @@ async function runMigration() {
 const notifyNode = () => registered.get(WORKFLOW_ID)!.nodes.find((n) => n.nodeId === `${PREFIX}notify`)!;
 
 beforeEach(async () => {
+  storage ??= await openStorage('memory://');
   const { seedWorkflowId } = await import('../src/host/seedWorkflows.js');
   WORKFLOW_ID = seedWorkflowId(CHAIN_ID);
   registered.clear();
@@ -139,7 +146,7 @@ describe('the edit is surgical — everything it must not disturb', () => {
 
   it('PRESERVES edges', async () => {
     await runMigration();
-    expect(registered.get(WORKFLOW_ID)!.edges).toEqual([{ from: `${PREFIX}draft`, to: `${PREFIX}notify` }]);
+    expect(registered.get(WORKFLOW_ID)!.edges).toEqual([{ edgeId: `${PREFIX}e1`, sourceNodeId: `${PREFIX}draft`, targetNodeId: `${PREFIX}notify` }]);
   });
 
   it('PRESERVES every metadata key — the data-loss the first design caused', async () => {

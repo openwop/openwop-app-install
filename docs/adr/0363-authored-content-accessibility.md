@@ -274,6 +274,11 @@ fast-follow, not a scope drop.
    (authored theme colors validate as hex upstream; oklch/named skip = no false
    positive). A parity test (`content-a11y-twin.test.ts`) pins FE↔BE to the same
    fixtures against drift.
+
+   > **CORRECTED 2026-10-29 (grade-tests wave 68, TST-CKA-4):** `content-a11y-twin.test.ts`
+   > COPIES the FE fixtures; it does not read the FE checker or its tests (separate
+   > builds, no shared module). It pins the BACKEND rules only, so a change to the
+   > FE checker never reddens it: it cannot detect frontend drift.
 4. **Packs ship UNSIGNED** like every in-repo `feature.*` pack (dev-mounted; the
    "Ed25519 + SRI" is a future registry-publish concern, not a runnable P3 step). The
    node/agent pack versions (`1.0.0`) are pinned in `feature.ts` `requiredPacks`

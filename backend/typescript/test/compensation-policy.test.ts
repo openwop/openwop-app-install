@@ -31,8 +31,15 @@
  * still a normative MUST for any host in that state and a contract nobody runs
  * is a contract that rots; the accept path is asserted WITHOUT the overlay, so
  * it tests the shipped default rather than a seam-manufactured one.
+ *
+ * Tracker: TST-CGE-4. Red when (workflowDefinitionValidation.ts): the §B block stops
+ * being closed or drops an explicit `waiveRequiresApproval: false`; the policy is
+ * accepted while `compensation.supported` is off; a trigger the host does not FIRE
+ * is accepted (driven by narrowing the fired set through a module mock); a
+ * manual-intervention disposition is accepted without the sub-flag; or (compensationUnwind.ts)
+ * retry precedence or escalate-only approval changes.
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { OpenwopError } from '../src/types.js';
 import { validateWorkflowDefinition } from '../src/host/workflowDefinitionValidation.js';
 import { setCapabilityOverlay, resetCapabilityOverlay, resolveCapabilityFlag } from '../src/host/capabilityOverlay.js';
@@ -139,20 +146,18 @@ describe('RFC 0151 §B — the workflow policy is refused by a host that does NO
   beforeEach(() => { setCapabilityOverlay('compensation.supported', false); });
 
   it('refuses `settings.compensation` with `capability_required`', () => {
-    try {
-      validateWorkflowDefinition(def({ settings: { compensation: POLICY } }));
-      throw new Error('expected a refusal');
-    } catch (err) {
-      expect(err).toBeInstanceOf(OpenwopError);
-      const e = err as OpenwopError;
-      // The schema names this exact code and detail. `validation_error` is also
-      // in the closed set, but it cannot tell an author "your document is fine,
-      // this host just does not do that yet" — and those need different fixes.
-      expect(e.code).toBe('capability_required');
-      expect(e.details).toMatchObject({ requiredCapability: 'compensation' });
-    }
+    // The schema names this exact code and detail. `validation_error` is also
+    // in the closed set, but it cannot tell an author "your document is fine,
+    // this host just does not do that yet" — and those need different fixes.
+    expect(() => validateWorkflowDefinition(def({ settings: { compensation: POLICY } }))).toThrow(
+      expect.objectContaining({ code: 'capability_required', details: expect.objectContaining({ requiredCapability: 'compensation' }) }),
+    );
+    expect(() => validateWorkflowDefinition(def({ settings: { compensation: POLICY } }))).toThrow(OpenwopError);
   });
 
+  // DEDUPE-NEEDS-HUMAN-ASK (TST-CGE-4b): this repeats the throw the case above
+  // asserts — a refusal cannot return a definition at all. Kept unchanged by ruling
+  // (protected file); a human decides whether it merges.
   it('the refused policy never reaches the stored definition', () => {
     // Refusal must precede preservation on EVERY path. A policy that 400s but
     // still lands in the row would be honoured by a later host upgrade that
@@ -227,12 +232,16 @@ describe('RFC 0151 §B — the accept path, LIVE since the advert flipped', () =
     ).not.toThrow();
 
     setCapabilityOverlay('compensation.manualIntervention', false);
-    for (const settings of [
-      { compensation: { triggers: ['node-failure'], exhaustedDisposition: 'manual-intervention' } },
-      { compensation: { triggers: ['node-failure'], onParentCancel: 'pause' } },
-      { compensation: { triggers: ['node-failure'], onParentCancel: 'manual' } },
-    ]) {
-      expect(() => validateWorkflowDefinition(def({ settings }))).toThrow(/manualIntervention/);
+    try {
+      for (const settings of [
+        { compensation: { triggers: ['node-failure'], exhaustedDisposition: 'manual-intervention' } },
+        { compensation: { triggers: ['node-failure'], onParentCancel: 'pause' } },
+        { compensation: { triggers: ['node-failure'], onParentCancel: 'manual' } },
+      ]) {
+        expect(() => validateWorkflowDefinition(def({ settings }))).toThrow(/manualIntervention/);
+      }
+    } finally {
+      resetCapabilityOverlay();
     }
   });
 });
@@ -297,26 +306,41 @@ describe('RFC 0151 erratum — a policy naming a trigger this host does not FIRE
     expect([...FIRED_COMPENSATION_TRIGGERS].sort()).toEqual([...COMPENSATION_TRIGGERS].sort());
   });
 
-  it('refuses a policy naming a trigger absent from the fired set', () => {
+  it('refuses a policy naming a trigger absent from the fired set', async () => {
     // Simulate the state this guard exists for — a vocabulary entry the host
-    // does not initiate — by asserting the predicate the validator uses, since
-    // no such value exists today.
-    const pretendFired: readonly string[] = ['node-failure'];
-    for (const t of COMPENSATION_TRIGGERS) {
-      const wouldRefuse = !pretendFired.includes(t);
-      expect(wouldRefuse, `${t}`).toBe(t !== 'node-failure');
+    // does not initiate — by NARROWING the fired set the validator imports
+    // (workflowDefinitionValidation.ts reads FIRED_COMPENSATION_TRIGGERS from
+    // compensationUnwind.ts), then driving the REAL validator. No such value
+    // exists today, so the narrowing is the only way to reach the refusal.
+    vi.resetModules();
+    vi.doMock('../src/host/compensationUnwind.js', async (importOriginal) => ({
+      ...(await importOriginal<typeof import('../src/host/compensationUnwind.js')>()),
+      FIRED_COMPENSATION_TRIGGERS: ['node-failure'],
+    }));
+    try {
+      const fresh = await import('../src/host/workflowDefinitionValidation.js');
+      for (const t of COMPENSATION_TRIGGERS.filter((x) => x !== 'node-failure')) {
+        expect(() => fresh.validateWorkflowDefinition(def({ settings: { compensation: { triggers: [t] } } })), t)
+          .toThrow(expect.objectContaining({ code: 'validation_error', message: expect.stringMatching(/It initiates: node-failure\./) }));
+      }
+      // Positive control: the trigger still in the fired set is accepted.
+      expect(() => fresh.validateWorkflowDefinition(def({ settings: { compensation: { triggers: ['node-failure'] } } }))).not.toThrow();
+    } finally {
+      vi.doUnmock('../src/host/compensationUnwind.js');
+      vi.resetModules();
     }
   });
 
   it('accepts every trigger the host does fire', () => {
     for (const t of FIRED_COMPENSATION_TRIGGERS) {
-      expect(() => validateWorkflowDefinition({
+      const raw: unknown = {
         workflowId: 'wf.erratum',
         name: 'erratum',
         nodes: [{ nodeId: 'a', typeId: 'test.noop' }],
         edges: [],
         settings: { compensation: { triggers: [t] } },
-      } as never)).not.toThrow();
+      };
+      expect(() => validateWorkflowDefinition(raw)).not.toThrow();
     }
   });
 });

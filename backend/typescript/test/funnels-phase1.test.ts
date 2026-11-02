@@ -6,6 +6,14 @@
  *  - lifecycle: publish requires ≥1 step and resolving pages; slug immutable while
  *    published; unpublish/archive; archived is read-only;
  *  - tenant isolation: another tenant's funnel reads 404 (no existence leak).
+ *
+ * TST-DEB-4 — red when a refusal (slug clash, foreign step page, slug lock,
+ * archived edit, empty/deleted-page publish) is dropped, or either isolation
+ * guard is removed. Isolation is a DOUBLE GUARD, and each half has its own leg:
+ *  - OUTER: `requireOrgScope` → `assertOrgScope` refuses an org outside the
+ *    caller's tenant ("Organization not found.") — the cross-tenant stranger;
+ *  - INNER: `getFunnel`'s `tenantId`/`orgId` row fence — reached by the OWNER
+ *    asking for org A's funnel through their own org B path ("Funnel not found.").
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -31,29 +39,42 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+interface Res<T> { status: number; body: T }
+interface FunnelBody { funnel: { funnelId: string; slug: string; status: string; publishedAt?: string; steps: unknown[] } }
 function client() {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    for (const c of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]!; }
+    const text = res.status === 204 ? '' : await res.text();
+    return { status: res.status, body: (text ? JSON.parse(text) : undefined) as T };
   };
-  return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b), patch: (p: string, b?: unknown) => call('PATCH', p, b), del: (p: string) => call('DELETE', p) };
+  return {
+    get: <T>(p: string) => call<T>('GET', p),
+    post: <T>(p: string, b?: unknown) => call<T>('POST', p, b),
+    patch: <T>(p: string, b?: unknown) => call<T>('PATCH', p, b),
+    del: <T>(p: string) => call<T>('DELETE', p),
+  };
+}
+
+/** The exact refusal: status, envelope code and message (two 400s share a code). */
+function refused(r: Res<unknown>, status: number, error: string, message: string): void {
+  expect(r.status).toBe(status);
+  expect(r.body).toMatchObject({ error, message });
 }
 
 async function marketer(): Promise<{ user: ReturnType<typeof client>; orgId: string }> {
   const user = client();
   await user.post('/host/openwop-app/test/login', { email: `fun-${Date.now()}-${n++}@acme.test` });
-  const org = await user.post('/host/openwop-app/orgs', { name: 'Funnel Co' });
+  const org = await user.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Funnel Co' });
+  expect(org.status).toBe(201);
   return { user, orgId: org.body.orgId };
 }
 
 const f = (orgId: string, suffix = ''): string => `/host/openwop-app/funnels/orgs/${encodeURIComponent(orgId)}/funnels${suffix}`;
 
 async function makePage(user: ReturnType<typeof client>, orgId: string, title: string): Promise<string> {
-  const r = await user.post(`/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages`, { title });
+  const r = await user.post<{ pageId: string }>(`/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages`, { title });
   expect(r.status).toBe(201);
   return r.body.pageId; // cms create returns the page object directly
 }
@@ -65,69 +86,76 @@ describe('funnels Phase 1 — entity + lifecycle over HTTP', () => {
     const thanks = await makePage(user, orgId, 'Thanks');
 
     // create with slug derived from the name
-    const created = await user.post(f(orgId), { name: 'Summer Launch!', steps: [{ kind: 'landing', pageId: landing }] });
+    const created = await user.post<FunnelBody>(f(orgId), { name: 'Summer Launch!', steps: [{ kind: 'landing', pageId: landing }] });
     expect(created.status).toBe(201);
-    const id: string = created.body.funnel.funnelId;
+    const id = created.body.funnel.funnelId;
     expect(created.body.funnel.slug).toBe('summer-launch');
     expect(created.body.funnel.status).toBe('draft');
 
     // org-unique slug
-    const dup = await user.post(f(orgId), { name: 'Summer Launch' });
-    expect(dup.status).toBe(400);
+    refused(await user.post(f(orgId), { name: 'Summer Launch' }), 400, 'validation_error', 'A funnel with slug "summer-launch" already exists.');
 
     // steps referencing a page outside the workspace are rejected
-    const bad = await user.patch(f(orgId, `/${id}`), { steps: [{ kind: 'landing', pageId: 'nope-not-a-page' }] });
-    expect(bad.status).toBe(400);
+    refused(await user.patch(f(orgId, `/${id}`), { steps: [{ kind: 'landing', pageId: 'nope-not-a-page' }] }), 400, 'validation_error', 'Step page not found in this workspace: nope-not-a-page');
 
     // extend the path + publish
-    const upd = await user.patch(f(orgId, `/${id}`), { steps: [{ kind: 'landing', pageId: landing }, { kind: 'thankyou', pageId: thanks }] });
+    const upd = await user.patch<FunnelBody>(f(orgId, `/${id}`), { steps: [{ kind: 'landing', pageId: landing }, { kind: 'thankyou', pageId: thanks }] });
     expect(upd.status).toBe(200);
     expect(upd.body.funnel.steps).toHaveLength(2);
-    const pub = await user.post(f(orgId, `/${id}/publish`));
+    const pub = await user.post<FunnelBody>(f(orgId, `/${id}/publish`));
     expect(pub.status).toBe(200);
     expect(pub.body.funnel.status).toBe('published');
-    expect(pub.body.funnel.publishedAt).toBeTruthy();
+    expect(typeof pub.body.funnel.publishedAt).toBe('string');
 
     // slug immutable while published
-    const slugMove = await user.patch(f(orgId, `/${id}`), { slug: 'moved' });
-    expect(slugMove.status).toBe(400);
+    refused(await user.patch(f(orgId, `/${id}`), { slug: 'moved' }), 400, 'validation_error', 'Unpublish the funnel before changing its slug.');
 
     // unpublish → editable again; archive → read-only; delete
-    const unpub = await user.post(f(orgId, `/${id}/unpublish`));
+    const unpub = await user.post<FunnelBody>(f(orgId, `/${id}/unpublish`));
     expect(unpub.body.funnel.status).toBe('draft');
-    const arch = await user.post(f(orgId, `/${id}/archive`));
+    const arch = await user.post<FunnelBody>(f(orgId, `/${id}/archive`));
     expect(arch.body.funnel.status).toBe('archived');
-    const editArchived = await user.patch(f(orgId, `/${id}`), { name: 'New name' });
-    expect(editArchived.status).toBe(400);
+    refused(await user.patch(f(orgId, `/${id}`), { name: 'New name' }), 400, 'validation_error', 'An archived funnel cannot be edited.');
     const del = await user.del(f(orgId, `/${id}`));
     expect(del.status).toBe(200);
-    expect((await user.get(f(orgId, `/${id}`))).status).toBe(404);
+    refused(await user.get(f(orgId, `/${id}`)), 404, 'not_found', 'Funnel not found.');
   });
 
   it('publish refuses an empty funnel and a funnel whose step page was deleted', async () => {
     const { user, orgId } = await marketer();
-    const empty = await user.post(f(orgId), { name: 'Empty' });
-    expect((await user.post(f(orgId, `/${empty.body.funnel.funnelId}/publish`))).status).toBe(400);
+    const empty = await user.post<FunnelBody>(f(orgId), { name: 'Empty' });
+    refused(await user.post(f(orgId, `/${empty.body.funnel.funnelId}/publish`)), 400, 'validation_error', 'A funnel needs at least one step to publish.');
 
     const pageId = await makePage(user, orgId, 'Doomed');
-    const withStep = await user.post(f(orgId), { name: 'Doomed funnel', steps: [{ kind: 'landing', pageId }] });
+    const withStep = await user.post<FunnelBody>(f(orgId), { name: 'Doomed funnel', steps: [{ kind: 'landing', pageId }] });
     const delPage = await user.del(`/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages/${pageId}`);
     expect(delPage.status).toBe(204);
-    expect((await user.post(f(orgId, `/${withStep.body.funnel.funnelId}/publish`))).status).toBe(400);
+    // The page id is high-entropy, so the envelope scrubber redacts it — match the prefix.
+    const doomed = await user.post(f(orgId, `/${withStep.body.funnel.funnelId}/publish`));
+    expect(doomed.status).toBe(400);
+    expect(doomed.body).toMatchObject({ error: 'validation_error', message: expect.stringMatching(/^Step page no longer exists: /) });
   });
 
   it('tenant isolation: a foreign tenant cannot see or mutate the funnel (404, no leak)', async () => {
     const { user, orgId } = await marketer();
     const pageId = await makePage(user, orgId, 'Mine');
-    const created = await user.post(f(orgId), { name: 'Private', steps: [{ kind: 'landing', pageId }] });
-    const id: string = created.body.funnel.funnelId;
+    const created = await user.post<FunnelBody>(f(orgId), { name: 'Private', steps: [{ kind: 'landing', pageId }] });
+    const id = created.body.funnel.funnelId;
+    // Positive control: the owner reads it.
+    expect((await user.get(f(orgId, `/${id}`))).status).toBe(200);
 
-    const { user: stranger } = await marketer(); // different tenant, own org
-    // Stranger probes the owner's org path — org membership gate should already deny.
-    const read = await stranger.get(f(orgId, `/${id}`));
-    expect([403, 404]).toContain(read.status);
-    const write = await stranger.patch(f(orgId, `/${id}`), { name: 'Hijack' });
-    expect([403, 404]).toContain(write.status);
+    // OUTER guard — a different tenant: the org gate refuses before any row read.
+    const { user: stranger } = await marketer();
+    refused(await stranger.get(f(orgId, `/${id}`)), 404, 'not_found', 'Organization not found.');
+    refused(await stranger.patch(f(orgId, `/${id}`), { name: 'Hijack' }), 404, 'not_found', 'Organization not found.');
+
+    // INNER guard — the owner's OWN second org passes the org gate, so only the
+    // row fence stands between org B's path and org A's funnel.
+    const orgB = await user.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Other Co' });
+    expect(orgB.status).toBe(201);
+    refused(await user.get(f(orgB.body.orgId, `/${id}`)), 404, 'not_found', 'Funnel not found.');
+    const after = await user.get<FunnelBody & { funnel: { name: string } }>(f(orgId, `/${id}`));
+    expect(after.body.funnel.name).toBe('Private');
   });
 
   it('toggle gate: routes deny while the funnels toggle is off', async () => {
@@ -136,8 +164,7 @@ describe('funnels Phase 1 — entity + lifecycle over HTTP', () => {
     await saveConfig({ ...d!, status: 'off' }, 'test');
     try {
       const { user, orgId } = await marketer();
-      const r = await user.get(f(orgId));
-      expect([403, 404]).toContain(r.status);
+      refused(await user.get(f(orgId)), 404, 'not_found', 'Funnels is not enabled for this tenant.');
     } finally {
       await saveConfig({ ...d!, status: 'on' }, 'test');
     }

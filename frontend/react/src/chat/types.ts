@@ -348,6 +348,11 @@ export interface ChatMessage {
    *  assistant chat turn only ever has zero or one. Deduped by
    *  `interruptId`. */
   activeInterrupts?: OpenInterrupt[];
+  /** ADR 1017 D2 — where this assistant turn lives on the wire: the conversation's
+   *  backing run and the turn's raw wire message id (before `conversationMessageId`
+   *  sanitizes it). The chat asks the server for the artifacts a chat tool saved
+   *  during this turn with exactly these two. Set on turns rebuilt from the wire. */
+  turnRef?: { conversationRunId: string; turnMessageId: string };
   /** Final-turn metadata for the assistant bubble. */
   meta?: {
     runId?: string | undefined;
@@ -416,12 +421,25 @@ export interface ChatMessage {
      *  an in-bubble reduced-context notice via `voiceCtxBlockLabels`; stamped
      *  at merge time and persisted with the message meta. */
     degradedBlocks?: string[];
+    /** ADR 1003 D5 — how many earlier turns the transcript window left out of
+     *  what the model saw for this reply (the
+     *  `openwop-app.conversation.context-budgeted` count). Stamped at merge time
+     *  like `degradedBlocks`. */
+    contextOmittedTurns?: number;
     /** ADR 0665 D4 — this agent turn carried NO output. Set from the backend's
      *  typed non-contribution turn content, so it survives a reopen the same way
      *  the two markers above do. The bubble renders a muted "did not respond"
      *  line: in a council, a silent advisor read as an agreeing one is the
      *  failure this exists to prevent. */
     noContribution?: true;
+    /** ADR 1001 D7 — this agent turn ended with a question card
+     *  (`openwop:ask-user`). `askId` is the wire turn id the answer names;
+     *  `data` is the host's lifted `ClarificationData`. Set from the run log's
+     *  `clarification-requested` event, so it survives a reopen. */
+    clarificationAsk?: { askId: string; data: unknown; answered?: boolean };
+    /** ADR 1001 D7 — this user turn skipped an agent's questions; the feed shows
+     *  the viewer's localized line instead of the host's English fallback. */
+    clarificationSkipped?: boolean;
   };
   /** Structured state for `role: 'workflow_run'` messages. */
   workflowRun?: WorkflowRunState;
@@ -538,6 +556,10 @@ export interface SendOptions {
    *  lets the agent run consequential tools (code-exec, file-write, egress) WITHOUT an approval
    *  card; `'safe'` (default) gates them. Host-internal (not a wire change). */
   permissionMode?: 'safe' | 'bypass' | undefined;
+  /** ADR 1001 D7 — this send answers the agent's question card. The host
+   *  builds the turn's content from these answers (the text is only the
+   *  optimistic bubble). Host-internal resume field, not a wire change. */
+  clarificationAnswer?: { askId: string; answers: unknown } | undefined;
   /** Fully-qualified agent id from RFC 0072 §A inventory when an
    *  agent is the currently-routing voice for this chat. The
    *  chat-responder resolves the agent's `systemPrompt` from the

@@ -50,6 +50,10 @@ import { getChainBackedWorkflow, _resetChainBackedWorkflowsForTest } from '../sr
 import { registerLegacyDefsChainBacked, BACKEND_FEATURES } from '../src/features/index.js';
 import { kicktodoCreatorBuiltinWorkflows, CHALLENGE_FACTORY_WORKFLOW_ID, LESSON_BATCH_WORKFLOW_ID } from '../src/features/kicktodo-creator/builtinWorkflows.js';
 import { campaignOrchestrationParallel, ORCHESTRATION_ID } from '../src/features/campaign-orchestration/orchestrationWorkflow.js';
+import { CHANNEL_WORKFLOWS, CHANNEL_WORKFLOW_IDS } from '../src/features/campaign-channels/channelWorkflows.js';
+import { getCampaignByBrief } from '../src/features/campaign-orchestration/campaignService.js';
+import { KERNEL_WORKFLOWS, KERNEL_WORKFLOW_ID } from '../src/features/campaign-brief/intelWorkflows.js';
+import { listBriefs as listCreativeBriefs } from '../src/features/creative-briefs/creativeBriefsService.js';
 import { __resolveAndResumeForTests, __awaitRunResumeChainForTests } from '../src/routes/interrupts.js';
 import { createCandidate, getCandidate } from '../src/features/kicktodo-creator/creatorService.js';
 import { getPublication } from '../src/features/kicktodo-creator/publishService.js';
@@ -57,7 +61,7 @@ import { getApproval } from '../src/host/approvalService.js';
 import { getRunArtifact } from '../src/host/runArtifactStore.js';
 import { validateArtifact } from '../src/host/artifactTypes.js';
 import { registerKicktodoCreatorArtifactTypes, CHALLENGE_LESSON_BATCH_TYPE } from '../src/features/kicktodo-creator/artifactSchemas.js';
-import { createBrief, getBrief } from '../src/features/campaign-brief/briefService.js';
+import { createBrief, getBrief, setKernel } from '../src/features/campaign-brief/briefService.js';
 import { createOrg, getOrg } from '../src/host/accessControlService.js';
 import { configureSecretResolver, setSecret } from '../src/byok/secretResolver.js';
 import type { NodeModule, WorkflowDefinition } from '../src/executor/types.js';
@@ -74,6 +78,7 @@ const kicktodoPackUrl = new URL('../../../packs/feature.kicktodo.nodes/index.mjs
 const chatPackUrl = new URL('../../../packs/vendor.myndhyve.chat/index.mjs', import.meta.url).href;
 const briefPackUrl = new URL('../../../packs/feature.campaign-brief.nodes/index.mjs', import.meta.url).href;
 const orchestrationPackUrl = new URL('../../../packs/feature.campaign-orchestration.nodes/index.mjs', import.meta.url).href;
+const channelsPackUrl = new URL('../../../packs/feature.campaign-channels.nodes/index.mjs', import.meta.url).href;
 
 type NodeFn = (ctx: Record<string, unknown>) => Promise<{ status: string; outputs?: Record<string, unknown>; error?: unknown }>;
 
@@ -133,6 +138,10 @@ beforeAll(async () => {
   // child through this seam — without it every child dispatch fails internal_error.
   const { setSubWorkflowDispatcher } = await import('../src/executor/subWorkflowDispatcher.js');
   setSubWorkflowDispatcher({ storage, hostSuite, executeRun: executeRun as never });
+  // Boot parity (src/index.ts): a child that finishes completes its parent's
+  // RFC 0118 wait-all wave — the campaign fan-out (C) parks on it.
+  const { registerDispatchWaitAll } = await import('../src/host/dispatchWaitAll.js');
+  registerDispatchWaitAll(storage, hostSuite);
   ensureNodesRegistered();
   // Boot parity: the chain packs load through the REAL loader, then the EXACT boot
   // registrar registers both flagships chain-backed same-id (outputRoles restored).
@@ -142,6 +151,9 @@ beforeAll(async () => {
   expect(errors).toEqual([]);
   registerLegacyDefsChainBacked(kicktodoCreatorBuiltinWorkflows);
   registerLegacyDefsChainBacked([campaignOrchestrationParallel]);
+  // ADR 1020 D6 — the five channel children, registered as at boot.
+  registerLegacyDefsChainBacked(CHANNEL_WORKFLOWS);
+  registerLegacyDefsChainBacked(KERNEL_WORKFLOWS); // ADR 1020 D8 — the standalone kernel chain
   // Boot parity: feature surfaces (ctx.features.*) — no toggle defaults are
   // registered in this harness, so the gate's always-on path applies.
   for (const f of BACKEND_FEATURES) if (f.surface) registerFeatureSurface(f.surface.id, f.surface.build);
@@ -275,7 +287,31 @@ beforeAll(async () => {
   register('feature.campaign-brief.nodes.generate-kernel', brief['feature.campaign-brief.nodes.generate-kernel']!, () => ({
     callAI: async () => ({ data: { headline: 'Paint boldly', supportingStatement: 'From first wash to finished study.', primaryCta: 'Start today', tone: 'confident', proofPoints: ['Guided daily studies'] } }),
   }));
+  // ADR 1020 D6 — past the kernel gate: the REAL channel generate node (canned
+  // draft; it records which brief each child was handed), the REAL consistency
+  // and finalize nodes, and a skip stand-in for production planning (not under test).
+  const channels = ((await import(channelsPackUrl)) as { nodes: Record<string, NodeFn> }).nodes;
+  register('feature.campaign-channels.nodes.generate', channels['feature.campaign-channels.nodes.generate']!, (ctx) => ({
+    callAI: async () => {
+      const inputs = (ctx.inputs ?? {}) as Record<string, unknown>;
+      channelGenerations.push({ channel: String(inputs.channel), briefId: inputs.briefId });
+      if (inputs.channel === 'creative_briefs') return { data: { briefs: [{ format: 'hero-image', sceneDescription: 'A painter at an easel at dawn' }] } };
+      return { data: { emails: [{ position: 1, subjectLines: ['Paint boldly this week'], body: 'Start today with guided daily studies.' }] } };
+    },
+  }));
+  register('feature.campaign-orchestration.nodes.consistency-check', orchestration['feature.campaign-orchestration.nodes.consistency-check']!, () => ({
+    callAI: async () => ({ data: { score: 90, rationale: 'same promise' } }),
+  }));
+  register('feature.campaign-orchestration.nodes.finalize', orchestration['feature.campaign-orchestration.nodes.finalize']!);
+  // ADR 1020 D14 — the creative_briefs chain's post-approval creation step.
+  register('feature.campaign-channels.nodes.create-creative-briefs', channels['feature.campaign-channels.nodes.create-creative-briefs']!);
+  register('feature.production.nodes.plan-generate', async () => ({ status: 'success', outputs: { skipped: true } }));
+  // ADR 1020 D8 — the kernel is saved only by promote-kernel, after the approval.
+  register('feature.campaign-brief.nodes.promote-kernel', brief['feature.campaign-brief.nodes.promote-kernel']!);
 });
+
+/** ADR 1020 D6 — every channel generation that reached the model: which channel, which brief. */
+const channelGenerations: Array<{ channel: string; briefId: unknown }> = [];
 
 /** ADR 0458 §2.2 correction — the task text each sim persona received (agentId → task). */
 const simTasks = new Map<string, string>();
@@ -514,43 +550,192 @@ describe('(A2) a lesson batch that cannot be built stops the factory run', () =>
   });
 });
 
-describe('(B) campaign-orchestration runs to its DESIGNED human gate chain-backed', () => {
-  it('validate → generate-kernel persists the kernel → suspends at the prefixed kernel-approve gate', async () => {
-    const T = 'tenant-cb-e2e-campaign';
-    // The marketer is a real member of the brief's org: the campaign-brief surface
-    // scopes a row named by id to an org the run's person may read (security fix,
-    // ADR 0948 P2 review). Before it, this run read the brief by tenant alone.
+describe('(B) campaign-orchestration: the kernel is saved only when its gate is APPROVED (ADR 1020 D8)', () => {
+  // The marketer is a real member of the brief's org: the campaign-brief surface
+  // scopes a row named by id to an org the run's person may read (security fix,
+  // ADR 0948 P2 review). Before it, this run read the brief by tenant alone.
+  const T = 'tenant-cb-e2e-campaign';
+  const MARKETER = 'user:cb-e2e-marketer';
+  async function briefAndRun(name: string): Promise<{ briefId: string; runId: string }> {
     if (!(await getOrg('org-cb-e2e'))) {
-      await createOrg({ tenantId: T, createdBy: 'user:cb-e2e-marketer', name: 'Campaign e2e', orgId: 'org-cb-e2e', ownerSubject: 'user:cb-e2e-marketer' });
+      await createOrg({ tenantId: T, createdBy: MARKETER, name: 'Campaign e2e', orgId: 'org-cb-e2e', ownerSubject: MARKETER });
     }
-    const brief = await createBrief(T, 'org-cb-e2e', 'user:cb-e2e-marketer', {
-      name: 'Watercolor course launch',
+    const brief = await createBrief(T, 'org-cb-e2e', MARKETER, {
+      name,
       productName: 'Watercolor Basics',
       personaIds: ['persona-beginner'],
       messaging: { primaryValueProp: 'Paint your first watercolor in three weeks.' },
       // R2 CB-SP-13's class: 'email' is not a real channel enum — the sanitizer
-      // silently DROPPED it, so this brief never had an enabled channel and only
-      // the old unconditional setKernel promotion made the 'validated' assertion
-      // below pass. With the real enum the brief genuinely validates.
+      // silently DROPPED it, so this brief never had an enabled channel.
       channels: [{ type: 'email_sequence', enabled: true }],
     });
-    const { run, def } = await startRun(ORCHESTRATION_ID, T, 'user:cb-e2e-marketer', { briefId: brief.id });
-
+    const { run, def } = await startRun(ORCHESTRATION_ID, T, MARKETER, { briefId: brief.id });
     const result = await executeRun(storage, run, def);
-    // Genuine terminal state: the designed human gate — never forced past it.
+    // Genuine state: the designed human gate — never forced past it.
     expect(result.status).toBe('waiting-approval');
     expect((await storage.getRun(run.runId))!.currentNodeId).toMatch(/_kernel-approve$/);
-    const open = await storage.listOpenInterrupts(run.runId);
+    return { briefId: brief.id, runId: run.runId };
+  }
+  const promoted = async (runId: string): Promise<boolean> =>
+    (await storage.listEvents(runId)).some((e) => e.type === 'node.completed' && typeof e.nodeId === 'string' && /_promote-kernel$/.test(e.nodeId));
+
+  it('at the gate nothing is saved and the reviewer sees the kernel; approving saves it and promotes the brief', async () => {
+    const { briefId, runId } = await briefAndRun('Watercolor course launch');
+    const open = await storage.listOpenInterrupts(runId);
     expect(open).toHaveLength(1);
-    // ADR 0942 P2 — the gate is the autonomy gate in its legacy posture: an approval
-    // with no policy block and no named approvers, exactly today's open gate.
-    const gate = open[0] ? await storage.getInterrupt(open[0].interruptId) : null;
+    // ADR 0942 P2 — the autonomy gate in its legacy posture: an open approval.
+    const gate = await storage.getInterrupt(open[0]!.interruptId);
     expect(gate?.kind).toBe('approval');
     expect((gate?.data as Record<string, unknown>).autonomy).toBeUndefined();
-    expect((gate?.data as Record<string, unknown>).approverRoleRefs).toBeUndefined();
-    // generate-kernel REALLY persisted through the feature surface before the gate.
-    const after = await getBrief(T, brief.id);
+    // CS70WF-12 — before ADR 1020 the kernel was SAVED here, before anyone approved it.
+    const before = await getBrief(T, briefId);
+    expect(before?.kernel).toBeUndefined();
+    expect(before?.status).toBe('draft');
+    // …but the brief knows a kernel waits in THIS run (the page links to it).
+    expect(before?.kernelReview?.runId).toBe(runId);
+    // The reviewer is shown the kernel itself (the ADR 0083 gate preview of the upstream output).
+    const preview = await getRunArtifact(`${runId}:${open[0]!.nodeId}`);
+    expect(preview?.content ?? '').toContain('Paint boldly');
+
+    await __resolveAndResumeForTests(storage, hostSuite, open[0]!.interruptId, { action: 'accept' });
+    await __awaitRunResumeChainForTests(runId);
+    expect(await promoted(runId)).toBe(true);
+    const after = await getBrief(T, briefId);
     expect(after?.kernel?.headline).toBe('Paint boldly');
     expect(after?.status).toBe('validated');
+    expect(after?.kernelReview).toBeUndefined();
+  });
+
+  it('the standalone messaging-kernel chain: staged at its gate, saved by promote on approval', async () => {
+    if (!(await getOrg('org-cb-e2e'))) {
+      await createOrg({ tenantId: T, createdBy: MARKETER, name: 'Campaign e2e', orgId: 'org-cb-e2e', ownerSubject: MARKETER });
+    }
+    const brief = await createBrief(T, 'org-cb-e2e', MARKETER, {
+      name: 'Kernel only', productName: 'Watercolor Basics', personaIds: ['persona-beginner'],
+      messaging: { primaryValueProp: 'Paint your first watercolor in three weeks.' },
+      channels: [{ type: 'email_sequence', enabled: true }],
+    });
+    const { run, def } = await startRun(KERNEL_WORKFLOW_ID, T, MARKETER, { briefId: brief.id });
+    expect((await executeRun(storage, run, def)).status).toBe('waiting-approval');
+    expect((await getBrief(T, brief.id))?.kernel).toBeUndefined();
+    const open = await storage.listOpenInterrupts(run.runId);
+    await __resolveAndResumeForTests(storage, hostSuite, open[0]!.interruptId, { action: 'accept' });
+    await __awaitRunResumeChainForTests(run.runId);
+    expect((await storage.getRun(run.runId))!.status).toBe('completed');
+    expect((await getBrief(T, brief.id))?.kernel?.headline).toBe('Paint boldly');
+  });
+
+  it('rejecting the gate saves nothing: no kernel, no promotion, the brief stays a draft', async () => {
+    const { briefId, runId } = await briefAndRun('Watercolor course launch (rejected)');
+    const open = await storage.listOpenInterrupts(runId);
+    await __resolveAndResumeForTests(storage, hostSuite, open[0]!.interruptId, { action: 'reject', comment: 'Off-brand.' });
+    await __awaitRunResumeChainForTests(runId);
+    expect((await storage.getRun(runId))!.status).toBe('failed');
+    expect(await promoted(runId)).toBe(false);
+    const after = await getBrief(T, briefId);
+    expect(after?.kernel).toBeUndefined();
+    expect(after?.status).toBe('draft');
+  });
+});
+
+describe('(C) campaign-orchestration runs PAST the kernel gate to a finalized campaign (ADR 1020 D6)', () => {
+  it('every child gets the brief; a disabled channel raises no gate; consistency scores the real draft; finalize records the campaign', async () => {
+    const T = 'tenant-cb-e2e-campaign-c';
+    const ORG = 'org-cb-e2e-c';
+    const MARKETER = 'user:cb-e2e-marketer-c';
+    if (!(await getOrg(ORG))) await createOrg({ tenantId: T, createdBy: MARKETER, name: 'Campaign e2e C', orgId: ORG, ownerSubject: MARKETER });
+    const brief = await createBrief(T, ORG, MARKETER, {
+      name: 'Watercolor course launch',
+      productName: 'Watercolor Basics',
+      personaIds: ['persona-beginner'],
+      messaging: { primaryValueProp: 'Paint your first watercolor in three weeks.' },
+      channels: [{ type: 'email_sequence', enabled: true }],
+    });
+    channelGenerations.length = 0;
+    const { run, def } = await startRun(ORCHESTRATION_ID, T, MARKETER, { briefId: brief.id });
+    expect((await executeRun(storage, run, def)).status).toBe('waiting-approval');
+
+    // Approve every gate the parent or any child raises, until the run settles.
+    const childGates: string[] = [];
+    let rounds = 0;
+    // The parent waits on an approval (the kernel) or on its children (`waiting-external`, RFC 0118 wait-all).
+    while (['waiting-approval', 'waiting-external'].includes((await storage.getRun(run.runId))!.status) && rounds++ < 10) {
+      const runs = [run.runId, ...(await storage.listRunsByParent(run.runId)).map((c) => c.runId)];
+      for (const id of runs) {
+        for (const open of await storage.listOpenInterrupts(id)) {
+          // The dispatch's wait-all resolves itself when the children finish.
+          if ((await storage.getInterrupt(open.interruptId))?.kind !== 'approval') continue;
+          if (id !== run.runId) childGates.push((await storage.getRun(id))!.workflowId);
+          await __resolveAndResumeForTests(storage, hostSuite, open.interruptId, { decision: 'approved', approved: true });
+          await __awaitRunResumeChainForTests(id);
+        }
+      }
+      await __awaitRunResumeChainForTests(run.runId);
+    }
+    const parent = (await storage.getRun(run.runId))!;
+    expect(parent.status, JSON.stringify(parent.error ?? null)).toBe('completed');
+
+    // CS70WF-1 — all five children were dispatched with the real brief id.
+    const children = await storage.listRunsByParent(run.runId);
+    expect(children.map((c) => c.workflowId).sort()).toEqual([...CHANNEL_WORKFLOW_IDS].sort());
+    for (const c of children) {
+      expect(c.inputs, c.workflowId).toMatchObject({ briefId: brief.id });
+      expect(c.status, `${c.workflowId} ${JSON.stringify(c.error ?? null)}`).toBe('completed');
+    }
+    // CS70WF-3 — only the enabled channel reached the model or raised a gate.
+    expect(channelGenerations).toEqual([{ channel: 'email_sequence', briefId: brief.id }]);
+    expect(childGates).toEqual(['campaign-studio.channel.email-sequence']);
+
+    // CS70WF-2 — consistency scored the one real draft (never "no drafts to compare").
+    const events = await storage.listEvents(run.runId);
+    const consistency = events.find((e) => e.type === 'node.completed' && e.nodeId && /_consistency$/.test(e.nodeId));
+    const outputs = ((consistency?.payload as { outputs?: Record<string, unknown> } | undefined)?.outputs ?? {}) as { report?: { note?: string; dimensions?: Array<{ name: string; description: string }> }; channels?: Array<{ channel: string; status: string }> };
+    expect(outputs.report?.note).toBeUndefined();
+    expect(outputs.report?.dimensions?.[0]?.description).toBe('1/1 drafts echo the kernel.');
+    expect(outputs.channels?.filter((c) => c.status === 'drafted').map((c) => c.channel)).toEqual(['email_sequence']);
+    expect(outputs.channels?.filter((c) => c.status === 'skipped')).toHaveLength(4);
+
+    // Finalize recorded the campaign for this brief.
+    const campaign = await getCampaignByBrief(T, brief.id);
+    expect(campaign?.channels).toEqual(['email_sequence']);
+  });
+});
+
+describe('(D) the creative_briefs channel creates its managed briefs only after its approval (ADR 1020 D14)', () => {
+  const T = 'tenant-cb-e2e-creative';
+  const ORG = 'org-cb-e2e-d';
+  const MARKETER = 'user:cb-e2e-marketer-d';
+  async function creativeRun(name: string): Promise<{ briefId: string; runId: string }> {
+    if (!(await getOrg(ORG))) await createOrg({ tenantId: T, createdBy: MARKETER, name: 'Creative e2e', orgId: ORG, ownerSubject: MARKETER });
+    const brief = await createBrief(T, ORG, MARKETER, {
+      name, productName: 'Watercolor Basics', personaIds: ['persona-beginner'],
+      messaging: { primaryValueProp: 'Paint your first watercolor in three weeks.' },
+      channels: [{ type: 'creative_briefs', enabled: true }],
+    });
+    await setKernel(T, brief.id, { headline: 'Paint boldly', supportingStatement: 'From first wash to finished study.', proofPoints: ['Guided daily studies'], primaryCta: 'Start today', secondaryCta: '', tone: 'confident', channelTones: {}, sourceDocIds: [], generatedAt: new Date().toISOString() });
+    const { run, def } = await startRun('campaign-studio.channel.creative-briefs', T, MARKETER, { briefId: brief.id });
+    expect((await executeRun(storage, run, def)).status).toBe('waiting-approval');
+    return { briefId: brief.id, runId: run.runId };
+  }
+  const managedFor = async (briefId: string) => (await listCreativeBriefs(T, ORG)).filter((b) => b.campaignBriefId === briefId);
+
+  it('nothing is created while the draft waits; approving creates the brief', async () => {
+    const { briefId, runId } = await creativeRun('Creative approve');
+    expect(await managedFor(briefId)).toHaveLength(0); // CS70WF-24: they used to exist before the gate
+    const open = await storage.listOpenInterrupts(runId);
+    await __resolveAndResumeForTests(storage, hostSuite, open[0]!.interruptId, { action: 'accept' });
+    await __awaitRunResumeChainForTests(runId);
+    expect((await storage.getRun(runId))!.status).toBe('completed');
+    const made = await managedFor(briefId);
+    expect(made.map((b) => b.title)).toEqual(['Watercolor Basics — hero-image']);
+  });
+
+  it('rejecting the draft creates nothing', async () => {
+    const { briefId, runId } = await creativeRun('Creative reject');
+    const open = await storage.listOpenInterrupts(runId);
+    await __resolveAndResumeForTests(storage, hostSuite, open[0]!.interruptId, { action: 'reject', comment: 'Off-brand.' });
+    await __awaitRunResumeChainForTests(runId);
+    expect((await storage.getRun(runId))!.status).toBe('failed');
+    expect(await managedFor(briefId)).toHaveLength(0);
   });
 });

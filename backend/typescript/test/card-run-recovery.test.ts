@@ -10,6 +10,22 @@
  * restore idempotent, race-safe, fork-safe, and unable to fight a workflow that
  * moved its own card. Each of those is a separate test below, because each was
  * a separate way to lose or duplicate a user's work.
+ *
+ * DOUBLE GUARD (grade-tests w67, TST-CBR-1). The `lastRunId` and Working-column
+ * checks are enforced twice: on the snapshot in `restoreCardForRun`
+ * (cardRunRecovery.ts) and again by the CAS precondition of `releaseCardClaim`
+ * (kanbanService.ts). `recoverCardForTerminalRun` reads the card just before
+ * restoring, so on that path the two always agree and a single-guard sabotage
+ * stays green. The CAS (the guard that actually decides the write) is witnessed
+ * on its own by the two "stale SNAPSHOT" reconcile cases, which hand the
+ * reconciler a card read BEFORE a re-pick / a workflow's own move: red when the
+ * CAS stops comparing `lastRunId` or `columnId`. The snapshot check is the inner
+ * copy of the same predicate.
+ *
+ * Other sabotages that red this file: dropping `approval` from the pointer keys,
+ * a cancelled run that does not hold, `completed` restoring, the tenant gate
+ * removed, the grace window ignored, a running run restored, and a blocker-note
+ * compose that drops the human line or stacks machine lines.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -107,6 +123,8 @@ describe('ADR 0535 P2 — restore on a terminal run', () => {
     const card = await getCard(cardId);
     expect(card?.columnId, 'the work must return to the lane the loop picks FROM').toBe('todo');
     expect(card?.blockerNote, 'the board must explain itself').toContain('run-1');
+    // ADR 0963 D3 — every restore HOLDS the card for a person.
+    expect(card && isHeldForReview(card), 'a failed card waits for a person').toBe(true);
   });
 
   it('covers the APPROVAL path too, not just the heartbeat path', async () => {
@@ -182,8 +200,35 @@ describe('ADR 0535 P2 — the lastRunId guard', () => {
   });
 
   it('ignores a run with no card pointer (an ordinary non-work-loop run)', async () => {
-    await seedRun('run-7', 'failed', { something: 'else' });
+    // A real picked card whose run carries its pointer under a key the RESTORE
+    // does not read (`kanban`, the human trigger lane): restoring it would hand
+    // a human's card to the agent loop.
+    const cardId = await pickedCard('run-7');
+    await seedRun('run-7', 'failed', { kanban: { boardId: board.id, cardId } });
     expect(await recoverCardForTerminalRun(storage, 'run-7', 'failed')).toBe(false);
+    expect((await getCard(cardId))?.columnId, 'a human-lane card is not the loop\'s to restore').toBe('working');
+  });
+
+  it('a stale SNAPSHOT cannot restore a card re-picked since (the CAS lastRunId guard)', async () => {
+    const cardId = await pickedCard('run-snap-old');
+    const snapshot = (await getCard(cardId))!;
+    await seedRun('run-snap-old', 'failed', heartbeatMeta(cardId));
+    await setCardLastRun(cardId, 'run-snap-new', 'running'); // re-picked after the read
+
+    expect(await reconcileStrandedCards(storage, board, [snapshot], PAST_GRACE())).toBe(0);
+    const card = await getCard(cardId);
+    expect(card?.columnId, 'the newer run still owns this card').toBe('working');
+    expect(card?.lastRunId).toBe('run-snap-new');
+  });
+
+  it('a stale SNAPSHOT cannot pull back a card its workflow moved on (the CAS column guard)', async () => {
+    const cardId = await pickedCard('run-snap-moved');
+    const snapshot = (await getCard(cardId))!;
+    await seedRun('run-snap-moved', 'failed', heartbeatMeta(cardId));
+    await moveCard(cardId, 'done'); // the workflow closed its own card after the read
+
+    expect(await reconcileStrandedCards(storage, board, [snapshot], PAST_GRACE())).toBe(0);
+    expect((await getCard(cardId))?.columnId, 'a well-behaved workflow wins').toBe('done');
   });
 });
 

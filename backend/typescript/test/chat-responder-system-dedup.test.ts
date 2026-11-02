@@ -25,10 +25,18 @@
  * `dispatchManagedChat`, capture the `messages` it receives,
  * assert exactly one system message and that it's the one resolved
  * by the chat-responder, not the chat-tab default.
+ *
+ * Incident: the 2026-05-28 MiniMax `invalid chat setting (2013)` rejection.
+ * Tracker TST-CEC-7. Red when (w67g3, witnessed): the chat-responder prepends
+ * its system body without stripping the incoming system messages (the managed,
+ * BYOK and two-user-turn cases); or rewrites the messages when no system body
+ * resolved (the pass-through case).
  */
 
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { NodeContext } from '../src/executor/types.js';
+import type { ManagedDispatchResult } from '../src/providers/managedProvider.js';
+import type { DispatchResult } from '../src/providers/dispatch.js';
 
 interface ChatMessage { role: 'system' | 'user' | 'assistant'; content: string }
 let capturedMessages: ChatMessage[] | null = null;
@@ -40,14 +48,15 @@ vi.mock('../src/providers/managedProvider.js', async (importOriginal) => {
     dispatchManagedChat: vi.fn(async (req: { messages: readonly ChatMessage[] }) => {
       capturedMessages = req.messages.map((m) => ({ ...m }));
       // Return a minimal success so the chat-responder finishes
-      // without erroring. Shape mirrors `ManagedDispatchResult`.
-      return {
+      // without erroring. Typed against the real `ManagedDispatchResult`.
+      const result: ManagedDispatchResult = {
         provider: 'openwop-free',
         model: 'openwop-free',
         completion: 'ok',
         usage: { inputTokens: 1, outputTokens: 1 },
         finishReason: 'stop',
       };
+      return result;
     }),
   };
 });
@@ -63,13 +72,14 @@ vi.mock('../src/providers/dispatch.js', async (importOriginal) => {
     ...original,
     dispatchChat: vi.fn(async (req: { messages: readonly ChatMessage[] }) => {
       capturedMessages = req.messages.map((m) => ({ ...m }));
-      return {
+      const result: DispatchResult = {
         provider: 'anthropic',
         model: 'claude-sonnet-4-6',
         completion: 'ok',
         usage: { inputTokens: 1, outputTokens: 1 },
         finishReason: 'stop',
       };
+      return result;
     }),
   };
 });

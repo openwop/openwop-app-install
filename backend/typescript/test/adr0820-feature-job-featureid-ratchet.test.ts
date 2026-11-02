@@ -20,6 +20,7 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { stripComments } from './helpers/stripComments.js';
 
 const SRC = join(__dirname, '..', 'src');
 const FEATURES = join(SRC, 'features');
@@ -54,7 +55,7 @@ function walk(dir: string): string[] {
 
 /** The `{ … }` argument of each `registerJob(` call, brace-matched, comments stripped. */
 function registerJobArgs(src: string): string[] {
-  const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+  const code = stripComments(src);
   const out: string[] = [];
   const re = /\bregisterJob\s*\(\s*\{/g;
   let m: RegExpExecArray | null;

@@ -10,6 +10,12 @@
  * isolation. A kid-miss refetch cannot see a re-used kid; only a signature failure
  * can. The cooldown is the other half: without it a forged signature would cost
  * an outbound JWKS fetch per request.
+ *
+ * Sabotage witnesses (middleware/oidcVerifier.ts): never refetching on a
+ * signature failure reds cases 1 and 2; dropping the cooldown (or never
+ * stamping lastSigRefetchAt) reds case 2; treating a key this call just
+ * fetched as cached reds case 3. Every count is a delta from the case's own
+ * start, because the JWKS counter is shared across cases.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import express from 'express';
@@ -60,13 +66,16 @@ describe('OidcVerifier — re-used kid with a rotated key', () => {
   it('refetches once on a signature failure against a cached key, and accepts the new key', async () => {
     const v = new OidcVerifier({ issuer, audience: AUD });
     served = keypair();
+    // `fetches` is shared by every case: count from this case's own start, so the
+    // case holds in any order (it asserted an absolute 1 and 2 before).
+    const base = fetches;
     await expect(v.verify(mint(served.privateKey))).resolves.toMatchObject({ sub: 'u1' });
-    expect(fetches).toBe(1);
+    expect(fetches).toBe(base + 1);
 
     // Same kid, new key — exactly the harness's shape across two scenarios.
     served = keypair();
     await expect(v.verify(mint(served.privateKey))).resolves.toMatchObject({ sub: 'u1' });
-    expect(fetches, 'exactly one extra fetch, driven by the signature failure').toBe(2);
+    expect(fetches, 'exactly one extra fetch, driven by the signature failure').toBe(base + 2);
   });
 
   it('a forged signature costs at most one refetch per cooldown, and is still refused', async () => {

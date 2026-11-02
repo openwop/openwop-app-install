@@ -26,14 +26,18 @@ import { DurableCollection } from './hostExtPersistence.js';
 import { OpenwopError } from '../types.js';
 import { resolveSecret, listSecretRefs, type SecretScope } from '../byok/secretResolver.js';
 import {
-  dispatchManagedChat, managedProviderIdFromRef, managedUnderlyingProvider, MANAGED_FREE_REF,
+  dispatchManagedChat, managedProviderIdFromRef, managedUnderlyingProvider, MANAGED_FREE_REF, isManagedCredentialRef,
 } from '../providers/managedProvider.js';
+import { isSubscriptionCredentialRef } from '../byok/subscriptionCredential.js';
 import { dispatchChat, dispatchEmbeddings, EMBEDDINGS_PROVIDERS, type ChatMessage, type ProviderId } from '../providers/dispatch.js';
 import { getClassDefault, getDefaultModel } from '../providers/catalog.js';
 import { createLogger } from '../observability/logger.js';
 import { assertEffectAllowed } from './runEffectContext.js';
 import { nativeSearchSatisfies, nativeSearchSuitability } from './webSearchCapability.js';
 import { registerCredentialRefConsumer } from './credentialRefRegistry.js';
+import { checkByokChatBudget, recordByokChatUsage } from '../aiProviders/byokChatBudget.js';
+import { explicitRefNamesOtherProvider } from '../aiProviders/credentialRefLadder.js';
+import type { ServedModel } from './turnAttribution.js';
 import { createVertexEmbed, VERTEX_EMBEDDING_MAX_DIMS, VERTEX_EMBEDDING_MODELS } from './vertexEmbedder.js';
 
 const log = createLogger('host.headlessAi');
@@ -365,6 +369,63 @@ export async function resolveHeadlessAiDescribed(
     log.warn('headless_ai_default_ref_unresolved', { tenantId }); // ephemeral/expired — fall through to null
   }
   return null;
+}
+
+/** What answered a chat exchange — the turn-attribution record's own type. */
+export type ConversationServed = ServedModel;
+
+/**
+ * ADR 1019 D3 — a headless TEXT dispatch on the credential that SERVED a chat
+ * conversation, for background work done on that conversation's own text (the
+ * auto-title). The headless ladder above answers "which key, when nobody chose
+ * one"; a conversation HAS a chosen credential, and its text must not leave for a
+ * provider the user did not pick:
+ *   - served by managed → the ADR 0821 D5 ladder (`resolveHeadlessAiDescribed`),
+ *     metered to the acting person (ADR 0721). The tenant's `preferForText` opt-in is
+ *     its own consent to move background text to its key, so it is honoured.
+ *   - served by a BYOK-direct provider (`HEADLESS_PROVIDERS`) on a ref that does not
+ *     name another vendor (ADR 0779 D6) and resolves now → the same key, on the
+ *     provider's catalog `quick` class model, refused (null) when the org or personal
+ *     BYOK budget is spent, and recorded against it on success;
+ *   - anything else (subscription, Copilot, compat, mock, unresolvable) → null: no call.
+ * Keyed on `served`, not `run.inputs.provider` — a route or override can switch the
+ * provider per turn. SR-1: the key stays inside the closure.
+ */
+export async function resolveHeadlessAiForConversation(
+  input: { tenantId: string; credentialRef: string | undefined; served: ConversationServed | undefined; actingSubject?: string },
+  options: { featureId: string },
+): Promise<DescribedHeadlessDispatch | null> {
+  const { tenantId, credentialRef, served, actingSubject } = input;
+  if (!served) return null;
+  if (served.managed) {
+    return resolveHeadlessAiDescribed(tenantId, 'text', {
+      featureId: options.featureId, modelClass: 'quick', ...(actingSubject ? { actingSubject } : {}),
+    });
+  }
+  const provider = served.provider;
+  if (!(HEADLESS_PROVIDERS as readonly string[]).includes(provider)) return null;
+  if (!credentialRef || isManagedCredentialRef(credentialRef) || isSubscriptionCredentialRef(credentialRef)) return null;
+  // Loaded on demand: a static import of the provider host from this module closes an
+  // import cycle that made a `vi.mock` of this module bind the real resolver in the
+  // media tests (the same failure class `untrustedContent.ts` documents).
+  const { CREDENTIAL_PROVIDERS } = await import('../aiProviders/aiProvidersHost.js');
+  if (explicitRefNamesOtherProvider(provider, credentialRef, CREDENTIAL_PROVIDERS) !== null) return null;
+  const model = getClassDefault(provider, 'quick');
+  if (!model) return null;
+  const budget = await checkByokChatBudget(tenantId, provider, actingSubject);
+  if (budget.exceeded || budget.personal?.exceeded) return null;
+  const apiKey = await resolveSecret(credentialRef, { tenantId });
+  if (!apiKey) return null;
+  return {
+    provider,
+    model,
+    route: 'byok-chosen',
+    dispatch: async (messages, opts) => {
+      const r = await dispatchChat({ provider: provider as ProviderId, model, apiKey, messages: messages as ChatMessage[], maxTokens: opts.maxTokens, ...signalFor(opts) });
+      void recordByokChatUsage(tenantId, provider, r.usage?.inputTokens ?? 0, r.usage?.outputTokens ?? 0, actingSubject);
+      return r.completion ?? '';
+    },
+  };
 }
 
 /** ADR 0904 D7 — the tenant's OWN key for a text op that must never draw the managed

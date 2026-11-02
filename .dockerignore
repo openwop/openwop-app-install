@@ -41,6 +41,8 @@
 #                       vitest.config.ts,src,scripts,vendor}
 #   providers.json  conformance-fixtures  schemas  packs  distributions
 #   examples/workflow-chain-packs  examples/connection-packs  build-meta
+#   frontend/react/{package.json,package-lock.json,tsconfig.json,
+#                   vite.site-runtime.config.ts,src}   (ADR 1015 site runtime)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Dependency trees — reinstalled inside the image from the lockfile.
@@ -54,6 +56,7 @@
 # Build products — the image builds its own.
 backend/typescript/lib
 frontend/react/dist
+frontend/react/dist-site-runtime
 frontend/react/.vite
 
 # Test/CI output.

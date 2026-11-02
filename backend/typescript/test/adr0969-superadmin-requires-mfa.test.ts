@@ -16,6 +16,18 @@
  * `refusesForMissingMfa` term from `isSuperadmin`; removing the break-glass
  * exemption, or loosening it to a substring match (the IdP-spoof case); widening the check to key principals; reading the flag as
  * default-on; and removing the `mfa_required` branch from `requireSuperadmin`.
+ * Re-witnessed by the w73 probes mfa69-* — including the verified-claim read in
+ * `middleware/auth.ts` (mfa69-claim) and the `/access/effective` projection
+ * (mfa69-effective).
+ *
+ * DOUBLE PATH (recorded, TST-DRI): `requireSuperadmin` refuses through
+ * `superadminNeedsMfa` BEFORE it asks `isSuperadmin`, so dropping the MFA term
+ * from `isSuperadmin` alone leaves every governance-route HTTP case green; only
+ * the predicate cases and `/access/effective` catch it (mfa69-term). The req()
+ * cast below is forced by the `Request` parameter of the product functions.
+ *
+ * "headers asserting MFA change nothing" is a negative tripwire: no product code
+ * reads those headers today, so no sabotage can red it; it guards a future one.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -126,12 +138,14 @@ function mint(sub: string, secondFactor?: string): string {
 /** The personal tenant the host derives for an OIDC subject (`middleware/auth.ts`). */
 const personalOf = (sub: string): string => `user:${createHash('sha256').update(`${issuer}:${sub}`).digest('hex').slice(0, 32)}`;
 
-async function get(path: string, token: string, extra: Record<string, string> = {}): Promise<{ status: number; body: Record<string, unknown> }> {
+async function get(path: string, token: string, extra: Record<string, string> = {}): Promise<{ status: number; body: unknown }> {
   const res = await fetch(`${BASE}${path}`, { headers: { authorization: `Bearer ${token}`, ...extra } });
-  return { status: res.status, body: (await res.json().catch(() => ({}))) as Record<string, unknown> };
+  const body: unknown = await res.json().catch(() => ({}));
+  return { status: res.status, body };
 }
 
 describe('ADR 0969 — over HTTP', () => {
+  const savedBootEnv = { dsn: process.env.OPENWOP_STORAGE_DSN, secret: process.env.OPENWOP_SESSION_SECRET };
   beforeAll(async () => {
     const { publicKey, privateKey: priv } = generateKeyPairSync('rsa', { modulusLength: 2048 });
     privateKey = priv;
@@ -148,12 +162,14 @@ describe('ADR 0969 — over HTTP', () => {
     _resetOidcVerifier();
     const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
     await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-  });
+  }, 120_000);
   afterAll(async () => {
     await new Promise<void>((res) => server.close(() => res()));
     await new Promise<void>((res) => issuerServer.close(() => res()));
     _resetOidcVerifier();
     for (const k of ['OPENWOP_OIDC_ISSUER', 'OPENWOP_OIDC_AUDIENCE', 'OPENWOP_OIDC_JWKS_URL']) delete process.env[k];
+    if (savedBootEnv.dsn === undefined) delete process.env.OPENWOP_STORAGE_DSN; else process.env.OPENWOP_STORAGE_DSN = savedBootEnv.dsn;
+    if (savedBootEnv.secret === undefined) delete process.env.OPENWOP_SESSION_SECRET; else process.env.OPENWOP_SESSION_SECRET = savedBootEnv.secret;
   });
 
   it('flag ON: a single-factor token is refused 403 mfa_required; the same person with the verified claim gets 200', async () => {

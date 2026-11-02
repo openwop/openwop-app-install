@@ -9,6 +9,16 @@
  * The probe: register a template whose fields the loader accepts (well-formed shape)
  * but which `sanitizeFields` must still normalize or drop. If the persisted form
  * comes back with the raw pack values, the route bypassed the sanitizer.
+ *
+ * Tracker TST-DCE-6. Red when `sanitizeFields` stops dropping options off a
+ * non-select field, the provenance stamp records the wrong version, a hand-made
+ * form accepts a body `originTemplate`, the caller's title is ignored, an unknown
+ * templateId stops being a 404, `createForm` stamps a hand-authored form, or the
+ * catalog route drops its org gate (grade-tests w70 probes `ftr-*`).
+ * The org gate is a DOUBLE GUARD over HTTP: org ids are unique across tenants, so
+ * the tenant check behind the org check cannot be isolated here.
+ * Dedupe row (needs a human ask): `models the OLDER three-key provenance shape`
+ * shares its `templateVersion` assertion with `stamps the ORIGIN PACK`.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -17,7 +27,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
-import type { FormDef } from '../src/features/forms/formsService.js';
+import { createForm, type FormDef } from '../src/features/forms/formsService.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { loadFormContentPacks, _resetFormContentRegistryForTest } from '../src/host/formContentPackLoader.js';
@@ -68,10 +78,12 @@ afterAll(async () => {
   if (packDir) rmSync(packDir, { recursive: true, force: true });
 });
 
-interface Res<T = any> { status: number; body: T }
+interface Res<T> { status: number; body: T }
+interface ErrBody { error?: string; message?: string }
+type FormRes = FormDef & { form?: FormDef };
 function client() {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
@@ -82,64 +94,68 @@ function client() {
     for (const sc of (typeof h.getSetCookie === 'function' ? h.getSetCookie() : single ? [single] : [])) {
       const m = /(__session=[^;]+)/.exec(sc); if (m) cookie = m[1];
     }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    return { status: res.status, body: (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as T };
   };
-  return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
+  return { get: <T>(p: string) => call<T>('GET', p), post: <T>(p: string, b?: unknown) => call<T>('POST', p, b) };
 }
 
 let n = 0;
-async function signedInOrg(): Promise<{ c: ReturnType<typeof client>; orgId: string }> {
+async function signedInOrg(): Promise<{ c: ReturnType<typeof client>; orgId: string; tenantId: string }> {
   const c = client();
-  const login = await c.post('/host/openwop-app/test/login', { email: `ft-${Date.now()}-${n++}@t.test` });
+  const login = await c.post<{ user: { tenantId: string } }>('/host/openwop-app/test/login', { email: `ft-${Date.now()}-${n++}@t.test` });
   expect(login.status, JSON.stringify(login.body)).toBe(201);
-  const org = await c.post('/host/openwop-app/orgs', { name: `Org ${n++}` });
+  const org = await c.post<{ org?: { orgId: string }; orgId?: string }>('/host/openwop-app/orgs', { name: `Org ${n++}` });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  return { c, orgId: org.body.org?.orgId ?? org.body.orgId };
+  const orgId = org.body.org?.orgId ?? org.body.orgId;
+  expect(orgId).toBeTruthy();
+  return { c, orgId: orgId!, tenantId: login.body.user.tenantId };
 }
+/** The created form, whichever envelope the route used. */
+const formOf = (b: FormRes): FormDef => b.form ?? b;
 const base = (orgId: string) => `/host/openwop-app/forms/orgs/${encodeURIComponent(orgId)}`;
 
 describe('ADR 0516 — form templates over HTTP', () => {
   it('lists installed templates', async () => {
     const { c, orgId } = await signedInOrg();
-    const res = await c.get(`${base(orgId)}/form-templates`);
+    const res = await c.get<{ templates: { templateId: string }[] }>(`${base(orgId)}/form-templates`);
     expect(res.status, JSON.stringify(res.body)).toBe(200);
-    expect(res.body.templates.map((t: { templateId: string }) => t.templateId)).toContain('vendor.test.form.probe');
+    expect(res.body.templates.map((t) => t.templateId)).toContain('vendor.test.form.probe');
   });
 
   it('instantiates THROUGH createForm — pack fields are sanitized, not trusted', async () => {
     const { c, orgId } = await signedInOrg();
-    const res = await c.post(`${base(orgId)}/forms/from-template`, { templateId: 'vendor.test.form.probe' });
+    const res = await c.post<FormRes>(`${base(orgId)}/forms/from-template`, { templateId: 'vendor.test.form.probe' });
     expect(res.status, JSON.stringify(res.body)).toBe(201);
 
-    const form = res.body.form ?? res.body;
+    const form = formOf(res.body);
     expect(form.title).toBe('Probe form');
-    // THE ASSERTION THAT MATTERS. `sanitizeFields` owns the closed field catalog, so
-    // the unknown type must not survive verbatim. If it does, the route wrote the
+    // THE ASSERTION THAT MATTERS. `sanitizeFields` alone knows options belong to
+    // 'select', so they must not survive on a text field. If they do, the route wrote the
     // row directly and pack data is defining a public submission surface unchecked.
-    const sneaky = (form.fields as { key: string; type: string; options?: string[] }[]).find((f) => f.key === 'sneaky');
+    const sneaky = form.fields.find((f) => f.key === 'sneaky');
     expect(
       sneaky?.options,
       'options on a non-select field must be dropped by sanitizeFields, not persisted verbatim',
     ).toBeUndefined();
     // And the legitimate field survives — the sanitizer must not eat everything,
     // which would make the assertion above pass for the wrong reason.
-    expect((form.fields as { key: string }[]).some((f) => f.key === 'name')).toBe(true);
+    expect(form.fields.some((f) => f.key === 'name')).toBe(true);
   });
 
   it('a form created from a template is tenant/org-stamped by the CALLER, not the pack', async () => {
     const { c, orgId } = await signedInOrg();
-    const res = await c.post(`${base(orgId)}/forms/from-template`, { templateId: 'vendor.test.form.probe' });
-    const form = res.body.form ?? res.body;
+    const res = await c.post<FormRes>(`${base(orgId)}/forms/from-template`, { templateId: 'vendor.test.form.probe' });
+    const form = formOf(res.body);
     expect(form.orgId).toBe(orgId);
     // Readable back through the ordinary list route — same tenant, same org.
-    const list = await c.get(`${base(orgId)}/forms`);
-    expect(list.body.forms.some((f: { formId: string }) => f.formId === form.formId)).toBe(true);
+    const list = await c.get<{ forms: FormDef[] }>(`${base(orgId)}/forms`);
+    expect(list.body.forms.some((f) => f.formId === form.formId)).toBe(true);
   });
 
   it('stamps the ORIGIN PACK on the created form — grade-data FT-DATA-1', async () => {
     const { c, orgId } = await signedInOrg();
-    const res = await c.post(`${base(orgId)}/forms/from-template`, { templateId: 'vendor.test.form.probe' });
-    const form = res.body.form ?? res.body;
+    const res = await c.post<FormRes>(`${base(orgId)}/forms/from-template`, { templateId: 'vendor.test.form.probe' });
+    const form = formOf(res.body);
     // Instantiation COPIES the fields, so without this stamp there is nothing left
     // to tell a pack-authored form from a hand-typed one — and no later pass could
     // recover it. The version matters as much as the name: "which forms came from
@@ -160,22 +176,27 @@ describe('ADR 0516 — form templates over HTTP', () => {
     // three-key shape forever. A required `templateVersion` would be the type
     // lying about data that already exists — the first reader would deref a
     // string the compiler promised and get undefined.
-    const legacy: FormDef['originTemplate'] = {
+    // A row in the OLDER shape, persisted and read back through the ordinary list
+    // route: it must round-trip with its three keys and no invented fourth.
+    const legacyStamp: NonNullable<FormDef['originTemplate']> = {
       templateId: 'vendor.test.form.probe', packName: 'test.forms', packVersion: '1.0.0',
     };
-    expect(legacy?.templateVersion).toBeUndefined();
+    const { c, orgId, tenantId } = await signedInOrg();
+    const legacy = await createForm({ tenantId, orgId, title: 'Legacy row', fields: [], createdBy: 'user:legacy', originTemplate: legacyStamp });
+    const list = await c.get<{ forms: FormDef[] }>(`${base(orgId)}/forms`);
+    expect(list.status).toBe(200);
+    expect(list.body.forms.find((f) => f.formId === legacy.formId)?.originTemplate).toEqual(legacyStamp);
     // And the CURRENT writer supplies it, so absence means "stamped before we
     // recorded the revision" rather than "we forgot".
-    const { c, orgId } = await signedInOrg();
-    const res = await c.post(`${base(orgId)}/forms/from-template`, { templateId: 'vendor.test.form.probe' });
-    expect((res.body.form ?? res.body).originTemplate.templateVersion).toBe('2.3.4');
+    const res = await c.post<FormRes>(`${base(orgId)}/forms/from-template`, { templateId: 'vendor.test.form.probe' });
+    expect(formOf(res.body).originTemplate?.templateVersion).toBe('2.3.4');
   });
 
   it('leaves originTemplate ABSENT on a hand-authored form', async () => {
     const { c, orgId } = await signedInOrg();
-    const res = await c.post(`${base(orgId)}/forms`, { title: 'Typed by hand', fields: [] });
+    const res = await c.post<FormRes>(`${base(orgId)}/forms`, { title: 'Typed by hand', fields: [] });
     expect(res.status, JSON.stringify(res.body)).toBe(201);
-    const form = res.body.form ?? res.body;
+    const form = formOf(res.body);
     // Absence is the signal. If the field were always present (say, an empty
     // object) the stamp would distinguish nothing.
     expect(form.originTemplate).toBeUndefined();
@@ -184,9 +205,9 @@ describe('ADR 0516 — form templates over HTTP', () => {
   it('will not let a caller FORGE a template origin through the request body', async () => {
     const { c, orgId } = await signedInOrg();
     const forged = { templateId: 'forms.contact-us', packName: 'core.openwop.forms.starters', packVersion: '9.9.9' };
-    const res = await c.post(`${base(orgId)}/forms`, { title: 'Claims a pedigree', fields: [], originTemplate: forged });
+    const res = await c.post<FormRes>(`${base(orgId)}/forms`, { title: 'Claims a pedigree', fields: [], originTemplate: forged });
     expect(res.status, JSON.stringify(res.body)).toBe(201);
-    const form = res.body.form ?? res.body;
+    const form = formOf(res.body);
     // Provenance is only worth querying if it cannot be self-declared: a tenant
     // that could stamp its own form as pack-authored would poison the very audit
     // the stamp exists to serve.
@@ -195,22 +216,37 @@ describe('ADR 0516 — form templates over HTTP', () => {
 
   it('an unknown templateId is a 404 naming the id, not a 500', async () => {
     const { c, orgId } = await signedInOrg();
-    const res = await c.post(`${base(orgId)}/forms/from-template`, { templateId: 'nope.missing' });
+    const res = await c.post<ErrBody>(`${base(orgId)}/forms/from-template`, { templateId: 'nope.missing' });
     expect(res.status, JSON.stringify(res.body)).toBe(404);
-    expect(JSON.stringify(res.body)).toContain('nope.missing');
+    expect(res.body.error).toBe('not_found');
+    expect(res.body.message).toContain("'nope.missing'");
   });
 
   it('the caller may override the template title', async () => {
     const { c, orgId } = await signedInOrg();
-    const res = await c.post(`${base(orgId)}/forms/from-template`, { templateId: 'vendor.test.form.probe', title: 'My own title' });
-    expect((res.body.form ?? res.body).title).toBe('My own title');
+    const res = await c.post<FormRes>(`${base(orgId)}/forms/from-template`, { templateId: 'vendor.test.form.probe', title: 'My own title' });
+    expect(formOf(res.body).title).toBe('My own title');
   });
 
   it('both template routes are org-gated — an unauthenticated caller is refused', async () => {
-    const anon = client();
-    const listRes = await anon.get(`${base('org-whatever')}/form-templates`);
-    expect(listRes.status).toBeGreaterThanOrEqual(400);
-    const createRes = await anon.post(`${base('org-whatever')}/forms/from-template`, { templateId: 'vendor.test.form.probe' });
-    expect(createRes.status).toBeGreaterThanOrEqual(400);
+    // A REAL org (owner positive control), so the refusal below is the gate, not a missing org.
+    const { c: owner, orgId } = await signedInOrg();
+    expect((await owner.get(`${base(orgId)}/form-templates`)).status).toBe(200);
+    const refusals = [
+      { who: 'anonymous', status: 401, error: 'sign_in_required' },
+      { who: 'another signed-in user', status: 404, error: 'not_found' },
+    ] as const;
+    for (const { who, status, error } of refusals) {
+      const caller = client();
+      if (who !== 'anonymous') {
+        expect((await caller.post('/host/openwop-app/test/login', { email: `ft-other-${Date.now()}-${n++}@t.test` })).status).toBe(201);
+      }
+      const listRes = await caller.get<ErrBody>(`${base(orgId)}/form-templates`);
+      expect({ who, status: listRes.status, error: listRes.body?.error }).toEqual({ who, status, error });
+      const createRes = await caller.post<ErrBody>(`${base(orgId)}/forms/from-template`, { templateId: 'vendor.test.form.probe' });
+      expect({ who, status: createRes.status, error: createRes.body?.error }).toEqual({ who, status, error });
+    }
+    const owned = await owner.get<{ forms: FormDef[] }>(`${base(orgId)}/forms`);
+    expect(owned.body.forms.filter((f) => f.originTemplate)).toEqual([]); // nothing was created by the refused calls
   });
 });

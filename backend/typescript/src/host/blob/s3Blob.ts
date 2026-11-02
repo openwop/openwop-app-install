@@ -149,12 +149,14 @@ export function createS3Blob(scope: BundleScope, deps: S3BlobDeps = {}): BlobSur
     });
 
   return {
-    async put({ key, contentBase64, contentType }) {
+    async put({ key, contentBase64, contentType, signal }) {
       const url = sign('PUT', key, 60);
       const body = Buffer.from(String(contentBase64), 'base64');
       const res = await fetchFn(url, {
         method: 'PUT',
         body,
+        // ADR 0951 P2.5: a caller's deadline aborts the upload itself.
+        ...(signal instanceof AbortSignal ? { signal } : {}),
         headers: contentType ? { 'content-type': String(contentType) } : {},
       });
       if (!res.ok) { await drainBody(res); throw new Error(`s3 blob put failed: HTTP ${res.status}`); }

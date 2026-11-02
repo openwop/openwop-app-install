@@ -5,6 +5,11 @@
  * RFC 0199's `v2-credential-interrupt` mints a FRESH Subject per run through the
  * mint seam, so a minted key must authenticate as its own Subject and be able to
  * start a run; the revocation leg is RFC 0170's (`identity.md` §2.2).
+ *
+ * Tracker TST-CQE-3 (w68). Sabotage-witnessed: red when a revoked key is no
+ * longer recognised (falls through as an unknown bearer), when the revoked
+ * refusal is spelled `unauthenticated` on the protocol lane, and when the seam
+ * mints a session lane while cookies are disabled.
  */
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
@@ -53,7 +58,7 @@ describe('RFC 0170 §B.3 — mint seam (api-key lane, production issuance)', () 
     const auth = { 'content-type': 'application/json', authorization: `Bearer ${credential}` };
     const wf = `mint-seam-wf-${Date.now()}`;
     const reg = await fetch(`${BASE}/host/openwop-app/workflows`, { method: 'POST', headers: H, body: JSON.stringify({ workflowId: wf, nodes: [{ nodeId: 'n', typeId: 'core.noop' }], edges: [] }) });
-    expect([200, 201]).toContain(reg.status);
+    expect(reg.status, await reg.clone().text()).toBe(201);
     const run = await fetch(`${BASE}/runs`, { method: 'POST', headers: auth, body: JSON.stringify({ workflowId: wf, inputs: {} }) });
     expect([200, 201, 202], await run.clone().text()).toContain(run.status);
   });
@@ -67,7 +72,7 @@ describe('RFC 0170 §B.3 / identity.md §2.2 — revoked on the NEXT request', (
   it('v2: a revoked api-key credential is refused 401 credential_revoked', async () => {
     const { credential } = (await (await mint()).json()) as { credential: string };
     const auth = { authorization: `Bearer ${credential}`, 'OpenWOP-Version': '2' };
-    expect((await fetch(`${BASE}/runs`, { headers: auth })).status).not.toBe(401);
+    expect((await fetch(`${BASE}/runs`, { headers: auth })).status).toBe(200); // the key authenticates before revoke
     const rev = await fetch(`${BASE}${REVOKE}`, { method: 'POST', headers: H, body: JSON.stringify({ credential }) });
     expect(rev.status).toBe(200);
     const after = await fetch(`${BASE}/runs`, { headers: auth });
@@ -77,12 +82,16 @@ describe('RFC 0170 §B.3 / identity.md §2.2 — revoked on the NEXT request', (
     expect(code).toBe('credential_revoked');
   });
 
-  it('v1: the same refusal keeps the v1 code it always had (no v1 error-code change)', async () => {
+  it('no OpenWOP-Version header: a revoked key on the protocol lane is still credential_revoked', async () => {
+    // Retitled in w68 (was "v1: … keeps the v1 code"). This request sends NO
+    // version header, and `/runs` is a protocol route, so `isProtocolRequest` holds
+    // and the refusal is `credential_revoked` — the same code as the v2 case above.
+    // It does not exercise a major-1 request (v1 is retired; check-v1-reliance).
     const { credential } = (await (await mint()).json()) as { credential: string };
-    await fetch(`${BASE}${REVOKE}`, { method: 'POST', headers: H, body: JSON.stringify({ credential }) });
+    const rev = await fetch(`${BASE}${REVOKE}`, { method: 'POST', headers: H, body: JSON.stringify({ credential }) });
+    expect(rev.status).toBe(200);
     const after = await fetch(`${BASE}/runs`, { headers: { authorization: `Bearer ${credential}` } });
     expect(after.status).toBe(401);
-    // Major 2 names the revoked credential (auth.ts); major 1 said 'unauthenticated'.
     expect(((await after.json()) as { error: string }).error).toBe('credential_revoked');
   });
 

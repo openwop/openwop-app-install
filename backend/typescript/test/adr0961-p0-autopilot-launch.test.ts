@@ -300,7 +300,7 @@ describe('ADR 0961 P0 — launch', () => {
     const c = await campaignFor(orgA);
     const now = new Date().toISOString();
     const live = { runId: `r-live-${randomBytes(4).toString('hex')}`, workflowId: AUTOPILOT_CHAIN_ID, tenantId: TENANT, status: 'waiting-approval' as const, inputs: {}, metadata: { campaignOrchestration: stampCampaignRun(c, { role: 'spine' }) }, configurable: {}, createdAt: now, updatedAt: now };
-    await insertRunWithStartContext(storage, live);
+    await insertRunWithStartContext(storage, live, { admission: { plan: 'exempt:test-fixture' } });
     await __resetIgnitionClaims();
     const r = await call<{ runId: string; reused: boolean }>(adminCookie, 'POST', ap(c.id, 'launch'));
     expect(r.status).toBe(200);
@@ -317,7 +317,7 @@ describe('ADR 0961 P0 — launch', () => {
     const c = await campaignFor(orgA);
     const now = new Date().toISOString();
     const stage = { runId: `autopilot-stage-${randomBytes(16).toString('hex')}`, workflowId: 'campaign-studio.campaign-orchestration', tenantId: TENANT, status: 'waiting-approval' as const, inputs: {}, metadata: { campaignOrchestration: stampCampaignRun(c, { role: 'stage' }) }, configurable: {}, createdAt: now, updatedAt: now };
-    await insertRunWithStartContext(storage, stage);
+    await insertRunWithStartContext(storage, stage, { admission: { plan: 'exempt:test-fixture' } });
     await __resetIgnitionClaims();
     const r = await call<{ runId: string; reused: boolean }>(adminCookie, 'POST', ap(c.id, 'launch'));
     expect(r.body).toMatchObject({ runId: stage.runId, reused: true });

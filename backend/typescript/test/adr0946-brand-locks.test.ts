@@ -8,7 +8,16 @@
  * Sabotage: dropping the `maxScale` clamp reddens "an over-scaled logo nudge
  * is clamped"; dropping the background-colour check reddens both "a non-brand
  * colour is refused" cases; dropping `creativeLocksChanged` from the PATCH
- * gate reddens the governance case.
+ * gate reddens the governance case (w73 probes: bl-scale, bl-trunc, bl-bg,
+ * bl-font, bl-zone, bl-gov, bl-sanitize — all witnessed).
+ *
+ * The lock facts below are derived BY HAND from the `meta.feed.1x1` template
+ * boxes (logo 60,60 140×140 on 1080×1080 → 5.56% / 12.96%; scrim `ink`, CTA
+ * `accent` fill, paper canvas; headline `paper`, CTA `accentInk`), never from
+ * `applyBrandLocks` itself.
+ *
+ * The one cast left (the whole-`Brand` cast below) is forced: `creativeLocksChanged`
+ * takes a whole `Brand` and reads only `creativeLocks` (test-infra row).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -78,10 +87,16 @@ describe('ADR 0946 P3 — applyBrandLocks', () => {
 
   it('reports lock facts the P2 brand-lock rule can re-check', () => {
     const out = applyBrandLocks({ template: template(), tokens: TOKENS, locks: undefined, overrides: undefined, logoPresent: true, textLayerIds: TEXTS });
-    expect(out.lockFacts).toMatchObject({ logoPresent: true, fonts: ['inter'], disclaimerPresent: false });
-    expect(out.lockFacts.textColours.length).toBeGreaterThan(0);
-    expect(out.lockFacts.backgroundColours).toContain('#ffffff');
-    expect(out.lockFacts.logoBox).toBeDefined();
+    expect(out.lockFacts).toEqual({
+      logoPresent: true,
+      logoBox: { x: 5.56, y: 5.56, w: 12.96, h: 12.96 },
+      logoPx: 140,
+      textColours: ['#ffffff'],
+      backgroundColours: ['#111111', '#3b5bdb', '#ffffff'],
+      fonts: ['inter'],
+      nudges: {},
+      disclaimerPresent: false,
+    });
   });
 
   it('one type end to end: a locked render\'s facts pass the P2 brand-lock pre-flight rule', () => {
@@ -117,7 +132,7 @@ describe('ADR 0946 P3 — routes', () => {
       const d = getToggleDefault(id);
       if (d) await saveConfig({ ...d, status: 'on' }, 'test');
     }
-  });
+  }, 120_000);
   afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
   interface Res { status: number; body: Record<string, unknown> & { details?: { reason?: string } } }
@@ -167,6 +182,7 @@ describe('ADR 0946 P3 — routes', () => {
     expect((await c.call('POST', `/host/openwop-app/orgs/${orgId}/members`, { displayName: 'Ed', subject: userId, roles: ['editor'] })).status).toBeLessThan(300);
     const blocked = await ed.call('PATCH', `/host/openwop-app/brand/brands/${brandId}`, { creativeLocks: null });
     expect(blocked.status, JSON.stringify(blocked.body)).toBe(403);
+    expect(blocked.body).toMatchObject({ error: 'forbidden_scope', details: { requiredScope: 'host:org:manage' } });
     // A content edit by the same editor still goes through.
     expect((await ed.call('PATCH', `/host/openwop-app/brand/brands/${brandId}`, { description: 'New copy' })).status).toBe(200);
     // The owner (org admin) may change them, and the change lands in the guardrail audit trail.

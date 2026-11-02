@@ -20,6 +20,11 @@
  *  - drop the `revokedAt` kvAgeOut registrations → the age-out tests red;
  *  - restore revoke-then-put rotation → the concurrent-rotation test leaves two
  *    live tokens.
+ *
+ * TST-DKA-4 (grade-tests wave 72): re-witnessed by w72 probes tok-*. The
+ * cross-tenant erase is a recorded DOUBLE GUARD — `tenantInvites` (index slice or
+ * tenant-filtered scan) AND the per-row tenant check in `eraseSubjectInvites`;
+ * `h-other-tenant` surviving is reached through either.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -65,7 +70,7 @@ const feed = (tokenHash: string, tenantId: string, ownerSubject: string, revoked
 });
 
 describe('KTC-8 / KTX-D1 — invites: tenant index with an idempotent backfill', () => {
-  it('erases from the scan while unverified (legacy rows have no marker), then the reconcile backfills once and is a no-op after', async () => {
+  it('the reconcile backfills a legacy row once (idempotent), and a verified erase never full-scans', async () => {
     // A LEGACY row: written raw, exactly as pre-index code left it (no marker).
     await storage.kvSet('hostext:kicktodo-invites:h-legacy', JSON.stringify(invite('h-legacy', T, A)));
     await inviteStore.invites.put(invite('h-new', T, A));
@@ -138,8 +143,11 @@ describe('KTCORE-4 / KTINT-4 — revoked tokens age out; live ones never do', ()
     expect(await integrationStore.feeds.get('f-live')).not.toBeNull();
     expect(await webhookStore.registrations.get('w-old')).toBeNull();
     expect(await webhookStore.registrations.get('w-live')).not.toBeNull();
-    // The swept rows' tenant-index markers went with them (deleted via the collection).
-    expect((await storage.kvList('hostextidx:kicktodo-invites:')).map((r) => r.key)).not.toContain(`hostextidx:kicktodo-invites:${T}:i-old`);
+    // The swept rows' tenant-index markers went with them (deleted via the collection);
+    // a surviving row's marker is the positive control that the key format is right.
+    const markers = (await storage.kvList('hostextidx:kicktodo-invites:')).map((r) => r.key);
+    expect(markers).toContain(`hostextidx:kicktodo-invites:${T}:i-recent`);
+    expect(markers).not.toContain(`hostextidx:kicktodo-invites:${T}:i-old`);
   });
 });
 

@@ -7,6 +7,13 @@
  * guard, F2). Published pages there are not protocol responses (versioning
  * §1.4: a non-protocol response on a shared name MUST NOT carry the version).
  * The platform origin's protocol routes keep `OpenWOP-Version`.
+ *
+ * Tracker TST-CQG-4 (w68). Sabotage-witnessed: red when the custom-domain guard
+ * stops removing `OpenWOP-Version`, and when `x-powered-by` is re-enabled. The
+ * guard's `setHeader` override (which drops a LATER version write) is a second
+ * guard this test cannot reach: on every path here the negotiator stamps the
+ * header BEFORE the guard runs, so `removeHeader` is the one that strips it
+ * (w68 round 1: the override-only sabotage stayed green). Recorded ceiling.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -33,13 +40,17 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+/** Every JSON field this file reads (login, orgs, cms pages). */
+interface Body { user?: { tenantId?: string }; orgId: string; pageId: string; slug: string }
+interface Res { status: number; body: Body }
 function client() {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    for (const c of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
+    // JSON.parse is the typing boundary (every route here answers JSON, or 204 with no body).
+    const text = await res.text();
+    const out: Body = JSON.parse(text === '' ? '{}' : text);
     return { status: res.status, body: out };
   };
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b), del: (p: string) => call('DELETE', p) };
@@ -63,8 +74,12 @@ function rawGet(path: string, host: string, extra: Record<string, string> = {}):
 async function marketer(): Promise<{ user: ReturnType<typeof client>; orgId: string; tenantId: string }> {
   const user = client();
   const login = await user.post('/host/openwop-app/test/login', { email: `cd-${Date.now()}-${n++}@acme.test` });
+  expect(login.status).toBe(201);
   const org = await user.post('/host/openwop-app/orgs', { name: 'Domain Co' });
-  return { user, orgId: org.body.orgId, tenantId: login.body.user?.tenantId ?? '' };
+  expect(org.status).toBe(201);
+  const tenantId = login.body.user?.tenantId ?? '';
+  expect(tenantId).not.toBe('');
+  return { user, orgId: org.body.orgId, tenantId };
 }
 
 
@@ -75,18 +90,22 @@ describe('ADR 0940 P1 — white-label custom hosts', () => {
     await __resetCustomDomains();
     const { user, orgId, tenantId } = await marketer();
     const page = await user.post(`/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages`, { title: 'White Label Home' });
-    await user.post(`/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages/${page.body.pageId}/publish`);
+    expect(page.status).toBe(201);
+    const published = await user.post(`/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages/${page.body.pageId}/publish`);
+    expect(published.status).toBe(200);
     const added = await addDomain({ tenantId, orgId, createdBy: 'u', hostname: 'wl.acme.test' });
     await verifyDomain(tenantId, orgId, 'wl.acme.test', async () => [[added.verificationToken]]);
     invalidateHostCache();
     expect(await resolveCustomHost('wl.acme.test')).toEqual({ tenantId, orgId });
 
     const pagePath = `/host/openwop-app/public/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(page.body.slug)}`;
+    const guard404 = await rawGet('/host/openwop-app/orgs', 'wl.acme.test');
+    expect(guard404.status, 'a non-public path on a customer host is the guard 404').toBe(404);
     for (const [label, r] of [
       ['document /', await rawGet('/', 'wl.acme.test')],
       ['public page read', await rawGet(pagePath, 'wl.acme.test')],
       ['public page read with a protocol header', await rawGet(pagePath, 'wl.acme.test', { 'openwop-version': '2' })],
-      ['guard 404 (non-public path)', await rawGet('/host/openwop-app/orgs', 'wl.acme.test')],
+      ['guard 404 (non-public path)', guard404],
     ] as const) {
       expect(r.headers['x-powered-by'], label).toBeUndefined();
       expect(r.headers['openwop-version'], label).toBeUndefined();
@@ -99,7 +118,7 @@ describe('ADR 0940 P1 — white-label custom hosts', () => {
     // The platform origin is unchanged for the protocol, and never powered-by.
     const platform = await rawGet('/.well-known/openwop', `127.0.0.1:${PORT}`, { 'openwop-version': '2' });
     expect(platform.status).toBe(200);
-    expect(platform.headers['openwop-version']).toBeDefined();
+    expect(platform.headers['openwop-version']).toBe('2.0');
     expect(platform.headers['x-powered-by']).toBeUndefined();
   });
 });

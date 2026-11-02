@@ -76,8 +76,12 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 beforeEach(async () => {
-  const d = getToggleDefault('campaign-orchestration');
-  if (d) await saveConfig({ ...d, status: 'on' }, 'test');
+  // ADR 1020 D4 — the run tool refuses up front when Campaign Channels is off
+  // (the five channel children are gated on it), so a campaign needs both on.
+  for (const id of ['campaign-orchestration', 'campaign-channels']) {
+    const d = getToggleDefault(id);
+    if (d) await saveConfig({ ...d, status: 'on' }, 'test');
+  }
 });
 
 async function jf<T>(path: string, init: RequestInit = {}): Promise<{ status: number; body: T }> {
@@ -105,7 +109,7 @@ async function insertTaggedRun(tag: CampaignRunTag, extra: Partial<RunRecord> = 
     runId: `r-${Date.now()}-${n++}`, workflowId: fixtureWorkflowId, tenantId: TENANT, status: 'completed',
     inputs: {}, metadata: { campaignOrchestration: tag }, configurable: {}, createdAt: now, updatedAt: now, ...extra,
   };
-  await insertRunWithStartContext(storage, run);
+  await insertRunWithStartContext(storage, run, { admission: { plan: 'exempt:test-fixture' } });
   // A fork needs a source event to fork from.
   await getEventLog().append({ runId: run.runId, type: 'log.message', payload: { message: 'adr0941 fork point' } });
   return run;

@@ -12,9 +12,19 @@
  *    Commerce keeps `order.createdBy`. A purchase made after the erasure still grants.
  *
  * Every case runs through the real Commerce order lifecycle and the real observers.
+ *
+ * TST-DJB-3 (grade-tests wave 71). `Date` is faked per case (fixed start, advanced a
+ * minute between orders), so order `createdAt` stamps are ordered by construction,
+ * not by a real sleep. DOUBLE GUARD (entitlementService.ts `revokeOrderEntitlements`):
+ * "a refund of an OLDER order cannot claw back a newer purchase" is held by the
+ * candidate filter (`candidate.orderId !== order.orderId`) AND the re-read check
+ * (`e.orderId !== order.orderId`); either alone keeps it green, the re-probe breaks both.
+ * Red when: revoke resolves through the product's CURRENT link (KTCOM-D1); reconcile
+ * re-grants an erased buyer, or refuses a purchase made after the erasure (KTCOM-D2);
+ * a refund skips the anonymized row.
  */
 import { createHash } from 'node:crypto';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { registerGoalVerifier } from '../src/features/goals/goalVerifiers.js';
@@ -40,6 +50,11 @@ beforeAll(async () => {
   registerOrderPaidObserver(async (o) => void (await reprocessOrder(o, 'grant')));
   registerOrderRefundObserver(async (o) => void (await reprocessOrder(o, 'revoke')));
 });
+
+beforeEach(() => { vi.useFakeTimers({ toFake: ['Date'], now: new Date('2026-03-01T12:00:00.000Z') }); });
+afterEach(() => { vi.useRealTimers(); });
+/** Move the faked clock a minute on, so the next order is strictly newer. */
+const tick = (): void => { vi.setSystemTime(Date.now() + 60_000); };
 
 async function published(T: string, title: string): Promise<string> {
   const draft = await createDraft({
@@ -98,7 +113,7 @@ describe('KTCOM-D1 — a refund revokes what THIS order granted, whatever the li
     const challengeId = await published(T, 'Repurchased Course');
     const productId = await sellable(T, challengeId, 'Repurchased Course');
     const older = await paidOrder(T, productId, 'demo:pi-old');
-    await new Promise((r) => setTimeout(r, 5));
+    tick();
     const newer = await paidOrder(T, productId, 'demo:pi-new');
     expect((await getEntitlement(T, BUYER, challengeId, 1))?.orderId).toBe(newer);
 
@@ -125,7 +140,7 @@ describe('KTCOM-D2 — reconciliation does not undo a DSAR', () => {
     expect(await listEntitlementsFor(T, BUYER)).toHaveLength(0);
 
     // A NEW purchase after the erasure is a new fact and grants normally.
-    await new Promise((r) => setTimeout(r, 5));
+    tick();
     const fresh = await paidOrder(T, productId, 'demo:pi-after-erasure');
     expect(await getEntitlement(T, BUYER, challengeId, 1)).toMatchObject({ state: 'active', orderId: fresh });
   });

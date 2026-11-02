@@ -6,6 +6,9 @@
  * for the in-tree chain packs that were unpinned when the refusal landed. P3 pins
  * them; this test is what makes each pinning PR also delete its waiver, and what
  * stops a new unpinned pack from shipping behind the list.
+ *
+ * TST-CCP-2. Red when an in-tree chain pack ships an unpinned node reference, or the
+ * allowlist gains any entry (stale or not).
  */
 import { describe, expect, it } from 'vitest';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
@@ -46,7 +49,7 @@ describe('ADR 0766 D2 — unpinned chain-pack ratchet', () => {
   const packs = inTreeChainPacks();
 
   it('the scan found the in-tree chain packs (a vacuous scan would pass everything)', () => {
-    expect(packs.length).toBeGreaterThanOrEqual(60);
+    expect(packs.length).toBeGreaterThan(75); // measured 79 across the three roots (2026-10-29)
   });
 
   it('every UNPINNED in-tree chain pack is on the ratchet (a new one ships pinned)', () => {

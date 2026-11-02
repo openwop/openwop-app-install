@@ -11,8 +11,16 @@
  * It uses the app's OWN storage (`__hostExtStorage()`), because a second
  * `openStorage('memory://')` is a different sqlite instance — seeding into it
  * would test nothing.
+ *
+ * grade-tests w67 (TST-CBR-2): red when `createApp` stops calling
+ * `registerCardRunRecovery`, when the restore stops reading the `approval`
+ * pointer key, or when a `completed` run is restored. The global fan-out is
+ * fire-and-forget, so restores are awaited with `vi.waitFor`, and the
+ * "stays in Working" case first proves the fan-out reached that card (its
+ * outcome stamp landed, and a failed control card restored) before asserting
+ * the absence.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { Server } from 'node:http';
 import { createApp } from '../src/index.js';
 import { __hostExtStorage } from '../src/host/hostExtPersistence.js';
@@ -85,8 +93,12 @@ async function pickedCardWithRun(
   return card.id;
 }
 
-/** The global fan-out is fire-and-forget; let its microtasks drain. */
-const drain = () => new Promise((r) => setImmediate(r));
+/** The global fan-out is fire-and-forget: wait for the card to reach a column. */
+async function expectColumn(cardId: string, columnId: string, why?: string): Promise<void> {
+  await vi.waitFor(async () => {
+    expect((await getCard(cardId))?.columnId, why).toBe(columnId);
+  });
+}
 
 describe('ADR 0535 P3 — recovery is wired at boot', () => {
   it('a terminal run announced the way the executor announces it restores a heartbeat-picked card', async () => {
@@ -94,21 +106,16 @@ describe('ADR 0535 P3 — recovery is wired at boot', () => {
 
     // Exactly what `emitTerminalFailure` does — no test-only registration.
     notifyRunTerminal('boot-run-1', 'failed');
-    await drain();
 
-    expect(
-      (await getCard(cardId))?.columnId,
-      'if this is "working", registerCardRunRecovery never ran at boot and the feature is inert',
-    ).toBe('todo');
+    await expectColumn(cardId, 'todo', 'if this is "working", registerCardRunRecovery never ran at boot and the feature is inert');
   });
 
   it('and an approval-picked card, through the same boot registration', async () => {
     const cardId = await pickedCardWithRun('boot-run-2', 'approval');
 
     notifyRunTerminal('boot-run-2', 'failed');
-    await drain();
 
-    expect((await getCard(cardId))?.columnId).toBe('todo');
+    await expectColumn(cardId, 'todo');
   });
 
   it('a completed run leaves its card in Working', async () => {
@@ -129,7 +136,17 @@ describe('ADR 0535 P3 — recovery is wired at boot', () => {
     });
 
     notifyRunTerminal('boot-run-3', 'completed');
-    await drain();
+    // Control: a failed run announced AFTER it restores, so the fan-out has run
+    // (in order) by the time the completed card is read.
+    const controlId = await pickedCardWithRun('boot-run-3-control', 'heartbeat');
+    notifyRunTerminal('boot-run-3-control', 'failed');
+    await expectColumn(controlId, 'todo');
+    // The completed run's own handler reached the card: it stamps the outcome
+    // (ADR 0774 D3) before deciding not to restore. Then drain what follows.
+    await vi.waitFor(async () => {
+      expect((await getCard(card.id))?.lastRunStatus).toBe('completed');
+    });
+    for (let i = 0; i < 5; i += 1) await new Promise((r) => setImmediate(r));
 
     expect(
       (await getCard(card.id))?.columnId,

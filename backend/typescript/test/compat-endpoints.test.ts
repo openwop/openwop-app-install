@@ -2,6 +2,13 @@
  * Compat endpoint config — RFC 0108 / ADR 0121. Covers the §A.2 dark-by-default
  * advertise helper, the §A.3 opaque non-URL provider id, the §B declared→RFC-0031
  * capability mapping, the tenant-scoped store, and the dispatch-resolution seam.
+ * Tracker: TST-CGD-2.
+ *
+ * Red when: the advert stops being dark with no endpoints, or a multi-endpoint id
+ * stops carrying the opaque endpoint id; vision is reported as a model capability;
+ * the store's list stops filtering by org, or its key stops including the tenant
+ * (another tenant then reads `ep-1`); an unknown endpoint resolves to anything but
+ * `null`; or a transport error leaks the endpoint host.
  */
 import { describe, it, expect, beforeAll, afterEach } from 'vitest';
 import { createServer, type Server } from 'node:http';
@@ -83,6 +90,11 @@ describe('compat endpoint store + dispatch resolution (tenant-scoped)', () => {
     expect((await getCompatEndpoint('t1', 'ep-1'))?.baseUrl).toBe('https://vllm.internal/v1');
     const o1 = await listCompatEndpoints('t1', 'o1');
     expect(o1.map((e) => e.id)).toEqual(['ep-1']); // org filter excludes ep-2 (o2)
+    // Tenant-scoped: while ep-1 exists for t1, another tenant reads nothing —
+    // by id, by org, or through dispatch resolution.
+    expect(await getCompatEndpoint('t2', 'ep-1')).toBeNull();
+    expect(await listCompatEndpoints('t2', 'o1')).toEqual([]);
+    expect(await resolveCompatDispatch('t2', 'ep-1')).toBeNull();
     expect(await deleteCompatEndpoint('t1', 'ep-1')).toBe(true);
     expect(await getCompatEndpoint('t1', 'ep-1')).toBeNull();
     await deleteCompatEndpoint('t1', 'ep-2');

@@ -897,4 +897,6 @@ export const messages = {
   compactionLoadFailed: "The compaction setting could not be loaded.",
   compactionCountHelp: "Leave blank for {{n}}.",
   compactionSaved: "Compaction setting saved. It applies to the next run this agent starts.",
+  // ADR 1005 P3c — the agent workspace's Deployments tab (its console strings live in `agent-deployments`).
+  wsTabDeployments: "Deployments",
 } as const;

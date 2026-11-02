@@ -1,7 +1,14 @@
 /**
- * A3 — OpenAI + Google single-round tool-calling. Mocks `fetch` to verify the
- * request shape sent to each provider and the parsing of tool-call responses
- * into the shared `ToolsRoundResult`.
+ * OpenAI + Google single-round tool-calling (TST-CWA-4; the ADR 0101 tool-round
+ * fork, ADR 1001 no-tool turns). Mocks `fetch` with real `Response`s to verify
+ * the request each provider receives and the parsing of tool-call responses into
+ * the shared `ToolsRoundResult`.
+ *
+ * Red when (sabotage-witnessed, wave 69): tool-call arguments are not parsed, or
+ * the tool type is not `function` ("sends function tools"); the non-ok error
+ * drops `openai_<status>` ("throws on non-ok"); Gemini loses `systemInstruction`,
+ * keeps the system turn inside `contents`, or drops `usageMetadata` token counts
+ * ("maps system→systemInstruction").
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -27,11 +34,13 @@ function baseReq(overrides: Partial<ToolsRoundRequest> = {}): ToolsRoundRequest 
   };
 }
 
-function mockFetchOnce(jsonBody: unknown): { calls: Array<{ url: string; init: RequestInit }> } {
-  const calls: Array<{ url: string; init: RequestInit }> = [];
-  vi.stubGlobal('fetch', (url: string, init: RequestInit) => {
+interface Call { url: string; init: RequestInit }
+
+function mockFetchOnce(jsonBody: unknown, status = 200): { calls: Call[] } {
+  const calls: Call[] = [];
+  vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
     calls.push({ url, init });
-    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(jsonBody), text: () => Promise.resolve('') } as Response);
+    return new Response(typeof jsonBody === 'string' ? jsonBody : JSON.stringify(jsonBody), { status, headers: { 'content-type': 'application/json' } });
   });
   return { calls };
 }
@@ -47,11 +56,14 @@ describe('OpenAI tool round (A3)', () => {
 
     const res = await dispatchOpenAIToolsRound(baseReq());
 
-    const body = JSON.parse(calls[0]!.init.body as string);
-    expect(calls[0]!.url).toContain('api.openai.com');
+    const body = JSON.parse(calls[0]!.init.body as string) as { tools: Array<{ type: string; function: { name: string } }> };
+    const url = new URL(calls[0]!.url);
+    expect(url.origin).toBe('https://api.openai.com');
+    expect(url.pathname).toMatch(/^\/v\d+\/chat\/completions$/);
     expect((calls[0]!.init.headers as Record<string, string>).authorization).toBe('Bearer k');
-    expect(body.tools[0].type).toBe('function');
-    expect(body.tools[0].function.name).toBe('search');
+    expect(body.tools).toHaveLength(1);
+    expect(body.tools[0]!.type).toBe('function');
+    expect(body.tools[0]!.function.name).toBe('search');
     expect(res.text).toBe('ok');
     expect(res.toolUses).toEqual([{ id: 'tc1', name: 'search', input: { q: 'x' } }]);
     expect(res.inputTokens).toBe(11);
@@ -59,8 +71,8 @@ describe('OpenAI tool round (A3)', () => {
   });
 
   it('throws on non-ok', async () => {
-    vi.stubGlobal('fetch', () => Promise.resolve({ ok: false, status: 429, text: () => Promise.resolve('rate') } as Response));
-    await expect(dispatchOpenAIToolsRound(baseReq())).rejects.toThrow(/openai_429/);
+    mockFetchOnce('rate', 429);
+    await expect(dispatchOpenAIToolsRound(baseReq())).rejects.toThrow('openai_429: rate');
   });
 });
 
@@ -73,12 +85,17 @@ describe('Google (Gemini) tool round (A3)', () => {
 
     const res = await dispatchGoogleToolsRound(baseReq());
 
-    const body = JSON.parse(calls[0]!.init.body as string);
-    expect(calls[0]!.url).toContain('generativelanguage.googleapis.com');
+    const body = JSON.parse(calls[0]!.init.body as string) as {
+      systemInstruction: { parts: Array<{ text: string }> };
+      contents: unknown[];
+      tools: Array<{ functionDeclarations: Array<{ name: string }> }>;
+    };
+    expect(calls[0]!.url).toBe('https://generativelanguage.googleapis.com/v1beta/models/m:generateContent');
     expect((calls[0]!.init.headers as Record<string, string>)['x-goog-api-key']).toBe('k');
-    expect(body.systemInstruction.parts[0].text).toBe('be terse');
-    expect(body.contents[0].role).toBe('user'); // the non-system user turn
-    expect(body.tools[0].functionDeclarations[0].name).toBe('search');
+    expect(body.systemInstruction).toEqual({ parts: [{ text: 'be terse' }] });
+    // The system turn lives ONLY in systemInstruction — never also as a `user` content.
+    expect(body.contents).toEqual([{ role: 'user', parts: [{ text: 'find x' }] }]);
+    expect(body.tools[0]!.functionDeclarations[0]!.name).toBe('search');
     expect(res.text).toBe('sure');
     expect(res.toolUses).toEqual([{ id: 'gemini-search-0', name: 'search', input: { q: 'x' } }]);
     expect(res.inputTokens).toBe(7);

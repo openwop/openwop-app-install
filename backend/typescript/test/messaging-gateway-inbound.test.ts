@@ -50,6 +50,18 @@ describe('verifyDiscordSignature (Ed25519)', () => {
     expect(verifyDiscordSignature({ publicKeyHex, timestampHeader: oldTs, signatureHeader: signature, rawBody: body, now })).toEqual({ ok: false, reason: 'stale' });
   });
 
+  it('the replay window is FIVE minutes, pinned from both sides', () => {
+    // A boundary, not a far-away point: the stale case above (10 min) stayed
+    // green with the window widened to 9 min (w72 probe mgi-window).
+    const { publicKeyHex, privateKey } = ed25519Pair();
+    const at = (ageMs: number) => {
+      const t = String(Math.floor((now - ageMs) / 1000));
+      return verifyDiscordSignature({ publicKeyHex, timestampHeader: t, signatureHeader: sign(null, Buffer.from(`${t}${body}`, 'utf8'), privateKey).toString('hex'), rawBody: body, now });
+    };
+    expect(at(299_000)).toEqual({ ok: true });
+    expect(at(301_000)).toEqual({ ok: false, reason: 'stale' });
+  });
+
   it('rejects missing headers', () => {
     const { publicKeyHex } = ed25519Pair();
     expect(verifyDiscordSignature({ publicKeyHex, timestampHeader: undefined, signatureHeader: undefined, rawBody: body, now })).toEqual({ ok: false, reason: 'missing_headers' });
@@ -67,6 +79,10 @@ describe('verifyTelegramSecret (constant-time token)', () => {
   it('accepts a matching token, rejects a mismatch/missing', () => {
     expect(verifyTelegramSecret({ expected: 's3cret-token', provided: 's3cret-token' }).ok).toBe(true);
     expect(verifyTelegramSecret({ expected: 's3cret-token', provided: 'wrong' })).toEqual({ ok: false, reason: 'bad_signature' });
+    // SAME length, one byte off: the only input that reaches the constant-time
+    // compare (a different-length token is refused by the length check first,
+    // so the old fixture never exercised it — w72 probe mgi-tg-tse).
+    expect(verifyTelegramSecret({ expected: 's3cret-token', provided: 's3cret-tokex' })).toEqual({ ok: false, reason: 'bad_signature' });
     expect(verifyTelegramSecret({ expected: 's3cret-token', provided: undefined })).toEqual({ ok: false, reason: 'missing_headers' });
   });
 });

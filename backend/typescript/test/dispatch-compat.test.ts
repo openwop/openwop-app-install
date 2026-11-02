@@ -4,6 +4,16 @@
  * don't have: the SSRF egress check on the operator-supplied base URL, and the
  * §D `self-hosted-endpoint-no-disclosure` scrubbing (the endpoint location must
  * never appear in an error). Exercised through the public `dispatchChat`.
+ *
+ * TST-CVG-18. Every guard error is asserted by its EXACT message, so an error
+ * that echoes the endpoint (`compat_insecure_endpoint: http://…`) is red, not a
+ * substring match. Red when: the SSRF host check or the https check is dropped
+ * or echoes the URL, the missing / invalid base-URL guards are dropped or echo,
+ * or a transport failure is rethrown unscrubbed. Fixture hosts are RFC 6761
+ * `.invalid` so a sabotaged guard can never reach a real domain. The transport-
+ * scrub case overlaps `compat-endpoints.test.ts` "§D end-to-end" (that one goes
+ * through a configured endpoint); both are kept (dedupe-needs-human-ask row
+ * TST-CVG-18a).
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { createServer, type Server } from 'node:http';
@@ -53,13 +63,16 @@ describe('dispatchChat compat provider (RFC 0108 / ADR 0121)', () => {
 
   it('rejects http when private egress is OFF (https required)', async () => {
     delete process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE;
-    await expect(dispatchChat({ ...base, baseUrl: 'http://example.com/v1' })).rejects.toThrow('compat_insecure_endpoint');
+    const err = await dispatchChat({ ...base, baseUrl: 'http://compat-endpoint.invalid/v1' }).then(() => null, (e) => e as Error);
+    expect(err?.message).toBe('compat_insecure_endpoint'); // exact: §D, no URL echoed
   });
 
   it('rejects a missing or invalid base URL', async () => {
-    await expect(dispatchChat({ ...base, baseUrl: undefined })).rejects.toThrow('compat_no_base_url');
+    const missing = await dispatchChat({ ...base, baseUrl: undefined }).then(() => null, (e) => e as Error);
+    expect(missing?.message).toBe('compat_no_base_url');
     process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true';
-    await expect(dispatchChat({ ...base, baseUrl: 'not a url' })).rejects.toThrow('compat_invalid_base_url');
+    const invalid = await dispatchChat({ ...base, baseUrl: 'not a url' }).then(() => null, (e) => e as Error);
+    expect(invalid?.message).toBe('compat_invalid_base_url'); // exact: §D, the raw value is never echoed
   });
 
   it('dispatches against a reachable compat endpoint (happy path, private egress allowed)', async () => {

@@ -1,19 +1,12 @@
 /**
- * XCH-ENV-2 / XCH-ENV-5 (LLM-EXCHANGE-AUDIT Wave 5): the RFC 0021
- * `schema.request` channel finally has LIVE callers. Pins:
- *  1. `extractSchemaRequestEnvelope` finds exactly the fenced schema.request
- *     kind (prose, other kinds, and bad JSON are ignored);
- *  2. the managed chat tool loop answers a schema.request from the live
- *     registry and the model continues with the schemas in context — the
- *     advertised `schemaRounds` cap enforced;
- *  3. the `openwop:schema.lookup` tool serves all three schema families
- *     (node types, canvas component catalogs, artifact types).
+ * XCH-ENV-5 / XCH-INFRA-1 (LLM-EXCHANGE-AUDIT Wave 5): `openwop:schema.lookup`
+ * serves all three schema families (node types, canvas component catalogs,
+ * artifact types), and schema-read tool outputs are never compacted.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
-import { runChatToolLoop, extractSchemaRequestEnvelope } from '../src/host/agentDispatch.js';
 import { createAgentToolProvider } from '../src/host/agentToolProvider.js';
 
 let server: http.Server;
@@ -24,84 +17,6 @@ beforeAll(async () => {
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { void (server.address() as AddressInfo); res(); }); });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
-
-const REQUEST_ENVELOPE = {
-  type: 'schema.request',
-  envelopeId: 'env-test-1',
-  correlationId: 'corr-test-1',
-  // Per schemas/envelopes/schema.request.schema.json the payload names an
-  // ENVELOPE KIND — node/component schemas ride openwop:schema.lookup instead.
-  payload: { envelopeType: 'clarification.request' },
-  meta: { source: 'ai-generation', ts: '2026-07-13T00:00:00Z' },
-};
-const fenced = (v: unknown) => `Let me check the schema first.\n\`\`\`json\n${JSON.stringify(v)}\n\`\`\`\n`;
-
-describe('extractSchemaRequestEnvelope (XCH-ENV-2)', () => {
-  it('finds a fenced schema.request', () => {
-    const env = extractSchemaRequestEnvelope(fenced(REQUEST_ENVELOPE));
-    expect(env?.correlationId).toBe('corr-test-1');
-  });
-  it('ignores prose, other kinds, and invalid JSON', () => {
-    expect(extractSchemaRequestEnvelope('just prose about schema.request')).toBeNull();
-    expect(extractSchemaRequestEnvelope(fenced({ type: 'result', payload: {} }))).toBeNull();
-    expect(extractSchemaRequestEnvelope('```json\n{ not json\n```')).toBeNull();
-  });
-});
-
-describe('the live schema.request → schema.response loop (XCH-ENV-2)', () => {
-  it('answers from the registry and the model finishes with the schemas in context', async () => {
-    const seen: string[][] = [];
-    const replies = [
-      { content: fenced(REQUEST_ENVELOPE), toolCalls: [] },
-      { content: 'Final answer using core.noop.', toolCalls: [] },
-    ];
-    let call = 0;
-    const result = await runChatToolLoop(
-      {
-        provider: 'mock', model: 'm', credentialRef: '', systemPrompt: 's',
-        messages: [{ role: 'user', content: 'Ask me a clarifying question via envelope.' }],
-        tools: [], agentId: 'a1', persona: 'Probe',
-      },
-      {
-        callAIWithTools: async (req) => {
-          seen.push(req.messages.map((m) => `${m.role}:${typeof m.content === 'string' ? m.content : ''}`));
-          return replies[Math.min(call++, replies.length - 1)]!;
-        },
-        executeTool: async () => ({ content: '' }),
-      },
-    );
-    expect(result.finalText).toBe('Final answer using core.noop.');
-    expect(result.rounds).toBe(2);
-    // The second round's messages carry the OUT-OF-BAND schema injection for
-    // the requested envelope kind (per the wire, schema.response is the
-    // MODEL's optional ack — never the host's delivery vehicle).
-    const secondRound = seen[1]!.join('\n');
-    expect(secondRound).toContain("JSON Schema for envelope kind 'clarification.request'");
-    expect(secondRound).toContain('corr-test-1');
-    expect(secondRound).toContain('question');
-  });
-
-  it('enforces the advertised schemaRounds cap (3) — a loop of requests cannot spin forever', async () => {
-    let calls = 0;
-    const result = await runChatToolLoop(
-      {
-        provider: 'mock', model: 'm', credentialRef: '', systemPrompt: 's',
-        messages: [{ role: 'user', content: 'go' }],
-        tools: [], agentId: 'a1', persona: 'Probe', maxRounds: 10,
-      },
-      {
-        callAIWithTools: async () => {
-          calls += 1;
-          return { content: fenced({ ...REQUEST_ENVELOPE, envelopeId: `env-${calls}`, correlationId: `corr-${calls}` }), toolCalls: [] };
-        },
-        executeTool: async () => ({ content: '' }),
-      },
-    );
-    // 3 schema rounds answered, then the 4th request-bearing reply is FINAL.
-    expect(calls).toBe(4);
-    expect(result.finalText).toContain('schema.request');
-  });
-});
 
 describe('openwop:schema.lookup serves all three families (XCH-ENV-5 / XCH-ENV-3)', () => {
   const run = (input: Record<string, unknown>) =>

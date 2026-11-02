@@ -1,9 +1,17 @@
 /**
- * Sales Commissions — Phase 4 (ctx.features['sales-commissions'] surface + packs).
- * Surface: governed writes (compute/approve) enforce the run owner's
- * host:commissions:manage; system run denied; statement reads are subject-scoped.
+ * Sales Commissions — ADR 0280 Phase 4 + ADR 0820 G2 (the
+ * ctx.features['sales-commissions'] surface + packs). Tracker: TST-CGA-1.
+ *
+ * Surface: governed writes (compute/approve) enforce the RUN OWNER's
+ * host:commissions:manage; a system run (no acting user) is denied; statement
+ * reads are subject-scoped. R2 COM2-M3: approve SUBMITS for review, never applies.
  * Packs: node + agent manifests validate; writes are side-effectful + kept out of
  * the advisory agent's allowlist; index.mjs exports the node functions.
+ *
+ * Red when: `hasManage` grants a non-manager or a system run (surface.ts);
+ * `listStatements` stops filtering to the viewer's own subject (entities/statement.ts
+ * — the read fixture holds TWO subjects' statements, so a rep who could read the
+ * owner's statement shows up); the approve node returns success without a review.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -16,6 +24,7 @@ import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { buildCommissionSurface } from '../src/features/sales-commissions/surface.js';
+import { PACK_PINS } from '../src/features/packPins.js';
 
 let BASE: string;
 let server: http.Server;
@@ -30,31 +39,39 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+interface Res<T> { status: number; body: T }
 function client() {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as T;
     return { status: res.status, body: out };
   };
-  return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
+  return { post: <T>(p: string, b?: unknown) => call<T>('POST', p, b) };
 }
+interface LoginBody { user: { userId: string } }
+interface StatementRow { statementId: string; subjectId: string; status: string }
 let n = 0;
 
 describe('commissions P4 — governed surface writes + subject-scoped reads', () => {
   it('compute/approve require the run owner host:commissions:manage; system run denied; reads are subject-scoped', async () => {
     const tenantId = `org:commsurf-${Date.now()}-${n++}`;
     const owner = client();
-    const ownerId = (await owner.post('/host/openwop-app/test/login', { email: `o-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
+    const ownerId = (await owner.post<LoginBody>('/host/openwop-app/test/login', { email: `o-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
     const rep = client();
-    const repId = (await rep.post('/host/openwop-app/test/login', { email: `r-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
-    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
-    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'R', subject: repId, roles: ['editor'] });
+    const repId = (await rep.post<LoginBody>('/host/openwop-app/test/login', { email: `r-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
+    const orgId = (await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+    const added = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'R', subject: repId, roles: ['editor'] });
+    expect(added.status).toBe(201);
 
     const B = `/host/openwop-app/commissions/orgs/${encodeURIComponent(orgId)}`;
-    const planId = (await owner.post(`${B}/plans`, { name: 'P', currency: 'USD', assignment: { kind: 'rep', ref: repId }, effectiveFrom: '2026-01-01', rules: [{ basis: 'deal-won', type: 'fixed', rate: 100 }] })).body.planId;
+    const planRes = await owner.post<{ planId: string }>(`${B}/plans`, { name: 'P', currency: 'USD', assignment: { kind: 'rep', ref: repId }, effectiveFrom: '2026-01-01', rules: [{ basis: 'deal-won', type: 'fixed', rate: 100 }] });
+    expect(planRes.status, JSON.stringify(planRes.body)).toBe(201);
+    const planId = planRes.body.planId;
+    // A SECOND subject's plan, so subject-scoping has something to hide from the rep.
+    const ownerPlanRes = await owner.post<{ planId: string }>(`${B}/plans`, { name: 'P-owner', currency: 'USD', assignment: { kind: 'rep', ref: ownerId }, effectiveFrom: '2026-01-01', rules: [{ basis: 'deal-won', type: 'fixed', rate: 100 }] });
+    expect(ownerPlanRes.status, JSON.stringify(ownerPlanRes.body)).toBe(201);
     await owner.post(`/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}/deals`, { title: 'D', amount: 1000, owner: repId, closeDate: '2026-02-10', status: 'won' });
 
     const surfaceFor = (actingUserId?: string) => buildCommissionSurface({ tenantId, ...(actingUserId ? { actingUserId } : {}), runId: `run-${n++}` });
@@ -65,6 +82,10 @@ describe('commissions P4 — governed surface writes + subject-scoped reads', ()
     const computed = await surfaceFor(ownerId).computeStatement!({ orgId, planId, subjectId: repId, period: '2026-Q1' }) as { success: boolean; statement: { statementId: string } };
     expect(computed.success).toBe(true);
     const statementId = computed.statement.statementId;
+    // The owner's OWN statement (a different subject) — the row the rep must never see.
+    const ownerStmt = await surfaceFor(ownerId).computeStatement!({ orgId, planId: ownerPlanRes.body.planId, subjectId: ownerId, period: '2026-Q1' }) as { statement: { statementId: string } };
+    const statementsOf = async (actingUserId?: string): Promise<StatementRow[]> =>
+      (await surfaceFor(actingUserId).listStatements!({ orgId })).statements as StatementRow[];
 
     // approveStatement — same governance, and (R2 COM2-M3) it SUBMITS rather than
     // approves. This assertion used to read `approved.statement.status === 'approved'`,
@@ -77,15 +98,18 @@ describe('commissions P4 — governed surface writes + subject-scoped reads', ()
     expect(submitted.submittedForReview).toBe(true);
     expect(submitted.review.status).toBe('pending');
     // …and the statement itself has NOT moved.
-    expect(((await surfaceFor(ownerId).listStatements!({ orgId })).statements as Array<{ status: string }>)[0]!.status).toBe('draft');
+    expect((await statementsOf(ownerId)).find((s) => s.statementId === statementId)?.status).toBe('draft');
 
-    // Reads: subject-scoped. The rep's run sees their own statement; a manager sees all.
-    expect((await surfaceFor(repId).listStatements!({ orgId })).statements).toHaveLength(1);
-    expect((await surfaceFor(ownerId).listStatements!({ orgId })).statements).toHaveLength(1);
+    // Reads: subject-scoped. The rep's run sees ONLY their own statement — the
+    // owner's statement exists and is absent; a manager sees both.
+    const repView = await statementsOf(repId);
+    expect(repView.map((s) => s.statementId)).toEqual([statementId]);
+    expect(repView.some((s) => s.statementId === ownerStmt.statement.statementId)).toBe(false);
+    expect((await statementsOf(ownerId)).map((s) => s.statementId).sort()).toEqual([statementId, ownerStmt.statement.statementId].sort());
     // A system run (no owner) sees none (fail-closed).
-    expect((await surfaceFor(undefined).listStatements!({ orgId })).statements).toHaveLength(0);
+    expect(await statementsOf(undefined)).toHaveLength(0);
     // listPlans is open to any tenant-scoped run.
-    expect((await surfaceFor(repId).listPlans!({ orgId })).plans).toHaveLength(1);
+    expect((await surfaceFor(repId).listPlans!({ orgId })).plans).toHaveLength(2);
   });
 });
 
@@ -99,9 +123,10 @@ describe('feature.sales-commissions.nodes pack', () => {
   const manifest = JSON.parse(readFileSync(join(NODES_DIR, 'pack.json'), 'utf8')) as NodesManifest;
   it('declares 2 read + 2 governed (side-effectful) write nodes', () => {
     expect(manifest.name).toBe('feature.sales-commissions.nodes');
-    // R2 review — bumped with the approve-statement behaviour change (it submits now);
-    // 1.2.0 with ADR 0820 G2 (binds ctx.features['sales-commissions'], the gated id).
-    expect(manifest.version).toBe('1.2.0');
+    // The manifest version must equal the feature's pin (ADR 0919 PACK_PINS) — the
+    // boot installer resolves the pack at that version, so a mismatch ships a pack
+    // the feature does not require. A coordinated bump of both stays green.
+    expect(manifest.version).toBe(PACK_PINS['feature.sales-commissions.nodes']);
     expect(manifest.nodes).toHaveLength(4);
     for (const node of manifest.nodes) expect(node.role, node.typeId).toBe('action');
     const writes = manifest.nodes.filter((node) => node.capabilities.includes('side-effectful')).map((node) => node.typeId).sort();

@@ -3,6 +3,13 @@
  * Option C). Proves the host attaches the acting user's token ONLY through the
  * double gate (run allow-list × host-curated apiHost match), keyed on the acting
  * human, and stamps RFC 0079 provenance — plus the eTLD+1 matcher rejects spoofs.
+ *
+ * Tracker TST-CJB-3 (grade-tests w68). Red when: the matcher stops dot-anchoring
+ * (`endsWith(a)`); an adapterOnly provider is injectable; apiHost matching is
+ * skipped for an allow-listed provider WITH a usable connection; a system run (no
+ * acting user) resolves a user's credential; the run allow-list is ignored; or the
+ * connectionUse provenance stamp is dropped. The eTLD+1 case is duplicated (by
+ * design, protected) in connection-pack-apihosts + connection-pack-egress-seam.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -76,6 +83,7 @@ describe('connection injection at the egress seam (ADR 0024 §4 / Option C)', ()
     const meta = (await storage.getRun('run-inj'))?.metadata as Record<string, unknown> | undefined;
     const uses = meta?.connectionUse as Array<{ provider?: string; scopeAxis?: string }> | undefined;
     expect(uses?.[0]?.provider).toBe('testapi');
+    expect(uses?.[0]?.scopeAxis).toBe('user');
   });
 
   it('does NOT inject when the provider is not allow-listed by the run', async () => {
@@ -89,6 +97,14 @@ describe('connection injection at the egress seam (ADR 0024 §4 / Option C)', ()
     // google is allow-listed but its apiHost is googleapis.com — the loopback
     // request host doesn't match, so no token attaches.
     await drain(await safeFetchFor(['google'], 'u1')(`http://127.0.0.1:${port}/`));
+    expect(lastAuth).toBeUndefined();
+    // google has no connection for u1, so that leg alone is double-guarded. This
+    // leg withholds ONLY by host: an allow-listed provider WITH a usable user
+    // connection whose curated apiHost is elsewhere.
+    registerProvider({ id: 'testapi-elsewhere', label: 'Elsewhere', kind: 'bearer', authFlow: 'none', reach: 'openapi', scopes: { read: [] }, refreshable: false, defaultScopes: [], consumerNodes: ['core.openwop.http'], apiHosts: ['example.invalid'] });
+    await createSecretConnection({ tenantId: 'tinj', provider: 'testapi-elsewhere', kind: 'bearer', secret: 'ELSEWHERETOKEN', scope: 'user', userId: 'u1' });
+    lastAuth = undefined;
+    await drain(await safeFetchFor(['testapi-elsewhere'], 'u1')(`http://127.0.0.1:${port}/`));
     expect(lastAuth).toBeUndefined();
   });
 

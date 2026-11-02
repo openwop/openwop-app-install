@@ -34,6 +34,10 @@ vi.mock('../../../client/chatWidgetClient.js', async (orig) => ({
 // The page reads no toggle, so a hook mock here would be scenery that makes the
 // file look like it covers a gate.
 
+// ADR 1018 — the page now offers a roster picker (listAgents) and a "try in chat" deep
+// link (useNavigate), so it renders inside a router with the roster read stubbed.
+vi.mock('../../../client/agentsClient.js', () => ({ listAgents: vi.fn(async () => []) }));
+import { MemoryRouter } from 'react-router-dom';
 import { WidgetsPage } from '../WidgetsPage.js';
 import type { Widget } from '../../../client/chatWidgetClient.js';
 
@@ -41,7 +45,7 @@ const ORG = { orgId: 'o1', name: 'Acme' };
 const WIDGET: Widget = { widgetId: 'w1', agentId: 'a1', allowedDomains: ['example.com'], caps: {}, token: 'wgt_x', enabled: true };
 
 const mount = async (): Promise<void> => {
-  render(<WidgetsPage />);
+  render(<MemoryRouter><WidgetsPage /></MemoryRouter>);
   await act(async () => {});
 };
 

@@ -6,6 +6,7 @@
  */
 import { OpenwopError } from '../../types.js';
 import { DurableCollection, hostExtStorage } from '../../host/hostExtPersistence.js';
+import { casRewrite } from './casRewrite.js';
 import { ATTRIBUTION_MODELS, isAttributionModel, type AttributionModel } from './attributionModels.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
 import { createLogger } from '../../observability/logger.js';
@@ -88,7 +89,8 @@ export async function setAttributionSettings(tenantId: string, orgId: string, se
 export async function eraseAttributionSettingsActors(tenantId: string, forms: ReadonlySet<string>, tombstone: string): Promise<number> {
   let n = 0;
   for (const r of await rows.listForTenantIndexed(tenantId)) {
-    if (r.tenantId === tenantId && forms.has(r.updatedBy)) { await rows.put({ ...r, updatedBy: tombstone }); n += 1; }
+    if (r.tenantId !== tenantId || !forms.has(r.updatedBy)) continue;
+    if (await casRewrite(rows, `${r.tenantId}::${r.orgId}`, (x) => x.tenantId === tenantId && forms.has(x.updatedBy), (x) => ({ ...x, updatedBy: tombstone }), 'Attribution settings')) n += 1;
   }
   return n;
 }

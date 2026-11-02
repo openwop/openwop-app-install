@@ -213,6 +213,8 @@ export interface ConversationFetch {
    *  exchanged/closed turn in that window). On a from-0 fetch this is the whole
    *  thread; on a tail fetch it is just the newly-appended turns. */
   turns: ConversationTurn[];
+  /** ADR 1001 D7 — question cards and answered asks seen in the same slice. */
+  clarification?: ClarificationState;
   /** Highest event sequence observed (≥ sinceSeq) — pass back as the next cursor. */
   lastSeq: number;
 }
@@ -231,7 +233,34 @@ export async function fetchTurns(runId: string, sinceSeq = 0): Promise<Conversat
     if (typeof e.sequence === 'number' && e.sequence > lastSeq) lastSeq = e.sequence;
     return toRunEvent({ type: e.type, payload: e.payload });
   });
-  return { turns: reconstructConversation(events), lastSeq };
+  const clarification = clarificationStateFromEvents(events);
+  return { turns: reconstructConversation(events), lastSeq, ...(clarification.asks.length || clarification.answered.length ? { clarification } : {}) };
+}
+
+/** ADR 1001 D7 — the chat question cards (`clarification-requested`) and the
+ *  asks already answered (`clarification-answered`) in a slice of the run log. */
+export const CLARIFICATION_REQUESTED_EVENT = 'openwop-app.conversation.clarification-requested';
+export const CLARIFICATION_ANSWERED_EVENT = 'openwop-app.conversation.clarification-answered';
+export interface ClarificationState {
+  asks: Array<{ askId: string; data: unknown }>;
+  answered: string[];
+  /** Wire ids of answer turns that were a Skip (shown in the viewer's language). */
+  skippedTurns: string[];
+}
+export function clarificationStateFromEvents(events: ReadonlyArray<{ type?: string; payload?: unknown }>): ClarificationState {
+  const asks: ClarificationState['asks'] = [];
+  const answered: string[] = [];
+  const skippedTurns: string[] = [];
+  for (const e of events) {
+    const p = (e.payload ?? {}) as { askId?: unknown; data?: unknown; skipped?: unknown; turnMessageId?: unknown };
+    if (typeof p.askId !== 'string' || !p.askId) continue;
+    if (e.type === CLARIFICATION_REQUESTED_EVENT && p.data && typeof p.data === 'object') asks.push({ askId: p.askId, data: p.data });
+    else if (e.type === CLARIFICATION_ANSWERED_EVENT) {
+      answered.push(p.askId);
+      if (p.skipped === true && typeof p.turnMessageId === 'string') skippedTurns.push(p.turnMessageId);
+    }
+  }
+  return { asks, answered, skippedTurns };
 }
 
 /** Provider selection carried into the conversation run (mirrors the per-turn
@@ -412,6 +441,22 @@ export function contextDegradedFromEvent(
 }
 
 /**
+ * ADR 1003 D5 — how many earlier turns THIS exchange's transcript window left
+ * out of what the model saw. The backend emits
+ * `openwop-app.conversation.context-budgeted` with a count only; anything else
+ * (an older exchange's event, a non-positive or non-integer count) is ignored.
+ */
+export function contextBudgetedFromEvent(
+  ev: { type?: string; sequence?: number; payload?: unknown },
+  startSeq: number,
+): number | null {
+  if (ev.type !== 'openwop-app.conversation.context-budgeted') return null;
+  if (typeof ev.sequence !== 'number' || ev.sequence <= startSeq) return null;
+  const n = (ev.payload as { omittedTurns?: unknown } | undefined)?.omittedTurns;
+  return typeof n === 'number' && Number.isInteger(n) && n > 0 ? n : null;
+}
+
+/**
  * RCL-UX-1 — did THIS exchange's composition draw on twin borrowed recall?
  * The backend emits `openwop-app.conversation.recall-used` (best-effort) when
  * owner-corpus chunks were actually composed; the send path uses it to stamp
@@ -513,6 +558,8 @@ export async function openConversationSession(cfg: ConversationProviderConfig = 
 export interface SendResult {
   turns: ConversationTurn[];
   lastSeq: number;
+  /** ADR 1001 D7 — see `ConversationFetch.clarification`. */
+  clarification?: ClarificationState;
   /** ADR 0173 — a non-blocking soft-warning the exchange ack carried (the org is
    *  approaching its BYOK daily spend cap). Absent on a normal turn. */
   notice?: ExchangeNotice;
@@ -528,7 +575,7 @@ export async function sendConversationTurn(
   nodeId: string,
   // `content` may be a multimodal ContentPart[] (attachment turns) — turn content is
   // opaque on the RFC 0005 wire; the exchange client already posts it verbatim.
-  input: { content: string | readonly ContentPart[]; to?: string; exchangeKey?: string; webSearch?: boolean; model?: string; provider?: string },
+  input: { content: string | readonly ContentPart[]; to?: string; exchangeKey?: string; webSearch?: boolean; model?: string; provider?: string; permissionMode?: 'safe' | 'bypass'; clarificationAnswer?: { askId: string; answers: unknown } },
   sinceSeq = 0,
 ): Promise<SendResult> {
   const { notice } = await exchange(runId, nodeId, input);

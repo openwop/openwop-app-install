@@ -57,15 +57,15 @@ describe('routeTurn — a single difficultyAtLeast cost rule', () => {
 describe('config validation — difficultyAtLeast', () => {
   it('accepts a valid level', () => {
     const cfg = validateRouterConfig({
-      rules: [{ when: { kind: 'difficultyAtLeast', level: 'medium' }, target: { provider: 'anthropic', model: 'y' } }],
-      fallback: { provider: 'anthropic', model: 'y' },
+      rules: [{ when: { kind: 'difficultyAtLeast', level: 'medium' }, target: { provider: 'anthropic', model: 'claude-haiku-4-5' } }],
+      fallback: { provider: 'anthropic', model: 'claude-haiku-4-5' },
     });
     expect(cfg.rules[0]!.when).toEqual({ kind: 'difficultyAtLeast', level: 'medium' });
   });
   it('rejects a bad level', () => {
     expect(() => validateRouterConfig({
-      rules: [{ when: { kind: 'difficultyAtLeast', level: 'extreme' }, target: { provider: 'anthropic', model: 'y' } }],
-      fallback: { provider: 'anthropic', model: 'y' },
+      rules: [{ when: { kind: 'difficultyAtLeast', level: 'extreme' }, target: { provider: 'anthropic', model: 'claude-haiku-4-5' } }],
+      fallback: { provider: 'anthropic', model: 'claude-haiku-4-5' },
     })).toThrow(/difficultyAtLeast/);
   });
 });

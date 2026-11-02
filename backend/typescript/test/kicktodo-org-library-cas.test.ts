@@ -8,7 +8,9 @@
  * or resurrected the removed entry.
  *
  * The removal-to-empty half matters because KTORG-D1 requires an empty library
- * to be NO row and `Storage` has no compare-and-delete. The service claims an
+ * to be NO row, and the service was written when `Storage` had no
+ * compare-and-delete (`kvCompareAndDelete` arrived later, 206ee7f54, 2026-10-25;
+ * the service still uses the claim below). The service claims an
  * EMPTYING row by CAS, then deletes; a writer never builds on an empty row, and a
  * stale one (crashed claimant) is retired rather than wedging the library.
  *
@@ -16,6 +18,10 @@
  * (cases 1 and 2 red); a bare delete without the emptying
  * CAS claim (case 5 red); dropping the stale-retire branch (case 3 red); letting a
  * writer build on a fresh emptying row (case 4 red).
+ *
+ * TST-DJF-2 (grade-tests wave 71): the read barrier releases after 2 s even if the
+ * second racer never reads, and the racing cases assert BOTH racers arrived — a
+ * race that was not forced is red, never a hang or a silent pass.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -33,6 +39,15 @@ const libraries = () => new DurableCollection<OrgChallengeLibrary>('kicktodo-org
  *  Without it the add's extra `getChallenge` await let the removal finish first
  *  and the "race" ran sequentially (measured: case 2 passed on the old code). */
 let barrier: { key: string; n: number; waiting: Array<() => void> } | null = null;
+/** How many reads the most recent barrier saw (asserted by the racing cases). */
+let barrierArrivals = 0;
+function armBarrier(key: string): void {
+  barrierArrivals = 0;
+  const b = { key, n: 2, waiting: [] as Array<() => void> };
+  barrier = b;
+  // Fallback: release whoever arrived, so a missed race fails the arrivals assert.
+  setTimeout(() => { if (barrier === b) { barrier = null; for (const r of b.waiting) r(); } }, 2_000);
+}
 
 beforeAll(async () => {
   const real = await openStorage('memory://');
@@ -40,6 +55,7 @@ beforeAll(async () => {
   real.kvGet = async (key: string) => {
     const b = barrier;
     if (b && key.endsWith(b.key)) {
+      barrierArrivals += 1;
       await new Promise<void>((resolve) => {
         b.waiting.push(resolve);
         if (b.waiting.length === b.n) { barrier = null; for (const r of b.waiting) r(); }
@@ -94,22 +110,24 @@ const ids = (lib: OrgChallengeLibrary | null): string[] => (lib?.entries ?? []).
 describe('KTORG-2 — concurrent org library edits', () => {
   it('two concurrent adds both land', async () => {
     const [a, b] = [await published('A'), await published('B')];
-    barrier = { key: `${T}::org-1`, n: 2, waiting: [] };
+    armBarrier(`${T}::org-1`);
     await Promise.all([
       setLibraryEntry(T, 'org-1', 'user:c1', { challengeId: a, version: 1, present: true }),
       setLibraryEntry(T, 'org-1', 'user:c2', { challengeId: b, version: 1, present: true }),
     ]);
+    expect(barrierArrivals, 'the race was not forced').toBe(2);
     expect(ids(await getLibrary(T, 'org-1')), 'one concurrent add was lost').toEqual([a, b].sort());
   });
 
   it('removing the last entry while another is added keeps exactly the added one', async () => {
     const [x, y] = [await published('X'), await published('Y')];
     await setLibraryEntry(T, 'org-2', 'user:c1', { challengeId: x, version: 1, present: true });
-    barrier = { key: `${T}::org-2`, n: 2, waiting: [] };
+    armBarrier(`${T}::org-2`);
     await Promise.all([
       setLibraryEntry(T, 'org-2', 'user:c1', { challengeId: x, version: 1, present: false }),
       setLibraryEntry(T, 'org-2', 'user:c2', { challengeId: y, version: 1, present: true }),
     ]);
+    expect(barrierArrivals, 'the race was not forced').toBe(2);
     expect(ids(await getLibrary(T, 'org-2')), 'the add was deleted, or the removal was undone').toEqual([y]);
   });
 
@@ -133,12 +151,13 @@ describe('KTORG-2 — concurrent org library edits', () => {
     // the adder's CAS (from the same [x]) lands first and the delete erases it.
     const [x, y] = [await published('X5'), await published('Y5')];
     await setLibraryEntry(T, 'org-5', 'user:c1', { challengeId: x, version: 1, present: true });
-    barrier = { key: `${T}::org-5`, n: 2, waiting: [] };
+    armBarrier(`${T}::org-5`);
     armDeleteGate(`${T}::org-5`);
     await Promise.all([
       setLibraryEntry(T, 'org-5', 'user:c1', { challengeId: x, version: 1, present: false }),
       setLibraryEntry(T, 'org-5', 'user:c2', { challengeId: y, version: 1, present: true }),
     ]);
+    expect(barrierArrivals, 'the race was not forced').toBe(2);
     expect(ids(await getLibrary(T, 'org-5')), 'the delete erased a concurrent add').toEqual([y]);
   });
 });

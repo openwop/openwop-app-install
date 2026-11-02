@@ -248,3 +248,26 @@ read verbatim after — so the rule applies to conversations group-typed at thei
 first turn (canonical board chats via `ensureBoardChat`, the incident's case);
 an in-place `@@` summon into an existing chat keeps its original stamp. The
 per-exchange ModelSwitcher override still beats the stamp.
+
+> **CORRECTED 2026-10-31 (ADR 1016) — the stamp, the per-org config and the
+> credential-blind decision are superseded.** Measured on `e6e1e27b2`:
+> - The console wrote configs per org, while the chat read only the workspace
+>   root. 17 of 30 production orgs could hold a config that no chat would ever read.
+> - The "per-turn" router stamped once, on a conversation's first message, and
+>   then judged nothing again. That contradicts the replay section above, which
+>   says new turns route "by the rules (a new decision, freshly stamped)".
+> - A rule could name a provider the conversation's key did not cover. That
+>   broke the conversation for good: every later turn failed with
+>   `explicit_ref_wrong_provider`.
+>
+> ADR 1016 changes four things:
+> - The config is now one per workspace.
+> - The route is decided on every exchange and never stamped. Chat exchanges are
+>   never re-dispatched, and ADR 0986 records what answered each turn, so this
+>   costs nothing in replay safety.
+> - A rule may only target a catalog model of the provider the conversation's
+>   key belongs to.
+> - Writes need `host:byok:manage`, which closes `MRC-1`.
+>
+> The "CRITICAL design point" above remains right about a decision that is
+> *re-dispatched*. A chat exchange is not one.

@@ -229,6 +229,11 @@ const HOLD_CONSULT: Record<string, Consult> = {
 
   // ── state transitions that DELETE nothing ────────────────────────────────
   'executor/approvalGateTimeout.ts#sweepExpiredApprovalGates': { mode: 'exempt', reason: 'times out due approval gates (writes an interrupt resolution); deletes no row', pin: { kind: 'no-delete-token' } },
+  // ADR 1001 D6 — the same shape as the approval-gate sweep: an overdue agent
+  // clarification is RESOLVED with the spec's empty answer and its run resumes;
+  // no row is deleted, so there is nothing a legal hold must stop. (Its
+  // checkpoint rows go with the run through `deleteRun`, already censused.)
+  'host/interruptExpiry.ts#sweepExpiredPrompts': { mode: 'exempt', reason: 'resolves overdue expiring prompts (an interrupt resolution + resume through the one choke point); deletes no row', pin: { kind: 'no-delete-token' } },
   'features/claude-code/tasks.ts#sweepExpiredTasks': { mode: 'exempt', reason: 'expires an overdue dispatched task (a status CAS + a run resume as maybe_executed); deletes no row', pin: { kind: 'no-delete-token' } },
   'features/commerce/commerceService.ts#sweepExpiredReservations': { mode: 'exempt', reason: 'pending→canceled order transition; the due-index row is derived state cleared via `clearReservationDue`', pin: { kind: 'no-delete-token' } },
   'host/collab/collabRoom.ts#__runCollabHeartbeatOnce': { mode: 'exempt', reason: 'lease refresh + flush retry for in-process rooms; durable state is PUT, never deleted', pin: { kind: 'no-delete-token' } },

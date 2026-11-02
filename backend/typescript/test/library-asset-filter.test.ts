@@ -3,6 +3,10 @@
  * library, not a run log. `isLibraryAsset` keeps documents + media + typed/file run
  * artifacts and drops the raw inline run-output fallback (kind data/text/markdown,
  * no artifactTypeId) that produced the `{`-named rows.
+ *
+ * TST-DKE-3 (grade-tests wave 72). Red when (w72 probes): run-event raw outputs
+ * are kept (lib-raw), run-event file links are dropped (lib-file), or non-run
+ * sources (documents, media) stop being kept unconditionally (lib-source).
  */
 import { describe, it, expect } from 'vitest';
 import { isLibraryAsset, type ArtifactProjection } from '../src/host/artifactProjection.js';

@@ -13,12 +13,14 @@
 import http from 'node:http';
 import { readFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { createAgentToolProvider, builtinAgentToolIds } from '../src/host/agentToolProvider.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createOrg } from '../src/host/accessControlService.js';
+import { createProduct } from '../src/features/commerce/commerceService.js';
+import { createPromotion } from '../src/features/promotions/promotionsService.js';
 import {
   DISCOVERY_SEARCH_TOOL_ID, DISCOVERY_LIST_COLLECTIONS_TOOL_ID, DISCOVERY_LIST_RULES_TOOL_ID,
   DISCOVERY_CREATE_COLLECTION_TOOL_ID, DISCOVERY_CREATE_RULE_TOOL_ID,
@@ -31,6 +33,8 @@ import {
 } from '../src/features/promotions/agentTools.js';
 
 const TENANT = 'default';
+let ORG = '';
+let seq = 0;
 
 let server: http.Server;
 beforeAll(async () => {
@@ -39,8 +43,18 @@ beforeAll(async () => {
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { void (server.address() as AddressInfo); res(); }); });
   // The sole org auto-resolves; its owner (`u-1`) holds workspace:write.
-  await createOrg({ tenantId: TENANT, createdBy: 'u-1', name: 'Acme', ownerSubject: 'u-1' });
+  ORG = (await createOrg({ tenantId: TENANT, createdBy: 'u-1', name: 'Acme', ownerSubject: 'u-1' })).orgId;
 });
+
+// Every case starts with every feature it touches ON — cases used to inherit a
+// toggle another case had switched, which made them order-dependent.
+beforeEach(async () => {
+  for (const id of ['discovery', 'recommendations', 'promotions', 'commerce']) await setFeature(id, 'on');
+});
+
+/** A product only this case created, so a non-empty read is this case's own row. */
+const seedProduct = async (): Promise<string> =>
+  (await createProduct({ tenantId: TENANT, orgId: ORG, createdBy: 'u-1', type: 'physical', name: `Seeded camera ${seq++}`, price: 120, currency: 'USD', categories: ['camera'] })).productId;
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 const setFeature = async (id: string, status: 'on' | 'off'): Promise<void> => {
@@ -85,18 +99,38 @@ describe('merchandising agent tools — registration + pack allowlist parity', (
 
 describe('discovery curator tools', () => {
   it('search: read fails EMPTY without an acting user (no system-turn enumeration)', async () => {
-    await setFeature('discovery', 'on');
+    const pid = await seedProduct();
+    // Positive control: the same read WITH the acting user sees the product, so
+    // the empty answer below is the gate, not an empty catalog.
+    const withUser = await provider({ actingUserId: 'u-1' }).executeTool({ name: DISCOVERY_SEARCH_TOOL_ID, input: {} });
+    expect(parse(withUser).productIds).toContain(pid);
     const out = await provider().executeTool({ name: DISCOVERY_SEARCH_TOOL_ID, input: {} });
     expect(out.isError).toBeFalsy();
     expect(parse(out)).toEqual({ productIds: [], facets: [] });
   });
 
-  it('search: toggle-off is a toggle-honest EMPTY read, not an error', async () => {
-    await setFeature('discovery', 'off');
-    const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: DISCOVERY_SEARCH_TOOL_ID, input: {} });
+  it('search: a FOREIGN org is an EMPTY read, not an error or a leak', async () => {
+    const pid = await seedProduct();
+    const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: DISCOVERY_SEARCH_TOOL_ID, input: { orgId: 'org-not-in-this-workspace' } });
     expect(out.isError).toBeFalsy();
     expect(parse(out)).toEqual({ productIds: [], facets: [] });
-    await setFeature('discovery', 'on');
+    // Control: the caller's own org sees it.
+    const own = await provider({ actingUserId: 'u-1' }).executeTool({ name: DISCOVERY_SEARCH_TOOL_ID, input: { orgId: ORG } });
+    expect(parse(own).productIds).toContain(pid);
+  });
+
+  it('search: toggle-off is a toggle-honest EMPTY read, not an error', async () => {
+    const pid = await seedProduct();
+    const on = await provider({ actingUserId: 'u-1' }).executeTool({ name: DISCOVERY_SEARCH_TOOL_ID, input: {} });
+    expect(parse(on).productIds).toContain(pid); // the catalog is NOT empty
+    await setFeature('discovery', 'off');
+    try {
+      const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: DISCOVERY_SEARCH_TOOL_ID, input: {} });
+      expect(out.isError).toBeFalsy();
+      expect(parse(out)).toEqual({ productIds: [], facets: [] });
+    } finally {
+      await setFeature('discovery', 'on');
+    }
   });
 
   it('create-collection: write fails TYPED without an acting user', async () => {
@@ -135,10 +169,14 @@ describe('discovery curator tools', () => {
 
 describe('recommendations merchandiser tools', () => {
   it('resolve: read fails EMPTY without an acting user', async () => {
-    await setFeature('recommendations', 'on');
+    // Positive control: a configured slot resolves to its placement for u-1.
+    const created = await provider({ actingUserId: 'u-1' }).executeTool({ name: RECOMMENDATIONS_CREATE_PLACEMENT_TOOL_ID, input: { slot: 'pdp', source: 'upsell' } });
+    expect(created.isError).toBeFalsy();
+    const withUser = await provider({ actingUserId: 'u-1' }).executeTool({ name: RECOMMENDATIONS_RESOLVE_TOOL_ID, input: { slot: 'pdp' } });
+    expect(parse(withUser).placementId).toBeTruthy();
     const out = await provider().executeTool({ name: RECOMMENDATIONS_RESOLVE_TOOL_ID, input: { slot: 'pdp' } });
     expect(out.isError).toBeFalsy();
-    expect(parse(out)).toMatchObject({ products: [], placementId: null });
+    expect(parse(out)).toEqual({ products: [], placementId: null });
   });
 
   it('resolve: an invalid slot is a TYPED validation error', async () => {
@@ -166,7 +204,14 @@ describe('recommendations merchandiser tools', () => {
 
 describe('promotions manager tools', () => {
   it('list: read fails EMPTY without an acting user', async () => {
-    await setFeature('promotions', 'on');
+    const drafted = await provider({ actingUserId: 'u-1' }).executeTool({
+      name: PROMOTIONS_DRAFT_TOOL_ID,
+      input: { name: `Seeded ${seq++}`, type: 'cart_threshold', reward: { kind: 'percentage', value: 5 }, minSpend: 10 },
+    });
+    expect(drafted.isError).toBeFalsy();
+    // Positive control: u-1 sees the draft, so EMPTY below is the gate.
+    const withUser = await provider({ actingUserId: 'u-1' }).executeTool({ name: PROMOTIONS_LIST_TOOL_ID, input: {} });
+    expect((parse(withUser).promotions as { promotionId: string }[]).map((x) => x.promotionId)).toContain(parse(drafted).promotionId);
     const out = await provider().executeTool({ name: PROMOTIONS_LIST_TOOL_ID, input: {} });
     expect(out.isError).toBeFalsy();
     expect(parse(out)).toEqual({ promotions: [] });
@@ -205,7 +250,13 @@ describe('promotions manager tools', () => {
   });
 
   it('apply-preview: read fails EMPTY without an acting user', async () => {
-    const out = await provider().executeTool({ name: PROMOTIONS_APPLY_PREVIEW_TOOL_ID, input: { items: [{ productId: 'p1', unitPrice: 50, quantity: 3 }] } });
+    // An ACTIVE promotion that fires on this cart (150 ≥ 100 → 10%), so u-1's
+    // preview is non-zero and the user-less zero below is the gate.
+    await createPromotion({ tenantId: TENANT, orgId: ORG, createdBy: 'u-1', name: `Live ${seq++}`, type: 'cart_threshold', reward: { kind: 'percentage', value: 10 }, minSpend: 100, active: true });
+    const items = [{ productId: 'p1', unitPrice: 50, quantity: 3 }];
+    const withUser = await provider({ actingUserId: 'u-1' }).executeTool({ name: PROMOTIONS_APPLY_PREVIEW_TOOL_ID, input: { items } });
+    expect(parse(withUser).discount).toBeGreaterThan(0);
+    const out = await provider().executeTool({ name: PROMOTIONS_APPLY_PREVIEW_TOOL_ID, input: { items } });
     expect(out.isError).toBeFalsy();
     expect(parse(out)).toEqual({ discount: 0, appliedPromotions: [] });
   });

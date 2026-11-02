@@ -17,9 +17,19 @@
  *   7. Happy path: signed-in tenant under cap → dispatch succeeds and
  *      usage is incremented. Result uses USER-FACING provider/model ids
  *      (underlying `minimax` / `MiniMax-M2` MUST NOT appear on the result).
+ *   8. MMXC-1 / ADR 0611 — the per-tenant cache-scope sentinel leads the system
+ *      prompt; ADR 0786 D6 + ADR 0821 D2 — the prepaid draw discounts cached
+ *      reads past the free allowance while the cap rail keeps full weight.
+ *
+ * Hermetic: `fetch` fails closed in every case (a broken gate can never reach the
+ * live MiniMax API), Date is faked to one UTC day, and every env key a case sets
+ * is restored after it.
  */
 
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { openStorage } from '../src/storage/index.js';
 import { resetCachedMasterKey } from '../src/byok/encryption.js';
 import {
@@ -28,6 +38,7 @@ import {
   bootstrapManagedProvider,
   configureManagedProvider,
   dispatchManagedChat,
+  dispatchManagedToolsRound,
   getManagedProviderStatuses,
   isManagedCredentialRef,
   ManagedProviderError,
@@ -38,29 +49,48 @@ import { setManagedBalanceProvider } from '../src/host/managedBalanceHook.js';
 
 // Deterministic master key so encrypt/decrypt is stable across the run.
 const TEST_MASTER_KEY = 'a'.repeat(64);
+/** The one UTC day every case runs on (Date is faked per case). */
+const DAY = '2026-06-15';
+/** Every env key a case sets, snapshotted at load and restored after EVERY case. */
+const ENV_KEYS = [
+  'OPENWOP_BYOK_ENCRYPTION_KEY',
+  'OPENWOP_MANAGED_DAILY_TOKEN_CAP',
+  'MINIMAX_API_KEY',
+  'OPENWOP_MANAGED_ANON_SIGNIN_REQUIRED',
+  'OPENWOP_MANAGED_GLOBAL_DAILY_TOKEN_CAP',
+  'OPENWOP_MANAGED_SYSTEM_PROMPT',
+] as const;
+const ENV_AT_LOAD: Record<string, string | undefined> = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
 
 let storage: Storage;
 
 async function freshSetup(): Promise<void> {
   storage = await openStorage('memory://');
-  configureManagedProvider({ storage, dataDir: '/tmp/openwop-managed-test' });
+  configureManagedProvider({ storage, dataDir: mkdtempSync(join(tmpdir(), 'owp-managed-')) });
   _clearManagedCacheForTests();
   resetCachedMasterKey();
 }
 
-beforeAll(() => {
+beforeEach(async () => {
+  vi.useFakeTimers({ toFake: ['Date'], now: Date.UTC(2026, 5, 15, 12) });
   process.env.OPENWOP_BYOK_ENCRYPTION_KEY = TEST_MASTER_KEY;
   process.env.OPENWOP_MANAGED_DAILY_TOKEN_CAP = '100';
-});
-
-beforeEach(async () => {
-  await freshSetup();
   delete process.env.MINIMAX_API_KEY;
+  // Fail CLOSED on the network. A gate that broke would otherwise dispatch to the
+  // live MiniMax API with a fake key; each case's own `mock…Once` answers first.
+  vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('managed-provider.test: unexpected network call'));
+  await freshSetup();
 });
 
 afterEach(async () => {
   await storage.close();
   vi.restoreAllMocks();
+  vi.useRealTimers();
+  for (const k of ENV_KEYS) {
+    const v = ENV_AT_LOAD[k];
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
 });
 
 describe('isManagedCredentialRef / managedProviderIdFromRef', () => {
@@ -95,6 +125,7 @@ describe('bootstrapManagedProvider', () => {
     process.env.MINIMAX_API_KEY = 'sk-stable';
     await bootstrapManagedProvider();
     const first = await storage.getEncryptedSecret('managed:openwop-free');
+    expect(first, 'precondition: the first bootstrap wrote a row').toBeTruthy();
     _clearManagedCacheForTests();
     await bootstrapManagedProvider();
     const second = await storage.getEncryptedSecret('managed:openwop-free');
@@ -114,6 +145,11 @@ describe('bootstrapManagedProvider', () => {
     // Different plaintext → rotation → cipher row replaced.
     expect(second).not.toBe(first);
     expect(second).not.toContain('sk-rotated');
+    // The sealed value must round-trip to the NEW key, not merely differ.
+    mockMiniMaxSseOnce('ok', 1, 1);
+    await dispatchManagedChat({ userFacingProvider: 'openwop-free', tenantId: 'user:rotated', messages: [{ role: 'user', content: 'hi' }] });
+    const init = vi.mocked(globalThis.fetch).mock.calls.at(-1)?.[1];
+    expect(new Headers(init?.headers).get('authorization')).toBe('Bearer sk-rotated');
   });
 });
 
@@ -183,7 +219,7 @@ describe('dispatchManagedChat — gating', () => {
     await bootstrapManagedProvider();
 
     // Pre-seed usage at the cap (cap is 100 for the test env).
-    const date = new Date().toISOString().slice(0, 10);
+    const date = DAY;
     await storage.incrementManagedUsage('user:alice', 'openwop-free', date, 60, 40);
 
     await expect(
@@ -204,7 +240,7 @@ describe('dispatchManagedChat — gating', () => {
     process.env.OPENWOP_MANAGED_GLOBAL_DAILY_TOKEN_CAP = '500';
     try {
       await bootstrapManagedProvider();
-      const date = new Date().toISOString().slice(0, 10);
+      const date = DAY;
       await storage.incrementManagedUsage(GLOBAL_USAGE_TENANT, 'openwop-free', date, 300, 200);
 
       await expect(
@@ -226,7 +262,7 @@ describe('dispatchManagedChat — gating', () => {
     // daily_limit_reached after clearing the key).
     process.env.MINIMAX_API_KEY = 'sk-test';
     await bootstrapManagedProvider();
-    const date = new Date().toISOString().slice(0, 10);
+    const date = DAY;
     await storage.incrementManagedUsage(GLOBAL_USAGE_TENANT, 'openwop-free', date, 9_000_000, 0);
 
     // No OPENWOP_MANAGED_GLOBAL_DAILY_TOKEN_CAP set → dispatch proceeds past
@@ -266,32 +302,10 @@ function mockMiniMaxSseOnce(completion: string, inputTokens: number, outputToken
 }
 
 describe('dispatchManagedChat — happy path', () => {
-  function mockMiniMaxSse(completion: string, inputTokens: number, outputTokens: number): void {
-    // Synthesize an SSE response that dispatchMiniMax can stream-parse.
-    const chunks = [
-      `data: ${JSON.stringify({ choices: [{ delta: { content: completion } }] })}\n\n`,
-      `data: ${JSON.stringify({ choices: [{ finish_reason: 'stop' }], usage: { prompt_tokens: inputTokens, completion_tokens: outputTokens } })}\n\n`,
-      `data: [DONE]\n\n`,
-    ];
-    const body = new ReadableStream<Uint8Array>({
-      start(controller) {
-        const enc = new TextEncoder();
-        for (const c of chunks) controller.enqueue(enc.encode(c));
-        controller.close();
-      },
-    });
-    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      new Response(body, {
-        status: 200,
-        headers: { 'content-type': 'text/event-stream' },
-      }),
-    );
-  }
-
   it('routes through the underlying provider but returns user-facing ids', async () => {
     process.env.MINIMAX_API_KEY = 'sk-happy';
     await bootstrapManagedProvider();
-    mockMiniMaxSse('hello there', 7, 3);
+    mockMiniMaxSseOnce('hello there', 7, 3);
 
     const result = await dispatchManagedChat({
       userFacingProvider: 'openwop-free',
@@ -308,7 +322,7 @@ describe('dispatchManagedChat — happy path', () => {
   it('increments per-tenant usage after a successful dispatch', async () => {
     process.env.MINIMAX_API_KEY = 'sk-happy';
     await bootstrapManagedProvider();
-    mockMiniMaxSse('ok', 5, 11);
+    mockMiniMaxSseOnce('ok', 5, 11);
 
     await dispatchManagedChat({
       userFacingProvider: 'openwop-free',
@@ -316,7 +330,7 @@ describe('dispatchManagedChat — happy path', () => {
       messages: [{ role: 'user', content: 'hi' }],
     });
 
-    const date = new Date().toISOString().slice(0, 10);
+    const date = DAY;
     const usage = await storage.getManagedUsage('user:alice', 'openwop-free', date);
     expect(usage).toEqual({ inputTokens: 5, outputTokens: 11 });
     // The reserved global bucket accrues in lockstep (spend backstop history
@@ -331,7 +345,7 @@ describe('dispatchManagedChat — happy path', () => {
     // past the rewrite at the dispatchManagedChat boundary.
     process.env.MINIMAX_API_KEY = 'sk-test';
     await bootstrapManagedProvider();
-    mockMiniMaxSse('greetings', 2, 1);
+    mockMiniMaxSseOnce('greetings', 2, 1);
 
     const result = await dispatchManagedChat({
       userFacingProvider: 'openwop-free',
@@ -524,7 +538,7 @@ describe('ADR 0786 D6 — the PREPAID draw discounts cached reads; the cap bucke
     // ADR 0821 D2 (G1) — the balance is now the LAST payer: a call inside the free
     // daily allowance draws nothing. Spend the allowance first (cap is 100 in this
     // file) so the whole call is past it and the draw shows D6's weighting exactly.
-    await storage.incrementManagedUsage('user:d6', 'openwop-free', new Date().toISOString().slice(0, 10), 100, 0);
+    await storage.incrementManagedUsage('user:d6', 'openwop-free', DAY, 100, 0);
     const chunks = [
       `data: ${JSON.stringify({ choices: [{ delta: { content: 'ok' } }] })}\n\n`,
       `data: ${JSON.stringify({ choices: [{ finish_reason: 'stop' }], usage: { prompt_tokens: 1000, completion_tokens: 100, prompt_tokens_details: { cached_tokens: 800 } } })}\n\n`,
@@ -543,7 +557,24 @@ describe('ADR 0786 D6 — the PREPAID draw discounts cached reads; the cap bucke
     }
     // MiniMax: cached is a SUBSET of prompt tokens → (1000−800) + 800×0.2 + 100.
     expect(draws).toEqual([200 + 160 + 100]);
-    const usage = await storage.getManagedUsage('user:d6', 'openwop-free', new Date().toISOString().slice(0, 10));
+    const usage = await storage.getManagedUsage('user:d6', 'openwop-free', DAY);
     expect(usage.inputTokens + usage.outputTokens).toBe(100 + 1100); // the cap rail keeps full weight
+  });
+});
+
+describe('dispatchManagedToolsRound (ADR 1011)', () => {
+  it('passes the stop reason and the invalid-arguments mark to the tool loop', async () => {
+    process.env.MINIMAX_API_KEY = 'sk-test';
+    await bootstrapManagedProvider();
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(new Response(JSON.stringify({
+      choices: [{ message: { content: '', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'send', arguments: '{"to":"a' } }] }, finish_reason: 'length' }],
+    }), { status: 200 }));
+    const round = await dispatchManagedToolsRound({
+      userFacingProvider: 'openwop-free', tenantId: 'user:tools', featureId: 'chat',
+      messages: [{ role: 'user', content: 'go' }],
+      tools: [{ name: 'send', description: 'd', inputSchema: { type: 'object' } }],
+    });
+    expect(round.finishReason).toBe('length');
+    expect(round.toolUses[0]).toMatchObject({ input: {}, argumentsInvalid: true });
   });
 });

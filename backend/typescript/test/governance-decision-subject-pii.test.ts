@@ -23,10 +23,16 @@
  * explicitly-allowlisted opaque identifier. A bare variable is refused, because
  * "it happens to hold a non-PII value today" is exactly the reasoning that
  * shipped the defect.
+ *
+ * TST-DEF-2 — red when a `subject:` argument becomes a bare identifier or a
+ * non-hashing call (`String(subjectKey)`), the consent lane's five hashed sites
+ * change, or the scan stops seeing a production call site (the floor equals the
+ * measured eight, so losing ONE site reds it).
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { stripComments } from './helpers/stripComments.js';
 
 const SRC = join(__dirname, '..', 'src');
 
@@ -38,14 +44,6 @@ function walk(dir: string): string[] {
     else if (p.endsWith('.ts') && !p.endsWith('.test.ts') && !p.includes('__tests__')) out.push(p);
   }
   return out;
-}
-
-/** Comments are not code — the repo's own KB-3 lesson, in the gate that would
- *  otherwise pass over a commented-out violation as if it were a live one. */
-function stripComments(src: string): string {
-  return src
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')
-    .replace(/(^|[^:'"`\\])\/\/[^\n]*/g, '$1');
 }
 
 interface Site { file: string; subject: string }
@@ -113,12 +111,14 @@ describe('WF-CONS-14 — the governance decision log holds no raw subject identi
     // A floor below the real population would let the matcher silently break.
     // Re-derive with:
     //   grep -rn 'recordGovernanceDecision(' backend/typescript/src --include='*.ts' | grep -v '\.test\.ts'
-    // RE-DERIVED 2026-08-19 (never a copied number): SIX production call sites
-    // -- consentService x3 (the isAllowed denial, deleteSubject's erasure row,
-    // deleteSubject's CONS-4 legal-hold refusal), cdp/identityService x1,
-    // host/conversationToolLoop x2. The definition itself is not a call and is
-    // not matched. Raise this floor deliberately when a writer is added.
-    expect(sites.length).toBeGreaterThanOrEqual(6);
+    // RE-DERIVED 2026-10-30 (never a copied number): EIGHT production call sites
+    // -- consentService x5 (readmitSubject's allow row, the isAllowed denial,
+    // deleteSubject's erasure row, its CONS-4 legal-hold refusal and its CONS-29
+    // mid-request hold deny), cdp/identityService x1, host/laneFirewall.ts x2
+    // (:113, :121 — they moved there from host/conversationToolLoop). The
+    // definition itself is not a call and is not matched. A LIVENESS floor at the
+    // measured count: raise it deliberately when a writer is added.
+    expect(sites.length).toBeGreaterThanOrEqual(8);
     // The consent lane is the one the defect lived in; if the scan stops seeing
     // it, every assertion below is hollow.
     expect(sites.some((s) => s.file.includes('consent'))).toBe(true);

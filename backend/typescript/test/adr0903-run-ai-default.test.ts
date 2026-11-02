@@ -127,15 +127,24 @@ describe('Campaign Studio chains carry the user\'s provider/model to every AI no
   });
 
   it('orchestration hands the brief and the same provider/model to each of its five channel children', () => {
-    // Measured live 2026-10-18: the dispatch's `inputMapping` reads the parent's
-    // VARIABLE bag, but from-chain freezes briefId into node inputs, so every
-    // child failed `brief_not_found` until briefId rode the per-child inputs too.
+    // Measured live 2026-10-18: the dispatch's `inputMapping` read the parent's
+    // VARIABLE bag, but from-chain froze briefId into node inputs, so every child
+    // failed `brief_not_found`; the fix then was a per-child `nextWorkerInputs`
+    // literal. ADR 0964 D2 has since forwarded mapped params into the bag on BOTH
+    // instantiation paths, and on the same-id (deferred) path that literal froze
+    // to `undefined` and ERASED the mapped value (ADR 1020 D1 / CS70WF-1). So the
+    // three ride `inputMapping` only, and each path forwards them.
     const [chain] = chainsOf('campaign-orchestration');
-    const def = expandChain(chain as never, { params: { briefId: 'b1', provider: 'google', model: 'gemini-3.8-flash' } }) as never;
-    const sup = nodesOf(def).find((n) => n.typeId.startsWith('core.orchestrator.supervisor'))!;
-    const step = (sup.config!.mockDispatchPlan as Array<{ kind: string; nextWorkerIds?: string[]; nextWorkerInputs?: unknown[] }>).find((s) => s.kind === 'next-worker')!;
-    expect(step.nextWorkerInputs).toHaveLength(step.nextWorkerIds!.length);
-    for (const x of step.nextWorkerInputs!) expect(x).toEqual({ briefId: 'b1', provider: 'google', model: 'gemini-3.8-flash' });
+    for (const deferred of [false, true]) {
+      const def = expandChain(chain as never, { params: { briefId: 'b1', provider: 'google', model: 'gemini-3.8-flash' }, ...(deferred ? { deferred: true } : {}) }) as never as { nodes: Array<{ typeId: string; config?: Record<string, unknown> }>; metadata?: Record<string, unknown> };
+      const sup = def.nodes.find((n) => n.typeId.startsWith('core.orchestrator.supervisor'))!;
+      const step = (sup.config!.mockDispatchPlan as Array<Record<string, unknown>>).find((s) => s.kind === 'next-worker')!;
+      expect('nextWorkerInputs' in step).toBe(false);
+      const dispatch = def.nodes.find((n) => n.typeId.startsWith('core.dispatch'))!;
+      expect(dispatch.config!.inputMapping).toEqual({ briefId: 'briefId', provider: 'provider', model: 'model' });
+      if (deferred) expect(Object.keys(def.metadata!.forwardedParamAliases as object).sort()).toEqual(['briefId', 'model', 'provider']);
+      else expect(def.metadata!.forwardedParams).toEqual({ briefId: 'b1', provider: 'google', model: 'gemini-3.8-flash' });
+    }
   });
 
   it('the consistency check receives the dispatch outcomes and fails when every channel failed', async () => {
@@ -151,8 +160,10 @@ describe('Campaign Studio chains carry the user\'s provider/model to every AI no
     const ctx = (dispatched: unknown) => ({ inputs: { briefId: 'b1', dispatched }, features: {} });
     const allFailed = [{ childWorkflowId: 'campaign-studio.channel.landing-page', childStatus: 'failed' }, { childWorkflowId: 'campaign-studio.channel.ad-variants', childStatus: 'cancelled' }];
     expect(await consistencyCheck(ctx(allFailed))).toMatchObject({ status: 'failed', error: { code: 'channels_all_failed' } });
-    expect((await consistencyCheck(ctx([...allFailed, { childWorkflowId: 'x', childStatus: 'completed' }]))).status).toBe('success');
-    expect((await consistencyCheck(ctx(undefined))).status).toBe('success');
+    // ADR 1020 D2 — a completed child with no reported result, or no dispatch at
+    // all, is no longer a neutral pass ("no drafts to compare").
+    expect(await consistencyCheck(ctx([...allFailed, { childWorkflowId: 'x', childStatus: 'completed' }]))).toMatchObject({ status: 'failed', error: { code: 'drafts_missing' } });
+    expect(await consistencyCheck(ctx(undefined))).toMatchObject({ status: 'failed', error: { code: 'drafts_missing' } });
   });
 });
 
@@ -166,7 +177,7 @@ describe('a child run inherits the parent run\'s provider/model choice', () => {
     initHostExtPersistence(storage);
     initInMemorySurfaces({ dataDir: mkdtempSync(join(tmpdir(), 'openwop-adr0903-')) });
     setSubWorkflowDispatcher({ storage, hostSuite: { workflowCatalog: catalog, providerPolicyResolver: policy } as never, executeRun: async (_s: unknown, run: { runId: string }, _d: unknown, options: unknown) => { executed.push({ runId: run.runId, options }); return {}; } });
-    await insertRunWithStartContext(storage, { runId: 'p-ai', workflowId: 'wf.parent', tenantId: 'adr0903', status: 'running', inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now } as never);
+    await insertRunWithStartContext(storage, { runId: 'p-ai', workflowId: 'wf.parent', tenantId: 'adr0903', status: 'running', inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now } as never, { admission: { plan: 'exempt:test-fixture' } });
   });
   afterAll(async () => { __resetHostExtPersistence(); await storage.close(); });
 

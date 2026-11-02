@@ -48,7 +48,7 @@ describe('routeTurn', () => {
     // the dedicated describe block below, on a fixture where the fallback is NOT.
     const d = routeTurn({ hasAttachment: true, tokenEstimate: 100 }, config, probe, 0);
     expect(d).toEqual({ reason: 'fallback', target: { provider: 'anthropic', model: 'default' } });
-    expect(probe(d!.target.provider)).toContain('vision-input'); // the invariant, stated
+    expect(probe(d!.target.provider, d!.target.model)).toContain('vision-input'); // the invariant, stated
   });
 
   it('applies cooldown stickiness when the sticky target is still eligible', () => {
@@ -60,12 +60,12 @@ describe('routeTurn', () => {
     const d = routeTurn({ hasAttachment: true }, config, probe, 1000, { lastTarget: { provider: 'openai', model: 'no-vision' }, lastAtMs: 0 });
     // sticky non-vision is ineligible for an attachment turn → the vision fallback
     expect(d).toEqual({ reason: 'fallback', target: { provider: 'anthropic', model: 'default' } });
-    expect(probe(d!.target.provider)).toContain('vision-input');
+    expect(probe(d!.target.provider, d!.target.model)).toContain('vision-input');
   });
 
   it('expires cooldown after the window', () => {
     const d = routeTurn({ tokenEstimate: 100 }, config, probe, 70_000, { lastTarget: { provider: 'google', model: 'sticky' }, lastAtMs: 0 });
-    expect(d).toEqual({ reason: 'rule', target: { provider: 'openai', model: 'cheap' } });
+    expect(d).toEqual({ reason: 'rule', target: { provider: 'openai', model: 'cheap' }, ruleIndex: 2 });
   });
 });
 
@@ -135,7 +135,7 @@ describe('routeTurn — conversationKind rule (ADR 0130 Phase 6, the board model
 
   it('a group (board/multi-agent) conversation routes to the rule target', () => {
     const d = routeTurn({ tokenEstimate: 10, conversationKind: 'group' }, cfg, probe, 0);
-    expect(d).toEqual({ target: { provider: 'anthropic', model: 'strong' }, reason: 'rule' });
+    expect(d).toEqual({ target: { provider: 'anthropic', model: 'strong' }, reason: 'rule', ruleIndex: 0 });
   });
 
   it('a 1:1 turn (no conversationKind) falls through to the fallback', () => {
@@ -146,5 +146,53 @@ describe('routeTurn — conversationKind rule (ADR 0130 Phase 6, the board model
   it('a channel does not match a group rule (exact kind match)', () => {
     const d = routeTurn({ tokenEstimate: 10, conversationKind: 'channel' }, cfg, probe, 0);
     expect(d).toEqual({ target: { provider: 'minimax', model: 'small' }, reason: 'fallback' });
+  });
+});
+
+describe('ADR 1016 D4/D5 — only a listed model of the conversation\'s own provider; the fallback is optional', () => {
+  // A per-MODEL probe, as `listedModelCapabilities` answers: `null` = not in the catalog.
+  const catalog: Record<string, readonly string[]> = {
+    'anthropic/strong': ['vision-input', 'tools'],
+    'anthropic/text-only': ['tools'],
+    'openai/cheap': ['vision-input', 'tools'],
+  };
+  const probe: CapabilityProbe = (p, m) => catalog[`${p}/${m}`] ?? null;
+  const cfg: ModelRouterConfig = {
+    rules: [
+      { when: { kind: 'tokensOver', threshold: 1000 }, target: { provider: 'openai', model: 'cheap' } },
+      { when: { kind: 'tokensOver', threshold: 1000 }, target: { provider: 'anthropic', model: 'strong' } },
+      { when: { kind: 'always' }, target: { provider: 'anthropic', model: 'typo-model' } },
+    ],
+  };
+
+  it('skips a rule for ANOTHER provider and takes the next rule this conversation can call', () => {
+    // An anthropic-keyed conversation: the openai rule would 422 every turn
+    // (explicit_ref_wrong_provider) — it is skipped, never chosen.
+    const d = routeTurn({ tokenEstimate: 5000, dispatchProvider: 'anthropic' }, cfg, probe, 0);
+    expect(d).toEqual({ reason: 'rule', target: { provider: 'anthropic', model: 'strong' }, ruleIndex: 1 });
+  });
+
+  it('CONTROL: an openai-keyed conversation takes the openai rule', () => {
+    const d = routeTurn({ tokenEstimate: 5000, dispatchProvider: 'openai' }, cfg, probe, 0);
+    expect(d).toEqual({ reason: 'rule', target: { provider: 'openai', model: 'cheap' }, ruleIndex: 0 });
+  });
+
+  it('never routes to a model the catalog does not list (probe null)', () => {
+    // Only the `always` rule matches a short turn, and its model is unlisted.
+    expect(routeTurn({ tokenEstimate: 10, dispatchProvider: 'anthropic' }, cfg, probe, 0)).toBeNull();
+  });
+
+  it('with NO fallback, a turn no rule matches keeps its own model (null)', () => {
+    const noFallback: ModelRouterConfig = { rules: [{ when: { kind: 'attachment' }, target: { provider: 'anthropic', model: 'strong' } }] };
+    expect(routeTurn({ tokenEstimate: 10, dispatchProvider: 'anthropic' }, noFallback, probe, 0)).toBeNull();
+  });
+
+  it('judges vision per MODEL: an attachment turn skips a text-only model of a vision provider', () => {
+    const c: ModelRouterConfig = {
+      rules: [{ when: { kind: 'attachment' }, target: { provider: 'anthropic', model: 'text-only' } }],
+      fallback: { provider: 'anthropic', model: 'strong' },
+    };
+    const d = routeTurn({ hasAttachment: true, dispatchProvider: 'anthropic' }, c, probe, 0);
+    expect(d).toEqual({ reason: 'fallback', target: { provider: 'anthropic', model: 'strong' } });
   });
 });

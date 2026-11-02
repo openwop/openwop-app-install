@@ -9,6 +9,11 @@
  *    sources. Sabotage: removing `omittedClaims` reds the count.
  *  - EV-3: the prompt offers only supported ids as citable and lists the
  *    unsupported ones apart as a warning.
+ *
+ * TST-DJE-3 (grade-tests wave 71). Red when (re-probed in wave 71): the brief drops
+ * supported-first order or its omitted count or either per-claim disclosure; the
+ * rendered block lists unsupported ids as citable, hides a cut, or relabels the
+ * overview; a factory node reports a generic code instead of the provider's.
  */
 import { describe, expect, it } from 'vitest';
 import { evidenceBrief, supportedClaimIds, EVIDENCE_BRIEF_LIMITS, type ResearchDossier } from '../src/features/kicktodo-creator/creatorService.js';

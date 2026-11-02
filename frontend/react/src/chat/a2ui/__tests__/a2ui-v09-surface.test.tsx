@@ -80,35 +80,29 @@ describe('the v0.9 renderer', () => {
     fireEvent.change(screen.getByLabelText(/Product name/), { target: { value: 'Orbit' } });
     expect(btn.disabled).toBe(false);
     fireEvent.click(btn);
-    expect(onAction).toHaveBeenCalledWith('resolve', { name: 'Orbit' });
+    expect(onAction).toHaveBeenCalledWith('resolve', { answers: [{ id: 'name', answer: 'Orbit' }] });
   });
 
-  it('a failing required check gates resume but never an exchange (asking a question needs no complete form)', () => {
-    const p = { ...POSITIVE, messages: [...POSITIVE.messages, { version: 'v0.9', updateComponents: { surfaceId: SID, components: [
-      { id: 'root', component: 'Column', children: ['h', 'name', 'submit', 'ask'] },
-      { id: 'ask_l', component: 'Text', text: 'Ask' },
-      { id: 'ask', component: 'Button', child: 'ask_l', action: { event: { name: 'exchange' } } },
-    ] } }] };
-    renderCard(p);
+  it('a failing required check gates resume', () => {
+    renderCard(POSITIVE);
     expect((screen.getByRole('button', { name: 'Submit' }) as HTMLButtonElement).disabled).toBe(true);
-    expect((screen.getByRole('button', { name: 'Ask' }) as HTMLButtonElement).disabled).toBe(false);
   });
 
-  it('an exchange action with no context submits the whole data model', () => {
+  it('a resume action answers each reachable input by its id', () => {
     const p = { ...POSITIVE, messages: [
       POSITIVE.messages[0],
       { version: 'v0.9', updateComponents: { surfaceId: SID, components: [
         { id: 'root', component: 'Row', children: ['ok', 'go'] },
         { id: 'ok', component: 'CheckBox', label: 'Looks good', value: { path: '/ok' } },
         { id: 'go_l', component: 'Text', text: 'Send' },
-        { id: 'go', component: 'Button', child: 'go_l', action: { event: { name: 'exchange' } } },
+        { id: 'go', component: 'Button', child: 'go_l', action: { event: { name: 'resume' } } },
       ] } },
       { version: 'v0.9', updateDataModel: { surfaceId: SID, path: '/ok', value: false } },
     ] };
     const onAction = renderCard(p);
     fireEvent.click(screen.getByLabelText(/Looks good/));
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
-    expect(onAction).toHaveBeenCalledWith('exchange', { ok: true });
+    expect(onAction).toHaveBeenCalledWith('resolve', { answers: [{ id: 'ok', answer: true }] });
   });
 
   it('agent headings never reach the document outline as real h1–h3', () => {
@@ -169,10 +163,10 @@ describe('the v0.9 renderer', () => {
 
 describe('interrupt bridge', () => {
   it('carries a v0.9 payload from interrupt data, dropping the free-text fallback', () => {
-    const card = a2uiInterruptCard({ data: { question: 'Details?', ...POSITIVE } });
+    const card = a2uiInterruptCard({ data: { questions: [{ id: 'name', question: 'Details?' }], form: POSITIVE } });
     expect(card?.payload).toEqual(POSITIVE);
   });
   it('carries several envelopes of one surface as `surfaces`', () => {
-    expect(a2uiInterruptCard({ data: { surfaces: [POSITIVE] } })?.payload).toEqual({ surfaces: [POSITIVE] });
+    expect(a2uiInterruptCard({ data: { form: { surfaces: [POSITIVE] } } })?.payload).toEqual({ surfaces: [POSITIVE] });
   });
 });

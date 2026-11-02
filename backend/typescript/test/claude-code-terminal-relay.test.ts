@@ -8,7 +8,13 @@
  *     B declared interest, and in NOTIFY-sized chunks;
  *   - a re-attaching viewer gets the replay FIRST and never a duplicate of bytes
  *     already inside it (the ordering argument in terminalRelay.ts);
- *   - input from a remote viewer reaches the device.
+ *   - input from a remote viewer reaches the device;
+ *   - the last viewer leaving drops its `cc:term:` bus subscription.
+ *
+ * TST-CFA-4. Red when: a viewer awaiting its replay is sent live output; bytes are
+ * published with no remote interest; a replay is not chunked; a remote closeDevice
+ * is not published; a stale socket's detach evicts its replacement; the last
+ * viewer's detach keeps its subscription; remote input is dropped.
  */
 import { describe, expect, it } from 'vitest';
 import { CHUNK_BYTES, TerminalRelay, type RelayConn } from '../src/features/claude-code/terminalRelay.js';
@@ -18,6 +24,8 @@ function bus() {
   const published: { channel: string; payload: string }[] = [];
   return {
     published,
+    /** Live handlers on a channel — what a dropped subscription must take to 0. */
+    subCount: (channel: string): number => subs.get(channel)?.size ?? 0,
     publish: async (channel: string, payload: string) => {
       published.push({ channel, payload });
       for (const h of [...(subs.get(channel) ?? [])]) h(payload);
@@ -88,6 +96,9 @@ describe('ADR 0785 P2 — terminal relay', () => {
     await A.onDeviceFrame({ type: 'output', sessionId: 's1', data: b64('!') });
     expect(viewer.text()).toBe(`${big}!`);
     for (const p of b.published) expect(Buffer.byteLength(p.payload)).toBeLessThan(8000);
+    // 2 × CHUNK + 17 bytes is exactly three replay chunks, the last one flagged.
+    const replayChunks = b.published.filter((p) => p.channel === 'cc:term:s1').map((p) => JSON.parse(p.payload) as { k: string; last?: boolean }).filter((e) => e.k === 'r');
+    expect(replayChunks.map((e) => e.last)).toEqual([false, false, true]);
 
     await B.viewerInput('s1', Buffer.from('ls\r'));
     expect(device.json).toContainEqual({ type: 'input', sessionId: 's1', data: b64('ls\r') });
@@ -124,8 +135,10 @@ describe('ADR 0785 P2 — terminal relay', () => {
     await A.attachDevice('d1', conn());
     const viewer = conn();
     const vid = await B.attachViewer('s1', 'd1', viewer);
+    expect(b.subCount('cc:term:s1')).toBe(1); // positive control: B subscribed for its remote viewer
     await B.detachViewer('s1', vid);
     expect(B.localViewerCount('s1')).toBe(0);
+    expect(b.subCount('cc:term:s1')).toBe(0);
     await A.onDeviceFrame({ type: 'output', sessionId: 's1', data: b64('late') });
     expect(viewer.bin).toEqual([]);
   });

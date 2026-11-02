@@ -12,6 +12,8 @@
  * Sabotage: drop the "never cut inside a table" step ⇒ the atomic case is red; drop the
  * header repeat ⇒ the oversize case is red; change the window maths ⇒ the v2 parity case
  * is red.
+ * Tracker TST-DHK-3 (wave 71): witnessed by `w71g3-kc-cut`, `kc-header`,
+ * `kc-window`, `kc-overlapinto`.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';

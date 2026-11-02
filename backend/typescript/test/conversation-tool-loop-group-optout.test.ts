@@ -8,6 +8,11 @@
  * fires first. (The OPENWOP_GROUP_ROOM_TOOL_LOOP=true escape hatch and the
  * non-group path proceed to the eligibility gates, which need live host
  * services — covered by the conversation-exchange integration tests.)
+ *
+ * TST-CKC-3. Red when: the group gate is removed (the trap fires), the escape hatch
+ * is ignored, or the notice is not appended on an opted-out group turn. The
+ * double cast around the trap Proxy (the `params` builder) is an honest ceiling: the
+ * trap IS the point (any dependency access throws), and it cannot be a typed value.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import {

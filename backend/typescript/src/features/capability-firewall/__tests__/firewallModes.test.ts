@@ -1,12 +1,28 @@
 /**
  * ADR 0397 Phase 3 — mode flag + shadow, and the replay-provenance stamp fix.
+ * ADR 0397 Phase 5 — the platform floor and fail-closed evaluation. ADR 0834 D2 — origin.
  *
  * Pins the deny-mode semantics on the pure hook: default-allow is unchanged; shadow logs a
  * would-block but APPLIES allow (deduped per turn); enforce denies/holds an unmatched
- * action; an explicit `allow` rule carves an exception; bypass downgrades a fall-through
- * require-approval but NEVER a hard deny. Plus: `computeFirewallStamp` now writes under a
+ * action; an explicit `allow` rule carves an exception; the enforce default's ask is
+ * `policy` origin, so the user's bypass skips neither it nor a hard deny — only an
+ * approval satisfies it (ADR 0834 D2; this line said "bypass downgrades" before D2). Plus: `computeFirewallStamp` now writes under a
  * deny mode even with an EMPTY allow-list (so an enforce run isn't misrepresented as
  * ungoverned — the flagged provenance hazard).
+ *
+ * Double guard (recorded): a platform DENY is held both by the early return in
+ * `evaluate` and by `mostRestrictive(platformFloor, verdict)`; the shadow-honesty case is
+ * held by that same early return and by the final-allow check before the shadow log. A
+ * probe on the early return alone stays green (w74g4-fm-floor-early-return, vacuous by
+ * design); turning the floor evaluation off reds all five floor cases (w74g4-fm-floor-off).
+ *
+ * Red when (w74g4-fm-* probes, wave 74): shadow stops applying allow or stops deduping; the
+ * deny-mode fall-through applies under default-allow, or stops applying under enforce; an
+ * explicit allow rule is treated as a fall-through; `defaultDenyVerdict` is ignored; a
+ * policy ask yields to bypass; bypass downgrades a deny; the platform floor is skipped, or
+ * stops classifying an unclassified tool as risky; an evaluation error stops denying under
+ * enforce, blocks under default-allow, or a floor error stops denying; the stamp is skipped
+ * for an empty enforce rule set, written for default-allow, or overwrites an existing one.
  */
 import { describe, it, expect } from 'vitest';
 import { buildFirewallHook, computeFirewallStamp } from '../firewallHook.js';
@@ -136,8 +152,7 @@ describe('shadow + platform floor honesty (ADR 0397 P5, grade-code #3)', () => {
 describe('computeFirewallStamp provenance (ADR 0397 P3 hazard fix)', () => {
   it('writes a stamp under a deny mode even with an EMPTY allow-list', () => {
     const md = computeFirewallStamp({}, [], '2026-07-17T00:00:00Z', { mode: 'enforce', defaultDenyVerdict: 'deny' });
-    expect(md).not.toBeNull();
-    expect((md as Record<string, { mode: string }>).capabilityFirewall.mode).toBe('enforce');
+    expect(md).toEqual({ capabilityFirewall: { rules: [], mode: 'enforce', defaultDenyVerdict: 'deny', resolvedAt: '2026-07-17T00:00:00Z' } });
   });
 
   it('stays a no-op under default-allow with no rules', () => {

@@ -5,6 +5,8 @@ import { resolveByRun } from '../client/interruptsClient.js';
 import { TextareaField } from '../ui/Field.js';
 import { decideErrorMessage } from './decideErrorMessage.js';
 import { Notice } from '../ui/index.js';
+import { ClarificationQuestions } from './ClarificationQuestions.js';
+import { CLARIFICATION_SKIP, buildClarificationAnswers, parseAgentClarification, type AgentClarification, type ClarifyValues } from './clarificationModel.js';
 
 interface Props {
   runId: string;
@@ -14,7 +16,65 @@ interface Props {
   onResolved: () => void;
 }
 
-export function ClarificationDialog({ runId, nodeId, data, onResolved }: Props) {
+export function ClarificationDialog(props: Props) {
+  // ADR 1001 D8 — an agent's multi-question ask (`data.questions[]`) renders the
+  // shared field group; the single-`question` shape is unchanged. Hook-free
+  // dispatcher so both branches obey rules-of-hooks.
+  const ask = parseAgentClarification(props.data);
+  return ask ? <AgentClarificationDialog {...props} ask={ask} /> : <SingleQuestionDialog {...props} />;
+}
+
+function AgentClarificationDialog({ runId, nodeId, onResolved, ask }: Props & { ask: AgentClarification }) {
+  const { t } = useTranslation('interrupts');
+  const [values, setValues] = useState<ClarifyValues>({});
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const headingId = useId();
+  const skipHelpId = useId();
+  const inFlight = useRef(false); // `APUX-10` — a same-tick double submit
+  const answers = buildClarificationAnswers(ask.questions, values);
+
+  async function send(value: unknown) {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    setSubmitting(true);
+    setError(null);
+    try {
+      await resolveByRun(runId, nodeId, value);
+      onResolved();
+    } catch (err) {
+      setError(decideErrorMessage(t, err));
+      inFlight.current = false;
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="card" role="group" aria-labelledby={headingId}>
+      <h2 id={headingId}>{ask.askedBy ? t('clarifyAgentNeedsAnswer', { name: ask.askedBy }) : t('clarifyNeedsAnswer')}</h2>
+      <p className="u-fs-13 muted">{t('clarifySafety')}</p>
+      <ClarificationQuestions
+        questions={ask.questions}
+        values={values}
+        disabled={submitting}
+        onChange={(id, v) => setValues((s) => ({ ...s, [id]: v }))}
+      />
+      {error && <Notice variant="error" announce={error}>{error}</Notice>}
+      <div className="button-row">
+        <Button variant="primary" onClick={() => { if (answers) void send(answers); }} disabled={submitting || !answers}>
+          {submitting ? t('submitting') : t('submitAnswer')}
+        </Button>
+        <Button variant="secondary" onClick={() => { void send(CLARIFICATION_SKIP); }} disabled={submitting} aria-describedby={skipHelpId}>
+          {t('clarifySkip')}
+        </Button>
+      </div>
+      <p id={skipHelpId} className="u-fs-12 muted">{t('clarifySkipHelp')}</p>
+    </div>
+  );
+}
+
+function SingleQuestionDialog({ runId, nodeId, data, onResolved }: Props) {
   const { t } = useTranslation('interrupts');
   const [answer, setAnswer] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -28,7 +88,8 @@ export function ClarificationDialog({ runId, nodeId, data, onResolved }: Props) 
   const answerRef = useRef<HTMLTextAreaElement>(null);
   const inFlight = useRef(false); // `APUX-10` — a same-tick double submit
 
-  const question = ((data as { question?: string })?.question) ?? t('clarificationDefaultQuestion');
+  const { question: single, questions } = (data ?? {}) as { question?: string; questions?: Array<{ question?: string }> };
+  const question = single ?? questions?.[0]?.question ?? t('clarificationDefaultQuestion');
 
   async function submit() {
     if (inFlight.current) return;

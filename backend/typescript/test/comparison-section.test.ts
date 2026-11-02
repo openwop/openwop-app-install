@@ -2,9 +2,15 @@
  * ADR 0485 — the `comparison` CMS section type (a capability matrix). Pure unit
  * test over `validateSection`: axis bounds, cell scrubbing, highlight-column
  * clamping, and the required-field failures on full (non-partial) validation.
+ * Tracker: TST-CGC-2.
+ *
+ * Red when: a cap (columns 8, rows 24, cells 8, cell text 80) is dropped; the
+ * highlight column is bounded by the cap instead of the real column count; a
+ * non-string cell survives as text; a blank-label row is kept; an empty
+ * columns/rows list stops failing full validation.
  */
 import { describe, expect, it } from 'vitest';
-import { validateSection, sanitizeSectionOverlay, type SectionType } from '../src/features/cms/cmsService.js';
+import { validateSection, sanitizeSectionOverlay } from '../src/features/cms/cmsService.js';
 
 const data = (raw: object): Record<string, unknown> =>
   validateSection(raw).data;
@@ -31,12 +37,6 @@ describe('comparison section — happy path', () => {
     expect(d.highlightColumn).toBe(0);
     expect(d.legend).toBe('L');
     expect(d.note).toBe('N');
-  });
-
-  it('is a registered section type', () => {
-    // Type-level assertion the union carries it (compile guard).
-    const t: SectionType = 'comparison';
-    expect(t).toBe('comparison');
   });
 });
 
@@ -76,16 +76,23 @@ describe('comparison section — bounds + scrubbing', () => {
   });
 
   it('drops highlightColumn when out of range', () => {
-    expect(matrix({ highlightColumn: 9 }).highlightColumn).toBeUndefined();
+    // The fixture has 2 columns. 2 (== columns.length) and 5 (past the columns but
+    // UNDER the 8-column cap) must both drop — a guard comparing against the cap
+    // instead of the real column count keeps 5.
+    expect(matrix({ highlightColumn: 2 }).highlightColumn).toBeUndefined();
+    expect(matrix({ highlightColumn: 5 }).highlightColumn).toBeUndefined();
     expect(matrix({ highlightColumn: -1 }).highlightColumn).toBeUndefined();
+    // Positive control: an in-range non-zero index is kept.
+    expect(matrix({ highlightColumn: 1 }).highlightColumn).toBe(1);
   });
 
   it('bounds an over-long cell to MAX.cell (80)', () => {
     const long = 'ok '.repeat(60); // 180 chars of realistic spaced text (not a scrub-triggering blob)
     const d = matrix({ columns: ['A'], rows: [{ label: 'r', cells: [long] }] });
     const cell = (d.rows as { cells: string[] }[])[0].cells[0];
-    expect(cell.length).toBeLessThanOrEqual(80);
-    expect(cell.length).toBeGreaterThan(0);
+    // The first 80 characters of the trimmed input, derived by hand.
+    expect(cell).toBe('ok '.repeat(26) + 'ok');
+    expect(cell).toHaveLength(80);
   });
 
   it('coerces non-string cells to empty (no HTML/objects survive)', () => {

@@ -5,6 +5,11 @@
  *  - knowledge-sync sources → status 'paused' with the revoke reason on lastError
  *  - crm gmail syncs → status 'paused' (scheduler job disabled by the status path)
  * Bystander connection's dependents untouched; a re-fire is a no-op.
+ *
+ * Tracker TST-CJB-5 (grade-tests w68). Red when: the inbound disable leaves the
+ * config enabled; the knowledge-sync or gmail pause stops filtering on the revoked
+ * connectionId (a bystander is paused too); or the gmail pause leaves its scheduler
+ * job enabled.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Server } from 'node:http';
@@ -13,6 +18,7 @@ import { createSecretConnection, revokeConnection } from '../src/features/connec
 import { setInboundConfig, getInboundConfig, disableInboundForRevokedConnection } from '../src/features/connections/inboundWebhooks.js';
 import { createSyncSource, getSyncSource, pauseSourcesForRevokedConnection } from '../src/features/knowledge-sync/knowledgeSyncService.js';
 import { createGmailSync, getGmailSync, pauseGmailSyncsForRevokedConnection } from '../src/features/crm/gmailSyncService.js';
+import { getJob } from '../src/host/schedulingService.js';
 
 const T = 'conn-lc-t1';
 const now = () => new Date().toISOString();
@@ -60,6 +66,9 @@ describe('connection revoke disables dependents (ADR 0285)', () => {
     // Gmail: paused; bystander active.
     expect((await getGmailSync(T, gmailDoomed.syncId))!.status).toBe('paused');
     expect((await getGmailSync(T, gmailKeeper.syncId))!.status).toBe('active');
+    // …and the status path disabled the doomed sync's scheduler job (the keeper's stays on).
+    expect((await getJob(gmailDoomed.jobId))?.enabled).toBe(false);
+    expect((await getJob(gmailKeeper.jobId))?.enabled).toBe(true);
 
     // Idempotent re-fire: everything already non-active ⇒ zero work.
     expect(await pauseSourcesForRevokedConnection(T, doomed.connectionId, now())).toBe(0);

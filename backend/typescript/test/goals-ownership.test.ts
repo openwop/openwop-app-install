@@ -6,6 +6,12 @@
  * from absent (uniform 404, no existence oracle). Reads stay tenant-scoped.
  * Principal-less goals keep tenant-only semantics (the conformance bearer and
  * the demo row are unaffected).
+ *
+ * TST-DEE-5 — red when: `principalDenied` stops denying a foreign principal,
+ * accepts only the FIRST of the caller's owner spellings, denies a
+ * principal-less goal, the replay short-circuit runs before the denial (a
+ * stranger reads the recorded verdict), or an objective edit drops the judge
+ * sidecar (each sabotage-witnessed, wave 70).
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';

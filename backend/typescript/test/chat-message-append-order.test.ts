@@ -17,6 +17,11 @@
  * The real-Postgres arm lives in `storage-adapter-parity-testcontainers.test.ts`
  * (it needs Docker); this file covers SQLite, which is also the `memory://`
  * backend the route tests run on.
+ *
+ * Fix: 5c72bce4c ("message order is append order, even within one
+ * millisecond"). Tracker TST-CEC-3. Red when (w67g3, witnessed): the SQLite
+ * adapter stores the requested stamp instead of `nextChatMessageCreatedAt`'s;
+ * a tied stamp is kept instead of bumped; an unparseable stamp is "repaired".
  */
 import { describe, expect, it } from 'vitest';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';

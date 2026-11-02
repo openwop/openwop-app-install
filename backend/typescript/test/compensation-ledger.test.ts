@@ -11,6 +11,13 @@
  * RFC and disagrees with it (see the module docblock). The identity tuple and
  * the state vocabulary below are the RFC's, and that is asserted directly — if
  * someone "fixes" the code back toward the ADR's wording, these fail.
+ *
+ * Tracker: TST-CGE-2. Red when (compensationLedger.ts): the transition table gains
+ * or loses a pair (pinned below as a LITERAL matrix, not read from `canTransition`);
+ * the runtime stops consulting it; the reason rule accepts whitespace; a tuple
+ * component leaves the identity hash; first-write-wins is lost; ordering stops
+ * descending; another run's or tenant's rows leak in; the rollup stops reporting
+ * `partial`/`none`; or erasure deletes rows or crosses tenants.
  */
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -39,6 +46,21 @@ const R = 'run-1';
 const ALL_STATES: CompensationState[] = [
   'requested', 'started', 'completed', 'failed', 'paused', 'manual_intervention_required',
 ];
+
+/**
+ * RFC 0151's transition table, written out by hand. The exhaustive leg compares
+ * the product's `canTransition` AND the runtime against THIS, so editing the
+ * product table (e.g. letting `completed` re-open — a double refund) reds here
+ * rather than moving the oracle with it.
+ */
+const EXPECTED_LEGAL: Readonly<Record<CompensationState, readonly CompensationState[]>> = {
+  requested: ['started', 'paused', 'manual_intervention_required', 'failed'],
+  started: ['completed', 'failed', 'paused', 'manual_intervention_required'],
+  failed: ['started', 'failed', 'paused', 'manual_intervention_required'],
+  paused: ['started', 'failed', 'manual_intervention_required'],
+  manual_intervention_required: ['started', 'failed', 'paused'],
+  completed: [],
+};
 
 async function commit(ordinal: number, over: Partial<Parameters<typeof recordObligation>[0]> = {}) {
   return recordObligation({
@@ -113,7 +135,8 @@ describe('ADR 0554 P1 — the state machine, exhaustively', () => {
           }
           if (!ok) continue; // unreachable `from`; nothing to assert
         }
-        const expected = canTransition(from, to);
+        const expected = EXPECTED_LEGAL[from].includes(to);
+        expect(canTransition(from, to), `${from} -> ${to}`).toBe(expected);
         const attempt = resolveObligation({ tenantId: T, inverseActionId: row.inverseActionId, to, reason: 'x' });
         if (expected) await expect(attempt).resolves.toMatchObject({ state: to });
         else await expect(attempt).rejects.toBeInstanceOf(CompensationTransitionError);
@@ -318,8 +341,9 @@ describe('ADR 0554 P1 / ADR 0464 — subject erasure REDACTS, it does not delete
     const n = await eraseCompensationSubject(T, 'subject-jane');
     expect(n).toBe(1);                                    // the eraser DID touch it
 
-    expect(await compensationStatusForRun(T, R)).not.toBe('none');
-    expect(await nextClaimable(T, R)).not.toBeNull();     // still owed, still claimable
+    // Exact: a lone `paused` row folds to `pending` — deletion would read `none`.
+    expect(await compensationStatusForRun(T, R)).toBe('pending');
+    expect((await nextClaimable(T, R))?.inverseActionId).toBe(row.inverseActionId); // still owed, still claimable
   });
 
   it('does not touch another tenant\'s rows', async () => {

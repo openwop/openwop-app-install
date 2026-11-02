@@ -8,6 +8,13 @@
  * Also covers the capability-honesty surface: discovery advertises
  * `host.connectors` supported only because the slot is wired (no longer
  * throw-on-use), and the agent-pack peer-dependency resolver satisfies it.
+ *
+ * Tracker TST-CJC-4 (grade-tests w68). Red when: the broker stops stripping a
+ * caller-forged authorization/content-type; a missing connection throws instead of
+ * failing closed; a provider HTTP error reads ok:true; the connectionUse stamp is
+ * dropped; malformed args or an unknown connector id stop being refused; or the
+ * apiHosts pin is skipped (the off-host URL is an RFC 6761 `.invalid` host, so the
+ * sabotaged path can never make a real connection).
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -15,7 +22,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
-import { createConnectorInvoker, type ConnectorInvokeResult } from '../src/host/connectorInvoker.js';
+import { createConnectorInvoker } from '../src/host/connectorInvoker.js';
 import { __resetConnectionsStore, createSecretConnection } from '../src/features/connections/connectionsService.js';
 import { registerProvider, getProvider } from '../src/features/connections/providerRegistry.js';
 import { listHostSurfaces, seedDefaultHostSurfaces } from '../src/bootstrap/hostSurfaceRegistry.js';
@@ -67,6 +74,8 @@ describe('Connector invoker (ADR 0037)', () => {
     });
 
     await storage.insertRun({ runId: 'run-c', workflowId: 'w', tenantId: 'tc', status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: 'x', updatedAt: 'x' });
+    // u1's connection is seeded ONCE here, so no case depends on another having run.
+    await createSecretConnection({ tenantId: 'tc', provider: 'testconn', kind: 'api_key', secret: 'SECRET-KEY', scope: 'user', userId: 'u1' });
   });
 
   afterAll(async () => {
@@ -76,17 +85,17 @@ describe('Connector invoker (ADR 0037)', () => {
   beforeEach(() => {
     nextStatus = 200;
     nextBody = '{"result":[{"sys_id":"abc"}]}';
+    received = {};
   });
 
   const invoker = () => createConnectorInvoker({ storage });
   const ctx = (actingUserId?: string) => ({ tenantId: 'tc', runId: 'run-c', ...(actingUserId ? { actingUserId } : {}) });
 
   it('resolves the connection, calls through with the token, and stamps provenance', async () => {
-    await createSecretConnection({ tenantId: 'tc', provider: 'testconn', kind: 'api_key', secret: 'SECRET-KEY', scope: 'user', userId: 'u1' });
     const out = (await invoker().invoke('testconn', {
       context: ctx('u1'),
       request: { url: `http://127.0.0.1:${apiPort}/api/now/table/incident`, method: 'GET' },
-    })) as ConnectorInvokeResult;
+    }));
 
     expect(out.ok).toBe(true);
     expect(out.status).toBe(200);
@@ -103,7 +112,7 @@ describe('Connector invoker (ADR 0037)', () => {
     const out = (await invoker().invoke('testconn', {
       context: ctx('u1'),
       request: { url: `http://127.0.0.1:${apiPort}/api/now/table/incident`, method: 'POST', body: '{"short_description":"x"}' },
-    })) as ConnectorInvokeResult;
+    }));
     expect(out.ok).toBe(true);
     expect(out.status).toBe(201);
     expect(received.method).toBe('POST');
@@ -121,7 +130,7 @@ describe('Connector invoker (ADR 0037)', () => {
         // a caller trying to smuggle a second auth header + override content-type:
         extraHeaders: { Prefer: 'transient', authorization: 'Bearer FORGED', 'Content-Type': 'text/evil' },
       },
-    })) as ConnectorInvokeResult;
+    }));
     expect(out.ok).toBe(true);
     expect(received.prefer).toBe('transient');            // the legit protocol header passes through
     expect(received.auth).toBe('Bearer SECRET-KEY');      // broker's token wins — the forged one was stripped
@@ -132,22 +141,23 @@ describe('Connector invoker (ADR 0037)', () => {
     const noUser = (await invoker().invoke('testconn', {
       context: ctx(), // no actingUserId → broker withholds → fail closed
       request: { url: `http://127.0.0.1:${apiPort}/x`, method: 'GET' },
-    })) as ConnectorInvokeResult;
+    }));
     expect(noUser).toEqual({ ok: false, error: 'connector_no_connection' });
 
     const other = (await invoker().invoke('testconn', {
       context: ctx('u-without-conn'),
       request: { url: `http://127.0.0.1:${apiPort}/x`, method: 'GET' },
-    })) as ConnectorInvokeResult;
+    }));
     expect(other).toEqual({ ok: false, error: 'connector_no_connection' });
   });
 
   it('pins to the provider apiHosts — an off-host URL fails closed BEFORE touching the secret', async () => {
     const out = (await invoker().invoke('testconn', {
       context: ctx('u1'),
-      request: { url: 'https://attacker.example.com/steal', method: 'GET' },
-    })) as ConnectorInvokeResult;
+      request: { url: 'https://attacker.invalid/steal', method: 'GET' },
+    }));
     expect(out).toEqual({ ok: false, error: 'connector_host_not_allowed' });
+    expect(received, 'nothing reached the provider api').toEqual({});
   });
 
   it('throws a 404 for an unknown connector id', async () => {
@@ -164,7 +174,7 @@ describe('Connector invoker (ADR 0037)', () => {
     const out = (await invoker().invoke('testconn', {
       context: ctx('u1'),
       request: { url: `http://127.0.0.1:${apiPort}/api/now/table/incident`, method: 'GET' },
-    })) as ConnectorInvokeResult;
+    }));
     expect(out.ok).toBe(false);
     expect(out.status).toBe(403);
     expect(out.data).toEqual({ error: 'forbidden' });

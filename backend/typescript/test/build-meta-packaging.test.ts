@@ -19,6 +19,15 @@
  * These are static-consistency checks by necessity: CI has no Docker daemon and
  * no gcloud credentials, so neither `docker build` nor a real upload-set diff is
  * runnable here. They pin the three declarations that must agree.
+ *
+ * TST-BBI-1 (w66 g4, sabotage-witnessed). Red when: `.gcloudignore` narrows the
+ * `!build-meta/**` negation to one file or drops `.git`; the Dockerfile COPYs
+ * the file instead of the directory; `.dockerignore` excludes a stamp; the
+ * COMMIT reader (or the corpus-suite reader) in buildInfo.ts resolves a different
+ * dir/sentinel; preflight stops comparing the stamp to HEAD; the writer renames
+ * commit.txt. The stamp list is the union of the writer's `join(OUT_DIR, '…')`
+ * files and every `build-meta/<file>` line in `.gitignore` (measured 2026-10-29:
+ * 3 from the writer, 5 in .gitignore).
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
@@ -73,9 +82,15 @@ describe('build-meta packaging contract', () => {
       stamps.length,
       'parsed NO stamp filenames out of scripts/write-build-commit.mjs — the writer changed shape. '
         + 'Fix this parse rather than letting the check silently cover nothing.',
-    ).toBeGreaterThanOrEqual(2);
+    ).toBeGreaterThanOrEqual(3);
     expect(stamps).toContain('commit.txt');
     expect(stamps).toContain('corpus-suite.txt');
+    expect(stamps).toContain('deployer.json');
+    // Stamps written by OTHER scripts are gitignored under build-meta/ too; the
+    // class is "every gitignored build-meta file", so read those as well.
+    const ignored = [...gitignore.matchAll(/^build-meta\/(\S+)$/gm)].map((m) => m[1]!);
+    expect(ignored.length, 'parsed no build-meta/ lines out of .gitignore').toBeGreaterThanOrEqual(3);
+    for (const f of ignored) if (!stamps.includes(f)) stamps.push(f);
 
     const gcloudIncludesGitignore = /^#!include:\.gitignore$/m.test(gcloudignore);
     if (!gcloudIncludesGitignore) return; // no inheritance ⇒ no hazard
@@ -137,7 +152,8 @@ describe('build-meta packaging contract', () => {
     // ships and `COPY build-meta` is satisfied by an empty dir. A green build
     // that produced an unidentifiable artifact — and ADR 0518 treats `unknown`
     // as a failed deploy precisely because it is indistinguishable from stale.
-    if (!existsSync(join(REPO, '.dockerignore'))) return; // not yet added — nothing to pin
+    // The file exists (added 2026-08-13); a deletion must be a deliberate edit here.
+    expect(existsSync(join(REPO, '.dockerignore'))).toBe(true);
     const dockerignore = read('.dockerignore');
 
     // Deliberately NOT a general .dockerignore pattern engine. Implementing one
@@ -186,7 +202,8 @@ describe('build-meta packaging contract', () => {
     ).toBeGreaterThan(-1);
     // Same last-match-wins hazard as the stamp negations above: placed ABOVE
     // the include it would still be overridden.
-    if (includeAt > -1) expect(gitAt).toBeGreaterThan(includeAt);
+    expect(includeAt, '.gcloudignore no longer includes .gitignore — re-read this test').toBeGreaterThan(-1);
+    expect(gitAt).toBeGreaterThan(includeAt);
 
     // And it must NOT have been written as a negation-defeating blanket that
     // also swallows the build stamp — `build-meta` is re-included below it.
@@ -233,7 +250,11 @@ describe('build-meta packaging contract', () => {
     // So this asserts the SOURCE's literals. It is the only thing tying the
     // reader to the directory the Dockerfile actually ships.
     const reader = read('backend/typescript/src/host/buildInfo.ts');
-    expect(reader).toMatch(/locateRepoDir\(\s*here,\s*'build-meta',\s*'\.gitkeep'\s*\)/);
+    // Pinned per CALL SITE: the literal occurs twice (commit + corpus-suite), so a
+    // bare `locateRepoDir(here, 'build-meta', '.gitkeep')` match stayed green with
+    // the commit reader renamed (w66 probe, vacuous before this).
+    expect(reader).toMatch(/readImageCommit\(locateRepoDir\(\s*here,\s*'build-meta',\s*'\.gitkeep'\s*\)\)/);
+    expect(reader).toMatch(/readImageCorpusSuite\(locateRepoDir\(\s*here,\s*'build-meta',\s*'\.gitkeep'\s*\)\)/);
     expect(reader).toMatch(/join\(dir, 'commit\.txt'\)/);
   });
 });

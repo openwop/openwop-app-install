@@ -7,15 +7,23 @@
  * (R9), so the URL they return is asserted to carry what the builder adds.
  */
 import type { AddressInfo } from 'node:net';
+import { readFileSync } from 'node:fs';
 import http from 'node:http';
+import { join } from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const pin = vi.hoisted(() => ({ servers: ['https://as.pin.example'] }));
 
 vi.mock('../src/host/webhookEgressGuard.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/host/webhookEgressGuard.js')>();
   return {
     ...actual,
     // The synthetic issuer's metadata: promises `iss` (RFC 9207).
-    guardedEgressFetch: vi.fn(async (url: string) => String(url).startsWith('https://as.suite.example/.well-known/oauth-authorization-server')
+    guardedEgressFetch: vi.fn(async (url: string) => String(url).startsWith('https://mcp.pin.example/.well-known/oauth-protected-resource')
+      ? new Response(JSON.stringify({ resource: 'https://mcp.pin.example/mcp', authorization_servers: pin.servers, bearer_methods_supported: ['header'] }), { status: 200, headers: { 'content-type': 'application/json' } })
+      : String(url).startsWith('https://as.pin.example/.well-known/oauth-authorization-server')
+      ? new Response(JSON.stringify({ issuer: 'https://as.pin.example', authorization_endpoint: 'https://as.pin.example/authorize', token_endpoint: 'https://as.pin.example/token', code_challenge_methods_supported: ['S256'], response_types_supported: ['code'] }), { status: 200, headers: { 'content-type': 'application/json' } })
+      : String(url).startsWith('https://as.suite.example/.well-known/oauth-authorization-server')
       ? new Response(JSON.stringify({ issuer: 'https://as.suite.example', authorization_response_iss_parameter_supported: true }), { status: 200, headers: { 'content-type': 'application/json' } })
       : new Response('nope', { status: 404 })),
   };
@@ -23,7 +31,8 @@ vi.mock('../src/host/webhookEgressGuard.js', async (importOriginal) => {
 
 import { createApp } from '../src/index.js';
 import { __resetOAuthAdvertisement, oauthAdvertised, refreshOAuthAdvertisement } from '../src/features/connections/oauthAdvertisement.js';
-import { getProvider } from '../src/features/connections/providerRegistry.js';
+import { getProvider, registerProvider } from '../src/features/connections/providerRegistry.js';
+import { __resetOAuthClientStore, getHostOAuthClient, setHostOAuthClient } from '../src/features/connections/oauthClientStore.js';
 
 let server: http.Server;
 let BASE = '';
@@ -136,6 +145,77 @@ describe('ADR 0753 D12 — seams configure, the production builder builds (R9)',
   it('expire-refresh: 404 when the caller holds no credential for the provider', async () => {
     const r = await fetch(`${BASE}/conformance/seams/sample/oauth/expire-refresh`, { method: 'POST', headers: H, body: JSON.stringify({ provider: 'synthetic' }) });
     expect(r.status).toBe(404);
+  });
+});
+
+describe('DV-SEC-1 — a connection pack cannot re-point a provider the seam did not create', () => {
+  const FIXTURE = join(import.meta.dirname, '..', '..', '..', 'conformance-fixtures', 'connection-packs', 'connection-pack-acme-widgets.json');
+  const pack = (id: string, engines: string): Record<string, unknown> => {
+    const p = JSON.parse(readFileSync(FIXTURE, 'utf8')) as { provider: Record<string, unknown> } & Record<string, unknown>;
+    return { ...p, name: `core.openwop.connections.${id}`, engines: { openwop: engines }, provider: { ...p.provider, id, reach: { integration: { node: 'core.openwop.integration.test' } } } };
+  };
+  const start = (connection: Record<string, unknown>): Promise<Response> =>
+    fetch(`${BASE}/conformance/seams/sample/oauth/authorize-start`, { method: 'POST', headers: H, body: JSON.stringify({ connection }) });
+  const OPERATOR = { provider: 'google', clientId: 'operator-client', clientSecret: 'operator-secret', updatedBy: 'operator' };
+
+  beforeEach(async () => {
+    await __resetOAuthClientStore();
+    await setHostOAuthClient(OPERATOR);
+  });
+
+  afterAll(() => __resetOAuthClientStore());
+
+  it('a conflict on a built-in id is refused and leaves the host client unchanged', async () => {
+    const res = await start(pack('google', '>=2.0.0'));
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toBe('connection_provider_conflict');
+    expect((await getHostOAuthClient('google'))?.clientId).toBe('operator-client');
+  });
+
+  it('a pack that would INSTALL over a built-in is refused before it changes the registry or the client', async () => {
+    const authorize = getProvider('google')?.endpoints?.authorize;
+    expect((await start(pack('google', '>=1.0.0'))).status).toBe(409);
+    expect(getProvider('google')?.endpoints?.authorize).toBe(authorize);
+    expect((await getHostOAuthClient('google'))?.clientId).toBe('operator-client');
+  });
+
+  it('a real provider a boot pack defined is refused too: pack ownership is not the test', async () => {
+    const google = getProvider('google')!;
+    registerProvider({ ...google, id: 'boot-pack-provider' }, { packName: 'core.openwop.connections.boot' });
+    await setHostOAuthClient({ ...OPERATOR, provider: 'boot-pack-provider' });
+    expect((await start(pack('boot-pack-provider', '>=2.0.0'))).status).toBe(409);
+    expect((await getHostOAuthClient('boot-pack-provider'))?.clientId).toBe('operator-client');
+  });
+
+  it('a seam install over a real provider does not unlock it', async () => {
+    const google = getProvider('google')!;
+    registerProvider({ ...google, id: 'shadowed-provider' });
+    await setHostOAuthClient({ ...OPERATOR, provider: 'shadowed-provider' });
+    const { installConnectionPackManifest } = await import('../src/features/connections/connectionPackLoader.js');
+    expect(installConnectionPackManifest(pack('shadowed-provider', '>=1.0.0')).installed).toBe(true);
+    expect((await start(pack('shadowed-provider', '>=1.0.0'))).status).toBe(409);
+    expect((await getHostOAuthClient('shadowed-provider'))?.clientId).toBe('operator-client');
+  });
+
+  it('a pack the seam created is configured, and re-sending it still reaches the grant (the pinning leg)', async () => {
+    const p = pack('seam-created-provider', '>=2.0.0');
+    expect((await start(p)).status).toBe(201);
+    const first = (await getHostOAuthClient('seam-created-provider'))?.clientId;
+    expect(first).toBe('openwop-conformance-seam-created-provider');
+    expect((await start(p)).status).toBe(201);
+    const rival = { ...p, name: 'core.openwop.connections.seam-created-rival' };
+    expect((await start(rival)).status).toBe(201);
+  });
+
+  it('the pinning leg (RFC 0199 §B.4): a re-sent MCP pack is refused on the pin, not by this guard', async () => {
+    const p = pack('seam-pinned-provider', '>=2.0.0') as { provider: Record<string, unknown> } & Record<string, unknown>;
+    const auth = { kind: 'oauth2', authFlow: 'pkce', scopeModel: 'coarse', issuer: 'https://as.pin.example', endpoints: { authorize: 'https://as.pin.example/authorize', token: 'https://as.pin.example/token' } };
+    const mcp = { ...p, provider: { ...p.provider, auth, reach: { mcp: { server: { url: 'https://mcp.pin.example/mcp', transport: 'http' } } } } };
+    expect((await start(mcp)).status).toBe(201);
+    pin.servers = ['https://as.foreign.example'];
+    const later = await start(mcp);
+    expect(later.status).toBe(422);
+    expect(((await later.json()) as { error: string }).error).toBe('connection_auth_metadata_mismatch');
   });
 });
 

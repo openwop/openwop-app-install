@@ -16,10 +16,22 @@
  *     mirroring board/schedule heal semantics).
  *
  * Fixed-`default`-tenant posture (cookies disabled), same device the
- * demo-seed dedup/cascade test uses.
+ * demo-seed dedup/cascade test uses. Every case starts from a CLEARED agents
+ * step followed by an explicit heal, so the ten personas are always created
+ * through the create path (`createSeededRosterMember` → `seedAgentProfile`) and
+ * the file passes in any order.
+ *
+ * Case 3 asserts the AUTHORED governance fields (`permissions`, `metrics`), not
+ * just a 200: the heal's depth seed (`seedAgentDepth` → knowledge binding) also
+ * writes a MINIMAL profile for the persona, so "a profile exists" alone held
+ * even with the backfill removed (round-1 probe w70g2-sp-backfill was vacuous).
+ *
+ * Tracker: TST-DBA-4. Red when: the create path skips `seedAgentProfile`, the
+ * heal backfill is removed, or the silent path behaves as heal (probes
+ * w70g2-sp-create, -sp-backfill-r2, -sp-silent-heal).
  */
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
@@ -66,13 +78,30 @@ async function api<T = unknown>(path: string, init: RequestInit = {}): Promise<{
 }
 const seed = (body: unknown = {}): Promise<{ status: number; body: { seeded: boolean } }> =>
   api('/host/openwop-app/example-data/seed', { method: 'POST', body: JSON.stringify(body) });
+const clearAgents = (): Promise<{ status: number; body: unknown }> =>
+  api('/host/openwop-app/example-data/clear', { method: 'POST', body: JSON.stringify({ steps: ['agents'] }) });
 const roster = async (): Promise<RosterEntry[]> => (await api<{ roster: RosterEntry[] }>('/host/openwop-app/roster')).body.roster;
 const profileOf = (rosterId: string): Promise<{ status: number; body: ProfileResp }> =>
   api(`/host/openwop-app/agents/${encodeURIComponent(rosterId)}/profile`);
 
+/** A roster entry by role, asserted present. */
+function byRole(entries: RosterEntry[], roleKey: string): RosterEntry {
+  const e = entries.find((x) => x.roleKey === roleKey);
+  expect(e, `seeded persona with roleKey ${roleKey}`).toBeDefined();
+  if (!e) throw new Error('unreachable');
+  return e;
+}
+
 describe('demo-seed → agentProfile persistence (ADR 0031 §1c)', () => {
+  beforeEach(async () => {
+    // Fresh personas through the CREATE path: clear removes them (and their
+    // profiles, via the roster cascade); heal re-creates every missing persona.
+    expect((await clearAgents()).status).toBe(200);
+    expect((await roster()).length).toBe(0);
+    expect((await seed({ heal: true })).body.seeded).toBe(true);
+  });
+
   it('persists a retrievable profile per seeded persona, level derived from specLevel', async () => {
-    expect((await seed()).body.seeded).toBe(true);
     const entries = await roster();
     expect(entries.length).toBe(10); // 8 twins + Iris + Executive Operations (ADR 0032)
 
@@ -88,18 +117,14 @@ describe('demo-seed → agentProfile persistence (ADR 0031 §1c)', () => {
     }
 
     // Spot-check a `recommend` twin (Sales Execution → derived review) survived.
-    const sales = entries.find((e) => e.roleKey === 'sales-execution');
-    expect(sales).toBeDefined();
-    const salesProfile = (await profileOf(sales!.rosterId)).body;
+    const salesProfile = (await profileOf(byRole(entries, 'sales-execution').rosterId)).body;
     expect(salesProfile.autonomy.specLevel).toBe('recommend');
     expect(salesProfile.autonomy.level).toBe('review');
     expect(salesProfile.permissions?.never).toContain('email.send');
     expect(salesProfile.requiredConnections).toContain('google');
 
     // And a within-policy twin (IT Service Desk → derived guided) keeps its allowlist.
-    const it = entries.find((e) => e.roleKey === 'it-service-desk');
-    expect(it).toBeDefined();
-    const itProfile = (await profileOf(it!.rosterId)).body;
+    const itProfile = (await profileOf(byRole(entries, 'it-service-desk').rosterId)).body;
     expect(itProfile.autonomy.specLevel).toBe('execute-with-approval');
     expect(itProfile.autonomy.level).toBe('guided');
     expect(itProfile.autonomy.withinPolicyActions).toContain('ticket.tag');
@@ -107,7 +132,7 @@ describe('demo-seed → agentProfile persistence (ADR 0031 §1c)', () => {
 
   it('silent re-seed does not duplicate — one profile per rosterId, unchanged', async () => {
     const before = await roster();
-    const sales = before.find((e) => e.roleKey === 'sales-execution')!;
+    const sales = byRole(before, 'sales-execution');
     const first = (await profileOf(sales.rosterId)).body;
 
     expect((await seed()).body.seeded).toBe(false); // already initialized → no-op
@@ -121,7 +146,7 @@ describe('demo-seed → agentProfile persistence (ADR 0031 §1c)', () => {
 
   it('heal:true backfills a missing profile; a silent re-seed does not', async () => {
     const entries = await roster();
-    const iris = entries.find((e) => e.roleKey === 'chief-of-staff')!;
+    const iris = byRole(entries, 'chief-of-staff');
     expect((await profileOf(iris.rosterId)).status).toBe(200);
 
     // Simulate a tenant seeded before this feature: roster exists, profiles gone.
@@ -139,5 +164,9 @@ describe('demo-seed → agentProfile persistence (ADR 0031 §1c)', () => {
     expect(restored.status).toBe(200);
     expect(restored.body.profileId).toBe(iris.rosterId);
     expect(restored.body.autonomy.level).toBe('review'); // recommend → review
+    // The AUTHORED profile came back, not the depth seed's minimal one
+    // (values from seed-data/exampleAgents.json, chief-of-staff).
+    expect(restored.body.permissions?.never).toEqual(['message.broadcast', 'decision.finalize']);
+    expect(restored.body.metrics).toEqual(['memos_drafted', 'blockers_surfaced']);
   });
 });

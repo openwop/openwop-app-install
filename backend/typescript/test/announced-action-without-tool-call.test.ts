@@ -3,6 +3,13 @@
  * host follow-up instead of ending the turn. Pins the trigger (a trailing
  * colon, tools offered, a round left), the once-per-turn bound, and that an
  * ordinary final answer is untouched.
+ *
+ * TST-BXH-2. Red when: the trailing-colon regex loosens, the once-per-turn flag
+ * is dropped, the follow-up fires with no tools offered or on the last round,
+ * or the follow-up message changes (w66 probes annc-regex/once/tools/last/nudge).
+ * The "does not fire" cases assert the nudge is ABSENT from every request and
+ * the reply is the final text, not only the round count (a nudge on the last
+ * round still ends at round 1 — w66 annc-last read vacuous on rounds alone).
  */
 import { describe, expect, it } from 'vitest';
 import { ANNOUNCED_WITHOUT_CALL_NUDGE, endsOnAnnouncement, runChatToolLoop, type CompiledTool } from '../src/host/agentDispatch.js';
@@ -36,6 +43,12 @@ async function run(replies: Reply[], over: { tools?: CompiledTool[]; maxRounds?:
   return { result, seen, executed };
 }
 
+/** The follow-up's own run event (`agent.reasoned` "…announced an action…"): present
+ *  even when no later request is made to carry the nudge (the last-round case). */
+function nudgedEvents(result: { events: Array<{ type: string }> }): unknown[] {
+  return result.events.filter((e) => e.type === 'agent.reasoned' && JSON.stringify(e).includes('announced an action without calling a tool'));
+}
+
 describe('endsOnAnnouncement', () => {
   it('matches only a trailing colon', () => {
     expect(endsOnAnnouncement('First batch — add the trigger:')).toBe(true);
@@ -66,20 +79,30 @@ describe('the announced-action follow-up (ADR 0796)', () => {
     expect(result.rounds).toBe(2);
     expect(result.finalText).toBe('Suggesting now:');
     expect(seen.flat().filter((m) => m === `user:${ANNOUNCED_WITHOUT_CALL_NUDGE}`)).toHaveLength(1);
+    expect(nudgedEvents(result)).toHaveLength(1);
   });
 
   it('leaves an ordinary final answer alone', async () => {
-    const { result } = await run([{ content: 'Done. Nothing else to change.', toolCalls: [] }]);
+    const { result, seen } = await run([{ content: 'Done. Nothing else to change.', toolCalls: [] }]);
     expect(result.rounds).toBe(1);
+    expect(result.finalText).toBe('Done. Nothing else to change.');
+    expect(seen.flat().filter((m) => m === `user:${ANNOUNCED_WITHOUT_CALL_NUDGE}`)).toHaveLength(0);
+    expect(nudgedEvents(result)).toEqual([]);
   });
 
   it('does not fire when no tools were offered', async () => {
-    const { result } = await run([{ content: 'Here is the plan:', toolCalls: [] }], { tools: [] });
+    const { result, seen } = await run([{ content: 'Here is the plan:', toolCalls: [] }], { tools: [] });
     expect(result.rounds).toBe(1);
+    expect(result.finalText).toBe('Here is the plan:');
+    expect(seen.flat().filter((m) => m === `user:${ANNOUNCED_WITHOUT_CALL_NUDGE}`)).toHaveLength(0);
+    expect(nudgedEvents(result)).toEqual([]);
   });
 
   it('does not fire on the last round', async () => {
-    const { result } = await run([{ content: 'Suggesting now:', toolCalls: [] }], { maxRounds: 1 });
+    const { result, seen } = await run([{ content: 'Suggesting now:', toolCalls: [] }], { maxRounds: 1 });
     expect(result.rounds).toBe(1);
+    expect(result.finalText).toBe('Suggesting now:');
+    expect(seen.flat().filter((m) => m === `user:${ANNOUNCED_WITHOUT_CALL_NUDGE}`)).toHaveLength(0);
+    expect(nudgedEvents(result)).toEqual([]);
   });
 });

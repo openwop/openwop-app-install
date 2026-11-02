@@ -7,6 +7,12 @@
  * vendor on its `ProviderManifest`, so the ADR 0185 connector catalog groups it under
  * its declared commercial vendor exactly as the built-ins group. A pack WITHOUT vendor
  * stays valid and falls back to its own label — presentational only, gates nothing.
+ *
+ * Sabotage witnesses (w74): dropping the loader's vendor mapping reds cases 1 and 3;
+ * defaulting vendor to the displayName reds case 2; removing `type: string` from the
+ * schema's `provider.vendor` reds case 4; a `maxLength: 128` reds case 5; un-declaring
+ * `vendor` in the schema (so `additionalProperties:false` refuses it) reds 1, 3 and 5.
+ * Cases 1 and 3 share one code path (TST-DXE-4, human-ask dedupe; protected, kept).
  */
 import { describe, it, expect } from 'vitest';
 import { installConnectionPackManifest, resolveConnectionProviderOrThrow } from '../connectionPackLoader.js';
@@ -66,6 +72,8 @@ describe('RFC 0123 connection-pack provider.vendor', () => {
       },
     });
     expect(outcome.installed).toBe(false);
+    expect(outcome.errors?.[0]?.message).toContain('/provider/vendor must be string');
+    expect(() => resolveConnectionProviderOrThrow('v123badtype')).toThrow(/No connection provider 'v123badtype'/);
   });
 
   it('accepts a long vendor string — the ACCEPTED RFC 0123 schema dropped the draft maxLength bound (openwop#851)', () => {
@@ -74,6 +82,7 @@ describe('RFC 0123 connection-pack provider.vendor', () => {
     // schema change. The app validates against the vendored canonical schema,
     // so a conformant host accepts it (the catalog UI truncates for display).
     const outcome = installConnectionPackManifest(manifest('v123long', 'V'.repeat(129)));
-    expect(outcome.installed).toBe(true);
+    expect(outcome.installed, JSON.stringify(outcome.errors)).toBe(true);
+    expect(outcome.errors).toBeUndefined();
   });
 });

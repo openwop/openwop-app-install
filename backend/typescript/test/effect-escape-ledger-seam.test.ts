@@ -13,6 +13,11 @@
  *   3. An unknown run answers an EMPTY LIST, not 404 — a 404 is
  *      indistinguishable to the suite from "seam not wired", which soft-skips,
  *      and a soft-skip reads as a pass.
+ *
+ * Tracker TST-CXC-2. Red when (routes/effectEscapeLedgerSeam.ts): the seam
+ * mounts with the flag off; a missing runId is defaulted; an unknown run 404s;
+ * the host-namespaced twin is dropped; or the route reports anything but the
+ * stored per-identity count.
  */
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -24,11 +29,23 @@ import { resetLogicalInvocationOrdinals } from '../src/host/effectIdentity.js';
 
 let server: http.Server;
 let BASE: string;
+let offServer: http.Server;
+let OFF_BASE: string;
 const H = { 'content-type': 'application/json', authorization: 'Bearer dev-token' };
+const prevSeams = process.env.OPENWOP_TEST_SEAM_ENABLED;
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
+  // The flag-OFF app boots FIRST. The gate runs at registration, so it needs its
+  // own boot; booting it before the seam-ON app keeps the ON app's process-wide
+  // ledger backend (installed last) the one every case records into, whatever
+  // order the cases run in.
+  process.env.OPENWOP_TEST_SEAM_ENABLED = 'false';
+  const offApp = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  await new Promise<void>((res) => {
+    offServer = offApp.listen(0, '127.0.0.1', () => { OFF_BASE = `http://127.0.0.1:${(offServer.address() as AddressInfo).port}`; res(); });
+  });
   process.env.OPENWOP_TEST_SEAM_ENABLED = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => {
@@ -37,7 +54,9 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (prevSeams === undefined) delete process.env.OPENWOP_TEST_SEAM_ENABLED; else process.env.OPENWOP_TEST_SEAM_ENABLED = prevSeams;
   await new Promise<void>((res) => server.close(() => res()));
+  await new Promise<void>((res) => offServer.close(() => res()));
 });
 
 async function get(path: string): Promise<{ status: number; body: Record<string, unknown> }> {
@@ -81,39 +100,36 @@ describe('ADR 0591 — effect-escape ledger seam', () => {
   });
 
   it('rejects a missing runId rather than defaulting to something', async () => {
-    const { status } = await get('/host/sample/replay/effect-escapes');
+    const { status, body } = await get('/host/sample/replay/effect-escapes');
     expect(status).toBe(400);
+    expect(body['error']).toBe('validation_error');
   });
 
   it('is mounted on BOTH the spec-canonical and host-namespaced paths', async () => {
     // The suite drives `/host/sample/*`; the product surface is the
     // host-namespaced twin. A seam mounted on only one is unreachable from
-    // whichever side is not checked.
-    const a = await get('/host/sample/replay/effect-escapes?runId=esc-run-1');
-    const b = await get('/host/openwop-app/replay/effect-escapes?runId=esc-run-1');
+    // whichever side is not checked. This case records its OWN escape, so it
+    // compares real data whatever order the cases run in.
+    resetLogicalInvocationOrdinals();
+    await runWithEffectContext({ runId: 'esc-run-dual', replaying: false, nodeId: 'notify', tenantId: 'demo', attempt: 1 }, async () => {
+      await recordDurableEffectEscape('notification:approval');
+    });
+    const a = await get('/host/sample/replay/effect-escapes?runId=esc-run-dual');
+    const b = await get('/host/openwop-app/replay/effect-escapes?runId=esc-run-dual');
     expect(a.status).toBe(200);
     expect(b.status).toBe(200);
+    expect((a.body['escapes'] as unknown[]).length).toBe(1);
     expect(b.body).toEqual(a.body);
   });
 });
 
 describe('ADR 0591 — the seam is OFF by default (production safety)', () => {
   it('404s when OPENWOP_TEST_SEAM_ENABLED is not true', async () => {
-    // A SEPARATE app instance with the flag off — the gate runs at registration,
-    // so flipping the env after boot proves nothing.
-    const prev = process.env.OPENWOP_TEST_SEAM_ENABLED;
-    process.env.OPENWOP_TEST_SEAM_ENABLED = 'false';
-    try {
-      const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-      const srv = await new Promise<http.Server>((res) => {
-        const s = app.listen(0, '127.0.0.1', () => res(s));
-      });
-      const base = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
-      const res = await fetch(`${base}/host/sample/replay/effect-escapes?runId=x`, { headers: H });
-      expect(res.status).toBe(404);
-      await new Promise<void>((r) => srv.close(() => r()));
-    } finally {
-      process.env.OPENWOP_TEST_SEAM_ENABLED = prev;
-    }
+    // A SEPARATE app instance booted with the flag off (see beforeAll) — the gate
+    // runs at registration, so flipping the env after boot proves nothing.
+    const res = await fetch(`${OFF_BASE}/host/sample/replay/effect-escapes?runId=x`, { headers: H });
+    expect(res.status).toBe(404);
+    // Positive control: the seam-ON app answers the same request 200.
+    expect((await get('/host/sample/replay/effect-escapes?runId=x')).status).toBe(200);
   });
 });

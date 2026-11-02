@@ -18,10 +18,17 @@
  *
  * Every refusal has a positive control in the same test, so it cannot pass for the
  * wrong reason. Isolated env — its own app boot.
+ *
+ * Tracker TST-BEE-2 (w66). Red when: an unknown `bundle:` entry leaks through;
+ * standalone features are not stripped (listed plans or the `'*'` plan); the
+ * plan-included refusal or the `includedInPlan` flag drifts; bundle cadence
+ * resolution ignores the cadence; a repeat trial is granted; the grace
+ * predicate ignores the window or admits `unpaid`; a repeat past_due restarts
+ * the clock (the events are stamped a second apart); the grace end is wrong.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
@@ -179,6 +186,7 @@ describe('ADR 0820 §5 — the store shows plan-included bundles; checkout refus
     expect(JSON.stringify(await refused.json())).toContain('bundle_included_in_plan');
     const generic = await authed('/checkout', { method: 'POST', body: JSON.stringify({ priceId: 'price_agents' }) });
     expect(generic.status).toBe(409);
+    expect(JSON.stringify(await generic.json())).toContain('bundle_included_in_plan');
     // POSITIVE CONTROL — same tenant, same plan, a bundle the plan does not cover.
     expect((await authed('/bundles/crm/checkout', { method: 'POST', body: '{}' })).status).toBe(201);
   });
@@ -197,8 +205,12 @@ describe('ADR 0820 §7 — annual cadence at checkout (server-resolved price)', 
     expect((await month.json() as { priceId: string }).priceId).toBe('price_crm');
   });
   it('an invalid cadence is 400; a cadence the bundle has no price for is 404', async () => {
-    expect((await authed('/bundles/crm/checkout', { method: 'POST', body: JSON.stringify({ cadence: 'week' }) })).status).toBe(400);
-    expect((await authed('/bundles/agents/checkout', { method: 'POST', body: JSON.stringify({ cadence: 'year' }) })).status).toBe(404);
+    const week = await authed('/bundles/crm/checkout', { method: 'POST', body: JSON.stringify({ cadence: 'week' }) });
+    expect(week.status).toBe(400);
+    expect(((await week.json()) as { error?: string }).error).toBe('validation_error');
+    const noYear = await authed('/bundles/agents/checkout', { method: 'POST', body: JSON.stringify({ cadence: 'year' }) });
+    expect(noYear.status).toBe(404);
+    expect(((await noYear.json()) as { error?: string }).error).toBe('not_found');
   });
   it('the store lists the cadences a bundle is sold at', async () => {
     const body = await (await authed('/bundles')).json() as { bundles: Array<{ bundleId: string; cadences?: string[]; priceDisplay?: Record<string, string> }> };
@@ -277,7 +289,14 @@ describe('ADR 0820 §7 — past_due grace', () => {
     const first = (await getSubscription(T)).pastDueSince;
     expect(first).toBeDefined();
     expect((await resolveEntitlements(T, true)).plan).toBe('pro'); // inside the window
-    await processStripeEvent(T, subEvent('evt_c', 'customer.subscription.updated', { subId: 'sub_p', priceId: 'price_pro', status: 'past_due' }));
+    // Stamp the repeat a second later, so a restarted clock would differ.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.parse(first!) + 1_000);
+      await processStripeEvent(T, subEvent('evt_c', 'customer.subscription.updated', { subId: 'sub_p', priceId: 'price_pro', status: 'past_due' }));
+    } finally {
+      vi.useRealTimers();
+    }
     expect((await getSubscription(T)).pastDueSince).toBe(first); // a repeat never restarts the clock
     await processStripeEvent(T, subEvent('evt_d', 'customer.subscription.updated', { subId: 'sub_p', priceId: 'price_pro', status: 'active' }));
     expect((await getSubscription(T)).pastDueSince).toBeUndefined();

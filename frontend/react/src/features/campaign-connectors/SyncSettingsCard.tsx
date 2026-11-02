@@ -4,6 +4,7 @@
  * ad accounts), Meta's conversion action types, and a bounded, resumable
  * backfill. No credentials here: the ad-platform token stays in Connections.
  */
+import { syncReasonText } from './syncReason.js';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '../../ui/Button.js';
@@ -137,7 +138,7 @@ export function SyncSettingsCard({ orgId, platforms, onSynced }: { orgId: string
               {backfillLine(backfill)}
               {(backfill.failures?.length ?? 0) > 0 ? (
                 <ul className="u-m-0 u-mt-1 u-fs-13">
-                  {backfill.failures!.slice(0, 5).map((f, i) => <li key={`${f.adAccountId ?? ''}-${i}`}><code>{f.adAccountId}</code>: {f.reason}</li>)}
+                  {backfill.failures!.slice(0, 5).map((f, i) => <li key={`${f.adAccountId ?? ''}-${i}`}><code>{f.adAccountId}</code>: {syncReasonText(t, f.reason)}</li>)}
                 </ul>
               ) : null}
               {backfill.truncated ? <p className="u-m-0 u-mt-1 u-fs-13">{t('syncTruncated')}</p> : null}

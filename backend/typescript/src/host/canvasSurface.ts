@@ -17,7 +17,7 @@ import { runOrgScopeSubject } from './accessControlService.js';
 import { hasWorkflowScope } from './workflowWriteAuthority.js';
 import { canvasTypeValidator, isPrivilegedCanvasType, resolveCanvasTypeAccess } from './canvasTypeOwnership.js';
 import { randomUUID } from 'node:crypto';
-import { insertRunWithStartContext } from './runInsert.js';
+import { chargedAdmission, insertRunWithStartContext } from './runInsert.js';
 import { createLogger } from '../observability/logger.js';
 import { DurableCollection } from './hostExtPersistence.js';
 import { snapshotRunVariables } from './variablesRuntime.js';
@@ -973,7 +973,9 @@ export function createCanvasSurface(scope: BundleScope): CanvasSurface {
         createdAt: now,
         updatedAt: now,
       };
-      await insertRunWithStartContext(storage, childRun, { definition: wf.definition });
+      // ADR 0987 D3 / Q1 — a cross-canvas child: a new run for the monthly plan,
+      // inside its parent's concurrency slot.
+      await insertRunWithStartContext(storage, childRun, { definition: wf.definition, admission: chargedAdmission() });
 
       // awaitTerminal:false → fire-and-forget; return the id immediately.
       if (opts?.awaitTerminal === false) {

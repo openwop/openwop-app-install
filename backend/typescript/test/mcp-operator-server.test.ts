@@ -26,7 +26,7 @@ import {
   isOperatorManagedMcpServer,
   _resetOperatorMcpRegistration,
 } from '../src/host/mcpOperatorServer.js';
-import { getProvider, registerProvider } from '../src/features/connections/providerRegistry.js';
+import { getProvider, listProviders, registerProvider } from '../src/features/connections/providerRegistry.js';
 import { setSecret } from '../src/byok/secretResolver.js';
 import { __resetConnectionsStore, createSecretConnection } from '../src/features/connections/connectionsService.js';
 import { setGovernancePolicy, __resetGovernanceStore } from '../src/host/governanceService.js';
@@ -48,6 +48,8 @@ describe('operator-configured outbound MCP server (H21)', () => {
   let storage: Storage;
   let url: string;
   let seen: { authorization?: string; method?: string } = {};
+  /** Provider ids registered by the BOOT, before any case here registers one. */
+  let builtIns: string[] = [];
 
   beforeAll(async () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -56,6 +58,7 @@ describe('operator-configured outbound MCP server (H21)', () => {
     process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true';
     const app = await createApp({ port: 18971, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
     storage = app.locals.storage;
+    builtIns = listProviders().map((p) => p.id);
     await __resetConnectionsStore();
     await __resetGovernanceStore();
 
@@ -78,7 +81,7 @@ describe('operator-configured outbound MCP server (H21)', () => {
     await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
     url = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
 
-    await storage.insertRun({ runId: 'run-opmcp', workflowId: 'w', tenantId: 'topmcp', status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: 'x', updatedAt: 'x' });
+    await storage.insertRun({ runId: 'run-opmcp', workflowId: 'w', tenantId: 'topmcp', status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: '2026-06-15T12:00:00.000Z', updatedAt: '2026-06-15T12:00:00.000Z' });
   });
 
   afterAll(async () => {
@@ -142,15 +145,22 @@ describe('operator-configured outbound MCP server (H21)', () => {
   });
 
   it('registers nothing when unconfigured', () => {
+    // Order-independent: the provider registry is process-global with no
+    // unregister, and other cases here DO register `operator-mcp`. So the claim
+    // is asserted as "this call changed nothing", not "the id is absent".
+    const ids = (): string[] => listProviders().map((p) => p.id).sort();
+    const before = ids();
+    const priorDefault = getProvider(DEFAULT_OPERATOR_MCP_SERVER_ID);
     registerOperatorMcpServer();
-    expect(getProvider(DEFAULT_OPERATOR_MCP_SERVER_ID)).toBeNull();
+    expect(ids()).toEqual(before);
+    expect(getProvider(DEFAULT_OPERATOR_MCP_SERVER_ID)).toEqual(priorDefault);
   });
 
   it('no built-in provider carries the operatorManaged marker', () => {
     // The marker is the ONLY thing that skips the per-user credential gate, so a
     // built-in acquiring it would be a silent authorization bypass.
-    expect(isOperatorManagedMcpServer('google')).toBe(false);
-    expect(isOperatorManagedMcpServer('slack')).toBe(false);
+    expect(builtIns, 'positive control: the boot snapshot holds the built-ins').toEqual(expect.arrayContaining(['google', 'slack']));
+    expect(builtIns.filter((id) => isOperatorManagedMcpServer(id))).toEqual([]);
   });
 
   // ── credential lane ───────────────────────────────────────────────────────

@@ -6,12 +6,26 @@
  *  - runMetric evaluates over BOTH row paths (kernel system rows via the
  *    service layer; user-type rows via queryEntities), applies stored filters +
  *    bounded caller params only, groups, buckets, and stays tenant-isolated.
+ *
+ * Tracker TST-BED-2 (w66). Red when: the org filter is dropped (`an org with
+ * no rows…`); a foreign tenant's row is summed (the foreign deal sits in the
+ * SAME org id as the caller's, so only the tenant boundary keeps it out);
+ * `since`, month buckets, stored filters, the numeric-field check, the
+ * kernel allowlist (a minted but non-allowlisted system type), the timeField
+ * refusal, or the system read-only guard drift; the BI tools answer data with
+ * the toggle off or without an acting user (each asserted with the OTHER
+ * guard open). The `bi` toggle is reset to its default after every case.
+ * Double guard (cross-file, recorded): a no-user `run-metric` is also emptied
+ * by `resolveReadOrgScope` (host/agentToolKit.ts), with a different note; the
+ * case asserts the tool's own note so dropping the tool's check reds it.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
-import { createEntityType, createEntity } from '../src/features/entities/entitiesService.js';
+import { createEntityType, createEntity, mintSystemType } from '../src/features/entities/entitiesService.js';
+import { saveConfig } from '../src/host/featureToggles/service.js';
+import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createDeal } from '../src/features/crm/entities/deals.js';
 import { listMetrics, getMetric, createMetric, updateMetric, deleteMetric, runMetric } from '../src/features/bi/biService.js';
 
@@ -30,7 +44,8 @@ beforeAll(async () => {
   const validateContact = async (): Promise<boolean> => true;
   await createDeal({ tenantId: T1, orgId: 'org-1', title: 'Alpha', amount: 1000, closeDate: '2026-07-01', createdBy: 'u1', validateCompany, validateContact });
   await createDeal({ tenantId: T1, orgId: 'org-1', title: 'Beta', amount: 3000, closeDate: '2026-07-15', createdBy: 'u1', validateCompany, validateContact });
-  await createDeal({ tenantId: T2, orgId: 'org-x', title: 'Foreign', amount: 999_999, closeDate: '2026-07-02', createdBy: 'u2', validateCompany, validateContact });
+  // Same org id as T1's deals: only the TENANT boundary keeps it out of T1's sums.
+  await createDeal({ tenantId: T2, orgId: 'org-1', title: 'Foreign', amount: 999_999, closeDate: '2026-07-02', createdBy: 'u2', validateCompany, validateContact });
 
   // A user type + rows in T1 for the queryEntities path.
   await createEntityType({
@@ -46,23 +61,34 @@ beforeAll(async () => {
   }
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+// `saveConfig` is global: restore the `bi` toggle so no case sees another's.
+// (Read lazily: the toggle registry is populated by `createApp`.)
+const biDefault = () => getToggleDefault('bi');
+const setBi = async (status: 'on' | 'off'): Promise<void> => {
+  const d = biDefault();
+  expect(d).toBeTruthy();
+  await saveConfig({ ...d!, status }, 'test');
+};
+afterEach(async () => { const d = biDefault(); if (d) await saveConfig(d, 'test'); });
 
 describe('closed-world validation (write time)', () => {
   it('rejects an unknown entity type', async () => {
     await expect(createMetric(T1, 'u1', 'bad-type', { title: 'X', entityType: 'nope', aggregate: 'count' }))
-      .rejects.toMatchObject({ code: 'validation_error' });
+      .rejects.toMatchObject({ code: 'validation_error', message: expect.stringContaining('Unknown entity type') });
   });
   it('rejects a non-allowlisted system type', async () => {
+    // Minted, so the refusal is the allowlist's, not "unknown type".
+    await mintSystemType({ tenantId: T1, name: 'crm.activity', displayName: 'Activity', fields: [{ key: 'subject', label: 'Subject', type: 'string', required: false }], actor: 'u1' });
     await expect(createMetric(T1, 'u1', 'bad-sys', { title: 'X', entityType: 'crm.activity', aggregate: 'count' }))
-      .rejects.toMatchObject({ code: 'validation_error' });
+      .rejects.toMatchObject({ code: 'validation_error', message: expect.stringContaining('is not metric-enabled') });
   });
   it('rejects sum over a non-number field and unknown fields/ops', async () => {
     await expect(createMetric(T1, 'u1', 'bad-field', { title: 'X', entityType: 'ticket', aggregate: 'sum', field: 'subject' }))
-      .rejects.toMatchObject({ code: 'validation_error' });
+      .rejects.toMatchObject({ code: 'validation_error', message: expect.stringContaining('needs a number field') });
     await expect(createMetric(T1, 'u1', 'bad-gb', { title: 'X', entityType: 'ticket', aggregate: 'count', groupBy: 'ghost' }))
-      .rejects.toMatchObject({ code: 'validation_error' });
+      .rejects.toMatchObject({ code: 'validation_error', message: expect.stringContaining('`ghost` does not exist') });
     await expect(createMetric(T1, 'u1', 'bad-op', { title: 'X', entityType: 'ticket', aggregate: 'count', filters: [{ key: 'severity', op: 'like', value: 'x' }] }))
-      .rejects.toMatchObject({ code: 'validation_error' });
+      .rejects.toMatchObject({ code: 'validation_error', message: expect.stringContaining('op must be one of') });
   });
 });
 
@@ -121,9 +147,9 @@ describe('runMetric — evaluation', () => {
   });
   it('rejects range/bucket runs on a metric without a timeField, and groupBy+bucket together', async () => {
     await expect(runMetric(T1, 'sys-company-count', { orgId: 'org-1', bucket: 'month' }, undefined))
-      .rejects.toMatchObject({ code: 'validation_error' });
+      .rejects.toMatchObject({ code: 'validation_error', message: expect.stringContaining('declares no `timeField`') });
     await expect(runMetric(T1, 'sys-pipeline-value', { orgId: 'org-1', bucket: 'month', groupBy: 'stage_id' }, undefined))
-      .rejects.toMatchObject({ code: 'validation_error' });
+      .rejects.toMatchObject({ code: 'validation_error', message: expect.stringContaining('not both') });
   });
   it('a kernel type never minted for the tenant returns an honest empty result', async () => {
     const r = await runMetric('tenant-bi-fresh', 'sys-product-count', { orgId: 'org-1' }, undefined);
@@ -140,20 +166,24 @@ describe('ADR 0417 P2 — chat tools (toggle-gated, fail-empty)', () => {
   };
 
   it('list/run tools fail EMPTY when the toggle is off or no acting user', async () => {
-    // Toggle is OFF by default → empty note, never data.
+    // Toggle OFF (set here, not inherited) → empty note, never data.
+    await setBi('off');
     const offRes = await exec('openwop:bi.list-metrics', {}, { tenantId: T1, actingUserId: 'u1' });
     expect(JSON.parse(offRes.content).metrics).toEqual([]);
-    // No acting user (system run) → empty even with the toggle on later.
+    // No acting user, with the toggle ON: only the acting-user guard can empty it.
+    await setBi('on');
+    // The exact note names WHICH guard emptied it: the tool's own acting-user
+    // check. (Double guard, cross-file: `resolveReadOrgScope` in
+    // host/agentToolKit.ts also empties a no-user call, with a different note —
+    // so asserting only `result: null` could not see the tool's check go.)
     const anonRes = await exec('openwop:bi.run-metric', { metricId: 'sys-deal-count', orgId: 'org-1' }, { tenantId: T1 });
-    expect(JSON.parse(anonRes.content).result).toBeNull();
+    expect(JSON.parse(anonRes.content)).toEqual({ result: null, note: 'BI metrics unavailable for this workspace/run' });
+    const anonList = await exec('openwop:bi.list-metrics', {}, { tenantId: T1 });
+    expect(JSON.parse(anonList.content)).toEqual({ metrics: [], note: 'BI metrics unavailable for this workspace/run' });
   });
 
   it('with the toggle on + acting user, run-metric returns governed numbers; bad params are typed errors', async () => {
-    const { saveConfig } = await import('../src/host/featureToggles/service.js');
-    const { getToggleDefault } = await import('../src/host/featureToggles/registry.js');
-    const d = getToggleDefault('bi');
-    expect(d).toBeTruthy();
-    await saveConfig({ ...d!, status: 'on' }, 'test');
+    await setBi('on');
     // BI-SCOPE-1 — the tool now applies the route's org gate, so the caller must
     // actually READ org-1 (this test used to pass for a non-member, which pinned
     // the defect). Make u1 a reader of a real org-1.
@@ -171,8 +201,11 @@ describe('ADR 0417 P2 — chat tools (toggle-gated, fail-empty)', () => {
 
 describe('ADR 0417 P3 — feature.bi.nodes', () => {
   it('run-metric wraps the surface and emits an interactive.chart artifact envelope', async () => {
-    // @ts-expect-error — .mjs pack module has no type declarations (pure-JS node pack).
-    const { nodes } = await import('../../../packs/feature.bi.nodes/index.mjs');
+    // The pack is pure JS with no declarations: import it by a non-literal path
+    // and type the one export this case uses.
+    type RunMetricOut = { status: string; outputs: { result: { points: unknown[] }; artifact: { artifactTypeId: string; payload: { chartType: string; data: { labels: string[] } } } } };
+    const packPath = new URL('../../../packs/feature.bi.nodes/index.mjs', import.meta.url).href;
+    const { nodes } = (await import(packPath)) as { nodes: Record<string, (ctx: { inputs: Record<string, unknown>; features: Record<string, unknown> }) => Promise<RunMetricOut>> };
     const ctx = {
       inputs: { metricId: 'sys-pipeline-value', orgId: 'org-1', bucket: 'month' },
       features: { bi: (await import('../src/features/bi/surface.js')).buildBiSurface({ tenantId: T1 }) },

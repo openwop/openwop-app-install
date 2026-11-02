@@ -105,6 +105,31 @@ describe('the visitor key (D5)', () => {
 });
 
 describe('token repair (grade-code M4)', () => {
+  // ADR 0951 P2 review #7: a choice that lost a consent CAS race came back 409
+  // and was not retried, so a refusal sent beside a grant was lost.
+  it('a contended save is retried once; any other 409 is not', async () => {
+    let posts = 0;
+    stubFetch((url, init) => {
+      if (init?.method !== 'POST') return posture('opt-in')(url, init);
+      posts += 1;
+      return posts === 1
+        ? { status: 409, body: { error: 'conflict', message: 'Consent changed concurrently.', details: { reason: 'consent_write_contended' } } }
+        : { status: 201, body: { ok: true, subjectToken: 'tok-1' } };
+    });
+    await loadPosture(ORG);
+    await recordChoice(ORG, true, { replay: false });
+    expect(posts).toBe(2);
+    expect(decisionFor(ORG)).toBe('allowed');
+    posts = 0;
+    stubFetch((url, init) => {
+      if (init?.method !== 'POST') return posture('opt-in')(url, init);
+      posts += 1;
+      return { status: 409, body: { error: 'conflict', message: 'Conflict.', details: { reason: 'something_else' } } };
+    });
+    await expect(recordChoice(ORG, true, { replay: false })).rejects.toThrow('409');
+    expect(posts).toBe(1);
+  });
+
   it('a beacon 400 naming consentToken re-records the SAME choice once, minting a fresh token', async () => {
     let n = 0;
     stubFetch((url, init) => {

@@ -12,6 +12,11 @@
  * was false for every session the chain started. This suite pins the whole
  * lane: the RFC 0134 edge condition, the param plumbing, the context's
  * reachability, and the gate outcomes with and without a grant.
+ *
+ * grade-tests w67 (TST-CBK-2): red when the computer-use `task` node stops
+ * forwarding `applyContext`, when the chain's `guard.ok → session` edge
+ * condition is inverted, when the commit gate auto-approves without a grant,
+ * or when a granted submission is not attributed to the grant.
  */
 import { beforeAll, beforeEach, describe, expect, it, afterAll } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -33,7 +38,7 @@ import { advance } from '../src/features/computer-use/computerUseService.js';
 import { sessions, type CuSession } from '../src/features/computer-use/sessionStore.js';
 import type { ComputerUseAdapter, CuAction } from '../src/features/computer-use/adapter.js';
 import { createApplyGrant } from '../src/host/applyGrant.js';
-import type { NodeModule, WorkflowDefinition } from '../src/executor/types.js';
+import type { NodeContext, NodeModule, NodeOutcome, WorkflowDefinition } from '../src/executor/types.js';
 import type { RunRecord } from '../src/types.js';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -49,11 +54,36 @@ afterAll(() => { __clearFeatureSurfaces(); });
 const jobSearchPackUrl = new URL('../../../packs/feature.job-search.nodes/index.mjs', import.meta.url).href;
 const computerUsePackUrl = new URL('../../../packs/feature.computer-use.nodes/index.mjs', import.meta.url).href;
 
-type NodeFn = (ctx: Record<string, unknown>) => Promise<{ status: string; outputs?: Record<string, unknown>; error?: unknown }>;
+/** What a pack node fn returns: the executor's outcome, or `{status:'failed'}`
+ *  which the production tarball loader maps to `failure`. */
+interface PackNodeResult {
+  status: string;
+  outputs?: unknown;
+  interrupt?: Extract<NodeOutcome, { status: 'suspended' }>['interrupt'];
+  error?: { code?: string; message?: string };
+}
+type NodeFn = (ctx: NodeContext) => Promise<PackNodeResult>;
+
+/** Adapt a pack fn the way `packs/tarballLoader.ts` does (non-success → failure). */
+function adaptPackNode(typeId: string, fn: NodeFn): NodeModule {
+  return {
+    typeId,
+    version: '1.0.0',
+    async execute(ctx: NodeContext): Promise<NodeOutcome> {
+      const r = await fn(ctx);
+      if (r.status === 'success') return { status: 'success', outputs: r.outputs };
+      if (r.status === 'suspended' && r.interrupt) return { status: 'suspended', interrupt: r.interrupt };
+      return { status: 'failure', error: { code: r.error?.code ?? 'pack_node_error', message: r.error?.message ?? 'non-success' } };
+    },
+  };
+}
+
+let runSeq = 0;
 
 const T = 'user:t-apply-chain';
 const ORIGIN = 'jobs.example.com';
-const CTX = { subjectId: 'subj-apply', campaignId: 'camp-apply', tier: 'B' as const };
+const CTX = { subjectId: 'user:apply-e2e', // DG-SEC-1: the grantor's own applications
+   campaignId: 'camp-apply', tier: 'B' as const };
 
 const storage = await openStorage('memory://');
 
@@ -73,16 +103,7 @@ beforeAll(async () => {
     ['feature.job-search.nodes.guard-rewrite', js['feature.job-search.nodes.guard-rewrite']!],
     ['feature.computer-use.nodes.task', cu['feature.computer-use.nodes.task']!],
   ] as const) {
-    reg.register({
-      typeId,
-      version: '1.0.0',
-      async execute(ctx) {
-        const r = await fn(ctx as unknown as Record<string, unknown>);
-        if (r.status === 'success' || r.status === 'suspended') return r as never;
-        const err = (r as { error?: { code?: string; message?: string } }).error;
-        return { status: 'failure', error: { code: err?.code ?? 'pack_node_error', message: err?.message ?? 'non-success' } } as never;
-      },
-    } as NodeModule);
+    reg.register(adaptPackNode(typeId, fn));
   }
   loadWorkflowChainPacks({ roots: defaultWorkflowChainPackRoots() });
   // ADR 0832 — the seam's org floor checks the run's person against the org the
@@ -108,7 +129,7 @@ async function runApplyChain(params: Record<string, unknown>): Promise<{ run: Ru
   const def = expandChain(entry!.chain, { params });
   const now = new Date().toISOString();
   const run: RunRecord = {
-    runId: `run-apply-${Math.random().toString(36).slice(2)}`,
+    runId: `run-apply-${(runSeq += 1)}`,
     workflowId: def.workflowId, tenantId: T, status: 'pending',
     inputs: {}, metadata: { actingUserId: 'user:apply-e2e' }, configurable: {},
     createdAt: now, updatedAt: now,
@@ -179,7 +200,7 @@ describe('WF-JS-2 — career.apply to the gate, through the expanded chain', () 
   });
 
   it('a FAILED guard verdict stops the session node — the RFC 0134 edge condition, live', async () => {
-    const { status } = await runApplyChain({
+    const { run, status } = await runApplyChain({
       ...PARAMS,
       reworded: 'Led the payments team at Acme for nine years, managing $40M.', // fabricated tenure + number
     });
@@ -190,6 +211,14 @@ describe('WF-JS-2 — career.apply to the gate, through the expanded chain', () 
     // rewrite: the substance pinned here is that the browser is never reached.
     expect(status).toBe('failed');
     expect((await sessions.listByPrefix(`${T}:`)).length, 'a failed guard must never reach the browser').toBe(0);
+    // …and it failed BECAUSE the guard ran and said no, not for an earlier reason.
+    const guardVerdicts = (await storage.listEvents(run.runId))
+      .filter((e) => e.type === 'node.completed')
+      .map((e) => (e.payload as { outputs?: { ok?: unknown; violationCount?: unknown } } | null)?.outputs)
+      .filter((o) => o !== undefined && 'violationCount' in o);
+    expect(guardVerdicts).toHaveLength(1);
+    expect(guardVerdicts[0]?.ok).toBe(false);
+    expect(guardVerdicts[0]?.violationCount).not.toBe(0);
   });
 
   it('without a grant, the chain-started session HALTS for a human at the commit', async () => {

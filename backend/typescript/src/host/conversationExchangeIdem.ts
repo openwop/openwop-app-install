@@ -58,7 +58,8 @@ export type ClaimOutcome =
  * - `committed`   — the exchange already succeeded; the caller returns the
  *                   existing turns WITHOUT re-dispatching.
  * - `in_progress` — another live request holds a fresh pending claim; the caller
- *                   returns 409 so the client retries and eventually sees committed.
+ *                   returns 409 `conflict` (ADR 1001 R12: never a dead-run code)
+ *                   so the client retries and eventually sees committed.
  */
 export async function claimExchange(
   tenantId: string,

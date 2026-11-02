@@ -12,7 +12,11 @@
  * superadmin early return is the only way the call can succeed.
  *
  * Sabotage-witnessed (2026-10-23): swapping `isListedSuperadmin` for
- * `isSuperadmin` in `entitlementGuard.ts` turns this red.
+ * `isSuperadmin` in `entitlementGuard.ts` turns this red. Re-witnessed by the w73
+ * probes pw69-listed (that swap), pw69-follows (the exemption no longer follows
+ * the person's `personalTenant` into a customer workspace) and pw69-control (the
+ * mocked plan really paywalls a non-operator). The `as unknown as Request` casts
+ * are forced by the `requireEntitledFeature(req: Request)` signature.
  */
 import type { Request } from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';

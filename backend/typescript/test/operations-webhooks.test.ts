@@ -1,11 +1,25 @@
 /**
  * ADR 0395 Phase A — the operator webhook-delivery health panel, ROUTE-level:
- * superadmin gate on the cross-tenant summary + the retry/pause writes (403
- * for a plain tenant admin), the org-scoped summary behind the operations
- * toggle + `webhooks:manage` (editor 403s), ONE batched response (counts +
+ * superadmin gate on the cross-tenant summary + the retry write (403
+ * `forbidden` for a plain tenant admin), the org-scoped summary served to the
+ * org owner (who holds `webhooks:manage`), ONE batched response (counts +
  * recent rows fanned in server-side), the SAFE PROJECTION (no `secret`, no
  * `payload`, no query strings on URLs), and manual retry re-arming a dead
- * delivery for the existing worker.
+ * delivery for the existing worker, with its audit row. Phases B+C: the DLQ +
+ * system-health reads are superadmin-only, and the durable DLQ snapshot/replay
+ * never surfaces a payload and replays a message exactly once.
+ *
+ * NOT covered here (corrected w74; the header used to claim both): the
+ * trigger-subscription pause/resume write, and an editor's 403 on the
+ * org-scoped summary. Nor does any case seed a foreign-tenant webhook, so the
+ * org-scoped summary's tenant filter is not asserted by this file.
+ *
+ * Sabotage, each red (w74 round 1): `sanitizeUrl` returning the raw URL; a
+ * delivery projection carrying `secret`; a zero `dead` count; dropping
+ * `requireSuperadmin` from the cross-tenant summary, the retry, or the health
+ * read; skipping the retry 404; a retry that keeps the spent attempts; a replay
+ * that does not delete the DLQ row; a replay that does not bump
+ * `deliveryCount` or unwrap `original`; a snapshot that carries payloads.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -35,30 +49,51 @@ beforeAll(async () => {
     const d = getToggleDefault(id);
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
   }
-});
+}, 120_000);
 afterAll(async () => {
   delete process.env.OPENWOP_SUPERADMIN_TENANTS;
   await new Promise<void>((res) => server.close(() => res()));
 });
 
-interface Res<T = any> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res> }
+interface Res<T> { status: number; body: T }
+/** The flat S22 refusal envelope (`middleware/errorEnvelope.ts`). */
+interface Refusal { error: string; message: string }
+interface DlqSummary { subjects: unknown[]; pointInTime: boolean; backend: string }
+interface HealthSummary {
+  perInstance: boolean;
+  checks?: { storage?: { ok: boolean } };
+  sse?: { totalStreams: unknown };
+  rateLimits?: { ipReqsPerMin: unknown };
+}
+interface WebhookSummary {
+  webhooks: Array<{ subscriptionId: string; url: string; counts: { dead: number }; recent: Array<Record<string, unknown>> }>;
+}
+interface Client {
+  get: <T>(p: string) => Promise<Res<T>>;
+  post: <T>(p: string, b?: unknown) => Promise<Res<T>>;
+}
 function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    return { status: res.status, body: await res.json().catch(() => undefined) };
+    for (const ck of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
+    return { status: res.status, body: (await res.json().catch(() => undefined)) as T };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b) };
+}
+
+/** A refusal from `requireSuperadmin`: exactly 403 `forbidden`. */
+function expectForbidden(r: Res<Refusal>, what: string): void {
+  expect(r.status, what).toBe(403);
+  expect(r.body.error, what).toBe('forbidden');
 }
 
 let n = 0;
 async function login(tenantId: string): Promise<{ c: Client; orgId: string }> {
   const c = client();
-  const r = await c.post('/host/openwop-app/test/login', { email: `ops-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await c.post<unknown>('/host/openwop-app/test/login', { email: `ops-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status).toBe(201);
   return { c, orgId: org.body.orgId };
 }
@@ -90,18 +125,18 @@ async function seedDelivery(subscriptionId: string, tenantId: string, status: 'p
 describe('operations DLQ + system-health (Phases B+C) — gating + honesty', () => {
   it('DLQ summary + replay + health summary are superadmin-only; summary carries honesty flags', async () => {
     const plain = await login(`org:test-ops-dlq-plain-${Date.now()}`);
-    expect((await plain.c.get(`${OPS}/dlq/summary`)).status).toBe(403);
-    expect((await plain.c.post(`${OPS}/dlq/replay`, { tenantId: 't', subject: 's.dlq', messageId: 'm' })).status).toBe(403);
-    expect((await plain.c.get(`${OPS}/health/summary`)).status).toBe(403);
+    expectForbidden(await plain.c.get<Refusal>(`${OPS}/dlq/summary`), 'dlq summary');
+    expectForbidden(await plain.c.post<Refusal>(`${OPS}/dlq/replay`, { tenantId: 't', subject: 's.dlq', messageId: 'm' }), 'dlq replay');
+    expectForbidden(await plain.c.get<Refusal>(`${OPS}/health/summary`), 'health summary');
 
     const superAdmin = await login(SUPER_TENANT);
-    const dlq = await superAdmin.c.get(`${OPS}/dlq/summary`);
+    const dlq = await superAdmin.c.get<DlqSummary>(`${OPS}/dlq/summary`);
     expect(dlq.status).toBe(200);
     expect(Array.isArray(dlq.body.subjects)).toBe(true);
     expect(dlq.body.pointInTime).toBe(true);
     expect(['memory', 'durable']).toContain(dlq.body.backend);
 
-    const health = await superAdmin.c.get(`${OPS}/health/summary`);
+    const health = await superAdmin.c.get<HealthSummary>(`${OPS}/health/summary`);
     expect(health.status, JSON.stringify(health.body)).toBe(200);
     expect(health.body.perInstance).toBe(true); // the multi-instance honesty caveat
     expect(health.body.checks?.storage?.ok).toBe(true);
@@ -110,9 +145,14 @@ describe('operations DLQ + system-health (Phases B+C) — gating + honesty', () 
     // no secrets in the health payload
     expect(JSON.stringify(health.body)).not.toMatch(/secret|token|password/i);
 
-    // replay of a nonexistent message is a typed 404, bad subject a 400
-    expect((await superAdmin.c.post(`${OPS}/dlq/replay`, { tenantId: 'org:x', subject: 'jobs.dlq', messageId: 'nope' })).status).toBe(404);
-    expect((await superAdmin.c.post(`${OPS}/dlq/replay`, { tenantId: 'org:x', subject: 'jobs', messageId: 'nope' })).status).toBe(400);
+    // replay of a nonexistent message is a typed 404, bad subject a 400 — two
+    // distinct branches, so assert the code as well as the status
+    const missing = await superAdmin.c.post<Refusal>(`${OPS}/dlq/replay`, { tenantId: 'org:x', subject: 'jobs.dlq', messageId: 'nope' });
+    expect(missing.status).toBe(404);
+    expect(missing.body.error).toBe('not_found');
+    const badSubject = await superAdmin.c.post<Refusal>(`${OPS}/dlq/replay`, { tenantId: 'org:x', subject: 'jobs', messageId: 'nope' });
+    expect(badSubject.status).toBe(400);
+    expect(badSubject.body.error).toBe('validation_error');
   });
 });
 
@@ -149,14 +189,17 @@ describe('durable DLQ snapshot + replay (the fleet-shared backend, OQ-3)', () =>
 describe('operations webhook summary — gating + projection', () => {
   it('cross-tenant summary: superadmin only (tenant admin 403s); tenant summary needs webhooks:manage', async () => {
     const plain = await login(`org:test-ops-plain-${Date.now()}`);
-    expect((await plain.c.get(`${OPS}/webhooks/summary`)).status).toBe(403);
+    expectForbidden(await plain.c.get<Refusal>(`${OPS}/webhooks/summary`), 'cross-tenant summary');
 
     // own-org summary: the org owner holds webhooks:manage (admin tier) → 200
-    const own = await plain.c.get(`${OPS}/orgs/${encodeURIComponent(plain.orgId)}/webhooks/summary`);
+    const own = await plain.c.get<WebhookSummary>(`${OPS}/orgs/${encodeURIComponent(plain.orgId)}/webhooks/summary`);
     expect(own.status, JSON.stringify(own.body)).toBe(200);
+    expect(Array.isArray(own.body.webhooks)).toBe(true);
 
     const superAdmin = await login(SUPER_TENANT);
-    expect((await superAdmin.c.get(`${OPS}/webhooks/summary`)).status).toBe(200);
+    const all = await superAdmin.c.get<WebhookSummary>(`${OPS}/webhooks/summary`);
+    expect(all.status).toBe(200);
+    expect(Array.isArray(all.body.webhooks)).toBe(true);
   });
 
   it('returns ONE batched response with counts + recent rows, secrets/payloads/query-strings stripped', async () => {
@@ -164,9 +207,9 @@ describe('operations webhook summary — gating + projection', () => {
     const { c, orgId } = await login(tenant);
     const subId = `wh-sub-${Date.now()}`;
     await seedDelivery(subId, tenant, 'dead');
-    const res = await c.get(`${OPS}/orgs/${encodeURIComponent(orgId)}/webhooks/summary`);
+    const res = await c.get<WebhookSummary>(`${OPS}/orgs/${encodeURIComponent(orgId)}/webhooks/summary`);
     expect(res.status).toBe(200);
-    const row = (res.body.webhooks as Array<{ subscriptionId: string; url: string; counts: { dead: number }; recent: Array<Record<string, unknown>> }>).find((w) => w.subscriptionId === subId);
+    const row = res.body.webhooks.find((w) => w.subscriptionId === subId);
     expect(row).toBeTruthy();
     expect(row!.counts.dead).toBe(1);
     expect(row!.url).toBe('https://receiver.example.test/hook'); // query string stripped
@@ -182,11 +225,19 @@ describe('operations webhook summary — gating + projection', () => {
     const plain = await login(tenant);
     const deliveryId = await seedDelivery(`wh-sub-retry-${Date.now()}`, tenant, 'dead');
 
-    expect((await plain.c.post(`${OPS}/webhooks/deliveries/${deliveryId}/retry`)).status).toBe(403);
+    expectForbidden(await plain.c.post<Refusal>(`${OPS}/webhooks/deliveries/${deliveryId}/retry`), 'retry');
+    // the refused retry wrote no audit row
+    expect(await storage.listAudit({ actionPrefix: 'operations.webhook.retry', resource: deliveryId })).toEqual([]);
 
     const superAdmin = await login(SUPER_TENANT);
-    const retried = await superAdmin.c.post(`${OPS}/webhooks/deliveries/${deliveryId}/retry`);
+    const retried = await superAdmin.c.post<{ retried: boolean }>(`${OPS}/webhooks/deliveries/${deliveryId}/retry`);
     expect(retried.status, JSON.stringify(retried.body)).toBe(202);
+    expect(retried.body).toEqual({ retried: true });
+
+    // the audited path: exactly one success row for THIS delivery
+    const audit = await storage.listAudit({ actionPrefix: 'operations.webhook.retry', resource: deliveryId });
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({ action: 'operations.webhook.retry', resource: deliveryId, outcome: 'success' });
 
     // the row is pending + due again with a fresh budget
     const rows = await storage.listWebhookDeliveries({ subscriptionIds: undefined, limit: 1000 });
@@ -194,6 +245,8 @@ describe('operations webhook summary — gating + projection', () => {
     expect(row?.status).toBe('pending');
     expect(row?.attempts).toBe(0);
     // unknown delivery → 404
-    expect((await superAdmin.c.post(`${OPS}/webhooks/deliveries/nope/retry`)).status).toBe(404);
+    const nope = await superAdmin.c.post<Refusal>(`${OPS}/webhooks/deliveries/nope/retry`);
+    expect(nope.status).toBe(404);
+    expect(nope.body.error).toBe('not_found');
   });
 });

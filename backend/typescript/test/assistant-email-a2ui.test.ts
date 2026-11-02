@@ -33,6 +33,11 @@ import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { buildAssistantSurface } from '../src/features/assistant/surface.js';
 import { __resetAssistantStore, listPendingActions } from '../src/features/assistant/assistantService.js';
 
+/** The resume value the form card sends: one answer per field (ADR 1013 D4). */
+const answers = (values: Record<string, unknown>): { answers: Array<{ id: string; answer: unknown }> } => ({
+  answers: Object.entries(values).map(([id, answer]) => ({ id, answer })),
+});
+
 // Mirrors the host-pinned closed catalog (frontend `chat/a2ui/catalog.ts`).
 const CATALOG_VERSION = '0.9.1';
 const CATALOG = new Set(['heading', 'text', 'field.text', 'field.date', 'field.select', 'field.checkbox', 'action.button']);
@@ -54,8 +59,8 @@ describe('Assistant email.send A2UI clarification (ADR 0051 §3/§5)', () => {
   const field = (r: { outputs?: Record<string, unknown> }, key: string): unknown => (r.outputs ?? {})[key];
 
   const assertCatalogValid = (payload: Record<string, unknown>): void => {
-    expect(payload.catalogVersion).toBe(CATALOG_VERSION);
-    const surface = payload.surface as { components?: unknown };
+    expect((payload.form as Record<string, unknown>).catalogVersion).toBe(CATALOG_VERSION);
+    const surface = (payload.form as Record<string, unknown>).surface as { components?: unknown };
     expect(Array.isArray(surface.components)).toBe(true);
     for (const c of surface.components as Array<Record<string, unknown>>) {
       expect(CATALOG.has(String(c.component))).toBe(true);
@@ -80,7 +85,7 @@ describe('Assistant email.send A2UI clarification (ADR 0051 §3/§5)', () => {
     expect(captured!.reason).toBe('clarification');
     expect(captured!.resumeKey).toBe('email-send-clarify');
     assertCatalogValid(captured!);
-    const components = (captured!.surface as { components: Array<Record<string, unknown>> }).components;
+    const components = ((captured!.form as Record<string, unknown>).surface as { components: Array<Record<string, unknown>> }).components;
     const ids = components.map((c) => c.id).filter((id): id is string => typeof id === 'string');
     // No recipient and no subject → asks for both.
     expect(ids).toEqual(expect.arrayContaining(['to', 'subject']));
@@ -88,11 +93,11 @@ describe('Assistant email.send A2UI clarification (ADR 0051 §3/§5)', () => {
   });
 
   it('resumed recipient + subject merge into the payload and enqueue', async () => {
-    const resume = { action: 'confirm', to: 'sam@acme.com, lee@acme.com', subject: 'Following up' };
+    const resume = { to: 'sam@acme.com, lee@acme.com', subject: 'Following up' };
     const ctx = {
       features: { assistant: buildAssistantSurface({ tenantId: 't-mail2' }) },
       inputs: { kind: 'email.send', draft: 'Following up on our chat.', payload: {} },
-      suspend: async () => resume,
+      suspend: async () => answers(resume),
     };
     const r = await enqueueAction(ctx);
     const pa = field(r, 'pendingAction') as { status: string; kind: string; payload: { to?: unknown; subject?: unknown } };
@@ -135,11 +140,11 @@ describe('Assistant email.send A2UI clarification (ADR 0051 §3/§5)', () => {
   });
 
   it('the recipient field re-validates the resumed value (drops non-emails)', async () => {
-    const resume = { action: 'confirm', to: 'not-an-email, real@acme.com, also bad' };
+    const resume = { to: 'not-an-email, real@acme.com, also bad' };
     const ctx = {
       features: { assistant: buildAssistantSurface({ tenantId: 't-mail5' }) },
       inputs: { kind: 'email.send', draft: 'Hi', payload: {} },
-      suspend: async () => resume,
+      suspend: async () => answers(resume),
     };
     const r = await enqueueAction(ctx);
     const pa = field(r, 'pendingAction') as { payload: { to?: unknown } };
@@ -151,7 +156,7 @@ describe('Assistant email.send A2UI clarification (ADR 0051 §3/§5)', () => {
       features: { assistant: buildAssistantSurface({ tenantId: 't-mail6' }) },
       inputs: { kind: 'email.send', draft: 'Hi', payload: {} },
       // Only invalid addresses → after re-validation the recipient is still missing.
-      suspend: async () => ({ action: 'confirm', to: 'nope, also-bad' }),
+      suspend: async () => answers({ to: 'nope, also-bad' }),
     };
     await expect(enqueueAction(ctx)).rejects.toThrow(/recipient/);
     // The node failed BEFORE the enqueue — the store has no pending action.
@@ -163,7 +168,7 @@ describe('Assistant email.send A2UI clarification (ADR 0051 §3/§5)', () => {
       features: { assistant: buildAssistantSurface({ tenantId: 't-mail7' }) },
       inputs: { kind: 'email.send', draft: 'Hi', payload: {} },
       // The newline makes the whole token fail the email regex → dropped → still missing → fail fast.
-      suspend: async () => ({ action: 'confirm', to: 'a@b.com\nBcc: evil@x.com' }),
+      suspend: async () => answers({ to: 'a@b.com\nBcc: evil@x.com' }),
     };
     await expect(enqueueAction(ctx)).rejects.toThrow(/recipient/);
     // Rejected means nothing reached the approval queue.

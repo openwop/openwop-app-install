@@ -16,48 +16,6 @@ import { ThinkBlockSplitter } from './thinkBlockSplitter.js';
 
 const log = createLogger('providers.tools');
 
-/** MiniMax-M models sometimes emit a tool call as inline TEXT — an Anthropic-style
- *  `<invoke name="…"><parameter name="…">value</parameter></invoke>` block, often wrapped
- *  in model delimiter tokens (e.g. `<minimax>` markers that surface as `]<]minimax[>[`) —
- *  instead of the structured `tool_calls` field. Parse those so they EXECUTE (HITL + run)
- *  rather than leaking raw markup into the chat. Returns the parsed tool calls + the visible
- *  text with the markup stripped. The emitted name is resolved leniently to a real tool id
- *  (the model often drops the `openwop:` prefix / restores `.`). */
-export function parseInlineToolCalls(
-  raw: string,
-  tools: readonly ToolDef[],
-): { toolUses: ToolsRoundResult['toolUses']; cleanedText: string } {
-  // Strip model delimiter noise WITHOUT eating the real `<invoke>`/`<parameter>` tags:
-  // the observed leak token (`]<]minimax[>[`) + `<minimax …>` / `</minimax>` variants.
-  const denoised = raw
-    .replace(/\]<\]minimax\[>\[/g, '')
-    .replace(/<\/?minimax\b[^>]*>/gi, '');
-  const resolve = (emitted: string): string => {
-    const e = emitted.trim();
-    const exact = tools.find((t) => t.name === e);
-    if (exact) return exact.name;
-    const fuzzy = tools.find((t) => t.name.endsWith(e) || sanitizeToolName(t.name) === sanitizeToolName(e));
-    return fuzzy ? fuzzy.name : e;
-  };
-  const toolUses: ToolsRoundResult['toolUses'] = [];
-  const invokeRe = /<invoke\s+name="([^"]+)"\s*>([\s\S]*?)<\/invoke>/gi;
-  let im: RegExpExecArray | null;
-  let i = 0;
-  while ((im = invokeRe.exec(denoised)) !== null) {
-    const name = resolve(im[1]);
-    const args: Record<string, unknown> = {};
-    const paramRe = /<parameter\s+name="([^"]+)"\s*>([\s\S]*?)<\/parameter>/gi;
-    let pm: RegExpExecArray | null;
-    while ((pm = paramRe.exec(im[2])) !== null) args[pm[1].trim()] = pm[2].trim();
-    toolUses.push({ id: `minimax_inline_${i++}`, name, input: args });
-  }
-  const cleanedText = denoised
-    .replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, '')
-    .replace(invokeRe, '')
-    .trim();
-  return { toolUses, cleanedText };
-}
-
 function contentToText(content: string | readonly ContentPart[]): string {
   if (typeof content === 'string') return content;
   return content
@@ -143,11 +101,16 @@ async function openAICompatibleToolsRound(
       model: req.model,
       max_tokens: maxTokens,
       messages: req.messages.map((m) => ({ role: m.role, content: contentToText(m.content) })),
-      tools: req.tools.map((t: ToolDef) => ({
-        type: 'function',
-        function: { name: sanitizeToolName(t.name), description: t.description, parameters: t.inputSchema },
-      })),
-      tool_choice: 'auto',
+      // ADR 1001 — a turn may offer NO tools (a no-tool agent that may still
+      // ask a clarification). OpenAI-compatible APIs refuse `tool_choice`
+      // without tools, so both are omitted then (the Gemini arm below does the same).
+      ...(req.tools.length > 0 ? {
+        tools: req.tools.map((t: ToolDef) => ({
+          type: 'function',
+          function: { name: sanitizeToolName(t.name), description: t.description, parameters: t.inputSchema },
+        })),
+        tool_choice: 'auto',
+      } : {}),
     }),
     ...(req.signal ? { signal: req.signal } : {}),
   });
@@ -168,35 +131,16 @@ async function openAICompatibleToolsRound(
     usage?: { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } };
   };
   const choice = data.choices?.[0];
-  let toolUses = (choice?.message?.tool_calls ?? [])
+  const toolUses = (choice?.message?.tool_calls ?? [])
     .filter((c) => c.type === 'function')
-    .map((c) => ({ id: c.id, name: names.get(c.function.name) ?? c.function.name, input: safeParseArgs(c.function.arguments) }));
+    .map((c) => ({ id: c.id, name: names.get(c.function.name) ?? c.function.name, ...parseToolArgs(c.function.arguments) }));
   // Reasoning models (MiniMax) put their chain-of-thought INLINE as
   // `<think>…</think>`. The plain-chat path splits it off (dispatch.ts runs a
   // ThinkBlockSplitter); this tool round did not, so the whole reasoning reached
   // the visible answer (measured: a 17k-char <think> dump in the builder's Pair
-  // chat, ADR 0773 G-10b, 2026-09-30). Split FIRST, so a tool call that appears
-  // only inside a thought is never parsed and run below.
+  // chat, ADR 0773 G-10b, 2026-09-30).
   const rawContent = choice?.message?.content ?? '';
-  const structuredToolCalls = toolUses.length;
-  let text = stripThinkBlocks(rawContent);
-  // MiniMax-M sometimes returns the tool call as inline TEXT instead of structured
-  // `tool_calls` (it leaks `<invoke …>` markup into the bubble + nothing executes). When
-  // we see that shape with no structured calls, parse + strip it so it runs like normal.
-  if (toolUses.length === 0 && /<invoke\s+name=|<tool_call>/i.test(text)) {
-    // Diagnostic: capture the EXACT raw shape so the parser can be tuned to it.
-    log.warn('inline_tool_call_detected', {
-      provider: errPrefix,
-      sentToolNames: [...names.keys()],
-      rawContent: text.slice(0, 2000),
-    });
-    const parsed = parseInlineToolCalls(text, req.tools);
-    if (parsed.toolUses.length > 0) {
-      toolUses = parsed.toolUses;
-      text = parsed.cleanedText;
-      log.info('inline_tool_call_parsed', { provider: errPrefix, count: toolUses.length, names: toolUses.map((t) => t.name) });
-    }
-  }
+  const text = stripThinkBlocks(rawContent);
   // Why a round ended, in COUNTS only (never content). Without this a turn that
   // announces a tool call and then stops is undiagnosable: a model stop, an output
   // budget cut (`length`) and a call the parser never saw all look the same from
@@ -206,12 +150,11 @@ async function openAICompatibleToolsRound(
     finishReason: choice?.finish_reason ?? null,
     maxTokens,
     outputTokens: data.usage?.completion_tokens ?? null,
-    structuredToolCalls,
-    inlineToolCalls: toolUses.length - structuredToolCalls,
+    structuredToolCalls: toolUses.length,
     rawChars: rawContent.length,
     visibleChars: text.length,
-    // A call that lives only inside a thought is dropped on purpose (see above);
-    // this counts how often that is what happened.
+    // Text never becomes a tool call (ADR 1010); this counts how often a model
+    // wrote one anyway.
     invokeMarkupInRaw: /<invoke\s+name=|<tool_call>/i.test(rawContent),
   });
   return {
@@ -266,13 +209,21 @@ async function openAIResponsesToolsRound(req: ToolsRoundRequest): Promise<ToolsR
       content?: Array<{ type: string; text?: string; annotations?: Array<{ type: string; url?: string; title?: string }> }>;
     }>;
     usage?: { input_tokens?: number; output_tokens?: number };
+    status?: string;
+    incomplete_details?: { reason?: string } | null;
   };
+  // ADR 1011 — Responses reports a cut-off through `status`, not a finish reason.
+  // Any incomplete reason other than a safety stop reads as the output limit, so
+  // an unknown one still runs nothing.
+  const incomplete = data.status === 'incomplete'
+    ? (data.incomplete_details?.reason === 'content_filter' ? 'content_filter' : 'length')
+    : undefined;
   const output = data.output ?? [];
   const blocks = output.filter((o) => o.type === 'message').flatMap((m) => m.content ?? []);
   const text = blocks.filter((c) => c.type === 'output_text' && typeof c.text === 'string').map((c) => c.text as string).join('');
   const toolUses = output
     .filter((o) => o.type === 'function_call' && typeof o.name === 'string')
-    .map((o) => ({ id: o.call_id ?? `openai-${o.name}`, name: names.get(o.name as string) ?? (o.name as string), input: safeParseArgs(o.arguments ?? '{}') }));
+    .map((o) => ({ id: o.call_id ?? `openai-${o.name}`, name: names.get(o.name as string) ?? (o.name as string), ...parseToolArgs(o.arguments ?? '{}') }));
   const citations = blocks
     .flatMap((c) => c.annotations ?? [])
     .filter((a) => a.type === 'url_citation' && typeof a.url === 'string')
@@ -280,6 +231,7 @@ async function openAIResponsesToolsRound(req: ToolsRoundRequest): Promise<ToolsR
   return {
     text,
     toolUses,
+    ...(incomplete ? { finishReason: incomplete } : {}),
     ...(data.usage?.input_tokens != null ? { inputTokens: data.usage.input_tokens } : {}),
     ...(data.usage?.output_tokens != null ? { outputTokens: data.usage.output_tokens } : {}),
     ...(citations.length > 0 ? { citations } : {}),
@@ -371,12 +323,15 @@ export async function dispatchGoogleToolsRound(req: ToolsRoundRequest): Promise<
   };
 }
 
-/** OpenAI tool-call arguments arrive as a JSON string; tolerate malformed. */
-function safeParseArgs(raw: string): Record<string, unknown> {
+/** OpenAI tool-call arguments arrive as a JSON string. Blank or `null` is a call
+ *  with no arguments. Anything else that is not a JSON object is marked, never
+ *  turned into `{}`: a call the model did not finish must not run (ADR 1011). */
+function parseToolArgs(raw: string): { input: Record<string, unknown>; argumentsInvalid?: true } {
+  if (raw.trim() === '') return { input: {} };
   try {
     const v = JSON.parse(raw) as unknown;
-    return v && typeof v === 'object' ? (v as Record<string, unknown>) : {};
-  } catch {
-    return {};
-  }
+    if (v === null) return { input: {} };
+    if (typeof v === 'object' && !Array.isArray(v)) return { input: v as Record<string, unknown> };
+  } catch { /* marked below */ }
+  return { input: {}, argumentsInvalid: true };
 }

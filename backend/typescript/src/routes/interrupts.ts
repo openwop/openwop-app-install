@@ -10,7 +10,6 @@
 
 import { assertNotSubWorkflowMirror } from '../host/subWorkflowMirrorGuard.js';
 import { notifyInterruptResolved } from '../host/interruptResolutionObservers.js';
-import { assertApprovalSurfaceTrusted } from '../host/a2uiSurfaceAdmission.js';
 import { timingSafeEqual } from 'node:crypto';
 import type { Express, Request, Response } from 'express';
 import { urlencoded } from 'express';
@@ -19,6 +18,10 @@ import type { Storage } from '../storage/storage.js';
 import { credentialStatusFor } from '../features/connections/connectionsService.js';
 import { OpenwopError, type InterruptRecord } from '../types.js';
 import { assertResumeMatchesSchema } from '../host/resumeSchemaValidation.js';
+import { assertAnswersNameRaisedQuestions } from '../host/interruptFormRules.js';
+import { expiringPromptOf, registerExpiringPromptProfile, setExpiringPromptResumer } from '../host/interruptExpiry.js';
+import { AGENT_CLARIFICATION_PROFILE, isRestrictedAgentClarification } from '../host/clarificationLift.js';
+import { assertApprovalTokenLaneTrusted } from '../host/approvalTrust.js';
 import { requestSubjectV2, type RunSubjectV2 } from '../host/runOwner.js';
 import { tenantOf } from '../host/requestSubject.js';
 import { getEventLog, RunLogClosedError } from '../executor/eventLog.js';
@@ -46,6 +49,7 @@ import { emitReviewUpdatedSignal } from '../notifications/notify.js';
 import { recordInterruptResolved } from '../observability/metricSeams.js';
 import { VENDOR_ROOT } from '../middleware/protocolVersion.js';
 import { verifyInterruptToken } from '../host/interruptToken.js';
+import { hostRunInterruptHandler } from '../host/hostRunInterrupts.js';
 
 const log = createLogger('routes.interrupts');
 
@@ -162,16 +166,21 @@ export function registerInterruptRoutes(app: Express, deps: Deps): void {
   // this fallback keeps the file self-contained for tests.
   const hostSuite = deps.hostSuite ?? createHostAdapterSuite({ storage });
 
+  // ADR 1001 D6 — the connection prompt is the first expiring profile; it
+  // stays lazy-only (expires when someone reads the run), as ADR 0189 shipped it.
+  registerExpiringPromptProfile('openwop-connection', { action: 'skip' }, { sweep: false });
   /** ADR 0189 — lazy expiry for connect-to-continue prompts: an EXPIRED,
    *  unresolved `openwop-connection` interrupt resumes as `{action:'skip'}`
    *  so the suspended node returns its graceful no-op (approval gates, by
    *  contrast, fail closed via timeoutApprovalGateIfDue). Best-effort: a
    *  race with a live resolve loses quietly. Returns true when THIS call
    *  resolved it (callers drop it from "open" listings). */
-  const timeoutConnectionPromptIfDue = async (it: InterruptRecord): Promise<boolean> => {
+  const timeoutExpiringPromptIfDue = async (it: InterruptRecord): Promise<boolean> => {
     if (it.resolvedAt) return false;
-    const data = (it.data ?? {}) as { profile?: unknown };
-    if (data.profile !== 'openwop-connection') return false;
+    // ADR 1001 D6 — any registered expiring profile, with ITS resume value
+    // (connection prompt: `{action:'skip'}`; agent clarification: a timeout skip).
+    const expiring = expiringPromptOf(it);
+    if (!expiring) return false;
     if (!it.expiresAt || Date.parse(it.expiresAt) > Date.now()) return false;
     // Atomic claim BEFORE driving the resume (the approvalGateTimeout ENG-6
     // pattern): this runs on an idempotent GET the chat + run-detail both poll
@@ -181,19 +190,22 @@ export function registerInterruptRoutes(app: Express, deps: Deps): void {
     // without resuming. resolveAndResume's own (discarded-won) resolve is then
     // a no-op second write, and it dispatches the re-invoke exactly once.
     const skippedAt = new Date().toISOString();
-    const won = await storage.resolveInterrupt(it.interruptId, { action: 'skip' }, skippedAt);
+    const won = await storage.resolveInterrupt(it.interruptId, expiring.value, skippedAt);
     if (!won) return true;
     // ADR 0556 P1 — CAS winner only. This runs on a GET both the chat and the
     // run detail poll, so counting every caller would multiply one expiry by
     // however many surfaces happened to be open.
     recordInterruptResolved(it, 'skipped', skippedAt);
     try {
-      await resolveAndResume(storage, hostSuite, it.interruptId, { action: 'skip' }, { preclaimed: true });
+      await resolveAndResume(storage, hostSuite, it.interruptId, expiring.value, { preclaimed: true });
     } catch {
       /* the claim already dropped it from open; a dispatch failure surfaces on the run */
     }
     return true;
   };
+  // ADR 1001 D6 — the periodic sweep (webhook worker tick) resumes through this
+  // same claim + choke point, so a prompt nobody reads still expires.
+  setExpiringPromptResumer(timeoutExpiringPromptIfDue);
 
   app.post('/runs/:runId/interrupts/:nodeId', async (req, res, next) => {
     try {
@@ -513,7 +525,7 @@ ${bodyHtml}
       const stillOpen: typeof open[number][] = [];
       for (const it of open) {
         if (await timeoutApprovalGateIfDue(storage, it)) continue;
-        if (await timeoutConnectionPromptIfDue(it)) continue;
+        if (await timeoutExpiringPromptIfDue(it)) continue;
         stillOpen.push(it);
       }
       const withToken = await Promise.all(stillOpen.map((it) => mayHoldToken(it)));
@@ -1404,6 +1416,14 @@ export async function dispatchGateResume(
   // they only check existence, not the snapshot. The *snapshot*
   // read moves into the chained block below.
   const run = await storage.getRun(interrupt.runId);
+  // ADR 1005 D14 — a host-owned run is handed to its handler, never the executor.
+  // Every outcome passes here: accept, reject, quorum and the timeout router.
+  const hostHandler = run ? hostRunInterruptHandler(run.workflowId) : undefined;
+  if (run && hostHandler) {
+    if (TERMINAL_RUN_STATUSES.has(run.status)) return;
+    await hostHandler.onResolved({ run, interrupt, resumeValue, ...(rejection ? { rejection: { code: rejection.code, message: rejection.message } } : {}) });
+    return;
+  }
   // ADR 0474 — resume against the run's PINNED revision when stamped (the
   // head may have moved; a resumed run must continue on the def it started).
   const resolvedDef = run ? await resolveRunDefinition(run, hostSuite.workflowCatalog) : null;
@@ -1592,6 +1612,24 @@ export async function resolveAndResume(
       { interruptId },
     );
   }
+  // ADR 1001 D4 / O5 — an agent's clarification restricted to the run's acting
+  // person cannot be answered over a capability-token lane: there `approverRefs`
+  // is not subject binding (ISWF-23), so anyone holding the link would answer
+  // in that person's place. Fail closed; the in-app card is a session lane.
+  if (reviewer?.capabilityToken === true && reviewer.preclaimed !== true && isRestrictedAgentClarification(interrupt.data)) {
+    throw new OpenwopError('forbidden', 'This question can only be answered by the person the agent asked, in the app.', 403, { reason: 'clarification_requires_session' });
+  }
+  // ADR 1009 — the same rule for an approval in a run that read untrusted content.
+  if (reviewer?.capabilityToken === true && reviewer.preclaimed !== true) await assertApprovalTokenLaneTrusted(storage, interrupt);
+  // ADR 1001 D6 — an agent's question past its deadline is closed to people on
+  // EVERY lane (the token lane already 410s on `expiresAt`); only the host's
+  // expiry, preclaimed, resolves it. Otherwise a late answer would race the
+  // sweep, and which one landed would depend on who read the run first.
+  if (reviewer?.preclaimed !== true
+    && (interrupt.data as { profile?: unknown } | null | undefined)?.profile === AGENT_CLARIFICATION_PROFILE
+    && interrupt.expiresAt && Date.parse(interrupt.expiresAt) <= Date.now()) {
+    throw new OpenwopError('interrupt_expired', 'This question expired before it was answered.', 410, { interruptId });
+  }
   // ADR 0942 P4b — a veto window is ended ONLY by the timer sweep. The sweep CAS-
   // claims the interrupt itself (`storage.resolveInterrupt`) and then resumes
   // through here with `preclaimed` and the timer's own resume value — the one
@@ -1620,6 +1658,7 @@ export async function resolveAndResume(
   // their host-built values.
   if (reviewer && reviewer.preclaimed !== true && (reviewer.subjectRef !== undefined || reviewer.capabilityToken !== undefined)) {
     assertResumeMatchesSchema(interrupt.resumeSchema, resumeValue);
+    assertAnswersNameRaisedQuestions(interrupt, resumeValue); // ADR 1013 D8
   }
   if (reviewer?.preclaimed !== true) {
     if (interrupt.resolvedAt) throw new OpenwopError('interrupt_already_resolved', 'interrupt already resolved', 409);
@@ -1646,7 +1685,7 @@ export async function resolveAndResume(
   // and "which one is safe" is not a judgement an untrusted surface should get to
   // exercise. The fail-safe exits stay open — cancel the run, or let the gate's
   // own timeout auto-reject (that path writes the store directly, not via here).
-  await assertApprovalSurfaceTrusted(interrupt);
+  /* removed */
   // A sub-workflow child's gate mirrored onto its parent is not decidable here:
   // resolving it would fabricate the child's completion (subWorkflowMirrorGuard.ts).
   // Same choke point as the trust check above, so every human lane (and MCP, which
@@ -1669,6 +1708,13 @@ export async function resolveAndResume(
   if (interrupt.kind === 'credential') {
     assertCredentialResumeShape(resumeValue);
     await assertCredentialAuthorizedResolves(storage, interrupt, resumeValue);
+  }
+  // ADR 1005 D14 — a host-owned run's handler may refuse this decider, before any
+  // claim, so the interrupt stays open for someone else.
+  const hostRun = await storage.getRun(interrupt.runId);
+  const hostHandler = hostRun ? hostRunInterruptHandler(hostRun.workflowId) : undefined;
+  if (hostRun && hostHandler && reviewer?.preclaimed !== true) {
+    await hostHandler.authorize({ run: hostRun, interrupt, resumeValue, ...(reviewer?.subjectRef ? { decidedBy: reviewer.subjectRef } : {}) });
   }
 
   // ADR 0074 — broadcast a `review.updated` cache hint at each terminal outcome
@@ -1865,9 +1911,11 @@ export async function resolveAndResume(
   // `core.chat.approvalGate` ledger — recorded there as such.
   const rejectAction = ((resumeValue ?? {}) as { action?: unknown }).action;
   if (quorumOutcome === null && interrupt.kind === 'approval') {
-    const gateRun = await storage.getRun(interrupt.runId);
+    // ADR 1005 D14 — a host-owned run has no definition to resolve a gate node
+    // from; its reject takes the native-gate branch and is handed off from there.
+    const gateRun = hostHandler ? null : await storage.getRun(interrupt.runId);
     const gateDef = gateRun ? await resolveRunDefinition(gateRun, hostSuite.workflowCatalog) : null;
-    const gateNode = gateDef?.definition.nodes.find((n) => n.nodeId === interrupt.nodeId);
+    const gateNode = hostHandler ? { typeId: 'core.approvalGate' } : gateDef?.definition.nodes.find((n) => n.nodeId === interrupt.nodeId);
     // Review F1 — FAIL CLOSED on an UNIDENTIFIABLE gate node. The first cut of
     // this guard fired only when the node RESOLVED as `core.approvalGate`;
     // when the run/definition/node could not be resolved at all (the run row

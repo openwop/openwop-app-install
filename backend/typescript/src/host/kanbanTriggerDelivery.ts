@@ -9,10 +9,9 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { insertRunWithStartContext } from './runInsert.js';
+import { chargedAdmission, insertRunWithStartContext } from './runInsert.js';
 import { resolveLaunchWorkflow } from './resolveLaunchDefinition.js';
 import { WorkflowFeatureRefusedError } from './workflowFeatureGate.js';
-import { withRunLimit } from './runLimitSeam.js';
 import type { RunRecord } from '../types.js';
 import type { HostAdapterSuite } from './index.js';
 import type { Storage } from '../storage/storage.js';
@@ -141,7 +140,7 @@ export async function startKanbanTriggerRun(
         createdAt: now,
         updatedAt: now,
       };
-      await withRunLimit(tenantId, () => insertRunWithStartContext(storage, run, { definition: wf.definition }));
+      await insertRunWithStartContext(storage, run, { admission: chargedAdmission(), definition: wf.definition });
       await recordRunAttribution(storage, run);
       await getEventLog().append({ runId, type: 'openwop-app.kanban.card-moved', payload: attribution });
       setImmediate(() => {

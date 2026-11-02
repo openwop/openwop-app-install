@@ -13,24 +13,32 @@
  * never empty. This file uses the REAL loader for exactly that reason.
  */
 
-import { describe, expect, it, beforeEach } from 'vitest';
-import { _resetChainRegistryForTest, listChains } from '../src/host/workflowChainPackLoader.js';
-import { retargetSeededNotifyNodes } from '../src/host/seedWorkflows.js';
+import { describe, expect, it, beforeEach, vi } from 'vitest';
+import {
+  _resetChainRegistryForTest,
+  defaultWorkflowChainPackRoots,
+  expandChain,
+  listChains,
+  loadWorkflowChainPacks,
+} from '../src/host/workflowChainPackLoader.js';
+import { retargetSeededNotifyNodes, seedWorkflowId } from '../src/host/seedWorkflows.js';
+import { getRegisteredWorkflowStrict } from '../src/host/workflowsRegistry.js';
+import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
 
-/** The surgical design needs NO run history, so the migration must never ask for it. */
-let listRunsCalls = 0;
-const storage = {
-  listRuns: async () => {
-    listRunsCalls += 1;
-    return [];
-  },
-} as unknown as Storage;
+/** The surgical design needs NO run history, so the migration must never ask for
+ *  it. A REAL in-memory storage with a spy on `listRuns` — not a cast stub — so
+ *  the migration sees a production-shaped Storage. */
+let storage: Storage;
+let listRuns: ReturnType<typeof vi.spyOn>;
 
-beforeEach(() => {
+beforeEach(async () => {
   // Reproduce migration-time conditions exactly: registry EMPTY, as at index.ts:186.
   _resetChainRegistryForTest();
-  listRunsCalls = 0;
+  storage = await openStorage('memory://');
+  initHostExtPersistence(storage);
+  listRuns = vi.spyOn(storage, 'listRuns');
 });
 
 describe('the retarget migration self-loads the chain registry', () => {
@@ -44,7 +52,15 @@ describe('the retarget migration self-loads the chain registry', () => {
   it('rewrites nothing on a fresh install, and never MINTS a definition', async () => {
     const result = await retargetSeededNotifyNodes(storage);
     expect(result.rewritten).toBe(0);
+    // Measured 2026-10-31: examined 63, absent 63 (272 chains loaded). On a fresh
+    // install EVERY examined chain is absent — nothing was ever seeded here.
     expect(result.absent).toBeGreaterThan(20);
+    expect(result.absent).toBe(result.examined);
+    // …and never MINTS: a chain it examined is still unregistered afterwards.
+    const examinedChain = listChains().find(({ chain }) => chain.internal !== true
+      && ((chain.parameters as { required?: unknown[] } | undefined)?.required ?? []).length === 0);
+    expect(examinedChain, 'no seedable chain to check').toBeDefined();
+    expect(await getRegisteredWorkflowStrict(seedWorkflowId(examinedChain!.chain.chainId))).toBeNull();
   });
 
   it('never queries run history — preserving node ids is what removed that need', async () => {
@@ -52,7 +68,7 @@ describe('the retarget migration self-loads the chain registry', () => {
     // safe. The surgical edit keeps node ids, so no run can be disturbed and the
     // scan is gone. A regression to re-expansion would reintroduce this call.
     await retargetSeededNotifyNodes(storage);
-    expect(listRunsCalls).toBe(0);
+    expect(listRuns).toHaveBeenCalledTimes(0);
   });
 
   it('every examined chain is accounted for by exactly one counter', async () => {
@@ -84,9 +100,7 @@ describe('the shipped packs no longer carry the retired node', () => {
     // Phases B+C retargeted all 55 occurrences. If a pack regresses, this
     // migration would start rewriting definitions back to a broken node —
     // so the migration is only safe while this holds.
-    const { expandChain } = await import('../src/host/workflowChainPackLoader.js');
     _resetChainRegistryForTest();
-    const { loadWorkflowChainPacks, defaultWorkflowChainPackRoots } = await import('../src/host/workflowChainPackLoader.js');
     loadWorkflowChainPacks({ roots: defaultWorkflowChainPackRoots() });
     const chains = listChains();
     expect(chains.length, 'no chains loaded — this assertion would pass vacuously').toBeGreaterThan(100);

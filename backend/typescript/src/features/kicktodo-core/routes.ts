@@ -51,6 +51,10 @@ import {
 } from './enrollmentService.js';
 import { acceptRecovery, submitCheckIn, todayFor, journalFor, planFor, CheckInDeniedError, EvidenceRequiredError } from './todayService.js';
 import { ensureKickBot } from './kickbotService.js';
+import { KICKBOT_CHAT_GRANT, kickbotChatStartGrant, kickbotChatTurnGrant } from './kickbotChatGrant.js';
+import { registerRunStartGrant } from '../../host/runStartGrant.js';
+import { registerRunApprovalGrant } from '../../host/runApprovalGrant.js';
+import { CONVERSATION_WORKFLOW_ID } from '../../host/conversation.js';
 import { recommendedChallengesFor, DEFAULT_RECOMMENDATION_LIMIT } from './recommendationService.js';
 import { evaluateEnrollment, progressFor, setEnrollmentSnooze, EnrollmentNotEvaluableError, type ProgressView } from './progressService.js';
 import { applyRevisionCommands, previewRevisionCommands } from './replanService.js';
@@ -594,6 +598,10 @@ export const KICKTODO_ROUTES: ReadonlyArray<{ method: 'get' | 'post'; path: stri
 ];
 
 export function registerKicktodoCoreRoutes(deps: RouteDeps): void {
+  // ADR 0975 D11 — a participant (an auto-join viewer) may open and continue a
+  // KickBot conversation in the participant workspace, and nothing wider.
+  registerRunStartGrant([CONVERSATION_WORKFLOW_ID], KICKBOT_CHAT_GRANT, kickbotChatStartGrant);
+  registerRunApprovalGrant([CONVERSATION_WORKFLOW_ID], KICKBOT_CHAT_GRANT, kickbotChatTurnGrant);
   const app: Express = deps.app;
   const wrap = (h: Handler) => async (req: Request, res: Response, next: NextFunction) => {
     try {

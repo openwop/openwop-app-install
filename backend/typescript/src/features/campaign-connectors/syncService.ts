@@ -39,7 +39,8 @@ import type { AdPlatform } from './types.js';
 // Cross-feature READ (the documented campaign-orchestration → campaign-brief
 // precedent): link synced rows to the MarketingCampaign finalized from the
 // dispatch's brief, so campaign-scoped KPI + C5 attribution see them.
-import { getCampaignByBrief } from '../campaign-orchestration/campaignService.js';
+import { getCampaignByBrief, listCampaigns } from '../campaign-orchestration/campaignService.js';
+import { dispatchBelongsToOrg, listTenantDispatchRecords } from '../../host/adsAdapter.js';
 
 const log = createLogger('campaign-connectors.sync');
 
@@ -51,8 +52,15 @@ interface SyncStateRow {
   tenantId: string;
   orgId: string;
   platform: string;
+  /** The cooldown clock: when the last sync CLAIMED its window (it may have
+   *  fetched nothing). Never shown as "last synced" (ADR 1022 D7). */
   lastSyncAt: string;
+  /** ADR 1022 D7 — when at least one account last returned data. */
+  lastSuccessAt?: string;
+  /** ADR 1022 D7 — how the last attempt went. */
+  lastAttempt?: SyncAttempt;
 }
+export interface SyncAttempt { at: string; outcome: 'ok' | 'partial' | 'failed'; reason?: string }
 const syncState = new DurableCollection<SyncStateRow>(
   'campaign-connectors:sync-state',
   (r) => r.key,
@@ -61,11 +69,41 @@ const stateKey = (tenantId: string, orgId: string, platform: string): string => 
 
 /** R2 CC-SP-13 — `lastSyncAt` was persisted for the cooldown and never exposed:
  *  no surface answered "when did this data last refresh?". */
-export async function getSyncStatus(tenantId: string, orgId: string): Promise<Array<{ platform: string; lastSyncAt: string }>> {
+export async function getSyncStatus(tenantId: string, orgId: string): Promise<Array<{ platform: string; lastSyncAt: string; lastSuccessAt?: string; lastAttempt?: SyncAttempt }>> {
   const rows = await syncState.listByPrefix(`${tenantId}::${orgId}::`);
   return rows.filter((r) => r.tenantId === tenantId && r.orgId === orgId)
-    .map(({ platform, lastSyncAt }) => ({ platform, lastSyncAt }))
+    .map(({ platform, lastSyncAt, lastSuccessAt, lastAttempt }) => ({ platform, lastSyncAt, ...(lastSuccessAt ? { lastSuccessAt } : {}), ...(lastAttempt ? { lastAttempt } : {}) }))
     .sort((a, b) => a.platform.localeCompare(b.platform));
+}
+
+/** ADR 1022 D7 — record how a sync went: `lastAttempt` always, `lastSuccessAt`
+ *  only when an account returned data. A CAS merge, so it never drops the
+ *  cooldown claim it races with. Best effort: a lost status write must not
+ *  fail a sync whose rows already landed. */
+export async function noteSyncAttempt(tenantId: string, orgId: string, platform: string, attempt: SyncAttempt): Promise<void> {
+  if (!(await mergeSyncState(tenantId, orgId, platform, attempt.at, { lastAttempt: attempt, ...(attempt.outcome !== 'failed' ? { lastSuccessAt: attempt.at } : {}) }))) {
+    log.warn('campaign_sync_status_write_lost', { tenantId, orgId, platform, outcome: attempt.outcome });
+  }
+}
+
+/** A CAS merge of `patch` into the (tenant, org, platform) state row, so the
+ *  cooldown clock and the status fields never overwrite each other (CP71CD-8).
+ *  False when it kept losing. */
+async function mergeSyncState(tenantId: string, orgId: string, platform: string, at: string, patch: Partial<Pick<SyncStateRow, 'lastSyncAt' | 'lastSuccessAt' | 'lastAttempt'>>): Promise<boolean> {
+  const key = stateKey(tenantId, orgId, platform);
+  for (let i = 0; i < 4; i++) {
+    const prev = await syncState.get(key).catch(() => undefined);
+    const mine = prev && prev.tenantId === tenantId ? prev : null;
+    const next: SyncStateRow = { ...(mine ?? { key, tenantId, orgId, platform, lastSyncAt: at }), ...patch };
+    if (await syncState.compareAndSwap(mine, next).catch(() => false)) return true;
+  }
+  return false;
+}
+
+/** The attempt a set of per-account results adds up to. */
+export function attemptOf(okAccounts: number, failures: ReadonlyArray<{ reason: string }>, at = new Date().toISOString()): SyncAttempt {
+  if (okAccounts === 0) return { at, outcome: 'failed', ...(failures[0] ? { reason: failures[0].reason } : {}) };
+  return failures.length > 0 ? { at, outcome: 'partial', reason: failures[0]!.reason } : { at, outcome: 'ok' };
 }
 
 /** Yesterday (UTC) — the date synced rows carry. */
@@ -99,7 +137,11 @@ export async function persistSyncedRows(
     deduped += r.deduped;
   }
   // A backfill passes stampSync:false — it must not move the daily sync's cooldown.
-  if (opts.stampSync !== false) await syncState.put({ key: stateKey(tenantId, orgId, platform), tenantId, orgId, platform, lastSyncAt: new Date().toISOString() });
+  if (opts.stampSync !== false) {
+    // Only the cooldown clock moves here; the status fields are kept (ADR 1022 D7).
+    const at = new Date().toISOString();
+    if (!(await mergeSyncState(tenantId, orgId, platform, at, { lastSyncAt: at }))) log.warn('campaign_sync_cooldown_stamp_lost', { tenantId, orgId, platform });
+  }
   return { imported, deduped };
 }
 
@@ -117,7 +159,7 @@ export async function claimSync(tenantId: string, orgId: string, platform: strin
     const retryAt = new Date(prev.lastSyncAt).getTime() + SYNC_COOLDOWN_MS;
     if (now < retryAt) return { claimed: false, retryAtIso: new Date(retryAt).toISOString() };
   }
-  const next: SyncStateRow = { key, tenantId, orgId, platform, lastSyncAt: new Date(now).toISOString() };
+  const next: SyncStateRow = { ...(prev && prev.tenantId === tenantId ? prev : {}), key, tenantId, orgId, platform, lastSyncAt: new Date(now).toISOString() };
   const won = await syncState.compareAndSwap(prev && prev.tenantId === tenantId ? prev : null, next);
   if (!won) {
     // A concurrent sync claimed first — surface its cooldown honestly.
@@ -126,16 +168,6 @@ export async function claimSync(tenantId: string, orgId: string, platform: strin
     return { claimed: false, retryAtIso: new Date(retryAt).toISOString() };
   }
   return { claimed: true };
-}
-
-/** Cooldown check — callers surface `retryAtIso` honestly instead of silently
- *  re-pulling. */
-export async function syncCooldown(tenantId: string, orgId: string, platform: string): Promise<{ blocked: boolean; retryAtIso?: string }> {
-  const row = await syncState.get(stateKey(tenantId, orgId, platform)).catch(() => undefined);
-  if (!row || row.tenantId !== tenantId) return { blocked: false };
-  const retryAt = new Date(row.lastSyncAt).getTime() + SYNC_COOLDOWN_MS;
-  if (Date.now() >= retryAt) return { blocked: false };
-  return { blocked: true, retryAtIso: new Date(retryAt).toISOString() };
 }
 
 // ── ADR 0907 D3 — connector settings, plan, record ───────────────────────────
@@ -217,6 +249,7 @@ export async function saveConnectorSettings(
     }
   }
   if (scope === 'account' && adAccountIds.length === 0) throw new OpenwopError('validation_error', 'Account scope needs at least one ad-account id.', 400, { field: 'adAccountIds' });
+  await assertAccountsNotOtherOrgs(tenantId, orgId, platform, adAccountIds.filter((a) => !prev.adAccountIds.includes(a)));
   const row: ConnectorSettings = {
     key: stateKey(tenantId, orgId, platform), tenantId, orgId, platform, syncScope: scope, adAccountIds,
     ...(conversionActionTypes ? { conversionActionTypes } : {}),
@@ -224,6 +257,31 @@ export async function saveConnectorSettings(
   };
   await connectorSettings.put(row);
   return row;
+}
+
+/** ADR 1022 (CP71CD-4) — an ad account belongs to ONE client org. An
+ *  account-scope sync reads every campaign of the accounts it names, through
+ *  the run owner's connection, and one agency token reaches every client's
+ *  accounts; so an org may not name an account another org already names in
+ *  its settings or already launched campaigns on (a stamped ledger row). Only
+ *  NEWLY added ids are checked, so an existing overlap never blocks unrelated
+ *  edits. */
+async function assertAccountsNotOtherOrgs(tenantId: string, orgId: string, platform: LiveSyncPlatform, added: readonly string[]): Promise<void> {
+  if (added.length === 0) return;
+  const norm = (a: string): string => a.replace(/^act_/, '').replace(/[^0-9]/g, '');
+  const wanted = new Set(added.map(norm));
+  const takenBySettings = (await connectorSettings.listByPrefix(`${tenantId}::`))
+    .some((r) => r.tenantId === tenantId && r.orgId !== orgId && r.platform === platform && r.adAccountIds.some((a) => wanted.has(norm(a))));
+  // Ledger rows on these accounts that are not this org's: a stamped row names
+  // its org; a legacy (pre-ADR 0941) row is resolved through its brief's
+  // campaign (CP71CD-12). An unresolvable legacy row proves no other owner.
+  let takenByLedger = false;
+  for (const r of await listTenantDispatchRecords(tenantId)) {
+    if (r.platform !== platform || r.adAccountId === undefined || !wanted.has(norm(r.adAccountId))) continue;
+    const owner = r.orgId ?? (r.briefId ? (await getCampaignByBrief(tenantId, r.briefId).catch(() => null))?.orgId : undefined);
+    if (owner !== undefined && owner !== orgId) { takenByLedger = true; break; }
+  }
+  if (takenBySettings || takenByLedger) throw new OpenwopError('conflict', 'That ad account belongs to another client organization in this workspace.', 409, { field: 'adAccountIds' });
 }
 
 /** ISO day `n` days before `fromIso` (UTC arithmetic on a calendar date). */
@@ -258,7 +316,11 @@ export async function planSync(
   if (!adsReaderEnabled(platform)) return { outcome: 'not_verified', platform };
   const settings = await getConnectorSettings(tenantId, orgId, platform);
   const scope = opts.scope ?? settings.syncScope;
-  const ledger = ledgerRows.filter((d) => d.platform === platform);
+  // ADR 1022 D1 — only THIS org's dispatches. The ledger is the whole tenant's;
+  // filtering by platform alone read every client's ad accounts through this
+  // org's connection and saved their numbers here.
+  const orgBriefIds = new Set((await listCampaigns(tenantId, orgId)).map((c) => c.briefId));
+  const ledger = ledgerRows.filter((d) => d.platform === platform && dispatchBelongsToOrg(d, orgId, orgBriefIds));
   const until = opts.until ?? yesterdayIso();
   const since = opts.since ?? isoDaysBefore(until, SYNC_LOOKBACK_DAYS - 1);
   let adAccountIds: string[];
@@ -312,6 +374,8 @@ export async function recordAccountRows(
 
 export type SyncOutcome =
   | { outcome: 'cooldown'; retryAtIso: string }
+  /** ADR 1022 D7 — no account returned data (every one failed). */
+  | { outcome: 'sync_failed'; platform: LiveSyncPlatform; reason: string; failures: Array<{ adAccountId: string; reason: string; retryAfterS?: number }> }
   | { outcome: 'no_dispatches' }
   | { outcome: 'no_accounts' }
   | { outcome: 'not_verified'; platform: LiveSyncPlatform }
@@ -375,6 +439,12 @@ export async function runMetricsSync(
   const claim = await claimSync(tenantId, orgId, platform);
   if (!claim.claimed) return { outcome: 'cooldown', retryAtIso: claim.retryAtIso ?? new Date().toISOString() };
   const out = await readAndRecord(adapter, tenantId, orgId, planned.plan);
+  const attempt = attemptOf(planned.plan.adAccountIds.length - out.failures.length, out.failures);
+  await noteSyncAttempt(tenantId, orgId, platform, attempt);
+  if (attempt.outcome === 'failed') {
+    log.warn('campaign_sync_failed', { tenantId, orgId, platform, failures: out.failures.length, reason: attempt.reason });
+    return { outcome: 'sync_failed', platform, reason: attempt.reason ?? 'no_account_answered', failures: out.failures };
+  }
   log.info('campaign_sync_completed', { tenantId, orgId, platform, scope: out.scope, since: out.since, until: out.until, campaigns: out.campaigns, imported: out.imported, deduped: out.deduped, failures: out.failures.length, truncated: out.truncated });
   return out;
 }

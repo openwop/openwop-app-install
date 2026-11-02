@@ -15,6 +15,14 @@
  *  - delete the `feature.campaign-ops.nodes.execute` entry → red (leg 1);
  *  - map `core.openwop.integration.email-send` to `refused` → red (leg 2);
  *  - add `approverRoleRefs` to the orchestration chain's kernel-approve config → red (leg 3).
+ * Leg 2 has an in-file negative control (every `refused` entry, planted, is
+ * found), and leg 3 asserts it saw the gates it checks (2 at w73).
+ *
+ * Denominators MEASURED at w73 (2026-11-01): 10 campaign chain packs carrying
+ * 31 chains (the floor below asserts >= 10) and 2 autonomy gates
+ * (campaign-orchestration, campaign-ops-reporting). The chain floor is slack by
+ * 21; raising it is a ratchet decision for its owner (floor-slack human-ask row
+ * TST-DPU-H1), so it is left as is.
  */
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -27,6 +35,7 @@ import { ACTION_CLASSES, NODE_ACTION_CLASSES, PENDING_APPROVAL_LANE_CLASSES, act
 const REPO = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..');
 const CAMPAIGN_PACK_PREFIX = 'core.openwop.workflows.campaign-';
 const GATE = 'feature.campaign-orchestration.nodes.autonomy-gate';
+const CLASS_NAMES: ReadonlySet<string> = new Set<string>(ACTION_CLASSES);
 
 /** typeId → manifest role, from every pack manifest the repo ships. */
 function manifestRoles(): Map<string, string | undefined> {
@@ -36,9 +45,13 @@ function manifestRoles(): Map<string, string | undefined> {
     for (const dir of readdirSync(root)) {
       const pj = join(root, dir, 'pack.json');
       if (!existsSync(pj)) continue;
-      let m: { nodes?: Array<{ typeId?: string; role?: string }> };
-      try { m = JSON.parse(readFileSync(pj, 'utf8')) as typeof m; } catch { continue; }
-      for (const n of m.nodes ?? []) if (n.typeId) roles.set(n.typeId, n.role);
+      let m: unknown;
+      try { m = JSON.parse(readFileSync(pj, 'utf8')); } catch { continue; }
+      const nodes = typeof m === 'object' && m !== null && 'nodes' in m && Array.isArray(m.nodes) ? m.nodes : [];
+      for (const n of nodes) {
+        if (typeof n !== 'object' || n === null || !('typeId' in n) || typeof n.typeId !== 'string' || !n.typeId) continue;
+        roles.set(n.typeId, 'role' in n && typeof n.role === 'string' ? n.role : undefined);
+      }
     }
   }
   return roles;
@@ -54,7 +67,7 @@ beforeAll(() => {
   expect(campaignErrors, JSON.stringify(campaignErrors)).toEqual([]);
   campaignNodes = listChains()
     .filter((c) => c.packName.startsWith(CAMPAIGN_PACK_PREFIX))
-    .flatMap((c) => c.chain.dag.nodes.map((n) => ({ chainId: c.chain.chainId, nodeId: n.id, typeId: bare(n.typeId), config: (n.config ?? {}) as Record<string, unknown> })));
+    .flatMap((c) => c.chain.dag.nodes.map((n) => ({ chainId: c.chain.chainId, nodeId: n.id, typeId: bare(n.typeId), config: n.config ?? {} })));
 });
 
 describe('ADR 0942 D6 — the action-class table covers every campaign chain node', () => {
@@ -76,25 +89,35 @@ describe('ADR 0942 D6 — the action-class table covers every campaign chain nod
 
   it('every entry names a real class, none or refused, with a reason', () => {
     for (const [typeId, e] of Object.entries(NODE_ACTION_CLASSES)) {
-      expect(e.class === 'none' || e.class === 'refused' || (ACTION_CLASSES as readonly string[]).includes(e.class), typeId).toBe(true);
+      expect(e.class === 'none' || e.class === 'refused' || CLASS_NAMES.has(e.class), typeId).toBe(true);
       expect(e.why.length, typeId).toBeGreaterThan(10);
     }
   });
 
   it('no campaign chain contains a refused node', () => {
-    const refused = campaignNodes.filter((n) => actionClassOf(n.typeId)?.class === 'refused').map((n) => `${n.chainId}/${n.nodeId}`);
-    expect(refused).toEqual([]);
+    const refusedIn = (nodes: ReadonlyArray<{ chainId: string; nodeId: string; typeId: string }>): string[] =>
+      nodes.filter((n) => actionClassOf(n.typeId)?.class === 'refused').map((n) => `${n.chainId}/${n.nodeId}`);
+    // Negative control: every refused entry in the table, planted into a chain, is found.
+    const refusedTypeIds = Object.entries(NODE_ACTION_CLASSES).filter(([, e]) => e.class === 'refused').map(([typeId]) => typeId);
+    expect(refusedTypeIds.length, 'the table has refused entries to plant').toBeGreaterThan(0);
+    const planted = refusedTypeIds.map((typeId, i) => ({ chainId: 'planted', nodeId: `n${i}`, typeId }));
+    expect(refusedIn(planted)).toEqual(planted.map((n) => `planted/${n.nodeId}`));
+    expect(refusedIn(campaignNodes)).toEqual([]);
   });
 });
 
 describe('ADR 0942 D10.1 — autonomy gates in campaign chains', () => {
   it('no gate sets approvers in config, and each names a known interrupt-lane class', () => {
     const gates = campaignNodes.filter((n) => n.typeId === GATE);
+    // Non-vacuity: the loop below checks real gates (2 measured at w73), never an empty list.
+    expect(gates.length).toBeGreaterThanOrEqual(2);
+    const isActionClass = (v: unknown): v is ActionClass => typeof v === 'string' && ACTION_CLASSES.some((c) => c === v);
     for (const g of gates) {
       const forged = ['approverRefs', 'approverRoleRefs', 'approverGroupRefs', 'approversList', 'requiredApprovals', 'rejectionPolicy', 'overrideScopes'].filter((k) => k in g.config);
       expect(forged, `${g.chainId}/${g.nodeId}`).toEqual([]);
-      expect((ACTION_CLASSES as readonly unknown[]).includes(g.config.actionClass), `${g.chainId}/${g.nodeId} actionClass`).toBe(true);
-      expect(PENDING_APPROVAL_LANE_CLASSES.has(g.config.actionClass as ActionClass), `${g.chainId}/${g.nodeId}: lane not built until P3`).toBe(false);
+      const cls = g.config.actionClass;
+      expect(isActionClass(cls), `${g.chainId}/${g.nodeId} actionClass`).toBe(true);
+      expect(isActionClass(cls) && PENDING_APPROVAL_LANE_CLASSES.has(cls), `${g.chainId}/${g.nodeId}: lane not built until P3`).toBe(false);
     }
   });
 });

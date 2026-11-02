@@ -12,15 +12,25 @@
  * `run.failed` must stay at the end.
  *
  * Two paths were previously emitting only `run.failed` and skipping
- * `node.failed` (workflow_not_found / capability_not_provided). The
- * `emitTerminalFailure` helper in executor.ts normalizes them; this
- * test pins the ordering so future refactors don't regress.
+ * `node.failed` (workflow_not_found / capability_not_provided). WHERE each
+ * event comes from today (CORRECTED in w70 — this header used to credit
+ * `emitTerminalFailure` with the `node.failed`):
+ *   - `node.failed` — `executeNode`, at the unregistered-module and the
+ *     unsatisfied-`requires` refusals;
+ *   - `run.dead_lettered` + `run.failed` + the failed run row —
+ *     `emitTerminalFailure`, called by `finalizeRun` without a `nodeId`.
+ * This test pins the resulting ordering so future refactors don't regress.
  *
  * The canonical error code for unsatisfied node `requires` is
  * `capability_not_provided` per `spec/v1/capabilities.md §"Runtime
  * capabilities"`. `host_capability_missing` is a legacy alias still
  * in OpenwopErrorCode for back-compat with older `aiProviders`
  * dispatch surfaces; the executor emits the canonical name.
+ *
+ * Tracker: TST-DBC-4. Red when: the dead-letter row is not appended, the
+ * unregistered-module refusal stops emitting `node.failed`, the capability
+ * refusal emits the legacy code, or the failed row drops `error` (probes
+ * w70g2-tf-deadletter / -tf-missing-node / -tf-capcode / -tf-stored-error).
  */
 
 import { describe, expect, it, beforeEach } from 'vitest';
@@ -53,10 +63,19 @@ beforeEach(async () => {
   configureSecretResolver({ storage, dataDir });
 });
 
+/** The `error.code` a failure event carries (typed read of an unknown payload). */
+function errorCodeOf(payload: unknown): string | undefined {
+  if (typeof payload !== 'object' || payload === null || !('error' in payload)) return undefined;
+  const error = payload.error;
+  return typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string' ? error.code : undefined;
+}
+
+let runSeq = 0;
 async function newRun(workflowId: string): Promise<RunRecord> {
   const now = new Date().toISOString();
+  runSeq += 1;
   const run: RunRecord = {
-    runId: `run-${Math.random().toString(36).slice(2, 10)}`,
+    runId: `run-terminal-${runSeq}`,
     workflowId,
     tenantId: 'demo',
     status: 'pending',
@@ -88,21 +107,22 @@ describe('executor terminal-failure event sequence', () => {
     // node.failed + the RFC 0053 dead-letter row + run.failed, in that order.
     expect(sequence).toEqual(['run.started', 'node.failed', 'run.dead_lettered', 'run.failed']);
 
-    const nodeFailed = events.find((e) => e.type === 'node.failed')!;
-    const runFailed = events.find((e) => e.type === 'run.failed')!;
+    const nodeFailed = events.find((e) => e.type === 'node.failed');
+    const runFailed = events.find((e) => e.type === 'run.failed');
+    if (!nodeFailed || !runFailed) throw new Error('missing failure events');
     expect(nodeFailed.nodeId).toBe('n1');
-    expect((nodeFailed.payload as { error: { code: string } }).error.code).toBe('workflow_not_found');
-    expect((runFailed.payload as { error: { code: string } }).error.code).toBe('workflow_not_found');
+    expect(errorCodeOf(nodeFailed.payload)).toBe('workflow_not_found');
+    expect(errorCodeOf(runFailed.payload)).toBe('workflow_not_found');
     expect(nodeFailed.sequence).toBeLessThan(runFailed.sequence);
     // RFC 0053 + observability.md: the sink row precedes the terminal event,
     // and the terminal event is the last thing in the stream.
-    expect(events.find((e) => e.type === 'run.dead_lettered')!.sequence).toBeLessThan(runFailed.sequence);
-    expect(events[events.length - 1]!.type).toBe('run.failed');
+    expect(events.find((e) => e.type === 'run.dead_lettered')?.sequence).toBeLessThan(runFailed.sequence);
+    expect(events.at(-1)?.type).toBe('run.failed');
 
-    const stored = (await storage.getRun(run.runId))!;
-    expect(stored.status).toBe('failed');
-    expect(stored.error?.code).toBe('workflow_not_found');
-    expect(stored.completedAt).toBeDefined();
+    const stored = await storage.getRun(run.runId);
+    expect(stored?.status).toBe('failed');
+    expect(stored?.error?.code).toBe('workflow_not_found');
+    expect(stored?.completedAt).toBeDefined();
   });
 
   it('emits node.failed → run.failed when a node requires an unprovided capability', async () => {
@@ -129,19 +149,20 @@ describe('executor terminal-failure event sequence', () => {
     const sequence = events.map((e) => e.type);
     expect(sequence).toEqual(['run.started', 'node.failed', 'run.dead_lettered', 'run.failed']);
 
-    const nodeFailed = events.find((e) => e.type === 'node.failed')!;
-    const runFailed = events.find((e) => e.type === 'run.failed')!;
+    const nodeFailed = events.find((e) => e.type === 'node.failed');
+    const runFailed = events.find((e) => e.type === 'run.failed');
+    if (!nodeFailed || !runFailed) throw new Error('missing failure events');
     expect(nodeFailed.nodeId).toBe('n1');
-    expect((nodeFailed.payload as { error: { code: string } }).error.code).toBe('capability_not_provided');
-    expect((runFailed.payload as { error: { code: string } }).error.code).toBe('capability_not_provided');
+    expect(errorCodeOf(nodeFailed.payload)).toBe('capability_not_provided');
+    expect(errorCodeOf(runFailed.payload)).toBe('capability_not_provided');
     expect(nodeFailed.sequence).toBeLessThan(runFailed.sequence);
     // RFC 0053 + observability.md: the sink row precedes the terminal event,
     // and the terminal event is the last thing in the stream.
-    expect(events.find((e) => e.type === 'run.dead_lettered')!.sequence).toBeLessThan(runFailed.sequence);
-    expect(events[events.length - 1]!.type).toBe('run.failed');
+    expect(events.find((e) => e.type === 'run.dead_lettered')?.sequence).toBeLessThan(runFailed.sequence);
+    expect(events.at(-1)?.type).toBe('run.failed');
 
-    const stored = (await storage.getRun(run.runId))!;
-    expect(stored.status).toBe('failed');
-    expect(stored.error?.code).toBe('capability_not_provided');
+    const stored = await storage.getRun(run.runId);
+    expect(stored?.status).toBe('failed');
+    expect(stored?.error?.code).toBe('capability_not_provided');
   });
 });

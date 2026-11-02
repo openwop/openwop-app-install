@@ -10,7 +10,7 @@
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { surfaceStr as str, surfaceOptStr as optStr, type FeatureSurface } from '../../host/featureSurfaces.js';
 import { getPersona, listPersonas } from './personaService.js';
-import { getBrief, listBriefs, setKernel, validateBrief } from './briefService.js';
+import { getBrief, listBriefs, markKernelReview, setKernel, validateBrief } from './briefService.js';
 import { assembleBriefContextText } from './briefContext.js';
 import { listVocEvidence, persistVocEvidence, validateVocCandidate, type VocEvidenceInput, type VocSentiment, VOC_SENTIMENTS } from './vocService.js';
 import { listAngles, persistAngles, deleteAngle, validateAngleCandidate, type AngleCandidateInput } from './angleService.js';
@@ -135,7 +135,18 @@ export function buildCampaignBriefSurface(scope: BundleScope): FeatureSurface {
           personaIds: brief.personaIds ?? [],
         },
         // The kernel (ADR 0156) — channel generators (ADR 0157) echo it.
-        kernel: brief.kernel ?? null,
+        // ADR 1020 D8 — a STALE kernel (the brief changed after it was approved)
+        // is not a usable kernel: every reader here (channels, angles, the
+        // production plan) would otherwise build on content the brief no longer
+        // says. Readers get null and `kernelStale`, and refuse.
+        kernel: brief.kernelStale ? null : (brief.kernel ?? null),
+        kernelStale: brief.kernelStale === true,
+        // ADR 1020 D11 — the revision this context was assembled from; the kernel
+        // promotion refuses `brief_changed` if the brief moved past it.
+        briefVersion: brief.version ?? 1,
+        // ADR 1020 (grade-code M3) — the kernel a new one would replace (its
+        // generatedAt; null = none), so promotion can refuse a second approval.
+        priorKernelAt: brief.kernel?.generatedAt ?? null,
         // ADR 0403 P2 — TESTED hooks only (human-attested via the promote
         // route; candidates are unvetted model output and feeding them back
         // into generation would be a self-reinforcing ungraded loop), capped
@@ -148,13 +159,28 @@ export function buildCampaignBriefSurface(scope: BundleScope): FeatureSurface {
       };
     },
 
-    /** Persist a generated kernel (the node calls this after ctx.callAI). */
+    /** ADR 1020 D8 — note that a staged kernel waits for approval in this run, so
+     *  the brief page can say so and link to it. Never writes the kernel. */
+    markKernelReview: async (args) => {
+      if (!(await scopedBrief(str(args.briefId), optStr(args.orgId), 'workspace:write'))) throw notFound(str(args.briefId));
+      const runId = str(args.runId);
+      if (!runId) return { marked: false };
+      return { marked: await markKernelReview(tenantId, str(args.briefId), runId) };
+    },
+
+    /** Persist an APPROVED kernel (ADR 1020 D8: the promote-kernel node, after the approval). */
     setKernel: async (args) => {
       const kernel = args.kernel as MessagingKernel;
       // A refusal is a typed failure, as for the other writes: returning
       // `{brief:null}` let the kernel node report success with nothing saved.
       if (!(await scopedBrief(str(args.briefId), optStr(args.orgId), 'workspace:write'))) throw notFound(str(args.briefId));
-      const updated = await setKernel(tenantId, str(args.briefId), kernel);
+      // ADR 1020 D11 — the promotion names the revision it was generated from.
+      const expectedVersion = typeof args.expectedVersion === 'number' && Number.isInteger(args.expectedVersion) ? args.expectedVersion : undefined;
+      const expectedPriorKernelAt = args.expectedPriorKernelAt === null || typeof args.expectedPriorKernelAt === 'string' ? args.expectedPriorKernelAt : undefined;
+      const updated = await setKernel(tenantId, str(args.briefId), kernel, 'system', {
+        ...(expectedVersion === undefined ? {} : { expectedVersion }),
+        ...(expectedPriorKernelAt === undefined ? {} : { expectedPriorKernelAt }),
+      });
       return { brief: updated ?? null };
     },
 

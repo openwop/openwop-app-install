@@ -36,6 +36,11 @@ import { join } from 'node:path';
 import type { Request } from 'express';
 import { principalFromReq } from '../src/routes/mcp.js';
 
+type Principal = NonNullable<ReturnType<typeof principalFromReq>>;
+/** The boundary reads only `req.principal`; the single cast from a Partial is the
+ *  honest ceiling (principalFromReq takes a full Request). */
+const reqWith = (principal?: Principal): Request => (principal ? { principal } : {}) as Partial<Request> as Request;
+
 describe('ADR 0553 P0 — principalFromReq fails closed', () => {
   const prior = process.env.OPENWOP_TEST_SEAM_ENABLED;
   afterAll(() => {
@@ -45,18 +50,18 @@ describe('ADR 0553 P0 — principalFromReq fails closed', () => {
 
   it('returns null — never a wildcard — when nothing attached a principal', () => {
     delete process.env.OPENWOP_TEST_SEAM_ENABLED;
-    expect(principalFromReq({} as Request)).toBeNull();
+    expect(principalFromReq(reqWith())).toBeNull();
   });
 
   it('passes through a principal the middleware DID attach', () => {
     delete process.env.OPENWOP_TEST_SEAM_ENABLED;
-    const real = { principalId: 'real-caller', tenants: ['acme'], token: 't' };
-    expect(principalFromReq({ principal: real } as unknown as Request)).toEqual(real);
+    const real: Principal = { principalId: 'real-caller', tenants: ['acme'], token: 't' };
+    expect(principalFromReq(reqWith(real))).toEqual(real);
   });
 
   it('the test seam yields a NAMED, single-tenant principal', () => {
     process.env.OPENWOP_TEST_SEAM_ENABLED = 'true';
-    const p = principalFromReq({} as Request);
+    const p = principalFromReq(reqWith());
     expect(p).not.toBeNull();
     expect(p?.principalId).toBe('mcp-test-seam');
     // The property that matters: not `['*']`.
@@ -68,8 +73,8 @@ describe('ADR 0553 P0 — principalFromReq fails closed', () => {
     // The seam must be a fallback, never an override — otherwise enabling it
     // would downgrade a real caller's identity.
     process.env.OPENWOP_TEST_SEAM_ENABLED = 'true';
-    const real = { principalId: 'real-caller', tenants: ['acme'], token: 't' };
-    expect(principalFromReq({ principal: real } as unknown as Request)?.principalId).toBe('real-caller');
+    const real: Principal = { principalId: 'real-caller', tenants: ['acme'], token: 't' };
+    expect(principalFromReq(reqWith(real))?.principalId).toBe('real-caller');
   });
 
   it('no wildcard-tenant literal survives in the module', () => {

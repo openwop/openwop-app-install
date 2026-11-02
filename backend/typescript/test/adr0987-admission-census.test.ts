@@ -25,15 +25,19 @@
  * `adr0987-admission-insert.test.ts` (five runs still running at 61 s still hold
  * their slots).
  *
- * P1 changes one pin: `/runs` mounts `runQuotaMiddleware({ concurrencyInStore: true })`
- * (its concurrency is counted in the store), and the other five mounts keep the
- * per-process map until P2.
+ * P1 changed one pin: `/runs` counted its concurrency in the store. P2 moves the
+ * rest: every mount passes its scope to the insert, the per-process map, its 60 s
+ * filter and `reserveConcurrentSlot` are deleted, creative-briefs mounts the
+ * middleware, and the monthly plan is charged at the insert seam. The per-lane
+ * policy table (charge or a named exemption) is the T4 ratchet in
+ * `adr0987-p2-admission-lanes.test.ts`.
  */
 import { describe, expect, it } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
 const SRC = join(import.meta.dirname, '..', 'src');
+// (callSites skips a line matching its `definition` argument; /^$/ skips nothing.)
 
 function tsFiles(dir: string): string[] {
   const out: string[] = [];
@@ -61,10 +65,11 @@ function callSites(re: RegExp, definition: RegExp): Map<string, number> {
 }
 const total = (m: Map<string, number>): number => [...m.values()].reduce((a, b) => a + b, 0);
 
-describe('ADR 0987 P0 — the run-admission lane census (as of P0)', () => {
-  it('runQuotaMiddleware (per-day + concurrency) is mounted on 6 routes in 4 files', () => {
+describe('ADR 0987 — the run-admission lane census (as of P2)', () => {
+  it('runQuotaMiddleware (per-minute, per-day and the concurrency scope) is mounted on 7 routes in 5 files', () => {
     const m = callSites(/runQuotaMiddleware\(/, /export function runQuotaMiddleware/);
     expect(Object.fromEntries(m)).toEqual({
+      'features/creative-briefs/routes.ts': 1, // P2: the reel lane had no mount, so its slot was a no-op
       'features/workflow-author/routes.ts': 1,
       'routes/runs.ts': 2,
       'routes/workflowDebug.ts': 2,
@@ -72,19 +77,14 @@ describe('ADR 0987 P0 — the run-admission lane census (as of P0)', () => {
     });
   });
 
-  it('only POST /runs counts concurrency in the store (P1); the other five mounts keep the per-process map', () => {
-    expect(Object.fromEntries(callSites(/runQuotaMiddleware\(\{ concurrencyInStore: true \}\)/, /export function runQuotaMiddleware/))).toEqual({ 'routes/runs.ts': 1 });
+  it('P2: the per-process slot map, its 60 s filter and reserveConcurrentSlot are gone from src', () => {
+    for (const re of [/reserveConcurrentSlot\(/, /sessionInflightRuns/, /concurrencyInStore/, /startedAtMs < 60_000/]) {
+      expect(Object.fromEntries(callSites(re, /^$/)), String(re)).toEqual({});
+    }
   });
 
-  it('creative-briefs reserves a concurrency slot without the middleware, so the reservation is a no-op there', () => {
-    const slots = callSites(/reserveConcurrentSlot\(/, /export function reserveConcurrentSlot/);
-    expect(slots.get('features/creative-briefs/routes.ts')).toBe(1);
-    const mounts = callSites(/runQuotaMiddleware\(/, /export function runQuotaMiddleware/);
-    expect(mounts.has('features/creative-briefs/routes.ts')).toBe(false);
-  });
-
-  it('the monthly plan check (reservePlanRun) has exactly one caller: host/runStarter.ts', () => {
-    expect(Object.fromEntries(callSites(/reservePlanRun\(/, /export async function reservePlanRun/))).toEqual({ 'host/runStarter.ts': 1 });
+  it('P2: the monthly plan check (reservePlanRun) has exactly one caller, the run-insert seam', () => {
+    expect(Object.fromEntries(callSites(/reservePlanRun\(/, /export async function reservePlanRun/))).toEqual({ 'host/runInsert.ts': 1 });
   });
 
   it('insertRunWithStartContext is called from these 18 files', () => {

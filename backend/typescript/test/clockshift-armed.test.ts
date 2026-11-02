@@ -42,6 +42,7 @@ describe('date-bomb sweep — the clock is really shifted', () => {
     // `new Date()` would sail past a sweep that only patched the static.
     const skewDays = (new Date().getTime() - realEpochMs()) / 86_400_000;
     expect(skewDays).toBeGreaterThan(DAYS - 1);
+    expect(skewDays).toBeLessThan(DAYS + 1);
   });
 
   it.skipIf(ARMED)('is inert outside the sweep', () => {

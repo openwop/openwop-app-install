@@ -5,6 +5,10 @@
  * pack the registry actually SERVES, and — for schema-lookup — the chat tool
  * `openwop:schema.lookup` it mirrors). This pins all three together, reading
  * what the MCP registry serves, not what a source file claims.
+ *
+ * Tracker TST-CEE-3. Red when (w67g3, witnessed): the served chain-pack schema
+ * drifts from the TS source (`additionalProperties` flipped); the TS source's
+ * `kind` enum drifts from the chat tool it mirrors.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';

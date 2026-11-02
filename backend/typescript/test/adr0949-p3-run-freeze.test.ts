@@ -14,9 +14,12 @@
  * Sabotage (run 2026-10-20): stamping on a derived run reds the born-OFF fork
  * case (a stamped source is protected by the copy-wins merge on its own);
  * dropping the reserved key reds 1's caller case; ignoring the epoch's `at`
- * reds 2's fresh-run leg.
+ * reds 2's fresh-run leg. Re-run w73 (p3-derived, p3-reserved, p3-epochat,
+ * p3-stopped, p3-guardrail, p3-unsupported — all witnessed). The fresh-run leg now
+ * starts a REAL run after the epoch (only `Date` faked) and assigns through its
+ * surface; toggles are restored in `finally`.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
@@ -47,7 +50,7 @@ beforeAll(async () => {
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   const disco = await api<{ fixtures?: string[] }>('/.well-known/openwop');
   workflowId = disco.body.fixtures?.[0] ?? 'openwop-app.uppercase';
-});
+}, 120_000);
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 async function api<T = unknown>(path: string, init: RequestInit = {}): Promise<{ status: number; body: T }> {
@@ -78,8 +81,9 @@ function experiment(tenantId: string, epochs: Experiment['epochs'], status: Expe
 describe('ADR 0949 P3 — the run stamp', () => {
   it('is stamped when experiments is ON, absent when OFF, and a caller cannot supply it', async () => {
     await setToggle('off');
-    expect(readExperimentsRunStamp((await runOf(await createRun())).metadata)).toBeNull();
-    await setToggle('on');
+    try {
+      expect(readExperimentsRunStamp((await runOf(await createRun())).metadata)).toBeNull();
+    } finally { await setToggle('on'); }
     const stamped = readExperimentsRunStamp((await runOf(await createRun())).metadata);
     expect(stamped?.asOf).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     const forged = readExperimentsRunStamp((await runOf(await createRun({ 'openwop-app.experiments': { asOf: '2000-01-01T00:00:00.000Z' } }))).metadata);
@@ -90,9 +94,11 @@ describe('ADR 0949 P3 — the run stamp', () => {
 describe('ADR 0949 P3 — absence is inherited too (ADR 0604)', () => {
   it('a run born with experiments OFF is not stamped when forked after it turns ON', async () => {
     await setToggle('off');
-    const src = await createRun();
-    expect(readExperimentsRunStamp((await runOf(src)).metadata)).toBeNull();
-    await setToggle('on');
+    let src: string;
+    try {
+      src = await createRun();
+      expect(readExperimentsRunStamp((await runOf(src)).metadata)).toBeNull();
+    } finally { await setToggle('on'); }
     expect(readExperimentsRunStamp((await runOf(await createRun())).metadata)).not.toBeNull(); // the toggle really is on
     expect(readExperimentsRunStamp((await runOf(await forkRun(src))).metadata)).toBeNull();
   });
@@ -126,7 +132,17 @@ describe('ADR 0949 P3 — a fork after an epoch change reuses the source\'s weig
     expect(b.map((x) => x.arm)).toEqual(a.map((x) => x.arm));
     expect(new Set(b.map((x) => x.epoch))).toEqual(new Set([0]));
 
-    // A fresh run after the epoch change is assigned at the NEW weights.
+    // A fresh run started after the epoch change is assigned at the NEW weights,
+    // through the same surface. Only `Date` is moved (to just past the epoch).
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(Date.parse(later) + 1);
+    let freshRunId: string;
+    try { freshRunId = await createRun(); } finally { vi.useRealTimers(); }
+    expect(readExperimentsRunStamp((await runOf(freshRunId)).metadata)?.asOf).toBe(new Date(Date.parse(later) + 1).toISOString());
+    const c = await armsOf(buildExperimentsSurface({ tenantId, runId: bareRunId(freshRunId) }));
+    expect(new Set(c.map((x) => x.epoch))).toEqual(new Set([1]));
+    expect(c.filter((x) => x.arm === 'b').length).toBeGreaterThan(340); // ≈95%
+    // The pure rule agrees.
     const fresh = Array.from({ length: 400 }, (_, i) => assignAt(exp, `contact-${i}`, new Date(Date.parse(later) + 1).toISOString()));
     expect(new Set(fresh.map((x) => x?.epoch))).toEqual(new Set([1]));
     expect(fresh.filter((x) => x?.arm.key === 'b').length).toBeGreaterThan(340); // ≈95%

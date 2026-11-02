@@ -10,6 +10,13 @@
  *
  * What matters here is the COST SHAPE and the DISAGREEMENT POLICY, so those are
  * what these pin.
+ *
+ * Tracker TST-CEE-2. Red when (w67g3, witnessed): no second opinion is sought on
+ * `supports`, or one is sought on every verdict; a disputed pair still counts as
+ * support or is not surfaced; a span-less `supports` passes; an unparseable
+ * judgement becomes `supports`; the bounded repair is skipped; pairs are judged
+ * serially, or land in completion order; the `maxVerifications` cap is ignored;
+ * a cut source is not marked; a citation with no content is judged.
  */
 import { describe, it, expect, vi } from 'vitest';
 
@@ -139,16 +146,11 @@ describe('claim-verify — entailment', () => {
     expect(support.map((x) => x.span)).toEqual(['span 0', 'span 1', 'span 2']);
   });
 
-  it('`supports` with NO quoted span is downgraded — an unauditable pass is not a pass', async () => {
-    const { ctx } = ctxWith([{ verdict: 'supports' }]);
-    const out = await claimVerify(ctx);
-    expect(out.status).toBe('failed'); // downgraded to unverifiable ⇒ nothing entailed
-  });
-
   it('an UNPARSEABLE judgement fails closed to `unverifiable`, never `supports`', async () => {
     const { ctx } = ctxWith([{ verdict: 'yes-definitely' }]);
     const out = await claimVerify(ctx);
     expect(out.status).toBe('failed');
+    expect((out.error as { code: string }).code).toBe('no_entailed_claims');
   });
 
   // XCH-CV-1 — ONE bounded error-fed repair before the downgrade, so a
@@ -175,10 +177,14 @@ describe('claim-verify — entailment', () => {
     expect(String(calls[1]![2]!.content)).toContain('`verdict` must be one of');
   });
 
+  // Also carries the claim the cut "`supports` with NO quoted span is downgraded"
+  // case made (w67: identical fixture, strict subset of these assertions; both
+  // red under w67g3-cv-span).
   it('a `supports` without a span is asked for the span once, then downgraded if still missing', async () => {
     const { ctx, callAI } = ctxWith([{ verdict: 'supports' }]);
     const out = await claimVerify(ctx);
-    expect(out.status).toBe('failed');
+    expect(out.status).toBe('failed'); // downgraded to unverifiable ⇒ nothing entailed
+    expect((out.error as { code: string }).code).toBe('no_entailed_claims');
     expect(callAI).toHaveBeenCalledTimes(2);
   });
 

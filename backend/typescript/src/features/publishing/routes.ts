@@ -32,6 +32,7 @@ import {
   prerenderPageCached,
   prerenderTtlSeconds,
 } from './prerenderService.js';
+import { sendPrerenderHtml, serveRuntimeAsset, setPrerenderSecurityHeaders } from './siteRuntime.js';
 import {
   blogFeedXml,
   feedRss,
@@ -87,6 +88,11 @@ export function registerPublishingRoutes(deps: RouteDeps): void {
 
   // ── public: the published site (NO auth; org→tenant; toggle-gated) ──
   const PUB = '/host/openwop-app/public/:orgId';
+
+  // ADR 1015 D6 — the tenant site visitor runtime, served from the image by
+  // manifest. Reachable on a bound custom domain only for that domain's org
+  // (the guard's org pin); anything the manifest does not name is a 404.
+  app.get(`${PUB}/_rt/:file`, (req, res, next) => { serveRuntimeAsset(req, res).catch(next); });
 
   // ADR 0486 — the public-site NAV list (published pages, slug + title) so the
   // public shell menu can reach EVERY published page. Registered before
@@ -235,7 +241,9 @@ export function registerPublishingRoutes(deps: RouteDeps): void {
       res.setHeader('Content-Language', out.locale);
       res.vary('Accept-Language, Accept-Encoding');
       res.setHeader('Cache-Control', `public, max-age=${prerenderTtlSeconds()}`);
-      res.type('html').send(out.html);
+      // ADR 1015 — CSP always; the visitor runtime only on a bound host whose
+      // workspace turned it on.
+      await sendPrerenderHtml(res, out.html);
     } catch (err) { next(err); }
   });
 
@@ -267,7 +275,7 @@ export function registerPublishingRoutes(deps: RouteDeps): void {
       if (blogLocale) res.setHeader('Content-Language', blogLocale);
       res.vary('Accept-Language, Accept-Encoding');
       res.setHeader('Cache-Control', `public, max-age=${prerenderTtlSeconds()}`);
-      res.type('html').send(html);
+      await sendPrerenderHtml(res, html);
     } catch (err) { next(err); }
   });
 
@@ -296,6 +304,7 @@ export function registerPublishingRoutes(deps: RouteDeps): void {
             // the custom-domain door (no Firebase CDN, no UA branch) keeps its
             // public caching.
             res.setHeader('Cache-Control', 'no-store');
+            setPrerenderSecurityHeaders(res); // ADR 1015 D7 (no runtime: not a bound host)
             res.type('html').send(out.html);
             return;
           }

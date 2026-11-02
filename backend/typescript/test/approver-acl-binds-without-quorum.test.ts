@@ -15,6 +15,11 @@
  * Leg 3 is the guard that keeps the fix from drifting into a conformance break:
  * `openwop-interrupt-quorum` is pure vote-counting and `conformance-interrupt-quorum.json`
  * pins `approversList: []` as an OPEN gate. Only a NON-EMPTY declaration may bind.
+ *
+ * TST-BZC-14 (grade-tests w66). Red when: the token lane's early return ignores a declared
+ * ACL (legs 1, 2b, 5, 6); the resolver check is skipped (legs 1, 5); the per-recipient HMAC
+ * binding is skipped (legs 2b, 7); the non-token refusal is dropped (leg 6); blank refs
+ * count as a declaration (leg 4); the legacy `approversList` spelling is ignored (leg 5).
  */
 import { describe, expect, it } from 'vitest';
 import { __assertTokenQuorumVoteForTests as assertTokenQuorumVote } from '../src/routes/interrupts.js';
@@ -27,8 +32,10 @@ import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 // resolver (groups, roles, delegations), which reads host-ext rows.
 initHostExtPersistence(await openStorage('memory://'));
 
-const gate = (data: Record<string, unknown>): InterruptRecord =>
-  ({ interruptId: 'int-1', runId: 'run-1', nodeId: 'n1', reason: 'approval', status: 'pending', data, token: 'tok-1' } as unknown as InterruptRecord);
+const gate = (data: Record<string, unknown>): InterruptRecord => ({
+  interruptId: 'int-1', runId: 'run-1', nodeId: 'n1', kind: 'approval', token: 'tok-1', data,
+  createdAt: '2026-01-01T00:00:00.000Z',
+});
 
 describe('ADR 0677 D1 — a non-empty ACL binds on the token lane without a quorum', async () => {
   it('leg 1: a voter NOT on the list is refused 403 — with NO requiredApprovals at all', async () => {

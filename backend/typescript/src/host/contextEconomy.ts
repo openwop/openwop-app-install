@@ -23,9 +23,13 @@
  *   - `OPENWOP_CONTEXT_ECONOMY_TRANSCRIPT`      (A1 — Phase 3)
  *   - `OPENWOP_CONTEXT_ECONOMY_MEMORY`          (A4 — Phase 4)
  *   - `OPENWOP_CONTEXT_ECONOMY_TRANSPORT`       (A6/A7 — Phase 5)
+ *   - `OPENWOP_CONTEXT_ECONOMY_CONVERSATION_CACHE` (ADR 1003 D3)
  *
  * @see docs/adr/0148-context-economy-token-budgeted-host-assembly.md
  */
+import { createLogger } from '../observability/logger.js';
+
+const log = createLogger('host.contextEconomy');
 
 /** Parse an env var as a boolean. Accepts 1/true/on/yes (case-insensitive);
  *  anything else (incl. unset) is `undefined` so callers can fall back to the
@@ -58,14 +62,21 @@ export interface ContextEconomyConfig {
   readonly enabled: boolean;
   /** A2 (Phase 1) — Anthropic prompt caching on the stable system+tools prefix. */
   readonly providerCache: boolean;
-  /** A3 (Phase 2) — compact tool descriptors + per-agent sub-allowlist. */
+  /** A3 (Phase 2) — strip non-functional annotation keywords from each tool's
+   *  input schema. Only that: there is no per-agent sub-allowlist (ADR 1003 D7). */
   readonly toolDiet: boolean;
-  /** A1 (Phase 3) — token-budgeted transcript (last-k verbatim + rolling summary). */
+  /** A1 (Phase 3) — token-budgeted transcript: deterministic last-k within a char
+   *  budget. No summary of the elided turns is made (ADR 1003 D7). */
   readonly transcriptBudget: boolean;
   /** A4 (Phase 4) — memory injection budget / distillation. */
   readonly memoryBudget: boolean;
-  /** A6/A7 (Phase 5) — transport economy (gzip + meta strip). */
+  /** A6 (Phase 5) — gzip of `res.json` bodies only. SSE is never compressed and
+   *  no envelope field is stripped; A7 went to Tier B (ADR 1003 D7). */
   readonly transport: boolean;
+  /** ADR 1003 D3 — an Anthropic cache breakpoint on the LAST message, only on a
+   *  tool-loop round after the first (where tools + system are byte-identical
+   *  to the previous round's, so the write is read back). */
+  readonly conversationCache: boolean;
 }
 
 /** Resolve the context-economy config from the environment. Pure (reads
@@ -82,5 +93,25 @@ export function contextEconomy(): ContextEconomyConfig {
     transcriptBudget: lever('OPENWOP_CONTEXT_ECONOMY_TRANSCRIPT'),
     memoryBudget: lever('OPENWOP_CONTEXT_ECONOMY_MEMORY'),
     transport: lever('OPENWOP_CONTEXT_ECONOMY_TRANSPORT'),
+    conversationCache: lever('OPENWOP_CONTEXT_ECONOMY_CONVERSATION_CACHE'),
   });
+}
+
+/** The levers that report what they did (ADR 1003 D4). */
+export type ContextEconomyLever = 'transcript' | 'memory' | 'tool_diet';
+
+/**
+ * ADR 1003 D4 / ADR 0148 guardrail 3 — one structured line each time a lever
+ * actually changed what the model is sent. COUNTS ONLY: no conversation,
+ * message, tool name or retrieved content ever reaches it. `tenantId` is the
+ * plain field `managed_prompt_cache` already logs. Best-effort, never throws.
+ */
+export function logContextEconomyApplied(
+  lever: ContextEconomyLever,
+  tenantId: string | undefined,
+  counts: Readonly<Record<string, number>>,
+): void {
+  try {
+    log.info('context_economy_applied', { lever, ...(tenantId ? { tenantId } : {}), ...counts });
+  } catch { /* observability never fails a turn */ }
 }

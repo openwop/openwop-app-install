@@ -13,6 +13,10 @@
     .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-weight: 600; font-size: 11px; }
     .ok { background: #0a7d3320; color: #0a7d33; }
     .blocked { background: #b4232320; color: #b42323; }
+    @media (prefers-color-scheme: dark) {
+      .ok { background: #3ddc7a26; color: #5fe08f; }
+      .blocked { background: #ff6b6b26; color: #ff8a8a; }
+    }
     pre { margin: 8px 0 0; padding: 12px; border-radius: 8px; background: #8881; overflow: auto; max-height: 40vh; }
     .muted { opacity: .55; font-size: 12px; margin-top: 12px; }
   </style>
@@ -20,7 +24,7 @@
 <body>
   <h1>community.openwop.artifact-viewer</h1>
   <div class="row"><span class="k">Isolation</span><span id="origin"></span></div>
-  <div class="row"><span class="k">Egress</span><span id="egress" class="badge">testing…</span></div>
+  <div class="row"><span class="k">Requests</span><span id="egress" class="badge">testing…</span></div>
   <div class="row"><span class="k">Artifact</span><span id="artifact-status">requesting…</span></div>
   <div class="row"><span class="k">Allowlist</span><span id="allowlist" class="badge">probing…</span></div>
   <pre id="payload" hidden></pre>
@@ -28,7 +32,10 @@
     This is a downloaded, signed <code>kind:"frontend-plugin"</code> pack running in a
     cross-origin sandboxed iframe. It talks to the host ONLY over <code>ui-plugin/1</code>
     postMessage RPC, using its declared <code>hostApi:["artifact.read"]</code>. It holds no
-    credentials and can make no network requests (deny-egress CSP).
+    credentials, and the host's policy blocks its own requests (fetch, images, forms). It can
+    still send what it reads to a server it chooses by loading another page in this frame,
+    and it can open a WebRTC connection to any server, so anything it can read could reach
+    its author.
   </p>
 
   <script>
@@ -37,15 +44,21 @@
     var isOpaque = (window.origin === 'null' || window.origin === undefined || location.origin === 'null');
     originEl.textContent = isOpaque ? 'opaque origin ✓ (cross-origin sandbox)' : 'origin: ' + location.origin;
 
-    // --- Egress self-witness: the deny-egress CSP must block any network request. ---
+    // --- Request self-witness: only a policy violation counts as blocked. ---
+    // A fetch that merely fails proves nothing (it also fails with no policy at all),
+    // so this waits for `securitypolicyviolation`, as the host's isolation probe does.
+    // It covers requests only: a page load in this frame is NOT stopped by the policy.
     (function () {
       var el = document.getElementById('egress');
+      var done = false;
+      function show(text, cls) { if (!done) { done = true; el.textContent = text; el.className = 'badge ' + cls; } }
+      document.addEventListener('securitypolicyviolation', function () { show('BLOCKED ✓', 'ok'); });
       try {
         fetch('https://example.com/exfil', { mode: 'no-cors' })
-          .then(function () { el.textContent = 'REACHABLE ✗'; el.className = 'badge blocked'; })
-          .catch(function () { el.textContent = 'BLOCKED ✓'; el.className = 'badge ok'; });
+          .then(function () { show('REACHABLE ✗', 'blocked'); })
+          .catch(function () { setTimeout(function () { show('failed, no policy violation ✗', 'blocked'); }, 250); });
       } catch (e) {
-        el.textContent = 'BLOCKED ✓'; el.className = 'badge ok';
+        show('threw, no policy violation ✗', 'blocked');
       }
     })();
 

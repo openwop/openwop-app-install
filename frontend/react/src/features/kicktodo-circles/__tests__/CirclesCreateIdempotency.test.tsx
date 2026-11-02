@@ -111,7 +111,9 @@ describe('CirclesPage create idempotency (KTACC-5)', () => {
       method: init?.method,
       key: new Headers(init?.headers).get('Idempotency-Key'),
     }));
-    expect(sent[0]!.url.endsWith('/host/openwop-app/circles')).toBe(true);
+    // The backend mount (pinned to KICKTODO_CIRCLES_PREFIX by the backend parity
+    // test). This line used to pin `/host/openwop-app/circles`, a path nothing serves.
+    expect(sent[0]!.url.endsWith('/host/openwop-app/kicktodo/circles')).toBe(true);
     expect(sent.map((x) => x.method)).toEqual(['POST', 'POST']);
     expect(sent[0]!.key).toMatch(UUID);
     expect(sent[1]!.key).toBe(sent[0]!.key);

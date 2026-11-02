@@ -52,7 +52,7 @@ export function ArtifactPreviewModal({ open, nodeId, label, output, onClose, art
       <header className="artifact-header">
         <h2 className="u-m-0 u-fs-16">{label}</h2>
         <span className="muted u-fs-12">
-          <Trans i18nKey="nodeLabel" ns="chat" values={{ nodeId }} components={{ 1: <code /> }} />
+          <Trans i18nKey="nodeLabel" ns="chat" values={{ nodeId }} components={[<></>, <code />]} />
         </span>
         {artifactId && onOpenWorkbench ? (
           <Button

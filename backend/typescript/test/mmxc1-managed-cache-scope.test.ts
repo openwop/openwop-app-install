@@ -14,7 +14,10 @@
  * the stamp, tenant A and tenant B's leading system bytes are identical (the shared
  * default prompt). Sabotage-verified.
  */
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { openStorage } from '../src/storage/index.js';
 import { resetCachedMasterKey } from '../src/byok/encryption.js';
 import {
@@ -29,15 +32,27 @@ import type { Storage } from '../src/storage/storage.js';
 
 const TEST_MASTER_KEY = 'a'.repeat(64);
 let storage: Storage;
+let dataDir = '';
+const savedEnv = {
+  key: process.env.OPENWOP_BYOK_ENCRYPTION_KEY,
+  cap: process.env.OPENWOP_MANAGED_DAILY_TOKEN_CAP,
+};
 
 beforeAll(() => {
   process.env.OPENWOP_BYOK_ENCRYPTION_KEY = TEST_MASTER_KEY;
   process.env.OPENWOP_MANAGED_DAILY_TOKEN_CAP = '100000';
+  dataDir = mkdtempSync(join(tmpdir(), 'openwop-mmxc1-'));
+});
+
+afterAll(() => {
+  if (savedEnv.key === undefined) delete process.env.OPENWOP_BYOK_ENCRYPTION_KEY; else process.env.OPENWOP_BYOK_ENCRYPTION_KEY = savedEnv.key;
+  if (savedEnv.cap === undefined) delete process.env.OPENWOP_MANAGED_DAILY_TOKEN_CAP; else process.env.OPENWOP_MANAGED_DAILY_TOKEN_CAP = savedEnv.cap;
+  rmSync(dataDir, { recursive: true, force: true });
 });
 
 beforeEach(async () => {
   storage = await openStorage('memory://');
-  configureManagedProvider({ storage, dataDir: '/tmp/openwop-mmxc1-test' });
+  configureManagedProvider({ storage, dataDir });
   _clearManagedCacheForTests();
   resetCachedMasterKey();
   process.env.MINIMAX_API_KEY = 'sk-test';
@@ -103,6 +118,15 @@ describe('MMXC-1 — managed MiniMax per-tenant cache-scope sentinel', () => {
   it('stamps a per-tenant sentinel into the outbound prefix', async () => {
     const body = await outboundBodyFor('user:alice');
     expect(body).toMatch(SENTINEL);
+    // The PREFIX, specifically: the cache keys on the leading bytes, so the
+    // sentinel must open the FIRST message, which must be the system turn.
+    // The hex is a literal (sha256('user:alice'), first 16 hex digits, computed
+    // offline) — never the product's own hash, which would move with a sabotage.
+    const sent = JSON.parse(body) as { messages: Array<{ role: string; content: unknown }> };
+    expect(sent.messages[0]!.role).toBe('system');
+    expect(String(sent.messages[0]!.content).startsWith('[cache-scope dabd1db8d35ab131] ')).toBe(true);
+    // …and ONLY there: the user turn carries no sentinel.
+    expect(JSON.stringify(sent.messages.slice(1))).not.toMatch(SENTINEL);
   });
 
   it('two tenants sending the SAME prompt get DIFFERENT cache-scope bytes (cross-tenant miss)', async () => {

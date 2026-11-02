@@ -13,6 +13,12 @@
  *  - the Vertex adapter: one request per text over a bounded pool, RETRIEVAL_* task
  *    types, Retry-After on 429, a fresh token after a 401, width checked, unit vectors;
  *  - INERT: with OPENWOP_KB_HOST_EMBEDDER unset nothing changes (local hash, `none`).
+ *
+ * Double guards (measured by w74 probes): `hostEmbedderEligible` is consulted by BOTH
+ * `resolveEmbedderMode` (kbService → 'local') and `resolveHostEmbedder`; removing the
+ * resolver's copy stays green, so the inert / anon / allowlist cases are witnessed by
+ * breaking the shared predicate. An unreachable operator embedder is degraded by the
+ * hydrate catch AND the query-time catch in kbService (no single edit breaks both).
  */
 import { describe, it, expect, beforeAll, afterEach } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -46,6 +52,8 @@ afterEach(() => {
 });
 
 interface Call { texts: readonly string[]; inputType: 'query' | 'document' }
+interface VertexBody { instances: Array<{ content: string; task_type: string }>; parameters: { outputDimensionality: number } }
+
 function fake(label: Partial<HeadlessEmbedder> & { model: string; provider: string }, calls: Call[] = []): HeadlessEmbedder {
   return {
     ...label,
@@ -170,16 +178,16 @@ describe('ADR 0904 D1 — Vertex adapter', () => {
     __resetVertexProjectForTests();
     let inFlight = 0;
     let peak = 0;
-    const seen: Array<{ url: string; body: { instances: Array<{ content: string; task_type: string }>; parameters: { outputDimensionality: number } }; auth: string }> = [];
+    const seen: Array<{ url: string; body: VertexBody; auth: string }> = [];
     const { embed, stats } = createVertexEmbed('gemini-embedding-001', 3, {
       beforeAttempt: async () => {}, // transport shape tests; durable admission has its own SQLite witnesses
       env: { OPENWOP_VERTEX_EMBED_CONCURRENCY: '2', OPENWOP_VERTEX_LOCATION: 'europe-west4' },
       metadata: metadata(['tok-1']),
       fetchImpl: async (url, init) => {
         inFlight += 1; peak = Math.max(peak, inFlight);
-        await new Promise((r) => setTimeout(r, 5));
+        await new Promise((r) => setImmediate(r)); // yield so the second worker's request overlaps
         inFlight -= 1;
-        seen.push({ url, body: JSON.parse(init.body), auth: init.headers.authorization! });
+        seen.push({ url, body: JSON.parse(init.body) as VertexBody, auth: init.headers.authorization! });
         return { ok: true, status: 200, headers: { get: () => null }, text: async () => JSON.stringify({ predictions: [{ embeddings: { values: [3, 4, 0] } }] }) };
       },
     });

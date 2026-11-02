@@ -2,7 +2,9 @@
  * feature.campaign-intel.nodes — budget optimization + forecasting (ADR 0160).
  * Both compose ctx.features['campaign-intel'] (heuristic over the performance
  * store, ADR 0159). budget-optimize optionally adds a ctx.callAI scenario
- * narrative on top of the deterministic recommendation. role:"action". Pure-JS.
+ * narrative on top of the deterministic recommendation (a failed narrative is
+ * reported as `narrativeError`). Reads are role:"action"; `pacing-check` claims
+ * the alert memo and notifies, so it is role:"side-effect" (ADR 1022 D6). Pure-JS.
  */
 
 /** ADR 0903 — no hard-coded vendor. A call passes the provider/model the node
@@ -30,6 +32,10 @@ export async function budgetOptimize(ctx) {
   const recommendation = await ci.optimizeBudget({ orgId: str(i.orgId), ...(i.campaignId ? { campaignId: str(i.campaignId) } : {}) });
 
   let narrative;
+  // ADR 1022 (CP71WF-26) — a narrative that was asked for and did not come is
+  // said, never dropped silently: the recommendation still stands.
+  let narrativeError;
+  if (i.narrate && typeof ctx.callAI !== 'function') narrativeError = 'ai_unavailable';
   if (i.narrate && typeof ctx.callAI === 'function') {
     try {
       const ai = await ctx.callAI({
@@ -38,10 +44,11 @@ export async function budgetOptimize(ctx) {
         systemPrompt: 'You are a marketing budget analyst. Given a deterministic budget reallocation recommendation, explain it in 2-3 sentences a CMO can act on. Be specific about the trade-off; do not invent numbers beyond the data.',
         messages: [{ role: 'user', content: JSON.stringify(recommendation) }],
       });
-      if (ai && typeof ai.content === 'string') narrative = ai.content;
-    } catch { /* narrative optional */ }
+      if (ai && typeof ai.content === 'string' && ai.content.trim()) narrative = ai.content;
+      else narrativeError = 'empty_response';
+    } catch (e) { narrativeError = (e && e.code) || 'ai_call_failed'; }
   }
-  return { status: 'success', outputs: { recommendation, ...(narrative ? { narrative } : {}) } };
+  return { status: 'success', outputs: { recommendation, ...(narrative ? { narrative } : {}), ...(narrativeError ? { narrativeError } : {}) } };
 }
 
 export async function forecast(ctx) {
@@ -221,6 +228,7 @@ export async function planBudgetNode(ctx) {
     ...(Array.isArray(i.platforms) ? { platforms: i.platforms } : {}),
   });
   let narrative;
+  let narrativeError; // ADR 1022 (CP71WF-26) — see budgetOptimize
   if (typeof ctx.callAI === 'function' && i.narrate !== false) {
     try {
       const ai = await ctx.callAI({
@@ -228,9 +236,10 @@ export async function planBudgetNode(ctx) {
         systemPrompt: 'You explain a computed media budget plan to a marketer in 3-5 sentences. Use ONLY the numbers provided — never invent or recompute figures.',
         messages: [{ role: 'user', content: JSON.stringify(out.plan) }],
       });
-      if (ai && typeof ai.content === 'string') narrative = ai.content;
+      if (ai && typeof ai.content === 'string' && ai.content.trim()) narrative = ai.content;
       else if (ai && ai.data) narrative = String(ai.data);
-    } catch { /* narration optional */ }
+      else narrativeError = 'empty_response';
+    } catch (e) { narrativeError = (e && e.code) || 'ai_call_failed'; }
   }
-  return { status: 'success', outputs: { plan: out.plan, ...(narrative ? { narrative } : {}) } };
+  return { status: 'success', outputs: { plan: out.plan, ...(narrative ? { narrative } : {}), ...(narrativeError ? { narrativeError } : {}) } };
 }

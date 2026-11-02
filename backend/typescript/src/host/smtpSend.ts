@@ -103,6 +103,39 @@ const defaultTransportFactory: SmtpTransportFactory = (opts) => {
   };
 };
 
+/** ADR 0994 — the closed-world class of an SMTP send failure, for ops. */
+export type SmtpFailureClass = 'auth' | 'connect' | 'timeout' | 'rejected' | 'other';
+
+// nodemailer's `err.code` values (dist/cjs/errors.js), plus the raw Node socket
+// codes a dial can surface before nodemailer wraps them.
+const FAILURE_BY_CODE: Readonly<Record<string, SmtpFailureClass>> = {
+  EAUTH: 'auth', ENOAUTH: 'auth', EOAUTH2: 'auth',
+  ECONNECTION: 'connect', ESOCKET: 'connect', EDNS: 'connect', ETLS: 'connect', EPROXY: 'connect',
+  ECONNREFUSED: 'connect', ECONNRESET: 'connect', ENOTFOUND: 'connect', EHOSTUNREACH: 'connect', ENETUNREACH: 'connect',
+  ETIMEDOUT: 'timeout',
+  EENVELOPE: 'rejected', EMESSAGE: 'rejected', EMAXRECIPIENTS: 'rejected', EREQUIRETLS: 'rejected',
+};
+
+/** The server's SMTP reply code when nodemailer recorded one, else undefined. */
+function smtpResponseCode(err: unknown): number | undefined {
+  const rc = err && typeof err === 'object' ? (err as { responseCode?: unknown }).responseCode : undefined;
+  return typeof rc === 'number' && Number.isInteger(rc) && rc >= 200 && rc <= 599 ? rc : undefined;
+}
+
+/**
+ * Classify a thrown send error from its `code` (and, failing that, its SMTP reply
+ * code). Reads only those two fields — never `message` or `response`, which can
+ * echo addresses. Anything unrecognised is `'other'`.
+ */
+export function classifySmtpFailure(err: unknown): SmtpFailureClass {
+  const code = err && typeof err === 'object' ? (err as { code?: unknown }).code : undefined;
+  if (typeof code === 'string' && Object.prototype.hasOwnProperty.call(FAILURE_BY_CODE, code)) return FAILURE_BY_CODE[code]!;
+  const rc = smtpResponseCode(err);
+  if (rc === 530 || rc === 534 || rc === 535 || rc === 454) return 'auth';
+  if (rc !== undefined && rc >= 400) return 'rejected';
+  return 'other';
+}
+
 /**
  * Send `args` over SMTP as the resolved `smtp` connection. `ledgerKey` is the
  * fork-stable key the caller already checked (miss) — we `recordSend` on accept.
@@ -133,6 +166,9 @@ export async function sendViaSmtp(
     pinned = await assertSmtpDialAllowed(deps.tenantId, cfg.host, cfg.port);
   } catch (err) {
     if (err instanceof OpenwopError && err.code === 'egress_blocked') return { sent: false, provider, error: 'email_egress_blocked' };
+    // Any other throw from the pre-dial checks (the egress-rules read, the replay
+    // effect guard): no socket was opened, so it is a `connect` failure (ADR 0994).
+    log.warn('smtp dial failed', { host: cfg.host, port: cfg.port, failure: 'connect', reasonCode: 'smtp_connect' });
     return { sent: false, provider, error: 'email_request_failed' };
   }
 
@@ -167,8 +203,19 @@ export async function sendViaSmtp(
   try {
     info = await transport.sendMail(msg);
   } catch (err) {
-    // NEVER log the password / auth. Record only the host + a coarse reason.
-    log.warn('smtp send failed', { host: cfg.host, port: cfg.port, reason: err instanceof Error ? err.name : 'error' });
+    // NEVER log the password / auth / recipients. `failure` is a closed-set literal
+    // and `reasonCode` (ADR 0900) is written past the PII mask by construction, so
+    // ops can tell bad credentials from a timeout (ADR 0994). Never `err.response`.
+    const failure = classifySmtpFailure(err);
+    const responseCode = smtpResponseCode(err);
+    log.warn('smtp send failed', {
+      host: cfg.host,
+      port: cfg.port,
+      reason: err instanceof Error ? err.name : 'error',
+      failure,
+      reasonCode: `smtp_${failure}`,
+      ...(responseCode !== undefined ? { responseCode } : {}),
+    });
     return { sent: false, provider, error: 'email_request_failed' };
   }
 

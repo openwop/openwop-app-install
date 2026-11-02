@@ -28,6 +28,7 @@
  * @see spec/v1/host-sample-test-seams.md (`/v1/host/openwop-app/authorization/decide`)
  */
 
+import { agentDeploymentEnabled } from './agentDeploymentFlag.js';
 import type { Request } from 'express';
 import { OpenwopError, type Principal } from '../types.js';
 import {
@@ -139,6 +140,19 @@ export const KEY_LANE_EXTENSION_SCOPES = ['runs:annotate', 'prompts:read', 'prom
 export const PROPOSAL_KEY_SCOPES = ['proposals:read', 'proposals:write', 'proposals:apply'] as const;
 export type KeyLaneExtensionScope = (typeof KEY_LANE_EXTENSION_SCOPES)[number] | (typeof PROPOSAL_KEY_SCOPES)[number];
 
+/**
+ * ADR 1005 D6 — the RFC 0082 deployment scope, key lane. RFC 0254 ruled `deploy:*`
+ * ONE literal scope (not a family), and a refusal is `403 forbidden` whose
+ * challenge names `scope="deploy:*"`. Always mintable; listed in
+ * `scopes_supported` only while `agents.deployment` is served.
+ */
+export const DEPLOY_KEY_SCOPES = ['deploy:*'] as const;
+
+/** 403 a declared-scope key that does not hold `deploy:*`. */
+export function requireDeployKeyScope(req: Request): void {
+  if (keyNarrowingRefuses(req, 'deploy:*')) refuseScope(req, 'deploy:*', 'key-scopes', req.principal?.principalId);
+}
+
 /** RFC 0200 §A.3 `scopes_supported` — every scope some route refuses a caller for,
  *  less the conditional proposal scopes (see `scopesSupported()`). */
 export const SCOPES_SUPPORTED: readonly string[] = [...ENFORCED_PROTOCOL_SCOPES, ...KEY_LANE_EXTENSION_SCOPES];
@@ -146,7 +160,11 @@ export const SCOPES_SUPPORTED: readonly string[] = [...ENFORCED_PROTOCOL_SCOPES,
 /** What discovery publishes: `SCOPES_SUPPORTED`, plus the proposal scopes once the
  *  RFC 0249 wire is available (ADR 0972 D9). */
 export function scopesSupported(): readonly string[] {
-  return rfc0249WireAvailable() ? [...SCOPES_SUPPORTED, ...PROPOSAL_KEY_SCOPES] : SCOPES_SUPPORTED;
+  return [
+    ...SCOPES_SUPPORTED,
+    ...(rfc0249WireAvailable() ? PROPOSAL_KEY_SCOPES : []),
+    ...(agentDeploymentEnabled() ? DEPLOY_KEY_SCOPES : []),
+  ];
 }
 
 /**
@@ -322,6 +340,18 @@ function noteMembershipCensus(req: Request, tenantId: string, scope: EnforcedPro
  * caller has no subject and is denied. Both refusals carry the RFC 0200
  * `insufficient_scope` challenge (#4113's shape, set on `req.res` at the throw).
  */
+/**
+ * The KEY-LANE half of `requireProtocolScope` alone: an `owk_` key that declares
+ * scopes is refused one it did not declare, with no membership decision. For a
+ * route whose membership authority belongs to someone else — today only the
+ * `/reviews` approval arm for a kind whose owner decides (ADR 0910 D11
+ * correction, `approvalKindOwnsDecideAuthority`). Narrowing only removes
+ * authority, so this half is never skipped.
+ */
+export function requireKeyDeclaredScope(req: Request, scope: EnforcedProtocolScope): void {
+  if (keyNarrowingRefuses(req, scope)) refuseScope(req, scope, 'key-scopes', req.principal?.principalId);
+}
+
 export async function requireProtocolScope(req: Request, scope: EnforcedProtocolScope): Promise<void> {
   return requireProtocolScopeIn(req, tenantOf(req), scope);
 }

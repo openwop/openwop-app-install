@@ -5,9 +5,9 @@
  * their own renderers the same way (cf. `registerDefaultCards`).
  *
  * The components are lazy-split (the PR #804 entry-budget pattern); the workbench
- * wraps the chosen renderer in a single <Suspense>. Trust model is unchanged from
- * ADR 0128: interactive.html/react render in the origin-isolated, no-egress sandbox;
- * interactive.mermaid is sandboxed-diagram source (ADR 0129); interactive.chart is
+ * wraps the chosen renderer in a single <Suspense>. Trust model (ADR 0128, corrected by
+ * ADR 1017): interactive.html renders in the origin-isolated sandbox, STATIC until the
+ * viewer runs its scripts (running scripts can reach the network); interactive.mermaid is sandboxed-diagram source (ADR 0129); interactive.chart is
  * untrusted DATA rendered as inline SVG; interactive.react stays inert (this host
  * bundles no React/Babel runtime — IART-1).
  */
@@ -50,8 +50,8 @@ function ReactInertRenderer({ content }: ArtifactRendererProps): JSX.Element {
   );
 }
 
-function HtmlSandboxRenderer({ artifact, content }: ArtifactRendererProps): JSX.Element {
-  return <SandboxedArtifactFrame body={content} title={artifact.title} />;
+function HtmlSandboxRenderer({ artifact, content, consentKey }: ArtifactRendererProps): JSX.Element {
+  return <SandboxedArtifactFrame body={content} title={artifact.title} {...(consentKey ? { consentKey } : {})} />;
 }
 
 let registered = false;

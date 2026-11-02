@@ -4,7 +4,8 @@
  * The resolved effective scope is a variable that influences the run (it decides
  * which tool calls fire and which suspend for approval), so it MUST be stamped in
  * `run.metadata` at run creation and read verbatim on `:fork` — never re-resolved
- * (the ADR 0031 invariant; mirrors `computeRouteStamp` for the model router). A
+ * (the ADR 0031 invariant; it mirrored the model router's `computeRouteStamp`,
+ * retired by ADR 1016 when routing became a per-exchange decision). A
  * re-resolution on fork could differ if the agent's ceiling changed since, silently
  * diverging the forked run.
  *
@@ -20,7 +21,7 @@
  * (already stamped — the replay/fork guard — or no narrowing to record).
  *
  * @see docs/adr/0132-per-conversation-capability-scope.md
- * @see src/host/conversationExchange.ts computeRouteStamp — the precedent
+ * @see docs/adr/1016-model-router-workspace-per-turn-routing.md — the stamp precedent's retirement
  */
 import type { EffectiveScope, CapabilityScopeStamp } from './types.js';
 

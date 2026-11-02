@@ -19,6 +19,11 @@
  * set `OPENWOP_MCP_FAKE_SERVER`, so `getMcpFakeServer()` was null and the
  * host-mediated leg soft-skipped `blocked` every run. A leg that returns early
  * is not a leg that passes.
+ *
+ * Tracker TST-CJA-3 (grade-tests w68). Red when: the bridge drops the
+ * `untrustedContent` marker or the node's `config.mcp.arguments`; the
+ * no-server / no-tool guards are removed (a typed failure becomes a call); or the
+ * vendored roundtrip fixture is respelled back to `core.ai.callPrompt`.
  */
 
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
@@ -94,14 +99,25 @@ afterEach(() => {
 
 /** A NodeContext carrying the REAL outbound client. */
 function ctxWith(config: Record<string, unknown>): NodeContext {
-  return {
+  const ctx: NodeContext = {
     runId: 'run-mcpbridge',
     nodeId: 'mcp-call',
     tenantId: 'tmcpb',
     config,
     inputs: {},
-    mcp: makeMcpClient({ storage, tenantId: 'tmcpb', runId: 'run-mcpbridge', actingUserId: 'u1', orgId: 'tmcpb' }),
-  } as unknown as NodeContext;
+    configurable: {},
+    attempt: 1,
+    secrets: {},
+    async emit() {
+      return { eventId: 'evt-mcpbridge', sequence: 1 };
+    },
+    // The executor's shape: a host-side `expose` plus the REAL outbound client.
+    mcp: {
+      expose: async () => ({ handle: 'mcp:run-mcpbridge:mcp-call', kind: 'tool' }),
+      ...makeMcpClient({ storage, tenantId: 'tmcpb', runId: 'run-mcpbridge', actingUserId: 'u1', orgId: 'tmcpb' }),
+    },
+  };
+  return ctx;
 }
 
 async function runBridge(config: Record<string, unknown>): Promise<{ status: string; outputs?: Record<string, unknown>; error?: { code?: string } }> {
@@ -191,39 +207,6 @@ describe('the roundtrip fixtures reach their bridges without a loader rewrite (H
     // The alias registration is deleted, so this spelling would now resolve to
     // nothing and fail at dispatch on a fixture the host still advertises.
     expect(typeIds, 'the legacy alias is deleted — this spelling resolves to no node').not.toContain('core.a2a.invoke');
-  });
-
-  it('no vendored fixture carries core.ai.callPrompt WITH config.mcp — nothing rewrites it any more', async () => {
-    // While the rewrite existed this shape was handled. It is not any more: such
-    // a node resolves to the `vendor.myndhyve.ai` prompt-library node, which
-    // requires `config.promptId`, ignores `config.mcp` and fails
-    // `prompt_not_found` — advertise-and-spuriously-fail, restored. If a future
-    // re-vendor reintroduces the shape, this red is the correct outcome.
-    const { readdirSync, readFileSync } = await import('node:fs');
-    const { join } = await import('node:path');
-    const dir = join(import.meta.dirname, '..', '..', '..', 'conformance-fixtures');
-    const docs = readdirSync(dir)
-      .filter((f) => f.endsWith('.json'))
-      .map((f) => JSON.parse(readFileSync(join(dir, f), 'utf8')) as { id?: string; nodes?: Array<{ typeId?: string; config?: Record<string, unknown> }> });
-    expect(docs.length, 'fixture corpus empty — every assertion here would be vacuous').toBeGreaterThan(10);
-
-    const mcpShapedCallPrompt = docs.filter((doc) =>
-      (doc.nodes ?? []).some(
-        (n) =>
-          n.typeId === 'core.ai.callPrompt' &&
-          typeof (n.config?.mcp as { tool?: unknown } | undefined)?.tool === 'string',
-      ),
-    );
-    expect(mcpShapedCallPrompt.map((d) => d.id)).toEqual([]);
-
-    // NON-VACUITY: `core.ai.callPrompt` must still appear in the corpus at all,
-    // otherwise the filter above is trivially empty for the wrong reason.
-    // `conformance-stream-text` is the plain prompt-library user.
-    const plainCallPrompt = docs.filter((doc) => (doc.nodes ?? []).some((n) => n.typeId === 'core.ai.callPrompt'));
-    expect(
-      plainCallPrompt.map((d) => d.id),
-      'no core.ai.callPrompt fixture left in the corpus — the filter above is now vacuous',
-    ).toContain('conformance-stream-text');
   });
 
   it('the vendored roundtrip fixtures are byte-identical to the PINNED suite package', async () => {

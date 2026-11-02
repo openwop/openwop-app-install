@@ -7,6 +7,20 @@
  * 502, state untouched), contributing-run dedup binding, cross-tenant denial
  * (service-level, the adr0379 pattern), and the wire projection (host-private
  * sidecar state never leaves the service).
+ *
+ * TST-DEE-7 — red when: an escalate verdict stays active, a replay re-invokes the
+ * verifier, a terminal goal is re-judged, an unregistered/throwing/malformed
+ * verifier is not a typed failure (422/409/502 with its own message), a re-bound
+ * run is recorded twice, a foreign tenant reaches a goal, or the host sidecar
+ * reaches the wire. DOUBLE GUARDS named here:
+ *  - terminal re-evaluate: `evaluateGoal`'s pre-judge state check (OUTER, probed
+ *    — removing it invokes the verifier, which this file counts) and the CAS
+ *    loop's `fresh.state` re-check (INNER, still refuses the write);
+ *  - same-run dedup: the pre-lookup check (GL2CD-11) and the in-CAS re-check —
+ *    witnessed by breaking the shared state both read (the id is never recorded);
+ *  - cross-tenant: the `${tenant}::${id}` key and the `owner.tenant` re-check in
+ *    `getGoalRow` — witnessed by an id-only lookup that breaks both.
+ * Every case creates its own goal; none reads another case's rows.
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
@@ -60,6 +74,7 @@ async function api<T = Record<string, unknown>>(path: string, init: RequestInit 
 }
 
 const BOUNDS = { maxLoopIterations: 5, runTimeoutMs: 60_000 };
+interface ErrBody { error: string; message: string }
 
 async function createRouteGoal(verifierRef: string): Promise<string> {
   const { status, body } = await api<{ id: string }>('/host/openwop-app/goals', {
@@ -136,34 +151,45 @@ describe('evaluate — replay idempotency', () => {
   });
 
   it('NEW evidence against a terminal goal → 409 (no re-judging a closed goal)', async () => {
-    registerGoalVerifier('v:done', async () => ({ satisfied: true, confidence: 1, runId: 'run-5' }));
+    let calls = 0;
+    registerGoalVerifier('v:done', async () => {
+      calls++;
+      return { satisfied: true, confidence: 1, runId: 'run-5' };
+    });
     const id = await createRouteGoal('v:done');
     await api(`/host/openwop-app/goals/${id}/evaluate`, {
       method: 'POST',
       body: JSON.stringify({ snapshotRef: 'ev:5', snapshotHash: 'h5' }),
     });
-    const { status } = await api(`/host/openwop-app/goals/${id}/evaluate`, {
+    const res = await api<ErrBody>(`/host/openwop-app/goals/${id}/evaluate`, {
       method: 'POST',
       body: JSON.stringify({ snapshotRef: 'ev:6', snapshotHash: 'h6' }),
     });
-    expect(status).toBe(409);
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ error: 'conflict', message: 'Goal is `satisfied` — a judge may only evaluate an active goal.' });
+    expect(calls, 'the closed goal must not be re-judged').toBe(1);
   });
 });
 
 describe('evaluate — fail-closed judge errors', () => {
   it('unregistered verifierRef: create refuses it (422); a goal stored before that → 409 at evaluate, untouched', async () => {
-    const refused = await api('/host/openwop-app/goals', {
+    const refused = await api<ErrBody>('/host/openwop-app/goals', {
       method: 'POST',
       body: JSON.stringify({ objective: 'x', completion: { check: 'verifier', verifierRef: 'v:nobody-home' }, continuation: { mode: 'manual' }, bounds: BOUNDS }),
     });
     expect(refused.status).toBe(422);
-    const tenant = ((await api<{ goals: Array<{ owner: { tenant: string } }> }>('/host/openwop-app/goals')).body.goals[0])!.owner.tenant;
+    expect(refused.body).toMatchObject({ error: 'validation_error', message: 'Verifier `v:nobody-home` is not registered on this host.' });
+    // The caller's tenant, read off a goal THIS case creates (no shared rows).
+    registerGoalVerifier('v:tenant-probe', async () => ({ satisfied: false, confidence: 0, runId: 'r' }));
+    const probeId = await createRouteGoal('v:tenant-probe');
+    const tenant = (await api<{ owner: { tenant: string } }>(`/host/openwop-app/goals/${encodeURIComponent(probeId)}`)).body.owner.tenant;
     const id = (await createGoal({ objective: 'stored earlier', completion: { check: 'verifier', verifierRef: 'v:nobody-home' }, continuation: { mode: 'manual' }, bounds: BOUNDS, owner: { tenant } })).id;
-    const { status } = await api(`/host/openwop-app/goals/${id}/evaluate`, {
+    const res = await api<ErrBody>(`/host/openwop-app/goals/${id}/evaluate`, {
       method: 'POST',
       body: JSON.stringify({ snapshotRef: 'ev:7', snapshotHash: 'h7' }),
     });
-    expect(status).toBe(409);
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ error: 'conflict', message: 'No goal verifier is registered for ref `v:nobody-home`.' });
     const g = await api<{ state: string; completion: { lastVerdict?: unknown } }>(`/host/openwop-app/goals/${id}`);
     expect(g.body.state).toBe('active');
     expect(g.body.completion.lastVerdict).toBeUndefined();
@@ -174,23 +200,30 @@ describe('evaluate — fail-closed judge errors', () => {
       throw new Error('provider down');
     });
     const id = await createRouteGoal('v:boom');
-    const { status } = await api(`/host/openwop-app/goals/${id}/evaluate`, {
+    const res = await api<ErrBody>(`/host/openwop-app/goals/${id}/evaluate`, {
       method: 'POST',
       body: JSON.stringify({ snapshotRef: 'ev:8', snapshotHash: 'h8' }),
     });
-    expect(status).toBe(502);
+    expect(res.status).toBe(502);
+    expect(res.body).toMatchObject({ error: 'runner_unavailable', message: 'Goal verifier `v:boom` failed: provider down' });
     const g = await api<{ state: string }>(`/host/openwop-app/goals/${id}`);
     expect(g.body.state).toBe('active');
   });
 
   it('malformed verdict (typed failure, never success-with-empty) → 502', async () => {
-    registerGoalVerifier('v:garbage', async () => ({ satisfied: 'yes' } as never));
+    // Valid in every field EXCEPT `satisfied` (a string), so only that check can
+    // refuse it. Parsed from JSON: a verdict arriving off a wire is untyped.
+    registerGoalVerifier('v:garbage', async () => JSON.parse('{"satisfied":"yes","confidence":1,"runId":"run-g"}'));
     const id = await createRouteGoal('v:garbage');
-    const { status } = await api(`/host/openwop-app/goals/${id}/evaluate`, {
+    const res = await api<ErrBody>(`/host/openwop-app/goals/${id}/evaluate`, {
       method: 'POST',
       body: JSON.stringify({ snapshotRef: 'ev:9', snapshotHash: 'h9' }),
     });
-    expect(status).toBe(502);
+    expect(res.status).toBe(502);
+    expect(res.body).toMatchObject({ error: 'runner_unavailable', message: 'Goal verifier `v:garbage` returned a malformed verdict.' });
+    const g = await api<{ state: string; completion: { lastVerdict?: unknown } }>(`/host/openwop-app/goals/${id}`);
+    expect(g.body.state).toBe('active');
+    expect(g.body.completion.lastVerdict).toBeUndefined();
   });
 });
 
@@ -218,13 +251,15 @@ describe('contributing-run binding', () => {
   });
 
   it('missing runId → 400; unknown goal → 404', async () => {
-    const bad = await api('/host/openwop-app/goals/nope/runs', { method: 'POST', body: JSON.stringify({}) });
+    const bad = await api<ErrBody>('/host/openwop-app/goals/nope/runs', { method: 'POST', body: JSON.stringify({}) });
     expect(bad.status).toBe(400);
-    const missing = await api('/host/openwop-app/goals/nope/runs', {
+    expect(bad.body).toMatchObject({ error: 'validation_error', message: 'Field `runId` is required.' });
+    const missing = await api<ErrBody>('/host/openwop-app/goals/nope/runs', {
       method: 'POST',
       body: JSON.stringify({ runId: 'run:x' }),
     });
     expect(missing.status).toBe(404);
+    expect(missing.body).toMatchObject({ error: 'not_found', message: 'Goal not found.' });
   });
 });
 

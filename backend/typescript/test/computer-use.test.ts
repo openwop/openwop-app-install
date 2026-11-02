@@ -3,6 +3,11 @@
  *  submit-once CAS (no double session/charge), risk-tiered auto vs halt,
  *  human decide (approve resumes / deny ends), fail-closed origin allowlist,
  *  step ceiling, daily budget, validation, and node-pack honest-off.
+ *
+ *  The tenant-guarded status read is a DOUBLE guard (sessionStore.getSession):
+ *  the tenant-prefixed collection key AND the `s.tenantId === tenantId` row
+ *  check. A one-guard probe is an equivalent mutant; w73 probe cu-tenant breaks
+ *  both in one edit.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -37,10 +42,10 @@ beforeAll(async () => {
   // ADR 0894 D4 — every advance rechecks the opener's `runs:create` in the
   // session's org and the toggle, so the loop runs against a real org it owns.
   const d = getToggleDefault('computer-use'); if (d) await saveConfig({ ...d, status: 'on' }, 'test');
-  for (const tenantId of [T, 'tenant-cu-budget']) {
-    await createOrg({ tenantId, createdBy: 'test', name: 'CU', orgId: tenantId === T ? 'org-1' : 'org-budget', ownerSubject: 'u1' });
+  for (const [tenantId, orgId] of [[T, 'org-1'], ['tenant-cu-budget', 'org-budget'], ['tenant-cu-budget-2', 'org-budget-2']] as const) {
+    await createOrg({ tenantId, createdBy: 'test', name: 'CU', orgId, ownerSubject: 'u1' });
   }
-});
+}, 120_000);
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 beforeEach(() => { delete process.env.OPENWOP_COMPUTER_USE_DAILY_SESSIONS; });
 
@@ -61,7 +66,7 @@ describe('validation (fail-closed)', () => {
     expect(() => parseAllowedOrigins([])).toThrowError(/non-empty/);
     expect(() => parseAllowedOrigins(['http://insecure.example.com'])).toThrowError(/https/);
     await expect(startTask(makeMockAdapter(), { ...BASE_INPUT, task: 'x', startUrl: 'https://other.example.com/' }))
-      .rejects.toMatchObject({ code: 'validation_error' });
+      .rejects.toMatchObject({ code: 'validation_error', message: 'Field `startUrl` must be https and inside `allowedOrigins`.' });
   });
 });
 
@@ -136,7 +141,7 @@ describe('the control loop', () => {
     const task = mockTask([act('d1', 'click', 'https://evil.example.net/phish')]);
     const out = await startTask(adapter, { ...BASE_INPUT, task });
     expect(out.status).toBe('failed');
-    expect(out.error).toContain('origin_denied');
+    expect(out.error).toBe('origin_denied:https://evil.example.net/phish');
   });
 
   it('enforces the step ceiling (runaway backstop)', async () => {
@@ -149,17 +154,20 @@ describe('the control loop', () => {
     }
     expect(v.status).toBe('failed');
     expect(v.error).toBe('step_ceiling_reached');
-    expect(v.steps).toBeLessThanOrEqual(40);
+    expect(v.steps).toBe(40); // MAX_STEPS; the fixture has 60 actions
   });
 
-  it('enforces the daily session budget (typed 429; sessions remain startable after)', async () => {
+  it('enforces the daily session budget (typed 429), per tenant: another tenant still starts', async () => {
     process.env.OPENWOP_COMPUTER_USE_DAILY_SESSIONS = '1';
     const adapter = makeMockAdapter();
     const t2 = 'tenant-cu-budget';
     const one = await startTask(adapter, { ...BASE_INPUT, tenantId: t2, orgId: 'org-budget', task: mockTask([act('e1', 'screenshot')]) });
     expect(one.status).toBe('completed');
     await expect(startTask(adapter, { ...BASE_INPUT, tenantId: t2, orgId: 'org-budget', task: mockTask([act('e2', 'screenshot')]) }))
-      .rejects.toMatchObject({ code: 'rate_limited' });
+      .rejects.toMatchObject({ code: 'rate_limited', httpStatus: 429 });
+    // Positive control: the cap is per TENANT — a tenant with no session today still starts.
+    const other = await startTask(adapter, { ...BASE_INPUT, tenantId: 'tenant-cu-budget-2', orgId: 'org-budget-2', task: mockTask([act('e3', 'screenshot')]) });
+    expect(other.status).toBe('completed');
   });
 
   it('status is a tenant-guarded read', async () => {

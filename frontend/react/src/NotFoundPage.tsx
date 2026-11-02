@@ -26,7 +26,7 @@ export function NotFoundPage() {
             t={t}
             i18nKey="notFoundBody"
             values={{ path: pathname }}
-            components={{ 0: <code /> }}
+            components={[<code />]}
           />
         }
         action={<Link className="btn" to="/">{t('notFoundHome')}</Link>}

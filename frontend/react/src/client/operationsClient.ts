@@ -257,6 +257,32 @@ export async function getSloSummary(): Promise<SloSummary> {
   return asJson<SloSummary>(res, 'SLO summary');
 }
 
+/** ADR 0987 D6 — one run-admission scope family. `refusals` is `null` for the two
+ *  concurrency families: the store counts their refusals together. */
+export interface AdmissionFamily {
+  family: string;
+  /** `null` when the cap is per tenant (the monthly plan); 0 = off. */
+  cap: number | null;
+  windowS?: number;
+  posture: 'transactional' | 'closed' | 'open';
+  refusals: Record<string, number> | null;
+}
+export interface AdmissionSummary {
+  profile: 'strict' | 'evaluation';
+  families: AdmissionFamily[];
+  /** Runs holding a concurrency slot now; `atLeast` when the bounded count hit its limit. */
+  holding: { count: number; atLeast: boolean; limit: number };
+  concurrencyRefusals: Record<string, number>;
+  windowUnavailable: number;
+  perInstance: boolean;
+  fetchedAt: string;
+}
+
+export async function getAdmissionSummary(): Promise<AdmissionSummary> {
+  const res = await fetch(`${BASE()}/admission/summary`, fetchOpts({ headers: authedHeaders() }));
+  return asJson<AdmissionSummary>(res, 'admission summary');
+}
+
 export async function retryDelivery(deliveryId: string): Promise<void> {
   const res = await fetch(`${BASE()}/webhooks/deliveries/${encodeURIComponent(deliveryId)}/retry`, fetchOpts({ method: 'POST', headers: authedHeaders({ 'content-type': 'application/json' }) }));
   await asJson(res, 'retry delivery');

@@ -7,11 +7,15 @@
  * must NOT expand — a destructive operation never grows beyond the explicit
  * selection (architect ruling). Fixtures are the LIVE registry edges at HEAD:
  * workforces → agents, strategy-showcase → advisors.
+ *
+ * TST-DAD-8. Every case uses its own tenant. Red when (sabotage-witnessed,
+ * wave 70): seed selection stops following `dependsOn`; `autoIncluded` marks
+ * explicitly named steps; clear expands to dependencies.
  */
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { openStorage } from '../src/storage/index.js';
@@ -19,6 +23,7 @@ import type { Storage } from '../src/storage/storage.js';
 import { runExampleDataSeed, runDemoClear, EXAMPLE_DATA_SEEDERS } from '../src/host/exampleDataSeeders.js';
 
 let storage: Storage;
+const priorSeedFlag = process.env.OPENWOP_DEMO_SEED_ENABLED;
 
 beforeAll(async () => {
   process.env.OPENWOP_DEMO_SEED_ENABLED = 'true';
@@ -30,6 +35,17 @@ beforeAll(async () => {
   // this file actually tests (dependsOn expansion).
   initInMemorySurfaces({ dataDir: mkdtempSync(join(tmpdir(), 'owp-seed-dep-')) });
 });
+
+afterAll(() => {
+  if (priorSeedFlag === undefined) delete process.env.OPENWOP_DEMO_SEED_ENABLED;
+  else process.env.OPENWOP_DEMO_SEED_ENABLED = priorSeedFlag;
+});
+
+const agentsSeeder = () => {
+  const s = EXAMPLE_DATA_SEEDERS.find((x) => x.id === 'agents');
+  if (!s) throw new Error('agents seeder missing from the registry');
+  return s;
+};
 
 describe('runExampleDataSeed dependsOn auto-include', () => {
   it('registry sanity: the fixture edges exist', () => {
@@ -60,8 +76,15 @@ describe('runExampleDataSeed dependsOn auto-include', () => {
   });
 
   it('clear does NOT expand to dependencies', async () => {
-    const r = await runDemoClear('dep-t2', storage, { steps: ['workforces'] });
-    expect(r.results.map((x) => x.step)).toEqual(['workforces']); // agents untouched
+    // Own tenant: seeding workforces pulls in agents (the ancestor).
+    expect((await runExampleDataSeed('dep-t4', storage, { steps: ['workforces'] })).success).toBe(true);
+    const agentsBefore = await agentsSeeder().count('dep-t4', storage);
+    expect(agentsBefore, 'premise: the ancestor really seeded rows').toBeGreaterThan(0);
+
+    const r = await runDemoClear('dep-t4', storage, { steps: ['workforces'] });
+    expect(r.results.map((x) => x.step)).toEqual(['workforces']);
+    // ...and the ancestor's rows are untouched.
+    expect(await agentsSeeder().count('dep-t4', storage)).toBe(agentsBefore);
   });
 
   it('selecting every step explicitly marks nothing autoIncluded; unknown ids stay ignored', async () => {

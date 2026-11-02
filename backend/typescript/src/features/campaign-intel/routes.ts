@@ -9,7 +9,7 @@
 import type { Request } from 'express';
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
-import { resolveEffectiveAccess, type Scope } from '../../host/accessControlService.js';
+import { type Scope } from '../../host/accessControlService.js';
 import { requireFeatureEnabled, requireString } from '../featureRoute.js';
 import { listRecords } from '../campaign-connectors/performanceService.js';
 import type { AdPlatform } from '../../host/adsAdapter.js';
@@ -38,14 +38,11 @@ const actingUserOf = (req: Request): string | undefined => req.userId ?? req.pri
 const APPLY_PLATFORM_SET: Record<AdPlatform, true> = { meta: true, google: true, tiktok: true, linkedin: true };
 const APPLY_PLATFORMS = Object.keys(APPLY_PLATFORM_SET) as AdPlatform[];
 
-/** The org-scope authority predicate SHARED by these routes and the Campaign
- *  Intelligence Analyst's chat tools (`agentTools.ts`) — ONE check, so the
- *  route and the tool can never drift on who may read/write an org's campaigns
- *  (the CLAUDE.md "one helper, route + tool both call it" rule). */
-export async function orgScopeGranted(tenantId: string, subject: string | undefined, orgId: string, scope: Scope): Promise<boolean> {
-  const access = await resolveEffectiveAccess(tenantId, { subject, orgId });
-  return access.scopes.includes(scope);
-}
+// The org-scope predicate lives in ./orgScope.ts (shared with the chat tools
+// and the alert audience); re-exported for existing importers.
+export { orgScopeGranted } from './orgScope.js';
+
+import { orgScopeGranted } from './orgScope.js';
 
 async function requireOrgScopeFor(req: Request, orgId: string, scope: Scope): Promise<void> {
   if (!(await orgScopeGranted(tenantOf(req), actingUserOf(req), orgId, scope))) {
@@ -142,10 +139,18 @@ export function registerCampaignIntelRoutes(deps: RouteDeps): void {
         ...(actingUserOf(req) ? { actingUserId: actingUserOf(req) as string } : {}), orgId,
       });
       const op = { platform, adAccountId: requireString(body.adAccountId, 'adAccountId'), campaignId: requireString(body.campaignId, 'campaignId'), dailyBudgetMinor: Math.floor(budget) };
+      // ADR 1022 (CP71CD-1) — the campaign must be THIS org's, not only the
+      // caller's org check: one agency token reaches every client's accounts.
+      // Same 404 for "absent" and "another org's".
+      const { orgOwnsAdCampaign } = await import('./adOwnership.js');
+      if (!(await orgOwnsAdCampaign(tenantOf(req), orgId, op))) throw new OpenwopError('not_found', 'No such campaign in this organization.', 404);
       const result = await adapter.updateBudget({ ...op, ...(body.dryRun === true ? { dryRun: true } : {}) });
       // ADR 0952 D3 / finding P3 — the outcome stamps back into the plan store.
       await recordRouteApply(tenantOf(req), orgId, actingUserOf(req), op, result);
-      res.json(result);
+      // ADR 1022 D5 — a spend cap (or an unreadable budget under one) refused
+      // the change: a conflict with the org's money policy, not a success.
+      const capRefused = result.outcome === 'failed' && (/^cap_/.test(result.error) || result.error === 'budget_unreadable');
+      res.status(capRefused ? 409 : 200).json(result);
     } catch (err) { next(err); }
   });
 

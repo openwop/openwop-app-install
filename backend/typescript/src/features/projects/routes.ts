@@ -506,7 +506,7 @@ export function registerProjectsRoutes(deps: RouteDeps): void {
       }
       const ts = new Date().toISOString();
       try {
-        await deps.storage.createChatSession({ sessionId, tenantId, title: `${p.name} · project`, createdAt: ts, updatedAt: ts, messageCount: 0 });
+        await deps.storage.createChatSession({ sessionId, tenantId, title: `${p.name} · project`, createdAt: ts, updatedAt: ts, messageCount: 0, titleSource: 'given' });
       } catch (err) {
         const code = (err as { code?: string }).code;
         if (code !== 'SQLITE_CONSTRAINT_PRIMARYKEY' && code !== '23505') throw err; // already exists ⇒ reuse

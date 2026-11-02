@@ -151,12 +151,15 @@ export function createGcsBlob(scope: BundleScope, deps: GcsBlobDeps = {}): BlobS
   const auth = async () => ({ authorization: `Bearer ${await token()}` });
 
   return {
-    async put({ key, contentBase64, contentType }) {
+    async put({ key, contentBase64, contentType, signal }) {
       const body = Buffer.from(String(contentBase64), 'base64');
       const url = `${API}/upload/storage/v1/b/${encodeURIComponent(cfg.bucket)}/o?uploadType=media&name=${encodeURIComponent(objName(key))}`;
       const res = await fetchFn(url, {
         method: 'POST',
         body,
+        // ADR 0951 P2.5: a caller's deadline aborts the upload itself, so a
+        // stalled PUT cannot land after the caller has stopped waiting.
+        ...(signal instanceof AbortSignal ? { signal } : {}),
         headers: { ...(await auth()), 'content-type': contentType ? String(contentType) : 'application/octet-stream' },
       });
       await drainBody(res);

@@ -13,6 +13,11 @@
  * `validateWorkflowDefinition` and assert the normalized condition then gates a
  * real `evaluateCondition` call (the executor authority) — proving the edge now
  * fires/drops as authored instead of vanishing.
+ *
+ * Tracker TST-CXB-2. Red when (edgeConditionMapping.ts): notEquals maps to the
+ * wrong op; a falsy `right` is dropped or a stray truthy/falsy `right` kept; an
+ * unknown host op, a missing `left` or an array condition is accepted; or
+ * `validateWorkflowDefinition` stops routing conditions through the mapper.
  */
 import { describe, expect, it } from 'vitest';
 import {

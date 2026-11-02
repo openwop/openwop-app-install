@@ -1,5 +1,23 @@
-/** ADR0904 D9: authoritative documents, cross-replica invalidation and late-write
- * fences. The SQL engine itself is exercised in kb-pg-lexical-live.test.ts. */
+/** ADR 0904 D9: authoritative documents, cross-replica invalidation and late-write
+ * fences. The SQL engine itself is exercised in kb-pg-lexical-live.test.ts.
+ *
+ * The `sharedIndex()` double carries the ADAPTER half of each fence (generation
+ * compare, pending refusal), so these cases assert the KB SERVICE half: that it
+ * begins a mutation before a primary write, retires an owner on collection delete,
+ * never consults a pending index, takes text and trust from the primary document,
+ * and falls back to authoritative BM25 on any index failure. Where the double also
+ * refuses (pending, a resurrected row dropped on read by currentIndexedMetadata),
+ * the case asserts a counter the service alone moves (`log.searches`,
+ * `log.replacements`) or the row store itself.
+ *
+ * Sabotage witnesses (features/kb/kbService.ts, host/vector/pgLexical.ts): merging
+ * index metadata over the primary reds case 1; rebuilding a ready index reds case 1;
+ * skipping the ingest/delete mutation reds cases 2/3/7/8; skipping or swallowing the
+ * lexical delete reds 7/8; not retiring the owner reds 4; rethrowing index errors
+ * reds 5; ignoring `pending` reds 6; ignoring the size trigger reds 9; the
+ * maintenance index following reads reds 8; tsquery operators or duplicates red the
+ * input-boundary case.
+ */
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -93,9 +111,9 @@ function sharedIndex() {
   return { rows, owners, log, client, onReplace: (f: () => Promise<void>) => { beforeReplace = f; } };
 }
 
-async function seeded(t: string) {
+async function seeded(t: string, internal: { contentTrust?: 'trusted' | 'untrusted' } = {}) {
   const c = await createCollection(t, 'o', 'u', { name: 'manuals' });
-  await ingestDocument(t, 'o', 'u', c.collectionId, { title: 'Safety', text: 'Forklift pallet recertification safety manual.' }, { documentId: 'd' });
+  await ingestDocument(t, 'o', 'u', c.collectionId, { title: 'Safety', text: 'Forklift pallet recertification safety manual.' }, { documentId: 'd', ...internal });
   return c.collectionId;
 }
 const query = (t: string, col: string, q = 'forklift') => searchDetailed(t, 'o', col, q, 5, 'hybrid');
@@ -103,22 +121,29 @@ const query = (t: string, col: string, q = 'forklift') => searchDetailed(t, 'o',
 describe('persisted lexical channel with real durable KB primaries', () => {
   it('uses a ready index across client replacement, but source documents remain text/trust authority', async () => {
     const f = sharedIndex(); setLexicalIndex(f.client()); process.env.OPENWOP_KB_LEXICAL_PERSIST_MIN_CHUNKS = '0';
-    const col = await seeded('lex-ready'); await query('lex-ready', col);
+    // The primary is UNTRUSTED, so a forged `trusted` in the index is distinguishable.
+    const col = await seeded('lex-ready', { contentTrust: 'untrusted' }); await query('lex-ready', col);
     const replacements = f.log.replacements;
     setLexicalIndex(f.client());
     expect((await query('lex-ready', col)).hits[0]?.documentId).toBe('d');
     expect(f.log.replacements).toBe(replacements);
     for (const row of f.rows.values()) row.metadata = { ...row.metadata, text: 'FORGED PRIVATE INDEX TEXT', contentTrust: 'trusted' };
     const result = await query('lex-ready', col);
-    expect(result.hits.some(h => h.text.includes('Forklift pallet'))).toBe(true);
+    expect(result.hits.length).toBeGreaterThan(0);
+    expect(result.hits.find(h => h.chunkId === 'd:0')?.text).toBe('Forklift pallet recertification safety manual.');
+    expect(result.hits.map(h => h.contentTrust)).toEqual(result.hits.map(() => 'untrusted'));
     expect(JSON.stringify(result)).not.toContain('FORGED PRIVATE INDEX TEXT');
   });
   it('another replica invalidates readiness before publishing a new primary document', async () => {
     const f = sharedIndex(); setLexicalIndex(f.client()); process.env.OPENWOP_KB_LEXICAL_PERSIST_MIN_CHUNKS = '0';
     const col = await seeded('lex-new'); await query('lex-new', col);
     setLexicalIndex(f.client());
+    const before = f.log.replacements;
     await ingestDocument('lex-new', 'o', 'u', col, { title: 'New', text: 'Zebracrane operating instructions.' }, { documentId: 'new' });
     expect((await query('lex-new', col, 'zebracrane')).hits.some(h => h.documentId === 'new')).toBe(true);
+    // The hit alone can come from the dense channel; the invalidation's own
+    // observable is that the other replica REBUILT before searching.
+    expect(f.log.replacements).toBe(before + 1);
   });
   it('a document delete crossing a paused rebuild cannot resurrect its chunk text', async () => {
     const f = sharedIndex(); setLexicalIndex(f.client()); process.env.OPENWOP_KB_LEXICAL_PERSIST_MIN_CHUNKS = '0';
@@ -138,17 +163,27 @@ describe('persisted lexical channel with real durable KB primaries', () => {
   it('an unavailable index read or publication retains a useful authoritative fallback', async () => {
     const f = sharedIndex(); setLexicalIndex(f.client()); process.env.OPENWOP_KB_LEXICAL_PERSIST_MIN_CHUNKS = '0';
     const col = await seeded('lex-down'); f.log.failReplace = true;
+    const replacements = f.log.replacements;
     expect((await query('lex-down', col)).hits.some(h => h.documentId === 'd')).toBe(true);
+    expect(f.log.replacements, 'the publication was attempted, and failed').toBe(replacements + 1);
     f.log.failReplace = false; await query('lex-down', col); f.log.failRead = true;
+    const searches = f.log.searches;
     expect((await query('lex-down', col)).hits.some(h => h.documentId === 'd')).toBe(true);
+    expect(f.log.searches, 'the index read was attempted, and failed').toBe(searches + 1);
   });
   it('an uncertain primary operation keeps the index unavailable to other replicas', async () => {
     const f = sharedIndex(); const a = f.client(); setLexicalIndex(a); process.env.OPENWOP_KB_LEXICAL_PERSIST_MIN_CHUNKS = '0';
     const col = await seeded('lex-pending'); await query('lex-pending', col);
     await a.beginMutation('lex-pending', `o/${col}`, `o/${col}`, 'uncertain');
     setLexicalIndex(f.client());
+    const searches = f.log.searches;
+    const replacements = f.log.replacements;
     expect((await query('lex-pending', col)).hits.some(h => h.documentId === 'd')).toBe(true);
-    expect(await a.searchReady('lex-pending', `o/${col}`, `o/${col}`, ['forklift'], 5)).toBeNull();
+    // The service never consults (or rebuilds) a pending index: it answers from
+    // authoritative BM25. (The double would also refuse a pending owner — a second
+    // guard — so the counters are the service's own observable.)
+    expect(f.log.searches).toBe(searches);
+    expect(f.log.replacements).toBe(replacements);
   });
   it('a failed lexical delete refuses completion and does not silently lose the primary', async () => {
     const f = sharedIndex(); setLexicalIndex(f.client()); const col = await seeded('lex-delete-fail'); f.log.failDelete = true;

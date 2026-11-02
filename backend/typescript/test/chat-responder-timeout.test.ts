@@ -14,6 +14,14 @@
  * within `OPENWOP_MANAGED_CHAT_TIMEOUT_MS`. Override the timeout
  * via the `_setManagedChatTimeoutMs` test affordance so the test
  * runs in ~250ms instead of 60s.
+ *
+ * > CORRECTED 2026-10-29 (/grade-tests w67, TST-CEC-8): the first version waited
+ * > 250 ms of REAL time and asserted a wall-clock band (`elapsed < 1000`), which a
+ * > loaded gate machine can blow. The abort timer is now driven by fake
+ * > `setTimeout`/`clearTimeout`: the node must still be pending 1 ms before the
+ * > bound and settled exactly at it.
+ * Red when (w67g3, witnessed): the timeout message stops naming the resolved
+ * value; the abort timer stops firing at `MANAGED_CHAT_TIMEOUT_MS`.
  */
 
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -55,18 +63,39 @@ vi.mock('../src/providers/managedProvider.js', async (importOriginal) => {
 // Import AFTER vi.mock so the stub is in place.
 let chatResponderNode: typeof import('../src/bootstrap/nodes.js')['chatResponderNode'];
 let _setManagedChatTimeoutMs: typeof import('../src/bootstrap/nodes.js')['_setManagedChatTimeoutMs'];
+let dispatchManagedChat: typeof import('../src/providers/managedProvider.js')['dispatchManagedChat'];
 
 beforeAll(async () => {
   const mod = await import('../src/bootstrap/nodes.js');
   chatResponderNode = mod.chatResponderNode;
   _setManagedChatTimeoutMs = mod._setManagedChatTimeoutMs;
+  dispatchManagedChat = (await import('../src/providers/managedProvider.js')).dispatchManagedChat;
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   // Restore the default so other tests in the same vitest worker
   // don't inherit a 250ms timeout.
   _setManagedChatTimeoutMs(60_000);
 });
+
+/** Start the node under fake setTimeout, wait until the dispatch is in flight
+ *  (the abort timer is armed just before it), and report whether it settled. */
+async function startUnderFakeTimers(ms: number) {
+  vi.mocked(dispatchManagedChat).mockClear();
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  _setManagedChatTimeoutMs(ms);
+  const { ctx } = makeCtx();
+  let settled = false;
+  const outcome = chatResponderNode.execute(ctx).finally(() => { settled = true; });
+  // Not `vi.waitFor`: under fake timers it ADVANCES the fake clock on every poll.
+  // `setImmediate` is not faked, so draining it moves no time.
+  for (let i = 0; i < 1000 && vi.mocked(dispatchManagedChat).mock.calls.length === 0; i++) {
+    await new Promise((r) => setImmediate(r));
+  }
+  expect(vi.mocked(dispatchManagedChat)).toHaveBeenCalledTimes(1);
+  return { outcome, isSettled: () => settled };
+}
 
 interface CapturedEvent { type: string; payload: unknown }
 
@@ -98,22 +127,16 @@ function makeCtx(overrides?: { credentialRef?: string }): { ctx: NodeContext; ev
 
 describe('chat-responder: managed-chat dispatch timeout', () => {
   it('fails with code=timeout when the upstream never responds within MANAGED_CHAT_TIMEOUT_MS', async () => {
-    _setManagedChatTimeoutMs(250);
-    const { ctx } = makeCtx();
-    const t0 = Date.now();
-    const outcome = await chatResponderNode.execute(ctx);
-    const elapsed = Date.now() - t0;
+    const run = await startUnderFakeTimers(250);
+    await vi.advanceTimersByTimeAsync(249);
+    expect(run.isSettled(), 'must still be waiting 1 ms before the bound').toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const outcome = await run.outcome;
     expect(outcome.status).toBe('failure');
     if (outcome.status !== 'failure') return; // type narrowing
     expect(outcome.error.code).toBe('timeout');
     expect(outcome.error.message).toMatch(/exceeded 250ms/);
     expect(outcome.error.message).toMatch(/upstream provider unresponsive/);
-    // The timeout MUST fire within the configured window plus a small
-    // buffer for the rejection + catch path. If this test starts
-    // taking longer than ~1s, something is wrong with the abort
-    // plumbing.
-    expect(elapsed).toBeGreaterThanOrEqual(240);
-    expect(elapsed).toBeLessThan(1000);
   });
 
   it('error message uses the resolved timeout value (not the raw env var)', async () => {
@@ -122,9 +145,9 @@ describe('chat-responder: managed-chat dispatch timeout', () => {
     // rendered the raw env value (or "60000" for unset) instead of
     // the actual `Number()`-coerced value. With `_setManagedChatTimeoutMs`
     // the source of truth is the module constant, not the env.
-    _setManagedChatTimeoutMs(420);
-    const { ctx } = makeCtx();
-    const outcome = await chatResponderNode.execute(ctx);
+    const run = await startUnderFakeTimers(420);
+    await vi.advanceTimersByTimeAsync(420);
+    const outcome = await run.outcome;
     expect(outcome.status).toBe('failure');
     if (outcome.status !== 'failure') return;
     expect(outcome.error.message).toMatch(/exceeded 420ms/);

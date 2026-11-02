@@ -9,6 +9,12 @@
  *   - the product path /host/openwop-app/dispatch/fanout serves the same handler
  *
  * Mirrors conformance/src/scenarios/dispatch-fanout-parallel.test.ts (capability-gated).
+ *
+ * TST-CVH-21. Red when: the capability advertises a join mode it does not honour,
+ * the seam stops refusing a non-parallel or under-2-children request (each 400 is
+ * asserted by its own code + message, since both share the `openwop-app.invalid_request` code), the
+ * join drops a child or the mergeOrder, or the product path stops serving the
+ * handler.
  */
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -59,11 +65,14 @@ describe('RFC 0118 — live parallel-fan-out witness', () => {
   it('joins a wait-all/collect fan-out over all children with joinOutcome satisfied', async () => {
     const res = await post(SAMPLE(), waitAll);
     expect(res.status).toBe(200);
-    const body = await res.json() as { joinOutcome?: string; children?: unknown[]; mergeOrder?: string[] };
+    const body = await res.json() as { joinOutcome?: string; children?: Array<{ childRunId: string; status: string }>; mergeOrder?: string[]; completedCount?: number };
     expect(body.joinOutcome).toBe('satisfied');
+    expect(body.completedCount).toBe(3);
     expect(body.children).toHaveLength(3);
-    expect(Array.isArray(body.mergeOrder)).toBe(true);
-    expect(body.mergeOrder).toHaveLength(3);
+    expect(body.children!.every((c) => c.status === 'completed')).toBe(true);
+    // The witness dispatcher's terminals are the mergeOrder, child for child.
+    expect(body.mergeOrder).toEqual(body.children!.map((c) => c.childRunId));
+    expect(new Set(body.mergeOrder).size).toBe(3);
   });
 
   it('serves the same handler at the product path', async () => {
@@ -73,7 +82,13 @@ describe('RFC 0118 — live parallel-fan-out witness', () => {
   });
 
   it('rejects a non-parallel or under-2-children request with 400', async () => {
-    expect((await post(SAMPLE(), { nextWorkerIds: ['only-one'], config: { fanOutPolicy: 'parallel' } })).status).toBe(400);
-    expect((await post(SAMPLE(), { nextWorkerIds: ['a', 'b'], config: { fanOutPolicy: 'sequential' } })).status).toBe(400);
+    const one = await post(SAMPLE(), { nextWorkerIds: ['only-one'], config: { fanOutPolicy: 'parallel' } });
+    const oneBody = await one.json() as { error?: string; message?: string };
+    expect(one.status).toBe(400);
+    expect(oneBody).toMatchObject({ error: 'openwop-app.invalid_request', message: "'nextWorkerIds' must be an array of ≥2 worker id strings" });
+    const seq = await post(SAMPLE(), { nextWorkerIds: ['a', 'b'], config: { fanOutPolicy: 'sequential' } });
+    const seqBody = await seq.json() as { error?: string; message?: string };
+    expect(seq.status).toBe(400);
+    expect(seqBody).toMatchObject({ error: 'openwop-app.invalid_request', message: "this seam exercises fanOutPolicy:'parallel'" });
   });
 });

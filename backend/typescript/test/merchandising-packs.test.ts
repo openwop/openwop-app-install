@@ -50,8 +50,8 @@ describe('merchandising node pack manifests', () => {
 describe('merchandising node handlers — delegate to the ctx surface', () => {
   it('reco resolve/placement-upsert pass merged inputs through', async () => {
     const recommendations = {
-      resolve: async (a: any) => ({ productIds: ['p2'], source: a.source ?? null, slot: a.slot }),
-      upsertPlacement: async (a: any) => ({ placementId: 'rpl:1', slot: a.slot, source: a.source }),
+      resolve: async (a: { slot?: string; source?: string }) => ({ productIds: ['p2'], source: a.source ?? null, slot: a.slot }),
+      upsertPlacement: async (a: { slot?: string; source?: string }) => ({ placementId: 'rpl:1', slot: a.slot, source: a.source }),
     };
     expect(await recoNodes['feature.recommendations.nodes.resolve']({ features: { recommendations }, inputs: { orgId: 'o', slot: 'pdp' } }))
       .toEqual({ status: 'success', outputs: { productIds: ['p2'], source: null, slot: 'pdp' } });
@@ -62,6 +62,10 @@ describe('merchandising node handlers — delegate to the ctx surface', () => {
     await expect(recoNodes['feature.recommendations.nodes.resolve']({ features: { recommendations: { resolve: async () => ({}) } }, inputs: {} })).rejects.toMatchObject({ code: 'validation_error' });
     await expect(recoNodes['feature.recommendations.nodes.resolve']({ features: {} })).rejects.toMatchObject({ code: 'host_capability_missing' });
     await expect(discNodes['feature.discovery.nodes.merch-rule-upsert']({ features: { discovery: { search: async () => ({}), createMerchRule: async () => ({}) } }, inputs: { orgId: 'o', name: 'r' } })).rejects.toMatchObject({ code: 'validation_error' }); // no actions
+    // …and an EMPTY actions array is refused too — the case the `length === 0`
+    // arm exists for (the missing-actions call above is refused by
+    // `Array.isArray` first, so it never reached it: w72 probe mpk-disc-actions).
+    await expect(discNodes['feature.discovery.nodes.merch-rule-upsert']({ features: { discovery: { search: async () => ({}), createMerchRule: async () => ({}) } }, inputs: { orgId: 'o', name: 'r', actions: [] } })).rejects.toMatchObject({ code: 'validation_error' });
   });
 });
 

@@ -7,6 +7,14 @@
  *  - providerInstalled reflects the host predicate;
  *  - a chain with no refs and fully-known types derives to empty (the
  *    "runs with zero connections" gallery signal).
+ *
+ * Owner: the chain loader pre-flight (ADR 0163; `pinMismatches` ADR 0766 D3;
+ * gated features ADR 0191 P2; node count ADR 0773 P11). Tracker TST-CEA-2.
+ * Red when (w67g3, witnessed): the connection refs stop being a Set; the
+ * provider id stops taking the last dot segment; the gate regex drops `.hitl.`;
+ * always-on features stop being filtered; the node-type list stops being
+ * deduped (the twice-missing `vendor.gone`); `nodeCount` counts distinct types
+ * instead of steps (the repeated `core.a`).
  */
 import { describe, expect, it } from 'vitest';
 
@@ -35,6 +43,7 @@ describe('chainRequirements', () => {
       { typeId: 'core.a', connectionRef: 'core.openwop.connections.microsoft365' },
       { typeId: 'core.a', connectionRef: 'core.openwop.connections.microsoft365' },
       { typeId: 'vendor.gone' },
+      { typeId: 'vendor.gone' }, // missing twice → reported once
       { typeId: 'core.b', connectionRef: 'core.openwop.connections.netsuite' },
     ]);
     const known = new Set(['core.a', 'core.b']);
@@ -61,11 +70,13 @@ describe('chainRequirements', () => {
       { typeId: 'core.chat.approvalGate' },
       { typeId: 'core.openwop.hitl.form' },
       { typeId: 'core.a' },
+      { typeId: 'core.a' }, // a repeated type is still a step
     ]);
     const req = chainRequirements(c, new Set(['core.a', 'core.chat.approvalGate', 'core.openwop.hitl.form']), () => true);
     expect(req.approvalGateCount).toBe(2);
-    // ADR 0773 P11 — the template chip's size: every step, gates included.
-    expect(req.nodeCount).toBe(3);
+    // ADR 0773 P11 — the template chip's size: every step, gates included
+    // (4 steps over 3 distinct types).
+    expect(req.nodeCount).toBe(4);
   });
 
   it('a bare (non-dotted) ref falls back to itself as the provider id', () => {

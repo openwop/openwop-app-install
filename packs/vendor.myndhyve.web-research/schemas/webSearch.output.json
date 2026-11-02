@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.web-research/1.0.2/webSearch.output.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.web-research/2.0.0/webSearch.output.json",
   "title": "WebSearchOutput",
   "type": "object",
   "required": ["results", "engine", "query"],

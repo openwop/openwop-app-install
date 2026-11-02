@@ -149,12 +149,15 @@ describe('ADR 0553 P3 — the MCP audit record', () => {
   it('the outcome and reason vocabularies are CLOSED', async () => {
     // Both end up in a durable, un-rewritable chain, so an open string would let
     // a call site invent a value the readers of that chain have never seen.
-    expect(MCP_AUDIT_OUTCOMES).toContain('allowed');
-    expect(MCP_AUDIT_OUTCOMES).toContain('audience_refused');
-    expect(MCP_AUDIT_OUTCOMES).toContain('downgrade_refused');
-    expect(MCP_AUDIT_REASONS).toContain('audience_unreadable');
-    expect(MCP_AUDIT_REASONS).toContain('pinned_profile_not_offered');
-    expect(MCP_AUDIT_REASONS).toContain('header_absent_legacy_unserved');
+    // EXACT, like the key set above: a `toContain` list cannot notice a widened
+    // vocabulary, which is the regression this leg names.
+    expect([...MCP_AUDIT_OUTCOMES].sort()).toEqual([
+      'allowed', 'audience_refused', 'cancelled', 'downgrade_refused', 'unauthenticated', 'version_refused',
+    ]);
+    expect([...MCP_AUDIT_REASONS].sort()).toEqual([
+      'anonymous_principal', 'audience_mismatch', 'audience_unreadable', 'header_absent_legacy_unserved',
+      'ok', 'pinned_profile_not_offered', 'run_cancelled', 'unsupported_revision',
+    ]);
     // Every reason a refusal path can emit must be nameable; a `reason` outside
     // the union is a compile error at the call site, which is the enforcement.
     expect(new Set(MCP_AUDIT_REASONS).size).toBe(MCP_AUDIT_REASONS.length);

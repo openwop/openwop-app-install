@@ -32,7 +32,9 @@ describe('interactive artifact types', () => {
     expect(validateArtifact('interactive.mermaid', {}).valid).toBe(false); // object is not the raw-text contract
     expect(validateArtifact('interactive.react', 'const A = () => <div/>;').valid).toBe(true);
     expect(validateArtifact('interactive.react', { jsx: 'x' }).valid).toBe(false); // IART-3: react is raw JSX text too
-    expect(validateArtifact('interactive.chart', { chartType: 'bar', data: { labels: [], datasets: [] } }).valid).toBe(true);
+    expect(validateArtifact('interactive.chart', { chartType: 'bar', data: { labels: ['a'], datasets: [{ label: 's', data: [1] }] } }).valid).toBe(true);
+    // ADR 1017 D5 — an empty `datasets` has nothing to draw; it was valid before.
+    expect(validateArtifact('interactive.chart', { chartType: 'bar', data: { labels: [], datasets: [] } }).valid).toBe(false);
     expect(validateArtifact('interactive.chart', { chartType: 'bar' }).valid).toBe(false); // missing data
   });
 });

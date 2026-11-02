@@ -5,6 +5,15 @@
  * `evaluateComposition`, so for the SAME input under `default-allow` it MUST return the
  * identical decision + matched rule. We fuzz across every predicate kind (presence,
  * countAtLeast, expression) and pin the mode-aware fall-through + trace attribution.
+ *
+ * What the parity fuzz can and cannot catch: both sides call the SAME `matchRule`, so a bug
+ * in the shared matcher moves both and stays green here by design. The fuzz pins
+ * `explainComposition`'s OWN loop — first-match-wins and the verdict it maps.
+ *
+ * Sabotage-witnessed (grade-tests w74): last-match-wins, marking a superseded rule as
+ * matched, `allow` on an enforce fall-through, ignoring `defaultDenyVerdict`, reporting a
+ * match as a fall-through, a wrong default-deny reason, a fixed verdict, or a clause that
+ * swaps its seen/next halves each reds its case.
  */
 import { describe, it, expect } from 'vitest';
 import { evaluateComposition, explainComposition } from '../compositionEvaluator.js';
@@ -51,7 +60,9 @@ describe('explainComposition — trace + mode-aware default', () => {
     expect(r.fellThroughToDefault).toBe(false);
     expect(r.trace).toHaveLength(1);
     expect(r.trace[0]?.matched).toBe(true);
-    expect(r.trace[0]?.why).toContain('matched');
+    expect(r.matchedClause).toBe('seen safetyTier:read → next egress:host-mediated');
+    expect(r.reason).toBe('exfil');
+    expect(r.trace[0]?.why).toBe('matched: seen safetyTier:read → next egress:host-mediated');
   });
 
   it('an unmatched action under default-allow falls through to allow', () => {
@@ -64,7 +75,7 @@ describe('explainComposition — trace + mode-aware default', () => {
     const r = explainComposition(new Set(), ['safetyTier:pure'], [presence], { mode: 'enforce' });
     expect(r.decision).toBe('deny');
     expect(r.fellThroughToDefault).toBe(true);
-    expect(r.reason).toContain('default-deny');
+    expect(r.reason).toBe('No rule matched — default-deny ⇒ deny.');
   });
 
   it('enforce + defaultDenyVerdict require-approval holds an unmatched action', () => {
@@ -80,6 +91,7 @@ describe('explainComposition — trace + mode-aware default', () => {
     expect(r.matchedRuleId).toBe('read-then-egress');
     const exprRow = r.trace.find((t) => t.ruleId === 'expr');
     expect(exprRow?.matched).toBe(false);
-    expect(exprRow?.why).toContain('earlier rule already decided');
+    expect(exprRow?.why).toBe('would match (expression: seen.read && next.egress:host-mediated) but an earlier rule already decided');
+    expect(r.trace.find((t) => t.ruleId === 'read-then-egress')?.matched).toBe(true);
   });
 });

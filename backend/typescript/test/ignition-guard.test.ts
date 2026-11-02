@@ -3,6 +3,14 @@
  * an identical claim inside the window is refused (and surfaces the recorded
  * run id); once the window elapses the same key re-claims. Backed by the durable
  * host KV via a memory:// storage, exactly as the igniter tools use it.
+ *
+ * TST-DGB-1. Red when the window compare stops expiring a claim, when a claim
+ * lookup can fall through to ANOTHER tenant's row for the same key, when
+ * release drops a claim that already recorded a run (or never deletes), when
+ * the run id is never recorded, and when recording on an absent claim
+ * resurrects one (sabotage-witnessed, wave 71). Tenant isolation is
+ * structural: the row id is `${tenantId}:${key}` at both the collection key
+ * and the lookup.
  */
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -62,11 +70,17 @@ describe('claimIgnition', () => {
   it('scopes claims per tenant and per key', async () => {
     const keyA = ignitionKey('podcasts.produce', 'nb-1', 'ep-1');
     const keyB = ignitionKey('podcasts.produce', 'nb-2', 'ep-1');
-    await claimIgnition(T, keyA, 5 * 60_000, 1_000);
+    expect(await claimIgnition(T, keyA, 5 * 60_000, 1_000)).toEqual({ claimed: true });
+    await recordIgnitionRun(T, keyA, 'run-tenant-ign');
     // a different key is independent
     expect((await claimIgnition(T, keyB, 5 * 60_000, 1_500)).claimed).toBe(true);
-    // a different tenant with the same key is independent
-    expect((await claimIgnition('tenant-other', keyA, 5 * 60_000, 1_500)).claimed).toBe(true);
+    // a different tenant with the same key is independent: it WINS its own
+    // claim, and never sees the first tenant's run id.
+    expect(await claimIgnition('tenant-other', keyA, 5 * 60_000, 1_500)).toEqual({ claimed: true });
+    // …and its own duplicate is refused WITHOUT the first tenant's run id.
+    expect(await claimIgnition('tenant-other', keyA, 5 * 60_000, 2_000)).toEqual({ claimed: false });
+    // positive control: the first tenant's latch is still its own.
+    expect(await claimIgnition(T, keyA, 5 * 60_000, 2_000)).toEqual({ claimed: false, existingRunId: 'run-tenant-ign' });
   });
 
   it('recordIgnitionRun on an absent claim is a no-op (never resurrects one)', async () => {

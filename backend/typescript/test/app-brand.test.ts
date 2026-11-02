@@ -4,6 +4,16 @@
  * non-superadmin is 403; the public read exposes ONLY the identity subset (never
  * voice/governance/createdBy) and is hardwired to the reserved brand so a tenant
  * marketing brand's identity can never be served; PUT sanitizes injection; ETag/304.
+ *
+ * Sanitising has TWO guards (an allowlist of color KEYS, then `safeColor` on each
+ * value), so the fixture carries one input per guard: an injection on a KNOWN key
+ * and a clean value on an UNKNOWN key. The first version put the injection on the
+ * unknown key, where the key filter alone dropped it (w66 ab-safecolor and
+ * ab-knownkeys both read vacuous).
+ *
+ * TST-BXE-1. Red when: the public read leaks more than `identity` (ab-subset),
+ * the ETag/304 short-circuit is dropped (ab-etag), the superadmin check leaves
+ * GET or PUT (ab-su-get / ab-su-put), or either sanitising guard is removed.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -55,10 +65,10 @@ describe('app-brand — public read (anonymous, pre-auth)', () => {
   });
 
   it('reflects a super-admin edit and supports ETag/304', async () => {
-    await ab('PUT', { identity: { productName: 'Acme', colors: { accent: 'oklch(58% 0.13 250)' } } });
+    expect((await ab('PUT', { identity: { productName: 'Acme-etag', colors: { accent: 'oklch(58% 0.13 250)' } } })).status).toBe(200);
     const res = await publicBrand();
     const body = await j<{ identity: { productName?: string } }>(res);
-    expect(body.identity.productName).toBe('Acme');
+    expect(body.identity.productName).toBe('Acme-etag');
     const etag = res.headers.get('etag');
     expect(etag).toBeTruthy();
     const again = await publicBrand({ 'if-none-match': etag ?? '' });
@@ -66,7 +76,7 @@ describe('app-brand — public read (anonymous, pre-auth)', () => {
   });
 
   it('exposes ONLY the identity subset — never voice/governance/createdBy', async () => {
-    await ab('PUT', { identity: { productName: 'Acme' } });
+    expect((await ab('PUT', { identity: { productName: 'Acme-subset' } })).status).toBe(200);
     const body = await j<Record<string, unknown>>(await publicBrand());
     expect(Object.keys(body)).toEqual(['identity']);
     expect(body).not.toHaveProperty('brand');
@@ -80,16 +90,26 @@ describe('app-brand — superadmin authority', () => {
   it('a super admin reads the full app brand and edits identity (with sanitization)', async () => {
     expect((await ab('GET')).status).toBe(200);
     const edited = await j<{ brand: { identity?: { colors?: Record<string, string>; productName?: string } } }>(
-      await ab('PUT', { identity: { productName: 'Brandy', colors: { accent: '#abc', bad: 'red;}evil{' } } }),
+      await ab('PUT', { identity: { productName: 'Brandy', colors: { accent: '#abc', paper: 'red;}evil{', bad: '#fff' } } }),
     );
     expect(edited.brand.identity?.productName).toBe('Brandy');
-    expect(edited.brand.identity?.colors).toEqual({ accent: '#abc' }); // injection + unknown key dropped
+    // `paper` is a real key with an injected value (safeColor drops it); `bad` is a
+    // clean value on an unknown key (the key allowlist drops it).
+    expect(edited.brand.identity?.colors).toEqual({ accent: '#abc' });
   });
 
   it('forbids a non-superadmin (403) on read and write', async () => {
     const call = await normalClient();
-    expect((await call('GET', '/host/openwop-app/app-brand')).status).toBe(403);
-    expect((await call('PUT', '/host/openwop-app/app-brand', { identity: { productName: 'Hijack' } })).status).toBe(403);
+    for (const res of [
+      await call('GET', '/host/openwop-app/app-brand'),
+      await call('PUT', '/host/openwop-app/app-brand', { identity: { productName: 'Hijack' } }),
+    ]) {
+      expect(res.status).toBe(403);
+      const body = await j<{ error: string; message: string }>(res);
+      expect(body.error).toBe('forbidden');
+      expect(body.message).toMatch(/requires a superadmin principal/);
+    }
+    expect((await j<{ identity: { productName?: string } }>(await publicBrand())).identity.productName).not.toBe('Hijack');
   });
 });
 

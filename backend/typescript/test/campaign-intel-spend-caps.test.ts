@@ -403,13 +403,15 @@ describe('ADR 0952 P1 — the spend-cap watchdog', () => {
   it('a client cap refuses when another covered platform reader loses verification', async () => {
     const org = `org-caps-${n++}`;
     const cap = await createCap(T, org, { scope: { kind: 'client' }, limitMinor: 10_000, currency: 'USD' }, 'user:creator', NOW);
-    await saveConnectorSettings(T, org, 'meta', { syncScope: 'account', adAccountIds: ['act_1'] }, 'test');
+    // Its own account: since ADR 1022 (CP71CD-4) an ad account belongs to ONE
+    // client org, and an earlier case in this tenant already holds act_1.
+    await saveConnectorSettings(T, org, 'meta', { syncScope: 'account', adAccountIds: ['act_41'] }, 'test');
     await saveConnectorSettings(T, org, 'tiktok', { syncScope: 'account', adAccountIds: ['2'] }, 'test');
     const previous = process.env.OPENWOP_ADS_VERIFIED_READERS;
     try {
       process.env.OPENWOP_ADS_VERIFIED_READERS = 'tiktok';
       await enforceCaps(fakeAdapter(() => ok([{ campaignId: '111', spend: 1 }])).adapter, T, org, at(1));
-      const target = { platform: 'meta' as const, adAccountId: 'act_1', campaignId: '111', orgId: org };
+      const target = { platform: 'meta' as const, adAccountId: 'act_41', campaignId: '111', orgId: org };
       expect(await checkLaunchAgainstCaps(T, target, at(2))).toEqual({ verdict: 'ok', noCeiling: 'client_scope' });
       delete process.env.OPENWOP_ADS_VERIFIED_READERS;
       expect(await checkLaunchAgainstCaps(T, target, at(2))).toEqual({ verdict: 'cap_unenforceable', capId: cap.capId });

@@ -1,111 +1,144 @@
 /**
- * ADR 0130 Phase 5 — the rule-based model-router config manager (admin).
+ * ADR 0130 Phase 5 / ADR 1016 — the model-router rule editor (admin).
  *
- * Org picker → the org's routing rules. Each rule is "when <condition> → route to
- * <provider>/<model>"; a required fallback target catches every other turn. An enable
- * toggle gates the dispatch stage (disabled until a config is saved — the backend 404s
- * `/enable` otherwise). The server validates + is authority. The per-turn "which model
- * answered" signal is already shown on each message (ADR 0124 provenance), so there is
- * no separate transparency chip here.
+ * ONE config per workspace (ADR 1016 D1): every chat in the active workspace is
+ * judged against it, message by message (D3). Each rule is "when <condition> →
+ * use <provider>/<model>"; an OPTIONAL fallback catches messages no rule matches
+ * (D5 — without one they keep the conversation's own model). A rule applies only
+ * to conversations whose key belongs to its provider, and never to the free tier
+ * or a subscription (D4), so the page says so rather than letting an admin expect
+ * cross-provider routing. Targets are picked from the catalog (`providers.json`),
+ * never typed (D5 — the server refuses an unlisted model).
  *
- * @see docs/adr/0130-rule-based-model-router.md
+ * Who may change it is the server's call (`canManage`, BYOK-manage authority —
+ * D2); everyone else sees the rules read-only and can still test a message with
+ * the preview (D6), which runs the same decision the chat runs.
+ *
+ * @see docs/adr/1016-model-router-workspace-per-turn-routing.md
  */
 import { Button } from '../../ui/Button.js';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useId, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { PageHeader } from '../../ui/PageHeader.js';
 import { useHub } from '../../chrome/hubContext.js';
 import { Notice } from '../../ui/Notice.js';
-import { StateCard } from '../../ui/StateCard.js';
 import { Skeleton } from '../../ui/Skeleton.js';
-import { SelectField } from '../../ui/Field.js';
+import { CheckboxField, SelectField, TextareaField, TextField } from '../../ui/Field.js';
 import { toast } from '../../ui/toast.js';
-import { WorkflowIcon } from '../../ui/icons/index.js';
+import { PROVIDERS } from '../../byok/lib/providers.js';
 import {
-  listOrgs, getRouterConfig, setRouterConfig, setRouterEnabled,
-  type Org, type RoutingRule, type RoutingTarget, type RuleCondition,
+  getRouterConfig, setRouterConfig, setRouterEnabled, previewRoute,
+  type RoutePreview, type RoutingRule, type RoutingTarget, type RuleCondition,
 } from './modelRouterClient.js';
 
 type CondKind = RuleCondition['kind'];
+type TFn = ReturnType<typeof useTranslation>['t'];
 const COND_KINDS: CondKind[] = ['always', 'attachment', 'tokensOver', 'difficultyAtLeast', 'conversationKind'];
 const DIFFICULTY_LEVELS = ['low', 'medium', 'high'] as const;
 const CONVERSATION_KINDS = ['group', 'workspace', 'channel'] as const;
 
-const emptyTarget = (): RoutingTarget => ({ provider: '', model: '' });
-const targetValid = (t: RoutingTarget): boolean => t.provider.trim().length > 0 && t.model.trim().length > 0;
+/** The providers a rule may target: the user BYOK providers (ADR 0610 D4 — the
+ *  managed tier and hidden providers are never routable). */
+const ROUTABLE = PROVIDERS.filter((p) => p.managed !== true && p.hidden !== true);
 
-function condLabel(c: RuleCondition, t: ReturnType<typeof useTranslation>['t']): string {
+/** The catalog's label for a target, or `null` when the catalog does not list it
+ *  (a rule saved before ADR 1016 D5 — inert, and refused on the next save). */
+function modelLabel(target: RoutingTarget): string | null {
+  const provider = ROUTABLE.find((p) => p.id === target.provider);
+  const model = provider?.models.find((m) => m.id === target.model);
+  return provider && model ? `${provider.label} · ${model.label}` : null;
+}
+
+/** Does the catalog say this model reads images? (An attachment message only
+ *  routes to one that does — ADR 1016 D4.) */
+function acceptsImages(target: RoutingTarget): boolean {
+  return ROUTABLE.find((p) => p.id === target.provider)?.models.find((m) => m.id === target.model)?.capabilities.includes('vision') ?? false;
+}
+
+const defaultTarget = (): RoutingTarget => {
+  const p = ROUTABLE[0];
+  const m = p?.models.find((x) => x.recommended) ?? p?.models[0];
+  return { provider: p?.id ?? '', model: m?.id ?? '' };
+};
+
+function condLabel(c: RuleCondition, t: TFn): string {
   switch (c.kind) {
-    case 'always': return t('condAlways', { defaultValue: 'always' });
-    case 'attachment': return t('condAttachment', { defaultValue: 'has an attachment' });
-    case 'tokensOver': return t('condTokensOver', { defaultValue: 'tokens over {{n}}', n: c.threshold });
-    case 'difficultyAtLeast': return t('condDifficultyAtLeast', { defaultValue: 'difficulty is at least {{level}}', level: c.level });
-    case 'conversationKind': return t('condConversationKind', { defaultValue: 'conversation is a {{value}}', value: c.value });
+    case 'always': return t('condAlways', { defaultValue: 'every message' });
+    case 'attachment': return t('condAttachment', { defaultValue: 'the message has an attachment' });
+    case 'tokensOver': return t('condTokensOver', { defaultValue: 'the message is over {{n}} tokens', n: c.threshold });
+    case 'difficultyAtLeast': return t('condDifficultyAtLeast', { defaultValue: 'difficulty is at least {{level}}', level: t(`difficulty_${c.level}`, { defaultValue: c.level }) });
+    case 'conversationKind': return t('condConversationKind', { defaultValue: 'the conversation is a {{value}}', value: t(`convKind_${c.value}`, { defaultValue: c.value }) });
   }
 }
 
 export function ModelRouterPage(): JSX.Element {
   const { t } = useTranslation('model-router');
   const { embedded } = useHub(); // a tab inside the Models console → drop our own header
-  const [orgs, setOrgs] = useState<Org[] | null>(null);
-  const [orgId, setOrgId] = useState('');
+  const [loaded, setLoaded] = useState(false);
   const [rules, setRules] = useState<RoutingRule[]>([]);
-  const [fallback, setFallback] = useState<RoutingTarget>(emptyTarget());
+  const [fallback, setFallback] = useState<RoutingTarget | null>(null);
   const [enabled, setEnabled] = useState(false);
   const [hasConfig, setHasConfig] = useState(false);
+  const [canManage, setCanManage] = useState(false);
   /** MR-G1 — the stored config could not be READ, so every write on this page
-   *  would be built on state we do not have. Distinct from , which
+   *  would be built on state we do not have. Distinct from `!hasConfig`, which
    *  means we read successfully and there is none. */
   const [loadFailed, setLoadFailed] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /** Bumped on every saved change, so a preview answer computed against the old
+   *  rules is cleared rather than left on screen (MR66UX-1). */
+  const [configVersion, setConfigVersion] = useState(0);
 
   // add-rule form state
-  const [kind, setKind] = useState<CondKind>('always');
-  const [threshold, setThreshold] = useState('8000');
+  const [kind, setKind] = useState<CondKind>('tokensOver');
+  const [threshold, setThreshold] = useState('4000');
   const [conversationKind, setConversationKind] = useState<(typeof CONVERSATION_KINDS)[number]>('group');
   const [difficulty, setDifficulty] = useState<(typeof DIFFICULTY_LEVELS)[number]>('high');
-  const [target, setTarget] = useState<RoutingTarget>(emptyTarget());
+  const [target, setTarget] = useState<RoutingTarget>(defaultTarget);
 
-  useEffect(() => {
-    void listOrgs().then((o) => { setOrgs(o); setOrgId((cur) => cur || (o[0]?.orgId ?? '')); })
-      .catch((e) => setError(e instanceof Error ? e.message : t('loadOrgsFailed', { defaultValue: 'Failed to load organizations.' })));
-  }, [t]);
-
-  const load = useCallback((org: string) => {
+  const load = useCallback(() => {
     setLoadFailed(false);
-    void getRouterConfig(org).then((stored) => {
+    void getRouterConfig().then(({ stored, canManage: may }) => {
       setHasConfig(stored !== null);
       setEnabled(stored?.enabled ?? false);
       setRules(stored?.config.rules ?? []);
-      setFallback(stored?.config.fallback ?? emptyTarget());
-      setError(null);
-    }).catch((e) => {
+      setFallback(stored?.config.fallback ?? null);
+      setCanManage(may);
+      setLoaded(true);
+    }).catch(() => {
       // MR-G1 — the editor's writes send the WHOLE config (`persist(rules, …)`),
       // so an unread config plus an enabled Save silently replaces every stored
-      // rule with the empty list this page happens to be holding. The `enabled`
-      // toggle was already gated on `hasConfig`; the DESTRUCTIVE controls were
-      // not. A failed read must disable the writes, not just report itself.
+      // rule with the empty list this page happens to be holding. A failed read
+      // must disable the writes, not just report itself.
+      // ONE notice for one failure (MR66UX-8): the guard below says what failed
+      // and what it means; the raw transport message is not shown.
       setLoadFailed(true);
-      setError(e instanceof Error ? e.message : t('loadFailed', { defaultValue: 'Failed to load routing config.' }));
+      setLoaded(true);
     });
-  }, [t]);
-  useEffect(() => { if (orgId) load(orgId); }, [orgId, load]);
+  }, []);
+  useEffect(() => { load(); }, [load]);
 
-  const persist = async (nextRules: RoutingRule[], nextFallback: RoutingTarget): Promise<void> => {
-    if (!targetValid(nextFallback)) { toast.error(t('needFallback', { defaultValue: 'Set a fallback provider and model first.' })); return; }
+  const writable = canManage && !loadFailed && !busy;
+
+  const persist = async (nextRules: RoutingRule[], nextFallback: RoutingTarget | null): Promise<void> => {
+    if (!canManage || loadFailed) return;
     setBusy(true);
     try {
-      const stored = await setRouterConfig(orgId, { rules: nextRules, fallback: { provider: nextFallback.provider.trim(), model: nextFallback.model.trim() } });
-      setHasConfig(true); setEnabled(stored.enabled); setRules(stored.config.rules); setFallback(stored.config.fallback);
-      toast.success(t('saved', { defaultValue: 'Routing config saved' }));
-    } catch (e) { toast.error(e instanceof Error ? e.message : t('saveFailed', { defaultValue: 'Could not save routing config.' })); }
+      const stored = await setRouterConfig({ rules: nextRules, ...(nextFallback ? { fallback: nextFallback } : {}) });
+      setHasConfig(true); setEnabled(stored.enabled); setRules(stored.config.rules); setFallback(stored.config.fallback ?? null);
+      setConfigVersion((v) => v + 1);
+      // A first save creates the config switched OFF (MR66UX-5) — say so, or the
+      // admin believes the rule is live.
+      toast.success(stored.enabled
+        ? t('saved', { defaultValue: 'Routing saved' })
+        : t('savedOff', { defaultValue: 'Saved. Routing is off — turn it on to apply it.' }));
+    } catch (e) { toast.error(e instanceof Error ? e.message : t('saveFailed', { defaultValue: 'Could not save routing.' })); }
     finally { setBusy(false); }
   };
 
   const toggleEnabled = async (next: boolean): Promise<void> => {
     setBusy(true);
-    try { const stored = await setRouterEnabled(orgId, next); setEnabled(stored.enabled); }
+    try { const stored = await setRouterEnabled(next); setEnabled(stored.enabled); setConfigVersion((v) => v + 1); }
     catch (e) { toast.error(e instanceof Error ? e.message : t('toggleFailed', { defaultValue: 'Could not change routing state.' })); }
     finally { setBusy(false); }
   };
@@ -125,12 +158,9 @@ export function ModelRouterPage(): JSX.Element {
   };
 
   const addRule = (): void => {
-    if (!targetValid(target)) { toast.error(t('needRuleTarget', { defaultValue: 'Set the rule’s provider and model.' })); return; }
     const when = buildCondition();
     if (!when) return;
-    const rule: RoutingRule = { when, target: { provider: target.provider.trim(), model: target.model.trim() } };
-    void persist([...rules, rule], fallback);
-    setKind('always'); setThreshold('8000'); setTarget(emptyTarget());
+    void persist([...rules, { when, target }], fallback);
   };
 
   // Inside the Models console the console owns the page chrome → no header here.
@@ -138,31 +168,24 @@ export function ModelRouterPage(): JSX.Element {
     <PageHeader
       eyebrow={t('eyebrow', { defaultValue: 'Platform' })}
       title={t('title', { defaultValue: 'Model routing' })}
-      lede={t('lede', { defaultValue: 'Send each chat turn to the right model by rule — cheaper models for simple turns, stronger ones when it matters.' })}
+      lede={t('lede', { defaultValue: 'Choose a model for each chat message by rule: a cheaper model for simple messages, a stronger one when it matters.' })}
     />
   );
 
-  // Designed loading state — keep the header stable and skeleton the config
-  // surfaces, so the org picker + cards don't flash empty before orgs resolve.
-  if (orgs === null && !error) {
+  if (!loaded) {
     return (
       <div className="u-flex u-flex-col u-gap-3" aria-busy="true">
         {header}
-        {embedded ? null : <Skeleton width={220} height={28} />}
+        <span className="sr-only">{t('loading', { defaultValue: 'Loading routing…' })}</span>
         <div className="surface-card u-pad-2 u-flex u-flex-col u-gap-2"><Skeleton width="40%" height={16} /><Skeleton width="100%" height={36} /></div>
         <div className="surface-card u-pad-2 u-flex u-flex-col u-gap-2"><Skeleton width="30%" height={16} /><Skeleton width="100%" height={36} /></div>
       </div>
     );
   }
 
-  if (orgs && orgs.length === 0) {
-    return <StateCard icon={<WorkflowIcon size={28} />} title={t('noOrgsTitle', { defaultValue: 'No organizations' })} body={t('noOrgsBody', { defaultValue: 'Create an organization to configure model routing.' })} />;
-  }
-
   return (
     <div className="u-flex u-flex-col u-gap-3">
       {header}
-      {error && <Notice variant="error">{error}</Notice>}
       {/* `announce` is REQUIRED, not decoration: `variant="warning"` renders
           role="status"/aria-live="polite", and a live region that ARRIVES
           complete announces nothing. Only the `error` variant is assertive. This
@@ -171,128 +194,280 @@ export function ModelRouterPage(): JSX.Element {
       {loadFailed && (
         <Notice variant="warning" announce={t('loadFailedGuard', { defaultValue: 'Editing is disabled because the current routing config could not be read — saving now would replace every stored rule with what is on screen.' })}>
           {t('loadFailedGuard', { defaultValue: 'Editing is disabled because the current routing config could not be read — saving now would replace every stored rule with what is on screen.' })}{' '}
-          <Button variant="quiet" size="sm" onClick={() => orgId && load(orgId)}>
+          <Button variant="quiet" size="sm" onClick={load}>
             {t('retryLoad', { defaultValue: 'Try again' })}
           </Button>
         </Notice>
       )}
 
-      <div className="u-flex u-items-end u-gap-2">
-        <SelectField label={t('org', { defaultValue: 'Organization' })} className="u-w-auto u-mb-0" value={orgId} onChange={(e) => setOrgId(e.target.value)}>
-          {(orgs ?? []).map((o) => <option key={o.orgId} value={o.orgId}>{o.name}</option>)}
-        </SelectField>
-        {!hasConfig && <span className="chip chip--muted u-fs-11">{t('notConfigured', { defaultValue: 'not configured' })}</span>}
+      <p className="muted u-fs-12 u-m-0">
+        {t('scopeNote', { defaultValue: 'Routing applies to every chat in this workspace and is decided again for each message. A rule only applies to conversations that use a key for its provider. Conversations on the free tier or a subscription are never routed. If a routed model can’t answer, the message falls back to the conversation’s own model.' })}
+      </p>
+      {!loadFailed && !canManage && (
+        <Notice variant="info">{t('readOnly', { defaultValue: 'Only people who manage this workspace’s API keys can change routing. You can still test a message below.' })}</Notice>
+      )}
+
+      <div className="u-flex u-items-center u-gap-2 u-flex-wrap">
+        <CheckboxField
+          label={t('enableLabel', { defaultValue: 'Use routing in this workspace' })}
+          checked={enabled}
+          disabled={!writable || !hasConfig}
+          onChange={(e) => void toggleEnabled(e.target.checked)}
+          {...(loadFailed ? {} : {
+            help: !hasConfig && canManage
+              ? t('enableHint', { defaultValue: 'Save a rule first.' })
+              : t('enableOffHelp', { defaultValue: 'Off: every message uses its conversation’s own model.' }),
+          })}
+        />
+        {!hasConfig && !loadFailed && <span className="chip chip--muted u-fs-11">{t('notConfigured', { defaultValue: 'not configured' })}</span>}
       </div>
 
-      <label className="u-flex u-items-center u-gap-2 u-fs-12">
-        <input
-          type="checkbox"
-          checked={enabled}
-          disabled={busy || loadFailed || !hasConfig}
-          onChange={(e) => void toggleEnabled(e.target.checked)}
-        />
-        {t('enableLabel', { defaultValue: 'Routing enabled for this organization' })}
-        {!hasConfig && <span className="muted u-fs-11">{t('enableHint', { defaultValue: '(save a config first)' })}</span>}
-      </label>
-
-      <section aria-labelledby="mr-fallback-h" className="surface-card u-pad-2 u-flex u-flex-col u-gap-2">
-        <h2 id="mr-fallback-h" className="u-fs-13">{t('fallbackHeading', { defaultValue: 'Fallback target (required)' })}</h2>
-        <p className="muted u-fs-11">{t('fallbackHint', { defaultValue: 'Used when no rule matches — should be vision-capable so attachment turns always have an eligible target.' })}</p>
-        <TargetInputs value={fallback} onChange={setFallback} idPrefix="mr-fb" />
-        <div><Button variant="primary" className="u-fs-12" disabled={busy || loadFailed} onClick={() => void persist(rules, fallback)}>{t('saveFallback', { defaultValue: 'Save routing' })}</Button></div>
-      </section>
-
-      <section aria-labelledby="mr-rules-h">
-        <h3 id="mr-rules-h" className="u-fs-13">{t('rulesHeading', { defaultValue: 'Rules' })}</h3>
-        {/* MR-R2-1 — `rules` is `useState<RoutingRule[]>([])`, i.e. NOT nullable,
-            so a failed load leaves it `[]` and this line asserted "every turn
-            uses the fallback target" — a claim about live routing behaviour we
-            could not read.
-            Gated rather than made nullable on purpose: `rules` is read at ~12
-            sites and `persist(rules, fallback)` writes the WHOLE config, so a
-            nullable type ripples through every one — and MR-G1 already solved
-            the dangerous half by disabling every save while `loadFailed`. What
-            was left was the sentence, so the sentence is what changed.
-
-            A TERNARY, not a bare gate. The first cut just suppressed the line,
-            which left this section as a bare "Rules" heading with nothing under
-            it. The `loadFailed` warning is at the TOP of the page — ~34 lines
-            and two <section>s above — so an empty heading here reads as "no
-            rules", which is the same false impression the gate was meant to
-            remove. Same reasoning as CreatorInsightsPage: a failed read gets its
-            own sentence rather than a blank. */}
+      <section aria-labelledby="mr-rules-h" className="u-flex u-flex-col u-gap-2">
+        <h2 id="mr-rules-h" className="u-fs-13 u-m-0">{t('rulesHeading', { defaultValue: 'Rules, checked in order' })}</h2>
+        <p className="muted u-fs-11 u-m-0">{t('rulesOrderHelp', { defaultValue: 'The first rule that matches the message and can run on the conversation’s provider is used.' })}</p>
+        {/* MR-R2-1 — a failed read gets its own sentence, never "no rules": that
+            would be a claim about live routing made from a read that never arrived. */}
         {loadFailed ? (
-          <p className="muted u-fs-12">{t('rulesUnknown', { defaultValue: 'The current rules could not be read, so what routing is doing right now is unknown.' })}</p>
+          <p className="muted u-fs-12 u-m-0">{t('rulesUnknown', { defaultValue: 'The current rules could not be read, so what routing is doing right now is unknown.' })}</p>
         ) : rules.length === 0 ? (
-          <p className="muted u-fs-12">{t('noRules', { defaultValue: 'No rules — every turn uses the fallback target.' })}</p>
+          <p className="muted u-fs-12 u-m-0">{t('noRules', { defaultValue: 'No rules yet. Until you add one, every message uses its conversation’s own model.' })}</p>
         ) : null}
-        <ul className="u-list-none u-p-0 u-flex u-flex-col u-gap-2 u-mt-1">
-          {rules.map((r, i) => (
-            <li key={`${r.when.kind}-${i}`} className="surface-card u-pad-2 u-flex u-flex-row u-items-center u-justify-between u-gap-2">
-              <div className="u-flex u-flex-wrap u-items-center u-gap-1 u-fs-11">
-                <span className="chip chip--muted">{condLabel(r.when, t)}</span>
-                <span className="muted">{t('routesTo', { defaultValue: '→ route to' })}</span>
-                <span className="chip chip--accent">{r.target.provider}/{r.target.model}</span>
-              </div>
-              <Button variant="secondary" className="u-fs-11" disabled={busy || loadFailed} onClick={() => void persist(rules.filter((_, j) => j !== i), fallback)} aria-label={t('removeAria', { defaultValue: 'Remove rule' })}>{t('remove', { defaultValue: 'Remove' })}</Button>
-            </li>
-          ))}
-        </ul>
+        {/* role="list": Safari/VoiceOver drops list semantics under list-style:none (MR66UX-9). */}
+        <ol role="list" className="u-list-none u-p-0 u-m-0 u-flex u-flex-col u-gap-2">
+          {rules.map((r, i) => {
+            const label = modelLabel(r.target);
+            return (
+              <li key={`${r.when.kind}-${i}`} className="surface-card u-pad-2 u-flex u-flex-row u-flex-wrap u-items-center u-justify-between u-gap-2">
+                <div className="u-flex u-flex-wrap u-items-center u-gap-1 u-fs-12 u-min-w-0">
+                  <span className="muted">{t('ruleNumber', { defaultValue: '{{n}}.', n: i + 1 })}</span>
+                  <span>{t('whenPrefix', { defaultValue: 'When' })}</span>
+                  <span className="chip chip--muted">{condLabel(r.when, t)}</span>
+                  <span className="muted">{t('routesTo', { defaultValue: 'use' })}</span>
+                  <span className="chip chip--accent">{label ?? `${r.target.provider}/${r.target.model}`}</span>
+                  {label === null && <span className="chip chip--warning">{t('notInCatalog', { defaultValue: 'not in catalog' })}</span>}
+                  {label === null && <span className="muted u-fs-11">{t('notInCatalogHelp', { defaultValue: 'This rule is never used. Remove it before saving other changes.' })}</span>}
+                </div>
+                {canManage && (
+                  <Button variant="secondary" size="sm" disabled={!writable} onClick={() => void persist(rules.filter((_, j) => j !== i), fallback)} aria-label={t('removeAria', { defaultValue: 'Remove rule {{n}}', n: i + 1 })}>
+                    {t('remove', { defaultValue: 'Remove' })}
+                  </Button>
+                )}
+              </li>
+            );
+          })}
+        </ol>
       </section>
 
-      <section aria-labelledby="mr-add-h" className="surface-card u-pad-2 u-flex u-flex-col u-gap-2">
-        <h3 id="mr-add-h" className="u-fs-13">{t('addHeading', { defaultValue: 'Add a rule' })}</h3>
-        <label className="u-flex u-items-center u-gap-2 u-fs-12">
-          {t('whenLabel', { defaultValue: 'When' })}
-          <select value={kind} onChange={(e) => setKind(e.target.value as CondKind)} aria-label={t('whenLabel', { defaultValue: 'When' })}>
-            {COND_KINDS.map((k) => <option key={k} value={k}>{t(`kind_${k}`, { defaultValue: k })}</option>)}
-          </select>
-        </label>
-        {kind === 'tokensOver' && (
-          <label className="u-flex u-items-center u-gap-2 u-fs-12">
-            {t('thresholdLabel', { defaultValue: 'Token threshold' })}
-            <input type="number" min={0} value={threshold} onChange={(e) => setThreshold(e.target.value)} aria-label={t('thresholdLabel', { defaultValue: 'Token threshold' })} className="u-fs-12" />
-          </label>
-        )}
-        {kind === 'difficultyAtLeast' && (
-          <label className="u-flex u-items-center u-gap-2 u-fs-12">
-            {t('difficultyLabel', { defaultValue: 'Difficulty at least' })}
-            <select value={difficulty} onChange={(e) => setDifficulty(e.target.value as (typeof DIFFICULTY_LEVELS)[number])} aria-label={t('difficultyLabel', { defaultValue: 'Difficulty at least' })}>
-              {DIFFICULTY_LEVELS.map((l) => <option key={l} value={l}>{t(`difficulty_${l}`, { defaultValue: l })}</option>)}
-            </select>
-          </label>
-        )}
-        {kind === 'conversationKind' && (
-          <label className="u-flex u-items-center u-gap-2 u-fs-12">
-            {t('conversationKindLabel', { defaultValue: 'Conversation kind' })}
-            <select value={conversationKind} onChange={(e) => setConversationKind(e.target.value as (typeof CONVERSATION_KINDS)[number])} aria-label={t('conversationKindLabel', { defaultValue: 'Conversation kind' })}>
-              {CONVERSATION_KINDS.map((k) => <option key={k} value={k}>{t(`convKind_${k}`, { defaultValue: k })}</option>)}
-            </select>
-            <span className="muted">{t('conversationKindHint', { defaultValue: '“group” = board / multi-agent rooms — route them to your strongest model.' })}</span>
-          </label>
-        )}
-        <fieldset className="u-border-0 u-p-0 u-m-0">
-          <legend className="u-fs-12 u-fw-600">{t('targetLegend', { defaultValue: 'Route to' })}</legend>
-          <TargetInputs value={target} onChange={setTarget} idPrefix="mr-rt" />
-        </fieldset>
-        <div><Button variant="primary" className="u-fs-12" disabled={busy || loadFailed} onClick={addRule}>{t('addRule', { defaultValue: 'Add rule' })}</Button></div>
-      </section>
+      <FallbackSection
+        fallback={fallback}
+        canManage={canManage}
+        writable={writable}
+        onSave={(next) => void persist(rules, next)}
+      />
+
+      {canManage && (
+        <section aria-labelledby="mr-add-h" className="surface-card u-pad-2 u-flex u-flex-col u-gap-2">
+          <h2 id="mr-add-h" className="u-fs-13 u-m-0">{t('addHeading', { defaultValue: 'Add a rule' })}</h2>
+          <div className="u-flex u-flex-wrap u-items-end u-gap-2">
+            <SelectField label={t('whenLabel', { defaultValue: 'When' })} className="u-w-auto u-mb-0" value={kind} onChange={(e) => setKind(e.target.value as CondKind)}>
+              {COND_KINDS.map((k) => <option key={k} value={k}>{t(`kind_${k}`, { defaultValue: k })}</option>)}
+            </SelectField>
+            {kind === 'tokensOver' && (
+              <TextField label={t('thresholdLabel', { defaultValue: 'Estimated tokens in the message' })} help={t('thresholdHelp', { defaultValue: 'About 4 characters per token. Earlier messages in the conversation don’t count.' })} className="u-w-auto u-mb-0" type="number" min={0} value={threshold} onChange={(e) => setThreshold(e.target.value)} />
+            )}
+            {kind === 'difficultyAtLeast' && (
+              <SelectField label={t('difficultyLabel', { defaultValue: 'Difficulty at least' })} help={t('difficultyHelp', { defaultValue: 'Estimated from length only: under about 500 tokens is low, under about 4,000 medium, longer is high. An attachment raises it one level.' })} className="u-w-auto u-mb-0" value={difficulty} onChange={(e) => setDifficulty(e.target.value as (typeof DIFFICULTY_LEVELS)[number])}>
+                {DIFFICULTY_LEVELS.map((l) => <option key={l} value={l}>{t(`difficulty_${l}`, { defaultValue: l })}</option>)}
+              </SelectField>
+            )}
+            {kind === 'conversationKind' && (
+              <SelectField label={t('conversationKindLabel', { defaultValue: 'Conversation kind' })} className="u-w-auto u-mb-0" value={conversationKind} onChange={(e) => setConversationKind(e.target.value as (typeof CONVERSATION_KINDS)[number])} help={t('conversationKindHint', { defaultValue: '“group” = board / multi-agent rooms — route them to your strongest model.' })}>
+                {CONVERSATION_KINDS.map((k) => <option key={k} value={k}>{t(`convKind_${k}`, { defaultValue: k })}</option>)}
+              </SelectField>
+            )}
+          </div>
+          <TargetPicker value={target} onChange={setTarget} legend={t('targetLegend', { defaultValue: 'Use this model' })} />
+          {kind === 'attachment' && !acceptsImages(target) && (
+            <p className="muted u-fs-11 u-m-0" role="note">{t('attachmentTextOnly', { defaultValue: 'This model can’t read images, so this rule would never be used for a message with an attachment.' })}</p>
+          )}
+          <div><Button variant="primary" size="sm" disabled={!writable} onClick={addRule}>{t('addRule', { defaultValue: 'Add rule' })}</Button></div>
+        </section>
+      )}
+
+      <PreviewSection key={configVersion} enabled={enabled} hasConfig={hasConfig} canManage={canManage} />
     </div>
   );
 }
 
-function TargetInputs({ value, onChange, idPrefix }: { value: RoutingTarget; onChange: (t: RoutingTarget) => void; idPrefix: string }): JSX.Element {
+/** ADR 1016 D5 — what happens to a message no rule matches. */
+function FallbackSection({ fallback, canManage, writable, onSave }: {
+  fallback: RoutingTarget | null;
+  canManage: boolean;
+  writable: boolean;
+  onSave: (next: RoutingTarget | null) => void;
+}): JSX.Element {
   const { t } = useTranslation('model-router');
+  const listed = fallback !== null && modelLabel(fallback) !== null;
+  const [useFallback, setUseFallback] = useState(fallback !== null);
+  // A stored fallback the catalog no longer lists can't be shown in the picker
+  // (MR66UX-7), so the draft starts from a catalog default and the note below says why.
+  const [draft, setDraft] = useState<RoutingTarget>(listed && fallback ? fallback : defaultTarget());
+  // Keyed on the VALUES, not the object: every rule save hands back a new
+  // `fallback` object, and keying on it wiped unsaved edits here (MR66UX-6).
+  const fbProvider = fallback?.provider;
+  const fbModel = fallback?.model;
+  useEffect(() => {
+    const stored = fbProvider && fbModel ? { provider: fbProvider, model: fbModel } : null;
+    setUseFallback(stored !== null);
+    if (stored && modelLabel(stored) !== null) setDraft(stored);
+  }, [fbProvider, fbModel]);
+  const dirty = useFallback !== (fallback !== null)
+    || (useFallback && (draft.provider !== fbProvider || draft.model !== fbModel));
+  const current = fallback ? (modelLabel(fallback) ?? `${fallback.provider}/${fallback.model}`) : null;
   return (
-    <div className="u-flex u-flex-wrap u-gap-2">
-      <label className="u-flex u-items-center u-gap-1 u-fs-12">
-        {t('provider', { defaultValue: 'Provider' })}
-        <input id={`${idPrefix}-provider`} type="text" value={value.provider} onChange={(e) => onChange({ ...value, provider: e.target.value })} placeholder={t('providerPlaceholder', { defaultValue: 'anthropic' })} aria-label={t('provider', { defaultValue: 'Provider' })} className="u-fs-12" />
-      </label>
-      <label className="u-flex u-items-center u-gap-1 u-fs-12">
-        {t('model', { defaultValue: 'Model' })}
-        <input id={`${idPrefix}-model`} type="text" value={value.model} onChange={(e) => onChange({ ...value, model: e.target.value })} placeholder={t('modelPlaceholder', { defaultValue: 'claude-opus-4-8' })} aria-label={t('model', { defaultValue: 'Model' })} className="u-fs-12" />
-      </label>
-    </div>
+    <section aria-labelledby="mr-fallback-h" className="surface-card u-pad-2 u-flex u-flex-col u-gap-2">
+      <h2 id="mr-fallback-h" className="u-fs-13 u-m-0">{t('fallbackHeading', { defaultValue: 'When no rule matches' })}</h2>
+      {fallback && !listed && (
+        <p className="muted u-fs-11 u-m-0">
+          <span className="chip chip--warning">{t('notInCatalog', { defaultValue: 'not in catalog' })}</span>{' '}
+          {t('fallbackNotInCatalog', { defaultValue: 'The saved fallback ({{model}}) is never used. Choose another or turn it off.', model: current })}
+        </p>
+      )}
+      {!canManage ? (
+        <p className="u-fs-12 u-m-0">
+          {current
+            ? t('fallbackUses', { defaultValue: 'Use {{model}}.', model: current })
+            : t('fallbackKeep', { defaultValue: 'Keep the conversation’s own model.' })}
+        </p>
+      ) : (
+        <>
+          <CheckboxField
+            label={t('fallbackToggle', { defaultValue: 'Send these messages to a fallback model instead of the conversation’s own' })}
+            help={t('fallbackHint', { defaultValue: 'Off is usually right: members keep the model they chose. The fallback only applies to conversations whose key belongs to its provider, and to a message with an attachment only if its model reads images.' })}
+            checked={useFallback}
+            disabled={!writable}
+            onChange={(e) => setUseFallback(e.target.checked)}
+          />
+          {useFallback && <TargetPicker value={draft} onChange={setDraft} legend={t('fallbackLegend', { defaultValue: 'Fallback model' })} />}
+          <div className="u-flex u-items-center u-gap-2">
+            <Button variant="secondary" size="sm" disabled={!writable || !dirty} onClick={() => onSave(useFallback ? draft : null)}>
+              {t('saveFallback', { defaultValue: 'Save' })}
+            </Button>
+            {dirty && <span className="chip chip--muted u-fs-11">{t('unsaved', { defaultValue: 'unsaved' })}</span>}
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+/** A provider + model choice from the catalog — never free text (ADR 1016 D5).
+ *  A model that cannot read images is marked, since an attachment message never
+ *  routes to it (MR66UX-3). */
+function TargetPicker({ value, onChange, legend }: { value: RoutingTarget; onChange: (t: RoutingTarget) => void; legend: string }): JSX.Element {
+  const { t } = useTranslation('model-router');
+  const provider = ROUTABLE.find((p) => p.id === value.provider) ?? ROUTABLE[0];
+  return (
+    <fieldset className="u-border-0 u-p-0 u-m-0 u-flex u-flex-wrap u-items-end u-gap-2">
+      <legend className="u-fs-12 u-fw-600 u-mb-1">{legend}</legend>
+      <SelectField
+        label={t('provider', { defaultValue: 'Provider' })}
+        className="u-w-auto u-mb-0"
+        value={provider?.id ?? ''}
+        onChange={(e) => {
+          const next = ROUTABLE.find((p) => p.id === e.target.value);
+          const m = next?.models.find((x) => x.recommended) ?? next?.models[0];
+          onChange({ provider: next?.id ?? '', model: m?.id ?? '' });
+        }}
+      >
+        {ROUTABLE.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+      </SelectField>
+      <SelectField label={t('model', { defaultValue: 'Model' })} className="u-w-auto u-mb-0" value={value.model} onChange={(e) => onChange({ provider: provider?.id ?? '', model: e.target.value })}>
+        {(provider?.models ?? []).map((m) => (
+          <option key={m.id} value={m.id}>
+            {m.capabilities.includes('vision') ? m.label : t('textOnlyModel', { defaultValue: '{{label}} (text only)', label: m.label })}
+          </option>
+        ))}
+      </SelectField>
+    </fieldset>
+  );
+}
+
+type PreviewInput = { text: string; provider: string; hasAttachment: boolean; kind: '' | (typeof CONVERSATION_KINDS)[number] };
+
+/** ADR 1016 D6 — "which model would this message get?", answered by the server.
+ *  The answer is stored WITH the request it answers and cleared when any input
+ *  changes (MR66UX-1); the parent re-keys this section on every saved change, so
+ *  an answer about the old rules never stays on screen either. */
+function PreviewSection({ enabled, hasConfig, canManage }: { enabled: boolean; hasConfig: boolean; canManage: boolean }): JSX.Element {
+  const { t } = useTranslation('model-router');
+  const resultId = useId();
+  const [input, setInput] = useState<PreviewInput>({ text: '', provider: ROUTABLE[0]?.id ?? '', hasAttachment: false, kind: '' });
+  const [answered, setAnswered] = useState<{ input: PreviewInput; result: RoutePreview } | null>(null);
+  const [testing, setTesting] = useState(false);
+  const change = (patch: Partial<PreviewInput>): void => { setInput((cur) => ({ ...cur, ...patch })); setAnswered(null); };
+
+  const run = async (): Promise<void> => {
+    const asked = input;
+    setAnswered(null); // the live region changes even when the answer repeats
+    setTesting(true);
+    try {
+      const result = await previewRoute({ text: asked.text, provider: asked.provider, hasAttachment: asked.hasAttachment, ...(asked.kind ? { conversationKind: asked.kind } : {}) });
+      setAnswered({ input: asked, result });
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : t('previewFailed', { defaultValue: 'Could not test the message.' }));
+    } finally { setTesting(false); }
+  };
+
+  let answer: string | null = null;
+  if (answered) {
+    const d = answered.result.decision;
+    const providerLabel = ROUTABLE.find((p) => p.id === answered.input.provider)?.label ?? answered.input.provider;
+    if (!d) answer = t('previewKeeps', { defaultValue: 'No rule that can run on a {{provider}} key matches, so it keeps the conversation’s own model.', provider: providerLabel });
+    else {
+      const model = modelLabel(d.target) ?? `${d.target.provider}/${d.target.model}`;
+      answer = d.reason === 'rule' && d.ruleIndex !== undefined
+        ? t('previewRule', { defaultValue: 'Rule {{n}} sends it to {{model}}.', n: d.ruleIndex + 1, model })
+        : t('previewFallback', { defaultValue: 'No rule matches, so the fallback sends it to {{model}}.', model });
+    }
+  }
+
+  return (
+    <section aria-labelledby="mr-preview-h" className="surface-card u-pad-2 u-flex u-flex-col u-gap-2">
+      <h2 id="mr-preview-h" className="u-fs-13 u-m-0">{t('previewHeading', { defaultValue: 'Test a message' })}</h2>
+      <TextareaField label={t('previewText', { defaultValue: 'Message' })} rows={3} value={input.text} onChange={(e) => change({ text: e.target.value })} />
+      <div className="u-flex u-flex-wrap u-items-end u-gap-2">
+        <SelectField label={t('previewProvider', { defaultValue: 'The conversation’s key is for' })} className="u-w-auto u-mb-0" value={input.provider} onChange={(e) => change({ provider: e.target.value })}>
+          {ROUTABLE.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+        </SelectField>
+        <SelectField label={t('conversationKindLabel', { defaultValue: 'Conversation kind' })} className="u-w-auto u-mb-0" value={input.kind} onChange={(e) => change({ kind: e.target.value as PreviewInput['kind'] })}>
+          <option value="">{t('convKind_direct', { defaultValue: 'one-to-one' })}</option>
+          {CONVERSATION_KINDS.map((k) => <option key={k} value={k}>{t(`convKind_${k}`, { defaultValue: k })}</option>)}
+        </SelectField>
+        <CheckboxField label={t('previewAttachment', { defaultValue: 'Has an attachment' })} checked={input.hasAttachment} onChange={(e) => change({ hasAttachment: e.target.checked })} />
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled={testing || !hasConfig}
+          aria-busy={testing || undefined}
+          onClick={() => void run()}
+          {...(!hasConfig ? { 'aria-describedby': resultId } : {})}
+        >
+          {testing ? t('previewRunning', { defaultValue: 'Testing…' }) : t('previewRun', { defaultValue: 'Test' })}
+        </Button>
+      </div>
+      <p id={resultId} className="u-fs-12 u-m-0" role="status" aria-live="polite">
+        {!hasConfig
+          ? <span className="muted">{canManage
+            ? t('previewNeedsConfig', { defaultValue: 'Add a rule to test messages against it.' })
+            : t('previewNoRouting', { defaultValue: 'No routing is set up for this workspace.' })}</span>
+          : answer && (
+            <>
+              {answer}
+              {!enabled && <span className="muted"> {t('previewOff', { defaultValue: 'Routing is off, so today it keeps its own model.' })}</span>}
+            </>
+          )}
+      </p>
+    </section>
   );
 }

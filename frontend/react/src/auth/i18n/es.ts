@@ -126,4 +126,13 @@ export const messages = {
   sessionRefused_session_revoked: 'Se cerró tu sesión. Vuelve a iniciar sesión para continuar.',
   sessionRefused_session_expired: 'Tu sesión ha finalizado, así que se cerró. Vuelve a iniciar sesión para continuar.',
   sessionRefused_self_revoked: 'Cerraste la sesión en todos los dispositivos, incluido este. Inicia sesión de nuevo para continuar.',
+
+  // ReauthDialog — confirm it's you after auth/requires-recent-login (reauth.ts)
+  reauthTitle: 'Confirme que es usted',
+  reauthLede: 'Por su seguridad, vuelva a iniciar sesión para hacer este cambio. Seguirá en esta página y el cambio se completará.',
+  reauthLoading: 'Comprobando cómo inició sesión…',
+  reauthConfirm: 'Confirmar',
+  reauthMfaLede: 'Introduzca el código de 6 dígitos de su aplicación de autenticación para confirmar que es usted.',
+  reauthUnsupported: 'Su método de inicio de sesión no se puede confirmar aquí. Cierre la sesión, vuelva a iniciarla y repita el cambio.',
+  reauthSignOutAgain: 'Cerrar sesión y volver a iniciarla',
 } as const;

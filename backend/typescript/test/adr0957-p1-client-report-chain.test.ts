@@ -58,7 +58,7 @@ async function insertRun(orgId: string, lineage: Partial<Pick<RunRecord, 'parent
   const definition = getChainBackedWorkflow(CLIENT_REPORT_CHAIN_ID);
   if (!definition) throw new Error('report chain missing');
   await recordRevision(HOST_REVISION_TENANT, definition);
-  await insertRunWithStartContext(storage, run, { definition });
+  await insertRunWithStartContext(storage, run, { admission: { plan: 'exempt:test-fixture' }, definition });
   const stored = await storage.getRun(run.runId);
   if (!stored) throw new Error('run not stored');
   return stored;

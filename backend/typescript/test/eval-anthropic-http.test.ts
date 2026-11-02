@@ -1,3 +1,19 @@
+/**
+ * Manual model-evaluation transport (ADR 0853 P3 / ADR 0855 P2-P3) — TST-DAD-6.
+ *
+ * `requestEvalText` feeds the team-ledger eval gates (decision suggester, drift
+ * check). A transport failure must ABORT the evaluation with a typed
+ * `EvalInfrastructureError`, never reach the verdict parser as a model answer
+ * (a 401/429 error body scored as a "negative verdict" would fail or pass a gate
+ * on infrastructure noise), and its message must never carry the key, the
+ * request text or the provider's response body. Malformed but SUCCESSFUL model
+ * text still goes to the real verdict parser.
+ *
+ * Red when (sabotage-witnessed, wave 70): a non-OK status is not refused; a raw
+ * network/abort error escapes unsanitised; a stalled body is reported as a
+ * response fault instead of a timeout; a non-string text block is accepted; an
+ * unparseable success body is returned as text.
+ */
 import { describe, expect, it, vi } from 'vitest';
 import { EvalInfrastructureError, requestEvalText } from '../scripts/eval-anthropic-http.mjs';
 

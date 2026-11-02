@@ -1,6 +1,12 @@
 /**
  * Core i18n helper (ADR 0064) — negotiateLocale + resolveSection unit tests +
  * the core-purity boundary guard (host/i18n MUST NOT import features/).
+ *
+ * Tracker TST-DFE-3. Red when (w71g1, witnessed): q=0 tags are kept; ties stop keeping
+ * request order; q stops ranking; the exact match becomes case-sensitive (the fixture
+ * gives the family fallback a DIFFERENT answer, so it cannot mask that); the family
+ * fallback is dropped; resolveSection skips the exact override or mutates its input;
+ * host/i18n imports from features/.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -34,11 +40,15 @@ describe('negotiateLocale (RFC 0103 / i18n.md)', () => {
 
   it('honors q=0 as "not acceptable" and respects request order on ties', () => {
     expect(negotiateLocale('es;q=0, fr', supported, 'en')).toBe('fr');
+    // A q=0 tag must not be chosen even when it is the ONLY supported one offered.
+    expect(negotiateLocale('es;q=0, de', supported, 'en')).toBe('en');
     expect(negotiateLocale('fr, es', supported, 'en')).toBe('fr'); // tie → first wins
   });
 
   it('is case-insensitive on the request tag', () => {
-    expect(negotiateLocale('PT-br', supported, 'en')).toBe('pt-BR');
+    // pt-PT is declared FIRST, so the family fallback would answer pt-PT; only a
+    // case-insensitive exact match answers pt-BR.
+    expect(negotiateLocale('PT-br', ['en', 'pt-PT', 'pt-BR'], 'en')).toBe('pt-BR');
   });
 });
 

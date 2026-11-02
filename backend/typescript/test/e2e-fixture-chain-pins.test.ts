@@ -13,6 +13,14 @@
  *
  * Built-in node types that no `packs/` manifest declares (e.g. `core.approvalGate`)
  * are out of scope: they are not versioned through packs, so they cannot drift here.
+ *
+ * TST-CWE-1. Red when (sabotage-witnessed, wave 69) a fixture pin disagrees with
+ * its pack's version (`agent-knowledge` ingest @1.2.0 → @1.1.9). The two floors
+ * below are LIVENESS floors (the walks found real input), set at ~95% of the
+ * measured truth on 2026-10-29 (ff4f979a0): 824 pack-versioned node types, 18
+ * compared pins. A legitimate pack or fixture removal edits the floor. An
+ * unparseable `packs/` manifest is a failure, never a silent skip — its nodes
+ * would otherwise vanish from the comparison.
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
@@ -23,24 +31,26 @@ const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const FIXTURE_ROOT = join(REPO, 'frontend', 'react', 'e2e', 'fixtures', 'chain-packs');
 const PACKS = join(REPO, 'packs');
 
-function installedNodeVersions(): Map<string, string> {
+function installedNodeVersions(): { versions: Map<string, string>; unparseable: string[] } {
   const out = new Map<string, string>();
+  const unparseable: string[] = [];
   for (const dir of readdirSync(PACKS)) {
     const manifest = join(PACKS, dir, 'pack.json');
     if (!existsSync(manifest)) continue;
     let pack: { nodes?: Array<{ typeId?: unknown; version?: unknown }> };
-    try { pack = JSON.parse(readFileSync(manifest, 'utf8')); } catch { continue; }
+    try { pack = JSON.parse(readFileSync(manifest, 'utf8')); } catch { unparseable.push(manifest); continue; }
     for (const n of pack.nodes ?? []) {
       if (typeof n.typeId === 'string' && typeof n.version === 'string') out.set(n.typeId, n.version);
     }
   }
-  return out;
+  return { versions: out, unparseable };
 }
 
 describe('the /builder gallery fixture pins the node versions this repo ships', () => {
   it('every pinned pack node in the fixture matches its installed version', () => {
-    const installed = installedNodeVersions();
-    expect(installed.size, 'the packs/ walk found node manifests').toBeGreaterThan(50);
+    const { versions: installed, unparseable } = installedNodeVersions();
+    expect(unparseable, 'every packs/*/pack.json must parse').toEqual([]);
+    expect(installed.size, 'the packs/ walk found node manifests (824 measured 2026-10-29)').toBeGreaterThanOrEqual(780);
     const packs = readdirSync(FIXTURE_ROOT).filter((d) => existsSync(join(FIXTURE_ROOT, d, 'pack.json')));
     expect(packs.length, 'the fixture walk found chain packs').toBeGreaterThan(0);
 
@@ -61,7 +71,7 @@ describe('the /builder gallery fixture pins the node versions this repo ships', 
         }
       }
     }
-    expect(checked, 'at least one pack-versioned pin was compared').toBeGreaterThan(5);
+    expect(checked, 'pack-versioned pins compared (18 measured 2026-10-29)').toBeGreaterThanOrEqual(17);
     expect(
       mismatches,
       'Re-pin the fixture to the shipped version (mirror the in-tree chain pack under examples/workflow-chain-packs). '

@@ -11,6 +11,11 @@
  * Each test builds a REAL file and a REAL symlink rather than asserting against
  * hand-written strings — a string fixture would encode my belief about what Node
  * produces, which is exactly the thing that was wrong.
+ *
+ * TST-DAD-1. Red when (sabotage-witnessed, wave 70): argv[1] is not realpath'd;
+ * the URL is built by concatenation instead of `pathToFileURL`; an absent
+ * argv[1] is not refused up front; an unresolvable path throws; a sibling file
+ * in the same directory matches.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, realpathSync } from 'node:fs';

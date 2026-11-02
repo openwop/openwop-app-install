@@ -8,6 +8,9 @@
  * this host never registered). Exercised through the REAL loader + the exact
  * `buildChainBackedDefinition` path boot registration uses — no synthetic registry.
  *
+ * TST-CCB-3. Red when: the sweep stops skipping parents that were only BUILT; stops
+ * checking the child is registered; the build stops recording binds; or an
+ * undeclared/absent ref is bound anyway (a phantom bind — the no-sub-chains case). *
  * @see docs/adr/0472-retire-builtin-workflows-seam.md (chain-backed same-id lane)
  */
 import { beforeEach, describe, expect, it } from 'vitest';

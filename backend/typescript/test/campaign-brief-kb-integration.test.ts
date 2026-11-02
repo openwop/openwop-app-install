@@ -257,6 +257,8 @@ describe('generate-kernel over the REAL kb surface (citation shape, KB-CODE-1 se
       industryVertical: 'grocery robotics',
       competitors: ['AcmePick', 'RoboGrab'],
       messaging: { primaryValueProp: 'v' },
+      // ADR 1020 D3 — generate skips a channel the brief does not enable.
+      channels: [{ type: 'ad_variants', enabled: true }],
     });
     await setKernel(TENANT, brief.id, {
       headline: 'H', supportingStatement: 'S', proofPoints: ['P'], primaryCta: 'C', secondaryCta: 'C2',
@@ -278,7 +280,7 @@ describe('generate-kernel over the REAL kb surface (citation shape, KB-CODE-1 se
   });
 
   it('ADR 0403 P4: a TESTED hook reaches the channel-generation prompt through the REAL surface — a candidate does not', async () => {
-    const brief = await createBrief(TENANT, ORG, 'u1', { name: 'Hook echo', productName: 'FlashPick', messaging: { primaryValueProp: 'v' } });
+    const brief = await createBrief(TENANT, ORG, 'u1', { name: 'Hook echo', productName: 'FlashPick', messaging: { primaryValueProp: 'v' }, channels: [{ type: 'ad_variants', enabled: true }] });
     await setKernel(TENANT, brief.id, {
       headline: 'H', supportingStatement: 'S', proofPoints: ['P'], primaryCta: 'C', secondaryCta: 'C2',
       tone: 't', channelTones: {}, sourceDocIds: [], generatedAt: new Date().toISOString(),

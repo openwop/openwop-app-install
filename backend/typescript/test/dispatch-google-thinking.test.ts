@@ -4,6 +4,11 @@
  * — so the reasoning-model detection must cover gemini-3.x (flash AND flash-lite, which —
  * unlike 2.5-flash-lite — accepts thinkingConfig). Mocks only the network; asserts the exact
  * request body our dispatcher sends.
+ *
+ * TST-CVG-24. An unmatched URL throws (never a real network call). Red when: the
+ * gemini-3.x or the 2.5-lite detection changes, the ladder loses a rung, the
+ * thinking-on ladder loses its fallback, the accepted shape is not memoised, a
+ * non-thinking 400 is retried, or the last rung raises the caller's token cap.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { dispatchChat, resetGoogleThinkingShapeMemoForTests } from '../src/providers/dispatch.js';
@@ -23,7 +28,7 @@ async function captureGoogleBody(model: string): Promise<GeminiReqBody> {
       body = JSON.parse(String(init?.body)) as GeminiReqBody;
       return new Response('data: {"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}\n\n', { status: 200, headers: { 'content-type': 'text/event-stream' } });
     }
-    return realFetch(input, init);
+    throw new Error(`unexpected fetch: ${url}`);
   });
   global.fetch = mock as typeof fetch;
   await dispatchChat({ provider: 'google', model, apiKey: 'k', messages: [{ role: 'user', content: 'hi' }], maxTokens: 24 });
@@ -70,7 +75,7 @@ describe('dispatchGoogle walks the thinking-shape ladder when Google rejects a s
     let i = 0;
     global.fetch = vi.fn(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]): Promise<Response> => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-      if (!url.includes('generativelanguage.googleapis.com')) return realFetch(input, init);
+      if (!url.includes('generativelanguage.googleapis.com')) throw new Error(`unexpected fetch: ${url}`);
       bodies.push(JSON.parse(String(init?.body)) as GeminiReqBody);
       const r = responses[Math.min(i++, responses.length - 1)]!;
       return new Response(r.body, { status: r.status, headers: { 'content-type': r.status === 200 ? 'text/event-stream' : 'application/json' } });

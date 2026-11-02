@@ -1,6 +1,8 @@
 /** ADR 0950 recovery — physical SQLite commit/ack and late-CAS witnesses.
  * Pointer, original baseline and terminal rollback fence must survive together;
- * removing the receipt or replacing a funnel CAS with put loses these cases. */
+ * removing the receipt or replacing a funnel CAS with put loses these cases.
+ * w73: fr-fence and fr-baseline witnessed; the refusals are asserted by reason /
+ * message, since every receipt refusal here is a 409. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -83,13 +85,13 @@ describe('surface-owned funnel promotion receipts', () => {
     vi.restoreAllMocks(); await reopen();
     expect(await apply('rollback')).toEqual({ baselineRef });
     expect((await currentStep())?.pageId).toBe(baselineRef);
-    await expect(apply('finalize')).rejects.toMatchObject({ httpStatus: 409 });
+    await expect(apply('finalize')).rejects.toMatchObject({ httpStatus: 409, details: { reason: 'promotion_rolled_back' } });
   });
 
   it('a stale editor write cannot erase a concurrently committed promotion receipt or pointer', async () => {
     const cas = storage.kvCompareAndSwap.bind(storage); let crossed = false;
     vi.spyOn(storage, 'kvCompareAndSwap').mockImplementation(async (rowKey, expected, next) => {
-      if (!crossed && rowKey === key() && JSON.parse(next).name === 'Stale edit') { crossed = true; await apply('finalize'); }
+      if (!crossed && rowKey === key() && (JSON.parse(next) as { name?: string }).name === 'Stale edit') { crossed = true; await apply('finalize'); }
       return cas(rowKey, expected, next);
     });
     await expect(updateFunnel(tenantId, orgId, funnelId, { name: 'Stale edit' })).rejects.toMatchObject({ details: { reason: 'funnel_changed' } });
@@ -98,7 +100,7 @@ describe('surface-owned funnel promotion receipts', () => {
     expect(funnel?.name).toBe('Receipt test');
     expect(funnel?.steps[0]?.pageId).toBe(winnerRef);
     expect(funnel?.promotionReceipts?.[experimentId]).toMatchObject({ outcome: 'finalized', baselineRef });
-    await expect(reconcileStepPromotion('foreign', orgId, funnelId, stepId, experimentId, winnerRef, 'rollback')).rejects.toMatchObject({ httpStatus: 404 });
+    await expect(reconcileStepPromotion('foreign', orgId, funnelId, stepId, experimentId, winnerRef, 'rollback')).rejects.toMatchObject({ httpStatus: 404, message: 'Funnel not found.' });
     expect((await currentStep())?.pageId).toBe(winnerRef);
   });
 });

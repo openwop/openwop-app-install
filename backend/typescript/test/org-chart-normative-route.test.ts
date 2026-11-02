@@ -4,7 +4,8 @@
  *
  * The host advertised `agents.orgChart.supported: true` while serving the chart
  * ONLY at the host-extension alias `/host/openwop-app/org-chart`. The spec
- * names `GET /v1/agents/org-chart` (§D), and the conformance scenario
+ * names `GET /agents/org-chart` (§D; spelled `/v1/agents/org-chart` until this
+ * host retired major 1, ADR 0812), and the conformance scenario
  * `org-position-no-authority-escalation` reads exactly that path to check the
  * §B no-authority invariant on the live wire. So the capability was real and
  * the wire the spec names was absent — an advertised-but-unobservable claim,
@@ -16,17 +17,26 @@
  *  1. the routes behave per §C/§D — tenant-scoped, roll-up, `?recursive=false`,
  *     404 for unknown/cross-tenant department;
  *  2. **`/agents/org-chart` is not shadowed.** `routes/agents.ts` serves
- *     `GET /v1/agents/:agentId`, which matches the literal segment `org-chart`
+ *     `GET /agents/:agentId`, which matches the literal segment `org-chart`
  *     and answers `404 not_found`. Express resolves in registration order, so
  *     if `orgChartNormative` were ever moved after `agents` in
  *     `registerAllRoutes.ts`, these endpoints would go dead — and dead in the
  *     most misleading way available, because a 404 is precisely what the
  *     conformance suite reads as "the seam is absent". The failure would look
- *     identical to never having built them.
+ *     identical to never having built them. Only the ONE-segment chart read is
+ *     shadowable: `/agents/org-chart/:departmentId` has two segments and
+ *     `/agents/:agentId` cannot match it (measured w74: with the two modules'
+ *     order swapped in `registerAllRoutes.ts`, the roll-up cases stay green and
+ *     every chart-read case goes red).
  *
  * Two tenants throughout, because the §C carry-forward (CTI-1) is that a chart
  * outside the caller's owner triple is never disclosed, and a single-tenant
  * test cannot tell a tenant-scoped read from a global one.
+ *
+ * Sabotage, each red (w74 round 1): swapping `orgChartNormative` after `agents`
+ * in `registerAllRoutes.ts`; reading one fixed tenant's chart; resolving the
+ * department in one fixed tenant (the cross-tenant 404); always recursing;
+ * dropping the `owner` envelope; skipping the `roles` structure check.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -68,6 +78,12 @@ interface ChartBody {
   error?: string;
 }
 
+interface ErrorBody {
+  error?: string;
+  message?: string;
+  details?: Record<string, unknown>;
+}
+
 interface ViewBody {
   department?: { departmentId: string };
   members?: { rosterId: string }[];
@@ -75,7 +91,7 @@ interface ViewBody {
   error?: string;
 }
 
-describe('RFC 0087 §D — normative GET /v1/agents/org-chart', () => {
+describe('RFC 0087 §D — normative GET /agents/org-chart', () => {
   let server: http.Server;
   let BASE: string;
   const prevKeys = process.env.OPENWOP_API_KEYS;
@@ -127,7 +143,7 @@ describe('RFC 0087 §D — normative GET /v1/agents/org-chart', () => {
       agentRef: { agentId: 'core.openwop.agents.brief-writer' },
       workflows,
     });
-    const rosterId = (entry as { rosterId: string }).rosterId;
+    const rosterId = entry.rosterId;
     const result = await putChart({
       tenantId,
       departments: DEPTS,
@@ -139,7 +155,7 @@ describe('RFC 0087 §D — normative GET /v1/agents/org-chart', () => {
     return rosterId;
   }
 
-  it('serves the chart at the NORMATIVE path — it is not shadowed by /v1/agents/:agentId', async () => {
+  it('serves the chart at the NORMATIVE path — it is not shadowed by /agents/:agentId', async () => {
     const rosterId = await seedChart(TENANT_A, ['wf-a']);
     const { status, body } = await get<ChartBody>('/agents/org-chart', KEY_A);
 
@@ -184,15 +200,21 @@ describe('RFC 0087 §D — normative GET /v1/agents/org-chart', () => {
   it('404s an unknown department, and a cross-tenant one identically', async () => {
     await seedChart(TENANT_A, ['wf-a']);
 
-    const unknown = await get<ViewBody>('/agents/org-chart/dept-nope', KEY_A);
+    // Positive control: the department is real, and its owner can read it.
+    const own = await get<ViewBody>('/agents/org-chart/dept-social', KEY_A);
+    expect(own.status).toBe(200);
+    expect(own.body.department?.departmentId).toBe('dept-social');
+
+    const unknown = await get<ErrorBody>('/agents/org-chart/dept-nope', KEY_A);
     expect(unknown.status).toBe(404);
+    expect(unknown.body.error).toBe('not_found');
 
     // B asking for a department that exists ONLY in A's chart gets the SAME
     // 404 as a department that exists nowhere — the response must not
-    // distinguish "absent" from "not yours".
-    const crossTenant = await get<ViewBody>('/agents/org-chart/dept-social', KEY_B);
+    // distinguish "absent" from "not yours". The whole body, bar the echoed id.
+    const crossTenant = await get<ErrorBody>('/agents/org-chart/dept-social', KEY_B);
     expect(crossTenant.status).toBe(404);
-    expect(crossTenant.body.error).toBe(unknown.body.error);
+    expect(crossTenant.body).toEqual({ ...unknown.body, details: { ...unknown.body.details, departmentId: 'dept-social' } });
   });
 
   it('keeps the host-extension alias serving the same chart', async () => {

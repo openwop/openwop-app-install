@@ -154,6 +154,7 @@ export const EXECUTOR_CTX_POLICY: Readonly<Record<string, CtxKeyPolicy>> = {
   inputs: { kind: 'run-context', why: 'node inputs' },
   config: { kind: 'run-context', why: 'node config' },
   nodeAgent: { kind: 'run-context', why: 'authoring-time agent pin' },
+  agentVersion: { kind: 'run-context', why: 'ADR 1014 D3 — the agent version this node runs, read from its recorded pin; grants nothing' },
   configurable: { kind: 'run-context', why: 'run configurable' },
   triggerData: { kind: 'run-context', why: 'trigger payload' },
   workflowId: { kind: 'run-context', why: 'ADR 0775 P3e — agent-runner checks the never list of its agent' },
@@ -175,6 +176,8 @@ export const EXECUTOR_CTX_POLICY: Readonly<Record<string, CtxKeyPolicy>> = {
   callVideoGenerator: { kind: 'gated', features: ['creative-video', 'creative-briefs'], wrapper: 'gateVideoGenerator', why: 'videoGeneratorOwningFeatures, per node type' },
   // ── core capabilities ──
   emit: { kind: 'core', why: 'run event log' },
+  pinServedAgent: { kind: 'core', why: 'ADR 1014 M6 — records which version of an unpinned agent this run is served (OPENWOP_AGENT_VERSIONS); runs and grants nothing' },
+  markUntrustedContext: { kind: 'core', why: 'ADR 1009 write-once taint bit on this run, nothing else' },
   callAI: { kind: 'core', why: 'BYOK/managed text AI is the platform; metered by ADR 0821, not a feature' },
   callAIWithTools: { kind: 'core', why: 'as callAI' },
   callSpeechSynthesizer: { kind: 'core', why: 'generic TTS seam, metered; podcasts gate their own surface' },

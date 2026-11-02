@@ -4,11 +4,16 @@
  * The loader-mechanics test (connection-packs.test.ts) uses synthetic packs;
  * this sweep pins the real shipped set so a malformed vendored manifest can't
  * ship silently (the pack would just vanish from the provider registry).
+ *
+ * Tracker TST-CJB-9 (grade-tests w68). Red when: a vendored pack fails to load or a
+ * dir is skipped (MEASURED 23 dirs == 23 installed); hubspot loses its CRM scopes;
+ * zendesk loses its per-subdomain instance template or gains fixed endpoints; or a
+ * duplicate Teams provider appears.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readdirSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { loadConnectionPacks } from '../src/features/connections/connectionPackLoader.js';
 import { getProvider } from '../src/features/connections/providerRegistry.js';
 
@@ -43,6 +48,14 @@ describe('vendored connection packs — all load', () => {
     expect(p).toBeTruthy();
     expect(p?.reach).toBe('openapi');
     expect(p?.scopes.read.some((g) => g.scopes.includes('tickets:read'))).toBe(true);
+    // No fixed endpoints on the registered provider — they come from the subdomain…
+    expect(p?.endpoints).toBeUndefined();
+    // …via the shipped pack's per-subdomain instance template.
+    const manifest = JSON.parse(readFileSync(join(VENDORED, 'zendesk', 'pack.json'), 'utf8')) as {
+      provider: { auth: { instanceUrlTemplate?: string; endpoints?: unknown } };
+    };
+    expect(manifest.provider.auth.instanceUrlTemplate).toBe('https://{subdomain}.zendesk.com');
+    expect(manifest.provider.auth.endpoints).toBeUndefined();
   });
 
   it('teams rides the existing microsoft365 provider — no duplicate pack', () => {

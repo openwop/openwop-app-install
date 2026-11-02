@@ -1,10 +1,17 @@
 /**
- * `classifyDispatchError` — chat improvements plan §2B.2. Pure-function
- * classifier mapping dispatch errors to {category, action, userMessage}.
+ * `classifyDispatchError` — chat improvements plan §2B.2 (TST-DAD-4). Pure-function
+ * classifier mapping dispatch errors to {category, action, userMessage}: the FE
+ * recovery UI, notifications and retry policies branch on it, so a wrong arm
+ * renders the generic "Something went wrong" or retries a daily cap in seconds.
+ *
+ * Red when (sabotage-witnessed, wave 70): the daily-cap arm stops sizing
+ * `retryAfterMs` to the next UTC midnight; `msUntilNextUtcMidnight` targets the
+ * wrong day; `sign_in_required` loses its `sign_in` action; the 402 arm or the
+ * `model_not_allowed` policy reason falls through.
  */
 
-import { describe, expect, it } from 'vitest';
-import { AiProviderError } from '../src/aiProviders/aiProvidersHost.js';
+import { describe, expect, it, vi } from 'vitest';
+import { AiProviderError, type AiProviderErrorCode } from '../src/aiProviders/aiProvidersHost.js';
 import { classifyDispatchError, msUntilNextUtcMidnight } from '../src/observability/errorRecovery.js';
 
 const ONE_HOUR_MS = 60 * 60 * 1000;
@@ -19,13 +26,14 @@ describe('classifyDispatchError — AiProviderError codes', () => {
   });
 
   // Managed-provider codes flow through the same classifier via the
-  // deliberate cast in executor.ts:emitTerminalFailure. Without explicit
+  // deliberate `as AiProviderErrorCode` cast in executor.ts:emitTerminalFailure
+  // (they are outside the union) — the fixtures below use that same cast. Without explicit
   // cases they would render as the generic "Something went wrong"
   // default — which is wrong for user-actionable errors like
   // sign-in-required and daily-cap.
   it('sign_in_required → auth / sign_in with sign-in message', () => {
     const r = classifyDispatchError(
-      new AiProviderError('sign_in_required' as never, 'Sign in to use the free tier.'),
+      new AiProviderError('sign_in_required' as AiProviderErrorCode, 'Sign in to use the free tier.'),
     );
     expect(r.category).toBe('auth');
     // Distinct from `reconfigure` so consumers (FE recovery UI,
@@ -38,18 +46,22 @@ describe('classifyDispatchError — AiProviderError codes', () => {
   });
 
   it('daily_limit_reached → rate_limit / wait with retryAfterMs sized for the actual UTC-midnight reset', () => {
-    const r = classifyDispatchError(
-      new AiProviderError('daily_limit_reached' as never, 'cap hit'),
-    );
-    expect(r.category).toBe('rate_limit');
-    expect(r.action).toBe('wait');
-    expect(r.userMessage).toMatch(/daily limit/i);
-    // The cap resets at 00:00 UTC, so the wait window is at least
-    // 1ms (just before midnight) and at most 24h (just after).
-    // Without this hint, callers honoring `retryAfterMs` would retry
-    // in seconds and keep burning the same 401.
-    expect(r.retryAfterMs).toBeGreaterThan(0);
-    expect(r.retryAfterMs!).toBeLessThanOrEqual(ONE_DAY_MS);
+    // Fake only Date, at 18:30 UTC: the cap resets at 00:00 UTC, 5h30m away.
+    // Without this hint, callers honoring `retryAfterMs` would retry in
+    // seconds and keep burning the same 401.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date(Date.UTC(2026, 4, 29, 18, 30, 0, 0)));
+      const r = classifyDispatchError(
+        new AiProviderError('daily_limit_reached' as AiProviderErrorCode, 'cap hit'),
+      );
+      expect(r.category).toBe('rate_limit');
+      expect(r.action).toBe('wait');
+      expect(r.userMessage).toMatch(/daily limit/i);
+      expect(r.retryAfterMs).toBe(5 * ONE_HOUR_MS + 30 * 60 * 1000);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('msUntilNextUtcMidnight is deterministic + correct for a fixed instant', () => {
@@ -67,7 +79,7 @@ describe('classifyDispatchError — AiProviderError codes', () => {
 
   it('managed_unavailable → network / retry', () => {
     const r = classifyDispatchError(
-      new AiProviderError('managed_unavailable' as never, 'no key'),
+      new AiProviderError('managed_unavailable' as AiProviderErrorCode, 'no key'),
     );
     expect(r.category).toBe('network');
     expect(r.action).toBe('retry');

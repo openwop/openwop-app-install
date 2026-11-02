@@ -24,12 +24,19 @@
  *
  * THE PATH LIST IS HAND-MAINTAINED, for the reason the superset test gives: a
  * grep-derived list silently under-counts. Adding a consumer read? Add its row.
+ *
+ * This backend-lane file imports the FRONTEND adapter on purpose: the adapter is
+ * the subject, and the live v2 document only exists in a booted backend.
+ *
+ * TST-CVF-16. Red when: the adapter drops `demoMode`, leaves `supported` on the
+ * limits block, stops restating a facet's presence (`aiProviders.reasoning`), or
+ * collapses the per-lane auth profiles; or the advert changes a pinned value
+ * (e.g. the 300 s default stream age, now a literal rather than computed with the
+ * product's `maxStreamAgeSec`).
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
-import { maxStreamAgeSec } from '../src/host/streamAgeCapability.js';
-import { defaultMaxAgeMs } from '../src/host/sseChannel.js';
 
 import { createApp } from '../src/index.js';
 import { adaptV2Capabilities } from '../../../frontend/react/src/client/capabilitiesV2Adapter.js';
@@ -44,9 +51,9 @@ const CONSUMER_READS: ReadonlyArray<readonly [path: string, consumer: string, ex
   ['feedback.targets', 'client/feedbackClient.ts', ['run', 'event', 'node']],
   ['feedback.signals', 'client/feedbackClient.ts', ['rating', 'correction', 'label', 'flag']],
   ['capabilities.prompts.supported', 'prompts/promptsClient.ts', true],
-  ['capabilities.envelopes.tierOneSubsetCompliance', 'prompts/PromptLibraryPage.tsx, discovery/CapabilitiesPanel.tsx', 'warn'],
-  ['capabilities.envelopes.reasoning.supported', 'discovery/CapabilitiesPanel.tsx', true],
-  ['capabilities.envelopes.reasoning.promptDirective', 'discovery/CapabilitiesPanel.tsx', 'advisory'],
+  ['capabilities.aiProviders.tierOneSubsetCompliance', 'prompts/PromptLibraryPage.tsx, discovery/CapabilitiesPanel.tsx', 'warn'],
+  ['capabilities.aiProviders.reasoning.supported', 'discovery/CapabilitiesPanel.tsx', true],
+  ['capabilities.aiProviders.reasoning.promptDirective', 'discovery/CapabilitiesPanel.tsx', 'advisory'],
   ['capabilities.memory.attribution.emitsWriteEvents', 'runs/RunMemoryPanel.tsx', true],
   ['capabilities.modelCapabilities.supported', 'discovery/CapabilitiesPanel.tsx', true],
   ['capabilities.modelCapabilities.substitutionSupported', 'discovery/CapabilitiesPanel.tsx', false],
@@ -72,10 +79,9 @@ const DELIBERATE = {
   // builderShellHelpers reads) was always undefined and the limits banner never
   // rendered. The adapter fills it with the root value v1 served.
   limits: 'capabilities.limits',
-  // v2 does not advertise the optional `envelopes.reliability` family, and has
-  // no interrupt-profile list. Only the wire-diagnostics panel reads either,
+  // v2 has no interrupt-profile list. Only the wire-diagnostics panel reads it,
   // and it now shows the v2 truth.
-  absentAtV2: ['capabilities.envelopes.reliability', 'capabilities.profiles'],
+  absentAtV2: ['capabilities.profiles'],
 } as const;
 
 function at(doc: unknown, path: string): unknown {
@@ -178,7 +184,9 @@ describe.each(CONFIGS)('adapt(v2 discovery) gives every consumer read the value 
     await load();
     const view = surfaceView(at(adapted, 'capabilities.hostSurfaces')) as Array<{ name: unknown; supported: unknown; implementation: unknown }>;
     expect(Array.isArray(view)).toBe(true);
-    expect(view.length).toBeGreaterThan(10);
+    // MEASURED 26 host surfaces on 2026-10-29 (all three configs); floor = that
+    // minus one. A legitimate surface removal edits this floor in the same change.
+    expect(view.length).toBeGreaterThanOrEqual(25);
     for (const s of view) {
       expect(typeof s.name, JSON.stringify(s)).toBe('string');
       expect(typeof s.supported, JSON.stringify(s)).toBe('boolean');
@@ -190,13 +198,13 @@ describe.each(CONFIGS)('adapt(v2 discovery) gives every consumer read the value 
   it('deliberate: capabilities.limits carries the root limits (v1 left it undefined)', async () => {
     await load();
     expect(at(adapted, DELIBERATE.limits)).toEqual({
-      clarificationRounds: 5, schemaRounds: 3, envelopesPerTurn: 32,
+      clarificationRounds: 5,
       maxNodeExecutions: 1000, maxRunDurationMs: 600000, maxRequestBodyBytes: 1048576,
-      // ADR 0897 P4 / RFC 0247 — from the advert's one source (300 with the
-      // default; absent when the host does not bound). The consumer
+      // ADR 0897 P4 / RFC 0247 — 300 s is the default `OPENWOP_SSE_MAX_AGE_MS`
+      // (300 000 ms) this test boots with, pinned as a literal. The consumer
       // (builderShellHelpers) reads named fields, so this member claims nothing
       // a v1 reader relied on.
-      ...(maxStreamAgeSec(defaultMaxAgeMs()) !== undefined ? { maxStreamAgeSec: maxStreamAgeSec(defaultMaxAgeMs()) } : {}),
+      maxStreamAgeSec: 300,
     });
   });
 

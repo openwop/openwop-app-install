@@ -31,7 +31,13 @@ import { recordEvent, listEvents, summarizeForReport, sinceIsoForDays, trendForD
 import { recordNav, navReport } from './navTelemetryService.js';
 import { notePaywallEvent, isValidPaywallEvent, type PaywallEventInput } from '../../host/paywallFunnel.js';
 import { visitorHashFor } from './visitorIdentity.js';
-import { HEATMAPS_TOGGLE, SESSION_REPLAY_TOGGLE, REPLAY_DEFAULT_RETENTION_DAYS, replayStorageStatus } from './replayStore.js';
+import { gzipSync } from 'node:zlib';
+import {
+  HEATMAPS_TOGGLE, SESSION_REPLAY_TOGGLE, REPLAY_DEFAULT_RETENTION_DAYS, replayStorageStatus,
+  listReplaySessionsForOrg, putReplayChunk, readReplayChunkForViewer, isReplayOrgEligible, setReplayOrgEligibility,
+  assertReplaySessionKey, readReplayOrgFences,
+} from './replayStore.js';
+import { decodeReplayEventsGzip, ReplayEventFormatError } from './replayEvents.js';
 import { recordHeat, countBotBatch, listHeatPages, readHeatmap, DEVICE_CLASSES, type DeviceClass } from './heatStore.js';
 import { parseHeatBatch, normalizePageKey, heatmapsEnabled } from './heatIngest.js';
 import { isAutomatedTraffic } from './botTraffic.js';
@@ -171,6 +177,64 @@ export function registerAnalyticsRoutes(deps: RouteDeps): void {
     } catch (err) { next(err); }
   });
 
+  // ADR 0951 D3/P2 — one masked recording chunk. The body is the client's gzipped
+  // geometry chunk (base64). The server decodes it through the closed P2.1 format
+  // and stores ONLY the re-encoded validated result, never the client's bytes.
+  // Every refusal that is not a malformed request (replay off, no grant, not
+  // sampled, daily limit, session length, bot) is the same `{recorded:false}`:
+  // the recorder stops, and the lane says nothing about why. The subject is the
+  // consent token's `visitor:` subject; a chunk without one records nothing.
+  const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  app.post(`${PUB}/:orgId/replay/:sessionId/chunk`, async (req, res, next) => {
+    try {
+      const { orgId, sessionId } = req.params;
+      const tenantId = await resolvePublicTenant(orgId);
+      if (!SESSION_ID_RE.test(sessionId)) throw new OpenwopError('validation_error', 'Invalid session id.', 400, { field: 'sessionId' });
+      if (!takeOrgBeaconBudget(orgId)) {
+        res.status(429).set('Retry-After', '60').json({ error: 'rate_limited', message: 'analytics beacon budget for this site is exhausted; retry in a minute' });
+        return;
+      }
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const index = body.index;
+      if (typeof index !== 'number' || !Number.isSafeInteger(index) || index < 0) {
+        throw new OpenwopError('validation_error', '`index` must be a non-negative integer.', 400, { field: 'index' });
+      }
+      if (typeof body.content !== 'string' || body.content.length === 0) {
+        throw new OpenwopError('validation_error', '`content` must be the base64 gzip chunk.', 400, { field: 'content' });
+      }
+      const visitorCtx = visitorConsentContextOf(req, tenantId, body.consentToken);
+      // P2 review #8: bounded like a subject key (a malformed request, not a refusal).
+      if (body.sessionKey !== undefined && body.sessionKey !== '') assertReplaySessionKey(body.sessionKey);
+      const sessionKey = typeof body.sessionKey === 'string' && body.sessionKey ? body.sessionKey : undefined;
+      const skip = (): void => { res.status(202).json({ recorded: false }); };
+      // Cheap refusals first: no decompression work for a caller with no consent token, or a bot.
+      if (!visitorCtx.tokenSubject) return skip();
+      if (isAutomatedTraffic(typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : undefined, body.automation === true)) return skip();
+      // P2 review #9: then the org fences (storage configured, attestation, replay
+      // on), still before the gunzip and parse, and as the same uniform refusal.
+      const fences = await readReplayOrgFences(tenantId, orgId);
+      if (!fences) return skip();
+      let events;
+      try { events = decodeReplayEventsGzip(Buffer.from(body.content, 'base64')); }
+      catch (err) {
+        if (err instanceof ReplayEventFormatError) throw new OpenwopError('validation_error', 'The recording chunk is not in the accepted format.', 400, { field: 'content' });
+        throw err;
+      }
+      const now = new Date().toISOString();
+      try {
+        await putReplayChunk({
+          tenantId, orgId, sessionId, subjectKey: visitorCtx.tokenSubject, ...(sessionKey ? { sessionKey } : {}),
+          pageIds: [], startedAt: now, updatedAt: now, durationMs: 0, bytes: 0, chunkCount: 0, flags: {},
+        }, index, gzipSync(Buffer.from(JSON.stringify(events))).toString('base64'), fences);
+      } catch (err) {
+        const status = (err as { httpStatus?: unknown }).httpStatus;
+        if (err instanceof OpenwopError && (status === 409 || status === 429)) return skip();
+        throw err;
+      }
+      res.status(202).json({ recorded: true });
+    } catch (err) { next(err); }
+  });
+
   // ───────────────────────── authed reporting ────────────────────────────────
   app.get(`${ORG}/summary`, async (req, res, next) => {
     try {
@@ -258,11 +322,12 @@ export function registerAnalyticsRoutes(deps: RouteDeps): void {
 
   app.get(`${ORG}/behavior/settings`, async (req, res, next) => {
     try {
-      const { tenantId } = await authz(req, 'workspace:read');
+      const { tenantId, orgId } = await authz(req, 'workspace:read');
       const on = async (id: string) => Boolean((await resolveOne(id, { tenantId }).catch(() => null))?.enabled);
       const [heatmaps, replay, consent] = await Promise.all([on(HEATMAPS_TOGGLE), on(SESSION_REPLAY_TOGGLE), on('consent')]);
       const storageConfigured = replayStorageStatus().configured;
-      const recordingOffered = (await offeredVisitorChoices(tenantId)).includes('analytics.replay');
+      const recordingOffered = (await offeredVisitorChoices(tenantId, orgId)).includes('analytics.replay');
+      const orgEligible = await isReplayOrgEligible(tenantId, orgId);
       res.setHeader('Cache-Control', 'private, no-store');
       res.json({
         heatmaps: { enabled: heatmaps },
@@ -273,9 +338,62 @@ export function registerAnalyticsRoutes(deps: RouteDeps): void {
           // The existing choice registry is also the capture-availability owner.
           // Storage and toggles alone cannot advertise an uninstalled recorder.
           available: recordingOffered && replay && storageConfigured && consent,
+          // David 2026-10-28: health and finance clients are excluded. Nothing
+          // records for this org until an owner/admin attests it is neither.
+          orgEligible,
           retentionDays: REPLAY_DEFAULT_RETENTION_DAYS,
         },
       });
+    } catch (err) { next(err); }
+  });
+
+  // The eligibility attestation: an owner/admin of THIS org says the client is not
+  // in a health or finance category (true) or withdraws that (false, which fences
+  // and then deletes the org's recordings). Same permission as playback
+  // (`host:analytics:replay`, built-in owner/admin only, never a custom role):
+  // attesting is the risky direction and is audited before it takes effect;
+  // withdrawing only stops recording and deletes, so asking for MORE permission
+  // to delete than to watch would make the protective act the harder one
+  // (ADR 0951 P2 review #5).
+  app.put(`${ORG}/replay/eligibility`, async (req, res, next) => {
+    try {
+      const { user, orgId, tenantId } = await authorizeOrgScope(req, FEATURE, 'host:analytics:replay');
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      if (typeof body.notHealthOrFinance !== 'boolean') {
+        throw new OpenwopError('validation_error', '`notHealthOrFinance` must be true or false.', 400, { field: 'notHealthOrFinance' });
+      }
+      await setReplayOrgEligibility(tenantId, orgId, body.notHealthOrFinance, user.userId);
+      res.setHeader('Cache-Control', 'private, no-store');
+      res.json({ orgEligible: body.notHealthOrFinance });
+    } catch (err) { next(err); }
+  });
+
+  // ADR 0951 P2.4 — the recordings list and one chunk, for owners/admins of the
+  // EXACT org (`host:analytics:replay`, built-in admin/owner only). The list
+  // carries no visitor identifier. Each chunk read goes through the audited
+  // store path: audit before bytes, integrity, re-check after the fetch.
+  app.get(`${ORG}/replay/sessions`, async (req, res, next) => {
+    try {
+      const { orgId, tenantId } = await authorizeOrgScope(req, FEATURE, 'host:analytics:replay');
+      const cursor = typeof req.query.cursor === 'string' && req.query.cursor.length <= 200 ? req.query.cursor : undefined;
+      const page = await listReplaySessionsForOrg(tenantId, orgId, cursor ? { cursor } : {});
+      res.setHeader('Cache-Control', 'private, no-store');
+      res.json({ sessions: page.sessions.map((r) => ({
+        sessionId: r.sessionId, startedAt: r.startedAt, updatedAt: r.updatedAt, durationMs: r.durationMs,
+        bytes: r.bytes, chunkCount: r.chunkCount, flags: r.flags,
+      })), ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) });
+    } catch (err) { next(err); }
+  });
+
+  app.get(`${ORG}/replay/sessions/:sessionId/chunks/:index`, async (req, res, next) => {
+    try {
+      const { user, orgId, tenantId } = await authorizeOrgScope(req, FEATURE, 'host:analytics:replay');
+      const index = Number(req.params.index);
+      const chunk = await readReplayChunkForViewer({ tenantId, orgId, sessionId: req.params.sessionId, chunkIndex: index, viewer: user.userId });
+      // Re-validate on the way out: a stored chunk is served only as the closed format.
+      const decoded = decodeReplayEventsGzip(Buffer.from(chunk.contentBase64, 'base64'));
+      res.setHeader('Cache-Control', 'private, no-store');
+      res.json({ chunkIndex: chunk.chunkIndex, version: decoded.version, events: decoded.events });
     } catch (err) { next(err); }
   });
 

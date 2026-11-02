@@ -1,15 +1,18 @@
 /**
  * ADR 0127 Phase 2c — public-widget abuse caps. The gate a visitor turn passes
  * BEFORE it drives the agent: a per-SESSION turn cap + a per-DAY new-session cap
- * (the `WidgetCaps` an operator set). Unset caps = uncapped. Deterministic — the
+ * (the `WidgetCaps` an operator set). An unset cap takes the secure default below
+ * (ADR 0707; this line used to say "uncapped"). Deterministic — the
  * `day` bucket is passed in (no host clock in the logic), so it is unit-testable
  * and replay-neutral. Persisted via DurableCollection (per-IP rate-limit still
  * applies on top at the middleware).
  *
  * @see docs/adr/0127-public-embeddable-chat-widget.md
  */
+import { createHash } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { registerRetentionPurger, purgeRowsByAge } from '../../host/retentionPurger.js';
+import { registerKvAgeOut } from '../../host/kvAgeOut.js';
 import type { WidgetConfig } from './widgetService.js';
 
 // A5 (chat-first port) — both counters carry `tenantId` + `updatedAt` so the
@@ -23,7 +26,15 @@ import type { WidgetConfig } from './widgetService.js';
 // function of turns/sessions/caps/day it always was; the clamp touches retention
 // metadata only, never decision input.
 interface WidgetSession { sKey: string; turns: number; tenantId: string; updatedAt: string }
-interface WidgetDayCount { dKey: string; sessions: number; tenantId: string; updatedAt: string }
+interface WidgetDayCount {
+  dKey: string;
+  sessions: number;
+  /** ADR 1018 D4 — 12-hex hashes of the sessions this day admitted (idempotent claim).
+   *  Absent on rows written before D4; `sessions` stays the authoritative count. */
+  members?: string[];
+  tenantId: string;
+  updatedAt: string;
+}
 // ADR 0469 A3 — the per-widget-per-day HELD-WRITE counter (anon write/egress cap).
 interface WidgetAnonWriteDay { wKey: string; writes: number; tenantId: string; updatedAt: string }
 // ADR 0469 Phase D — the per-widget-per-SESSION AUTO-WRITE counter (rate-limit-session-cap).
@@ -33,6 +44,20 @@ const sessions = new DurableCollection<WidgetSession>('chatwidget:session', (s) 
 const dayCounts = new DurableCollection<WidgetDayCount>('chatwidget:day', (d) => d.dKey);
 const anonWriteDay = new DurableCollection<WidgetAnonWriteDay>('chatwidget:anonwrite:day', (w) => w.wKey);
 const anonAutoWriteSession = new DurableCollection<WidgetAnonAutoWriteSession>('chatwidget:anonautowrite:session', (a) => a.aKey);
+
+// ADR 1018 D7 — SIZE hygiene, default ON. The opt-in retention purger below stays the
+// governance lane; this one bounds the rows whether or not an operator opted in. Every
+// counter's decision window is one day or one visitor session, and an active session
+// refreshes `updatedAt` on each turn, so two days loses nothing a live visitor needs.
+// Rows written before A5 carry no `updatedAt` and are skipped (never deleted on a guess).
+for (const [id, ns] of [
+  ['chatwidget:session', 'chatwidget:session'],
+  ['chatwidget:day', 'chatwidget:day'],
+  ['chatwidget:anonwrite:day', 'chatwidget:anonwrite:day'],
+  ['chatwidget:anonautowrite:session', 'chatwidget:anonautowrite:session'],
+] as const) {
+  registerKvAgeOut({ id, prefix: `hostext:${ns}:`, ttlDays: 2, timestampField: 'updatedAt' });
+}
 
 /** A day bucket (`YYYY-MM-DD`) normalized to an ISO instant for the retention
  *  `updatedAt < cutoffIso` comparison — day-granular is ample for a counter TTL. */
@@ -163,20 +188,53 @@ export async function checkAnonAutoWrite(widget: WidgetConfig, sessionId: string
  *
  *  Deliberately generous: the goal is BOUNDED, not tight. An operator's explicit value
  *  wins in either direction. */
-const DEFAULT_TURNS_PER_SESSION = (() => {
+/** The hard ceiling on visitor turns per session, for EVERY widget. The token is public
+ *  and every turn spends the platform's managed credential, so turns × the day's
+ *  sessions (≤ `MAX_SESSIONS_PER_DAY`) must have a bound no setting can lift: not the
+ *  operator's cap (refused above this at write, `widgetService.cleanCaps`), not a value
+ *  stored before the ceiling existed (clamped on read below), not an explicit Infinity,
+ *  and not the env default. */
+export const MAX_TURNS_PER_SESSION = 100;
+
+/** Exported so the env clamp is witnessed on its own (the read clamp would mask it). */
+export const DEFAULT_TURNS_PER_SESSION = (() => {
   const n = Number(process.env.OPENWOP_WIDGET_TURNS_DEFAULT_PER_SESSION);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 20;
+  return Math.min(MAX_TURNS_PER_SESSION, Number.isFinite(n) && n > 0 ? Math.floor(n) : 20);
 })();
 const DEFAULT_SESSIONS_PER_DAY = (() => {
   const n = Number(process.env.OPENWOP_WIDGET_SESSIONS_DEFAULT_PER_DAY);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 200;
 })();
 
+/** ADR 1018 D4 — reserve the day slot for THIS session, or refuse at the cap.
+ *
+ *  The claim is idempotent per session: the day row keeps a short hash of every
+ *  session it has admitted, so concurrent first turns of the SAME session all see
+ *  "already claimed" and none of them is refused by its siblings' claims, while
+ *  first turns of DIFFERENT sessions each need a free slot. A lost session create
+ *  therefore needs no release. Fail-closed on contention: exhausting the retries is
+ *  a refusal, never an uncounted admit. `cleanCaps` bounds `maxSessionsPerDay`, so
+ *  the member list is bounded too. */
+async function claimDaySlot(dKey: string, sKey: string, maxSessions: number, tenantId: string, updatedAt: string): Promise<boolean> {
+  if (maxSessions === Infinity) return true; // only an EXPLICIT opt-out (unset never reaches here)
+  const member = createHash('sha256').update(sKey).digest('hex').slice(0, 12);
+  for (let attempt = 0; attempt < 12; attempt++) {
+    const cur = await dayCounts.get(dKey);
+    const members = cur?.members ?? [];
+    if (members.includes(member)) return true;
+    if ((cur?.sessions ?? 0) >= maxSessions) return false;
+    if (await dayCounts.compareAndSwap(cur ?? null, { dKey, sessions: (cur?.sessions ?? 0) + 1, members: [...members, member], tenantId, updatedAt })) return true;
+  }
+  return false;
+}
+
 export async function checkWidgetTurn(widget: WidgetConfig, sessionId: string, day: string): Promise<CapDecision> {
   // `?? DEFAULT`, then an EXPLICIT Infinity still opts out — copied from
   // `checkAnonWrite` above, because the distinction between UNSET and
   // EXPLICITLY-UNBOUNDED is the whole point: absence must never be a grant.
-  const maxTurns = widget.caps.maxTurnsPerSession ?? DEFAULT_TURNS_PER_SESSION;
+  // Clamped on READ: a stored value above the ceiling (or an explicit Infinity) is held
+  // to it without a migration.
+  const maxTurns = Math.min(MAX_TURNS_PER_SESSION, widget.caps.maxTurnsPerSession ?? DEFAULT_TURNS_PER_SESSION);
   const maxSessions = widget.caps.maxSessionsPerDay ?? DEFAULT_SESSIONS_PER_DAY;
   const sKey = `${widget.widgetId}:${sessionId}`;
   const dKey = `${widget.widgetId}:${day}`;
@@ -186,16 +244,13 @@ export async function checkWidgetTurn(widget: WidgetConfig, sessionId: string, d
   for (let attempt = 0; attempt < 12; attempt++) {
     const sess = await sessions.get(sKey);
     if (!sess) {
-      // NEW session — gate on the per-day cap, then CAS-CREATE (the atomicity anchor).
-      const dc = await dayCounts.get(dKey);
-      if ((dc?.sessions ?? 0) >= maxSessions) return { allowed: false, reason: 'session_cap' };
+      // NEW session. ADR 1018 D4 (`CW68WF-4`) — CLAIM a day slot by CAS FIRST, then
+      // create the session. This used to read the day count, create the session, and
+      // increment the day afterwards unconditionally, so N concurrent first turns at
+      // `max − 1` all passed the read and all got in.
+      if (!(await claimDaySlot(dKey, sKey, maxSessions, tenantId, updatedAt))) return { allowed: false, reason: 'session_cap' };
       const created = await sessions.compareAndSwap(null, { sKey, turns: 1, tenantId, updatedAt });
-      if (!created) continue; // lost the create race → re-read (now exists) on retry
-      // We created it → this is the genuinely-new session; count it against the day.
-      for (let d = 0; d < 12; d++) {
-        const cur = await dayCounts.get(dKey);
-        if (await dayCounts.compareAndSwap(cur ?? null, { dKey, sessions: (cur?.sessions ?? 0) + 1, tenantId, updatedAt })) break;
-      }
+      if (!created) continue; // a concurrent first turn of the SAME session won → existing-session branch
       return { allowed: true, newSession: true };
     }
     // EXISTING session — gate on the per-session turn cap, then CAS-increment.

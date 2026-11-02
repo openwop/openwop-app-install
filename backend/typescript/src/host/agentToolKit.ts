@@ -28,6 +28,7 @@ import type { ResolvedAssignment, ToggleSubject } from './featureToggles/types.j
 import type { BundleScope } from './inMemorySurfaces.js';
 import { listOrgs, resolveEffectiveAccess, type Scope } from './accessControlService.js';
 import type { Logger } from '../observability/logger.js';
+import { OpenwopError } from '../types.js';
 
 /** The shape a `BuiltinTool.run` returns: a JSON string + an error flag the
  *  conversation loop surfaces verbatim to the model. */
@@ -165,4 +166,35 @@ export function toolFailLog(logger: Logger, toolId: string, err: unknown, messag
     error: err instanceof Error ? err.message : String(err),
   });
   return toolError('tool_failed', message ?? 'The tool failed to complete. Try again or narrow the request.');
+}
+
+/** ADR 1020 D5 — a `startWorkflowRun` throw a launcher tool reports as itself: the
+ *  feature gate (`workflowFeatureGate.ts`), the hard-cap budget (`runStarter.ts`)
+ *  and the plan run limit (`planRunLimit.ts`), keyed on `details.reason`. Returns
+ *  `null` for anything else, which the caller keeps as its generic failure, so an
+ *  unrelated error never reaches the model. Three campaign launchers used to turn
+ *  all of these into `dispatch_failed`, so the model could not tell the user that
+ *  their plan or budget was the reason. Every sentence is host-written (TOC2CD-11). */
+export function launchRefusalResult(err: unknown): ToolResult | null {
+  if (!(err instanceof OpenwopError)) return null;
+  const reason = typeof err.details?.reason === 'string' ? err.details.reason : '';
+  const feature = typeof err.details?.feature === 'string' ? { feature: err.details.feature } : {};
+  switch (reason) {
+    case 'not_entitled':
+      return toolError('forbidden', 'This workflow belongs to a feature this workspace\'s plan does not include, so it was not started.', { reason, ...feature });
+    case 'feature_disabled':
+      return toolError('forbidden', 'This workflow belongs to a feature that is turned off for this workspace, so it was not started.', { reason, ...feature });
+    case 'feature_unavailable':
+      return toolError('forbidden', 'This workflow\'s feature could not be checked right now, so it was not started. Try again shortly.', { reason, ...feature });
+    case 'workflow_budget_exhausted':
+      return toolError('rate_limited', 'This workflow\'s daily budget is spent and its hard cap is on, so new runs are paused until tomorrow (UTC).', { reason });
+    case 'plan_run_limit_reached':
+      return toolError('rate_limited', 'This workspace has used all the runs its plan includes this month, so the workflow was not started.', { reason });
+    case 'plan_run_limit_contention':
+      return toolError('rate_limited', 'Too many runs were starting at once, so this one was not started. Try again in a few seconds.', { reason });
+    case 'plan_run_limit_unavailable':
+      return toolError('service_unavailable', 'The plan\'s run limit could not be checked right now, so the workflow was not started. Try again shortly.', { reason });
+    default:
+      return null;
+  }
 }

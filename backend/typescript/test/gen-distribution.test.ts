@@ -4,10 +4,18 @@
  *  - a dependsOn-closure violation FAILS (never a silent partial build);
  *  - an unresolvable excluded id FAILS (typo/convention drift is loud);
  *  - a valid slim manifest excludes the vars from BOTH generated registries.
+ *
+ * TST-DED-1 — red when any composition gate (default no-op, closure, unresolved
+ * exclusion, core never excluded, sub-toggle parent) or catalog invariant
+ * (registered, one place, core closed, always-on in core — backend AND
+ * frontend-only branches — groups, sub-toggle parents) is removed. The
+ * unresolved-id manifest lives in this test's OWN temp dir, reached through the
+ * generator's distribution-name path; nothing is added under distributions/.
  */
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, relative } from 'node:path';
 import { generate, checkBundleCatalog, subToggleParents } from '../../../scripts/gen-distribution.mjs';
 
 describe('gen-distribution (ADR 0366 P1)', () => {
@@ -51,6 +59,19 @@ describe('gen-distribution (ADR 0366 P1)', () => {
   it('an unknown distribution fails', () => {
     expect(() => generate('nope', { write: false })).toThrowError(/no such distribution/);
   });
+
+  it('an unresolvable excluded id fails loudly (typo / convention drift)', () => {
+    // A Phase-1 exclude manifest written to a temp dir and named RELATIVE to
+    // distributions/ — the generator joins the name under that directory.
+    const dir = mkdtempSync(join(tmpdir(), 'gen-dist-'));
+    try {
+      writeFileSync(join(dir, 'unresolved.json'), JSON.stringify({ exclude: ['sales-mapz'] }), 'utf8');
+      const name = relative(join(REPO, 'distributions'), join(dir, 'unresolved'));
+      expect(() => generate(name, { write: false })).toThrowError(/excluded id\(s\) resolve in NEITHER registry \(typo or convention drift\): sales-mapz$/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('gen-distribution catalog invariants (ADR 0366 P4)', () => {
@@ -86,12 +107,22 @@ describe('gen-distribution catalog invariants (ADR 0366 P4)', () => {
   });
 
   it('flags a frontend-only always-on feature left out of core (core-audit M10)', () => {
-    // access-hub has no backend half and no toggle names it — the old
-    // backend-directory scan could not see it, so dropping it from core passed.
+    // `collab` is registered ONLY in the frontend registry and no toggle names
+    // it — the old backend-directory scan could not see it, so dropping it from
+    // core passed. (This case used `access-hub` until wave 70, which has since
+    // grown a backend half: it was caught by the BACKEND branch, so the
+    // frontend-only branch went unwitnessed — a sabotage there stayed green.)
+    const feRegistry = readFileSync(join(REPO, 'frontend/react/src/features/registry.ts'), 'utf8');
+    const beRegistry = readFileSync(join(REPO, 'backend/typescript/src/features/index.ts'), 'utf8');
+    expect(feRegistry).toMatch(/import \{ collabFeature \}/);
+    expect(beRegistry).not.toMatch(/import \{ collabFeature \}/);
     const real = JSON.parse(JSON.stringify(catalogOf())) as { core: string[]; bundles: Record<string, { label: string; features: string[] }> };
-    real.core = real.core.filter((f) => f !== 'access-hub');
+    expect(real.core).toContain('collab');
+    real.core = real.core.filter((f) => f !== 'collab');
     const errs = checkBundleCatalog(real);
-    expect(errs.some((e) => /always-on feature 'access-hub'.*MUST be in core/.test(e))).toBe(true);
+    expect(errs.filter((e) => /always-on feature 'collab'/.test(e))).toEqual([
+      "always-on feature 'collab' (no toggleDefault) MUST be in core — it cannot be excludable",
+    ]);
   });
 
   it('a frontend-only feature gated by a registered toggle is NOT always-on (positive control)', () => {
@@ -172,7 +203,9 @@ describe('gen-distribution sub-toggle bundle members (ADR 0820 §1 alt (b) / §4
   });
 });
 
+const REPO = join(import.meta.dirname, '../../..');
+
 function catalogOf(): unknown {
-  return JSON.parse(readFileSync(join(import.meta.dirname, '../../../distributions/bundles.json'), 'utf8'));
+  return JSON.parse(readFileSync(join(REPO, 'distributions/bundles.json'), 'utf8'));
 }
 

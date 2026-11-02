@@ -199,7 +199,7 @@ export function registerFireEffectSeam(app: Express, deps: { storage: Storage; h
       await recordRevision(tenant, definition, { createdBy: 'conformance-seam' });
       const run = buildRunRecord({ workflowId, tenantId: tenant, inputs: { seam: row.seam }, now: new Date().toISOString() });
       run.metadata = { ...(run.metadata ?? {}), seededBy: 'conformance-seam', seam: row.seam };
-      await insertRunWithStartContext(storage, run, { definition });
+      await insertRunWithStartContext(storage, run, { definition, admission: { plan: 'exempt:conformance-seam' } });
       dispatchRunInBackground({ storage, run, definition, hostSuite });
       const runId = run.runId;
 

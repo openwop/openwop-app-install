@@ -6,6 +6,11 @@ KickTodo app's strategy and industry best practices and works with the OpenWOP a
 defect (D7, P6, merged train 226r). The P7 re-run then found an eighth, exposed when kicktodo-prod
 turned authorization enforcement on (D8, P8); the Factory re-run follows P8's deploy.
 
+> **Status update 2026-10-30: implemented.** P9 witnessed the end-to-end path on kicktodo.com with
+> enforcement on: a Factory run (`ac43c2ff`) through the owner's self-approval to a completed
+> publication (`cand:1a385e8e`). The last blocker (#12) was fixed by #5390. Still open, not a P-row:
+> the NUL-in-object-KEY gap recorded under D10, and the open questions below.
+
 ## Context
 
 ADR 0910 P4 is the production enactment of the KickTodo operator seat: activate, store the
@@ -27,6 +32,8 @@ run did not, and the failure was not one defect but six, each hiding the next:
 | 9 | *(found by P9, 2026-10-27)* The Studio chat showed `id_tenant_mismatch` after a turn that had succeeded | The SSE route bound event ids with `req.tenantId`. On the cross-origin stream (D5's `streamToken` plus a bearer, no cookie) that is the bearer's personal tenant, so a `host-kicktodo` run's ids came back as `u-<personal>/<id>`, and the SPA's poll fallback re-sent them. See D9. |
 | 10 | *(found by P9, 2026-10-27)* Both Factory runs died at `fetch`: `unsupported Unicode escape sequence` | One fetched page contained U+0000; Postgres `jsonb` refuses it, so the `node.completed` append failed and the executor threw. D3's sharper query is what first reached such a page. See D10. |
 | 11 | *(same)* The dead runs still read `running` | `startWorkflowRun`'s dispatch catch only logged; `POST /runs`' dispatcher already failed such a run closed. See D10. |
+| 12 | *(found by P9, 2026-10-29)* The owner's approve of their own publication returned `403` once kicktodo-prod turned authorization enforcement on | `routes/reviews.ts` required the membership scope `approvals:respond` before `claimApproval`; the operator activation (ADR 0910 D1) withholds it, so the request never reached the `challenge-publish` owner check and its D11 self-approval waiver. Fixed by #5390: a kind registered with `decidesAuthority: true` (only `challenge-publish`) skips that floor on `/reviews` and runs its own owner + SoD check first. See the ADR 0910 D11 correction. |
+| 13 | *(found by the ADR 0910 P4 step-3 check, 2026-10-31)* A participant's first chat message in `host-kicktodo` failed: `forbidden: Missing required scope: runs:create` | Every participant there is an auto-join `viewer` (ADR 0684), and a chat turn is a run of the conversation workflow. D8 opened only the operator's Challenge Author chat, so the guide the chat welcome offers every participant ("@KickBot") has been shut for all of them since enforcement went on (2026-10-26). MEASURED read-only on `kicktodo-backend-00065-dmc`: `POST /api/runs` 403 at 13:25:23.936Z, `authorization.denied scope=runs:create`. See D11. |
 
 ## Decision
 
@@ -183,6 +190,90 @@ extractor drops C0/DEL controls at the source, since no reader of page text want
 > Today the extractor's control-character strip sits upstream of every page-text write, so no
 > path is known to reach it; sanitizing keys as well is the follow-up if one appears.
 
+### D11 — a participant may chat with KickBot, and only with KickBot (fixes #13) — P12
+
+> **Added 2026-10-31.** The same shape as D8, for the other person the shared workspace exists
+> for. The owner approved this fix in the session that found #13.
+
+1. **A KickBot run-start grant** (`features/kicktodo-core/kickbotChatGrant.ts`): admits a
+   conversation the caller opens with `metadata.agentScope` = KickBot (`user.kicktodo-guide`), only in
+   KickTodo's OWN declared default workspace (`declaredDefaultWorkspaceTargets()`, featureId
+   `kicktodo-core`), only for a current ROOT member there, and only with `kicktodo-core` enabled.
+   The start is stamped `{ grant: 'kicktodo-kickbot', agentId }`, which callers cannot write.
+2. **A KickBot turn grant** on the conversation's `gate`: the run carries THIS stamp, the caller
+   owns it and is still a root member, and an `exchange` is addressed to KickBot and is not
+   `bypass`. A `close` on the caller's own KickBot conversation is admitted.
+3. **The grant seams take NAMED grants, several per workflow id** (`host/runStartGrant.ts`,
+   `host/runApprovalGrant.ts`). D1/D8 registered ONE predicate per workflow id and treated a
+   second as a boot bug. The conversation workflow is the host's one chat, so two features now
+   need it. Each grant accepts only its own stamp, so neither admits the other's runs. Starts ask
+   the grants in registration order and take the first stamp; a decision is admitted if any grant
+   admits it. A grant that throws refuses, and the next is still asked. A second, different
+   predicate under the SAME name is still a boot error.
+
+What does not change: the viewer role; every other agent, an unscoped chat, any other workspace,
+and someone else's conversation still need the tenant-wide scopes; a narrowed `owk_` key is never
+widened (`grantMayStandIn` refuses the key lane before any grant is asked). KickBot's tools run as
+they already did for a member: its read tools are scoped to the acting user, and its ask-first
+approvals are owner-gated on the conversation (`features/conversation-tools`), not by
+`approvals:respond`.
+
+*Not chosen:* adding `runs:create` to `viewer`, or to the auto-join role (every participant could
+start every workflow in the shared workspace, the over-grant ADR 0910 D1 and D8 refused); a
+participant role carrying `runs:create` (the same over-grant under another name); defaulting the
+participant's chat to KickBot in the SPA (a client choice grants nothing; the server must still
+decide, and an unscoped chat stays refused, see the open question below).
+
+> **Correction 2026-10-31 (D12):** the SPA default was then chosen as well, on top of this grant,
+> not instead of it. It grants nothing; it makes the participant's unaddressed first message a
+> KickBot conversation, which this grant then admits.
+
+> **Witness:** `test/adr0975-participant-kickbot-chat.test.ts` runs the real stack under enforcement
+> (cookie sessions, real viewer memberships in the provisioned `host-kicktodo`, real KickBot
+> provisioning). The headline turn runs KickBot's tool loop: the one stand-in is the managed tier's
+> network round, which calls `openwop:kicktodo.today` once (it returns `ok` as the participant) and
+> then answers. Sabotage-witnessed red: the KickBot registration removed; the agent check removed
+> from either predicate; the workspace check removed; the root-member check removed from either
+> predicate; the bypass check removed; the owner check removed; the key-lane exclusion removed from
+> `grantMayStandIn`; the seams asking only their first grant.
+### D12 — a participant's new chat opens on KickBot (the D11 open question) — P13
+
+> **Added 2026-10-31. Depends on D11 (#5421) and lands after it.** The owner chose to default the
+> participant's chat to KickBot, in the session that found #13. D11 alone left the case #13 was
+> found by still broken: a message typed straight into the composer goes to the generic assistant,
+> and a `viewer` is refused that start with a raw `runs:create` error.
+
+1. **The workspace declares its chat agent.** `defaultOrg.chatAgent` on the feature (KickTodo:
+   `KICKBOT_AGENT_ID`) rides `featureDefaultOrgs()` into the boot-recorded default workspace
+   targets, and `GET /host/openwop-app/me/workspaces` carries it as `chatAgent` on that
+   workspace's row only.
+2. **The SPA scopes a NEW plain chat to it.** `chat/useWorkspaceChatAgent.ts` reads the ACTIVE
+   workspace's `chatAgent`, and `useDefaultChatAgent` activates it through the `@mention` path
+   (`activateAgent`), in both chat surfaces (the tab deck's `TabSession` and `ChatSidebar`). So the
+   start carries `metadata.agentScope` and each turn `to`, exactly as `@KickBot` does, and the
+   header shows KickBot. Only an EMPTY chat (no messages, no conversation run, not hydrating), never
+   a typed conversation (channel, group, workspace, person), and never over an explicit `?agent=`.
+   Once per session: `/clear` gets it again. `chat/` imports no feature; it reads only the id.
+3. **It applies to every member, and it is a starting scope, not a lock.** `@mention` or the agent
+   picker still switches, and choosing the assistant is not undone. An operator or admin in the
+   participant workspace meets KickBot first like everyone else; the workspace's chat IS its
+   declared agent, and a role-dependent default would be a second rule to test for no user benefit.
+
+It grants nothing. Whether a member may chat with KickBot is still D11's server grant, so a
+tampered client gains nothing and an unscoped chat by a viewer is still refused.
+
+*Not chosen:* a server-side default (an absent `agentScope` on a conversation start in this
+workspace treated as KickBot). The start grant would then admit unscoped starts, but the SPA would
+still address its turns to the assistant, which D11's turn grant refuses; making it work means
+widening D11's turn predicate to unaddressed turns, the over-grant D11 refuses. A typed "talk to
+KickBot" prompt in place of the raw refusal: it still makes the participant's first message fail.
+
+> **Witness:** `frontend/react/src/chat/hooks/__tests__/workspaceChatAgentDefault.test.tsx` runs
+> the real chain (`useDefaultChatAgent` → the real `useActiveAgents` in the real `useChatSession` →
+> `runCoreSubmit` → `openConversationSession` with `agentScope` and the turn's `to`), stubbing only
+> the network. `backend/typescript/test/adr0975-workspace-chat-agent.test.ts` boots the real app
+> and reads `/me/workspaces` as a participant. Sabotage-witnessed red in the PR.
+
 ## Phases
 
 | Phase | Scope | PR | Status |
@@ -195,9 +286,11 @@ extractor drops C0/DEL controls at the source, since no reader of page text want
 | P6 | D7 plan citations required + typed | #5235 (`7e71d7c30`) | merged (train 226r); LIVE kicktodo 00057-82x |
 | P7 | Fresh Factory run on kicktodo.com after P6's deploy and sync | — | blocked 2026-10-26 by #8 (`authorization.denied runs:create`, 21:50:06Z) → D8 |
 | P8 | D8 operator Challenge Author chat + D1 entry-gate repair | #5289 (`887a37038`) | merged (train 239r) |
-| P9 | Fresh Factory run on kicktodo.com; record the published challenge | — | 2026-10-27: run `f4925533` started (enforcement off; a duplicate `35cfbfac` was cancelled); found #9, then both died at `fetch` → #10/#11 |
+| P9 | Fresh Factory run on kicktodo.com; record the published challenge | #5390 (`974d96155`, the D11 approve fix) | **witnessed 2026-10-30.** Run `ac43c2ff` (dispatched 2026-10-28 16:00Z, publication submitted 18:28Z) published: the owner's approve of `appr:5fb0628e` → `POST …/reviews/approval:appr:5fb0628e…/actions/approve` **200** at 03:45:33Z on `kicktodo-backend-00063-7gd` (enforcement on, operator activation only, no Editor role), then `kicktodo_publication_completed` for `cand:1a385e8e` at 03:45:33.838Z (kicktodo-prod logs, read-only). The first attempts (2026-10-29 23:34:03Z / 23:34:10Z, `00062-gf9`) were 403 → #12 / ADR 0910 D11 correction. Earlier attempt (2026-10-27): run `f4925533` found #9, then died at `fetch` → #10/#11 |
 | P10 | D9 stream ids bound to the run's tenant | #5299 (`999e9a986`) | merged (train 240r) |
 | P11 | D10 NUL-safe jsonb + starter fail-closed | #5300 (`3bebf6eba`) | merged (train 240r) |
+| P12 | D11 participant KickBot chat + named grant seams | #5421 (`9108c0059`) | merged (train 319) |
+| P13 | D12 participant chat defaults to KickBot (after P12) | this PR | open |
 
 P1 changes chain packs, so the registry copies (`core.openwop.workflows.kicktodo-*`) must be
 republished after merge (ADR 0370: the registry copy wins when its SemVer is newer).
@@ -216,3 +309,8 @@ republished after merge (ADR 0370: the registry copy wins when its SemVer is new
       recorded-not-changed semantics)? Needs its own ADR.
 - [ ] Should the Factory search several framed questions (D3 alternative)?
 - [ ] Should `nulSafe` also rewrite object keys (D10's known gap)?
+- [x] D11: in `host-kicktodo`, should the SPA open a participant's chat scoped to KickBot by default?
+      Today an unscoped message (the "Assistant" composer) is still refused with a raw
+      `runs:create` error, which is how #13 was found. Either default the scope to KickBot there,
+      or show a typed "talk to KickBot" prompt instead of the raw refusal.
+      *Decided 2026-10-31 by the owner: default it to KickBot. See D12.*

@@ -39,7 +39,7 @@ import { surfaceDispatchedRun } from '../../host/turnRunDispatch.js';
 import { createLogger } from '../../observability/logger.js';
 import { getBrief } from '../campaign-brief/briefService.js';
 import { CAMPAIGN_CHANNELS, type CampaignChannel } from '../campaign-brief/types.js';
-import { untrustedToolError } from '../../host/agentToolKit.js';
+import { untrustedToolError, launchRefusalResult } from '../../host/agentToolKit.js';
 
 const log = createLogger('campaign-channels.generator-tools');
 
@@ -142,6 +142,11 @@ export async function runChannelGenerateTool(deps: StartRunDeps, input: Record<s
   if (!(await hasOrgScope(scope.tenantId, scope.actingUserId, brief.orgId, 'workspace:write'))) {
     return toolError('forbidden', 'You need write access to this brief\'s workspace to generate a channel.');
   }
+  // ADR 1020 D3 — the brief is the configuration: the run would skip a channel the
+  // brief does not enable, so say so before starting one.
+  if (!brief.channels.some((c) => c.type === channel && c.enabled)) {
+    return toolError('channel_disabled', 'This brief does not enable that channel, so nothing was generated. Enable it on the brief first, then generate it.', { channel });
+  }
 
   // HIGH-1 ignition dedup — a repeated identical generate call (same brief +
   // channel) inside the window reuses the run already started.
@@ -156,6 +161,7 @@ export async function runChannelGenerateTool(deps: StartRunDeps, input: Record<s
   // a campaign run: it carries the run tag (role 'stage'), composed by the
   // campaign owner, so the campaign's policy, caps and run index cover it.
   const campaignTag = await campaignRunTagForBrief(scope.tenantId, briefId, { role: 'stage', agentId: scope.agentProfileId ?? GENERATOR_AGENT_ID }).catch(() => null);
+  let startError: unknown;
   const runId = await startWorkflowRun(deps, {
     tenantId: scope.tenantId,
     workflowId,
@@ -170,12 +176,16 @@ export async function runChannelGenerateTool(deps: StartRunDeps, input: Record<s
     // DATA-4 — a startWorkflowRun THROW must also release the claim; coerce to
     // null so the shared failure handler below runs.
     log.warn('campaign_channel_dispatch_threw', { tenantId: scope.tenantId, briefId, channel, error: err instanceof Error ? err.message : String(err) });
+    startError = err;
     return null;
   });
   if (!runId) {
     // CFPT-2 / DATA-4 — the run never started (null OR a throw); release the claim
     // so an honest retry isn't blocked for the dedup window by a latch over a failure.
     await releaseIgnition(scope.tenantId, key);
+    // ADR 1020 D5 — a plan, budget or run-limit refusal keeps its code.
+    const refused = launchRefusalResult(startError);
+    if (refused) return refused;
     return untrustedToolError('dispatch_failed', 'The channel workflow (channel below) could not start.', channel);
   }
   await recordIgnitionRun(scope.tenantId, key, runId);
@@ -224,9 +234,10 @@ export function registerCampaignChannelsAgentTools(deps: StartRunDeps): void {
       description:
         'Generate ONE channel deliverable from a brief. Starts the channel workflow: generate the draft (grounded in the '
         + 'brief\'s KB + brand voice, echoing the kernel) → the human APPROVES it on an inline card. Pass the `briefId` and the '
-        + '`channel` (landing_page | ad_variants | email_sequence | creative_briefs | social_posts). Nothing publishes and the '
-        + 'run pauses at the approval gate — except that `creative_briefs` ALSO lands its drafts immediately as draft-status '
-        + 'managed briefs on the Creative Briefs page (the gate covers refinement, not their existence). Returns the started `runId`.',
+        + '`channel` (landing_page | ad_variants | email_sequence | creative_briefs | social_posts); the brief must enable that '
+        + 'channel (else `channel_disabled`). Nothing publishes and the run pauses at the approval gate; for '
+        + '`creative_briefs`, approving adds all of the draft\'s briefs to the Creative Briefs page as drafts (rejecting adds '
+        + 'none; nothing is added if Creative Briefs is turned off). Returns the started `runId`.',
       inputSchema: {
         type: 'object',
         properties: {

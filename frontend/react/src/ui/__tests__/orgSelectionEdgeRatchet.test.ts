@@ -402,7 +402,6 @@ const HAND_ROLLED: readonly string[] = [
   'features/forms/FormDetailPage.tsx',
   'features/kicktodo-org-programs/OrgProgramsPage.tsx',
   'features/media/MediaLibraryPage.tsx',
-  'features/model-router/ModelRouterPage.tsx',
   'features/operations/OperationsWebhooksPage.tsx',
   'features/priority-matrix/PriorityMatrixPage.tsx',
   'features/sales-commissions/CommissionsPage.tsx',
@@ -841,6 +840,10 @@ describe('the org-selection dependency edge', () => {
     // 44 -> 37 when the seven `SENTINEL_ORG_READS` surfaces migrated to the
     // hook; 37 -> 35 when the two adapter pass-throughs were excluded (they
     // never read orgs). It goes DOWN as the seam closes; a rise is a new entrant.
+    // 32 -> 31 (2026-10-31, ADR 1016): `features/model-router/ModelRouterPage`
+    // no longer reads orgs at all — the router config became the WORKSPACE's,
+    // so the org picker (and its hand-rolled `listOrgs` read) was deleted rather
+    // than migrated to the hook.
     // 33 -> 32 (2026-08-18): `features/kb/KnowledgeBasePage` migrated to
     // `useOrgSelection` in #3348 (`a78c543e6`) — the same KB round that closed
     // the chain-promise gap. The migration is the POINT of this ratchet, so the
@@ -861,7 +864,7 @@ describe('the org-selection dependency edge', () => {
     // — a 19th copy of the extracted idiom — and reproduced the ordering bug the
     // component exists to encode, rendering the disclosure BELOW a workspace
     // picker and a dead Create button rather than instead of them.
-    expect(handRolledOrgReads().length).toBe(32);
+    expect(handRolledOrgReads().length).toBe(31);
   });
 
   it('the hand-rolled detector rejects the three measured false positives', () => {

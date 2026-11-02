@@ -21,6 +21,10 @@
  * The wiring half — that a real HTTP viewer is refused — is the acceptance test in
  * `orgscope-shared-workspace.test.ts`, skipped until GC-5 lands. Mechanism and wiring
  * are tested separately and deliberately (ADR 0502).
+ *
+ * TST-CUE-8. Red when the bypass drops its `isSinglePrincipalTenant` narrowing
+ * (cases 1–2), when the demo bypass is disabled outright (case 3), or when the
+ * allowlist becomes a `ws:` denylist (case 4).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -33,6 +37,7 @@ import {
 } from '../src/host/accessControlService.js';
 
 const PRIOR_DEMO = process.env.OPENWOP_DEMO_MODE;
+const PRIOR_DSN = process.env.OPENWOP_STORAGE_DSN;
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -40,6 +45,8 @@ beforeAll(async () => {
   initHostExtPersistence(await openStorage('memory://'));
 });
 afterAll(() => {
+  if (PRIOR_DSN === undefined) delete process.env.OPENWOP_STORAGE_DSN;
+  else process.env.OPENWOP_STORAGE_DSN = PRIOR_DSN;
   if (PRIOR_DEMO === undefined) delete process.env.OPENWOP_DEMO_MODE;
   else process.env.OPENWOP_DEMO_MODE = PRIOR_DEMO;
 });

@@ -408,6 +408,26 @@ on composition, Compliance Reviewer on `needs_review`).
 >    > rule is unchanged. Test: the new prompt case in
 >    > `adr0945-p2-fidelity-judge.test.ts`. The gate still needs one green
 >    > re-run on the new prompt.
+>    >
+>    > **2026-10-31 (14:41Z): the live judge gate is GREEN.** With the prompt
+>    > fix (#5375) live on revision `01105-scf`, the user authorized a re-run
+>    > on `google:personal` with `gemini-3.5-flash`. All 4 cases held, for the
+>    > judge alone and combined, in 4 calls with no repair. The log reads
+>    > `identity:pass, colour-drift:fail, logo-swap:fail, extra-part:fail`,
+>    > `passed: true`. Per case:
+>    > - **identity:** stage A passed, and the judge answered `match` on all
+>    >   seven attributes.
+>    > - **colour drift:** stage A failed it on colour ΔE, and the judge
+>    >   answered `colour: mismatch`.
+>    > - **logo swap:** stage A failed it on phash, and the judge answered
+>    >   `logo: mismatch`.
+>    > - **extra part:** stage A passed it on all three checks. Only the judge
+>    >   caught it (`shape`, `proportions` and `part_count` mismatch), which
+>    >   is the case the judge exists for.
+>    >
+>    > The P2 live gate is no longer owed. A different provider or model is
+>    > not covered by this run, so a workspace that switches its vision model
+>    > should run the check again.
 > 2. **The outcome rule is one function** (`host/creativeFidelity/decide.ts`):
 >    the judge can add failures, never remove one; a non-critical mismatch
 >    (`proportions`, `part_count`, `extra_or_missing_parts`) is `needs_review`,
@@ -567,7 +587,7 @@ on composition, Compliance Reviewer on `needs_review`).
 |---|---|---|---|
 | P0 | implemented 2026-10-20 | #5067 (`feat/cs-0945-p0`) | `adr0945-p0-product-grounding.test.ts` (12), `adr0945-p0-render-video-grounding.test.ts` (3); sabotage-witnessed: PATCH clear, dedup first-write, token org check, full-prompt hash, unresolved refusal, render-id agreement each red a test |
 | P1 | implemented 2026-10-20 | #5074 (`feat/cs-0945-p1`, after #5067) | `adr0945-p1-stage-a.test.ts` (5: identity pass, recolour + missing-part sabotage fail, empty silhouette, CIEDE2000 reference pairs), `adr0945-p1-composite-run.test.ts` (5: a real run composes a passing composite, replay fork serves it with no second render/asset, the reclassified `render` node is served on a fork, a foreign cut-out is refused, toggle-off fails closed); sabotage-witnessed: ΔE threshold loosened, mask ignoring alpha, render/compose unclassified, toggle gate removed, byte-identity inverted, cut-out verification skipped each red a test |
-| P2 | implemented 2026-10-20 | #5080 (`feat/cs-0945-p2`, after #5074) | `adr0945-p2-fidelity-judge.test.ts` (16: prompt/parser parity, the one repair, 5 fixture eval cases with a scripted judge, judge-absent ⇒ needs_review, reframed edit ⇒ aspect fail, protection-mask encodings), `adr0945-p2-edit-run.test.ts` (4: a real edit run passes and a replay fork serves it without consulting the judge, no vision provider ⇒ needs_review, a twice-failing edit ends `fidelity_failed` after exactly one repair, an unverified product hint is not stamped); live gate `scripts/eval-fidelity-judge.mts` OWED (key + spend); **replaced 2026-10-27** by the in-app BYOK judge check (`…/fidelity/judge-check`, see the P2 correction above), real-model run still owed |
+| P2 | implemented 2026-10-20 | #5080 (`feat/cs-0945-p2`, after #5074) | `adr0945-p2-fidelity-judge.test.ts` (16: prompt/parser parity, the one repair, 5 fixture eval cases with a scripted judge, judge-absent ⇒ needs_review, reframed edit ⇒ aspect fail, protection-mask encodings), `adr0945-p2-edit-run.test.ts` (4: a real edit run passes and a replay fork serves it without consulting the judge, no vision provider ⇒ needs_review, a twice-failing edit ends `fidelity_failed` after exactly one repair, an unverified product hint is not stamped); live gate `scripts/eval-fidelity-judge.mts` OWED (key + spend); **replaced 2026-10-27** by the in-app BYOK judge check (`…/fidelity/judge-check`, see the P2 correction above); **real-model run GREEN 2026-10-31** (google `gemini-3.5-flash`, 4/4, after the prompt fix #5375) |
 | P3 | implemented 2026-10-20 | #5084 (`feat/cs-0945-p3`, after #5080) | `adr0945-p3-publish-gate.test.ts` (11: non-AI untouched everywhere; ungrounded / unchecked / failed refused; the store beats a lying summary; an unreadable store fails closed; token and URL resolve; needs_review only with an approval for this asset+verdict, a throwing check refuses; AI scratch bytes refused; disclosure rows; `publishAd` refuses before preview; the CMS adapter refuses in preview and write); sabotage-witnessed: publishAd unwired, summary trusted, store fail-open, scratch AI passed, CMS write ungated, token resolution dropped each red a test |
 | P4 | implemented 2026-10-20 | #5089 (`feat/cs-0945-p4`, after #5084) | `adr0945-p4-image-to-video.test.ts` (6: a checked shot animates on the one pipeline, stamped `animate` + `needs_review` and held by the publish gate; a product photo only with catalog confirmation; unchecked / under-review stills refused before any submit; one paid job per still; legacy avatar/t2v hashes unchanged; the adapter posts `image_to_video`) |
 | P5 | implemented 2026-10-20 | `feat/cs-0945-p5` (after #5089) | `adr0945-p5-read-routes.test.ts` (4: provenance returns the stamp, the stored verdict and in-org sources with no prompt text, a deleted source is `present:false`, another org's asset 404s; product media lists roles, an unresolvable photo is 422, commerce off refuses); FE `media/__tests__/provenance.test.tsx` (chip only for stamped assets and named in words; the drawer shows source beside result, value/limit, and judge evidence as text, never markup); `npm run build` green, entry chunk unchanged |
@@ -748,3 +768,6 @@ tests); the manual judge runner typechecks under strict and `--plan` reports
 `calls_made: 0` (4 fixtures, at most 8 requests × 1,200 output tokens). No
 live model call was made. The live fidelity evaluation is still owed and needs
 the user's authorization; the merge train is the canonical integration gate.
+
+> **Update 2026-10-31:** the live fidelity evaluation has since run green in
+> production (4/4, google `gemini-3.5-flash`); see the P2 correction above.

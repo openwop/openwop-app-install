@@ -7,7 +7,8 @@
  *  - withdrawn consent between intake and send ⇒ the row is DROPPED and
  *    nothing is sent; an erased visitor (tombstone) likewise;
  *  - a row with no visitor key, or an unreadable consent, is HELD (not sent,
- *    not lost);
+ *    not lost) — the unreadable leg makes `isAllowed` throw (vi.mock below),
+ *    the same failure `marketingAllowedOrUnreadable` maps to 'unreadable';
  *  - a failed send records the platform's last error (health card), cleared on
  *    success; health counts per platform and says when the read was capped;
  *  - `campaign-sync.conversions-dispatch` runs to `completed` and sends;
@@ -19,10 +20,27 @@
  * as consented; drop the `side-effect` role from the node (the replay fork
  * re-sends); stop skipping already-delivered platforms (the branch fork
  * double-fires).
+ *
+ * The replay-fork "sends nothing" claim is held by THREE guards: the pack
+ * manifest's `role:"side-effect"`, its `side-effectful` capability, and
+ * `executor/sideEffectFloor.generated.ts` (which lists this typeId). A probe on
+ * one of them alone is an equivalent mutant (w73 g4).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const consentRead = vi.hoisted(() => ({ fail: false }));
+vi.mock('../src/features/consent/consentService.js', async (orig) => {
+  const actual = await orig<typeof import('../src/features/consent/consentService.js')>();
+  return {
+    ...actual,
+    isAllowed: async (...args: Parameters<typeof actual.isAllowed>) => {
+      if (consentRead.fail) throw new Error('consent store unavailable');
+      return actual.isAllowed(...args);
+    },
+  };
+});
 import { getSetCookies } from './headerCookies.js';
 import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
@@ -70,7 +88,7 @@ beforeAll(async () => {
   await new Promise<void>((r) => meta.listen(0, '127.0.0.1', r));
   process.env.OPENWOP_META_API_BASE = `http://127.0.0.1:${(meta.address() as AddressInfo).port}`;
   registerProvider({ id: 'meta-ads', label: 'Meta Ads', kind: 'oauth2', authFlow: 'manual', reach: 'openapi', scopes: { read: [] }, refreshable: true, defaultScopes: [], consumerNodes: [], apiHosts: ['127.0.0.1'] });
-});
+}, 120_000);
 
 afterAll(async () => {
   delete process.env.OPENWOP_META_API_BASE;
@@ -78,7 +96,7 @@ afterAll(async () => {
   await new Promise<void>((r) => server.close(() => r()));
 });
 
-beforeEach(async () => { metaHits = []; metaStatus = 200; await __resetPixels(); });
+beforeEach(async () => { metaHits = []; metaStatus = 200; consentRead.fail = false; await __resetPixels(); });
 
 describe('ADR 0907 D7 — consent re-checked at send', () => {
   const T = 'cd-t';
@@ -107,7 +125,7 @@ describe('ADR 0907 D7 — consent re-checked at send', () => {
       expect(metaHits.flatMap((h) => h.eventIds)).toEqual(['ok-1']);
       expect((await listConversions(T, ORG)).map((r) => r.eventId)).toEqual(['ok-1']);
     } finally {
-      if (consent) await saveConfig({ ...consent, status: 'off' }, 'test');
+      if (consent) await saveConfig(consent, 'test');
     }
   });
 
@@ -117,6 +135,19 @@ describe('ADR 0907 D7 — consent re-checked at send', () => {
     expect(await deliverQueuedConversions(adapter(), T, ORG)).toEqual({ sent: 0, dropped: 0, held: 1, expired: 0 });
     expect(metaHits).toHaveLength(0);
     expect((await listConversions(T, ORG))[0]).toMatchObject({ eventId: 'novk-1', status: 'queued' });
+  });
+
+  it('an UNREADABLE consent HOLDS the row — not sent, not dropped', async () => {
+    await upsertPixel(T, ORG, { platform: 'meta', pixelId: 'PX' });
+    await relayConversion(T, ORG, { eventId: 'unread-1', eventName: 'purchase', visitor: 'vk-unread' });
+    consentRead.fail = true;
+    try {
+      expect(await deliverQueuedConversions(adapter(), T, ORG)).toEqual({ sent: 0, dropped: 0, held: 1, expired: 0 });
+    } finally {
+      consentRead.fail = false;
+    }
+    expect(metaHits).toHaveLength(0);
+    expect((await listConversions(T, ORG)).map((r) => [r.eventId, r.status])).toEqual([['unread-1', 'queued']]);
   });
 
   it('a failed send records the last error per platform (health), cleared once it succeeds', async () => {
@@ -143,7 +174,7 @@ describe('ADR 0907 D7 — consent re-checked at send', () => {
 
 // ── The chain, through the real executor, and both fork modes ────────────────
 
-interface Body { runId?: string; orgId?: string; status?: string; user?: { userId: string; tenantId: string }; events?: Array<{ type?: string; nodeId?: string; payload?: Record<string, unknown> }> }
+interface Body { error?: string; runId?: string; orgId?: string; status?: string; user?: { userId: string; tenantId: string }; events?: Array<{ type?: string; nodeId?: string; payload?: Record<string, unknown> }> }
 interface Res { status: number; body: Body }
 function client() {
   let cookie = '';
@@ -162,6 +193,7 @@ async function settle(c: Client, runId: string): Promise<string> {
     if (status === 'completed' || status === 'failed' || status === 'cancelled') break;
     await new Promise((r) => setTimeout(r, 25));
   }
+  if (status !== 'completed' && status !== 'failed' && status !== 'cancelled') throw new Error(`run ${runId} did not settle (last status ${status})`);
   return status;
 }
 async function deliverOutputs(c: Client, runId: string): Promise<Record<string, unknown>> {
@@ -199,27 +231,30 @@ describe('campaign-sync.conversions-dispatch — real executor + forks (ADR 0907
     const sub = getToggleDefault(SCHEDULED_CONVERSIONS_TOGGLE)!;
     expect(sub.status).toBe('off');
     await saveConfig({ ...sub, status: 'on' }, 'test');
-    const run = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: { orgId } });
-    expect(run.status, JSON.stringify(run.body)).toBe(201);
-    const src = run.body.runId!;
-    expect(await settle(owner, src)).toBe('completed');
-    expect(await deliverOutputs(owner, src)).toEqual({ outcome: 'delivered', sent: 1, dropped: 0, held: 0, expired: 0 });
-    expect(metaHits.flatMap((h) => h.eventIds)).toEqual(['chain-1']);
+    try {
+      const run = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: { orgId } });
+      expect(run.status, JSON.stringify(run.body)).toBe(201);
+      const src = run.body.runId!;
+      expect(await settle(owner, src)).toBe('completed');
+      expect(await deliverOutputs(owner, src)).toEqual({ outcome: 'delivered', sent: 1, dropped: 0, held: 0, expired: 0 });
+      expect(metaHits.flatMap((h) => h.eventIds)).toEqual(['chain-1']);
 
-    // REPLAY fork: the side-effect node is served its recorded outcome — no send.
-    const replay = await owner.post(`/runs/${src}:fork`, { mode: 'replay', fromSeq: 0 });
-    expect(replay.status, JSON.stringify(replay.body)).toBe(201);
-    expect(await settle(owner, replay.body.runId!)).toBe('completed');
-    expect(await deliverOutputs(owner, replay.body.runId!)).toEqual({ outcome: 'delivered', sent: 1, dropped: 0, held: 0, expired: 0 });
-    expect(metaHits.flatMap((h) => h.eventIds)).toEqual(['chain-1']); // still exactly one send
+      // REPLAY fork: the side-effect node is served its recorded outcome — no send.
+      const replay = await owner.post(`/runs/${src}:fork`, { mode: 'replay', fromSeq: 0 });
+      expect(replay.status, JSON.stringify(replay.body)).toBe(201);
+      expect(await settle(owner, replay.body.runId!)).toBe('completed');
+      expect(await deliverOutputs(owner, replay.body.runId!)).toEqual({ outcome: 'delivered', sent: 1, dropped: 0, held: 0, expired: 0 });
+      expect(metaHits.flatMap((h) => h.eventIds)).toEqual(['chain-1']); // still exactly one send
 
-    // BRANCH fork: runs live, and only what is still queued goes out.
-    await relayConversion(tenantId, orgId, { eventId: 'chain-2', eventName: 'purchase', visitor: 'vk-2' });
-    const branch = await owner.post(`/runs/${src}:fork`, { mode: 'branch', fromSeq: 0 });
-    expect(branch.status, JSON.stringify(branch.body)).toBe(201);
-    expect(await settle(owner, branch.body.runId!)).toBe('completed');
-    expect(metaHits.flatMap((h) => h.eventIds)).toEqual(['chain-1', 'chain-2']); // chain-1 NOT re-sent
-    await saveConfig({ ...sub, status: 'off' }, 'test');
+      // BRANCH fork: runs live, and only what is still queued goes out.
+      await relayConversion(tenantId, orgId, { eventId: 'chain-2', eventName: 'purchase', visitor: 'vk-2' });
+      const branch = await owner.post(`/runs/${src}:fork`, { mode: 'branch', fromSeq: 0 });
+      expect(branch.status, JSON.stringify(branch.body)).toBe(201);
+      expect(await settle(owner, branch.body.runId!)).toBe('completed');
+      expect(metaHits.flatMap((h) => h.eventIds)).toEqual(['chain-1', 'chain-2']); // chain-1 NOT re-sent
+    } finally {
+      await saveConfig(sub, 'test');
+    }
   });
 });
 
@@ -282,8 +317,12 @@ describe('GET …/conversions/health — workspace:read (ADR 0907 D7)', () => {
 
     const peer = client();
     expect((await peer.post('/host/openwop-app/test/login', { email: `ch-peer-${Date.now()}@acme.test`, tenantId })).status).toBe(201);
-    expect((await peer.get(path)).status).toBe(403);
-    expect((await client().get(path)).status).toBeGreaterThanOrEqual(401);
+    const denied = await peer.get(path);
+    expect(denied.status).toBe(403);
+    expect(denied.body.error).toBe('forbidden_scope');
+    const anon = await client().get(path);
+    expect(anon.status).toBe(401);
+    expect(anon.body.error).toBe('sign_in_required');
   });
 });
 

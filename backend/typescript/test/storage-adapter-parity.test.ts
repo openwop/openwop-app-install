@@ -485,6 +485,23 @@ describe('Storage parity: idempotency claim', () => {
   });
 });
 
+describe('Storage parity: chat-session title claim (ADR 1019 D2)', () => {
+  it.each(backendNames)('%s: claims NULL→claimed without touching title/updated_at; refuses a mismatch', async (name) => {
+    const s = S(name);
+    const sessionId = `cs-claim-${name}-${Math.random().toString(36).slice(2)}`;
+    const tenantId = `t-claim-${name}`;
+    await s.createChatSession({ sessionId, tenantId, title: 'placeholder', createdAt: baseTime, updatedAt: baseTime, messageCount: 1 });
+    expect(await s.claimChatSessionTitleSource(tenantId, sessionId, 'default', 'claimed')).toBe(true);
+    const claimed = await s.getChatSession(tenantId, sessionId);
+    expect(claimed?.title).toBe('placeholder');
+    expect(claimed?.titleSource).toBe('claimed');
+    expect(new Date(claimed!.updatedAt).getTime()).toBe(new Date(baseTime).getTime());
+    expect(await s.claimChatSessionTitleSource(tenantId, sessionId, 'default', 'claimed')).toBe(false);
+    expect(await s.casChatSessionTitle(tenantId, sessionId, { title: 'Auto', titleSource: 'auto', updatedAt: baseTime }, 'claimed')).toBe(true);
+    expect((await s.getChatSession(tenantId, sessionId))?.titleSource).toBe('auto');
+  });
+});
+
 describe('Storage parity: webhooks', () => {
   it.each(backendNames)('%s: insertWebhook → getWebhook round-trips', async (name) => {
     if (trackedSkipPgMem(name, 'insertWebhook → getWebhook round-trips')) return;

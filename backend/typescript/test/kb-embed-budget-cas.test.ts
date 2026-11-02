@@ -1,5 +1,19 @@
-/** ADR0904: provider dispatch must own a durable daily reservation. Real SQLite
- * connections pin last-slot contention and uncertain commit acknowledgements. */
+/** ADR 0904 P4/P5: every paid embedding/context dispatch owns a durable daily
+ * reservation (`reserveEmbedBudget`, the `kb:embedusage` counter) taken BEFORE the
+ * provider call. Two real SQLite connections over one file pin:
+ *  - last-slot contention: both reads are FORCED to land before either CAS (a one-shot
+ *    barrier on the counter read), exactly one writer is authorized, and the loser is
+ *    refused on the cap after its CAS retry (not on contention);
+ *  - a lost CAS acknowledgement refuses dispatch and the committed slot survives restart;
+ *  - an unreadable counter never authorizes a call;
+ *  - enrichment: a malformed answer keeps its reservation and the other pool workers
+ *    (4 concurrent, unforced) cannot overspend;
+ *  - every Vertex transport attempt, retries included, reserves again;
+ *  - the shared host embedder charges the same counter outside the KB service;
+ *  - an unclassified replay refuses before mutating the counter.
+ * Sabotage-witnessed (w74): a blind put for the CAS, a lost ack read as success, the cap
+ * compare removed, the replay refusal removed, retry admission only on attempt 0, the
+ * host admission or the KB admission callback bypassed, the enrichment budget stop removed. */
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -34,13 +48,33 @@ const bind = (target: Storage, prop: string | symbol): unknown => {
 
 it('two SQLite writers competing for the last slot authorize exactly one dispatch', async () => {
   let next = 0;
+  // Force the race: the FIRST counter read is parked until a second read arrives, so both
+  // writers have read the empty counter before either CAS runs (2 s fallback).
+  let arrivals = 0; let firstParked = false; let releasedWithBoth = false;
+  let release: () => void = () => {};
+  const parked = new Promise<void>(r => { release = r; });
+  const fallback = setTimeout(() => release(), 2000);
   initHostExtPersistence(new Proxy(a, { get(target, prop) {
+    if (prop === 'kvGet') return async (...args: Parameters<Storage['kvGet']>) => {
+      const value = await a.kvGet(...args); // the read happens BEFORE the hold
+      if (args[0].includes('kb:embedusage:last-slot')) {
+        arrivals += 1;
+        if (arrivals === 1) { firstParked = true; await parked; firstParked = false; }
+        else if (arrivals === 2) { releasedWithBoth = firstParked; release(); }
+      }
+      return value;
+    };
     if (prop === 'kvCompareAndSwap') return (...args: Parameters<Storage['kvCompareAndSwap']>) =>
       (next++ % 2 === 0 ? a : b).kvCompareAndSwap(...args);
     return bind(target, prop);
   } }));
   const results = await Promise.all([reserveEmbedBudget('last-slot', 10), reserveEmbedBudget('last-slot', 10)]);
+  clearTimeout(fallback);
+  expect(releasedWithBoth, 'both writers read the counter before either CAS').toBe(true);
   expect(results.filter(r => !r.exceeded)).toHaveLength(1);
+  const loser = results.find(r => r.exceeded);
+  expect(loser).toMatchObject({ exceeded: true, cap: 10, used: 10, nextTotal: 20 });
+  expect(loser).not.toHaveProperty('unavailable');
   initHostExtPersistence(b);
   expect((await checkEmbedBudget('last-slot', 0)).used).toBe(10);
 });

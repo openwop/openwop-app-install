@@ -32,6 +32,7 @@ import { EXPECTED_SUBJECT_ERASERS } from '../src/host/subjectEraserManifest.js';
 import {
   registeredSubjectEraserIds, missingSubjectErasers, registerSubjectEraser, __isSyntheticEraserRegistry,
 } from '../src/host/subjectErasure.js';
+import { stripComments } from './helpers/stripComments.js';
 
 const SRC = join(__dirname, '..', 'src');
 
@@ -54,14 +55,6 @@ function walk(dir: string): string[] {
     else if (p.endsWith('.ts') && !p.endsWith('.test.ts') && !p.includes('__tests__')) out.push(p);
   }
   return out;
-}
-
-/** Comments are not code (the repo's KB-3 lesson) — a commented-out
- *  registration must not count as one. */
-function stripComments(src: string): string {
-  return src
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')
-    .replace(/(^|[^:'"`\\])\/\/[^\n]*/g, '$1');
 }
 
 /** Every `registerSubjectEraser(<name>)` id declared in source. */

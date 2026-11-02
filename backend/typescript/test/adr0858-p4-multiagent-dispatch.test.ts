@@ -217,7 +217,7 @@ describe('ADR 0858 P4 — agents.dispatch and CP-2', () => {
       executeRun: async (_s: Storage, child: RunRecord) => { children.push(child); await storage.updateRun(child.runId, { status: 'completed', updatedAt: new Date().toISOString() }); return undefined; },
     });
     const now = new Date().toISOString();
-    await insertRunWithStartContext(storage, { runId: 'run-cp2', workflowId: 'cp2.parent', tenantId: 't-cp2', status: 'running', inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now });
+    await insertRunWithStartContext(storage, { runId: 'run-cp2', workflowId: 'cp2.parent', tenantId: 't-cp2', status: 'running', inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now }, { admission: { plan: 'exempt:test-fixture' } });
     const ctx = nodeCtx('run-cp2', 't-cp2', { agentId: 'orchestrator.cp2', decisions: [{ kind: 'next-worker', nextWorkerIds: ['wf-a', 'wf-b'] }] });
     await getNodeRegistry().get('core.dispatch')!.execute(ctx);
 

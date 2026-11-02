@@ -448,11 +448,24 @@ if [ "$CHECK_BACKEND" -eq 1 ]; then
       fi
       fail=1
     elif [ "$PEER_BUILD_WINDOW_MIN" -gt 0 ] 2>/dev/null; then
-      win=$(gcloud builds list --project "$gcp_project" --region "$gcp_region" \
+      # Count only builds for THIS service. The project also builds things that
+      # are not our deploy: MEASURED 2026-11-01, deploy 176d read NOT VERIFIED
+      # because a Cloud Run function (openwop-ci-budget-stop) was built in the
+      # same project and region. Every build Cloud Run makes carries a
+      # `service_<name>` tag (`p-run;r-docker;bt-DOCKER;service_openwop-app-backend`,
+      # `p-gcf;…;t-function;…;service_openwop-ci-budget-stop`), so the filter is
+      # an exact token match on that tag. The FLOOR above stays project-wide on
+      # purpose: it checks that the query can see builds at all, not whose they are.
+      pb_service="${OPENWOP_DEPLOY_SERVICE:-openwop-app-backend}"
+      win_all=$(gcloud builds list --project "$gcp_project" --region "$gcp_region" \
               ${GC_ID[@]+"${GC_ID[@]}"} \
               --filter="createTime>-PT${PEER_BUILD_WINDOW_MIN}M" \
-              --format='value(id,createTime,status)' 2>/dev/null)
+              --format='value(id,createTime,status,tags)' 2>/dev/null)
+      win=$(printf '%s\n' "$win_all" | awk -F'\t' -v want="service_$pb_service" '
+        { n = split($4, t, ";"); for (i = 1; i <= n; i++) if (t[i] == want) { print; next } }')
       n=$(printf '%s\n' "$win" | grep -c '[^[:space:]]')
+      n_other=$(( $(printf '%s\n' "$win_all" | grep -c '[^[:space:]]') - n ))
+      [ "$n_other" -gt 0 ] && echo "  peer build  (ignored $n_other build(s) in the window not tagged service_$pb_service)"
       if [ "$n" -ge 2 ]; then
         echo "  peer build  TWO OR MORE BUILDS in the last ${PEER_BUILD_WINDOW_MIN}m — a parallel deploy may have"
         echo "              landed on top of yours. The commit checks above CANNOT see this:"
@@ -488,7 +501,7 @@ if [ "$CHECK_BACKEND" -eq 1 ]; then
           echo "              run standalone rather than after a deploy; the arm checked nothing."
         fi
       else
-        echo "  peer build  OK       $n build(s) in the last ${PEER_BUILD_WINDOW_MIN}m (region $gcp_region)"
+        echo "  peer build  OK       $n build(s) of $pb_service in the last ${PEER_BUILD_WINDOW_MIN}m (region $gcp_region)"
       fi
     else
       echo "  peer build  FLOOR OK  (window check disabled via PEER_BUILD_WINDOW_MIN=0)"

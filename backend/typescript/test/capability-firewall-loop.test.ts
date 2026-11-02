@@ -2,6 +2,13 @@
  * ADR 0135 Phase 2 — the firewall hook wired into runChatToolLoop: a read-then-egress
  * combination within a turn is deferred (require-approval), a deny verdict is forbidden,
  * and an already-approved tool short-circuits.
+ *
+ * Tracker TST-CBF-4 (security: CGOV-4 — an approval never downgrades a deny; CGOV-1 —
+ * an unclassified tool is treated as risky egress by default). Red when: the loop stops
+ * recording run tools in the firewall's seen set; a `deny` verdict is not honoured; a
+ * held call is not collected as a pending approval; `approvedTools` no longer satisfies
+ * a require-approval, or starts satisfying a deny; the treat-as-risky fallback is
+ * dropped (w67g1-loop-* probes, wave 67).
  */
 import { describe, it, expect } from 'vitest';
 import { runChatToolLoop, type CompiledTool, type ChatToolLoopOpts } from '../src/host/agentDispatch.js';

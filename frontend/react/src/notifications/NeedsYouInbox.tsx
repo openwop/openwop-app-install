@@ -267,7 +267,7 @@ export function NeedsYouInbox({ onResolved, focusApprovalId, onApprovalFocused }
         ) : isRunProposal(a) ? (
           // Run-proposal: a compact row. ONLY this kind earns "Approve & run".
           <>
-            <p className="u-m-0"><Trans t={t} i18nKey="approvalsRunWorkflow" values={{ name: workflowName(a.workflowId) }} components={{ 1: <strong /> }} />{a.cardTitle ? <span className="muted"> {t('approvalsOnCard', { title: a.cardTitle })}</span> : null}</p>
+            <p className="u-m-0"><Trans t={t} i18nKey="approvalsRunWorkflow" values={{ name: workflowName(a.workflowId) }} components={[<></>, <strong />]} />{a.cardTitle ? <span className="muted"> {t('approvalsOnCard', { title: a.cardTitle })}</span> : null}</p>
             <div className="action-bar u-justify-end">
               <Button variant="accent-solid" size="sm" disabled={busy === a.approvalId} onClick={() => void approve(a)}><CheckIcon size={13} /> {t('approveAndRun')}</Button>
               <Button variant="secondary" size="sm" disabled={busy === a.approvalId} onClick={() => void reject(a)}><XIcon size={13} /> {t('rejectLabel')}</Button>

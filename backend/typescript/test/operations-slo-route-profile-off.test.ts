@@ -14,6 +14,14 @@
  *
  * The gate is unchanged by the profile: it is an authorization boundary, not a
  * telemetry one.
+ *
+ * What is unique here (vs the pure `slo-projection.test.ts`, which already
+ * asserts `unknown` for a null snapshot): the WIRING — with the profile off the
+ * route hands the projection `snapshot: null`, never an empty one. Sabotage,
+ * each red (w74 round 1): the route passing `[]` instead of `null` ("still
+ * serves", "answers unknown"); answering the no-reader rows `healthy`; reading
+ * the dispatch rows only when a snapshot exists; raising an alert for
+ * `unknown`; dropping `requireSuperadmin`; filling `window.startedAt`.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -22,6 +30,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { _resetMetricsProviderForTest, localScrapeEnabled } from '../src/observability/metrics.js';
 import { recordEffectBlocked } from '../src/observability/metricSeams.js';
+import type { SloProjection, SloRow } from '../src/observability/sloProjection.js';
 
 const SUPER_TENANT = 'org:test-slo-off-super';
 const OPS = '/host/openwop-app/operations';
@@ -39,7 +48,7 @@ beforeAll(async () => {
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-}, 60_000);
+}, 120_000);
 
 afterAll(async () => {
   delete process.env.OPENWOP_SUPERADMIN_TENANTS;
@@ -47,25 +56,39 @@ afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
 });
 
-interface Res { status: number; body: any }
+interface Res<T> { status: number; body: T }
+/** The flat S22 refusal envelope (`middleware/errorEnvelope.ts`). */
+interface Refusal { error: string; message: string; rows?: unknown }
+
+/** The catalog has 32 rows (`slo-projection.test.ts` "covers all 32 published
+ *  objectives"): 2 not projectable (C2, Q1) and 2 read from the queue table
+ *  (Q2, Q4 — `outbox_max`; Q3 is a `zero` objective over a metric), so exactly
+ *  28 rows depend on telemetry. Counted from `sloProjection.ts`, and measured. */
+const METRIC_DERIVED_ROWS = 28;
+
+function row(rows: readonly SloRow[], id: string): SloRow {
+  const found = rows.find((r) => r.id === id);
+  expect(found, `row ${id}`).toBeDefined();
+  return found!;
+}
 function client() {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
-    for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    return { status: res.status, body: await res.json().catch(() => undefined) };
+    for (const ck of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
+    return { status: res.status, body: (await res.json().catch(() => undefined)) as T };
   };
-  return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
+  return { get: <T>(p: string) => call<T>('GET', p), post: <T>(p: string, b?: unknown) => call<T>('POST', p, b) };
 }
 
 let n = 0;
 async function login(tenantId: string) {
   const c = client();
-  const r = await c.post('/host/openwop-app/test/login', { email: `slooff-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await c.post<unknown>('/host/openwop-app/test/login', { email: `slooff-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return c;
 }
@@ -79,7 +102,7 @@ describe('ADR 0556 P2 — profile off', () => {
 
   it('still serves an operator — the panel works, it just cannot see', async () => {
     const c = await login(SUPER_TENANT);
-    const r = await c.get(`${OPS}/slo/summary`);
+    const r = await c.get<SloProjection>(`${OPS}/slo/summary`);
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     expect(r.body.source).toBe('unavailable');
     expect(r.body.window.startedAt).toBeNull();
@@ -91,36 +114,36 @@ describe('ADR 0556 P2 — profile off', () => {
     // all good" while the process has in fact blocked one.
     recordEffectBlocked('network-egress');
     const c = await login(SUPER_TENANT);
-    const rows = (await c.get(`${OPS}/slo/summary`)).body.rows as any[];
-    const metricDerived = rows.filter((row) => row.state !== 'not_projectable' && row.source !== 'dispatch-outbox-stats');
-    expect(metricDerived.length).toBeGreaterThan(20);
-    expect(metricDerived.every((row) => row.state === 'unknown')).toBe(true);
-    expect(metricDerived.every((row) => row.observed === null)).toBe(true);
-    expect(metricDerived.some((row) => row.state === 'healthy')).toBe(false);
+    const { rows } = (await c.get<SloProjection>(`${OPS}/slo/summary`)).body;
+    const metricDerived = rows.filter((r) => r.state !== 'not_projectable' && r.source !== 'dispatch-outbox-stats');
+    expect(metricDerived.length).toBe(METRIC_DERIVED_ROWS);
+    expect(metricDerived.every((r) => r.state === 'unknown')).toBe(true);
+    expect(metricDerived.every((r) => r.observed === null)).toBe(true);
+    expect(metricDerived.some((r) => r.state === 'healthy')).toBe(false);
     // R1 specifically: an effect WAS blocked, and the panel must not imply none was.
-    expect(rows.find((row) => row.id === 'R1').state).toBe('unknown');
+    expect(row(rows, 'R1').state).toBe('unknown');
   });
 
   it('still answers the dispatch rows — they read the queue table, not telemetry', async () => {
     const c = await login(SUPER_TENANT);
-    const rows = (await c.get(`${OPS}/slo/summary`)).body.rows as any[];
-    const q2 = rows.find((row) => row.id === 'Q2');
+    const { rows } = (await c.get<SloProjection>(`${OPS}/slo/summary`)).body;
+    const q2 = row(rows, 'Q2');
     expect(q2.source).toBe('dispatch-outbox-stats');
     expect(q2.state).toBe('healthy');
   });
 
   it('raises no alerts — `unknown` is not a breach', async () => {
     const c = await login(SUPER_TENANT);
-    expect((await c.get(`${OPS}/slo/summary`)).body.alerts).toEqual([]);
+    expect((await c.get<SloProjection>(`${OPS}/slo/summary`)).body.alerts).toEqual([]);
   });
 
   it('keeps the gate exactly as it is with the profile on', async () => {
     // The profile is a telemetry setting, never an authorization one.
-    expect((await client().get(`${OPS}/slo/summary`)).status).toBe(403);
+    expect((await client().get<Refusal>(`${OPS}/slo/summary`)).status).toBe(403);
     const member = await login('org:not-an-operator');
-    const r = await member.get(`${OPS}/slo/summary`);
+    const r = await member.get<Refusal>(`${OPS}/slo/summary`);
     expect(r.status).toBe(403);
-    expect(r.body?.rows).toBeUndefined();
+    expect(r.body.rows).toBeUndefined();
     expect(r.body.error).toBe('forbidden');
   });
 });

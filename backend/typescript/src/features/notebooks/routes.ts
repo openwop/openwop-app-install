@@ -40,7 +40,7 @@ import { resolveEffectiveAccess, type Scope } from '../../host/accessControlServ
 import { resolveProjectAccess, projectSubject } from '../projects/projectsService.js';
 import {
   subjectConversationId, ensureConversationMeta, getConversationMeta,
-  addParticipant, agentRef,
+  addParticipant, agentRef, refreshEntityChatTitle,
 } from '../../host/conversationStore.js';
 import { deleteConversationCompletely } from '../../host/conversationCascade.js';
 import {
@@ -544,10 +544,13 @@ export function registerNotebooksRoutes(deps: RouteDeps): void {
       const researcherRef = agentRef(RESEARCHER_AGENT_ID);
       const ts = new Date().toISOString();
       try {
-        await deps.storage.createChatSession({ sessionId: conversationId, tenantId, title: `${nb.name} · notebook`, createdAt: ts, updatedAt: ts, messageCount: 0 });
+        await deps.storage.createChatSession({ sessionId: conversationId, tenantId, title: `${nb.name} · notebook`, createdAt: ts, updatedAt: ts, messageCount: 0, titleSource: 'given' });
       } catch (err) {
         const code = (err as { code?: string }).code;
         if (code !== 'SQLITE_CONSTRAINT_PRIMARYKEY' && code !== '23505') throw err; // already exists ⇒ reuse
+        // ADR 1019 D1 — follow a notebook rename, and repair a room the ADR 0151
+        // autotitler renamed (the shared helper boards and projects use).
+        await refreshEntityChatTitle(deps.storage, tenantId, conversationId, `${nb.name} · notebook`);
       }
       await ensureConversationMeta(tenantId, conversationId, {
         type: 'group',

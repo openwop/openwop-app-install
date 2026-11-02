@@ -26,10 +26,18 @@
  * (gates approve, live-slot flags are on), so a `falsy` edge (a reject route)
  * never fires and a `truthy` one always does — the happy path the gate guards.
  *
- * The violating set is pinned and may only SHRINK. Sabotage: deleting the
- * KickTodo factory's `build-fail-N` edges adds `kicktodo.challenge-factory`
- * rows (decompose and the publication submit run past a skipped gate) and reds
- * the ratchet.
+ * The violating set is pinned and may only SHRINK.
+ *
+ * CORRECTED 2026-10-29 (grade-tests w67, TST-CCC-7) — DOUBLE GUARD. This header used
+ * to say that deleting the factory's `build-fail-N` edges reds the ratchet. MEASURED:
+ * it does not, and neither does deleting replan's `enrich-fail → apply` edge (both
+ * probes vacuous). The scheduler now carries the same protection itself:
+ * `evaluateTrigger` treats a skip that sits BEHIND a failure (`failedBehindSkip`,
+ * `executor/scheduler.ts`) as an unrecovered failure, so `none_failed` work past a
+ * failure-skipped gate is skipped with or without the chain's barrier. The barrier
+ * edges (chain packs) and `failedBehindSkip` (scheduler) are two guards in two files;
+ * the probe that reds this file is the scheduler one: drop the `failedBehindSkip`
+ * term from `unrecoveredFailure`.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { dirname, join } from 'node:path';
@@ -83,7 +91,13 @@ function downstreamOf(def: WorkflowDefinition, from: string): Set<string> {
   return seen;
 }
 
+let memo: string[] | null = null;
+/** Computed once per file (the simulation is the expensive part); every case reads it. */
 function violations(): string[] {
+  memo ??= computeViolations();
+  return memo;
+}
+function computeViolations(): string[] {
   const out: string[] = [];
   for (const { chain } of listChains()) {
     const def = expandChain(chain, { deferred: true });
@@ -110,8 +124,12 @@ function violations(): string[] {
  *  gate's approval in its own code — each is proven by the case below, so an
  *  entry here cannot outlive the guard it names. */
 const GUARDED_IN_NODE: Record<string, string> = {
-  'app-builder.repair :: audit fails -> review skipped but apply ran':
-    'apply-repair fails approval_required when its `approval` input is absent (ADR 0835 D5)',
+  // SHRUNK 2026-10-29 (grade-tests w67, TST-CCC-7): the one entry,
+  // 'app-builder.repair :: audit fails -> review skipped but apply ran', no longer
+  // occurs — the scheduler's `failedBehindSkip` now skips `apply` itself (see the
+  // header). Measured by the two-sided check below, which reported it stale. The
+  // in-node guard (apply-repair refuses without an approval, ADR 0835 D5) is kept
+  // under test as defence in depth.
 };
 
 /** Pinned violating set (shrink-only). Each entry is a chain where a failing
@@ -122,6 +140,7 @@ const BASELINE: string[] = [];
 describe('WF-FAIL-2 — a failed node never silently skips an approval gate', () => {
   beforeAll(() => {
     _resetChainRegistryForTest();
+    memo = null;
     const { errors } = loadWorkflowChainPacks({ roots: [IN_TREE_ROOT] });
     expect(errors).toEqual([]);
   });
@@ -132,7 +151,7 @@ describe('WF-FAIL-2 — a failed node never silently skips an approval gate', ()
       const def = expandChain(chain, { deferred: true });
       if (def.nodes.some((n) => APPROVAL_GATE_TYPE_IDS.has(bareType(n.typeId)))) chainsWithGates++;
     }
-    expect(chainsWithGates).toBeGreaterThan(10);
+    expect(chainsWithGates).toBeGreaterThan(73); // measured 76 (raw gate typeIds, 2026-10-29)
   });
 
   it('the violating set only shrinks', () => {
@@ -161,7 +180,10 @@ describe('WF-FAIL-2 — a failed node never silently skips an approval gate', ()
     }
     expect(code).toBe('approval_required');
     expect(wrote).toBe(false);
-    expect(Object.keys(GUARDED_IN_NODE)).toHaveLength(1);
+    // Two-sided: a waiver must still waive something. A chain that no longer bypasses
+    // leaves a stale entry, and a stale entry is a standing grant for the next one.
+    const all = violations();
+    for (const key of Object.keys(GUARDED_IN_NODE)) expect(all, `stale GUARDED_IN_NODE entry: ${key}`).toContain(key);
   });
 
   // The replan chain is the WF-FAIL-2 finding this ratchet was written for:

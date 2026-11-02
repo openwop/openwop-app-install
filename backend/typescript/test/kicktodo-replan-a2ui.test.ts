@@ -21,6 +21,11 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
+/** The resume value the form card sends: one answer per field (ADR 1013 D4). */
+const answers = (values: Record<string, unknown>): { answers: Array<{ id: string; answer: unknown }> } => ({
+  answers: Object.entries(values).map(([id, answer]) => ({ id, answer })),
+});
+
 // The closed catalog is READ FROM ITS SSoT — the renderer's own
 // `frontend/react/src/chat/a2ui/catalog.ts` (`A2UI_CATALOG_VERSION` +
 // `SUPPORTED_COMPONENTS`), which fail-closes on anything outside it. A hand-copied
@@ -37,7 +42,7 @@ type NodeResult = { status: string; outputs?: Record<string, unknown>; error?: {
 /** One A2UI component as the node emits it (the fields these cases read). */
 interface SurfaceComponent { component: string; id?: string; text?: string; label?: string; required?: boolean; options?: unknown[]; action?: { target?: unknown } }
 /** The `ctx.suspend` payload the node raises. */
-interface SuspendPayload { reason?: string; resumeKey?: string; question?: string; catalogVersion?: string; surface?: { title?: string; components?: SurfaceComponent[] } }
+interface SuspendPayload { reason?: string; resumeKey?: string; questions?: Array<{ id: string; question: string }>; form?: { catalogVersion?: string; surface?: { title?: string; components?: SurfaceComponent[] } } }
 interface Ctx { inputs: Record<string, unknown>; suspend?: (payload: SuspendPayload) => Promise<unknown> }
 const packUrl = new URL('../../../packs/feature.kicktodo.nodes/index.mjs', import.meta.url).href;
 
@@ -52,8 +57,8 @@ function assertCatalogValid(payload: SuspendPayload | undefined): SurfaceCompone
   if (!payload) throw new Error('the node must suspend with a payload');
   expect(payload.reason).toBe('clarification');
   expect(payload.resumeKey).toBe('replan-clarify');
-  expect(payload.catalogVersion).toBe(CATALOG_VERSION);
-  const components = payload.surface?.components ?? [];
+  expect(payload.form?.catalogVersion).toBe(CATALOG_VERSION);
+  const components = payload.form?.surface?.components ?? [];
   expect(components.length).toBeGreaterThan(0);
   for (const c of components) {
     expect(CATALOG.has(c.component)).toBe(true);
@@ -112,7 +117,7 @@ describe('KickTodo replan-clarify A2UI clarification (ADR 0463)', () => {
       }),
     ).rejects.toThrow('__suspended__');
 
-    expect(captured?.question).toBe('Which day is your rest day?');
+    expect(captured?.questions?.[0]?.question).toBe('Which day is your rest day?');
     const components = assertCatalogValid(captured);
     const text = components.find((c) => c.component === 'text');
     expect(text?.text).toBe('Which day is your rest day?');
@@ -125,7 +130,7 @@ describe('KickTodo replan-clarify A2UI clarification (ADR 0463)', () => {
     // Resume: ctx.suspend returns the recorded values inline; the slot is filled.
     const resumed = await run({
       inputs: { revision },
-      suspend: async () => ({ daypart: 'wednesday' }),
+      suspend: async () => answers({ daypart: 'wednesday' }),
     });
     expect(resumed.status).toBe('success');
     expect(resumed.outputs?.result).toEqual({ commands: [{ lane: 'schedule', daypart: 'wednesday' }], rationale: revision.rationale });
@@ -157,7 +162,7 @@ describe('KickTodo replan-clarify A2UI clarification (ADR 0463)', () => {
     expect(dateField?.component).toBe('field.date');
     expect(dateField?.options).toBeUndefined();
 
-    const resumed = await run({ inputs: { revision }, suspend: async () => ({ targetDate: '2026-08-01' }) });
+    const resumed = await run({ inputs: { revision }, suspend: async () => answers({ targetDate: '2026-08-01' }) });
     expect(resumed.outputs?.result).toEqual({ commands: [{ lane: 'recovery', targetDate: '2026-08-01' }], rationale: revision.rationale });
   });
 
@@ -218,7 +223,7 @@ describe('KickTodo replan-clarify A2UI clarification (ADR 0463)', () => {
 
     it('an answer outside field.options is a typed failure, never a filled command', async () => {
       const run = await replanClarify();
-      const out = await run({ inputs: { revision: select }, suspend: async () => ({ daypart: 'friday' }) });
+      const out = await run({ inputs: { revision: select }, suspend: async () => answers({ daypart: 'friday' }) });
       expect(out.status).toBe('failed');
       expect(out.error?.code).toBe('clarification_answer_invalid');
     });
@@ -226,7 +231,7 @@ describe('KickTodo replan-clarify A2UI clarification (ADR 0463)', () => {
     it('an offered answer (string or {value} option) fills the command', async () => {
       const run = await replanClarify();
       for (const daypart of ['monday', 'sunday']) {
-        const out = await run({ inputs: { revision: select }, suspend: async () => ({ daypart }) });
+        const out = await run({ inputs: { revision: select }, suspend: async () => answers({ daypart }) });
         expect(out.status).toBe('success');
         expect(out.outputs?.result).toEqual({ commands: [{ lane: 'schedule', daypart }], rationale: 'Which rest day?' });
       }
@@ -234,10 +239,10 @@ describe('KickTodo replan-clarify A2UI clarification (ADR 0463)', () => {
 
     it('a missing answer or a malformed date is a typed failure', async () => {
       const run = await replanClarify();
-      expect((await run({ inputs: { revision: select }, suspend: async () => ({}) })).error?.code).toBe('clarification_answer_invalid');
+      expect((await run({ inputs: { revision: select }, suspend: async () => answers({}) })).error?.code).toBe('clarification_answer_invalid');
       const date = { ...select, clarification: { ...select.clarification, field: { id: 'restDate', type: 'date', label: 'Date' } } };
-      expect((await run({ inputs: { revision: date }, suspend: async () => ({ restDate: 'next tuesday' }) })).error?.code).toBe('clarification_answer_invalid');
-      expect((await run({ inputs: { revision: date }, suspend: async () => ({ restDate: '2026-10-20' }) })).status).toBe('success');
+      expect((await run({ inputs: { revision: date }, suspend: async () => answers({ restDate: 'next tuesday' }) })).error?.code).toBe('clarification_answer_invalid');
+      expect((await run({ inputs: { revision: date }, suspend: async () => answers({ restDate: '2026-10-20' }) })).status).toBe('success');
     });
 
     it('a revision with BOTH commands and a clarification is revision_ambiguous, and nothing is asked', async () => {

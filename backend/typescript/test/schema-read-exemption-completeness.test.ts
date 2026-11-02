@@ -84,6 +84,7 @@ const CLASSIFICATION: ReadonlyArray<readonly [string, boolean]> = [
   ['openwop:campaign-studio.render', false],
   ['openwop:cdp.identity.resolve', false],
   ['openwop:channels.list', false],
+  ['openwop:ask-user', false], // ADR 1001 D7: returns {ok, asked}; the questions end the turn as its text
   ['openwop:cms.get-draft-page', true],
   ['openwop:cms.get-page', false],
   ['openwop:cms.list-pages', false],

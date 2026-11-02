@@ -1,5 +1,16 @@
 /**
- * ADR 0135 Phase 1 — the pure composition evaluator.
+ * ADR 0135 Phase 1/5/6 — the pure composition evaluator (`evaluateComposition`).
+ *
+ * Invariants: a rule's `anyOf` matches the classes SEEN this turn ∪ the NEXT tool's
+ * (within-call exfil is caught on first use), while `with` matches the NEXT tool only
+ * (an earlier egress followed by a read is not read-then-egress); rules are ordered
+ * and the FIRST match decides; `countAtLeast` counts the about-to-run call and fires
+ * at the threshold; an expression's `count.*` facts include the next call.
+ *
+ * Tracker TST-CBF-2 (security). Red when: `anyOf` stops seeing the next tool; `with`
+ * is matched against seen ∪ next; rule order is not first-match-wins; the next call is
+ * not counted or `>=` becomes `>`; expressions read prior counts only; scopes drop out
+ * of a descriptor's classes (w67g1-ev-* probes, wave 67).
  */
 import { describe, it, expect } from 'vitest';
 import { evaluateComposition, classesOf, classKey } from '../src/features/capability-firewall/compositionEvaluator.js';
@@ -38,6 +49,8 @@ describe('evaluateComposition (ADR 0135 P1)', () => {
   it('CROSS-CALL: read earlier, egress now ⇒ require-approval', () => {
     const seen = new Set(keys(read));
     expect(evaluateComposition(seen, keys(egress), [EXFIL])).toMatchObject({ decision: 'require-approval', ruleId: 'read-then-egress' });
+    // Direction matters: egress EARLIER, read NOW is not read-then-egress (`with` = next only).
+    expect(evaluateComposition(new Set(keys(egress)), keys(read), [EXFIL])).toEqual({ decision: 'allow' });
   });
 
   it('WITHIN-CALL: a single tool that both reads and egresses ⇒ require-approval (first use)', () => {
@@ -58,9 +71,17 @@ describe('evaluateComposition (ADR 0135 P1)', () => {
 
   it('deny verdict + first-match-wins', () => {
     const seen = new Set([...keys(read), ...keys({ safetyTier: 'write' })]);
-    // write seen + exec now → DENY rule (listed first) wins over anything later
-    expect(evaluateComposition(seen, keys({ safetyTier: 'exec' }), [DENY_EXEC_AFTER_WRITE, EXFIL]))
-      .toMatchObject({ decision: 'deny', ruleId: 'no-exec-after-write' });
+    // write seen + exec now → BOTH rules match; the DENY rule (listed first) decides.
+    const LATER_MATCH: CapabilityRule = {
+      id: 'review-exec-after-write', description: '',
+      when: { anyOf: [{ safetyTier: 'write' }], with: [{ safetyTier: 'exec' }] },
+      verdict: 'require-approval', reason: 'later',
+    };
+    expect(evaluateComposition(seen, keys({ safetyTier: 'exec' }), [DENY_EXEC_AFTER_WRITE, LATER_MATCH]))
+      .toEqual({ decision: 'deny', ruleId: 'no-exec-after-write', reason: 'exec after a write is forbidden' });
+    // the same two rules in the other order: the later-listed one now decides
+    expect(evaluateComposition(seen, keys({ safetyTier: 'exec' }), [LATER_MATCH, DENY_EXEC_AFTER_WRITE]))
+      .toMatchObject({ decision: 'require-approval', ruleId: 'review-exec-after-write' });
   });
 
   it('empty rules ⇒ allow', () => {

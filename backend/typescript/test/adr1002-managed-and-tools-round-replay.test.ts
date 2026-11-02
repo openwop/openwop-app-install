@@ -539,3 +539,33 @@ describe('ADR 1002 D4 — through the REAL agent-runner node and REAL write tool
     expect(await jobs()).toBe(before + 2);
   });
 });
+
+describe('ADR 1012 — a provider-executed search is suppressed at dispatch', () => {
+  const inReplay = <T,>(replaying: boolean, fn: () => Promise<T>): Promise<T> =>
+    runWithEffectContext({ runId: 'run-1012', replaying } as Parameters<typeof runWithEffectContext>[0], fn);
+  const SEARCH: AiToolCallRequest = { ...TOOLS_REQ, webSearch: true };
+
+  it('control: the same round dispatches on a live run', async () => {
+    await inReplay(false, () => lane('run-1012-live').adapter.callAIWithTools(SEARCH));
+    expect(managedRound).toHaveBeenCalledTimes(1);
+  });
+
+  it('a replay miss refuses the search round instead of calling the provider', async () => {
+    await expect(inReplay(true, () => lane('run-1012-replay').adapter.callAIWithTools(SEARCH))).rejects.toMatchObject({ code: 'replay_source_missing' });
+    expect(managedRound).not.toHaveBeenCalled();
+  });
+
+  it('a replay miss refuses a BYOK search round too', async () => {
+    const req: AiToolCallRequest = { ...SEARCH, provider: 'anthropic', model: 'claude-sonnet-4-5', credentialRef: 'anthropic' };
+    await inReplay(false, () => lane('run-1012-byok-live', { byok: true }).adapter.callAIWithTools(req));
+    expect(anthropicRound).toHaveBeenCalledTimes(1);
+    anthropicRound.mockClear();
+    await expect(inReplay(true, () => lane('run-1012-byok', { byok: true }).adapter.callAIWithTools(req))).rejects.toMatchObject({ code: 'replay_source_missing' });
+    expect(anthropicRound).not.toHaveBeenCalled();
+  });
+
+  it('a replay round with no search is not refused here', async () => {
+    await inReplay(true, () => lane('run-1012-plain').adapter.callAIWithTools(TOOLS_REQ));
+    expect(managedRound).toHaveBeenCalledTimes(1);
+  });
+});

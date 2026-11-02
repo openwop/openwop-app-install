@@ -9,6 +9,17 @@
  *    (the executor's `runsummary:<runId>` idempotency).
  *  - DUR-3: `OPENWOP_DEMO_SEED_ENABLED` defaults OFF in the auth posture
  *    (opt-in), stays ON elsewhere; an explicit value always wins.
+ *  - LEAK-10: outside demo mode the demo knowledge corpus is never served.
+ *
+ * Tracker TST-CXG-2. Red when (deployPosture.ts / exampleDataSeed.ts /
+ * durableMemory.ts / knowledgeSurface.ts / inMemorySurfaces.ts): the NODE_ENV or
+ * durable-DSN check passes, or either escape hatch keys on another value; the
+ * seed default ignores the posture; the memory scope key drops the tenant;
+ * clearScope miscounts; the demo corpus is served outside demo mode; or an
+ * explicit memory id appends instead of replacing.
+ * DOUBLE GUARD: "concurrent appends never lose a row" is held by the in-process
+ * `withKeyLock` AND the kvCompareAndSwap retry loop; removing either alone stays
+ * green (measured w69), removing both is red.
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
@@ -18,7 +29,10 @@ import { _setDurableStorageForTesting } from '../src/host/durable/durableKv.js';
 import { createDurableMemory } from '../src/host/durable/durableMemory.js';
 import { enterprisePostureStartupError, enterprisePosture } from '../src/host/deployPosture.js';
 import { exampleDataSeedEnabled } from '../src/host/exampleDataSeed.js';
-import type { MemoryRow } from '../src/host/inMemorySurfaces.js';
+import { buildHostSurfaceBundle, initInMemorySurfaces, listMemoryEntries, writeMemoryEntry, type MemoryRow } from '../src/host/inMemorySurfaces.js';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const ENV_KEYS = [
   'OPENWOP_DEPLOY_POSTURE', 'OPENWOP_AUTH_ENFORCE_BEARER', 'NODE_ENV',
@@ -131,6 +145,7 @@ describe('DUR-2 — durable RFC 0004 memory store', () => {
     const a = createDurableMemory({ tenantId: 'dur2-a' });
     const b = createDurableMemory({ tenantId: 'dur2-b' });
     await a.mutateRows(REF, (rows) => [...rows, { id: 'only-a', content: 'x', tags: [], createdAt: new Date().toISOString() } satisfies MemoryRow]);
+    expect((await a.getRows(REF)).map((r) => r.id)).toContain('only-a'); // positive control
     expect(await b.getRows(REF)).toHaveLength(0);
   });
 
@@ -149,10 +164,6 @@ describe('DUR-2 — durable RFC 0004 memory store', () => {
 describe('LEAK-10 — ctx.knowledge demo corpus is demo-gated (regression guard)', () => {
   it('outside demo mode a tenant with no knowledge gets an honest EMPTY result, never the demo corpus', async () => {
     delete process.env.OPENWOP_DEMO_MODE; // clean/enterprise install
-    const { initInMemorySurfaces, buildHostSurfaceBundle } = await import('../src/host/inMemorySurfaces.js');
-    const { mkdtempSync } = await import('node:fs');
-    const { tmpdir } = await import('node:os');
-    const { join } = await import('node:path');
     initInMemorySurfaces({ dataDir: mkdtempSync(join(tmpdir(), 'openwop-leak10-')) });
     const knowledge = buildHostSurfaceBundle({ tenantId: 'leak10-clean-tenant' }).knowledge;
     // 'security' is a strong hit in the seeded demo corpus — with demo mode off
@@ -164,10 +175,6 @@ describe('LEAK-10 — ctx.knowledge demo corpus is demo-gated (regression guard)
 
   it('in demo mode the seeded corpus still serves (showcase preserved)', async () => {
     process.env.OPENWOP_DEMO_MODE = 'true';
-    const { initInMemorySurfaces, buildHostSurfaceBundle } = await import('../src/host/inMemorySurfaces.js');
-    const { mkdtempSync } = await import('node:fs');
-    const { tmpdir } = await import('node:os');
-    const { join } = await import('node:path');
     initInMemorySurfaces({ dataDir: mkdtempSync(join(tmpdir(), 'openwop-leak10b-')) });
     const knowledge = buildHostSurfaceBundle({ tenantId: 'leak10-demo-tenant' }).knowledge;
     const res = await knowledge.retrieve({ query: 'security credentials handling' }) as { hasResults: boolean };
@@ -178,10 +185,6 @@ describe('LEAK-10 — ctx.knowledge demo corpus is demo-gated (regression guard)
 
 describe('DUR-2 — writeMemoryEntry upsert-on-explicit-id (via the module API, in-memory tier)', () => {
   it('re-writing the same explicit id replaces the row instead of duplicating (runsummary idempotency)', async () => {
-    const { initInMemorySurfaces, writeMemoryEntry, listMemoryEntries } = await import('../src/host/inMemorySurfaces.js');
-    const { mkdtempSync } = await import('node:fs');
-    const { tmpdir } = await import('node:os');
-    const { join } = await import('node:path');
     initInMemorySurfaces({ dataDir: mkdtempSync(join(tmpdir(), 'openwop-dur2-')) });
     const T = 'dur2-upsert';
     await writeMemoryEntry(T, 'tenant-memory', { id: 'runsummary:run-1', content: 'first attempt', tags: ['run-summary'] });

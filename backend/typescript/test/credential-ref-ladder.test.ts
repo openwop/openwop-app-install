@@ -9,6 +9,11 @@
  * list order. First-match is what the dispatcher has always done — the factory
  * pins the ref it picks explicitly precisely because two lists can order
  * prefixed refs differently.
+ *
+ * Tracker TST-CQE-5 (w68). Sabotage-witnessed: red when an absent explicit ref
+ * falls through, when the exact rung is skipped, when the `-` separator is
+ * dropped, when a ref merely CONTAINING the provider matches, and when
+ * `isManagedRef` accepts any `:`-ref.
  */
 import { describe, expect, it } from 'vitest';
 import { isManagedRef, pickCredentialRef } from '../src/aiProviders/credentialRefLadder.js';

@@ -11,6 +11,19 @@
  * Both arms everywhere: the subject's rows go AND a bystander's rows survive. A
  * subject eraser that over-reaches is unrecoverable, which makes the second arm
  * the more important of the two.
+ *
+ * Fail-closed is a DOUBLE GUARD in two files: `deleteSubjectNotifications`
+ * (`host/notificationSubjectErasure.ts`) and the adapter's own
+ * `deleteNotificationsForSubject` (`storage/sqlite/index.ts`) both return 0 on a
+ * falsy tenant or subject, so removing either one alone changes nothing. The
+ * empty-SUBJECT half is witnessed by a row whose `metadata.actorId` is `''` (an
+ * unguarded `= ''` would delete it). The empty-TENANT half is an equivalent
+ * mutant: the SQL's own `tenant_id = ?` cannot match a real row on `''`.
+ *
+ * Sabotage witnessed (grade-tests w74, TST-DVA-4): each of the three SQL
+ * clauses neutralised (recipient_user_id / $.actorId / $.recipientId), the
+ * `tenant_id = ?` predicate dropped, and the eraser's registration removed —
+ * each reds its case.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -76,7 +89,8 @@ describe('CMNT-11 — per-subject notification erasure', () => {
       });
     }
     expect(await deleteSubjectNotifications(A, 'subject')).toBe(1);
-    expect((await rows(B)).length).toBe(1);
+    expect((await rows(A)).map((r) => r.notificationId)).toEqual([]);
+    expect((await rows(B)).map((r) => r.notificationId)).toEqual([`n-${B}`]);
   });
 
   it('fails CLOSED on an empty tenant or subject — never a widened purge', async () => {
@@ -85,9 +99,14 @@ describe('CMNT-11 — per-subject notification erasure', () => {
       tenantId: T, notificationId: 'n-keep', type: 'comment.added', priority: 'normal', status: 'unread',
       title: 'x', message: 'x', createdAt: new Date().toISOString(), recipientUserId: 'subject',
     });
+    // The row an UNGUARDED empty subject would match (`json_extract(metadata,'$.actorId') = ''`).
+    await hostExtStorage().insertNotification({
+      tenantId: T, notificationId: 'n-empty-actor', type: 'comment.added', priority: 'normal', status: 'unread',
+      title: 'y', message: 'y', createdAt: new Date().toISOString(), metadata: { actorId: '' },
+    });
     expect(await deleteSubjectNotifications('', 'subject')).toBe(0);
     expect(await deleteSubjectNotifications(T, '')).toBe(0);
-    expect((await rows(T)).length).toBe(1);
+    expect((await rows(T)).map((r) => r.notificationId).sort()).toEqual(['n-empty-actor', 'n-keep']);
   });
 
   it('END TO END: a DSAR erases the comment AND the notification it produced', async () => {

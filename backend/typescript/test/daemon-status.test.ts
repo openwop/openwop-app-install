@@ -1,4 +1,15 @@
-import { describe, expect, it } from 'vitest';
+/**
+ * Daemon-status body (`routes/daemonStatus.ts`) — TST-CUA-2.
+ *
+ * The CLI's `demo {status,stop,restart}` and `doctor` read this host-extension
+ * route as their readiness signal: pid, when the process started, how long it has
+ * been up, and the observation time as the liveness marker.
+ *
+ * Red when `lastHeartbeat` is stamped from anything but the observation time, or
+ * when the derived `startTime` stops subtracting `process.uptime()` from `now`.
+ * `process.uptime()` is stubbed so both are exact and independent of worker age.
+ */
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildDaemonStatus } from '../src/routes/daemonStatus.js';
 
 const config = {
@@ -9,33 +20,27 @@ const config = {
   enableConsoleTracer: false,
 };
 
+const NOW = Date.UTC(2026, 4, 26, 12, 0, 0); // 2026-05-26T12:00:00.000Z
+
+afterEach(() => { vi.restoreAllMocks(); });
+
 describe('daemon status route', () => {
   it('reports pid / startTime / uptimeSeconds / lastHeartbeat', () => {
-    const now = Date.UTC(2026, 4, 26, 12, 0, 0);
-    const startTimeMs = now - 5000;
-    const body = buildDaemonStatus({ config, startTimeMs }, now) as {
-      app: { name: string; serviceName: string; serviceVersion: string };
-      pid: number;
-      startTime: string;
-      uptimeSeconds: number;
-      lastHeartbeat: string;
-    };
-    expect(body.app.name).toBe('workflow-engine');
-    expect(body.app.serviceName).toBe('daemon-status-test');
-    expect(body.app.serviceVersion).toBe('0.0.1');
-    expect(body.pid).toBe(process.pid);
-    expect(body.startTime).toBe(new Date(startTimeMs).toISOString());
-    expect(body.lastHeartbeat).toBe(new Date(now).toISOString());
-    expect(typeof body.uptimeSeconds).toBe('number');
-    expect(body.uptimeSeconds).toBeGreaterThanOrEqual(0);
+    vi.spyOn(process, 'uptime').mockReturnValue(7.9);
+    const body = buildDaemonStatus({ config, startTimeMs: NOW - 5000 }, NOW);
+    expect(body).toEqual({
+      app: { name: 'workflow-engine', serviceName: 'daemon-status-test', serviceVersion: '0.0.1' },
+      pid: process.pid,
+      startTime: '2026-05-26T11:59:55.000Z',
+      uptimeSeconds: 7,
+      lastHeartbeat: '2026-05-26T12:00:00.000Z',
+    });
   });
 
   it('derives startTime from process.uptime() when not supplied', () => {
-    const now = Date.now();
-    const body = buildDaemonStatus({ config }, now) as { startTime: string; uptimeSeconds: number };
-    // startTime should be approximately now - uptime; allow a small window.
-    const startMs = Date.parse(body.startTime);
-    expect(now - startMs).toBeGreaterThanOrEqual(body.uptimeSeconds * 1000 - 1000);
-    expect(now - startMs).toBeLessThanOrEqual(body.uptimeSeconds * 1000 + 1000);
+    vi.spyOn(process, 'uptime').mockReturnValue(42.7);
+    const body = buildDaemonStatus({ config }, NOW);
+    expect(body['uptimeSeconds']).toBe(42);
+    expect(body['startTime']).toBe('2026-05-26T11:59:18.000Z'); // NOW − 42 s
   });
 });

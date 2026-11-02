@@ -105,7 +105,7 @@ export async function createChannel(tenantId: string, ownerUserId: string | unde
   }));
   const channelId = randomUUID();
   const now = new Date().toISOString();
-  await hostExtStorage().createChatSession({ sessionId: channelId, tenantId, title: name, createdAt: now, updatedAt: now, messageCount: 0 });
+  await hostExtStorage().createChatSession({ sessionId: channelId, tenantId, title: name, createdAt: now, updatedAt: now, messageCount: 0, titleSource: 'given' });
   let meta = await ensureConversationMeta(tenantId, channelId, {
     type: 'channel',
     ...(ownerUserId ? { ownerUserId } : {}),

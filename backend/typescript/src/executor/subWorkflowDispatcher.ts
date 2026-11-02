@@ -29,7 +29,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { insertRunWithStartContext } from '../host/runInsert.js';
+import { chargedAdmission, insertRunWithStartContext } from '../host/runInsert.js';
 import { stripReservedRunMetadata } from '../host/runDispatch.js';
 import { inheritedRunMetadata } from '../host/inheritedRunMetadata.js';
 import { scoreOnlineEvalsOnTerminal } from '../host/workflowEvalOnline.js';
@@ -279,8 +279,17 @@ export async function dispatchSubWorkflow(
     }
   }
   // RFC 0126 — per-item literal inputs override the mapping projection (G1).
+  // ADR 1020 D1 — an `undefined` per-item value is not a literal: JSON cannot
+  // carry one, so a recorded decision drops the key and the mapping wins. Live,
+  // it used to ERASE the mapped value instead (a deferred chain expansion
+  // freezes an unset `{{params.X}}` in config to `undefined`), which sent every
+  // Campaign Studio channel child `briefId: undefined`. Skip it, so live
+  // matches recorded. `null`, `''` and other real values still override.
   if (opts.perItemInputs) {
-    for (const [k, v] of Object.entries(opts.perItemInputs)) childInputs[k] = v;
+    for (const [k, v] of Object.entries(opts.perItemInputs)) {
+      if (v === undefined) continue;
+      childInputs[k] = v;
+    }
   }
 
   // ADR 0832 D3 (review B1) — a child run carries no actor (it must not inherit
@@ -315,7 +324,11 @@ export async function dispatchSubWorkflow(
     updatedAt: now,
   };
   try {
-    await insertRunWithStartContext(storage, childRun, { definition: wf.definition });
+    // ADR 0987 D3 / Q1 — a child is a new run for the monthly plan, but takes no
+    // concurrency slot: it runs inside its parent's, and a parent with N children
+    // would otherwise deadlock against a cap below N + 1. A plan refusal is a
+    // pre-creation failure like any other insert failure below.
+    await insertRunWithStartContext(storage, childRun, { definition: wf.definition, admission: chargedAdmission() });
   } catch (err) {
     // Storage failure during insertRun is a pre-creation failure per
     // RFC 0037 §"Handoff state machine" (child run was never persisted),

@@ -1,13 +1,9 @@
 /**
  * vendor.myndhyve.kanban — kanban-coordination pack runtime.
  *
- * 7 nodes route through ctx.kanban.*:
- *   board.create, board.review, task.assign, task.decompose,
+ * 6 nodes route through ctx.kanban.*:
+ *   board.create, board.review, task.assign,
  *   timeline.plan, workflow.automate, resource.monitor.
- *
- * task.decompose uses ctx.aiEnvelope.generate for the AI-decomposition
- * step (soft dep — pack manifests only host.kanban; hosts without
- * aiEnvelope can still register but task.decompose throws at runtime).
  *
  * @see docs/plans/MYNDHYVE-TO-OPENWOP-PACK-MIGRATION.md
  */
@@ -101,61 +97,6 @@ export async function taskAssign(ctx) {
   };
 }
 
-export async function taskDecompose(ctx) {
-  ensureKanban(ctx);
-  if (!ctx.aiEnvelope || typeof ctx.aiEnvelope.generate !== 'function') {
-    throw Object.assign(new Error('task.decompose requires ctx.aiEnvelope'), { code: 'host_capability_missing' });
-  }
-  const { maxSubtasks = 8, minSubtasks = 3, includeDependencies = true, provider, model, createOnBoard = false } = ctx.config;
-  const { taskId, context } = ctx.inputs;
-
-  // Fetch task details if host exposes the accessor.
-  let taskDetail = null;
-  if (typeof ctx.kanban?.taskGet === 'function') {
-    taskDetail = await ctx.kanban.taskGet(taskId);
-  }
-
-  const idempotencyKey = deriveIdempotencyKey([
-    String(ctx.runId), String(ctx.nodeId),
-    taskId, maxSubtasks, minSubtasks, includeDependencies, context ?? null,
-  ]);
-
-  const ai = await ctx.aiEnvelope.generate({
-    systemPrompt: `Decompose tasks into ${minSubtasks}-${maxSubtasks} subtasks${includeDependencies ? ' with dependencies between them' : ''}.`,
-    envelopeType: 'task.decomposition',
-    ...(provider !== undefined ? { provider } : {}),
-    ...(model !== undefined ? { model } : {}),
-    context: { task: taskDetail, additionalContext: context },
-    idempotencyKey,
-  });
-
-  let subtasks = Array.isArray(ai?.payload?.subtasks) ? ai.payload.subtasks : [];
-  // Clamp to config bounds.
-  if (subtasks.length > maxSubtasks) subtasks = subtasks.slice(0, maxSubtasks);
-
-  // Optionally persist subtasks on the board.
-  if (createOnBoard && subtasks.length > 0 && typeof ctx.kanban?.taskCreateBatch === 'function') {
-    const created = await ctx.kanban.taskCreateBatch({
-      parentTaskId: taskId,
-      subtasks: subtasks.map((s) => ({ title: s.title, description: s.description, estimateHours: s.estimateHours })),
-      idempotencyKey,
-    });
-    if (Array.isArray(created?.subtaskIds)) {
-      subtasks = subtasks.map((s, i) => ({ ...s, subtaskId: created.subtaskIds[i] ?? undefined }));
-    }
-  }
-
-  return {
-    status: 'success',
-    outputs: {
-      taskId,
-      subtasks,
-      ...(ai?.payload?.criticalPath ? { criticalPath: ai.payload.criticalPath } : {}),
-      ...(ai?.usage ? { usage: ai.usage } : {}),
-    },
-  };
-}
-
 export async function timelinePlan(ctx) {
   ensureKanban(ctx);
   if (typeof ctx.kanban.timelinePlan !== 'function') {
@@ -229,7 +170,6 @@ export const nodes = {
   'kanban.board.create': boardCreate,
   'kanban.board.review': boardReview,
   'kanban.task.assign': taskAssign,
-  'kanban.task.decompose': taskDecompose,
   'kanban.timeline.plan': timelinePlan,
   'kanban.workflow.automate': workflowAutomate,
   'kanban.resource.monitor': resourceMonitor,

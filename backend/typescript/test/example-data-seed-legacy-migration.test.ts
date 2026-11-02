@@ -9,9 +9,18 @@
  *
  * This simulates a pre-reconciliation tenant by injecting legacy roster entries
  * directly (as the old seed would have), then asserts the heal prune:
- *   - a demo-owned legacy persona (name + original retired roleKey) is pruned;
- *   - a user-RE-ROLED legacy persona (same name, different roleKey) survives;
+ *   - a persona carrying a retired NAME is pruned whatever its roleKey — the
+ *     demo-owned Sally/Marcus AND the user-re-roled Devon (the name-based prune of
+ *     2026-06-15; a stranded legacy name is what surfaced in the agent inventory);
+ *   - a persona RENAMED away from a retired name (Dakota) survives;
  *   - the silent path does NOT prune (heal-gated); the prune is idempotent.
+ *
+ * (CORRECTED in w70: this header used to say a re-roled legacy persona
+ * survives; the body has asserted the opposite since the name-based prune.)
+ *
+ * Tracker: TST-DBA-3. Red when: the prune runs on the silent path, the prune
+ * spares a re-roled retired name, or it prunes a renamed persona (probes
+ * w70g2-lm-heal-gate / -lm-name / -lm-dakota).
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -43,6 +52,9 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  // Restore the advisory-board toggle this file pinned off.
+  const advisors = getToggleDefault('advisory-board');
+  if (advisors) await saveConfig(advisors, 'test');
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   await new Promise<void>((res) => server.close(() => res()));
 });
@@ -73,7 +85,7 @@ describe('legacy-persona migration on reconcile (ADR 0032 / T2.A)', () => {
     await createRosterEntry({ tenantId: TENANT, persona: 'Marcus', agentRef: { agentId: 'user.default.marcus' }, workflows: [], roleKey: 'support-triage' });
     await createRosterEntry({ tenantId: TENANT, persona: 'Devon', agentRef: { agentId: 'user.default.devon' }, workflows: [], roleKey: 'my-custom-role' });
     await createRosterEntry({ tenantId: TENANT, persona: 'Dakota', agentRef: { agentId: 'user.default.dakota' }, workflows: [], roleKey: 'my-custom-role' });
-    expect((await personas()).sort()).toContain('Sally');
+    expect(await personas()).toContain('Sally');
     expect((await personas()).length).toBe(14); // 10 twins + 4 injected
 
     // Silent re-seed must NOT reconcile (heal-gated — respects user curation).

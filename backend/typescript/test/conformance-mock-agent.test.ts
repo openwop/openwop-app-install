@@ -6,6 +6,12 @@
  *
  * @see src/bootstrap/conformanceMockAgent.ts
  * @see RFCS/0023-conformance-agent-event-emitters.md
+ *
+ * Tracker TST-CJA-5 (grade-tests w68). Red when: the low-confidence test becomes
+ * `<=` (threshold must be strict); toolReturned's envelope causationId stops being
+ * the toolCalled eventId; verbosity 'off' stops suppressing; the run-level
+ * escalationThreshold or the nodes[].agent pin is ignored; a tool error envelope is
+ * dropped; or a handoff's fromAgentId is not the emitting agent.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -251,7 +257,7 @@ describe('core.conformance.mock-agent', () => {
       });
       const out: NodeOutcome = await mockAgentNode.execute(ctx);
       expect(out.status).toBe('suspended');
-      if (out.status !== 'suspended') return;
+      if (out.status !== 'suspended') throw new Error('unreachable: asserted suspended above');
       expect(out.interrupt.kind).toBe('approval');
       const data = out.interrupt.data as { reason: string; threshold: number; observed: number };
       expect(data.reason).toBe('low-confidence');
@@ -274,7 +280,7 @@ describe('core.conformance.mock-agent', () => {
       expect(events, 'ADR 0725 — the node emits agent.decided only; node.suspended is the executor\'s').toHaveLength(1);
       const decided = events[0].payload as { decision: unknown; confidence: number };
       expect(decided.confidence).toBe(0.3);
-      expect(decided.decision).toBeDefined(); // synthetic
+      expect(decided.decision).toEqual({ kind: 'mock-synthetic', reason: 'mockConfidence-shorthand' });
     });
 
     it('honors run-level escalationThreshold override', async () => {

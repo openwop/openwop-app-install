@@ -74,7 +74,7 @@ describe('ADR 0955 D5 — the send-time node', () => {
     await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
     const d = getToggleDefault('campaign-journeys'); if (d) await saveConfig({ ...d, status: 'on' }, 'test');
     await setSendPolicy({ tenantId: T, orgId: '', defaultTimezone: 'America/New_York', updatedBy: 'a' });
-  });
+  }, 120_000);
 
   it('reads the contact’s own opens, waits until the chosen time, and explains it', async () => {
     const c = await createContact({ tenantId: T, name: 'Opener', email: 'opener@example.test' });

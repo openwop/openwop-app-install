@@ -99,7 +99,7 @@ describe('signed-out challenge detail — the acquisition preview (ADR 0684 phas
     expect(screen.getAllByText(en.signInToStart).length).toBeGreaterThanOrEqual(1);
     expect(screen.getByRole('button', { name: 'Sign in to KickTodo' })).toBeTruthy();
     expect(screen.queryByText(en.challengeNotFoundTitle)).toBeNull();
-    expect(screen.queryByRole('button', { name: new RegExp(en.previewAndStart) })).toBeNull();
+    expect(screen.queryByRole('button', { name: new RegExp(en.startChallenge) })).toBeNull();
     // Nothing tenant-scoped was asked for on behalf of a stranger.
     const calls = fetchMock.mock.calls.map((c) => String(c[0]));
     expect(calls.some((u) => u.includes('/kicktodo/catalog'))).toBe(false);

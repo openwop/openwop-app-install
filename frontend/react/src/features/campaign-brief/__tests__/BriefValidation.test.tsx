@@ -37,6 +37,7 @@ vi.mock('../campaignBriefClient.js', async (orig) => {
     listOrgs: vi.fn(async () => [{ orgId: 'org-1', name: 'Acme' }]),
     listBrands: vi.fn(async () => []),
     findCampaignForBrief: vi.fn(async () => null),
+    getPendingKernelRun: vi.fn(async () => null), // ADR 1020 D8 — the pending-kernel read
     deleteBrief: vi.fn(async () => {}),
     duplicateBrief: vi.fn(async () => { throw new Error('duplicate not exercised here'); }),
   };

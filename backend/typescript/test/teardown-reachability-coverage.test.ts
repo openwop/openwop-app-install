@@ -64,6 +64,7 @@ import {
   initHostExtPersistence,
   purgeTenantHostExt,
 } from '../src/host/hostExtPersistence.js';
+import { stripComments } from './helpers/stripComments.js';
 
 const FEATURES_ROOT = join(__dirname, '..', 'src', 'features');
 
@@ -92,9 +93,6 @@ function walk(dir: string): string[] {
 /** Strip `//…` line comments and `/*…*​/` block comments (string-literal-naive,
  *  which is fine here — we only need to not match `new DurableCollection` inside
  *  a docblock). */
-function stripComments(src: string): string {
-  return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
-}
 
 /** Extract the paren-balanced argument list beginning at `openIdx` (the `(`). */
 function extractArgs(src: string, openIdx: number): string[] {
@@ -217,6 +215,8 @@ function distinctNamespaces(sites: Site[]): Map<string, Site> {
 
 const RESIDUAL_CLASSIFICATION: Record<string, { bucket: Bucket; reason: string }> = {
   'analytics:identity-link': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type IdentityLink carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
+  'analytics:replay-meta': { bucket: 'EXEMPT', reason: 'ADR 0951 P2 review #2: host-global one-time migration sentinel ({id, at}); no tenant dimension, no subject data' },
+  'analytics:replay-toggle-writes': { bucket: 'EXEMPT', reason: 'ADR 0951 P2 review #1: pending replay toggle-write markers ({writeId, scope, rows, at}), mostly host-global; copies of toggle config rows, no subject data; every marker is deleted by the replay sweep once applied and past the settle window (≈1 h), so none outlives a tenant teardown by more than that' },
   'analytics:visitor-salt': { bucket: 'EXEMPT', reason: 'host-global per-UTC-day visitor-hashing salt (DailySalt {day,salt}); not tenant-scoped, no subject data' },
   'assistant:commitment:by-status': { bucket: 'REACHABLE_PURGE_HOOK', reason: 'swept by purgeTenantAssistantIndexes (ADR 0590 registerTenantPurgeHook, assistant/feature.ts) — listByPrefix(`${tenantId}:`) exact-scans the ixId=`${tenantId}:${status}:${commitmentId}` index (trailing colon prevents org:foo/org:foobar collision)' },
   'assistant:commitment:by-tenant': { bucket: 'REACHABLE_PURGE_HOOK', reason: 'swept by purgeTenantAssistantIndexes (ADR 0590 registerTenantPurgeHook, assistant/feature.ts) — listByPrefix(`${tenantId}:`) exact-scans the ixId=`${tenantId}:${commitmentId}` index; primary assistant:commitment has tenantOf' },
@@ -235,6 +235,8 @@ const RESIDUAL_CLASSIFICATION: Record<string, { bucket: Bucket; reason: string }
   'chatwidget:config': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type WidgetConfig carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
   'chatwidget:day': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type WidgetDayCount carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
   'chatwidget:session': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type WidgetSession carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
+  'chatwidget:thread': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'ADR 1018 D2/D3: row type VisitorThread carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows; also deleted with its widget (deleteWidgetThreads) and aged out 7 days after its last message (registerKvAgeOut chatwidget:thread)' },
+  'chatwidget:threadsum': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'ADR 1018 D3: row type ThreadSummaryRow carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows; deleted with its thread and widget, aged out with the thread (registerKvAgeOut chatwidget:threadsum)' },
   'chatwidget:tokenidx': { bucket: 'REACHABLE_PURGE_HOOK', reason: 'swept by the chat-widget tenant-purge hook (ADR 0590 registerTenantPurgeHook, chat-widget/feature.ts → purgeTenantWidgetTokens) — enumerates the tenant widgets via listByPrefix(`${tenantId}:`) and deletes each one\'s token-index entry; deleteWidget/rotateWidgetToken keep the index in step on the normal paths so only teardown-surviving widgets need it. KNOWN NARROW RESIDUE (pre-existing, not closed here): a token entry orphaned by a SWALLOWED storage error in rotate/delete (.catch(()=>undefined)) has no widget left to enumerate and no tenant on the row, so no tenant-scoped mechanism can reach it' },
   'claude-code:pairing': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type PairingRecord carries a top-level tenantId field once approved (the only state that names a tenant) → jsonTenantId reaches it on purgeTenantRows; a still-pending row is pre-tenant, holds no subject data, and ages out in a day (registerKvAgeOut claude-code:pairing, ADR 0785)' },
   'claude-code:pairing-usercode': { bucket: 'EXEMPT', reason: 'host-global user-code → pairing-hash index; exists before any tenant is chosen, names no subject, and ages out in a day (registerKvAgeOut hostGlobal, ADR 0785)' },

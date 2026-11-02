@@ -19,6 +19,10 @@ export interface ArtifactRendererProps {
   /** Edit-aware body: the debounced draft while the scratch editor is open,
    *  else the persisted revision content. */
   content: string;
+  /** ADR 1017 D1 — what a viewer's "Run scripts" consent is for. The workbench sets
+   *  it per artifact revision, so a live-edit draft keeps its consent while a new
+   *  artifact or revision starts static. Renderers that run no scripts ignore it. */
+  consentKey?: string;
 }
 
 export interface ArtifactRendererRegistration {

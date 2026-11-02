@@ -324,6 +324,10 @@ export interface AnonReadTurnParams {
   surfaceSessionKey: string;
   /** The untrusted visitor message, ALREADY fenced by the caller (ADR 0027). */
   fencedUserMessage: string;
+  /** ADR 1018 D2 — the surface's prior turns, oldest first, placed before the current
+   *  message. The CALLER owns the store and the bounds and must fence every prior
+   *  `user` turn. Text only: no run/ask/conversation id (ADR 1002). Absent ⇒ single turn. */
+  history?: ReadonlyArray<{ role: 'user' | 'assistant'; content: string }>;
   /** The tool-call transport (the managed free-tier round in prod; a fake in
    *  tests). Pure DI — this module never reaches for a provider key. */
   callAIWithTools: (r: AiToolCallRequest) => Promise<AiToolCallResult>;
@@ -359,6 +363,8 @@ export interface AnonReadTurnResult {
   runId: string;
   /** The opaque anon principal the run + audit records are attributed to. */
   principal: string;
+  /** ADR 1018 — the loop ended in error; the caller must not record this as a turn. */
+  failed: boolean;
 }
 
 /**
@@ -499,7 +505,7 @@ export async function runAnonReadTurn(params: AnonReadTurnParams): Promise<AnonR
     firewallAudits.push(decide(d.toolName, false, d.decision === 'deny' ? 'anon-firewall-denied' : 'anon-firewall-held').catch(() => {}));
   };
 
-  const messages: AiCallMessage[] = [{ role: 'user', content: params.fencedUserMessage }];
+  const messages: AiCallMessage[] = [...(params.history ?? []).map((m): AiCallMessage => ({ role: m.role, content: m.content })), { role: 'user', content: params.fencedUserMessage }];
   const loop = await runChatToolLoop(
     {
       provider: 'openwop-free', model: 'openwop-free', credentialRef: 'managed:openwop-free',
@@ -533,7 +539,7 @@ export async function runAnonReadTurn(params: AnonReadTurnParams): Promise<AnonR
     log.warn('anon_run_terminal_patch_failed', { runId, error: err instanceof Error ? err.message : String(err) });
   }
 
-  return { reply: loop.finalText, runId, principal };
+  return { reply: loop.finalText, runId, principal, failed: Boolean(loop.error) };
 }
 
 /**

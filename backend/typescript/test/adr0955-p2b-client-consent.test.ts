@@ -13,8 +13,9 @@
  *  - the merge handler letting a `true` overwrite the survivor's `false`      → "merge: false wins"
  *  - `createCampaign` accepting an SMS template                              → "never an email"
  *  - the broadcast keeping its own consent check (topic not narrowed)          → "same reason"
+ *  - STOP withdrawing only the phone-keyed grant                               → "STOP withdraws it"
+ * (grade-tests w73, TST-DRF: re-witnessed; phones come from a per-file counter, never a random draw.)
  */
-import type { AddressInfo } from 'node:net';
 import { createHmac, randomBytes } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
@@ -50,21 +51,26 @@ beforeAll(async () => {
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   const server = app.listen(0, '127.0.0.1');
   await new Promise<void>((r) => server.once('listening', () => r()));
-  BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('server has no TCP address');
+  BASE = `http://127.0.0.1:${address.port}`;
   for (const id of ['consent', 'email', 'crm']) { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); }
   orgA = (await createOrg({ tenantId: T, createdBy: 'seed', name: 'Client A (synthetic)' })).orgId;
   orgB = (await createOrg({ tenantId: T, createdBy: 'seed', name: 'Client B (synthetic)' })).orgId;
   connectionId = (await createSecretConnection({ tenantId: T, provider: 'twilio', kind: 'basic', secret: 'ACp2b:token', scope: 'user', userId: 'u1' })).connectionId;
   await setInboundConfig({ tenantId: T, connectionId, provider: 'twilio', signingSecret: AUTH_TOKEN });
   await setSmsSender({ tenantId: T, number: NUM_A, orgId: orgA, connectionId, boundBy: 'admin' });
-});
+}, 120_000);
 afterAll(() => { delete process.env.OPENWOP_PUBLIC_BASE_URL; });
 
-const fresh = () => `+1555060${String(Math.floor(Math.random() * 9000) + 1000)}`;
+// A per-file counter, never a random draw: two cases must never share a phone (and
+// so a suppression or a grant). The tenant `T` is already unique per run.
+let phoneSeq = 1000;
+const fresh = () => `+1555060${String(phoneSeq++)}`;
 async function inbound(from: string, to: string, body: string): Promise<number> {
   const path = `/host/openwop-app/connections-inbound/${encodeURIComponent(connectionId)}`;
   const params = { MessageSid: `SM${randomBytes(8).toString('hex')}`, From: from, To: to, Body: body };
-  const data = `${PUBLIC}${path}` + Object.keys(params).sort().map((k) => `${k}${params[k as keyof typeof params]}`).join('');
+  const data = `${PUBLIC}${path}` + Object.entries(params).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([k, v]) => `${k}${v}`).join('');
   const r = await fetch(`${BASE}${path}`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-twilio-signature': createHmac('sha1', AUTH_TOKEN).update(data, 'utf8').digest('base64') }, body: new URLSearchParams(params).toString() });
   return r.status;
 }
@@ -98,6 +104,10 @@ describe('ADR 0955 Q7 — SMS consent belongs to the client that collected it', 
     expect(await checkChannelEligibility(T, orgB, contact.contactId, 'sms')).toMatchObject({ eligible: false, reason: 'consent' });
     expect(await inbound(person, NUM_A, 'STOP')).toBe(202);
     expect((await getClientChannelGrant(T, orgA, person, 'sms'))?.granted).toBe(false);
+    // STOP withdraws the grant under EVERY subject key it was recorded under: the
+    // contact-keyed grant the send path reads, not only the phone-keyed one.
+    expect((await getClientChannelGrant(T, orgA, contact.contactId, 'sms'))?.granted).toBe(false);
+    expect(await checkChannelEligibility(T, orgA, contact.contactId, 'sms')).toEqual({ eligible: false, channel: 'sms', reason: 'consent' });
     const other = fresh();
     const c2 = await createContact({ tenantId: T, name: 'Lee', phone: other });
     await inbound(other, NUM_A, 'STOPALL');

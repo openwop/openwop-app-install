@@ -11,6 +11,10 @@
  * node.completed in the fork's tail) while the effect is served, not re-run.
  * The fixture's own case: a source cancelled INSIDE the hold, whose replay must
  * re-run the hold and fail the effect CLOSED (`replay_source_missing`).
+ *
+ * Tracker TST-CJA-2 (grade-tests w68). Red when: the hold is declared
+ * `sideEffecting: true` (the fork then SERVES it instead of re-running it), or its
+ * outputs are anything but exactly its resolved inputs.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -40,7 +44,7 @@ const wf = (workflowId: string, delayMs: number): WorkflowDefinition => ({
   ],
   edges: [{ edgeId: 'wait-effect', sourceNodeId: 'wait', targetNodeId: 'effect' }],
   variables: [{ name: 'delayMs', type: 'number', required: true, defaultValue: delayMs }],
-} as unknown as WorkflowDefinition);
+});
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';

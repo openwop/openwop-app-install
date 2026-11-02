@@ -4,7 +4,14 @@
  * Verifies the sales org over the Phase-3 CRM: types, one active + one planning
  * model (the one-active CAS), an 8-territory 2-level hierarchy, first-match-wins
  * assignment rules + a reassignment, per-leaf quotas, real /attainment numbers,
- * and a clean orphan-free round-trip.
+ * and a clean orphan-free round-trip. TST-CVA-3.
+ *
+ * Red when: a deal rule is created per metro instead of one per rep (10 rules
+ * pinned), the clear stops deleting TERRITORY rows (each captured territory id
+ * is read back by id after the clear — `countDemoTerritories` only counts
+ * territories of surviving demo models, so it reads 0 for orphans and cannot
+ * show the leak), a re-seed re-creates the planning model, or seeding activates
+ * the demo plan over a tenant's own active model (review #1359 HIGH, case 2).
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -13,7 +20,8 @@ import { openStorage } from '../src/storage/index.js';
 import { seedDemoPeople } from '../src/host/demoPeopleSeed.js';
 import { seedDemoCrm } from '../src/host/demoCrmSeed.js';
 import { seedDemoTerritories, clearDemoTerritories, countDemoTerritories } from '../src/host/demoTerritoriesSeed.js';
-import { listModels, listTerritories, getActiveModelId } from '../src/features/territories/entities/territories.js';
+import { listModels, listTerritories, getActiveModelId, getTerritory, createModel, activateModel, getModel } from '../src/features/territories/entities/territories.js';
+import { listOrgs } from '../src/host/accessControlService.js';
 import { listRules } from '../src/features/territories/entities/assignment.js';
 import { computeAttainment } from '../src/features/territories/entities/quota.js';
 
@@ -30,7 +38,7 @@ describe('demo-territories seeder', () => {
     const tenantId = 'demo-terr-t1';
     await seedDemoPeople(tenantId);
     await seedDemoCrm(tenantId);
-    const orgId = (await (await import('../src/host/accessControlService.js')).listOrgs(tenantId))[0]!.orgId;
+    const orgId = (await listOrgs(tenantId))[0]!.orgId;
 
     const first = await seedDemoTerritories(tenantId);
     expect(first.created).toBeGreaterThan(10);
@@ -62,20 +70,26 @@ describe('demo-territories seeder', () => {
     expect(await countDemoTerritories(tenantId)).toBe(before);
 
     // Clear — no orphans; count back to zero.
+    const territoryIds = terrs.map((t) => t.territoryId);
     await clearDemoTerritories(tenantId);
     expect(await countDemoTerritories(tenantId)).toBe(0);
+    // Each territory row is gone from the store (read by id, not via its model).
+    for (const territoryId of territoryIds) {
+      await expect(getTerritory(tenantId, orgId, activeId!, territoryId)).rejects.toMatchObject({ code: 'not_found' });
+    }
     expect((await listModels(tenantId, orgId)).filter((m) => m.createdBy === 'demo:territories')).toHaveLength(0);
 
     // Round-trips.
     const third = await seedDemoTerritories(tenantId);
-    expect(third.created).toBeGreaterThan(10);
+    // Identical round-trip, minus the 3 territory TYPES the clear deliberately
+    // leaves (review #1359 MEDIUM) and the re-seed reuses by name.
+    expect(third.created).toBe(first.created - 3);
   });
 
   it('never archives a tenant\'s pre-existing active model (review #1359 HIGH)', async () => {
     const tenantId = 'demo-terr-foreign';
     await seedDemoPeople(tenantId); // just need an org + a foreign active model
-    const orgId = (await (await import('../src/host/accessControlService.js')).listOrgs(tenantId))[0]!.orgId;
-    const { createModel, activateModel, getActiveModelId, getModel } = await import('../src/features/territories/entities/territories.js');
+    const orgId = (await listOrgs(tenantId))[0]!.orgId;
 
     // A user's own model, activated.
     const userModel = await createModel(tenantId, orgId, { name: 'User FY26 Plan' }, 'user:real');

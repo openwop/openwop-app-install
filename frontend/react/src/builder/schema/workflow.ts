@@ -72,6 +72,11 @@ export interface BuilderNode {
    *  inverse. Round-tripped for the same reason as `compensation`: silently
    *  dropping it lets the §D rollup claim a full undo. */
   irreversibleEffect?: boolean | undefined;
+  /** RFC 0082 §B (ADR 1005) — the node's agent binding, `agentId` plus a
+   *  `version` or a `channel`. The builder has no editor for it, so it is
+   *  round-tripped verbatim: once the host kept it, a save that dropped it would
+   *  silently unbind the agent. */
+  agent?: Record<string, unknown> | undefined;
 }
 
 /** When a target node has multiple incoming edges, this rule controls

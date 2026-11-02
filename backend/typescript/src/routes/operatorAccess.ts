@@ -5,6 +5,7 @@
  *   POST   /host/openwop-app/workspaces/:id/operator-access            → 201 { activation }
  *   DELETE /host/openwop-app/workspaces/:id/operator-access[/:subject] → 204
  *   GET    /host/openwop-app/workspaces/:id/operator-access            → 200 { activations }
+ *   POST   /host/openwop-app/workspaces/:id/participant-removals       → 200 { removal }  (D12)
  *
  * The REQUEST guards (G1–G5) are here, in order, each fail-closed; the target,
  * duration and audit-first rules (G6–G8) are enforced by `host/operatorAccess.ts`.
@@ -18,6 +19,7 @@ import { declaredDefaultWorkspaceTargets } from '../host/workspaceJoinLedger.js'
 import { resolveOne } from '../host/featureToggles/service.js';
 import { clientIp } from '../host/clientIp.js';
 import { activateOperatorAccess, assertOperatorTarget, listOperatorActivations, revokeOperatorAccess } from '../host/operatorAccess.js';
+import { removeParticipant } from '../host/participantRemoval.js';
 
 /** G4 — the ID token's `auth_time` must be at most this old. */
 export const OPERATOR_REAUTH_WINDOW_S = 900;
@@ -102,6 +104,23 @@ export function registerOperatorAccessRoutes(app: Express): void {
   });
   app.delete('/host/openwop-app/workspaces/:id/operator-access/:subject', async (req, res, next) => {
     try { await revoke(req, String(req.params.subject)); res.status(204).end(); } catch (err) { next(err); }
+  });
+
+  // ADR 0910 D12 — G1–G3 here; the activation, target and participant guards
+  // are `removeParticipant`'s. No re-auth window, as for *End now* (D7.1).
+  app.post('/host/openwop-app/workspaces/:id/participant-removals', async (req, res, next) => {
+    try {
+      eligibilityTenantOf(req);
+      const actor = personOf(req);
+      requireMfa(req);
+      const b = (req.body ?? {}) as { member?: unknown; reason?: unknown; dryRun?: unknown };
+      const removal = await removeParticipant({
+        workspaceId: String(req.params.id), actor, member: b.member, reason: b.reason, dryRun: b.dryRun === true,
+      });
+      res.status(200).json({ removal });
+    } catch (err) {
+      next(err);
+    }
   });
 
   app.get('/host/openwop-app/workspaces/:id/operator-access', async (req, res, next) => {

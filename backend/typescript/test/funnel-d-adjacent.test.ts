@@ -9,6 +9,14 @@
  *     commission accrues at paid, and the payout CSV exports the ledger;
  *  D3 lead scoring: explainable compute-on-read from identity-linked funnel
  *     events + paid orders, with visible fixed weights.
+ *
+ * TST-DEB-1 — red when: the public pixel list ignores a missing `vk`, the relay
+ * stops deduping by eventId or stores the raw email, a retry re-fires an
+ * already-delivered platform, a junk `ref` is stamped, the commission basis or
+ * rate maths changes by a cent, or a lead-score part/weight moves (each
+ * sabotage-witnessed, wave 70). Amounts are cent-sensitive on purpose:
+ * 19.99 × 7.5% = 149.925 minor units → 149 (floor) = 1.49, so a dropped,
+ * rounded or doubled cent changes the asserted value.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -17,7 +25,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
-import { dispatchQueuedConversions, listConversions, hashEmail, upsertPixel, __resetPixels, type ConversionEvent, type PixelPlatform } from '../src/features/campaign-connectors/pixelService.js';
+import { dispatchQueuedConversions, listConversions, upsertPixel, __resetPixels, type ConversionEvent, type PixelPlatform } from '../src/features/campaign-connectors/pixelService.js';
 import { getOrder, markAsPaid } from '../src/features/commerce/commerceService.js';
 import { listAffiliates } from '../src/features/commerce/affiliate.js';
 import { linkSession } from '../src/features/analytics/identityLinkService.js';
@@ -41,30 +49,37 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+interface Res<T> { status: number; body: T }
+interface RawRes { status: number; text: string }
 function client() {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res | { status: number; text: string }> => {
+  const send = async (method: string, path: string, body?: unknown): Promise<Response> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    const ct = res.headers.get('content-type') ?? '';
-    if (!ct.includes('json')) return { status: res.status, text: await res.text() };
-    return { status: res.status, body: await res.json().catch(() => undefined) };
+    for (const c of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]!; }
+    return res;
+  };
+  const json = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
+    const res = await send(method, path, body);
+    return { status: res.status, body: (await res.json()) as T };
   };
   return {
-    get: (p: string) => call('GET', p) as Promise<Res>,
-    getRaw: (p: string) => call('GET', p) as Promise<{ status: number; text: string }>,
-    post: (p: string, b?: unknown) => call('POST', p, b) as Promise<Res>,
-    put: (p: string, b?: unknown) => call('PUT', p, b) as unknown as Promise<Res>,
+    get: <T>(p: string) => json<T>('GET', p),
+    getRaw: async (p: string): Promise<RawRes> => { const res = await send('GET', p); return { status: res.status, text: await res.text() }; },
+    post: <T>(p: string, b?: unknown) => json<T>('POST', p, b),
   };
 }
+interface Pixels { pixels: Array<{ platform: string; pixelId: string }> }
+interface Relay { recorded?: boolean; deduped?: boolean }
+interface Created { productId: string }
+interface Checkout { orderId: string }
 
 async function shop() {
   const owner = client();
-  const login = await owner.post('/host/openwop-app/test/login', { email: `fd-${Date.now()}-${n++}@acme.test` });
-  const tenantId: string = login.body.user?.tenantId ?? '';
-  const org = await owner.post('/host/openwop-app/orgs', { name: 'Adjacent Co' });
-  const orgId: string = org.body.orgId;
+  const login = await owner.post<{ user?: { tenantId: string } }>('/host/openwop-app/test/login', { email: `fd-${Date.now()}-${n++}@acme.test` });
+  const tenantId = login.body.user?.tenantId ?? '';
+  const org = await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Adjacent Co' });
+  const orgId = org.body.orgId;
+  expect(tenantId).not.toBe('');
   return { owner, tenantId, orgId };
 }
 
@@ -76,24 +91,26 @@ describe('D1 — pixels + conversions relay', () => {
     const v = client();
 
     // consent toggle off ⇒ isAllowed permissive — a vk-carrying visitor is "consented"
-    const consented = await v.get(`/host/openwop-app/public/${encodeURIComponent(orgId)}/pixels?vk=vis-1`);
+    const consented = await v.get<Pixels>(`/host/openwop-app/public/${encodeURIComponent(orgId)}/pixels?vk=vis-1`);
     expect(consented.body.pixels).toEqual([{ platform: 'meta', pixelId: 'px-123' }]);
     // no vk ⇒ empty (and indistinguishable from none-configured)
-    const anon = await v.get(`/host/openwop-app/public/${encodeURIComponent(orgId)}/pixels`);
+    const anon = await v.get<Pixels>(`/host/openwop-app/public/${encodeURIComponent(orgId)}/pixels`);
     expect(anon.body.pixels).toEqual([]);
 
     // relay: hashed identifier, dedup by eventId, honest 202
-    const first = await v.post(`/host/openwop-app/public/${encodeURIComponent(orgId)}/conversions`, {
+    const first = await v.post<Relay>(`/host/openwop-app/public/${encodeURIComponent(orgId)}/conversions`, {
       vk: 'vis-1', eventId: 'evt-1', eventName: 'purchase', email: '  Buyer@X.Test ', value: 120, currency: 'usd',
     });
     expect(first.status).toBe(202);
     expect(first.body.recorded).toBe(true);
-    const dup = await v.post(`/host/openwop-app/public/${encodeURIComponent(orgId)}/conversions`, { vk: 'vis-1', eventId: 'evt-1', eventName: 'purchase' });
+    const dup = await v.post<Relay>(`/host/openwop-app/public/${encodeURIComponent(orgId)}/conversions`, { vk: 'vis-1', eventId: 'evt-1', eventName: 'purchase' });
+    expect(dup.status).toBe(202);
     expect(dup.body.deduped).toBe(true);
 
     const rows = await listConversions(tenantId, orgId);
     expect(rows).toHaveLength(1);
-    expect(rows[0].emailHash).toBe(hashEmail('buyer@x.test'));
+    // sha256('buyer@x.test') — pinned as a literal, never computed by hashEmail.
+    expect(rows[0].emailHash).toBe('7a35f90e264bf3164414cce1b7ecee2c345f3d7911fa6c14a71f4f9e2575a116');
     expect(JSON.stringify(rows[0])).not.toContain('x.test'); // the raw address never persists
     expect(rows[0].status).toBe('queued');
 
@@ -125,32 +142,31 @@ describe('D2 — affiliate ref capture + payout export', () => {
   it('attributes only a real code, accrues at paid, and exports the CSV ledger', async () => {
     const { owner, tenantId, orgId } = await shop();
     const c = (sfx: string): string => `/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}${sfx}`;
-    const prod = await owner.post(c('/products'), { type: 'digital', name: 'Guide', price: 100, currency: 'USD' });
-    const aff = await owner.post(c('/affiliates'), { code: 'JANE10', name: 'Jane', commissionType: 'percentage', commissionRate: 10 });
+    const prod = await owner.post<Created>(c('/products'), { type: 'digital', name: 'Guide', price: 19.99, currency: 'USD' });
+    const aff = await owner.post(c('/affiliates'), { code: 'JANE10', name: 'Jane', commissionType: 'percentage', commissionRate: 7.5 });
     expect(aff.status).toBe(201);
 
     const guest = client();
     // junk ref: silently dropped (no oracle), order still succeeds
-    const junk = await guest.post(`/host/openwop-app/public-store/${encodeURIComponent(orgId)}/checkout`, {
+    const junk = await guest.post<Checkout>(`/host/openwop-app/public-store/${encodeURIComponent(orgId)}/checkout`, {
       email: `j-${n++}@x.test`, lines: [{ productId: prod.body.productId, quantity: 1 }], ref: 'NOT-A-CODE',
     });
     expect(junk.status).toBe(201);
     expect((await getOrder(tenantId, orgId, junk.body.orderId))?.affiliateCode).toBeUndefined();
 
     // real ref attributes + accrues on paid
-    const attributed = await guest.post(`/host/openwop-app/public-store/${encodeURIComponent(orgId)}/checkout`, {
+    const attributed = await guest.post<Checkout>(`/host/openwop-app/public-store/${encodeURIComponent(orgId)}/checkout`, {
       email: `a-${n++}@x.test`, lines: [{ productId: prod.body.productId, quantity: 1 }], ref: 'jane10',
     });
     expect((await getOrder(tenantId, orgId, attributed.body.orderId))?.affiliateCode).toBe('JANE10');
     await markAsPaid(tenantId, orgId, attributed.body.orderId, 'pi_aff', { actor: 'test' });
     const jane = (await listAffiliates(tenantId, orgId)).find((a) => a.code === 'JANE10');
-    expect(jane?.balanceOwed).toBe(10); // 10% of 100
+    expect(jane?.balanceOwed).toBe(1.49); // floor(1999 × 7.5 / 100) = 149 minor units
 
     const csv = await owner.getRaw(c('/affiliates/payouts.csv'));
     expect(csv.status).toBe(200);
     expect(csv.text.split('\n')[0]).toBe('code,name,currency,balance_owed,pending_payouts');
-    expect(csv.text).toContain('"JANE10","Jane"');
-    expect(csv.text).toContain(',10,');
+    expect(csv.text.split('\n').slice(1)).toEqual(['"JANE10","Jane","USD",1.49,0']);
   });
 });
 
@@ -168,9 +184,9 @@ describe('D3 — explainable lead score', () => {
 
     // a paid order for her (org-scoped part)
     const c = (sfx: string): string => `/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}${sfx}`;
-    const prod = await owner.post(c('/products'), { type: 'digital', name: 'Starter', price: 30, currency: 'USD' });
+    const prod = await owner.post<Created>(c('/products'), { type: 'digital', name: 'Starter', price: 30, currency: 'USD' });
     const guest = client();
-    const co = await guest.post(`/host/openwop-app/public-store/${encodeURIComponent(orgId)}/checkout`, {
+    const co = await guest.post<Checkout>(`/host/openwop-app/public-store/${encodeURIComponent(orgId)}/checkout`, {
       email: contact.email, lines: [{ productId: prod.body.productId, quantity: 1 }],
     });
     await markAsPaid(tenantId, orgId, co.body.orderId, 'pi_lucy', { actor: 'test' });
@@ -180,7 +196,7 @@ describe('D3 — explainable lead score', () => {
     expect(score.score).toBe(2 * 1 + 1 * 5 + 1 * 20);
 
     // the route serves it, tenant-guarded
-    const viaRoute = await owner.get(`/host/openwop-app/crm/contacts/${encodeURIComponent(contact.contactId)}/score?orgId=${encodeURIComponent(orgId)}`);
+    const viaRoute = await owner.get<{ score: number; weights: Record<string, number> }>(`/host/openwop-app/crm/contacts/${encodeURIComponent(contact.contactId)}/score?orgId=${encodeURIComponent(orgId)}`);
     expect(viaRoute.status).toBe(200);
     expect(viaRoute.body.score).toBe(score.score);
     expect(viaRoute.body.weights).toEqual({ view: 1, completion: 5, paidOrder: 20 });

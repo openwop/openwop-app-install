@@ -42,7 +42,7 @@ import { requestRunPause, clearRunPause, abortRunForPause, type RunPauseRequest 
 import { buildRunRecord, dispatchRunInBackground, stripCallerAttribution } from '../host/runDispatch.js';
 import { CALLER_LINKAGE_KEYS } from '../host/runLinkage.js';
 import { ownerStampFromRequest, runOwner, runOwnerV2, type RunOwnerBlock, type RunOwnerBlockV2 } from '../host/runOwner.js';
-import { insertRunWithStartContext } from '../host/runInsert.js';
+import { chargedAdmission, insertRunWithStartContext } from '../host/runInsert.js';
 import { COMPACTION_METADATA_KEY, readCompactionDecision } from '../executor/compaction.js';
 import { traceContextFromHeaders } from '../host/traceContext.js';
 import { eraOf } from '../storage/eventEra.js';
@@ -59,7 +59,7 @@ import { resolveLaunchWorkflow } from '../host/resolveLaunchDefinition.js';
 import { createAgentEvalRun, callerFromRequest } from '../host/evals/createEvalRun.js';
 import { requireAgentEvalsEnabled } from '../host/evals/access.js';
 import { isAgentEvalRun } from '../host/evals/agentEvalRun.js';
-import { withRunLimit } from '../host/runLimitSeam.js';
+import { isHostManagedRun } from '../host/hostRunInterrupts.js';
 import { launchSubjectOf } from '../features/featureRoute.js';
 import { approvalGatesWithGroupRole, validateApproverResolvability } from '../host/approverResolution.js';
 import { listOrgs } from '../host/accessControlService.js';
@@ -74,7 +74,7 @@ import { resolveSecret } from '../byok/secretResolver.js';
 import { runAiCredentialRefViolation } from '../host/runCredentials.js';
 import { advertisedByokProviders } from '../aiProviders/aiProvidersHost.js';
 import { createLogger } from '../observability/logger.js';
-import { refuseRunAdmission, runAdmissionFor, runQuotaMiddleware, reserveConcurrentSlot } from '../middleware/rateLimit.js';
+import { refuseRunAdmission, runAdmissionFor, runQuotaMiddleware } from '../middleware/rateLimit.js';
 import { isProtocolRequest, v2ErrorCode, vendorPath } from '../middleware/protocolVersion.js';
 import { RUN_LIST, mintRunListCursor, parseRunListCursor } from '../host/runList.js';
 import { requestOrigin } from '../host/requestOrigin.js';
@@ -184,7 +184,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
 
   // ADR 0987 D2 — `/runs` counts concurrency inside the run insert (every instance,
   // every holding state), so the per-process map does not gate it.
-  app.post('/runs', runQuotaMiddleware({ concurrencyInStore: true }), async (req, res, next) => {
+  app.post('/runs', runQuotaMiddleware(), async (req, res, next) => {
     // ADR 0549 P1 — hoisted ABOVE the try so the `finally` can see them. The
     // release is owed by whoever wins a claim, and the only scope that reliably
     // runs on every exit path is a `finally` sibling to the try.
@@ -531,7 +531,6 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
           throw err;
         }
         if (evalKey && heldClaimToken) heldClaimToken = undefined;
-        reserveConcurrentSlot(req, created.runId);
         res.status(201).json(created);
         return;
       }
@@ -859,12 +858,12 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       // matches nothing, the run insert is rolled back, and the reclaimer's run
       // is the one that exists: mapped to the protocol's in-flight 409 below.
       try {
-        // ADR 0821 P5 follow-up — the plan's monthly run limit (a no-op until
-        // wired), AFTER every refusal above; a failed insert releases it.
-        const admission = runAdmissionFor(req);
-        await withRunLimit(tenantId, () => insertRunWithStartContext(storage, run, {
+        // ADR 0987 D3 — the plan's monthly run limit (ADR 0821 P5), AFTER every
+        // refusal above, and this caller's concurrency scope counted in the
+        // insert (D2); a failed insert releases the plan unit.
+        await insertRunWithStartContext(storage, run, {
           enqueueDispatch: true,
-          ...(admission ? { admission } : {}),
+          admission: chargedAdmission(runAdmissionFor(req)),
           ...(wf ? { definition: wf.definition } : {}),
           ...(idempotencyKey && heldClaimToken
             ? {
@@ -879,7 +878,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
                 },
               }
             : {}),
-        }));
+        });
       } catch (err) {
         // ADR 0987 D2 — the store counted this user's (or key's) running runs
         // across every instance and the cap was full. Nothing was written.
@@ -917,13 +916,6 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
         wf.definition.variables,
         deferredConfigurableInputs(wf.definition, body.configurable as Record<string, unknown> | undefined, body.inputs),
       );
-      // Bind the run to a concurrent-runs slot (P0.4 rate limit) — the
-      // middleware reserved abstract capacity in its pre-flight check,
-      // and this call ties the reservation to the actual runId so the
-      // runLifecycle bus can auto-release on run.completed / run.failed
-      // / run.cancelled. No-op for routes outside the rate-limit
-      // middleware (e.g., conformance harness bypass).
-      reserveConcurrentSlot(req, runId);
       hostSuite.auditSink.record({
         principalId: principal.principalId,
         action: 'run.create',
@@ -1788,6 +1780,10 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       const run = await loadOwnedRun(req, storage, runId, 'runs:cancel');
       // ADR 0889 A2 — an eval run has no workflow to pause (its workflowId is the
       // synthetic `eval:<suite>@<version>`); re-evaluate with a new eval run.
+      // ADR 1005 D13 — a host-owned run stands for an operation, not a graph.
+      if (isHostManagedRun(run)) {
+        throw new OpenwopError('conflict', 'A deployment-management run cannot be paused.', 409, { runId: run.runId, reason: 'management_run_not_forkable' });
+      }
       if (isAgentEvalRun(run)) {
         throw new OpenwopError('conflict', 'An eval run cannot be paused; start a new eval run (with configurable.baselineRunId to compare).', 409, { runId: run.runId, reason: 'eval_run_not_forkable' });
       }
@@ -1843,6 +1839,10 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       const run = await loadOwnedRun(req, storage, runId, 'runs:cancel');
       // ADR 0889 A2 — an eval run has no workflow to resume (its workflowId is the
       // synthetic `eval:<suite>@<version>`); re-evaluate with a new eval run.
+      // ADR 1005 D13 — a host-owned run stands for an operation, not a graph.
+      if (isHostManagedRun(run)) {
+        throw new OpenwopError('conflict', 'A deployment-management run cannot be resumed.', 409, { runId: run.runId, reason: 'management_run_not_forkable' });
+      }
       if (isAgentEvalRun(run)) {
         throw new OpenwopError('conflict', 'An eval run cannot be resumed; start a new eval run (with configurable.baselineRunId to compare).', 409, { runId: run.runId, reason: 'eval_run_not_forkable' });
       }
@@ -1907,6 +1907,10 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       const sourceRun = await loadOwnedRun(req, storage, runId, 'runs:create');
       // ADR 0889 A2 — an eval run has no workflow to fork (its workflowId is the
       // synthetic `eval:<suite>@<version>`); re-evaluate with a new eval run.
+      // ADR 1005 D13 — a host-owned run stands for an operation, not a graph.
+      if (isHostManagedRun(sourceRun)) {
+        throw new OpenwopError('conflict', 'A deployment-management run cannot be forked.', 409, { runId: sourceRun.runId, reason: 'management_run_not_forkable' });
+      }
       if (isAgentEvalRun(sourceRun)) {
         throw new OpenwopError('conflict', 'An eval run cannot be forked; start a new eval run (with configurable.baselineRunId to compare).', 409, { runId: sourceRun.runId, reason: 'eval_run_not_forkable' });
       }
@@ -2162,8 +2166,17 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
           { reason: 'workflow_budget_exhausted', workflowId: forkedRun.workflowId },
         );
       }
-      // ADR 0821 P5 follow-up — a fork is a NEW run, so it counts (a no-op until wired).
-      await withRunLimit(sourceRun.tenantId, () => insertRunWithStartContext(storage, forkedRun, { derivedFromRun: true }));
+      // ADR 0987 D3 — a fork is a NEW run: it charges the plan (ADR 0821 P5) and
+      // takes a concurrency slot, counted in the insert (D2).
+      try {
+        await insertRunWithStartContext(storage, forkedRun, { admission: chargedAdmission(runAdmissionFor(req)), derivedFromRun: true });
+      } catch (err) {
+        if (err instanceof AdmissionRefusedError) {
+          refuseRunAdmission(req, res);
+          return;
+        }
+        throw err;
+      }
 
       // Replay events up to fromSeq into the new run, then re-dispatch.
       // Sample-grade: copies events as-is. Real impls re-execute pure
@@ -2218,9 +2231,6 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
         res.setHeader('Location', `/runs/${newRunId}`);
         throw new OpenwopError('internal_error', message, 500);
       }
-      // ADR 0772 D3 — bound only now: a failed copy above must not hold a
-      // concurrent-runs slot until the TTL, and a successful one is a real run.
-      reserveConcurrentSlot(req, newRunId);
       hostSuite.auditSink.record({
         principalId: req.principal?.principalId ?? 'anonymous',
         action: 'run.fork',

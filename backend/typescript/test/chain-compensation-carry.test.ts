@@ -28,6 +28,14 @@
  * / `'1'`: the values are the host's advert, and a test that restates them would
  * keep passing after the advert moved — asserting its own copy, not the host.
  *
+ * TST-CCD-1. Red when: expansion or `validateWorkflowDefinition` drops
+ * `compensation` / `waiveRequiresApproval` / `irreversibleEffect`; 5b/6b stop
+ * substituting or re-prefixing `inputMapping`; 3b/6c refusals are removed (either
+ * gate); the policy is aliased, merged, key-order sensitive or not inherited;
+ * `checkCompensationPolicy` stops refusing an unadvertised policy; the manifest
+ * schema's irreversible-XOR-compensation rule goes; or `coRegisterSubChains` hands a
+ * child its parent's settings (UQ2).
+ *
  * @see ../../../docs/adr — ADR 0554 (compensation), RFC 0157, RFC 0151 §B UQ4
  * @see spec/v1/workflow-chain-packs.md §"Compensation (RFC 0157)"
  */
@@ -40,11 +48,13 @@ import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { OpenwopError } from '../src/types.js';
 import {
+  coRegisterSubChains,
   expandChain,
   loadWorkflowChainPacks,
   getChain,
   type WorkflowChain,
 } from '../src/host/workflowChainPackLoader.js';
+import type { WorkflowDefinition } from '../src/executor/types.js';
 import { validateWorkflowDefinition } from '../src/host/workflowDefinitionValidation.js';
 import { setCapabilityOverlay, resetCapabilityOverlay } from '../src/host/capabilityOverlay.js';
 import { COMPENSATION_ORDERING_MODEL, type CompensationPolicy } from '../src/host/compensationUnwind.js';
@@ -361,18 +371,34 @@ describe('RFC 0157 §B — the chain policy becomes settings.compensation (step 
 // ── UQ2 — sub-chain nesting ─────────────────────────────────────────────────
 
 describe('RFC 0157 UQ2 (resolved for v1) — a child chain owns its own policy', () => {
-  it('a child policy DIFFERENT from the parent\'s is not a conflict: each co-registered workflow owns its `settings`', () => {
+  it('a child policy DIFFERENT from the parent\'s is not a conflict: each co-registered workflow owns its `settings`', async () => {
     const parentPolicy: CompensationPolicy = { triggers: ['node-failure'] };
     const childPolicy: CompensationPolicy = { triggers: ['run-cancel', 'operator-request'] };
-    // The parent's own expansion carries the parent policy…
-    const parentDef = expandChain(chain({ compensation: parentPolicy }), {});
+    const child = chain({ chainId: 'test.child', compensation: childPolicy });
+    const parent = chain({
+      chainId: 'test.parent',
+      compensation: parentPolicy,
+      subChains: [{ ref: 'test.child' }],
+      dag: { nodes: [{ id: 'call', typeId: 'core.subWorkflow', config: { subChainRef: 'test.child' } }] },
+    });
+    // Drive the REAL co-registration lane (`coRegisterSubChains`, what from-chain
+    // calls): the child is expanded as its own workflow and registered BEFORE the parent.
+    const registered: WorkflowDefinition[] = [];
+    const { definition: parentDef, registeredChildIds } = await coRegisterSubChains(parent, { params: {}, tenantId: 't-uq2' }, {
+      supported: true,
+      register: (def) => { registered.push(def); },
+      own: async () => {},
+      resolveSibling: (ref) => (ref === 'test.child' ? child : null),
+    });
+    expect(registeredChildIds).toHaveLength(1);
+    const childDef = registered.find((d) => d.workflowId === registeredChildIds[0]);
+    expect(childDef, 'the child was not registered').toBeTruthy();
+    // A difference is NOT `chain_compensation_policy_conflict`, and neither side
+    // takes the other's policy.
+    expect(childDef!.settings?.compensation).toEqual(childPolicy);
     expect(parentDef.settings?.compensation).toEqual(parentPolicy);
-    // …and the child, expanded as its own workflow (which is what
-    // `coRegisterSubChains` does — it never threads a parent policy into a
-    // child), carries the child's. A difference is NOT `chain_compensation_policy_conflict`.
-    const childDef = expandChain(chain({ chainId: 'test.child', compensation: childPolicy }), {});
-    expect(childDef.settings?.compensation).toEqual(childPolicy);
-    expect(childDef.settings?.compensation).not.toEqual(parentDef.settings?.compensation);
+    // …and the parent's dispatch node is bound to the registered child id.
+    expect((parentDef.nodes[0]!.config as { workflowId?: string }).workflowId).toBe(registeredChildIds[0]);
   });
 });
 
@@ -383,6 +409,7 @@ describe('RFC 0157 — the carry survives the real `POST /workflows/from-chain` 
   let PORT: number;
   const CHAIN_ID = 'test.compensating-pack';
 
+  const prevDsn = process.env.OPENWOP_STORAGE_DSN;
   beforeAll(async () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
     const app = await createApp({
@@ -435,7 +462,10 @@ describe('RFC 0157 — the carry survives the real `POST /workflows/from-chain` 
     expect(errors, 'the RFC 0157 pack MUST validate against the vendored manifest schema').toEqual([]);
     expect(getChain(CHAIN_ID)).not.toBeNull();
   });
-  afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+  afterAll(async () => {
+    await new Promise<void>((res) => server.close(() => res()));
+    if (prevDsn === undefined) delete process.env.OPENWOP_STORAGE_DSN; else process.env.OPENWOP_STORAGE_DSN = prevDsn;
+  });
 
   const url = (p: string): string => `http://127.0.0.1:${PORT}/host/openwop-app${p}`;
   const cookie = async (): Promise<string> =>

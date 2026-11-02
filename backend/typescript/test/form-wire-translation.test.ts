@@ -6,6 +6,15 @@
  * `checkbox` coerces to `text` on the next ordinary save — and `emailOptInField`
  * REQUIRES `checkbox` and throws 400, so every form with a marketing opt-in
  * becomes UNSAVEABLE (ADR 0338 consent machinery). Hence: translate here.
+ *
+ * TST-DEA-1 — red when: a WIRE_TO_HOST target or wire type is dropped/renamed,
+ * the email fold or `id`→`key` rename is removed, the `vendor.`/`x-` extension
+ * carve-out or `declaredType` is lost, the loader stops calling
+ * `wireFieldToHost`, or the templateId-scope / SemVer / unknown-type refusals
+ * are loosened (each sabotage-witnessed, wave 70).
+ * Overlap (kept, dedupe-needs-human-ask): `form-content-packs.test.ts` ›
+ * "REFUSES an out-of-catalog field type" also refuses an unknown type; this file
+ * owns the extension carve-out boundary next to it.
  */
 import { describe, expect, it } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
@@ -43,9 +52,8 @@ describe('RFC 0137 — wire → host field translation', () => {
   });
 
   it('covers every wire type — no silent gap', () => {
-    for (const w of WIRE_TYPES) {
-      expect(WIRE_TO_HOST[w], `wire type '${w}' has no mapping`).toBeTruthy();
-    }
+    // Two-sided: every wire type has a mapping AND the map names nothing else.
+    expect(Object.keys(WIRE_TO_HOST).sort()).toEqual([...WIRE_TYPES].sort());
   });
 
   it('maps the data-kind names onto the host widget names', () => {
@@ -74,8 +82,8 @@ describe('RFC 0137 — wire → host field translation', () => {
   it('DEGRADES a vendor extension to plain text rather than failing', () => {
     // Spec §Instantiation #2 — MUST degrade, not refuse. This is the
     // forward-compat escape hatch.
-    expect(wireFieldToHost({ id: 'x', type: 'vendor.myndhyve.color' }).type).toBe('text');
-    expect(wireFieldToHost({ id: 'y', type: 'x-fancy' }).type).toBe('text');
+    expect(wireFieldToHost({ id: 'x', type: 'vendor.myndhyve.color' })).toEqual({ key: 'x', type: 'text', declaredType: 'vendor.myndhyve.color' });
+    expect(wireFieldToHost({ id: 'y', type: 'x-fancy' })).toEqual({ key: 'y', type: 'text', declaredType: 'x-fancy' });
   });
 
   it('degrades portable kinds the host has no control for', () => {
@@ -103,7 +111,7 @@ describe('RFC 0137 — wire → host field translation', () => {
     });
     expect(out.errors).toEqual([]);
     const t = getFormTemplate('vendor.test.form.wire');
-    expect(t, 'template must register').toBeTruthy();
+    expect(t, 'template must register').not.toBeNull();
     expect(t!.fields.map((f) => f.type)).toEqual(['textarea', 'checkbox', 'email', 'number']);
     // `id` became `key` on the way through — storage keeps `key`.
     expect(t!.fields.map((f) => f.key)).toEqual(['note', 'optin', 'mail', 'party']);
@@ -118,7 +126,10 @@ describe('RFC 0137 — wire → host field translation', () => {
       }])],
     });
     expect(out.errors, 'an extension type must NOT fail the pack').toEqual([]);
-    expect(getFormTemplate('vendor.test.form.ext')!.fields[0]!.type).toBe('text');
+    const field = getFormTemplate('vendor.test.form.ext')!.fields[0]!;
+    expect(field.type).toBe('text');
+    // The declared wire type survives — the DEGRADE contract, not a silent rewrite.
+    expect(field.declaredType).toBe('vendor.myndhyve.color');
   });
 
   it('the LOADER still REFUSES a bare unknown type — a typo is not an extension', () => {
@@ -130,7 +141,10 @@ describe('RFC 0137 — wire → host field translation', () => {
       }])],
     });
     expect(getFormTemplate('vendor.test.form.typo')).toBeNull();
-    expect(JSON.stringify(out.errors)).toContain('emial');
+    expect(out.errors).toEqual([{
+      pack: 'test.forms', code: 'form_content_pack_invalid',
+      message: "vendor.test.form.typo: field 'x' has unknown type 'emial' (allowed: text, longtext, number, boolean, select, multiselect, file, artifact-ref, or a vendor.*/x- extension)",
+    }]);
   });
 });
 
@@ -155,20 +169,20 @@ describe('RFC 0137 — loader patterns match the wire schema', () => {
     // The exact id the shipped pack used before RFC 0137 — it would have failed
     // registry validation for a SECOND reason after the field-type remap.
     expect(getFormTemplate('forms.contact-us')).toBeNull();
-    expect(JSON.stringify(out.errors)).toContain('id slug');
+    expect(out.errors).toEqual([{ pack: 'test.forms', code: 'form_content_pack_invalid', message: 'templateId must be an id slug' }]);
   });
 
   it('REFUSES a non-SemVer template version', () => {
     _resetFormContentRegistryForTest();
     const out = loadFormContentPacks({ roots: [packRootFor(tpl({ version: 'v1' }))] });
     expect(getFormTemplate('vendor.test.form.ok')).toBeNull();
-    expect(JSON.stringify(out.errors)).toContain('SemVer');
+    expect(out.errors).toEqual([{ pack: 'test.forms', code: 'form_content_pack_invalid', message: 'vendor.test.form.ok: version must be SemVer' }]);
   });
 
   it('ACCEPTS a correctly scoped id and SemVer — the tightening must not over-fire', () => {
     _resetFormContentRegistryForTest();
     const out = loadFormContentPacks({ roots: [packRootFor(tpl())] });
     expect(out.errors).toEqual([]);
-    expect(getFormTemplate('vendor.test.form.ok')).toBeTruthy();
+    expect(getFormTemplate('vendor.test.form.ok')).not.toBeNull();
   });
 });

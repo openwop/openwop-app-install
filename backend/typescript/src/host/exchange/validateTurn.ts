@@ -35,6 +35,10 @@ export interface ConversationResolve {
    *  replayed. What is deterministic is a recorded run's tool VERDICTS (`agent.toolReturned`),
    *  which replay verbatim; a `:fork`'s next turn takes the mode its new request sends. */
   permissionMode?: unknown;
+  /** ADR 1001 D7 — the person's answer to the agent's question card:
+   *  `{ askId, answers }`. Host-internal (like `webSearch`), validated against
+   *  the recorded ask in `exchange/chatAnswer.ts`, never a wire field. */
+  clarificationAnswer?: unknown;
 }
 
 /** The parsed, typed projection of one resolve body — every per-exchange

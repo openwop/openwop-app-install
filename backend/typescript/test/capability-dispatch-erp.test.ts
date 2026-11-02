@@ -4,6 +4,13 @@
  * core.openwop.connectors.erp-action reports the connected `finance` provider and
  * RECOMMENDS a finance action — it applies NOTHING (ERP postings move money; real
  * execution is a future gated slice). Fails on an unknown action.
+ *
+ * Tracker TST-CBC-2 (money-posting writes; protected). Red when: an absent `dryRun`
+ * posts; the vendorBill entity or expense amount is mis-built; the idempotency record
+ * is skipped (a fork double-posts); `Prefer: transient` is dropped; a non-numeric
+ * postingPeriod is interpolated or a PO literal is left unescaped (SuiteQL injection);
+ * match-po without an identifier dispatches; an unknown action is accepted; a platform
+ * rejection reads as success (w67g1-erp-* probes, wave 67).
  */
 import { describe, expect, it, beforeAll } from 'vitest';
 import { createApp } from '../src/index.js';
@@ -40,7 +47,9 @@ describe('ADR 0186 slice 5 — erp-action node', () => {
   it('recommends a read action (get-financial-summary) but applies nothing', async () => {
     let called = false;
     const c = { ...conns('netsuite'), invoke: async () => { called = true; return { ok: true }; } };
-    expect(outputsOf(await node().execute(makeCtx({ config: { action: 'get-financial-summary', period: '2026-05' }, connectors: c })))).toMatchObject({ applied: false, planned: { action: 'get-financial-summary' } });
+    // Everything a real read needs is present (baseUrl + a numeric filter): only the
+    // dry-run default (dryRun absent) holds it back.
+    expect(outputsOf(await node().execute(makeCtx({ config: { action: 'get-financial-summary', baseUrl: 'https://acct.suitetalk.api.netsuite.com', postingPeriod: '42' }, connectors: c })))).toMatchObject({ applied: false, planned: { action: 'get-financial-summary' } });
     expect(called).toBe(false);
   });
 
@@ -107,7 +116,8 @@ describe('ADR 0186 slice 5b — post-bill / expense-report real execution (dry-r
 
   it('idempotent: a repeat post for the same key is REUSED, never double-posted', async () => {
     const c = execConns('netsuite');
-    await node().execute(makeCtx({ tenantId: 'e4', config: billCfg, connectors: c.surface }));
+    expect(outputsOf(await node().execute(makeCtx({ tenantId: 'e4', config: billCfg, connectors: c.surface })))).toMatchObject({ applied: true, reused: false, recordId: 'REC-9' });
+    expect(c.calls.length).toBe(1);
     const c2 = execConns('netsuite');
     expect(outputsOf(await node().execute(makeCtx({ tenantId: 'e4', config: billCfg, connectors: c2.surface })))).toMatchObject({ applied: true, reused: true, recordId: 'REC-9' });
     expect(c2.calls.length).toBe(0);
@@ -155,6 +165,8 @@ describe('ADR 0186 slice 5b — post-bill / expense-report real execution (dry-r
 
   it('a real post the platform rejects → failure', async () => {
     const c = execConns('netsuite', false);
-    expect((await node().execute(makeCtx({ tenantId: 'e7', config: billCfg, connectors: c.surface }))).status).toBe('failure');
+    const res = await node().execute(makeCtx({ tenantId: 'e7', config: billCfg, connectors: c.surface }));
+    if (res.status !== 'failure') throw new Error(`expected failure, got ${res.status}`);
+    expect(res.error?.code).toBe('bad_request');
   });
 });

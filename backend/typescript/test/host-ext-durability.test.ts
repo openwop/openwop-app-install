@@ -9,9 +9,13 @@
  *      SECOND, independently-opened handle on the same file WITHOUT any
  *      hydrate step — the proxy for "instance B sees instance A's write."
  *   3. PER-ENTITY: entities are independent rows (delete one, the other
- *      survives) and writes are synchronous (no fire-and-forget window).
+ *      survives); each write is read back after it is awaited.
  * A `:memory:` DSN is intentionally avoided for the cross-handle tests — it
  * does not share across connections (expected).
+ *
+ * Tracker TST-DFD-1. Red when (w71g1, witnessed): `kvList` ignores the prefix; `kvDelete`
+ * reports a missing row as deleted; unsubscribe keeps delivering; the not-initialized
+ * error loses its message.
  */
 
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';

@@ -25,7 +25,7 @@ export const messages = {
   cardDirections: "{{count}} direction(s)",
   open: 'Ouvrir',
   emptyTitle: 'Pas encore de briefs créatifs',
-  emptyBody: 'Créez votre premier brief visuel ou générez-les depuis une campagne.',
+  emptyBody: 'Créez votre premier brief visuel ou générez-les depuis une campagne. Les briefs générés apparaissent ici une fois le brouillon approuvé dans le chat.',
   status_draft: 'brouillon',
   status_review: 'en revue',
   status_approved: 'approuvé',

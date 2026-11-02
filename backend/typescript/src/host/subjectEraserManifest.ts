@@ -149,6 +149,14 @@
  *      `userId`; a USER-scoped row is only ever selected for its owner, so the
  *      eraser revokes those (and the subject's in-flight grants) in the tenant
  *      the DSAR names. Rows in OTHER shared workspaces are not reached (`CONNWF-16`).
+ *
+ *  +1 (2026-11-01, ADR 1014 D8):
+ *    + `eraseSubjectUserAgentRevisions` — `user-agent-revisions` sat in
+ *      REVIEWED_EXEMPT as "no author field". The user ruled that text a person
+ *      types into an agent gets an erasure path, so each revision now records
+ *      `authoredBy`, and the eraser deletes the subject's revisions unless the
+ *      agent is serving them (head or deployment-pinned: attribution redacted,
+ *      text kept). Rows written before D8 carry no author and are not reached.
  */
 /*
  *  +1 (2026-10-06, ADR 0834 D6):
@@ -268,6 +276,10 @@
  *    + `eraseManualTestRunsSubject` — `manual-tests:run` holds a tester's verdicts
  *      and free-text notes under their subjectRef and had no eraser; the row is
  *      deleted.
+ *  +1 (2026-10-31, ADR 1016, code grade MR66CD-8):
+ *    + `eraseRouterConfigSubject` — `modelrouter:config.updatedBy` names the person
+ *      who last saved the workspace's routing rules, and had no eraser. The config
+ *      is the workspace's and is kept; `updatedBy` is tombstoned.
  */
 export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'eraseExperimentFirstExposures',
@@ -332,6 +344,7 @@ export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'eraseTopicOptOuts', // ADR 0905 D7 — consent topic opt-outs
   'eraseClientChannelGrants', // ADR 0955 Q7 — per-client SMS consent grants
   'eraseScheduledChatsSubject',
+  'eraseRouterConfigSubject', // ADR 1016 (MR66CD-8)
   'eraseSharingSubject',
   'eraseSubjectAccessControl',
   // ADR 0910 — `workspace-operator-activation` (host/operatorAccess.ts).
@@ -387,6 +400,7 @@ export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   // over §7's durability and why that does not weaken the ban control.
   'eraseSubjectWorkspaceJoins',
   'eraseSubjectWorkflowRevisions',
+  'eraseSubjectUserAgentRevisions',
   'eraseSuggestionSubject',
   'eraseSyncBindingSubject',
   'eraseTeamLedgerSubject',

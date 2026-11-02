@@ -39,6 +39,10 @@ export interface TranscriptBudgetConfig {
    *  that would exceed it is elided. Measured on text only so a single
    *  multimodal turn (image/file bytes) can't evict all text history. */
   readonly maxChars: number;
+  /** ADR 1003 D2 — the first kept turn moves only in steps of this many turns,
+   *  counted from turn 0 of the conversation. Absent ⇒ 1 (the original
+   *  slide-by-one window). */
+  readonly stepTurns?: number;
 }
 
 const DEFAULT_KEEP_LAST_TURNS = 20;
@@ -52,10 +56,19 @@ function envInt(name: string, fallback: number): number {
 /** Resolve the transcript-budget knobs from env (used when
  *  `contextEconomy().transcriptBudget` is on). */
 export function transcriptBudgetConfig(): TranscriptBudgetConfig {
+  const keepLastTurns = envInt('OPENWOP_CONTEXT_ECONOMY_TRANSCRIPT_KEEP_TURNS', DEFAULT_KEEP_LAST_TURNS);
   return {
-    keepLastTurns: envInt('OPENWOP_CONTEXT_ECONOMY_TRANSCRIPT_KEEP_TURNS', DEFAULT_KEEP_LAST_TURNS),
+    keepLastTurns,
     maxChars: envInt('OPENWOP_CONTEXT_ECONOMY_TRANSCRIPT_MAX_CHARS', DEFAULT_MAX_CHARS),
+    stepTurns: envInt('OPENWOP_CONTEXT_ECONOMY_TRANSCRIPT_STEP_TURNS', Math.max(1, Math.floor(keepLastTurns / 2))),
   };
+}
+
+/** ADR 1003 D2 — the voice-session seed's budget: the same caps, NO stepping.
+ *  A seed is composed once per session, so a cache-stable window buys nothing
+ *  there and stepping would only drop turns the caps allow. */
+export function voiceSeedBudgetConfig(): TranscriptBudgetConfig {
+  return { ...transcriptBudgetConfig(), stepTurns: 1 };
 }
 
 export interface WindowedTranscript<T> {
@@ -68,6 +81,7 @@ export interface WindowedTranscript<T> {
 /**
  * Window a chronological turn list to the budget: keep the most-recent turns up
  * to `keepLastTurns` AND within `maxChars` of text (accumulated newest-first),
+ * then move the first kept turn only in steps of `stepTurns` (ADR 1003 D2),
  * preserving chronological order in the result. Pure + non-mutating.
  *
  * @param turns   chronological prior turns (oldest first)
@@ -93,6 +107,21 @@ export function windowTranscript<T>(
     kept.push(turns[i]);
     chars += size;
   }
-  kept.reverse(); // restore chronological order
-  return { kept, omittedCount: turns.length - kept.length };
+  // ADR 1003 D2 — hold the window still between steps. A window that slides by
+  // one turn on every exchange changes the first kept turn (and the elision
+  // count the caller writes into the system message) every time, so no provider
+  // prefix cache ever hits. Rounding the first kept index UP to a multiple of
+  // `stepTurns`, counted from turn 0, keeps the kept prefix byte-identical until
+  // the caps push it past the next multiple. Rounding up only ever drops more
+  // (≤ stepTurns − 1 turns), so both caps still hold; the newest turn is always
+  // kept. Pure in (turns, cfg, sizeOf): the same conversation windows the same
+  // way on every run.
+  const step = Math.max(1, Math.floor(cfg.stepTurns ?? 1));
+  const firstByCaps = turns.length - kept.length;
+  if (firstByCaps === 0 || step === 1) {
+    kept.reverse(); // restore chronological order
+    return { kept, omittedCount: firstByCaps };
+  }
+  const first = Math.min(Math.ceil(firstByCaps / step) * step, turns.length - 1);
+  return { kept: turns.slice(first), omittedCount: first };
 }

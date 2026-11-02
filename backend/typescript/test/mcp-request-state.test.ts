@@ -10,6 +10,7 @@
  * Upstream classes `requestState` as attacker-controlled on receipt. Every leg
  * below is therefore an ATTACK, not a happy path with a typo.
  */
+import { createHash } from 'node:crypto';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { mcpRequestDigest, mintMcpRequestState, verifyMcpRequestState } from '../src/host/mcpRequestState.js';
 
@@ -35,7 +36,16 @@ describe('the state verifies for the round it was minted for', () => {
   it('is opaque — the interrupt TOKEN is bound by digest, never carried', () => {
     // A state the peer holds must not be a way to LEARN a live capability. The
     // token is hashed into the preimage; it never appears in the value.
-    expect(mintMcpRequestState(CLAIMS)).not.toContain('tok-1');
+    //
+    // The value is base64url, so a substring check on the raw state can never
+    // see a carried token (MEASURED w72: carrying the raw token left the old
+    // `not.toContain('tok-1')` green). Decode the payload half and read it.
+    const [payload] = mintMcpRequestState(CLAIMS).split('.') as [string, string];
+    const decoded = Buffer.from(payload, 'base64url').toString('utf8');
+    expect(decoded).not.toContain('tok-1');
+    const claims = JSON.parse(decoded) as { t?: unknown };
+    // Independent derivation (node:crypto), not the function under test.
+    expect(claims.t).toBe(createHash('sha256').update('tok-1').digest('base64url'));
   });
 });
 
@@ -67,14 +77,27 @@ describe('every binding refuses independently', () => {
   });
 
   it('expires', () => {
+    // The TTL is 15 minutes (900 s) and `exp <= now` is expired, so the
+    // boundary is pinned from both sides: one second before is still valid,
+    // exactly 900 s is not. (MEASURED w72: the old 1-hour check stayed green
+    // with the TTL doubled.)
     const state = mintMcpRequestState(CLAIMS, 0);
     expect(verifyMcpRequestState(state, EXPECT, 0)).toMatchObject({ ok: true });
-    expect(verifyMcpRequestState(state, EXPECT, 3_600_000)).toEqual({ ok: false, reason: 'expired' });
+    expect(verifyMcpRequestState(state, EXPECT, 899_000)).toMatchObject({ ok: true });
+    expect(verifyMcpRequestState(state, EXPECT, 900_000)).toEqual({ ok: false, reason: 'expired' });
   });
 
   it('garbage is malformed, not a 500', () => {
-    for (const junk of ['', 'forged', 'a.b', '.']) {
-      expect(verifyMcpRequestState(junk, EXPECT).ok, junk).toBe(false);
+    const expected: Array<[string, string]> = [
+      ['', 'malformed'],
+      ['forged', 'malformed'],
+      ['.', 'malformed'],
+      // A dot with a payload: reaches the MAC, whose length mismatch is refused
+      // cleanly rather than throwing from timingSafeEqual.
+      ['a.b', 'bad_signature'],
+    ];
+    for (const [junk, reason] of expected) {
+      expect(verifyMcpRequestState(junk, EXPECT), junk).toEqual({ ok: false, reason });
     }
     expect(verifyMcpRequestState(undefined, EXPECT)).toEqual({ ok: false, reason: 'malformed' });
     expect(verifyMcpRequestState({ not: 'a string' }, EXPECT)).toEqual({ ok: false, reason: 'malformed' });
@@ -85,9 +108,13 @@ describe('the request digest is stable across the round trip', () => {
   it('the retry adds inputResponses + requestState, and the digest must not move', () => {
     // If the digest covered the whole params object, no retry could ever
     // verify — the binding would be self-defeating rather than protective.
-    const initial = mcpRequestDigest('tools/call', 'needs_input', {});
-    const retry = mcpRequestDigest('tools/call', 'needs_input', {});
-    expect(retry).toBe(initial);
+    //
+    // The digest's preimage is exactly (method, name, arguments): the codec
+    // (`mcpCurrentCodec.ts`) passes `params.arguments`, never the whole params
+    // object a retry grows. Pinned against an INDEPENDENT sha256 of the literal
+    // preimage — hashing the same call twice (the old form) could not fail.
+    const expected = createHash('sha256').update('["tools/call","needs_input",{}]').digest('base64url');
+    expect(mcpRequestDigest('tools/call', 'needs_input', {})).toBe(expected);
   });
 
   it('but a changed ARGUMENT moves it', () => {

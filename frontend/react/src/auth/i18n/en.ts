@@ -127,4 +127,13 @@ export const messages = {
   sessionRefused_session_revoked: 'You were signed out. Sign in again to continue.',
   sessionRefused_session_expired: 'Your session has ended, so you were signed out. Sign in again to continue.',
   sessionRefused_self_revoked: 'You signed out of every device, including this one. Sign in again to continue.',
+
+  // ReauthDialog — confirm it's you after auth/requires-recent-login (reauth.ts)
+  reauthTitle: 'Confirm it\'s you',
+  reauthLede: 'For your security, sign in again to make this change. You\'ll stay on this page and the change will finish.',
+  reauthLoading: 'Checking how you signed in…',
+  reauthConfirm: 'Confirm',
+  reauthMfaLede: 'Enter the 6-digit code from your authenticator app to confirm it\'s you.',
+  reauthUnsupported: 'Your sign-in method can\'t be confirmed here. Sign out and sign in again, then retry the change.',
+  reauthSignOutAgain: 'Sign out and sign in again',
 } as const;

@@ -3,6 +3,9 @@
  * `runChatToolLoop` with a `capabilityScope`: the model is offered only enabled
  * tools, and a forced/hallucinated call to a disabled-but-permitted tool is refused
  * (`agent.toolReturned{status:'forbidden'}`) before it executes.
+ *
+ * TST-CKC-6. Red when the loop offers tools outside the scope (case 1) or executes
+ * a forced call to a disabled-but-permitted tool (case 2).
  */
 import { describe, it, expect } from 'vitest';
 import { runChatToolLoop, type CompiledTool, type ChatToolLoopOpts } from '../src/host/agentDispatch.js';

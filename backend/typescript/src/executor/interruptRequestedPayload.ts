@@ -60,7 +60,7 @@ const strArr = (v: unknown): string[] | undefined =>
 /** The host's engine-routing keys, which never reach the wire. */
 function hostData(data: unknown): Data {
   if (data === null || typeof data !== 'object' || Array.isArray(data)) return {};
-  const { __resumeKey: _k, __resumeStyle: _s, ...rest } = data as Data;
+  const { __resumeKey: _k, __resumeStyle: _s, __durable: _d, __causationId: _c, ...rest } = data as Data;
   return rest;
 }
 
@@ -106,7 +106,11 @@ const PROJECTORS: { readonly [K in HostKind]: Projector } = {
       : [];
     const single = str(d.question);
     if (qs.length === 0 && single) qs.push({ id: nodeId, question: single, ...(d.schema && typeof d.schema === 'object' ? { schema: d.schema as Data } : {}) });
-    return qs.length > 0 ? { kind: 'clarification', data: { questions: qs } } : custom('clarification', d);
+    // ClarificationData.contextType is optional and spec-admitted (interrupt.md).
+    const contextType = str(d.contextType);
+    // RFC 0255 §E — the form rides verbatim; the executor refused a bad one.
+    const form = d.form !== undefined ? { form: d.form } : {};
+    return qs.length > 0 ? { kind: 'clarification', data: { questions: qs, ...form, ...(contextType ? { contextType } : {}) } } : custom('clarification', d);
   },
   'external-event': (d) => {
     const eventType = str(d.eventType);

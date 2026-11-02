@@ -29,12 +29,19 @@
  *
  * @see src/bootstrap/conformanceMemoryProbe.ts
  * @see spec/v1/agent-memory.md §CTI-1, §SR-1, §"TTL semantics", §"Injection budget"
+ *
+ * Tracker TST-CJA-4 (grade-tests w68). Red when: the adapter's TTL filter lets an
+ * expired row through or the write path stops redacting run secrets; the probe
+ * lands the wrong freshId / foreign-seed control / tokenCounter; the CTI-1 read is
+ * aimed at the foreign tenant; or an unknown memoryAction reaches dispatch without
+ * the `memory_action_not_implemented` refusal.
  */
 
-import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import { describe, expect, it, beforeAll, afterAll, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
+import { resolveSecret } from '../src/byok/secretResolver.js';
 import { MEMORY_PROBE_ACTIONS } from '../src/bootstrap/conformanceMemoryProbe.js';
 
 let server: http.Server;
@@ -58,8 +65,11 @@ beforeAll(async () => {
   await new Promise<void>((res) => {
     server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
-  // The canary is provisioned in a floating promise at boot; give it a tick.
-  await new Promise((r) => setTimeout(r, 250));
+  // The canary is provisioned in a floating promise at boot: wait for it to be
+  // resolvable under the dev-token tenant rather than sleeping a fixed tick.
+  await vi.waitFor(async () => {
+    expect(await resolveSecret('openwop-conformance-canary-secret', { tenantId: 'default' })).not.toBeNull();
+  }, { timeout: 5_000, interval: 20 });
 });
 
 afterAll(async () => {
@@ -145,6 +155,9 @@ describe('memoryAction seam — non-vacuity of the seam itself', () => {
     // host cannot meaningfully execute MUST NOT reach `completed`.
     const snap = await runProbe('h49.unknown-action', { memoryAction: 'no-such-action' });
     expect(snap.status).toBe('failed');
+    // The refusal must be the seam's own typed one: a missing handler that
+    // crashed with a TypeError would also fail the run.
+    expect(JSON.stringify(snap.error ?? {})).toContain('memory_action_not_implemented');
   });
 });
 
@@ -246,9 +259,11 @@ describe('write-then-read + redaction-probe', () => {
     const rb = snap.variables?.['memoryReadback'] as Record<string, unknown> | undefined;
     expect(rb).toBeDefined();
     expect(typeof rb!['id']).toBe('string');
-    expect(typeof rb!['content']).toBe('string');
-    expect(Array.isArray(rb!['tags'])).toBe(true);
-    expect(typeof rb!['createdAt']).toBe('string');
+    expect((rb!['id'] as string).length).toBeGreaterThan(0);
+    // The exact entry the probe wrote, read back through the adapter.
+    expect(rb!['content']).toBe('conformance round-trip entry: the host resolved this memoryRef and read it back.');
+    expect(rb!['tags']).toEqual(['conformance', 'memory-roundtrip']);
+    expect(rb!['createdAt']).toBe('2026-01-01T00:00:00.000Z');
   });
 
   it('redaction-probe persists [REDACTED:<secretId>] and never the plaintext (SR-1)', async () => {

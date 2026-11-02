@@ -271,8 +271,13 @@ export async function consultApplyGrant(input: ConsultInput): Promise<GrantDecis
         (g): g is ApplyGrant => g !== null,
       )
     : await applyGrants.listByPrefix(`${input.tenantId}:`);
+  // DG-SEC-1 — only SELF-consent authorises (`grantedBy === subjectId`). A grant
+  // one member minted for another's applications (stored before the route
+  // refused it, or by any future writer) is inert here, at every caller: this is
+  // the one decision point both the autopilot pipeline and computer-use pass.
   const candidates = all.filter(
-    (g) => g.subjectId === input.subjectId && g.campaignId === input.campaignId
+    (g) => g.grantedBy === g.subjectId
+      && g.subjectId === input.subjectId && g.campaignId === input.campaignId
       && (input.orgId === undefined || g.orgId === input.orgId)
       && (input.grantedBy === undefined || g.grantedBy === input.grantedBy),
   );

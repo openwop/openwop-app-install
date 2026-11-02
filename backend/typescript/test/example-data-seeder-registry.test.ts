@@ -9,12 +9,22 @@
  * reversible (clear empties the counts again).
  *
  * Covers host/exampleDataSeeders.ts + routes/agentOps.ts.
+ *
+ * The status → dryRun → run → re-run → clear sequence is ONE lifecycle case
+ * (it is a single ordered claim); the step-selection case clears first. So the
+ * file passes in any order. Every `.every(...)` is preceded by a non-empty check
+ * — an empty result list would otherwise satisfy it.
+ *
+ * Tracker: TST-DBA-6. Red when: dryRun writes, a re-run reports `created`
+ * for present data, or the step selection is ignored (probes w70g2-reg-dry,
+ * -reg-skip, -reg-select).
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
+import type { RunResult } from '../src/host/exampleDataSeeders.js';
 
 let server: http.Server;
 let BASE: string;
@@ -38,8 +48,6 @@ async function api<T>(path: string, init?: RequestInit): Promise<{ status: numbe
 }
 
 interface Step { id: string; label: string; description: string; count: number }
-interface StepResult { step: string; action: string; message: string }
-interface RunResult { success: boolean; dryRun: boolean; results: StepResult[]; summary: { created: number; skipped: number; cleared: number; errors: number; total: number } }
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -52,69 +60,79 @@ beforeAll(async () => {
 
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
+// Host-global content is deployment-wide and never cleared per-tenant (plus the
+// legal pages). Derived from the ONE `HOST_GLOBAL` set above — this used to be a
+// second hand-maintained literal, and both copies missed `comparison-page` when
+// ADR 0485 added it.
+const CLEAR_EXEMPT = new Set([...HOST_GLOBAL, 'marketing-legal-pages']);
+
+const status = async (): Promise<Step[]> => {
+  const r = await api<{ steps: Step[] }>('/host/openwop-app/example-data/status');
+  expect(r.status).toBe(200);
+  return r.body.steps;
+};
+const clearAll = async (): Promise<void> => {
+  const { body } = await api<RunResult>('/host/openwop-app/example-data/clear', { method: 'POST', body: JSON.stringify({}) });
+  expect(body.success).toBe(true);
+};
+
 describe('demo-seeder registry', () => {
-  it('status enumerates every registered step, starting at zero', async () => {
-    const { status, body } = await api<{ steps: Step[] }>('/host/openwop-app/example-data/status');
-    expect(status).toBe(200);
-    const ids = body.steps.map((s) => s.id);
-    expect(ids).toContain('agents');
-    expect(ids).toContain('advisors');
-    expect(ids).toContain('workforces');
-    expect(ids).toContain('cms-homepage');
-    for (const s of body.steps) {
+  it('status → dryRun → run → re-run → clear: honest counts, no-write preview, idempotent, reversible', async () => {
+    // Start from a cleared tenant whatever ran before.
+    await clearAll();
+
+    // status enumerates every registered step.
+    const steps0 = await status();
+    const ids = steps0.map((s) => s.id);
+    for (const id of ['agents', 'advisors', 'workforces', 'cms-homepage']) expect(ids).toContain(id);
+    for (const s of steps0) {
       expect(typeof s.label).toBe('string');
       expect(typeof s.description).toBe('string');
     }
-    // Per-tenant seeders start empty; the HOST-GLOBAL content (the system front page +
-    // the public Features page, #849/#850) is ensured at boot, so those are present from
-    // the start and excluded from the empty-at-start assertion.
-    for (const s of body.steps.filter((x) => !HOST_GLOBAL.has(x.id))) {
-      expect(s.count, s.id).toBe(0);
-    }
-    for (const id of HOST_GLOBAL) {
-      expect(body.steps.find((s) => s.id === id)!.count, id).toBeGreaterThanOrEqual(1);
-    }
-  });
+    // Per-tenant seeders are empty; the HOST-GLOBAL content (the system front page +
+    // the public Features page, #849/#850) is ensured at boot, so it is present.
+    // (The legal pages are clear-exempt, so after an earlier run they may be present.)
+    const perTenant0 = steps0.filter((s) => !CLEAR_EXEMPT.has(s.id));
+    expect(perTenant0.length).toBeGreaterThan(0);
+    for (const s of perTenant0) expect(s.count, s.id).toBe(0);
+    for (const id of HOST_GLOBAL) expect(steps0.find((s) => s.id === id)?.count, id).toBeGreaterThanOrEqual(1);
 
-  it('dryRun previews without writing', async () => {
-    const { body } = await api<RunResult>('/host/openwop-app/example-data/run', { method: 'POST', body: JSON.stringify({ dryRun: true }) });
-    expect(body.dryRun).toBe(true);
-    // Empty per-tenant seeders would create; the always-present host-global pages would skip.
-    expect(body.results.filter((r) => !HOST_GLOBAL.has(r.step)).every((r) => r.action === 'created')).toBe(true);
-    const after = await api<{ steps: Step[] }>('/host/openwop-app/example-data/status');
-    expect(after.body.steps.filter((s) => !HOST_GLOBAL.has(s.id)).every((s) => s.count === 0)).toBe(true);
-  });
+    // dryRun previews without writing.
+    const dry = await api<RunResult>('/host/openwop-app/example-data/run', { method: 'POST', body: JSON.stringify({ dryRun: true }) });
+    expect(dry.body.dryRun).toBe(true);
+    const dryPerTenant = dry.body.results.filter((r) => !CLEAR_EXEMPT.has(r.step));
+    expect(dryPerTenant.length).toBeGreaterThan(0);
+    expect(dryPerTenant.every((r) => r.action === 'created')).toBe(true);
+    const afterDry = (await status()).filter((s) => !CLEAR_EXEMPT.has(s.id));
+    expect(afterDry.every((s) => s.count === 0)).toBe(true);
 
-  it('run seeds all steps; counts go up; re-run skips (idempotent)', async () => {
+    // run seeds all steps; counts go up.
     const first = await api<RunResult>('/host/openwop-app/example-data/run', { method: 'POST', body: JSON.stringify({}) });
     expect(first.body.success).toBe(true);
     expect(first.body.summary.created).toBeGreaterThan(0);
+    const seeded = await status();
+    expect(seeded.find((s) => s.id === 'agents')?.count).toBeGreaterThan(0);
+    expect(seeded.find((s) => s.id === 'workforces')?.count).toBeGreaterThan(0);
 
-    const status = await api<{ steps: Step[] }>('/host/openwop-app/example-data/status');
-    const agents = status.body.steps.find((s) => s.id === 'agents');
-    const workforces = status.body.steps.find((s) => s.id === 'workforces');
-    expect(agents?.count).toBeGreaterThan(0);
-    expect(workforces?.count).toBeGreaterThan(0);
-
+    // re-run skips (idempotent).
     const second = await api<RunResult>('/host/openwop-app/example-data/run', { method: 'POST', body: JSON.stringify({}) });
     expect(second.body.summary.created).toBe(0); // all present → skipped
+    expect(second.body.results.length).toBeGreaterThan(0);
     expect(second.body.results.every((r) => r.action === 'skipped')).toBe(true);
-  }, 60_000); // #4176: 15 s timed out under peer load; the assertion is unchanged
+
+    // clear removes demo entities; per-tenant counts return to zero.
+    await clearAll();
+    const cleared = (await status()).filter((s) => !CLEAR_EXEMPT.has(s.id));
+    expect(cleared.every((s) => s.count === 0)).toBe(true);
+  }, 90_000); // #4176: the full run timed out at 15 s under peer load; two full runs here
 
   it('run honours a step selection', async () => {
+    await clearAll();
     const { body } = await api<RunResult>('/host/openwop-app/example-data/run', { method: 'POST', body: JSON.stringify({ steps: ['agents'] }) });
     expect(body.results.map((r) => r.step)).toEqual(['agents']);
-  });
-
-  it('clear removes demo entities; counts return to zero', async () => {
-    const { body } = await api<RunResult>('/host/openwop-app/example-data/clear', { method: 'POST', body: JSON.stringify({}) });
-    expect(body.success).toBe(true);
-    const status = await api<{ steps: Step[] }>('/host/openwop-app/example-data/status');
-    // Per-tenant seeders clear to zero; host-global content is deployment-wide
-    // and never cleared per-tenant. Derived from the ONE `HOST_GLOBAL` set above
-    // plus the legal pages — this used to be a second hand-maintained literal,
-    // and both copies missed `comparison-page` when ADR 0485 added it.
-    const hostGlobal = new Set([...HOST_GLOBAL, 'marketing-legal-pages']);
-    expect(status.body.steps.filter((s) => !hostGlobal.has(s.id)).every((s) => s.count === 0)).toBe(true);
-  });
+    // Only the selected step wrote: agents present, workforces untouched.
+    const after = await status();
+    expect(after.find((s) => s.id === 'agents')?.count).toBeGreaterThan(0);
+    expect(after.find((s) => s.id === 'workforces')?.count).toBe(0);
+  }, 30_000);
 });

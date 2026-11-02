@@ -1,11 +1,11 @@
 /**
  * React NodeView for the `embedBlock` node (ADR 0334 2b-3). Reuses the chat
- * `SandboxedArtifactFrame` — the app's accepted isolation boundary for untrusted
- * HTML: `sandbox="allow-scripts"` (opaque origin — no access to the app's cookies,
- * tokens, or storage) + a `default-src 'none'` CSP (no network egress) + `srcDoc`
- * only (never innerHTML). So an author's embed is neutralised even when it renders
- * in another viewer's browser. The stored HTML is inert PM-JSON until this frame
- * isolates it. Editing goes through the surface's embed modal.
+ * `SandboxedArtifactFrame`, the app's isolation boundary for untrusted HTML: an opaque
+ * origin (no access to the app's cookies, tokens or storage), `srcDoc` only (never
+ * innerHTML), and STATIC until the reader runs its scripts (ADR 1017 D1). Running
+ * scripts can reach the network, so the embed of another workspace member never runs
+ * in a reader's browser without that reader's click. Consent is keyed by the HTML, so
+ * a peer's edit starts static again. Editing goes through the surface's embed modal.
  */
 import { NodeViewWrapper, type ReactNodeViewProps } from '@tiptap/react';
 import { useTranslation } from 'react-i18next';

@@ -212,7 +212,29 @@ describe('campaign-connectors — routes + sync node', () => {
       { platform: 'google', adAccountId: '123', level: 'campaign', since: '2026-07-08', until: '2026-07-14' },
       { platform: 'google', adAccountId: '456', level: 'campaign', since: '2026-07-08', until: '2026-07-14' },
     ]);
-    expect(recorded).toEqual([{ orgId: 'o1', plan: PLAN, rows: [row] }]);
+    // ADR 1022 D1 — rows go back tagged by account with the window and scope,
+    // never the plan object: the host re-plans and drops unknown accounts.
+    // The failed account rides along so the host can record the attempt (D7).
+    expect(recorded).toEqual([{ orgId: 'o1', platform: 'google', syncScope: 'dispatched', since: '2026-07-08', until: '2026-07-14',
+      batches: [{ adAccountId: '123', rows: [row] }], failures: [{ adAccountId: '456', reason: 'rate_limited', retryAfterS: 30 }] }]);
+    expect(ok.outputs?.summary).toBe('Synced 1 row(s) for 1 campaign(s) from 1 of 2 google ad account(s), 2026-07-08 to 2026-07-14. 1 account(s) failed.');
+
+    // ADR 1022 D7 — every account failed ⇒ a typed failure, never success with
+    // imported:0. The attempt is still recorded (failures, no batches).
+    recorded.length = 0;
+    const down = { getAccountMetrics: async () => ({ outcome: 'no_connection' }) };
+    const failed = await nodePack['feature.campaign-connectors.nodes.sync']({ features, ads: down, inputs: { orgId: 'o1', platform: 'google' } });
+    expect(failed.status).toBe('failed');
+    expect(failed.error?.code).toBe('sync_failed');
+    expect(failed.error?.message).toMatch(/first: no_connection/);
+    expect(recorded).toEqual([{ orgId: 'o1', platform: 'google', syncScope: 'dispatched', since: '2026-07-08', until: '2026-07-14',
+      batches: [], failures: [{ adAccountId: '123', reason: 'no_connection' }, { adAccountId: '456', reason: 'no_connection' }] }]);
+    // CP71CD-3 — the host re-planned and dropped every batch that answered:
+    // nothing landed, so not "synced 0".
+    const dropping = { 'campaign-connectors': { ...features['campaign-connectors'], recordAccountRows: async () => ({ imported: 0, deduped: 0, campaigns: 0, droppedBatches: 1 }) } };
+    const gone = await nodePack['feature.campaign-connectors.nodes.sync']({ features: dropping, ads, inputs: { orgId: 'o1', platform: 'google' } });
+    expect(gone.status).toBe('failed');
+    expect(gone.error?.code).toBe('sync_failed');
   });
 
   // CC-SP-14 + SYNC-1: plan first (a probe never claims), then a lost atomic
@@ -222,11 +244,11 @@ describe('campaign-connectors — routes + sync node', () => {
     let claims = 0;
     const ads = { getAccountMetrics: async (a: unknown) => { asked.push(a); return { outcome: 'ok', rows: [] }; } };
     const empty = { 'campaign-connectors': { importCsv: async () => ({}), claimSync: async () => { claims++; return { blocked: false }; }, planSync: async () => ({ outcome: 'no_dispatches' }), recordAccountRows: async () => ({}) } };
-    expect((await nodePack['feature.campaign-connectors.nodes.sync']({ features: empty, ads, inputs: { orgId: 'o1', platform: 'google' } })).outputs).toEqual({ outcome: 'no_dispatches' });
+    expect((await nodePack['feature.campaign-connectors.nodes.sync']({ features: empty, ads, inputs: { orgId: 'o1', platform: 'google' } })).outputs).toEqual({ outcome: 'no_dispatches', summary: 'Nothing to sync: no campaign launched from this workspace on google.' });
     expect(claims).toBe(0);
     const blocked = { 'campaign-connectors': { importCsv: async () => ({}), claimSync: async () => ({ blocked: true, retryAtIso: '2026-07-02T00:00:00Z' }), planSync: async () => ({ outcome: 'plan', plan: PLAN }), recordAccountRows: async () => ({}) } };
     const out = await nodePack['feature.campaign-connectors.nodes.sync']({ features: blocked, ads, inputs: { orgId: 'o1', platform: 'google', syncScope: 'account' } });
-    expect(out.outputs).toEqual({ outcome: 'cooldown', retryAtIso: '2026-07-02T00:00:00Z' });
+    expect(out.outputs).toEqual({ outcome: 'cooldown', retryAtIso: '2026-07-02T00:00:00Z', summary: 'Skipped: google was synced recently; next sync after 2026-07-02T00:00:00Z.' });
     expect(asked).toHaveLength(0);
   });
 });

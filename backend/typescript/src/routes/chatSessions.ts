@@ -730,7 +730,7 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
       const childId = randomUUID();
       const childTitle = `${parentSession.title} (branch)`;
       const now = new Date().toISOString();
-      await storage.createChatSession({ sessionId: childId, tenantId, title: childTitle, createdAt: now, updatedAt: now, messageCount: 0 });
+      await storage.createChatSession({ sessionId: childId, tenantId, title: childTitle, createdAt: now, updatedAt: now, messageCount: 0, titleSource: 'given' });
       // Carry the settled prefix into the child (fresh message ids; preserve role/
       // content/author/order). appendChatMessage atomically bumps the child count.
       const prefix = allMessages.slice(0, fromSeq);
@@ -1114,7 +1114,7 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
       const sessionId = randomUUID();
       const title = typeof body.title === 'string' && body.title.trim().length > 0 ? body.title.slice(0, MAX_TITLE_BYTES) : 'New chat';
       const ts = new Date().toISOString();
-      await storage.createChatSession({ sessionId, tenantId, title, createdAt: ts, updatedAt: ts, messageCount: 0 });
+      await storage.createChatSession({ sessionId, tenantId, title, createdAt: ts, updatedAt: ts, messageCount: 0, titleSource: 'given' });
       const meta = await ensureConversationMeta(tenantId, sessionId, {
         type,
         ...(owner ? { ownerUserId: owner } : {}),

@@ -17,6 +17,18 @@
  *  - KTA-4: reverting `resolveProposal` to read/apply/put runs the commands twice
  *    (planRevision 3) on a double apply; dropping the propose CAS mints two
  *    proposals for one run-keyed replay.
+ *
+ * TST-DJC-1 (grade-tests wave 71) — what the wave-71 probes showed:
+ *  - DOUBLE GUARD (KTA-4 apply): a double APPLY is held by the proposal claim CAS
+ *    (`resolveProposal`, cohortService.ts) AND by `applyPlanRevision`'s enrollment CAS
+ *    (enrollmentService.ts): two concurrent applies both compute planRevision 2, so
+ *    `planRevision === 2` alone stays green with the claim CAS gone. The case
+ *    therefore also counts plan-revised events — two executions emit twice — which
+ *    is red when the claim CAS is a blind put.
+ *  - KTA-4 propose: the run-keyed id is DERIVED, so a blind put still leaves one
+ *    proposal ROW; what the CAS prevents is the second approval CARD (each create
+ *    mints a random card id). The replay case counts pending cards — red when the
+ *    propose CAS is a blind put, or when the surface stops passing the run key.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import http from 'node:http';
@@ -38,6 +50,8 @@ import {
 } from '../src/features/kicktodo-accountability/cohortService.js';
 import { buildKicktodoAccountabilitySurface } from '../src/features/kicktodo-accountability/surface.js';
 import { KICKTODO_CIRCLES_ROUTES } from '../src/features/kicktodo-accountability/routes.js';
+import { listApprovals } from '../src/host/approvalService.js';
+import { registerPlanRevisedListener, __resetPlanRevisedListenersForTest } from '../src/host/planRevisedHook.js';
 
 vi.mock('../src/features/featureRoute.js', async (orig) => {
   const actual = await orig<typeof import('../src/features/featureRoute.js')>();
@@ -100,7 +114,20 @@ beforeEach(async () => {
 afterEach(() => {
   for (const f of restore) f();
   restore = [];
+  __resetPlanRevisedListenersForTest();
 });
+
+/** Narrow a settled result to its rejection reason (fails loudly on a fulfilled one). */
+function rejectionOf(r: PromiseSettledResult<unknown>): unknown {
+  if (r.status !== 'rejected') throw new Error('expected a rejected settlement');
+  return r.reason;
+}
+/** The proposal id a surface `propose` call returned (fails loudly on another shape). */
+function proposalIdOf(v: Record<string, unknown>): string {
+  const p = v.proposal;
+  if (typeof p !== 'object' || p === null || !('id' in p) || typeof p.id !== 'string') throw new Error(`no proposal id in ${JSON.stringify(v)}`);
+  return p.id;
+}
 
 describe('KTACC-3 — holdSeat', () => {
   it('two concurrent holds by ONE buyer take ONE seat (room for two)', async () => {
@@ -171,7 +198,7 @@ describe('KTA-3 — grant transitions are CAS', () => {
     // must not have been reported as a success.
     expect(await liveGrant(T, circle.id, grantee)).toBeNull();
     expect(acc.status).toBe('rejected');
-    expect((acc as PromiseRejectedResult).reason).toBeInstanceOf(CircleDeniedError);
+    expect(rejectionOf(acc)).toBeInstanceOf(CircleDeniedError);
   });
 });
 
@@ -188,6 +215,8 @@ describe('KTA-4 — proposals', () => {
 
   it('a double APPLY executes the commands once', async () => {
     const { enrollmentId, proposalId } = await coachedProposal();
+    const revisedEvents: string[] = [];
+    registerPlanRevisedListener((ev) => { if (ev.enrollmentId === enrollmentId) revisedEvents.push(ev.enrollmentId); });
     const race = lockstep(`hostext:kicktodo-plan-proposals:${T}::${enrollmentId}::${proposalId}`, 2);
     const results = await Promise.allSettled([
       resolveProposal(T, enrollmentId, proposalId, OWNER, 'apply'),
@@ -195,6 +224,7 @@ describe('KTA-4 — proposals', () => {
     ]);
     expect(race.arrivals()).toBe(2);
     expect((await getEnrollment(T, enrollmentId))?.planRevision).toBe(2); // ONE revision, not two
+    expect(revisedEvents, 'the commands executed twice (two plan-revised events)').toHaveLength(1);
     const fulfilled = results.filter((r): r is PromiseFulfilledResult<Awaited<ReturnType<typeof resolveProposal>>> => r.status === 'fulfilled');
     expect(fulfilled.some((r) => r.value.state === 'applied')).toBe(true);
     for (const r of results) if (r.status === 'rejected') expect(r.reason).toBeInstanceOf(ProposalBusyError);
@@ -224,8 +254,11 @@ describe('KTA-4 — proposals', () => {
     const surface = buildKicktodoAccountabilitySurface({ tenantId: T, runId: 'run-kt4b-1' });
     const args = { circleId: circle.id, coachSubject: coach, note: 'Try evenings.' };
     const [a, b] = await Promise.all([surface.propose!(args), surface.propose!(args)]);
-    expect((a as { proposal: { id: string } }).proposal.id).toBe((b as { proposal: { id: string } }).proposal.id);
+    expect(proposalIdOf(a)).toBe(proposalIdOf(b));
     expect(await listProposalsFor(T, enrollmentId)).toHaveLength(1);
+    const cards = async () => (await listApprovals(T, 'pending')).filter((c) => c.kind === 'kicktodo-plan-proposal' && c.planProposal?.enrollmentId === enrollmentId);
+    expect(await cards(), 'one proposal ⇒ one approval card for the participant').toHaveLength(1);
+    expect((await cards())[0]?.planProposal?.proposalId).toBe(proposalIdOf(a));
     // A different run is a different ask.
     await buildKicktodoAccountabilitySurface({ tenantId: T, runId: 'run-kt4b-2' }).propose!(args);
     expect(await listProposalsFor(T, enrollmentId)).toHaveLength(2);

@@ -19,6 +19,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { stripComments } from './helpers/stripComments.js';
 
 const ROUTES_DIR = join(__dirname, '..', 'src', 'routes');
 const REGISTRAR = join(ROUTES_DIR, 'registerAllRoutes.ts');
@@ -55,9 +56,7 @@ function stripImportsAndComments(src: string): string {
   // Order matters: line comments go FIRST, so a `/*` inside one (a route glob in
   // prose, e.g. "`/v1/content/*`") cannot open a block comment that swallows code.
   // Block comments are stripped only where they open a line (JSDoc / banner style).
-  return src
-    .replace(/(^|\s)\/\/.*$/gm, '$1')
-    .replace(/^\s*\/\*[\s\S]*?\*\//gm, '')
+  return stripComments(src)
     .replace(/^\s*(?:import|export)\s[^;]*?\sfrom\s+['"][^'"]+['"];?/gm, '')
     .replace(/^\s*import\s+['"][^'"]+['"];?/gm, '');
 }

@@ -5,9 +5,15 @@
  * `configDomains.ts` already guarantees payloads are order-normalized MAPS
  * keyed by stable ids. These pin the properties that generality rests on: the
  * nested case (publish-pointers is `{orgId: {funnelId: status}}`), the flat case
- * (feature-toggles, workflow-pins), stable ordering, and an honest truncation
- * count — a capped list that looked complete would recreate the very
- * "counts you cannot verify" problem the feature exists to fix.
+ * (workflow-pins; `feature-toggles` was removed by ADR 0819 §2 but had the same
+ * shape), stable ordering, and an honest truncation count — a capped list that
+ * looked complete would recreate the very "counts you cannot verify" problem the
+ * feature exists to fix. Tracker: TST-CGH-1.
+ *
+ * Red when (configDomains.ts `diffEntries`): the path sort is dropped (the
+ * ordering fixtures are inserted in REVERSE, so only the sort yields k00…); the
+ * truncation count is lost; an unchanged entry is reported; or nested keys stop
+ * flattening to `a/b`.
  */
 import { describe, it, expect } from 'vitest';
 import { diffEntries } from '../src/host/configDomains.js';
@@ -59,10 +65,14 @@ describe('diffEntries — truncation is stated, not silent', () => {
   });
 
   it('orders stably, so the capped slice is deterministic across calls', () => {
-    const to = Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`k${String(i).padStart(2, '0')}`, 'on']));
-    const a = diffEntries({}, to, 5).changes.map((c) => c.path);
-    const b = diffEntries({}, { ...to }, 5).changes.map((c) => c.path);
+    // Inserted in REVERSE (k59 … k00), with a REMOVED entry that sorts first: the
+    // insertion order and the added-then-removed loop order both disagree with the
+    // path order, so only a real sort yields this slice.
+    const to = Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`k${String(59 - i).padStart(2, '0')}`, 'on']));
+    const from = { a00: 'on' };
+    const a = diffEntries(from, to, 5).changes.map((c) => c.path);
+    const b = diffEntries(from, { ...to }, 5).changes.map((c) => c.path);
     expect(a).toEqual(b);
-    expect(a).toEqual(['k00', 'k01', 'k02', 'k03', 'k04']);
+    expect(a).toEqual(['a00', 'k00', 'k01', 'k02', 'k03']);
   });
 });

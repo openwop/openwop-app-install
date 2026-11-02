@@ -9,13 +9,13 @@ afterEach(cleanup);
 /**
  * Unit coverage for the A2UI surface renderer (ADR 0051 / RFC 0102), aligned to
  * the core wire schema `ui.a2ui-surface` (discriminator `component`, `surface`
- * wrapper, `action.target` resume|exchange). Asserts the load-bearing security +
+ * wrapper, `action.target` resume). Asserts the load-bearing security +
  * behavior contract, not styling:
  *  - the closed catalog renders the day-1 form subset;
  *  - an out-of-catalog component fails closed (no interactive render);
  *  - a catalog-version mismatch fails closed;
  *  - a resume action routes collected values through onAction('resolve', …);
- *  - an exchange action routes through onAction('exchange', …) (a2ui-action-confinement);
+ *  - a non-resume action target fails closed
  *  - a required-but-empty field disables the action.
  */
 
@@ -65,7 +65,7 @@ describe('A2uiSurfaceCard — catalog parse', () => {
       { component: 'action.button', id: 'go', label: 'Go', action: { url: 'http://evil' } },
     ] } });
     expect(p.ok).toBe(false);
-    if (!p.ok) expect(p.reason).toBe('"action.button" requires `action.target` of "resume" | "exchange"');
+    if (!p.ok) expect(p.reason).toBe('"action.button" requires `action.target` of "resume"');
   });
 });
 
@@ -90,23 +90,16 @@ describe('A2uiSurfaceCard — render + action', () => {
     const { onAction } = renderCard(goodPayload);
     fireEvent.change(screen.getByLabelText(/Date/), { target: { value: '2026-07-01' } });
     fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
-    expect(onAction).toHaveBeenCalledWith('resolve', expect.objectContaining({
-      action: 'confirm', when: '2026-07-01', dur: '30', remind: false,
-    }));
+    expect(onAction).toHaveBeenCalledWith('resolve', { answers: expect.arrayContaining([
+      { id: 'when', answer: '2026-07-01' }, { id: 'dur', answer: '30' }, { id: 'remind', answer: false },
+    ]) });
   });
 
-  it('routes an exchange action through onAction("exchange", …)', () => {
-    const payload = {
-      catalogVersion: A2UI_CATALOG_VERSION,
-      surface: { components: [
-        { component: 'field.text', id: 'msg', label: 'Message' },
-        { component: 'action.button', id: 'send', label: 'Send', action: { target: 'exchange' } },
-      ] },
-    };
-    const { onAction } = renderCard(payload);
-    fireEvent.change(screen.getByLabelText(/Message/), { target: { value: 'hi' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
-    expect(onAction).toHaveBeenCalledWith('exchange', expect.objectContaining({ action: 'send', msg: 'hi' }));
+  it('fails closed on an action that does not resume the interrupt', () => {
+    renderCard({ catalogVersion: A2UI_CATALOG_VERSION, surface: { components: [
+      { component: 'action.button', id: 'send', label: 'Send', action: { target: 'exchange' } },
+    ] } });
+    expect(screen.queryByRole('button')).toBeNull();
   });
 
   it('fails closed on an out-of-catalog component (no button, shows a notice)', () => {

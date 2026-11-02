@@ -5,6 +5,12 @@
  * REAL app (the ADR 0308 registration seam) and assert the three read tools
  * register, share the brand routes' org-scope authority, and fail EMPTY without
  * an acting user. Brand is always-on/core (ADR 0170) — no toggle gate.
+ *
+ * Tracker TST-BEG-1 (w66). Red when: list-brands drops its per-org filter
+ * (non-member) or its no-acting-user empty; `readableBrand` drops its org
+ * check (a non-member gets the voice); a tool stops validating its input; the
+ * banned-phrase ceiling is removed; the pack allowlist or the Steward prompt
+ * drifts from the registered tools.
  */
 import http from 'node:http';
 import { readFileSync } from 'node:fs';
@@ -37,7 +43,7 @@ beforeAll(async () => {
   const brand = await createBrand(TENANT, orgId, 'u-1', {
     name: 'Acme Brand',
     keyPhrases: { bannedPhrases: ['synergy'] },
-  } as never);
+  });
   brandId = brand.id;
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
@@ -96,6 +102,12 @@ describe('CFP-1 — brand tools: authority + empty-without-acting-user', () => {
 
     const missing = await p.executeTool({ name: BRAND_RESOLVE_VOICE_TOOL_ID, input: { brandId: 'brand-nope' } });
     expect(JSON.parse(missing.content)).toMatchObject({ voice: null });
+
+    // The routes' org-scope authority: a same-tenant non-member gets nothing
+    // for the REAL brand (no voice, no existence leak).
+    const stranger = await provider({ actingUserId: 'stranger' }).executeTool({ name: BRAND_RESOLVE_VOICE_TOOL_ID, input: { brandId } });
+    expect(stranger.isError).toBeFalsy();
+    expect(JSON.parse(stranger.content)).toEqual({ voice: null, note: 'Brand not found, or you lack read access to it.' });
   });
 
   it('resolve-voice validates its input (missing brandId → typed error)', async () => {

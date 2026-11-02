@@ -6,6 +6,9 @@
  * yields a child whose `conversation` channel projection is BYTE-EQUAL to the
  * source's — even though the child has a different runId. Proven by making every
  * channel id + timestamp runId-independent.
+ *
+ * TST-CKB-8. Red when a channel message id embeds the runId (the fork's projection
+ * then differs) or the self-driven turn count drifts from `turnCount`.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -59,7 +62,7 @@ describe('core.conversationGate — replay-fork determinism', () => {
     expect((sourceConv as { conversation?: unknown[] }).conversation).toHaveLength(8);
 
     const fork = await api<{ runId: string }>(`/runs/${sourceRunId}:fork`, { method: 'POST', body: JSON.stringify({ mode: 'replay' }) });
-    expect([200, 201]).toContain(fork.status);
+    expect(fork.status).toBe(201);
     const forkedRunId = fork.body.runId;
     expect(await pollTerminal(forkedRunId)).toBe('completed');
 

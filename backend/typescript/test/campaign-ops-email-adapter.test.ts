@@ -9,14 +9,19 @@
  * is sending or has sent is refused `email_already_sent` (PRD scenario 10) and left
  * unchanged; and the email toggle being off refuses `destination_unavailable`.
  *
- * Sabotage notes (each run, 2026-10-19):
- *  - drop the `alreadySent` check → red (the sent template is rewritten);
- *  - drop the adapter's own expected-version compare → STAYS GREEN, correctly:
- *    0905's `updateTemplate` enforces the same pin. Dropping both the compare and
- *    the `expectedVersion` passed to `updateTemplate` → red (the stale write lands);
- *  - drop the `assertOrgScope` check → red (a viewer's write lands);
- *  - read the template across every org of the tenant → red (client B’s template
- *    registers on A).
+ * Tracker: TST-CBA-5 (/grade-tests wave 67). Red when (probe-witnessed,
+ * 2026-10-29): the adapter's `assertOrgScope` is dropped (a viewer's write lands);
+ * the editable-field check is dropped (not_editable case); the email-toggle check
+ * on write is dropped (toggle case); `refuseIfSent` is not passed to
+ * `updateTemplate` (send-race case); BOTH sent-email guards are dropped at once —
+ * the adapter's `alreadySent` precheck AND `refuseIfSent` (scenario 10).
+ *
+ * Recorded double guards (each single-guard sabotage stays green, correctly):
+ *  - scenario 10 (sending/sent): the adapter precheck (`alreadySent`) and
+ *    `updateTemplate`'s `refuseIfSent` campaign-status read (emailService.ts)
+ *    each refuse alone; the both-guards probe is the witness;
+ *  - stale version: the adapter's own compare and the `expectedVersion` passed to
+ *    `updateTemplate` each refuse alone.
  */
 import { randomBytes } from 'node:crypto';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
@@ -91,7 +96,7 @@ describe('ADR 0922 D5 — read and registration', () => {
     await expect(addAsset({
       tenantId: TENANT, orgId: orgA, destination: 'openwop.email.template', locator: { templateId: t.templateId },
       label: 'x', editableFields: ['subject'], createdBy: 'seed',
-    })).rejects.toMatchObject({ httpStatus: 404 });
+    })).rejects.toMatchObject({ httpStatus: 404, details: { reason: 'wrong_client_or_missing' } });
   });
 
   it('only subject and body are editable fields', async () => {
@@ -99,7 +104,7 @@ describe('ADR 0922 D5 — read and registration', () => {
     await expect(addAsset({
       tenantId: TENANT, orgId: orgA, destination: 'openwop.email.template', locator: { templateId: t.templateId },
       label: 'x', editableFields: ['name'], createdBy: 'seed',
-    })).rejects.toMatchObject({ httpStatus: 400 });
+    })).rejects.toMatchObject({ httpStatus: 400, details: { field: 'editableFields', unknown: ['name'] } });
   });
 });
 
@@ -151,8 +156,7 @@ describe('ADR 0922 D5 — preview and write', () => {
       await updateCampaignRow(TENANT, orgA, c.campaignId, (row) => ({ ...row, status }));
       const before = (await getTemplate(TENANT, orgA, templateId))!;
       const w = await emailTemplateAdapter.write(asset, edits, { expectedVersion: templateVersionOf(before) }, { tenantId: TENANT, actingUserId: editor });
-      expect(w, status).toMatchObject({ kind: 'refused', reason: 'email_already_sent' });
-      expect((w as { detail?: string }).detail).toContain('create a new draft');
+      expect(w, status).toMatchObject({ kind: 'refused', reason: 'email_already_sent', detail: expect.stringContaining('create a new draft') });
       const after = (await getTemplate(TENANT, orgA, templateId))!;
       expect(templateContentHash(after), status).toBe(templateContentHash(before));
     }
@@ -194,12 +198,13 @@ describe('ADR 0922 D5 — preview and write', () => {
     const db = hostExtStorage(); const cas = db.kvCompareAndSwap.bind(db);
     const delivered: EmailMessage[] = [];
     let raced = false;
+    let sentStatus: string | undefined;
     const spy = vi.spyOn(db, 'kvCompareAndSwap').mockImplementation(async (key, before, after) => {
       if (!raced && key === `hostext:email:template:${templateId}` && after) {
-        const proposed = JSON.parse(after) as EmailTemplate;
+        const proposed: EmailTemplate = JSON.parse(after);
         if (templateVersionOf(proposed) > templateVersionOf(original)) {
           raced = true;
-          expect((await sendCampaign(TENANT, orgA, campaign.campaignId, { provider: { id: 'test', send: async (message) => { delivered.push(message); } } }))?.status).toBe('sent');
+          sentStatus = (await sendCampaign(TENANT, orgA, campaign.campaignId, { provider: { id: 'test', send: async (message) => { delivered.push(message); } } }))?.status;
         }
       }
       return cas(key, before, after);
@@ -207,6 +212,7 @@ describe('ADR 0922 D5 — preview and write', () => {
     try {
       expect(await emailTemplateAdapter.write(asset, edits, { expectedVersion: templateVersionOf(original) }, { tenantId: TENANT, actingUserId: editor })).toMatchObject({ kind: 'refused', reason: 'email_already_sent' });
       expect(raced).toBe(true);
+      expect(sentStatus).toBe('sent');
       const final = (await getTemplate(TENANT, orgA, templateId))!;
       expect(templateVersionOf(final)).toBe(templateVersionOf(original));
       expect(templateContentHash(final)).toBe(templateContentHash(original));
@@ -216,6 +222,7 @@ describe('ADR 0922 D5 — preview and write', () => {
       expect(delivered[0].body).toContain('Join us Tuesday, Nov 3 at');
     } finally {
       spy.mockRestore();
+      if (gate) await saveConfig(gate, 'test');
       if (priorLinkBase === undefined) delete process.env.OPENWOP_EMAIL_LINK_BASE_URL;
       else process.env.OPENWOP_EMAIL_LINK_BASE_URL = priorLinkBase;
     }

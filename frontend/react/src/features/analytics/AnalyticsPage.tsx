@@ -24,8 +24,9 @@ import { ViewToggle, useViewMode } from '../../ui/ViewToggle.js';
 import { AnalyticsEventCard, EventTypeBadge, EventDetail, TYPE_LABEL } from './AnalyticsViews.js';
 // StatusBadge/TYPE_STATUS now live in AnalyticsViews (shared by the card + column).
 import { useFeatureAccess } from '../../featureToggles/FeatureAccessContext.js';
+import { useOrgEffectiveAccess } from '../../client/useEffectiveAccess.js';
 import { ActivityIcon, GlobeIcon, LockIcon } from '../../ui/icons/index.js';
-import { getEvents, getSummary, listOrgs, type AnalyticsComparison, type AnalyticsEvent, type AnalyticsSummary, type AnalyticsWindow, type Org , getNavReport, type NavReport , getTrend, type TrendPoint, getBehaviorSettings, type BehaviorSettings } from './analyticsClient.js';
+import { getEvents, getSummary, listOrgs, type AnalyticsComparison, type AnalyticsEvent, type AnalyticsSummary, type AnalyticsWindow, type Org , getNavReport, type NavReport , getTrend, type TrendPoint, getBehaviorSettings, type BehaviorSettings, setReplayEligibility } from './analyticsClient.js';
 
 /** Figure key → event-type filter. 'events'/'sessions' are non-filtering totals. */
 const FIGURE_FILTER: Record<string, AnalyticsEvent['type'] | undefined> = {
@@ -421,6 +422,7 @@ export function AnalyticsPage(): JSX.Element {
       <NavTelemetrySection />
       {orgId ? <BehaviorCaptureSection orgId={orgId} /> : null}
       {orgId ? <HeatmapSection orgId={orgId} /> : null}
+      {orgId ? <ReplaySection orgId={orgId} /> : null}
       {/* ADR 0768 D5 — the feature's assistant in a Pocket. Honest scope: the agent's
           tools read every org the caller can read, not only the one on screen. */}
       <ChatPocket
@@ -451,6 +453,27 @@ function HeatmapSection({ orgId }: { orgId: string }): JSX.Element | null {
   );
 }
 
+// ADR 0951 P2.4 — lazy: recordings load only for an owner/admin of THIS org
+// (`host:analytics:replay`) with session replay on. Anyone else never calls the
+// endpoint, so a missing permission is never mistaken for a plan refusal.
+const ReplayPanel = lazy(() => import('./ReplayPanel.js').then((m) => ({ default: m.ReplayPanel })));
+
+function ReplaySection({ orgId }: { orgId: string }): JSX.Element | null {
+  const { t } = useTranslation('analytics');
+  const { enabled } = useFeatureAccess('analytics.session-replay');
+  const access = useOrgEffectiveAccess(orgId);
+  if (!enabled || !access?.scopes.includes('host:analytics:replay')) return null;
+  return (
+    <section className="surface-card u-flex u-flex-col u-gap-2 u-p-4" aria-labelledby="replay-heading">
+      <h2 id="replay-heading" className="u-label-sm">{t('replayHeading')}</h2>
+      <p className="u-m-0 u-fs-12 muted">{t('replayHint')}</p>
+      <Suspense fallback={<InlineState kind="loading" message={t('replayLoading')} />}>
+        <ReplayPanel orgId={orgId} />
+      </Suspense>
+    </section>
+  );
+}
+
 /** ADR 0951 P0 — behavior-capture status. Renders only when heat maps or session
  *  replay is switched on for the workspace. Session replay fails closed: without
  *  durable blob storage it says "Not configured" and nothing is ever recorded;
@@ -463,6 +486,17 @@ function BehaviorCaptureSection({ orgId }: { orgId: string }): JSX.Element | nul
   const [settings, setSettings] = useState<BehaviorSettings | null>(null);
   const [failed, setFailed] = useState(false);
   const shown = heatOn || replayOn;
+  const canAttest = Boolean(useOrgEffectiveAccess(orgId)?.scopes.includes('host:analytics:replay'));
+  const [attesting, setAttesting] = useState(false);
+  const [attestFailed, setAttestFailed] = useState(false);
+  const attest = (next: boolean): void => {
+    setAttesting(true);
+    setAttestFailed(false);
+    setReplayEligibility(orgId, next)
+      .then((orgEligible) => setSettings((s) => (s ? { ...s, replay: { ...s.replay, orgEligible } } : s)))
+      .catch(() => setAttestFailed(true))
+      .finally(() => setAttesting(false));
+  };
   useEffect(() => {
     if (!shown) return;
     let live = true;
@@ -477,6 +511,7 @@ function BehaviorCaptureSection({ orgId }: { orgId: string }): JSX.Element | nul
     : !replay.enabled ? { chip: 'chip--muted', label: t('behaviorOff'), hint: null }
     : !replay.storageConfigured ? { chip: 'chip--warning', label: t('behaviorNotConfigured'), hint: t('behaviorReplayNoStorage') }
     : !replay.consentEnabled ? { chip: 'chip--warning', label: t('behaviorNeedsConsent'), hint: t('behaviorReplayNoConsent') }
+    : replay.orgEligible === false ? { chip: 'chip--muted', label: t('behaviorOff'), hint: t('behaviorReplayNotAttested') }
     : !replay.available ? { chip: 'chip--muted', label: t('behaviorNotAvailable'), hint: t('behaviorReplayNotAvailable') }
     : { chip: 'chip--success', label: t('behaviorOn'), hint: t('behaviorReplayReady', { days: replay.retentionDays }) };
   return (
@@ -499,6 +534,13 @@ function BehaviorCaptureSection({ orgId }: { orgId: string }): JSX.Element | nul
             <dd className="u-m-0 u-flex u-flex-col u-gap-1">
               {replayState ? <span><span className={`chip ${replayState.chip}`}>{replayState.label}</span></span> : null}
               {replayState?.hint ? <span className="u-fs-12 muted">{replayState.hint}</span> : null}
+              {replay?.enabled && canAttest && replay.orgEligible !== undefined ? (
+                <label className="u-flex u-gap-2 u-items-center u-fs-12">
+                  <input type="checkbox" checked={replay.orgEligible} disabled={attesting} onChange={(e) => attest(e.target.checked)} />
+                  <span>{t('behaviorReplayAttest')}</span>
+                </label>
+              ) : null}
+              {attestFailed ? <span className="u-fs-12" role="alert">{t('behaviorReplayAttestFailed')}</span> : null}
             </dd>
           </div>
         </dl>

@@ -3,6 +3,7 @@
  * routes on `/host/openwop-app/kicktodo/entitlements/cohort-seats/*`.
  */
 import { authedHeaders, config, fetchOpts } from './config.js';
+import { KICKTODO_CIRCLES_PATH } from './kicktodoCirclesClient.js';
 
 const ENTITLEMENTS_BASE = `${config.baseUrl}/host/openwop-app/kicktodo/entitlements`;
 const BASE = `${ENTITLEMENTS_BASE}/cohort-seats`;
@@ -187,7 +188,7 @@ export async function cancelPayoutRun(runId: string): Promise<PayoutRun> {
   return ((await res.json()) as { run: PayoutRun }).run;
 }
 
-const CIRCLES_BASE = `${config.baseUrl}/host/openwop-app/circles`;
+const CIRCLES_BASE = `${config.baseUrl}${KICKTODO_CIRCLES_PATH}`;
 
 /**
  * KTUX-6 / KTFULL-B12 — operator seat reconciliation for a cohort. Recomputes

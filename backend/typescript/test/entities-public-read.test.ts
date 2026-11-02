@@ -4,14 +4,27 @@
  * publicRead flag — ONE uniform 404), entry-level draft filtering, the
  * public projection (no actor subjects / storage internals), cross-tenant
  * probes, limit clamp, and the status lifecycle (draft → live → draft).
+ *
+ * TST-DAA-5. Every case seeds its own type in its own tenant, so the file
+ * passes alone and shuffled; toggle flips restore in `finally`.
+ * Honest ceiling: same-named types in two tenants live under tenant-derived
+ * storage keys (`typeKeyOf`), so the cross-tenant case proves the public read
+ * is keyed by the PATH tenant (both tenants public, each serves only its own
+ * row) — there is no shared reader to sabotage.
+ *
+ * Red when (sabotage-witnessed, wave 70): `gatePublicType` stops requiring
+ * `publicRead`, `status === 'published'`, or the `entities` toggle; the single
+ * read serves a draft row; `toPublicEntity` leaks record internals; the public
+ * list stops clamping `limit` to 50.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { getSetCookies } from './headerCookies.js';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import { createEntity, createEntityType, updateEntityType } from '../src/features/entities/entitiesService.js';
 
 let BASE: string;
 let server: http.Server;
@@ -68,6 +81,26 @@ const setToggle = async (id: string, status: 'on' | 'off'): Promise<void> => {
 const B = '/host/openwop-app/entities';
 const P = '/host/openwop-app/public-entities';
 
+interface ErrorBody { error?: string; message?: string }
+
+/** The uniform anonymous 404 — same code + message whichever gate closed. */
+async function expectNotFound(res: Response): Promise<void> {
+  expect(res.status).toBe(404);
+  const body = (await res.json()) as ErrorBody;
+  expect(body.error).toBe('not_found');
+  expect(body.message).toBe('Not found.');
+}
+
+/** Owner logs in, creates + publishes + opens `team-member` in `tenantId`. */
+async function seedPublicType(subject: string, tenantId: string): Promise<Client & { login: (s: string, t: string) => Promise<void> }> {
+  const owner = client();
+  await owner.login(subject, tenantId);
+  expect((await owner.post(`${B}/types`, { name: 'team-member', fields: TEAM_FIELDS })).status).toBe(201);
+  expect((await owner.patch(`${B}/types/team-member`, { status: 'published' })).status).toBe(200);
+  expect((await owner.patch(`${B}/types/team-member`, { publicRead: true })).status).toBe(200);
+  return owner;
+}
+
 const TEAM_FIELDS = [
   { key: 'name', label: 'Name', type: 'string', required: true },
   { key: 'role', label: 'Role', type: 'string', required: false },
@@ -90,39 +123,49 @@ beforeAll(async () => {
   });
 });
 
+beforeEach(async () => { await setToggle('entities', 'on'); });
+
 afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
 describe('entities public read (ADR 0407 D2)', () => {
   it('is uniformly 404 while ANY gate is closed: toggle off, type draft, publicRead absent, unknown tenant/type', async () => {
-    await setToggle('entities', 'on');
     const owner = client();
     await owner.login('owner-pub', 'tenant-pub');
     expect((await owner.post(`${B}/types`, { name: 'team-member', fields: TEAM_FIELDS })).status).toBe(201);
+    expect((await owner.post(`${B}/types/team-member/entities`, { values: { name: 'Ada' } })).status).toBe(201);
 
     const a = anon();
-    // Type exists but is DRAFT → 404.
-    expect((await a.get(`${P}/tenant-pub/types/team-member/entities`)).status).toBe(404);
+    // DRAFT type that already carries publicRead → still 404 (the status gate alone).
+    expect((await owner.patch(`${B}/types/team-member`, { publicRead: true })).status).toBe(200);
+    await expectNotFound(await a.get(`${P}/tenant-pub/types/team-member/entities`));
 
-    // Published but publicRead never flipped → still 404.
+    // Published but publicRead cleared → still 404 (the flag gate alone).
+    expect((await owner.patch(`${B}/types/team-member`, { publicRead: false })).status).toBe(200);
     expect((await owner.patch(`${B}/types/team-member`, { status: 'published' })).status).toBe(200);
-    expect((await a.get(`${P}/tenant-pub/types/team-member/entities`)).status).toBe(404);
+    await expectNotFound(await a.get(`${P}/tenant-pub/types/team-member/entities`));
 
     // Unknown tenant / unknown type → the same 404 shape.
-    expect((await a.get(`${P}/no-such-tenant/types/team-member/entities`)).status).toBe(404);
-    expect((await a.get(`${P}/tenant-pub/types/no-such-type/entities`)).status).toBe(404);
+    await expectNotFound(await a.get(`${P}/no-such-tenant/types/team-member/entities`));
+    await expectNotFound(await a.get(`${P}/tenant-pub/types/no-such-type/entities`));
+
+    // Every gate open → served (the positive control for the 404s above).
+    expect((await owner.patch(`${B}/types/team-member`, { publicRead: true })).status).toBe(200);
+    expect((await a.get(`${P}/tenant-pub/types/team-member/entities`)).status).toBe(200);
 
     // Toggle off closes an already-public type too (fail-closed).
-    expect((await owner.patch(`${B}/types/team-member`, { publicRead: true })).status).toBe(200);
     await setToggle('entities', 'off');
-    expect((await a.get(`${P}/tenant-pub/types/team-member/entities`)).status).toBe(404);
-    await setToggle('entities', 'on');
+    try {
+      await expectNotFound(await a.get(`${P}/tenant-pub/types/team-member/entities`));
+    } finally {
+      await setToggle('entities', 'on');
+    }
   });
 
   it('serves live entries through the public projection; drafts are invisible; the lifecycle round-trips', async () => {
-    const owner = client();
-    await owner.login('owner-pub', 'tenant-pub');
+    const owner = await seedPublicType('owner-pub2', 'tenant-pub2');
+    const T2 = 'tenant-pub2';
 
     const live = await owner.post(`${B}/types/team-member/entities`, { values: { name: 'Ada', role: 'CTO' } });
     expect(live.status).toBe(201);
@@ -132,36 +175,27 @@ describe('entities public read (ADR 0407 D2)', () => {
     const draftId = ((await draft.json()) as { entityId: string }).entityId;
 
     const a = anon();
-    const list = await a.get(`${P}/tenant-pub/types/team-member/entities`);
+    const list = await a.get(`${P}/${T2}/types/team-member/entities`);
     expect(list.status).toBe(200);
     const body = (await list.json()) as { entities: Array<Record<string, unknown>> };
-    const ids = body.entities.map((e) => e.entityId);
-    expect(ids).toContain(liveId);
-    expect(ids).not.toContain(draftId);
+    expect(body.entities.map((e) => e.entityId)).toEqual([liveId]);
 
     // Projection: values + ids + timestamps ONLY — never actor subjects or
     // storage internals (createdBy is a member subject; PII-adjacent).
-    for (const e of body.entities) {
-      expect(e.createdBy).toBeUndefined();
-      expect(e.updatedBy).toBeUndefined();
-      expect(e.tenantId).toBeUndefined();
-      expect(e.recordKey).toBeUndefined();
-      expect(e.typeId).toBeUndefined();
-      expect(e.values).toBeDefined();
-    }
+    expect(Object.keys(body.entities[0] ?? {}).sort()).toEqual(['createdAt', 'entityId', 'updatedAt', 'values']);
 
     // Single fetch: live 200 (same projection), draft 404, unknown 404.
-    const one = await a.get(`${P}/tenant-pub/types/team-member/entities/${liveId}`);
+    const one = await a.get(`${P}/${T2}/types/team-member/entities/${liveId}`);
     expect(one.status).toBe(200);
-    expect(((await one.json()) as Record<string, unknown>).createdBy).toBeUndefined();
-    expect((await a.get(`${P}/tenant-pub/types/team-member/entities/${draftId}`)).status).toBe(404);
-    expect((await a.get(`${P}/tenant-pub/types/team-member/entities/nope`)).status).toBe(404);
+    expect(Object.keys((await one.json()) as Record<string, unknown>).sort()).toEqual(['createdAt', 'entityId', 'updatedAt', 'values']);
+    await expectNotFound(await a.get(`${P}/${T2}/types/team-member/entities/${draftId}`));
+    await expectNotFound(await a.get(`${P}/${T2}/types/team-member/entities/nope`));
 
     // Lifecycle: draft → live appears; live → draft disappears.
     expect((await owner.patch(`${B}/types/team-member/entities/${draftId}`, { status: 'live' })).status).toBe(200);
-    expect((await a.get(`${P}/tenant-pub/types/team-member/entities/${draftId}`)).status).toBe(200);
+    expect((await a.get(`${P}/${T2}/types/team-member/entities/${draftId}`)).status).toBe(200);
     expect((await owner.patch(`${B}/types/team-member/entities/${draftId}`, { status: 'draft' })).status).toBe(200);
-    expect((await a.get(`${P}/tenant-pub/types/team-member/entities/${draftId}`)).status).toBe(404);
+    await expectNotFound(await a.get(`${P}/${T2}/types/team-member/entities/${draftId}`));
 
     // Authed reads still see the draft (authoring is unaffected).
     const authedList = await owner.get(`${B}/types/team-member/entities`);
@@ -171,29 +205,44 @@ describe('entities public read (ADR 0407 D2)', () => {
   });
 
   it('validates public query inputs and clamps the limit', async () => {
+    // 51 live rows in a public type, so a clamp to 50 is observable.
+    const TC = 'tenant-pub-clamp';
+    await createEntityType({ tenantId: TC, name: 'member', displayName: 'Member', fields: TEAM_FIELDS, createdBy: 'u-clamp' });
+    await updateEntityType({ tenantId: TC, name: 'member', patch: { status: 'published' }, actor: 'u-clamp' });
+    await updateEntityType({ tenantId: TC, name: 'member', patch: { publicRead: true }, actor: 'u-clamp' });
+    for (let i = 0; i < 51; i += 1) {
+      await createEntity({ tenantId: TC, typeName: 'member', entityId: `m-${String(i).padStart(2, '0')}`, values: { name: i === 0 ? 'Ada' : `Member ${i}` }, createdBy: 'u-clamp' });
+    }
+
     const a = anon();
-    expect((await a.get(`${P}/tenant-pub/types/team-member/entities?filters=not-json`)).status).toBe(400);
-    expect((await a.get(`${P}/tenant-pub/types/team-member/entities?filters=${encodeURIComponent(JSON.stringify([{ key: 'nope', op: 'eq', value: 1 }]))}`)).status).toBe(400);
-    // A huge limit is clamped server-side, not an error.
-    const res = await a.get(`${P}/tenant-pub/types/team-member/entities?limit=5000`);
+    const notJson = await a.get(`${P}/${TC}/types/member/entities?filters=not-json`);
+    expect(notJson.status).toBe(400);
+    expect(((await notJson.json()) as ErrorBody).message).toBe('`filters` must be valid JSON.');
+    const unknownKey = await a.get(`${P}/${TC}/types/member/entities?filters=${encodeURIComponent(JSON.stringify([{ key: 'nope', op: 'eq', value: 1 }]))}`);
+    expect(unknownKey.status).toBe(400);
+    expect(((await unknownKey.json()) as ErrorBody).error).toBe('validation_error');
+    // A huge limit is clamped server-side to 50, not an error.
+    const res = await a.get(`${P}/${TC}/types/member/entities?limit=5000`);
     expect(res.status).toBe(200);
+    const page = (await res.json()) as { entities: unknown[]; nextCursor?: string };
+    expect(page.entities).toHaveLength(50);
+    expect(page.nextCursor).toBeDefined();
     // Sort + equality filter work anonymously over live rows.
-    const sorted = await a.get(`${P}/tenant-pub/types/team-member/entities?sortKey=name&sortDir=asc&filters=${encodeURIComponent(JSON.stringify([{ key: 'name', op: 'eq', value: 'Ada' }]))}`);
+    const sorted = await a.get(`${P}/${TC}/types/member/entities?sortKey=name&sortDir=asc&filters=${encodeURIComponent(JSON.stringify([{ key: 'name', op: 'eq', value: 'Ada' }]))}`);
     expect(sorted.status).toBe(200);
-    expect(((await sorted.json()) as { entities: unknown[] }).entities.length).toBe(1);
+    expect(((await sorted.json()) as { entities: Array<{ entityId: string }> }).entities.map((e) => e.entityId)).toEqual(['m-00']);
   });
 
   it('never leaks another tenant\'s same-named type through the public path', async () => {
-    const ownerB = client();
-    await ownerB.login('owner-b', 'tenant-pub-b');
-    expect((await ownerB.post(`${B}/types`, { name: 'team-member', fields: TEAM_FIELDS })).status).toBe(201);
+    const ownerA = await seedPublicType('owner-xa', 'tenant-pub-xa');
+    expect((await ownerA.post(`${B}/types/team-member/entities`, { values: { name: 'Ada' } })).status).toBe(201);
+    const ownerB = await seedPublicType('owner-xb', 'tenant-pub-xb');
     expect((await ownerB.post(`${B}/types/team-member/entities`, { values: { name: 'Bee' } })).status).toBe(201);
-    // tenant-b never opted in → 404 under its OWN tenant path; tenant-a's
-    // public list never contains tenant-b rows.
+    // Both tenants are public; each path serves ONLY its own tenant's rows.
     const a = anon();
-    expect((await a.get(`${P}/tenant-pub-b/types/team-member/entities`)).status).toBe(404);
-    const listA = await a.get(`${P}/tenant-pub/types/team-member/entities`);
-    const names = ((await listA.json()) as { entities: Array<{ values: { name: string } }> }).entities.map((e) => e.values.name);
-    expect(names).not.toContain('Bee');
+    const names = async (t: string): Promise<string[]> =>
+      ((await (await a.get(`${P}/${t}/types/team-member/entities`)).json()) as { entities: Array<{ values: { name: string } }> }).entities.map((e) => e.values.name);
+    expect(await names('tenant-pub-xa')).toEqual(['Ada']);
+    expect(await names('tenant-pub-xb')).toEqual(['Bee']);
   });
 });

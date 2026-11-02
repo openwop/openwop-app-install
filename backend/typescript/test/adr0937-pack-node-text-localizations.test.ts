@@ -7,8 +7,14 @@
  * base, `resolveLocalizedValues`). It serves one locale, never the overlay map,
  * and says which locale it served.
  *
+ * The wire half (`i18n.md` §Accept-Language): `Content-Language` names the
+ * locale SERVED and is absent when no overlay applied, and the response carries
+ * the exact `Vary: Accept-Language` token.
+ *
  * Sabotage: dropping the route's `localizeCatalogNode` call reds the pt-BR case;
- * resolving the exact tag only (no language family) reds the `pt-PT` case.
+ * resolving the exact tag only (no language family) reds the `pt-PT` case;
+ * dropping the route's `Vary` or `Content-Language` write reds the pt-BR case
+ * (probes w73g1-b-loc-*, all witnessed in w73).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -55,12 +61,17 @@ afterAll(async () => {
   rmSync(packDir, { recursive: true, force: true });
 });
 
+function isCatalogBody(b: unknown): b is { nodes: CatalogNode[] } {
+  return typeof b === 'object' && b !== null && 'nodes' in b && Array.isArray(b.nodes);
+}
+
 async function catalog(acceptLanguage?: string): Promise<{ node: CatalogNode | undefined; contentLanguage: string | null; vary: string | null }> {
   const res = await fetch(`${BASE}/host/openwop-app/node-catalog`, {
     headers: { authorization: 'Bearer dev-token', ...(acceptLanguage ? { 'accept-language': acceptLanguage } : {}) },
   });
   expect(res.status).toBe(200);
-  const body = await res.json() as { nodes: CatalogNode[] };
+  const body: unknown = await res.json();
+  if (!isCatalogBody(body)) throw new Error(`node-catalog body has no nodes[]: ${JSON.stringify(body).slice(0, 200)}`);
   return { node: body.nodes.find((n) => n.typeId === TYPE_ID), contentLanguage: res.headers.get('content-language'), vary: res.headers.get('vary') };
 }
 
@@ -71,7 +82,8 @@ describe('ADR 0937 — the palette speaks the reader\'s language', () => {
     // pt-BR overlays only the label; the description stays the base (a shallow overlay, as for sections).
     expect(node?.description).toBe('Writes the next scene from the outline.');
     expect(contentLanguage).toBe('pt-BR');
-    expect(vary?.toLowerCase()).toContain('accept-language');
+    // The exact token, so `Accept-Encoding` or `Accept` cannot satisfy it.
+    expect(vary?.split(',').map((v) => v.trim().toLowerCase())).toContain('accept-language');
     expect(node).not.toHaveProperty('localizations');
   });
 
@@ -105,8 +117,8 @@ describe('ADR 0937 — the pieces', () => {
   });
 
   it('a script-family overlay wins over the language family (zh-Hant-TW never reads a zh overlay)', () => {
-    const node = { typeId: 't', label: 'Draft', description: '', category: 'flow', source: 'pack', requiresHostSurfaces: [], missingHostSurfaces: [],
-      localizations: { zh: { label: '撰写' }, 'zh-Hant': { label: '撰寫' } } } as CatalogNode;
+    const node: CatalogNode = { typeId: 't', label: 'Draft', description: '', category: 'flow', source: 'pack', requiresHostSurfaces: [], missingHostSurfaces: [],
+      localizations: { zh: { label: '撰写' }, 'zh-Hant': { label: '撰寫' } } };
     expect(localizeCatalogNode(node, 'zh-Hant-TW', 'en').node.label).toBe('撰寫');
     expect(localizeCatalogNode(node, 'zh-CN', 'en').node.label).toBe('撰写');
   });

@@ -408,68 +408,9 @@ scenario on their ping (and confirm the `tokenCounter` enum admits `"chars"`).
 
 ---
 
-## RFC 0209 — A2UI v0.9 surfaces at major 2
+## RFC 0209 and RFC 0114 — A2UI surfaces
 
-**Status:** implemented (ADR 0749). Seam-gated rows witnessed on the local major-2 lane
-through `POST /conformance/seams/sample/a2ui/emit-surface` (`emitA2uiSurface`, served
-only with `OPENWOP_TEST_SEAM_ENABLED=true`), which admits through
-`host/a2uiSurfaceAdmission.ts` — the production path, not a mock.
-
-- Pass, each sabotage-proven: `0209.version-selects-branch`, `0209.fold-guarded`,
-  `0209.catalog-equality`, `v2-a2ui-v09-surface.surface-id-equality`, `0209.taint-sticky`.
-- Inapplicable: `0209.legacy-readable` (needs a v2 floor of exactly 1; ours is 2).
-- Known-red (corpus defect): `recorded-as-recorded` forks at a `fromSeq` that names no
-  event on a suspended run — `runs.md` requires `422 fork_point_invalid`.
-- Reference-impl: `0209.render-needs-root` —
-  `frontend/react/src/chat/a2ui/__tests__/a2ui-v09-render-needs-root.test.tsx`.
-
-## RFC 0114 — A2UI surface delta transport
-
-**Status:** implemented on the demo host (Phase 5). The recorded `ui.a2ui-surface`
-envelope stays **full** (schema unchanged, replay-safe, validated once); deltas
-are **host-side transport only** to `?a2uiDelta=1` subscribers.
-
-**Advertisement** (`capabilities.a2uiSurface`, gated on `OPENWOP_TEST_SEAM_ENABLED`
-— the env where the emit-surface seam serves a non-vacuous witness; the app's
-production a2ui surfaces are one-shot, so the transport is witnessed via the seam,
-not a production surface-update node — honest-advert):
-
-```json
-{ "deltaTransport": true }
-```
-
-**Mechanism:**
-- `host/a2uiSurfaceDelta.ts` — `diffSurface` (reconstructing RFC 6902 add/remove/
-  replace; move/copy accepted-not-emitted; no `test`), `applyPatch` (fail-closed:
-  throws on bad path / `test` → caller re-materializes full), and
-  `projectA2uiDelivery` (per-subscriber full-vs-delta state machine; `surfaceRef` =
-  baseline full event id; chains against the last-delivered tree; a `catalogVersion`
-  bump forces a fresh full).
-- `routes/streams.ts` — `?a2uiDelta=1` delivers `ui.a2ui-surface.delta` frames
-  `{ surfaceRef, catalogVersion, patch }` (transport-only, never recorded); default
-  subscribers + replay + event-log read always get the full surface.
-- `routes/testSeam.ts` §15 — `POST /v1/host/sample/a2ui/emit-surface { runId, surface }`
-  validates through the REAL `acceptEnvelope` closed-catalog gate (out-of-catalog /
-  contentTrust-drop → **422**, the emit-side fail-closed leg), then appends the full
-  surface as a real run event.
-
-**Automated witness:** `backend/typescript/test/rfc0114-a2ui-delta-e2e.test.ts`
-(4 cases, end-to-end through the real seam + gate + SSE transport) + 14 unit cases
-in `a2ui-surface-delta.test.ts`:
-1. advert present when the seam is enabled;
-2. **two surfaces emitted → the 2nd arrives as a `ui.a2ui-surface.delta` frame whose
-   `applyPatch(full_A, patch)` equals the materialized full surface B** (delta and
-   full agree; `surfaceRef` = A's event id);
-3. a non-negotiating subscriber gets BOTH surfaces full, never a delta;
-4. **fail-closed: an out-of-catalog surface (`component:"script"`) is rejected 422**
-   on the same catalog gate a full receives (no-code-exec boundary holds at emit).
-
-**Reconstruction == full + fail-closed are proven on the real validator**, not a mock
-— `acceptEnvelope`'s 422 on the out-of-catalog surface confirms the closed-catalog
-check is live. Live-curl on `app.openwop.dev` requires `OPENWOP_TEST_SEAM_ENABLED`
-(the steward enables it to drive the 1.42.0 scenario).
-
----
+Deleted with the AI Envelope (RFC 0255, ADR 1007). Stored `ui.a2ui-surface` events stay readable through `storage/eventEra.ts`.
 
 ## RFC 0116 — Prompt-prefix cache
 

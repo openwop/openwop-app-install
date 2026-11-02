@@ -178,7 +178,14 @@ export const messages = {
   senderAdminOnly: 'Somente administradores do espaço de trabalho podem alterar o endereço do remetente.',
   senderUnconfiguredAskAdmin: 'As campanhas ainda não podem ser enviadas — um administrador do espaço de trabalho precisa definir o endereço do remetente.',
   testSendRateLimited: 'Muitos envios de teste — tente novamente em {{minutes}} min.',
-  senderUnconfiguredNotice: 'As campanhas ainda não podem ser enviadas — defina abaixo o endereço de remetente verificado (e conecte o SendGrid em Conexões).',
+  senderUnconfiguredNotice: 'As campanhas ainda não podem ser enviadas — defina abaixo o endereço de remetente verificado.',
+  // ADR 0994 — the send-blocked banner names the providers from provider-status.
+  sendBlockedSenderAndProvider: 'As campanhas ainda não podem ser enviadas — defina abaixo o endereço de remetente verificado e conecte um provedor de e-mail ({{providers}}) em <0>Conexões</0>.',
+  sendBlockedSenderAndProviderAskAdmin: 'As campanhas ainda não podem ser enviadas — um administrador do espaço de trabalho precisa definir o endereço do remetente, e um provedor de e-mail ({{providers}}) precisa ser conectado em <0>Conexões</0>.',
+  sendBlockedProvider: 'As campanhas ainda não podem ser enviadas — conecte um provedor de e-mail ({{providers}}) em <0>Conexões</0>.',
+  providerName_postmark: 'Postmark',
+  providerName_smtp: 'SMTP (ex.: Amazon SES)',
+  providerName_sendgrid: 'SendGrid',
 
   // Toasts / errors
   loadFailed: 'Falha ao carregar.',

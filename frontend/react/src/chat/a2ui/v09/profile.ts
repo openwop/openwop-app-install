@@ -10,7 +10,7 @@
  * `AudioPlayer`), no `theme.iconUrl`, no `obscured` (secret) text field, no
  * `FunctionCall` values except a `required` check.
  *
- * The table MIRRORS `schemas/v2/envelopes/ui.a2ui-surface.schema.json` `$defs`
+ * The table MIRRORS `schemas/v2/interrupt-form.schema.json` `$defs`
  * and `__tests__/a2ui-v09-profile-parity.test.ts` pins it to that file — every
  * component, every property, every enum — so the two cannot drift silently.
  */
@@ -35,7 +35,7 @@ export type V09Component =
   | (Base & { component: 'CheckBox'; label: DynString; value: DynBool; checks?: RequiredCheck[] })
   | (Base & { component: 'ChoicePicker'; label?: DynString; options: Array<{ label: DynString; value: string }>; value: string[] | Binding; variant?: 'multipleSelection' | 'mutuallyExclusive'; displayStyle?: 'checkbox' | 'chips'; filterable?: boolean; checks?: RequiredCheck[] })
   | (Base & { component: 'DateTimeInput'; label?: DynString; value: DynString; enableDate?: boolean; enableTime?: boolean; checks?: RequiredCheck[] })
-  | (Base & { component: 'Button'; child: string; variant?: 'default' | 'primary' | 'borderless'; action: { event: { name: 'resume' | 'exchange'; context?: Record<string, DynValue> } } })
+  | (Base & { component: 'Button'; child: string; variant?: 'default' | 'primary' | 'borderless'; action: { event: { name: 'resume'; context?: Record<string, DynValue> } } })
   | (Base & { component: 'Column'; children: string[]; justify?: string; align?: string })
   | (Base & { component: 'Row'; children: string[]; justify?: string; align?: string })
   | (Base & { component: 'Card'; child: string })
@@ -84,7 +84,7 @@ const childIds: Check = (v) => Array.isArray(v) && v.length <= 256 && v.every(co
 const option = closed({ label: dynString, value: str(1024) }, ['label', 'value']);
 const action = closed({
   event: closed({
-    name: oneOf('resume', 'exchange'),
+    name: oneOf('resume'),
     context: (v) => isRecord(v) && Object.keys(v).length <= 64 && Object.values(v).every(dynValue),
   }, ['name']),
 }, ['event']);

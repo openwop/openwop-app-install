@@ -12,6 +12,15 @@
  *   (c) the agent-runner node enters agentic execution through the SINGLE GATED
  *       owner (`runAgentDispatchLive`) with the host tool deps — no second path —
  *       and emits the loop's RFC 0064 `agent.*` events onto the run.
+ *
+ * TST-CKB-2. Red when: eligibility ignores the opt-in (truth table + the managed-seed
+ * legs of (b), the activation BEFORE half and the tenant case), ignores the
+ * per-exchange override, the nested dispatch is skipped ((a), budget, activation),
+ * the per-room budget never degrades, the 'unknown' model sentinel leaks, the
+ * dispatch drops the override, the runner drops the BYOK credentialRef or stops
+ * failing closed with `no_model_available`, or the capability read crosses tenants
+ * (the tenant case — seeded on the TOOL-BEARING managed tier, so the profile read
+ * actually runs; a mock provider never reaches it).
  */
 
 import { describe, expect, it, beforeAll, vi } from 'vitest';
@@ -45,7 +54,10 @@ initInMemorySurfaces({ dataDir: mkdtempSync(join(tmpdir(), 'openwop-deepinv-')) 
 initHostExtPersistence(storage);
 
 const TENANT = 't-deepinv';
-const policyStub = (() => undefined) as unknown as ProviderPolicyResolver;
+const policyStub: ProviderPolicyResolver = { resolveForRun: async () => [] };
+/** The tool-bearing managed tier (ADR 0315 baseline): the deep decision — and so the
+ *  capability read — only runs for a tool-bearing turn. */
+const MANAGED = { credentialRef: 'managed:openwop-free' };
 
 function registerAgent(id: string, extra: Partial<ResolvedAgentManifest>): void {
   getAgentRegistry().register({
@@ -66,7 +78,7 @@ async function seedConversation(runId: string, inputs: Record<string, unknown>):
   const run: RunRecord = {
     runId, workflowId: 'openwop-app.conversation', tenantId: TENANT,
     status: 'waiting-input', inputs, metadata: {}, configurable: {}, createdAt: now, updatedAt: now,
-  } as RunRecord;
+  };
   await storage.insertRun(run);
   const conversationId = `${runId}:gate:0`;
   await storage.appendEvent({
@@ -76,8 +88,8 @@ async function seedConversation(runId: string, inputs: Record<string, unknown>):
   });
   const interrupt: InterruptRecord = {
     interruptId: `${runId}:gate`, runId, nodeId: 'gate', kind: 'conversation',
-    data: { conversationId }, createdAt: now,
-  } as InterruptRecord;
+    token: `${runId}:gate:token`, data: { conversationId }, createdAt: now,
+  };
   return interrupt;
 }
 
@@ -89,9 +101,12 @@ async function agentTurnOf(runId: string): Promise<{ role?: string; content?: un
 }
 
 describe('conversationDeepInvestigationEligible (the opt-in gate)', () => {
-  const run = (inputs: Record<string, unknown>): RunRecord => ({ runId: 'r', tenantId: TENANT, inputs } as unknown as RunRecord);
-  const agent = (p: Partial<ResolvedAgentManifest>): ResolvedAgentManifest =>
-    ({ agentId: 'a', persona: 'P', toolAllowlist: ['openwop:ai.research.web'], ...p } as unknown as ResolvedAgentManifest);
+  const run = (inputs: Record<string, unknown>): RunRecord => ({
+    runId: 'r', workflowId: 'openwop-app.conversation', tenantId: TENANT, status: 'waiting-input',
+    inputs, metadata: {}, configurable: {}, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+  });
+  const agent = (p: Pick<ResolvedAgentManifest, 'investigationDepth' | 'toolAllowlist'>): ResolvedAgentManifest =>
+    ({ agentId: 'a', persona: 'P', modelClass: 'reasoning', systemPrompt: 's', packName: 'core.openwop.test', packVersion: '0', toolAllowlist: ['openwop:ai.research.web'], ...p });
 
   // The original ADR 0089 truth table — now pinned with `deepActivated: false`,
   // i.e. these prove the VESTIGIAL manifest path still works (ADR 0373 §2).
@@ -113,7 +128,12 @@ describe('conversationDeepInvestigationEligible (the opt-in gate)', () => {
     expect(conversationDeepInvestigationEligible(run({ credentialRef: 'managed:openwop-free' }), agent({}), true)).toBe(true);
   });
   it('FALSE when neither the capability nor the manifest field is present', () => {
-    expect(conversationDeepInvestigationEligible(run({ credentialRef: 'managed:openwop-free' }), agent({}), false)).toBe(false);
+    // Distinct from the case above: on a BYOK tool-calling provider (not the managed
+    // tier), with a positive control proving that run IS tool-eligible — so the false
+    // is the missing activation, not an ineligible provider.
+    const byokTools = run({ credentialRef: 'byok:k', provider: 'anthropic', model: 'claude-sonnet-5' });
+    expect(conversationDeepInvestigationEligible(byokTools, agent({}), false)).toBe(false);
+    expect(conversationDeepInvestigationEligible(byokTools, agent({}), true), 'control: the same run is eligible once activated').toBe(true);
   });
   it('the capability does NOT bypass tool-bearing eligibility (non-tool provider stays false)', () => {
     expect(conversationDeepInvestigationEligible(run({ credentialRef: 'byok:k', provider: 'mock' }), agent({}), true)).toBe(false);
@@ -189,6 +209,17 @@ describe('handleConversationResolve — Option B dispatch routing', () => {
       expect(startAgentMentionRun).not.toHaveBeenCalled();
       const turn = await agentTurnOf(runId);
       expect(turn?.content).toBe('Inline reply.'); // a string completion, not a workflow_run ref
+
+      // The OPT-IN leg: the mock provider above is not tool-calling, so it would stay
+      // inline even for an opted-in agent. On the tool-bearing managed tier the deep
+      // decision really runs — and a non-opted agent must still not dispatch.
+      await handleConversationResolve(
+        storage, await seedConversation('r-inline-managed', MANAGED),
+        { operation: 'exchange', turn: { to: 'test.inline-researcher', content: 'Just answer.' } },
+        async () => {},
+        { policyResolver: policyStub, startAgentMentionRun },
+      );
+      expect(startAgentMentionRun, 'a non-opted agent on a tool-bearing tier never dispatches').not.toHaveBeenCalled();
     } finally {
       resetMockPrograms();
     }
@@ -220,7 +251,7 @@ describe('agentRunnerNode — enters the GATED dispatch owner (no second path)',
         config: {}, configurable: {}, attempt: 1, secrets: {},
         callAI, callAIWithTools,
         emit: async (type: string) => { emitted.push(type); return { eventId: '', sequence: 0 }; },
-      } as unknown as NodeContext;
+      };
 
       const outcome = await agentRunnerNode.execute(ctx);
 
@@ -256,9 +287,11 @@ describe('agentRunnerNode — enters the GATED dispatch owner (no second path)',
       inputs: { agentId: 'test.runner-agent', task: 'x' },
       config: {}, configurable: {}, attempt: 1, secrets: {},
       emit: async () => ({ eventId: '', sequence: 0 }),
-    } as unknown as NodeContext;
+    };
     const outcome = await agentRunnerNode.execute(ctx);
-    expect(outcome.status).toBe('failure');
+    // The exact refusal: an earlier failure (binding read, missing agentId) would also
+    // be `status:'failure'`, so the code is what proves THIS guard fired.
+    expect(outcome).toMatchObject({ status: 'failure', error: { code: 'no_model_available' } });
   });
 
   // BYOK fix (review): a non-managed credentialRef must be registered in the nested
@@ -374,11 +407,11 @@ describe('ADR 0373 — deep investigation activates via the agentProfile capabil
     const startAgentMentionRun = vi.fn<NonNullable<ConversationHostDeps['startAgentMentionRun']>>()
       .mockResolvedValue('nested-capability-run');
 
-    // BEFORE activation: no profile capability ⇒ inline (no nested dispatch).
-    resetMockPrograms();
-    programMock('', [{ content: 'Inline reply.' }]);
+    // BEFORE activation: no profile capability ⇒ no nested dispatch. Seeded on the
+    // tool-bearing managed tier so the capability read actually runs (a mock provider
+    // would never reach it, and this half could not fail).
     await handleConversationResolve(
-      storage, await seedConversation('r-cap-before', { provider: 'mock', model: 'mock-1', credentialRef: 'byok:mock' }),
+      storage, await seedConversation('r-cap-before', MANAGED),
       { operation: 'exchange', turn: { to: 'test.capability-agent', content: 'Look into this.' } },
       async () => {}, { policyResolver: policyStub, startAgentMentionRun },
     );
@@ -406,15 +439,27 @@ describe('ADR 0373 — deep investigation activates via the agentProfile capabil
     });
     registerAgent('test.tenant-scoped-agent', { toolAllowlist: [] });
     const startAgentMentionRun = vi.fn<NonNullable<ConversationHostDeps['startAgentMentionRun']>>()
-      .mockResolvedValue('should-not-happen');
-    resetMockPrograms();
-    programMock('', [{ content: 'Inline reply.' }]);
+      .mockResolvedValue('nested-tenant-run');
+    // Managed tier: tool-bearing, so the capability read RUNS (with a mock provider the
+    // deep decision is skipped before the read and a leak could not show).
     await handleConversationResolve(
-      storage, await seedConversation('r-cap-tenant', { provider: 'mock', model: 'mock-1', credentialRef: 'byok:mock' }),
+      storage, await seedConversation('r-cap-tenant', MANAGED),
       { operation: 'exchange', turn: { to: 'test.tenant-scoped-agent', content: 'Look into this.' } },
       async () => {}, { policyResolver: policyStub, startAgentMentionRun },
     );
     expect(startAgentMentionRun, "another tenant's grant must not activate ours").not.toHaveBeenCalled();
+
+    // Positive control: the SAME agent, activated in OUR tenant, dispatches — so the
+    // silence above is the tenant fence, not a path that could never dispatch.
+    await activateAgentCapability(TENANT, 'test.tenant-scoped-agent', 'deep-investigation', {
+      roleKey: 'researcher', autonomy: { level: 'review', specLevel: 'draft-only' },
+    });
+    await handleConversationResolve(
+      storage, await seedConversation('r-cap-tenant-own', MANAGED),
+      { operation: 'exchange', turn: { to: 'test.tenant-scoped-agent', content: 'Look into this.' } },
+      async () => {}, { policyResolver: policyStub, startAgentMentionRun },
+    );
+    expect(startAgentMentionRun, 'activated in our tenant ⇒ dispatches').toHaveBeenCalledTimes(1);
   });
 
   it('the MANAGED tier hands the nested run NO provider/model — the resolver\'s "unknown" sentinel must not leak', async () => {

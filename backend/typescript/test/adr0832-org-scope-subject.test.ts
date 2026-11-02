@@ -73,7 +73,7 @@ describe('stamping', () => {
   const parent = async (runId: string, metadata: Record<string, unknown>): Promise<void> => {
     const now = new Date().toISOString();
     const run: RunRecord = { runId, workflowId: 'wf.parent', tenantId: TENANT, status: 'running', inputs: {}, metadata, configurable: {}, createdAt: now, updatedAt: now };
-    await insertRunWithStartContext(storage, run);
+    await insertRunWithStartContext(storage, run, { admission: { plan: 'exempt:test-fixture' } });
   };
 
   it('a sub-workflow child carries its parent person as orgScopeSubject, never as actor', async () => {

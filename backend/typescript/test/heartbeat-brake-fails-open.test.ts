@@ -16,6 +16,13 @@
  * the resolved `masterOff` boolean instead of the settings pins a time-derived decision
  * and silently disables the auto-disable window in one direction while making the fleet
  * unrevivable in the other.
+ *
+ * Tracker TST-DFB-3. Red when (w71g1, witnessed): every store fault rethrows (legs 1–6);
+ * the last-known-good cache keeps the FIRST config instead of the latest (leg 4); the
+ * window is derived at a stale time instead of `now` (leg 3); the degraded path keeps the
+ * cadence override (leg 2), drops the tightened budget (leg 5) or treats 0 as a cap
+ * (leg 6); masterOff stops overriding a per-agent cadence (leg 1); the env fallback is
+ * no longer 10 minutes (leg 0).
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { initHostExtPersistence, DurableCollection } from '../src/host/hostExtPersistence.js';
@@ -29,9 +36,10 @@ import type { RosterEntry } from '../src/host/rosterService.js';
 
 const T0 = Date.parse('2026-09-17T12:00:00.000Z');
 const agent = (ms?: number): RosterEntry => ({
-  tenantId: 't', rosterId: 'r1', agentId: 'a1', name: 'A', enabled: true,
+  tenantId: 't', rosterId: 'host:a', persona: 'A', agentRef: { agentId: 'user.default.a' }, workflows: [],
+  enabled: true, createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-01T00:00:00.000Z',
   ...(ms !== undefined ? { heartbeatIntervalMs: ms } : {}),
-} as unknown as RosterEntry);
+});
 
 /** Make the NEXT store read throw, simulating a durable-store hiccup. */
 function breakTheStore(): () => void {

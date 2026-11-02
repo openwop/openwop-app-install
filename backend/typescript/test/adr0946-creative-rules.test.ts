@@ -13,12 +13,15 @@
  *   ship untested.
  *
  * Sabotage witnessed: removing the contrast check, the CTA preset check or
- * the cluster finding each reddens its row.
+ * the cluster finding each reddens its row; computing the digest under a fixed
+ * version reds the determinism case (w73 probes cr-contrast, cr-cta,
+ * cr-cluster, cr-adset, cr-disclaimer, cr-digest).
  */
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { checkCreative, CREATIVE_RULES_VERSION } from '../src/host/contentRules/creative/index.js';
+import { reportDigest } from '../src/host/contentRules/findings.js';
 import { contrastRatio } from '../src/host/contentRules/creative/accessibility.js';
 import type { CreativeLocks, CreativeMemberInput, CreativeRulesInput } from '../src/host/contentRules/creative/types.js';
 
@@ -133,6 +136,11 @@ describe('ADR 0946 P2 — creative rule sets', () => {
     expect(one.digest).toMatch(/^[0-9a-f]{64}$/);
     expect(one.rulesetVersion).toBe(`creative@${CREATIVE_RULES_VERSION}`);
     expect(one.findings.every((f) => f.introduced)).toBe(true);
+    // The digest is bound to the ruleset version: the same findings under any
+    // other version digest differently, and the report's digest is the one for
+    // ITS version (a digest computed under a fixed version reds here).
+    expect(reportDigest(one.rulesetVersion, one.findings)).toBe(one.digest);
+    expect(reportDigest('creative@2026-01-01.0/channels-0', one.findings)).not.toBe(one.digest);
   });
 
   it('the contrast ratio is WCAG', () => {

@@ -13,10 +13,10 @@
  *
  * SETTLE BEFORE ABSENCE (wave 52 / grade-tests). Each "no duplicate header"
  * assertion waits for a signal the EMBEDDED owner page renders once it has
- * settled — the routing page's Organization picker, the leaderboard's zero-org
- * clause — so the absence is never read off a loading skeleton. The routing
- * fixture lists one org so the page reaches its main render, which is where a
- * non-embedded page shows its own header.
+ * settled — the routing page's "Rules" heading (its main render, ADR 1016: the
+ * config is the workspace's, so there is no org picker any more), the
+ * leaderboard's zero-org clause — so the absence is never read off a loading
+ * skeleton.
  * Sabotage: dropping `<HubProvider>` around the active owner page in
  * ModelsHubPage (the pages render non-embedded) reds the EMBEDDED and the
  * tab-switch cases (probe w52g1-mh-hubprovider).
@@ -48,10 +48,9 @@ vi.mock('../../../client/evalsClient.js', () => ({
   fetchLeaderboard: vi.fn().mockResolvedValue([]),
 }));
 vi.mock('../../model-router/modelRouterClient.js', () => ({
-  // One org, so the routing page settles on its MAIN render (header + picker),
-  // not the zero-org StateCard that has no header in either mode.
-  listOrgs: vi.fn().mockResolvedValue([{ orgId: 'o1', name: 'Acme' }]),
-  getRouterConfig: vi.fn().mockResolvedValue(null),
+  // A settled read (no config yet), so the routing page reaches its MAIN render.
+  getRouterConfig: vi.fn().mockResolvedValue({ stored: null, canManage: true }),
+  previewRoute: vi.fn(),
   setRouterConfig: vi.fn(),
   setRouterEnabled: vi.fn(),
 }));
@@ -83,8 +82,8 @@ describe('ModelsHubPage (ADR 0145 console shell)', () => {
     // model-router is the first tab; embedded, its own "Model routing" PageHeader
     // is suppressed (the console owns the chrome). Only the console title shows.
     expect(await screen.findByRole('heading', { name: 'Models' })).toBeTruthy();
-    // Settled: the routing page's own picker is up (its main render).
-    expect(await screen.findByLabelText('Organization')).toBeTruthy();
+    // Settled: the routing page's rules section is up (its main render).
+    expect(await screen.findByRole('heading', { name: /Rules, checked in order/ })).toBeTruthy();
     expect(screen.queryByRole('heading', { name: 'Model routing' })).toBeNull();
   });
 

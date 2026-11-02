@@ -8,6 +8,15 @@
  *     a card note is not (a person's handoff, not a workflow's);
  *   - a run the ledger STAMPS is counted under its project;
  *   - both evidence routes are superadmin-only: a signed-in member gets 403.
+ *
+ * TST-CFC-7. Red when: the one-version, active-days or span bar is dropped; a
+ * same-day re-record adds an active day; the tripwire threshold drops to one; the
+ * subject stops being the workflow; either route loses `requireSuperadmin`; the
+ * ledger stamp stops recording.
+ *
+ * DOUBLE GUARD (named, `structured-handoffs/evidence.ts`): a card note is excluded
+ * by `origin.kind !== 'run'` AND by the run lookup (a card origin has no runId, so
+ * `storage.getRun` finds nothing). Neither alone can be shown red from here.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -18,7 +27,7 @@ import type { Storage } from '../src/storage/storage.js';
 import { insertRunWithStartContext } from '../src/host/runInsert.js';
 import { notifyHandoffRecorded } from '../src/host/handoff/handoffObservers.js';
 import { normalizeHandoffRecord } from '../src/host/handoff/handoffRecord.js';
-import { usageEvidenceStore, EVIDENCE_BAR } from '../src/host/usageEvidence.js';
+import { usageEvidenceStore, EVIDENCE_BAR, type EvidenceSummary } from '../src/host/usageEvidence.js';
 import type { RunRecord } from '../src/types.js';
 
 let BASE: string;
@@ -38,13 +47,19 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-const bearer = (path: string) => fetch(`${BASE}${path}`, { headers: { authorization: 'Bearer dev-token' } }).then(async (r) => ({ status: r.status, body: await r.json().catch(() => undefined) as any }));
+interface EvBody extends Partial<EvidenceSummary> { error?: string; message?: string; orgId?: string; id?: string; boardId?: string }
+const bearer = async (path: string): Promise<{ status: number; body: EvBody }> => {
+  const r = await fetch(`${BASE}${path}`, { headers: { authorization: 'Bearer dev-token' } });
+  const body = (await r.json().catch(() => ({}))) as EvBody;
+  return { status: r.status, body };
+};
 function client() {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown) => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]!; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) as any };
+    const parsed = (res.status === 204 ? {} : await res.json().catch(() => ({}))) as EvBody;
+    return { status: res.status, body: parsed };
   };
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
 }
@@ -52,7 +67,7 @@ const day = (d: number): Date => new Date(Date.UTC(2026, 0, 1) + d * 24 * 60 * 6
 async function newRun(tenantId: string, workflowId: string, metadata: Record<string, unknown> = {}): Promise<string> {
   const now = new Date().toISOString();
   const run: RunRecord = { runId: `run-ev-${n++}`, workflowId, tenantId, status: 'pending', inputs: {}, metadata, configurable: {}, createdAt: now, updatedAt: now };
-  await insertRunWithStartContext(storage, run);
+  await insertRunWithStartContext(storage, run, { admission: { plan: 'exempt:test-fixture' } });
   return run.runId;
 }
 
@@ -64,10 +79,13 @@ describe('usage evidence — the bar', () => {
     await ev.record('t1', 'a', day(40), 1); // same day again: no new active day
     // Subject B: long span but only 3 active days ⇒ does not.
     for (const d of [0, 20, 45]) await ev.record('t1', 'b', day(d), 1);
+    // Subject D: 9 active days but squeezed into an 8-day span ⇒ does not (the span bar).
+    for (const d of [0, 1, 2, 3, 4, 5, 6, 7, 8]) await ev.record('t3', 'd', day(d), 1);
     let s = await ev.summarize('x');
     const a = s.subjects.find((x) => x.subject === 'a')!;
     expect(a).toMatchObject({ spanDays: 40, activeDays: 9, count: 10, qualifies: true });
     expect(s.subjects.find((x) => x.subject === 'b')!.qualifies).toBe(false);
+    expect(s.subjects.find((x) => x.subject === 'd')).toMatchObject({ spanDays: 8, activeDays: 9, qualifies: false });
     expect(s.qualifying).toBe(1);
     expect(s.tripwireMet).toBe(false);
     expect(EVIDENCE_BAR.minQualifying).toBe(2);
@@ -96,7 +114,7 @@ describe('collab tripwire evidence — recorded where the work happens', () => {
     await notifyHandoffRecorded({ tenantId, record: normalizeHandoffRecord({ intent: 'x' }, 'human')!, origin: { kind: 'card', cardId: 'c', boardId: 'b', ref: 'card:c:1', by: 'u' } });
     const r = await bearer('/host/openwop-app/structured-handoffs/evidence');
     expect(r.status).toBe(200);
-    const mine = (r.body.subjects as any[]).filter((s) => s.tenantId === tenantId);
+    const mine = (r.body.subjects ?? []).filter((s) => s.tenantId === tenantId);
     expect(mine.map((s) => s.subject)).toEqual([`workflow:${wf}`]);
     expect(mine[0]).toMatchObject({ count: 1, versions: [1], activeDays: 1 });
   });
@@ -106,22 +124,25 @@ describe('collab tripwire evidence — recorded where the work happens', () => {
     const tenantId = `org:evl-${Date.now()}-${n++}`;
     expect((await owner.post('/host/openwop-app/test/login', { email: `ev-${n++}@acme.test`, tenantId })).status).toBe(201);
     const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'EvCo' })).body.orgId as string;
-    const proj = (await owner.post('/host/openwop-app/projects', { orgId, name: 'Launch' })).body as { id: string; boardId: string };
+    const projBody = (await owner.post('/host/openwop-app/projects', { orgId, name: 'Launch' })).body;
+    const proj = { id: projBody.id ?? '', boardId: projBody.boardId ?? '' };
     expect((await owner.post(`/host/openwop-app/team-ledger/projects/${proj.id}`)).status).toBe(201);
     await newRun(tenantId, 'wf.test.evl', { kanban: { boardId: proj.boardId, cardId: 'c1' } });
     await newRun(tenantId, 'wf.test.evl', {});
     const r = await bearer('/host/openwop-app/team-ledger/evidence');
     expect(r.status).toBe(200);
-    const mine = (r.body.subjects as any[]).filter((s) => s.tenantId === tenantId);
+    const mine = (r.body.subjects ?? []).filter((s) => s.tenantId === tenantId);
     expect(mine.map((s) => s.subject)).toEqual([`project:${proj.id}`]);
-    expect(mine[0].count).toBe(1);
+    expect(mine[0]?.count).toBe(1);
   });
 
   it('both evidence routes are superadmin-only', async () => {
     const member = client();
     expect((await member.post('/host/openwop-app/test/login', { email: `evm-${n++}@acme.test` })).status).toBe(201);
     for (const p of ['/host/openwop-app/structured-handoffs/evidence', '/host/openwop-app/team-ledger/evidence']) {
-      expect((await member.get(p)).status, p).toBe(403);
+      const refused = await member.get(p);
+      expect(refused.status, p).toBe(403);
+      expect(refused.body.error, p).toBe('forbidden');
       expect((await bearer(p)).status, p).toBe(200);
     }
   });

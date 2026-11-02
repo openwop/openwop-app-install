@@ -19,10 +19,11 @@
  *      cases below now call THAT factory — a lane factory that dropped the
  *      safe-mode baseline goes red here;
  *   3. the chat CODE_EXEC builtin dropped the advertised `code.execution-result`
- *      artifact — it now persists one via `persistRunArtifact` and returns its
- *      id/key, readable back with a matching tenant. DATA-1: the key carries the
- *      tenant, so two tenants running identical code in same-named conversations
- *      get two rows, never a shared one.
+ *      artifact — it now persists one via `persistRunArtifact`. DATA-1: the key
+ *      carries the tenant, so two tenants running identical code in same-named
+ *      conversations get two rows, never a shared one. ADR 1017 D4: the result says
+ *      only `artifactSaved` (the key and id name the tenant and the conversation,
+ *      which model text must not); D2: the row carries the chat turn's message id.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -32,7 +33,8 @@ import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { createAgentToolProvider } from '../src/host/agentToolProvider.js';
 import { runAgentDispatchLive, type AgentToolDef, type LiveDispatchDeps } from '../src/host/agentDispatch.js';
 import { getAgentRegistry } from '../src/executor/agentRegistry.js';
-import { getRunArtifact, __resetRunArtifactStore } from '../src/host/runArtifactStore.js';
+import { getRunArtifact, listRunArtifactsForRun, __resetRunArtifactStore } from '../src/host/runArtifactStore.js';
+import { chatArtifactRunId } from '../src/host/chatArtifactScope.js';
 import { registerCodeExecArtifactType } from '../src/features/code-exec/artifactTypes.js';
 import { registerToggleDefault } from '../src/host/featureToggles/registry.js';
 import { codeExecFeature } from '../src/features/code-exec/feature.js';
@@ -64,50 +66,52 @@ afterAll(async () => {
 beforeEach(async () => { await __resetRunArtifactStore(); });
 
 describe('chat CODE_EXEC — execution-result artifact projection', () => {
-  it('a successful run returns artifact fields and the artifact is readable by matching tenant', async () => {
-    const provider = createAgentToolProvider({ tenantId: 't-code', conversationId: 'conv-1', actingUserId: 'u-1' });
+  /** The `chat-code:` rows a scope holds, newest first (the store's own prefix read). */
+  const rowsOf = async (scope: { tenantId: string; conversationId: string }) =>
+    (await listRunArtifactsForRun(chatArtifactRunId('chat-code', scope))).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+
+  it('a successful run saves a typed, tenant-scoped artifact, and the result names no key, tenant or conversation', async () => {
+    const provider = createAgentToolProvider({ tenantId: 't-code', conversationId: 'conv-1', actingUserId: 'u-1', turnMessageId: 'run-c:gate:0:1:agent' });
     const res = await provider.executeTool({ name: CODE_EXEC_ID, input: { code: 'print(6*7)' } });
     expect(res.isError).toBeFalsy();
-    const body = JSON.parse(res.content) as { exitCode: number; stdout: string; artifactId?: string; artifactKey?: string };
+    const body = JSON.parse(res.content) as { exitCode: number; stdout: string; artifactSaved?: true };
     // The tool result still carries the raw execution output …
     expect(body.exitCode).toBe(0);
     expect(body.stdout).toContain('42');
-    // … PLUS the newly-projected artifact reference.
-    expect(typeof body.artifactId).toBe('string');
-    // DATA-1 — the synthetic runId is tenant-prefixed (no cross-tenant key collision).
-    expect(body.artifactKey).toContain('chat-code:t-code:conv-1');
+    // … and says the artifact was saved, without ids (ADR 1017 D4).
+    expect(body.artifactSaved).toBe(true);
+    for (const leak of ['t-code', 'conv-1', 'chat-code', 'run-event']) expect(res.content).not.toContain(leak);
 
-    // The artifact is durable, typed, and tenant-scoped.
-    const record = await getRunArtifact(body.artifactKey!);
-    expect(record).toBeTruthy();
+    // The artifact is durable, typed, tenant-scoped, and names its chat turn (ADR 1017 D2).
+    const [record] = await rowsOf({ tenantId: 't-code', conversationId: 'conv-1' });
+    expect(record?.artifactKey).toContain('chat-code:t-code:conv-1');
     expect(record!.tenantId).toBe('t-code');
     expect(record!.artifactTypeId).toBe('code.execution-result');
     expect(record!.content).toContain('42');
+    expect(record!.turnMessageId).toBe('run-c:gate:0:1:agent');
 
     // DATA-1 — a DIFFERENT tenant running the SAME code in a same-named conversation gets
     // its OWN row; tenant t-code's row is untouched.
     const other = createAgentToolProvider({ tenantId: 't-other', conversationId: 'conv-1', actingUserId: 'u-2' });
-    const otherBody = JSON.parse((await other.executeTool({ name: CODE_EXEC_ID, input: { code: 'print(6*7)' } })).content) as { artifactKey?: string };
-    expect(otherBody.artifactKey).toContain('chat-code:t-other:conv-1');
-    expect(otherBody.artifactKey).not.toBe(body.artifactKey);
-    expect((await getRunArtifact(otherBody.artifactKey!))?.tenantId).toBe('t-other');
-    expect((await getRunArtifact(body.artifactKey!))?.tenantId).toBe('t-code');
+    expect(JSON.parse((await other.executeTool({ name: CODE_EXEC_ID, input: { code: 'print(6*7)' } })).content).artifactSaved).toBe(true);
+    const [otherRow] = await rowsOf({ tenantId: 't-other', conversationId: 'conv-1' });
+    expect(otherRow?.artifactKey).toContain('chat-code:t-other:conv-1');
+    expect(otherRow!.artifactKey).not.toBe(record!.artifactKey);
+    expect((await getRunArtifact(record!.artifactKey))?.tenantId).toBe('t-code');
   });
 
   it('is deterministic: the same code re-run does not mint a second artifact', async () => {
-    const provider = createAgentToolProvider({ tenantId: 't-code', conversationId: 'conv-2', actingUserId: 'u-1' });
-    type Out = { artifactId?: string; artifactKey?: string };
-    const exec = async (code: string): Promise<Out> => JSON.parse((await provider.executeTool({ name: CODE_EXEC_ID, input: { code } })).content) as Out;
-    const first = await exec('print(1)');
-    // Non-vacuity: an artifact was actually minted (two `undefined`s would also be "equal").
-    expect(typeof first.artifactId).toBe('string');
-    expect(await getRunArtifact(first.artifactKey!)).toBeTruthy();
-    const again = await exec('print(1)');
-    expect(again.artifactId).toBe(first.artifactId);
-    expect(again.artifactKey).toBe(first.artifactKey);
+    const scope = { tenantId: 't-code', conversationId: 'conv-2' };
+    const provider = createAgentToolProvider({ ...scope, actingUserId: 'u-1' });
+    const exec = async (code: string) => JSON.parse((await provider.executeTool({ name: CODE_EXEC_ID, input: { code } })).content) as { artifactSaved?: true };
+    // Non-vacuity: an artifact was actually minted.
+    expect((await exec('print(1)')).artifactSaved).toBe(true);
+    expect(await rowsOf(scope)).toHaveLength(1);
+    await exec('print(1)');
+    expect(await rowsOf(scope)).toHaveLength(1);
     // … and the key is content-derived, not constant: different code ⇒ a different artifact.
-    const different = await exec('print(2)');
-    expect(different.artifactKey).not.toBe(first.artifactKey);
+    await exec('print(2)');
+    expect(await rowsOf(scope)).toHaveLength(2);
   });
 });
 

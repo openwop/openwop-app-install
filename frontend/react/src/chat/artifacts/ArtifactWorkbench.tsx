@@ -76,7 +76,9 @@ export function ArtifactWorkbench({ artifactId, revisionId, onClose, docked = fa
   useEffect(() => { if (editing) editorRef.current?.focus(); }, [editing]);
   // Exit the scratch editor when the artifact changes, so a stale draft can't bleed
   // across artifacts (the draft is re-seeded from the persisted source on each Edit).
-  useEffect(() => { setEditing(false); }, [artifactId]);
+  // ADR 1017 D1 — a different REVISION too: the draft carries the Run-scripts consent of
+  // the revision it was seeded from, and must not hand it to another one.
+  useEffect(() => { setEditing(false); }, [artifactId, revisionId]);
 
   useEffect(() => {
     let live = true;
@@ -151,8 +153,9 @@ export function ArtifactWorkbench({ artifactId, revisionId, onClose, docked = fa
             <span className="chip chip--muted">{artifact.status}</span>
             {artifact.artifactTypeId ? <span className="chip chip--accent">{artifact.artifactTypeId}</span> : null}
             {/* IART-2: interactive artifacts are untrusted-by-construction — they render in an
-                origin-isolated, no-egress sandbox. Surface that transparency as a chip (the
-                content-trust signal, without persisting a per-record contentTrust flag). */}
+                origin-isolated sandbox, static until the viewer runs their scripts (ADR 1017).
+                Surface that as a chip (the content-trust signal, without persisting a
+                per-record contentTrust flag). */}
             {artifact.artifactTypeId?.startsWith('interactive.')
               ? <span className="chip chip--muted" title={t('artifactSandboxedHint')}>{t('artifactSandboxedBadge')}</span>
               : null}
@@ -243,7 +246,8 @@ export function ArtifactWorkbench({ artifactId, revisionId, onClose, docked = fa
                         />
                       ) : null}
                       <Suspense fallback={<StateCard loading title={t('artifactLoading')} />}>
-                        <RendererComponent artifact={artifact} content={body} />
+                        {/* ADR 1017 D1 — consent is per artifact revision; the draft keeps it. */}
+                        <RendererComponent artifact={artifact} content={body} consentKey={`${artifact.artifactId}:${shown.revisionId}`} />
                       </Suspense>
                     </div>
                   );

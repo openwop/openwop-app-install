@@ -5,6 +5,13 @@
  * connected `ticketing` provider (Jira / ServiceNow) via ctx.connectors, build the
  * per-provider REST request against the tenant `baseUrl`, and fail SAFE (no provider /
  * baseUrl / required field ⇒ connected:false, no side effect).
+ *
+ * Tracker TST-CBC-4 (create idempotency on fork/retry; protected). Red when: the
+ * provider pick takes a non-ticketing candidate; a trailing slash is kept; ServiceNow
+ * sys_id/number are swapped; a create without a summary or a transition without a key
+ * dispatches; an egress error or a missing connectors surface reads as success; the
+ * create idempotency record is skipped; ServiceNow transition stops using PATCH
+ * (w67g1-tkt-* probes, wave 67).
  */
 import { describe, expect, it, beforeAll } from 'vitest';
 import { createApp } from '../src/index.js';
@@ -55,7 +62,8 @@ describe('ADR 0186 slice 2 — ticket-create', () => {
   it('creates a ServiceNow record and maps sys_id/number → id/key', async () => {
     const c = connectors('servicenow', { result: { sys_id: 'abc', number: 'INC0001' } });
     const res = await node().execute(makeCtx({ config: { baseUrl: 'https://acme.service-now.com', summary: 'Down' }, connectors: c.surface }));
-    expect(c.calls[0].url).toBe('https://acme.service-now.com/api/now/table/incident');
+    expect(c.calls[0]).toMatchObject({ id: 'servicenow', method: 'POST', url: 'https://acme.service-now.com/api/now/table/incident' });
+    expect(JSON.parse(c.calls[0].body!)).toEqual({ short_description: 'Down' });
     expect(outputsOf(res)).toMatchObject({ connected: true, created: true, provider: 'servicenow', id: 'abc', key: 'INC0001' });
   });
 
@@ -72,6 +80,7 @@ describe('ADR 0186 slice 2 — ticket-create', () => {
     expect(none.calls.length).toBe(0);
     const noBase = connectors('jira', null);
     expect(outputsOf(await node().execute(makeCtx({ config: { summary: 'Y' }, connectors: noBase.surface })))).toMatchObject({ connected: false });
+    expect(noBase.calls.length).toBe(0);
     const noSummary = connectors('jira', null);
     expect(outputsOf(await node().execute(makeCtx({ config: { baseUrl: 'https://x' }, connectors: noSummary.surface })))).toMatchObject({ connected: false });
     expect(noSummary.calls.length).toBe(0);
@@ -79,7 +88,9 @@ describe('ADR 0186 slice 2 — ticket-create', () => {
 
   it('fails when the connector egress errors', async () => {
     const c = connectors('jira', null, false);
-    expect((await node().execute(makeCtx({ config: { baseUrl: 'https://x', summary: 'Y' }, connectors: c.surface }))).status).toBe('failure');
+    const res = await node().execute(makeCtx({ config: { baseUrl: 'https://x', summary: 'Y' }, connectors: c.surface }));
+    if (res.status !== 'failure') throw new Error(`expected failure, got ${res.status}`);
+    expect(res.error?.code).toBe('bad_request');
   });
 
   it('fails closed with no host connectors surface', async () => {

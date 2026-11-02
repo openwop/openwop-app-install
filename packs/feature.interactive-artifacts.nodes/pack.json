@@ -1,6 +1,6 @@
 {
   "name": "feature.interactive-artifacts.nodes",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "kind": "node",
   "description": "Interactive-artifacts producer node pack. The `render` node emits a typed `interactive.{mermaid,chart,html,react}` artifact whose content is the raw source (mermaid text / chart spec / HTML), so it flows through the existing run-output producer and renders in the chat artifact workbench's sandboxed canvas. Pure transform — no host capability required; replay-safe (output recorded, never re-derived).",
   "author": "OpenWOP App",

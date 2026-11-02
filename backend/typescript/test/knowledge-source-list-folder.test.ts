@@ -3,12 +3,22 @@
  * SSRF-guarded broker (`brokeredFetch`) is mocked; this covers the Drive Files
  * list parsing, pagination, malformed-entry skipping, provider dispatch, and the
  * fail-closed mapping of a missing connection.
+ *
+ * TST-DKC-2 (grade-tests wave 72). PROTECTED: the SSRF host check on every
+ * un-credentialed download, Box `redirect:'manual'` (the token stays on
+ * api.box.com), and the id guards against Drive-query injection and Graph/Box
+ * path traversal. Red when (w72 probes ll-*): an id guard goes, the Drive query
+ * drops `trashed = false` or the folder exclusion, the SSRF check goes, Box
+ * follows the redirect, the 32 MiB cap moves, or Drive pagination stops. A blank
+ * Drive folder id is refused by `if (!id)` AND `DRIVE_ID_RE` (a recorded double
+ * guard). Fixtures are real `Response` objects typed as the broker's outcome.
  */
-import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../src/host/brokeredEgress.js', () => ({ brokeredFetch: vi.fn() }));
 // The un-credentialed Graph downloadUrl fetch + its SSRF guard (ADR 0107 Phase: Graph binary).
-vi.mock('undici', () => ({ fetch: vi.fn() }));
+// The REAL undici module minus `fetch`, so fixtures can be real undici `Response`s.
+vi.mock('undici', async (importOriginal) => ({ ...(await importOriginal<typeof import('undici')>()), fetch: vi.fn() }));
 // ADR 0609 — `fetchGuardedBytes` now delegates its scheme arm to the ADR 0607
 // shared predicate, so this mock must supply it or the module under test imports
 // `undefined` and every download path throws a mock error instead of exercising
@@ -26,31 +36,46 @@ vi.mock('../src/host/webhookEgressGuard.js', async (importOriginal) => {
   };
 });
 import { brokeredFetch } from '../src/host/brokeredEgress.js';
-import { fetch as undiciFetch } from 'undici';
+import { fetch as undiciFetch, Response } from 'undici';
 import { isDeniedWebhookHost } from '../src/host/webhookEgressGuard.js';
-import { listFolder, fetchKnowledgeSource, fetchKnowledgeSourceBytes, browseFolders } from '../src/host/knowledgeSourceFetch.js';
-import type { Storage } from '../src/storage/storage.js';
+import { listFolder, fetchKnowledgeSource, fetchKnowledgeSourceBytes, browseFolders, type KnowledgeFetchDeps } from '../src/host/knowledgeSourceFetch.js';
+import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { openStorage } from '../src/storage/index.js';
 
 const mFetch = vi.mocked(brokeredFetch);
 const mUndici = vi.mocked(undiciFetch);
 const mDenied = vi.mocked(isDeniedWebhookHost);
-const deps = { storage: {} as Storage, tenantId: 't1', actingUserId: 'user:a', orgId: 'org1' };
+const storage = await openStorage('memory://');
+const deps: KnowledgeFetchDeps = { storage, tenantId: 't1', actingUserId: 'user:a', orgId: 'org1' };
 
 // ADR 0609 — the download leg now applies the ADR 0187 tenant egress policy, the
 // same gate `brokeredFetch` has always applied on the credentialed metadata leg.
 // That policy lives in a DurableCollection, so the host-ext store must be booted.
 // A tenant with no stored rules defaults to `off`, i.e. these tests keep the
 // posture they had; what changed is that the lookup now happens at all.
-beforeAll(async () => {
-  const { initHostExtPersistence } = await import('../src/host/hostExtPersistence.js');
-  const { openStorage } = await import('../src/storage/index.js');
-  initHostExtPersistence(await openStorage('memory://'));
+beforeAll(() => {
+  initHostExtPersistence(storage);
 });
-const sent = (body: unknown) => ({ outcome: 'sent' as const, res: { ok: true, status: 200, text: async () => JSON.stringify(body) } as unknown as Response });
-const sentBytes = (buf: Buffer) => ({ outcome: 'sent' as const, res: { ok: true, status: 200, arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) } as unknown as Response });
-const DRIVE_ID = '1AbcDEF_ghiJKL-mnoPQRstuVWxyz0123456789';
+// TST-DKC-2 (w72) — every mock is reset before EVERY case. The SSRF-denied cases
+// set `mDenied` to deny; with per-describe resets only, a shuffled order ran a
+// Dropbox/Box download straight after one and read a 502 that was not its own.
+beforeEach(() => {
+  mFetch.mockReset();
+  mUndici.mockReset();
+  mDenied.mockReset();
+  mDenied.mockReturnValue(false);
+});
 
-afterEach(() => mFetch.mockReset());
+/** Typed broker outcomes over REAL `Response` objects (no laundering casts):
+ *  the product reads `.text()`, `.body` (streamed) and `.headers` off them. */
+type Outcome = Awaited<ReturnType<typeof brokeredFetch>>;
+const PROV = { connectionId: 'conn-test', provider: 'test' };
+const sent = (body: unknown): Outcome => ({ outcome: 'sent', res: new Response(JSON.stringify(body), { status: 200 }), provenance: PROV });
+const sentText = (text: string): Outcome => ({ outcome: 'sent', res: new Response(text, { status: 200 }), provenance: PROV });
+const sentBytes = (buf: Buffer): Outcome => ({ outcome: 'sent', res: new Response(new Uint8Array(buf), { status: 200 }), provenance: PROV });
+const sentRedirect = (location: string): Outcome => ({ outcome: 'sent', res: new Response(null, { status: 302, headers: { location } }), provenance: PROV });
+const bytes = (b: Buffer) => new Response(new Uint8Array(b), { status: 200 });
+const DRIVE_ID = '1AbcDEF_ghiJKL-mnoPQRstuVWxyz0123456789';
 
 describe('listFolder (ADR 0107 Phase 1)', () => {
   it('parses Drive files into {fileId,name,mimeType,revision} and filters the folder', async () => {
@@ -59,7 +84,7 @@ describe('listFolder (ADR 0107 Phase 1)', () => {
         { id: 'f1', name: 'Doc A', mimeType: 'application/vnd.google-apps.document', modifiedTime: '2026-06-01T00:00:00Z' },
         { id: 'f2', name: 'Sheet B', mimeType: 'application/vnd.google-apps.spreadsheet', modifiedTime: '2026-06-02T00:00:00Z' },
       ],
-    }) as never);
+    }));
     const out = await listFolder(deps, 'google', 'FOLDER123');
     expect(out.files).toEqual([
       { fileId: 'f1', name: 'Doc A', mimeType: 'application/vnd.google-apps.document', revision: '2026-06-01T00:00:00Z' },
@@ -67,16 +92,19 @@ describe('listFolder (ADR 0107 Phase 1)', () => {
     ]);
     // ADR 0605 — a listing the loop DRAINED is complete, so it may be pruned from.
     expect(out.complete).toBe(true);
-    // the query targets the folder + excludes trashed files
-    const url = String(mFetch.mock.calls[0]![1].url);
-    expect(decodeURIComponent(url)).toContain("'FOLDER123' in parents and trashed = false");
-    expect(url).toContain('googleapis.com/drive/v3/files');
+    // the query targets the folder, excludes trashed files and subfolders — the
+    // EXACT request (a substring check passed a dropped `trashed = false`).
+    const q = encodeURIComponent("'FOLDER123' in parents and trashed = false and mimeType != 'application/vnd.google-apps.folder'");
+    const fields = encodeURIComponent('kind,nextPageToken,files(id,name,mimeType,modifiedTime)');
+    expect(mFetch.mock.calls[0]![1].url).toBe(
+      `https://www.googleapis.com/drive/v3/files?q=${q}&fields=${fields}&pageSize=200&supportsAllDrives=true&includeItemsFromAllDrives=true`,
+    );
   });
 
   it('paginates via nextPageToken and merges pages', async () => {
     mFetch
-      .mockResolvedValueOnce(sent({ files: [{ id: 'f1', name: 'A', mimeType: 'text/plain', modifiedTime: 'r1' }], nextPageToken: 'PAGE2' }) as never)
-      .mockResolvedValueOnce(sent({ files: [{ id: 'f2', name: 'B', mimeType: 'text/plain', modifiedTime: 'r2' }] }) as never);
+      .mockResolvedValueOnce(sent({ files: [{ id: 'f1', name: 'A', mimeType: 'text/plain', modifiedTime: 'r1' }], nextPageToken: 'PAGE2' }))
+      .mockResolvedValueOnce(sent({ files: [{ id: 'f2', name: 'B', mimeType: 'text/plain', modifiedTime: 'r2' }] }));
     const out = await listFolder(deps, 'google', 'F');
     expect(out.files.map((f) => f.fileId)).toEqual(['f1', 'f2']);
     expect(out.complete).toBe(true);
@@ -87,7 +115,7 @@ describe('listFolder (ADR 0107 Phase 1)', () => {
   it('skips malformed entries (missing id) and defaults a blank name', async () => {
     mFetch.mockResolvedValueOnce(sent({
       files: [{ name: 'no id' }, { id: 'f3', name: '', mimeType: 'text/plain', modifiedTime: 'r3' }],
-    }) as never);
+    }));
     const out = await listFolder(deps, 'google', 'F');
     expect(out.files).toEqual([{ fileId: 'f3', name: 'Untitled', mimeType: 'text/plain', revision: 'r3' }]);
   });
@@ -98,7 +126,7 @@ describe('listFolder (ADR 0107 Phase 1)', () => {
   });
 
   it('fail-closes to credential_required when the connection is absent', async () => {
-    mFetch.mockResolvedValueOnce({ outcome: 'no_connection' } as never);
+    mFetch.mockResolvedValueOnce({ outcome: 'no_connection' });
     await expect(listFolder(deps, 'google', 'F')).rejects.toMatchObject({ code: 'credential_required' });
   });
 
@@ -121,25 +149,26 @@ describe('listFolder (ADR 0107 Phase 1)', () => {
         { id: 'sub', name: 'Sub', folder: { childCount: 2 } }, // a subfolder ⇒ skipped
         { id: 'i2', name: 'B.md', file: { mimeType: 'text/markdown' }, lastModifiedDateTime: '2026-06-02T00:00:00Z' },
       ],
-    }) as never);
+    }));
     const out = await listFolder(deps, 'microsoft-graph', 'FOLDER1');
     expect(out.files).toEqual([
       { fileId: 'i1', name: 'A.txt', mimeType: 'text/plain', revision: '2026-06-01T00:00:00Z' },
       { fileId: 'i2', name: 'B.md', mimeType: 'text/markdown', revision: '2026-06-02T00:00:00Z' },
     ]);
     expect(out.complete).toBe(true);
-    const url = String(mFetch.mock.calls[0]![1].url);
-    expect(url).toContain('graph.microsoft.com/v1.0/me/drive/items/FOLDER1/children');
+    expect(mFetch.mock.calls[0]![1].url).toBe(
+      `https://graph.microsoft.com/v1.0/me/drive/items/FOLDER1/children?$select=${encodeURIComponent('id,name,file,folder,lastModifiedDateTime')}&$top=200`,
+    );
   });
 
   it('OneDrive `root` targets /me/drive/root and follows @odata.nextLink', async () => {
     mFetch
-      .mockResolvedValueOnce(sent({ value: [{ id: 'i1', name: 'A', file: { mimeType: 'text/plain' }, lastModifiedDateTime: 'r1' }], '@odata.nextLink': 'https://graph.microsoft.com/v1.0/next?p=2' }) as never)
-      .mockResolvedValueOnce(sent({ value: [{ id: 'i2', name: 'B', file: { mimeType: 'text/plain' }, lastModifiedDateTime: 'r2' }] }) as never);
+      .mockResolvedValueOnce(sent({ value: [{ id: 'i1', name: 'A', file: { mimeType: 'text/plain' }, lastModifiedDateTime: 'r1' }], '@odata.nextLink': 'https://graph.microsoft.com/v1.0/next?p=2' }))
+      .mockResolvedValueOnce(sent({ value: [{ id: 'i2', name: 'B', file: { mimeType: 'text/plain' }, lastModifiedDateTime: 'r2' }] }));
     const out = await listFolder(deps, 'microsoft-graph', 'root');
     expect(out.files.map((f) => f.fileId)).toEqual(['i1', 'i2']);
     expect(out.complete).toBe(true);
-    expect(String(mFetch.mock.calls[0]![1].url)).toContain('/me/drive/root/children');
+    expect(String(mFetch.mock.calls[0]![1].url)).toMatch(/^https:\/\/graph\.microsoft\.com\/v1\.0\/me\/drive\/root\/children\?/);
     expect(String(mFetch.mock.calls[1]![1].url)).toBe('https://graph.microsoft.com/v1.0/next?p=2');
   });
 
@@ -153,49 +182,47 @@ describe('listFolder (ADR 0107 Phase 1)', () => {
 describe('fetchKnowledgeSource — OneDrive (Phase 6)', () => {
   it('reads a text OneDrive item: meta then content → {title,text}', async () => {
     mFetch
-      .mockResolvedValueOnce(sent({ name: 'notes.md', file: { mimeType: 'text/markdown' } }) as never) // meta
-      .mockResolvedValueOnce({ outcome: 'sent', res: { ok: true, status: 200, text: async () => '# hi' } } as never); // content
+      .mockResolvedValueOnce(sent({ name: 'notes.md', file: { mimeType: 'text/markdown' } })) // meta
+      .mockResolvedValueOnce(sentText('# hi')); // content
     const out = await fetchKnowledgeSource(deps, { provider: 'microsoft-graph', ref: 'item1' });
     expect(out).toMatchObject({ title: 'notes.md', text: '# hi' });
-    expect(String(mFetch.mock.calls[1]![1].url)).toContain('/me/drive/items/item1/content');
+    expect(mFetch.mock.calls[1]![1].url).toBe('https://graph.microsoft.com/v1.0/me/drive/items/item1/content');
   });
 
   it('rejects a binary OneDrive item with no extractable text', async () => {
-    mFetch.mockResolvedValueOnce(sent({ name: 'deck.pptx', file: { mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation' } }) as never);
+    mFetch.mockResolvedValueOnce(sent({ name: 'deck.pptx', file: { mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation' } }));
     await expect(fetchKnowledgeSource(deps, { provider: 'microsoft-graph', ref: 'item2' })).rejects.toMatchObject({ code: 'validation_error' });
     expect(mFetch).toHaveBeenCalledTimes(1); // never fetched content
   });
 });
 
 describe('fetchKnowledgeSourceBytes (ADR 0107 Phase 2 — binary sync)', () => {
-  afterEach(() => mFetch.mockReset());
 
   it('downloads a Google Drive file as bytes: meta then alt=media → {contentBase64,contentType}', async () => {
     mFetch
-      .mockResolvedValueOnce(sent({ name: 'report.pdf', mimeType: 'application/pdf' }) as never) // meta
-      .mockResolvedValueOnce(sentBytes(Buffer.from('PDFBYTES')) as never);                        // alt=media
+      .mockResolvedValueOnce(sent({ name: 'report.pdf', mimeType: 'application/pdf' })) // meta
+      .mockResolvedValueOnce(sentBytes(Buffer.from('PDFBYTES')));                        // alt=media
     const out = await fetchKnowledgeSourceBytes(deps, { provider: 'google', ref: DRIVE_ID });
     expect(out.title).toBe('report.pdf');
     expect(out.contentType).toBe('application/pdf');
     expect(Buffer.from(out.contentBase64, 'base64').toString()).toBe('PDFBYTES');
-    expect(String(mFetch.mock.calls[1]![1].url)).toContain('alt=media'); // content via alt=media
+    expect(mFetch.mock.calls[1]![1].url).toBe(`https://www.googleapis.com/drive/v3/files/${DRIVE_ID}?alt=media&supportsAllDrives=true`); // content via alt=media
   });
 
   it('REJECTS an oversize download (413) — never truncates a binary into corruption', async () => {
     mFetch
-      .mockResolvedValueOnce(sent({ name: 'huge.pdf', mimeType: 'application/pdf' }) as never)
-      .mockResolvedValueOnce(sentBytes(Buffer.alloc(33 * 1024 * 1024)) as never); // > 32 MiB
+      .mockResolvedValueOnce(sent({ name: 'huge.pdf', mimeType: 'application/pdf' }))
+      .mockResolvedValueOnce(sentBytes(Buffer.alloc(33 * 1024 * 1024))); // > 32 MiB
     await expect(fetchKnowledgeSourceBytes(deps, { provider: 'google', ref: DRIVE_ID }))
       .rejects.toMatchObject({ httpStatus: 413 });
   });
 
   it('downloads a OneDrive file via @microsoft.graph.downloadUrl (SSRF-guarded, un-credentialed)', async () => {
-    mFetch.mockReset(); mUndici.mockReset(); mDenied.mockReset(); mDenied.mockReturnValue(false);
     // meta (credentialed, graph.microsoft.com) carries the pre-auth download URL
-    mFetch.mockResolvedValueOnce(sent({ name: 'deck.pptx', file: { mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation' }, '@microsoft.graph.downloadUrl': 'https://abc-my.sharepoint.com/download/xyz' }) as never);
+    mFetch.mockResolvedValueOnce(sent({ name: 'deck.pptx', file: { mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation' }, '@microsoft.graph.downloadUrl': 'https://abc-my.sharepoint.com/download/xyz' }));
     // the downloadUrl fetch is un-credentialed (undici), returns bytes
     const pptx = Buffer.from('PPTXBYTES');
-    mUndici.mockResolvedValueOnce({ ok: true, status: 200, arrayBuffer: async () => pptx.buffer.slice(pptx.byteOffset, pptx.byteOffset + pptx.byteLength) } as never);
+    mUndici.mockResolvedValueOnce(bytes(pptx));
     const out = await fetchKnowledgeSourceBytes(deps, { provider: 'microsoft-graph', ref: 'item1' });
     expect(out.contentType).toBe('application/vnd.openxmlformats-officedocument.presentationml.presentation');
     expect(Buffer.from(out.contentBase64, 'base64').toString()).toBe('PPTXBYTES');
@@ -205,8 +232,7 @@ describe('fetchKnowledgeSourceBytes (ADR 0107 Phase 2 — binary sync)', () => {
   });
 
   it('rejects a download host that the SSRF guard denies (private IP) — 502', async () => {
-    mFetch.mockReset(); mUndici.mockReset(); mDenied.mockReset();
-    mFetch.mockResolvedValueOnce(sent({ name: 'x', file: { mimeType: 'application/pdf' }, '@microsoft.graph.downloadUrl': 'https://169.254.169.254/latest/meta-data' }) as never);
+    mFetch.mockResolvedValueOnce(sent({ name: 'x', file: { mimeType: 'application/pdf' }, '@microsoft.graph.downloadUrl': 'https://169.254.169.254/latest/meta-data' }));
     mDenied.mockReturnValue(true); // guard denies the metadata-service host
     await expect(fetchKnowledgeSourceBytes(deps, { provider: 'microsoft-graph', ref: 'item1' }))
       .rejects.toMatchObject({ httpStatus: 502 });
@@ -214,17 +240,15 @@ describe('fetchKnowledgeSourceBytes (ADR 0107 Phase 2 — binary sync)', () => {
   });
 
   it('rejects a OneDrive item with no download URL (422 — folder or access denied)', async () => {
-    mFetch.mockReset(); mUndici.mockReset(); mDenied.mockReturnValue(false);
-    mFetch.mockResolvedValueOnce(sent({ name: 'x', file: { mimeType: 'application/pdf' } }) as never); // no downloadUrl
+    mFetch.mockResolvedValueOnce(sent({ name: 'x', file: { mimeType: 'application/pdf' } })); // no downloadUrl
     await expect(fetchKnowledgeSourceBytes(deps, { provider: 'microsoft-graph', ref: 'item1' }))
       .rejects.toMatchObject({ httpStatus: 422 });
   });
 });
 
 describe('listFolder — Google excludes subfolders (no recursion)', () => {
-  afterEach(() => mFetch.mockReset());
   it('the Drive query filters out folders', async () => {
-    mFetch.mockResolvedValueOnce(sent({ files: [] }) as never);
+    mFetch.mockResolvedValueOnce(sent({ files: [] }));
     await listFolder(deps, 'google', 'FOLDER1');
     const url = decodeURIComponent(String(mFetch.mock.calls[0]![1].url));
     expect(url).toContain("mimeType != 'application/vnd.google-apps.folder'");
@@ -232,7 +256,6 @@ describe('listFolder — Google excludes subfolders (no recursion)', () => {
 });
 
 describe('Dropbox (ADR 0107 follow-on)', () => {
-  afterEach(() => { mFetch.mockReset(); mUndici.mockReset(); mDenied.mockReset(); mDenied.mockReturnValue(false); });
 
   it('lists a Dropbox folder — files only, infers MIME from name, rev as revision', async () => {
     mFetch.mockResolvedValueOnce(sent({
@@ -242,7 +265,7 @@ describe('Dropbox (ADR 0107 follow-on)', () => {
         { '.tag': 'file', id: 'id:2', name: 'deck.pptx', rev: 'r2' },
       ],
       has_more: false,
-    }) as never);
+    }));
     const out = await listFolder(deps, 'dropbox', '/Reports');
     expect(out.files).toEqual([
       { fileId: 'id:1', name: 'report.pdf', mimeType: 'application/pdf', revision: 'r1' },
@@ -250,35 +273,35 @@ describe('Dropbox (ADR 0107 follow-on)', () => {
     ]);
     expect(out.complete).toBe(true);
     // the folder ref rides the JSON BODY (no URL-injection surface)
-    expect(String(mFetch.mock.calls[0]![1].url)).toContain('api.dropboxapi.com/2/files/list_folder');
+    expect(mFetch.mock.calls[0]![1].url).toBe('https://api.dropboxapi.com/2/files/list_folder');
     expect(mFetch.mock.calls[0]![1].method).toBe('POST');
     expect(JSON.parse(String(mFetch.mock.calls[0]![1].body)).path).toBe('/Reports');
   });
 
   it('paginates via list_folder/continue with the cursor', async () => {
     mFetch
-      .mockResolvedValueOnce(sent({ entries: [{ '.tag': 'file', id: 'id:1', name: 'a.txt', rev: 'r1' }], has_more: true, cursor: 'CUR2' }) as never)
-      .mockResolvedValueOnce(sent({ entries: [{ '.tag': 'file', id: 'id:2', name: 'b.txt', rev: 'r2' }], has_more: false }) as never);
+      .mockResolvedValueOnce(sent({ entries: [{ '.tag': 'file', id: 'id:1', name: 'a.txt', rev: 'r1' }], has_more: true, cursor: 'CUR2' }))
+      .mockResolvedValueOnce(sent({ entries: [{ '.tag': 'file', id: 'id:2', name: 'b.txt', rev: 'r2' }], has_more: false }));
     const out = await listFolder(deps, 'dropbox', 'root');
     expect(out.files.map((f) => f.fileId)).toEqual(['id:1', 'id:2']);
     expect(out.complete).toBe(true);
-    expect(String(mFetch.mock.calls[1]![1].url)).toContain('/2/files/list_folder/continue');
+    expect(mFetch.mock.calls[1]![1].url).toBe('https://api.dropboxapi.com/2/files/list_folder/continue');
     expect(JSON.parse(String(mFetch.mock.calls[1]![1].body)).cursor).toBe('CUR2');
   });
 
   it('downloads a Dropbox file via get_temporary_link → un-credentialed SSRF-guarded fetch', async () => {
-    mFetch.mockResolvedValueOnce(sent({ link: 'https://dl.dropboxusercontent.com/abc', metadata: { name: 'report.pdf' } }) as never);
+    mFetch.mockResolvedValueOnce(sent({ link: 'https://dl.dropboxusercontent.com/abc', metadata: { name: 'report.pdf' } }));
     const pdf = Buffer.from('PDFBYTES');
-    mUndici.mockResolvedValueOnce({ ok: true, status: 200, arrayBuffer: async () => pdf.buffer.slice(pdf.byteOffset, pdf.byteOffset + pdf.byteLength) } as never);
+    mUndici.mockResolvedValueOnce(bytes(pdf));
     const out = await fetchKnowledgeSourceBytes(deps, { provider: 'dropbox', ref: 'id:1' });
     expect(out.contentType).toBe('application/pdf');
     expect(Buffer.from(out.contentBase64, 'base64').toString()).toBe('PDFBYTES');
     expect(mDenied).toHaveBeenCalledWith('dl.dropboxusercontent.com'); // SSRF-checked
-    expect(String(mFetch.mock.calls[0]![1].url)).toContain('/2/files/get_temporary_link');
+    expect(mFetch.mock.calls[0]![1].url).toBe('https://api.dropboxapi.com/2/files/get_temporary_link');
   });
 
   it('rejects a Dropbox download whose temp-link host is SSRF-denied (502)', async () => {
-    mFetch.mockResolvedValueOnce(sent({ link: 'https://169.254.169.254/x', metadata: { name: 'a.pdf' } }) as never);
+    mFetch.mockResolvedValueOnce(sent({ link: 'https://169.254.169.254/x', metadata: { name: 'a.pdf' } }));
     mDenied.mockReturnValue(true);
     await expect(fetchKnowledgeSourceBytes(deps, { provider: 'dropbox', ref: 'id:1' })).rejects.toMatchObject({ httpStatus: 502 });
     expect(mUndici).not.toHaveBeenCalled();
@@ -286,8 +309,6 @@ describe('Dropbox (ADR 0107 follow-on)', () => {
 });
 
 describe('Box (ADR 0107 follow-on)', () => {
-  const sentRedirect = (location: string) => ({ outcome: 'sent' as const, res: { ok: false, status: 302, headers: { get: (h: string) => (h.toLowerCase() === 'location' ? location : null) } } as unknown as Response });
-  afterEach(() => { mFetch.mockReset(); mUndici.mockReset(); mDenied.mockReset(); mDenied.mockReturnValue(false); });
 
   it('lists a Box folder — files only, etag as revision, MIME from name; root ⇒ folder 0', async () => {
     mFetch.mockResolvedValueOnce(sent({
@@ -297,7 +318,7 @@ describe('Box (ADR 0107 follow-on)', () => {
         { type: 'file', id: '33', name: 'sheet.xlsx', etag: '7' },
       ],
       total_count: 3,
-    }) as never);
+    }));
     const out = await listFolder(deps, 'box', 'root');
     expect(out.files).toEqual([
       { fileId: '11', name: 'report.pdf', mimeType: 'application/pdf', revision: '3' },
@@ -309,10 +330,10 @@ describe('Box (ADR 0107 follow-on)', () => {
 
   it('downloads a Box file: meta name + a redirect:manual 302 → Location → un-credentialed fetch', async () => {
     mFetch
-      .mockResolvedValueOnce(sent({ name: 'report.pdf' }) as never)                 // meta
-      .mockResolvedValueOnce(sentRedirect('https://dl.boxcloud.com/abc') as never); // content 302
+      .mockResolvedValueOnce(sent({ name: 'report.pdf' }))                 // meta
+      .mockResolvedValueOnce(sentRedirect('https://dl.boxcloud.com/abc')); // content 302
     const pdf = Buffer.from('BOXPDF');
-    mUndici.mockResolvedValueOnce({ ok: true, status: 200, arrayBuffer: async () => pdf.buffer.slice(pdf.byteOffset, pdf.byteOffset + pdf.byteLength) } as never);
+    mUndici.mockResolvedValueOnce(bytes(pdf));
     const out = await fetchKnowledgeSourceBytes(deps, { provider: 'box', ref: '11' });
     expect(out.contentType).toBe('application/pdf');
     expect(Buffer.from(out.contentBase64, 'base64').toString()).toBe('BOXPDF');
@@ -323,8 +344,8 @@ describe('Box (ADR 0107 follow-on)', () => {
 
   it('rejects when the Box download Location is SSRF-denied (502)', async () => {
     mFetch
-      .mockResolvedValueOnce(sent({ name: 'a.pdf' }) as never)
-      .mockResolvedValueOnce(sentRedirect('https://169.254.169.254/x') as never);
+      .mockResolvedValueOnce(sent({ name: 'a.pdf' }))
+      .mockResolvedValueOnce(sentRedirect('https://169.254.169.254/x'));
     mDenied.mockReturnValue(true);
     await expect(fetchKnowledgeSourceBytes(deps, { provider: 'box', ref: '11' })).rejects.toMatchObject({ httpStatus: 502 });
     expect(mUndici).not.toHaveBeenCalled();
@@ -337,10 +358,9 @@ describe('Box (ADR 0107 follow-on)', () => {
 });
 
 describe('browseFolders — subfolders for the picker (ADR 0107 follow-on)', () => {
-  afterEach(() => mFetch.mockReset());
 
   it('Google: folder-filtered query, returns {id,name}', async () => {
-    mFetch.mockResolvedValueOnce(sent({ files: [{ id: 'fa', name: 'Reports' }, { id: 'fb', name: 'Decks' }] }) as never);
+    mFetch.mockResolvedValueOnce(sent({ files: [{ id: 'fa', name: 'Reports' }, { id: 'fb', name: 'Decks' }] }));
     const out = await browseFolders(deps, 'google', 'root');
     expect(out).toEqual([{ id: 'fa', name: 'Reports' }, { id: 'fb', name: 'Decks' }]);
     expect(decodeURIComponent(String(mFetch.mock.calls[0]![1].url))).toContain("mimeType = 'application/vnd.google-apps.folder'");
@@ -350,7 +370,7 @@ describe('browseFolders — subfolders for the picker (ADR 0107 follow-on)', () 
     mFetch.mockResolvedValueOnce(sent({ value: [
       { id: 'd1', name: 'Library', folder: { childCount: 3 } },
       { id: 'f1', name: 'a.pdf', file: { mimeType: 'application/pdf' } }, // a file ⇒ skipped
-    ] }) as never);
+    ] }));
     const out = await browseFolders(deps, 'microsoft-graph', 'root');
     expect(out).toEqual([{ id: 'd1', name: 'Library' }]);
   });
@@ -359,7 +379,7 @@ describe('browseFolders — subfolders for the picker (ADR 0107 follow-on)', () 
     mFetch.mockResolvedValueOnce(sent({ entries: [
       { type: 'folder', id: '9', name: 'Shared' },
       { type: 'file', id: '8', name: 'x.pdf' },
-    ], total_count: 2 }) as never);
+    ], total_count: 2 }));
     const out = await browseFolders(deps, 'box', 'root');
     expect(out).toEqual([{ id: '9', name: 'Shared' }]);
     expect(String(mFetch.mock.calls[0]![1].url)).toContain('/2.0/folders/0/items');
@@ -369,7 +389,7 @@ describe('browseFolders — subfolders for the picker (ADR 0107 follow-on)', () 
     mFetch.mockResolvedValueOnce(sent({ entries: [
       { '.tag': 'folder', id: 'id:f', name: 'Team' },
       { '.tag': 'file', id: 'id:x', name: 'y.pdf' },
-    ], has_more: false }) as never);
+    ], has_more: false }));
     const out = await browseFolders(deps, 'dropbox', 'root');
     expect(out).toEqual([{ id: 'id:f', name: 'Team' }]);
   });

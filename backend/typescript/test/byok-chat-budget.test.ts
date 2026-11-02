@@ -7,8 +7,18 @@
  *  - `recordByokChatUsage` no-ops when both counts ≤ 0;
  *  - `resolveByokBudget` per-org override: override wins over env (incl. 0 = uncap),
  *    fail-soft to env on a resolver throw.
+ *
+ * TST-BBY-2 (w66 g4, sabotage-witnessed). `Date` is faked to a fixed instant per
+ * case, so the product's per-call UTC day and this file's `today` can never fall
+ * either side of midnight. Red when: `exceeded` stops counting at-cap usage
+ * (`>=` → `>`); the warning stops firing at exactly the threshold (800/1000 =
+ * 80%); a per-org override stops winning (incl. 0 = uncapped); a resolver throw
+ * blocks instead of falling back to env; a ≤ 0 record reaches the store.
+ * HONEST CEILING: 'fails OPEN when no store' is held twice — the `storageRef`
+ * condition and the try/catch around the read — so removing the condition alone
+ * stays green (the null store throws into the same not-exceeded verdict).
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import {
   checkByokChatBudget,
@@ -20,16 +30,21 @@ import {
 import type { Storage } from '../src/storage/storage.js';
 
 const CAP = 'OPENWOP_BYOK_DAILY_TOKEN_CAP';
-const today = new Date().toISOString().slice(0, 10);
+const NOW = new Date('2026-10-15T12:00:00.000Z');
+const today = '2026-10-15'; // the UTC day of NOW, written by hand
 const PROVIDER = 'anthropic';
 
 let storage: Storage;
 
 beforeEach(async () => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(NOW);
   storage = await openStorage('memory://');
   configureByokChatBudget({ storage });
 });
 afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
   delete process.env[CAP];
   _resetByokChatBudgetForTest();
 });
@@ -80,11 +95,11 @@ describe('checkByokChatBudget (ADR 0178)', () => {
     expect(below.exceeded).toBe(false);
     expect(below.usedPct).toBe(79);
 
-    await storage.incrementByokChatUsage('org:a', PROVIDER, today, 20, 0); // 810 => 81% >= 80%
+    await storage.incrementByokChatUsage('org:a', PROVIDER, today, 10, 0); // 800 => exactly 80%: the edge warns
     const warned = await checkByokChatBudget('org:a', PROVIDER);
     expect(warned.warn).toBe(true);
     expect(warned.exceeded).toBe(false);
-    expect(warned.usedPct).toBe(81);
+    expect(warned.usedPct).toBe(80);
   });
 
   it('fails OPEN when no store is configured (a usage outage must not block a paid call)', async () => {
@@ -103,7 +118,12 @@ describe('recordByokChatUsage (ADR 0178)', () => {
   });
 
   it('NO-OPs when both counts are ≤ 0', async () => {
+    // The counts are clamped to ≥ 0 BEFORE the guard, so a read-back of zeros
+    // cannot tell a skipped write from a 0/0 increment — watch the store call.
+    const inc = vi.spyOn(storage, 'incrementByokChatUsage');
     await recordByokChatUsage('org:a', PROVIDER, 0, 0);
+    await recordByokChatUsage('org:a', PROVIDER, -5, 0);
+    expect(inc).not.toHaveBeenCalled();
     expect(await storage.getByokChatUsage('org:a', PROVIDER, today)).toEqual({ inputTokens: 0, outputTokens: 0 });
   });
 });

@@ -2,7 +2,7 @@
  * ADR 0440 — tripwire for the DEFERRED `validateWorkflowDefinition` whitelist.
  *
  * `validateWorkflowDefinition` returns a node whitelist. The wire's `WorkflowNode`
- * (`schemas/workflow-definition.schema.json`) declares more — so `agent`,
+ * (`schemas/workflow-definition.schema.json`) declares more — so
  * `credentialsRef`, `outputSensitivity`, `envelopeContract`, `settings`,
  * `disabled`, `notes`, `groupId`, `artifactType`, and `cardType` are silently
  * dropped by the host's own POST route.
@@ -19,6 +19,9 @@
  * (`executor.ts`), so persisting it changes run behavior. The deferral is only
  * safe while nothing ships a node carrying a dropped field — verified true when
  * the ADR was written.
+ *
+ * CORRECTED 2026-10-30: ADR 1005 D5 widened the whitelist by `agent` (validated),
+ * because RFC 0082 channel binding cannot work if registration drops it.
  *
  * This test is the forcing function that keeps it true. A bare "we'll do it
  * later" note goes stale invisibly; that is exactly how the CHAINX-5 bug landed
@@ -120,8 +123,10 @@ describe('ADR 0440 — no shipped pack node carries a field the validator drops'
   const allNodes = nodesByFile.flatMap((f) => f.nodes);
 
   it('derives a non-empty dropped-field list from the schema + validator', () => {
-    // `agent` is the field the executor honours (ADR 0440's reason to defer).
-    expect(DROPPED_BY_VALIDATOR).toContain('agent');
+    // CORRECTED 2026-10-30 (ADR 1005 D5): `agent` is KEPT now (RFC 0082 channel
+    // binding), validated; the ADR 0440 deferral stands for the rest.
+    expect(DROPPED_BY_VALIDATOR).not.toContain('agent');
+    expect(DROPPED_BY_VALIDATOR).toContain('credentialsRef');
     expect(DROPPED_BY_VALIDATOR).not.toContain('config');
     // MEASURED at 19d13e682: the ten fields the header names (not pinned: a widened
     // validator is meant to shrink this list by itself).

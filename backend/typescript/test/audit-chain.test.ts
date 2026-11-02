@@ -10,6 +10,19 @@
  *   3. verifyChain → ok on a clean chain, brokenAt on a store-mutated payload;
  *   4. per-tenant isolation (tenant A's appends never touch B's chain);
  *   5. the seeded consent + approval appends land on the chain.
+ *
+ * Tracker TST-BEB-2 (w66). Red when: verifyChain stops recomputing the entry
+ * hash (tamper case); genesis stops anchoring on '0'*64; canonicalize stops
+ * sorting keys; the orphan-adoption branch is removed or the entry write
+ * stops being a CAS (self-heal case); consent appends the raw subject key;
+ * a second approval resolve appends again.
+ * Double guards (single-guard probes stay green BY DESIGN):
+ *  - concurrency: the per-tenant mutex (`withTenantLock`) AND the entry CAS —
+ *    the CONCURRENCY cases red only when both are broken (w66 probe
+ *    `aud-lock-cas-r2`);
+ *  - linkage: `verifyChain`'s prevHash check AND the entry hash, which covers
+ *    prevHash — the relink case reds only when both checks are removed.
+ * Per-tenant isolation is structural (every key embeds the tenant).
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { initHostExtPersistence, __resetHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -22,6 +35,7 @@ import {
   canonicalize,
   __resetAuditChain,
   __tamperEntryForTest,
+  __forceHeadForTest,
   AUDIT_KIND_CONSENT_CHANGE,
   AUDIT_KIND_GOVERNANCE_DECISION,
 } from '../src/host/auditChainService.js';
@@ -116,7 +130,7 @@ describe('audit hash-chain — verifyChain tamper detection', () => {
 });
 
 describe('audit hash-chain — per-tenant isolation', () => {
-  it('appends to tenant A never touch tenant B', async () => {
+  it('appends to tenant A never touch tenant B (each tenant has its own seq space and verifies)', async () => {
     const a = 'org:iso-a';
     const b = 'org:iso-b';
     await appendAudit(a, 'k', { who: 'a1' });
@@ -173,7 +187,6 @@ describe('GRADE DATA-2 — orphan-entry self-heal', () => {
     const a = await appendAudit(t, 'test.one', {});
     // Simulate the crash window: force the head BACK to the previous seq while
     // entry `a.seq` exists — the exact state a mid-append crash leaves behind.
-    const { __forceHeadForTest } = await import('../src/host/auditChainService.js');
     await __forceHeadForTest(t, a.seq - 1, a.prevHash);
     // The next append must adopt the orphan and continue the chain, not spin
     // to exhaustion.

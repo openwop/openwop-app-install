@@ -5,10 +5,21 @@
  *  - import(export(state)) leaves ZERO drift (exact-match restore)
  *  - promote/rollback move pointers + append the ledger; idempotent by hash
  *  - RBAC fail-closed (toggle off → 404; non-admin write → 403; cross-tenant 404)
+ *
+ * TST-DAC-3. Each case uses its own tenant and the `environments` toggle (default
+ * OFF) is set in `beforeEach`; the toggle-off case restores in `finally`.
+ * Double guard (recorded): re-submitting a gated promote reuses the approval both
+ * via `findPendingEnvironmentPromotion` AND the deterministic approval id
+ * (`appr:envp-<hash>`); the leg reds only when both go.
+ *
+ * Red when (sabotage-witnessed, wave 70): a locked env accepts a pointer move;
+ * a same-hash promote is not a no-op; the gate queues an approval for a no-op
+ * move; act-as stops narrowing to the named member; the environment list stops
+ * being tenant-scoped.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { getSetCookies } from './headerCookies.js';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
@@ -36,6 +47,7 @@ function client() {
     return res;
   };
   return {
+    send,
     get: (p: string, h?: Record<string, string>) => send('GET', p, undefined, h),
     post: (p: string, b?: unknown) => send('POST', p, b),
     patch: (p: string, b?: unknown) => send('PATCH', p, b),
@@ -71,9 +83,19 @@ beforeAll(async () => {
   if (u) await saveConfig({ ...u, status: 'on' }, 'test');
 });
 
+beforeEach(async () => { await setToggle('environments', 'on'); });
+
 afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
+
+interface ErrorBody { error?: string; message?: string }
+async function expectMissingScope(res: Response, scope: string): Promise<void> {
+  expect(res.status).toBe(403);
+  const body = (await res.json()) as ErrorBody;
+  expect(body.error).toBe('forbidden_scope');
+  expect(body.message).toBe(`Missing required scope: ${scope}`);
+}
 
 describe('environments — service determinism (ADR 0387)', () => {
   it('snapshot hash is deterministic and import(export) leaves zero drift', async () => {
@@ -153,15 +175,22 @@ describe('environments — service determinism (ADR 0387)', () => {
 
 describe('environments — routes + RBAC (ADR 0387)', () => {
   it('404s every route while the toggle is off', async () => {
-    await setToggle('environments', 'off');
     const c = client();
-    await c.login('owner-e', 'tenant-e');
-    expect((await c.get(`${B}`)).status).toBe(404);
-    expect((await c.post(`${B}`, { name: 'dev' })).status).toBe(404);
+    await c.login('owner-off', 'tenant-off');
+    await setToggle('environments', 'off');
+    try {
+      for (const res of [await c.get(`${B}`), await c.post(`${B}`, { name: 'dev' })]) {
+        expect(res.status).toBe(404);
+        expect(((await res.json()) as ErrorBody).error).toBe('not_found');
+      }
+    } finally {
+      await setToggle('environments', 'on');
+    }
+    // Positive control: the same caller is served once the toggle is on.
+    expect((await c.get(`${B}`)).status).toBe(200);
   });
 
   it('env create, chain seed, protection, snapshot, promote/rollback + ledger', async () => {
-    await setToggle('environments', 'on');
     const c = client();
     await c.login('owner-e', 'tenant-e');
 
@@ -195,15 +224,16 @@ describe('environments — routes + RBAC (ADR 0387)', () => {
     expect(prom2.status).toBe(201);
     expect(((await prom2.json()) as { noop: boolean }).noop).toBe(true);
 
-    // ledger has the promotions + the rollback
+    // ledger: the dev pin, the staging promote, and the recorded no-op promote
     const hist = await c.get(`${B}/promotions`);
-    const promotions = ((await hist.json()) as { promotions: unknown[] }).promotions;
-    expect(promotions.length).toBeGreaterThanOrEqual(3);
+    const promotions = ((await hist.json()) as { promotions: Array<{ toEnv: string }> }).promotions;
+    expect(promotions.map((p) => p.toEnv).sort()).toEqual(['dev', 'staging', 'staging']);
 
     // locked env rejects a pointer move
-    await c.patch(`${B}/prod/protection`, { protection: 'locked' });
+    expect((await c.patch(`${B}/prod/protection`, { protection: 'locked' })).status).toBe(200);
     const blocked = await c.post(`${B}/rollback`, { env: 'prod', snapshotHash: hash });
     expect(blocked.status).toBe(409);
+    expect(((await blocked.json()) as ErrorBody).message).toBe('Environment is locked (change-freeze).');
 
     // drift view is opt-in
     const drift = await c.get(`${B}?drift=1`);
@@ -212,18 +242,26 @@ describe('environments — routes + RBAC (ADR 0387)', () => {
     expect(dbody.environments.every((e) => e.drift !== undefined)).toBe(true);
   });
 
-  it('non-admin acting member is denied writes (fail-closed 403); reads allowed', async () => {
+  it('acting as an unknown member resolves zero scopes: writes AND reads are refused', async () => {
     const c = client();
-    await c.login('owner-e', 'tenant-e');
-    // acting as an unknown member → zero scopes → 403 on write, 403 on read too
-    expect((await c.post(`${B}`, { name: 'qa' })).status).toBe(201); // owner ok
+    await c.login('owner-actas', 'tenant-actas');
+    // Positive control: the owner, acting as themself, may write and read.
+    expect((await c.post(`${B}`, { name: 'qa' })).status).toBe(201);
+    expect((await c.get(`${B}`)).status).toBe(200);
+    // Act-as narrows to the named member; an unknown member holds nothing (ADR 0797).
     const asStranger = { 'x-openwop-act-as': 'nobody-x' };
-    expect((await c.get(`${B}`, asStranger)).status).toBe(403);
+    await expectMissingScope(await c.send('POST', `${B}`, { name: 'qa-2' }, asStranger), 'host:members:manage');
+    await expectMissingScope(await c.get(`${B}`, asStranger), 'workspace:read');
   });
 
   it('cross-tenant isolation: tenant F sees none of tenant E', async () => {
+    const ce = client();
+    await ce.login('owner-xe', 'tenant-xe');
+    expect((await ce.post(`${B}/ensure-chain`)).status).toBe(200);
+    // Positive control: tenant E really has environments.
+    expect(((await (await ce.get(`${B}`)).json()) as { environments: unknown[] }).environments).toHaveLength(3);
     const cf = client();
-    await cf.login('owner-f', 'tenant-f');
+    await cf.login('owner-xf', 'tenant-xf');
     const list = await cf.get(`${B}`);
     expect(list.status).toBe(200);
     expect(((await list.json()) as { environments: unknown[] }).environments).toHaveLength(0);
@@ -234,7 +272,6 @@ describe('environments — H2 promotion-approval gate (ADR 0387)', () => {
   const APPR = '/host/openwop-app/approvals';
 
   it('settings default OFF; PATCH toggles the gate', async () => {
-    await setToggle('environments', 'on');
     const c = client();
     await c.login('owner-g', 'tenant-g');
     const def = await c.get(`${B}/settings`);
@@ -246,7 +283,6 @@ describe('environments — H2 promotion-approval gate (ADR 0387)', () => {
   });
 
   it('gate ON ⇒ promote is intercepted (202, no move); claim applies the pointer', async () => {
-    await setToggle('environments', 'on');
     const c = client();
     await c.login('owner-g2', 'tenant-g2');
     await c.post(`${B}/ensure-chain`);
@@ -290,7 +326,6 @@ describe('environments — H2 promotion-approval gate (ADR 0387)', () => {
   });
 
   it('gate ON ⇒ reject parks a rejected row and never moves the pointer', async () => {
-    await setToggle('environments', 'on');
     const c = client();
     await c.login('owner-g3', 'tenant-g3');
     await c.post(`${B}/ensure-chain`);
@@ -319,7 +354,6 @@ describe('environments — H2 promotion-approval gate (ADR 0387)', () => {
   });
 
   it('gate ON but a no-op move (pointer already at hash) applies without an approval', async () => {
-    await setToggle('environments', 'on');
     const c = client();
     await c.login('owner-g4', 'tenant-g4');
     await c.post(`${B}/ensure-chain`);

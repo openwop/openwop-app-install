@@ -20,14 +20,12 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { stripComments } from './helpers/stripComments.js';
 
 const SRC = join(dirname(fileURLToPath(import.meta.url)), '../src');
 const FILES = ['routes/authScim.ts', 'routes/authSaml.ts', 'routes/authSamlSso.ts'];
 const FORBIDDEN = /\b(userName|nameId|email|displayName|principalId)\s*[:,}]/;
 
-function stripComments(src: string): string {
-  return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`])\/\/.*$/gm, '$1');
-}
 
 /** Every `log.<level>(<name>, { … })` payload literal, balanced-brace extracted. */
 function logPayloads(src: string): string[] {

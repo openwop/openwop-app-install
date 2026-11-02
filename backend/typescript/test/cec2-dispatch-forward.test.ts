@@ -9,6 +9,11 @@
  * `cacheableAnthropicSystem` and asserts BOTH dispatchers pass the scope as the
  * 3rd arg. (`fetch` is stubbed to reject; the marker is assembled BEFORE the
  * network call, so the spy captures the arg regardless.)
+ *
+ * grade-tests w67 (TST-CBM-4): red when `dispatchAnthropic` (dispatch.ts) or
+ * `dispatchAnthropicToolsRound` passes anything but `req.cachePrefixScope` as
+ * the 3rd argument. `dispatchAnthropicWithTools` (the other tools entry point)
+ * is not exercised here — a grade-code row, not a claim of this file.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
@@ -26,6 +31,8 @@ vi.mock('../src/providers/promptCaching.js', async (orig) => {
 
 const { dispatchChat } = await import('../src/providers/dispatch.js');
 const { dispatchAnthropicToolsRound } = await import('../src/providers/dispatchAnthropicTools.js');
+type DispatchRequest = import('../src/providers/dispatch.js').DispatchRequest;
+type ToolsRoundRequest = import('../src/providers/dispatchAnthropicTools.js').ToolsRoundRequest;
 
 const SCOPE = { tenant: 'tenant-A', cachePrefixId: 'pref-1' };
 
@@ -37,23 +44,24 @@ afterEach(() => { vi.unstubAllGlobals(); });
 
 describe('CEC-2 — both Anthropic dispatchers forward cachePrefixScope to the marker', () => {
   it('plain dispatch (dispatchChat → dispatchAnthropic) forwards the scope as the 3rd arg', async () => {
-    await dispatchChat({
+    const req: DispatchRequest = {
       provider: 'anthropic', model: 'claude-x', apiKey: 'k',
       messages: [{ role: 'system', content: 'sys' }, { role: 'user', content: 'hi' }],
       cachePrefixScope: SCOPE,
-    } as unknown as Parameters<typeof dispatchChat>[0]).catch(() => {});
-    expect(spy).toHaveBeenCalled();
+    };
+    await dispatchChat(req).catch(() => {});
     // Some call carried the scope as the 3rd argument (the dropped-forward bug).
     expect(spy).toHaveBeenCalledWith(expect.anything(), expect.anything(), SCOPE);
   });
 
   it('tools dispatch (dispatchAnthropicToolsRound) forwards the scope (regression guard)', async () => {
-    await dispatchAnthropicToolsRound({
+    const req: ToolsRoundRequest = {
       model: 'claude-x', apiKey: 'k',
       messages: [{ role: 'system', content: 'sys' }, { role: 'user', content: 'hi' }],
       tools: [{ name: 'foo', description: 'd', inputSchema: { type: 'object' } }],
       cachePrefixScope: SCOPE,
-    } as unknown as Parameters<typeof dispatchAnthropicToolsRound>[0]).catch(() => {});
+    };
+    await dispatchAnthropicToolsRound(req).catch(() => {});
     expect(spy).toHaveBeenCalledWith(expect.anything(), expect.anything(), SCOPE);
   });
 });

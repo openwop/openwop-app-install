@@ -6,19 +6,31 @@
  * `agent:<id>`) and the run-stamp rules from D2. The ratchet (test 7) is
  * `adr0944-memory-scope-ratchet.test.ts`.
  *
- * Sabotage-witnessed (P0): replacing the `:no-org` sentinel return in
- * `resolveAgentMemory` with `agentMemoryScope(profile.profileId)` reds the
- * "per-org with no client" and "refused client" cases; restoring the runner's
- * `agentMemoryScope(runnerIdentity.profileId)` reds "client A's fact never reaches
- * client B"; dropping the both-stamps comparison in `runClientStamp` reds
- * "two stamps naming different clients".
+ * Sabotage-witnessed (P0, re-measured w73 `/grade-tests`): replacing the `:no-org`
+ * sentinel return in `resolveAgentMemory` with `agentMemoryScope(profile.profileId)`
+ * reds the "per-org with no client" cases (resolver, run lane, ad-hoc lane, nested);
+ * doing the same on the REFUSED-client branch reds "a REFUSED client binding", "a
+ * person without rows" and "two stamps naming different clients" (each run-lane
+ * case asserts the degradation notice AND that nothing landed in `agent:<id>`);
+ * restoring the runner's `agentMemoryScope(runnerIdentity.profileId)` reds "client
+ * A's fact never reaches client B"; dropping the both-stamps comparison in
+ * `runClientStamp` reds "two stamps naming different clients".
+ *
+ * DOUBLE GUARD (another tenant's org): `resolveRunMemoryClient` refuses it at the
+ * org lookup (`!org || org.tenantId !== scope.tenantId`) and again at the member
+ * check (`assertRunScopeOrg`); org ids are unique across tenants, so the case
+ * stamps a REAL org of another workspace and both guards see it.
+ *
+ * Order-independent: every run-lane case mints its own clients and members, seeds
+ * its own facts (each with an in-case positive control), and asserts the shared
+ * `agent:<id>` scope by its OWN reply, so no case reads another case's writes.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
 import type http from 'node:http';
 import { createApp } from '../src/index.js';
 import agentRunnerNode from '../src/host/agentRunnerNode.js';
-import { getAgentRegistry, type ResolvedAgentManifest } from '../src/executor/agentRegistry.js';
+import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 import { createMember, createOrg, createWorkspace, deleteMember } from '../src/host/accessControlService.js';
 import { upsertFromPrincipal } from '../src/features/users/usersService.js';
 import { hostExtStorage } from '../src/host/hostExtPersistence.js';
@@ -69,7 +81,7 @@ beforeAll(async () => {
   await createMember({ tenantId: TENANT, orgId: orgA, subject: onlyA, displayName: 'Only A', roles: ['editor'] });
   await upsertAgentProfile(TENANT, AGENT, { roleKey: 'copywriter', autonomy: { specLevel: 'recommend' }, memoryScope: 'per-org' });
   await upsertAgentProfile(TENANT, SHARED_AGENT, { roleKey: 'strategist', autonomy: { specLevel: 'recommend' } });
-});
+}, 120_000);
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 const registry = getAgentRegistry();
@@ -79,18 +91,38 @@ beforeEach(() => {
     registry.register({
       agentId, persona: agentId, modelClass: 'chat', systemPrompt: 'You write campaign copy.',
       packName: 'test', packVersion: '0', toolAllowlist: [], memoryShape: { longTerm: true },
-    } as ResolvedAgentManifest);
+    });
   }
   vi.restoreAllMocks();
 });
 
 async function stampedRun(metadata: Record<string, unknown>): Promise<string> {
   const runId = `run-0944-${randomBytes(5).toString('hex')}`;
+  const at = new Date().toISOString();
   await hostExtStorage().insertRun({
     runId, workflowId: 'w', tenantId: TENANT, status: 'running', inputs: null,
-    metadata, configurable: {}, createdAt: 'x', updatedAt: 'x',
+    metadata, configurable: {}, createdAt: at, updatedAt: at,
   });
   return runId;
+}
+
+const tag = (): string => randomBytes(4).toString('hex');
+/** Two clients of this case's own, a member of both and a member of A only. */
+async function freshClients(): Promise<{ aOrg: string; bOrg: string; both: string; onlyA: string }> {
+  const t = tag();
+  const aOrg = (await createOrg({ tenantId: TENANT, createdBy: 'seed', name: `Client A ${t}` })).orgId;
+  const bOrg = (await createOrg({ tenantId: TENANT, createdBy: 'seed', name: `Client B ${t}` })).orgId;
+  const bothId = (await upsertFromPrincipal({ tenantId: TENANT, principalId: `oidc:adr0944-both-${t}`, source: 'oidc' })).userId;
+  const onlyAId = (await upsertFromPrincipal({ tenantId: TENANT, principalId: `oidc:adr0944-only-a-${t}`, source: 'oidc' })).userId;
+  await createMember({ tenantId: TENANT, orgId: aOrg, subject: bothId, displayName: 'Both', roles: ['editor'] });
+  await createMember({ tenantId: TENANT, orgId: bOrg, subject: bothId, displayName: 'Both', roles: ['editor'] });
+  await createMember({ tenantId: TENANT, orgId: aOrg, subject: onlyAId, displayName: 'Only A', roles: ['editor'] });
+  return { aOrg, bOrg, both: bothId, onlyA: onlyAId };
+}
+/** Write `content` into `scope` and prove it is there (the positive control for a negative). */
+async function seedFact(scope: string, content: string): Promise<void> {
+  await createAgentMemoryPort(TENANT).write(scope, { content });
+  expect((await contents(scope)).join('\n'), `seed landed in ${scope}`).toContain(content);
 }
 
 /** Run one agent node; return the prompt the model saw. */
@@ -100,7 +132,8 @@ async function runNode(opts: { runId: string; agentId?: string; actor?: string; 
   let prompt = '';
   const callAI = vi.fn<(req: AiCallRequest) => Promise<AiCallResult>>(async (req) => {
     prompt = JSON.stringify(req.messages);
-    return { content: opts.reply } as AiCallResult;
+    const reply: AiCallResult = { content: opts.reply };
+    return reply;
   });
   const out = await agentRunnerNode.execute({
     tenantId: TENANT, runId: opts.runId, nodeId: 'copy', configurable: {},
@@ -186,6 +219,11 @@ describe('ADR 0944 D2 — the run lane reads the client from host-written stamps
     expect(await resolveRunMemoryClient({ tenantId: TENANT, runId: runB, orgScopeSubject: onlyA })).toEqual({ refused: 'forbidden' });
     const foreign = await stampedRun({ [OPS_STAMP]: { orgId: 'org-of-someone-else' } });
     expect(await resolveRunMemoryClient({ tenantId: TENANT, runId: foreign })).toEqual({ refused: 'forbidden' });
+    // A REAL org of another workspace (the double guard: org lookup + member check).
+    const other = await createWorkspace({ name: 'Other agency', ownerSubject: `oidc:adr0944-other-${tag()}` });
+    const foreignOrg = (await createOrg({ tenantId: other.tenantId, createdBy: 'seed', name: 'Foreign client' })).orgId;
+    const realForeign = await stampedRun({ [OPS_STAMP]: { orgId: foreignOrg } });
+    expect(await resolveRunMemoryClient({ tenantId: TENANT, runId: realForeign, actingUserId: both })).toEqual({ refused: 'forbidden' });
     expect(await resolveRunMemoryClient({ tenantId: TENANT, runId: await stampedRun({}) })).toBeUndefined();
     // A run of another tenant is not this run.
     expect(await resolveRunMemoryClient({ tenantId: 'other-tenant', runId: runA })).toEqual({ refused: 'unreadable' });
@@ -194,53 +232,70 @@ describe('ADR 0944 D2 — the run lane reads the client from host-written stamps
 
 describe('ADR 0944 D7 — isolation on the run lane (test 1) and the sentinel (test 4)', () => {
   it("client A's fact never reaches client B; it does reach client A's next run", async () => {
-    const runA = await stampedRun({ campaignOrchestration: { orgId: orgA, campaignId: 'cmp-a' } });
-    await runNode({ runId: runA, actor: both, task: 'Draft the hero line for client A', reply: 'FACT-ALPHA: never mention the rival brand' });
-    expect((await contents('org:' + orgA)).join('\n')).toContain('FACT-ALPHA');
+    const c = await freshClients();
+    const runA = await stampedRun({ campaignOrchestration: { orgId: c.aOrg, campaignId: 'cmp-a' } });
+    await runNode({ runId: runA, actor: c.both, task: 'Draft the hero line for client A', reply: 'FACT-ALPHA: never mention the rival brand' });
+    expect((await contents('org:' + c.aOrg)).join('\n')).toContain('FACT-ALPHA');
     expect(await contents(agentMemoryScope(AGENT))).toEqual([]);
 
-    const runB = await stampedRun({ [OPS_STAMP]: { orgId: orgB } });
-    const promptB = await runNode({ runId: runB, actor: both, task: 'Draft the hero line for client B', reply: 'FACT-BETA' });
+    const runB = await stampedRun({ [OPS_STAMP]: { orgId: c.bOrg } });
+    const promptB = await runNode({ runId: runB, actor: c.both, task: 'Draft the hero line for client B', reply: 'FACT-BETA' });
     expect(promptB).not.toContain('FACT-ALPHA');
-    expect((await contents('org:' + orgB)).join('\n')).toContain('FACT-BETA');
+    expect((await contents('org:' + c.bOrg)).join('\n')).toContain('FACT-BETA');
 
-    const runA2 = await stampedRun({ [OPS_STAMP]: { orgId: orgA } });
-    const promptA2 = await runNode({ runId: runA2, actor: both, task: 'Draft a subject line for client A', reply: 'ok' });
+    const runA2 = await stampedRun({ [OPS_STAMP]: { orgId: c.aOrg } });
+    const promptA2 = await runNode({ runId: runA2, actor: c.both, task: 'Draft a subject line for client A', reply: 'ok' });
     expect(promptA2, 'non-vacuity: the same lane DOES recall A in an A run').toContain('FACT-ALPHA');
     expect(promptA2).not.toContain('FACT-BETA');
   });
 
   it('an `agent`-scoped agent in a client run writes the client scope, not its shared one (Q6)', async () => {
-    const runA = await stampedRun({ [OPS_STAMP]: { orgId: orgA } });
-    await runNode({ runId: runA, agentId: SHARED_AGENT, actor: both, task: 'Plan client A', reply: 'FACT-SHARED-A' });
-    expect(await contents(agentMemoryScope(SHARED_AGENT))).toEqual([]);
-    expect((await contents('org:' + orgA)).join('\n')).toContain('FACT-SHARED-A');
+    const c = await freshClients();
+    const reply = `FACT-SHARED-A-${tag()}`;
+    const runA = await stampedRun({ [OPS_STAMP]: { orgId: c.aOrg } });
+    await runNode({ runId: runA, agentId: SHARED_AGENT, actor: c.both, task: 'Plan client A', reply });
+    expect((await contents(agentMemoryScope(SHARED_AGENT))).join('\n')).not.toContain(reply);
+    expect((await contents('org:' + c.aOrg)).join('\n')).toContain(reply);
   });
 
   it('a per-org agent with no client: empty recall, a degradation notice, nothing written anywhere', async () => {
+    const c = await freshClients();
+    const seed = `NOCLIENT-SEED-${tag()}`;
+    await seedFact('org:' + c.aOrg, seed);
     const runX = await stampedRun({});
-    const prompt = await runNode({ runId: runX, actor: both, task: 'Draft without a client', reply: 'FACT-NOWHERE' });
+    const prompt = await runNode({ runId: runX, actor: c.both, task: 'Draft without a client', reply: 'FACT-NOWHERE' });
     expect(prompt).toContain("this client's shared memory");
-    expect(prompt).not.toContain('FACT-ALPHA');
+    expect(prompt).not.toContain(seed);
     expect(await contents(agentMemoryScope(AGENT))).toEqual([]);
     expect(await contents(`${agentMemoryScope(AGENT)}:no-org`)).toEqual([]);
-    for (const org of [orgA, orgB]) expect((await contents('org:' + org)).join('\n')).not.toContain('FACT-NOWHERE');
+    for (const org of [c.aOrg, c.bOrg]) expect((await contents('org:' + org)).join('\n')).not.toContain('FACT-NOWHERE');
   });
 
   it('a person without rows on the client gets the sentinel, not the client memory', async () => {
-    const runB = await stampedRun({ [OPS_STAMP]: { orgId: orgB } });
-    const prompt = await runNode({ runId: runB, actor: onlyA, task: 'Draft for B', reply: 'FACT-DENIED' });
-    expect(prompt).not.toContain('FACT-BETA');
+    const c = await freshClients();
+    const seed = `DENIED-SEED-${tag()}`;
+    await seedFact('org:' + c.bOrg, seed);
+    const runB = await stampedRun({ [OPS_STAMP]: { orgId: c.bOrg } });
+    const prompt = await runNode({ runId: runB, actor: c.onlyA, task: 'Draft for B', reply: 'FACT-DENIED' });
+    expect(prompt).not.toContain(seed);
     expect(prompt).toContain("this client's shared memory");
-    expect((await contents('org:' + orgB)).join('\n')).not.toContain('FACT-DENIED');
+    expect((await contents('org:' + c.bOrg)).join('\n')).not.toContain('FACT-DENIED');
+    expect(await contents(agentMemoryScope(AGENT))).toEqual([]);
   });
 
   it('two stamps naming different clients: the sentinel, nothing read or written', async () => {
-    const run = await stampedRun({ campaignOrchestration: { orgId: orgA }, [OPS_STAMP]: { orgId: orgB } });
-    const prompt = await runNode({ runId: run, actor: both, task: 'Draft', reply: 'FACT-CONFLICT' });
-    expect(prompt).not.toContain('FACT-ALPHA');
-    expect(prompt).not.toContain('FACT-BETA');
-    for (const org of [orgA, orgB]) expect((await contents('org:' + org)).join('\n')).not.toContain('FACT-CONFLICT');
+    const c = await freshClients();
+    const seedA = `CONFLICT-SEED-A-${tag()}`;
+    const seedB = `CONFLICT-SEED-B-${tag()}`;
+    await seedFact('org:' + c.aOrg, seedA);
+    await seedFact('org:' + c.bOrg, seedB);
+    const run = await stampedRun({ campaignOrchestration: { orgId: c.aOrg }, [OPS_STAMP]: { orgId: c.bOrg } });
+    const prompt = await runNode({ runId: run, actor: c.both, task: 'Draft', reply: 'FACT-CONFLICT' });
+    expect(prompt).not.toContain(seedA);
+    expect(prompt).not.toContain(seedB);
+    expect(prompt, 'the sentinel tells the model').toContain("this client's shared memory");
+    for (const org of [c.aOrg, c.bOrg]) expect((await contents('org:' + org)).join('\n')).not.toContain('FACT-CONFLICT');
+    expect(await contents(agentMemoryScope(AGENT)), 'nothing written to the profile scope').toEqual([]);
   });
 });
 
@@ -253,15 +308,32 @@ describe('ADR 0944 D3 — the other lanes go through the same resolver', () => {
   });
 
   it('the knowledge path reads the bound client and only it', async () => {
-    await upsertAgentProfile(TENANT, AGENT, { roleKey: 'copywriter', autonomy: { specLevel: 'recommend' }, memoryScope: 'per-org', capabilities: ['knowledge'] });
+    // A knowledge agent of this case's own, so the capability never leaks into another case.
+    const knower = `test.adr0944-know-${tag()}`;
+    registry.register({
+      agentId: knower, persona: knower, modelClass: 'chat', systemPrompt: 'You write campaign copy.',
+      packName: 'test', packVersion: '0', toolAllowlist: [], memoryShape: { longTerm: true },
+    });
+    await upsertAgentProfile(TENANT, knower, { roleKey: 'copywriter', autonomy: { specLevel: 'recommend' }, memoryScope: 'per-org', capabilities: ['knowledge'] });
+    const c = await freshClients();
+    const factA = `KNOW-A-${tag()} hero line`;
+    const factB = `KNOW-B-${tag()} hero line`;
+    await seedFact('org:' + c.aOrg, factA);
+    await seedFact('org:' + c.bOrg, factB);
     const memory = createAgentMemoryPort(TENANT);
     const text = async (ctx: Parameters<typeof resolveAgentKnowledgeRetrieve>[3]): Promise<string> => {
-      const retrieve = await resolveAgentKnowledgeRetrieve(TENANT, AGENT, memory, ctx);
+      const retrieve = await resolveAgentKnowledgeRetrieve(TENANT, knower, memory, ctx);
       return retrieve ? JSON.stringify(await retrieve('hero line')) : '';
     };
-    expect(await text({ client: { orgId: orgA } })).toContain('FACT-ALPHA');
-    expect(await text({ client: { orgId: orgB } })).not.toContain('FACT-ALPHA');
-    expect(await text({ userId: both })).not.toContain('FACT-ALPHA'); // the retrieve preview: no client ⇒ sentinel
+    const forA = await text({ client: { orgId: c.aOrg } });
+    expect(forA).toContain(factA);
+    expect(forA).not.toContain(factB);
+    const forB = await text({ client: { orgId: c.bOrg } });
+    expect(forB).toContain(factB);
+    expect(forB).not.toContain(factA);
+    const preview = await text({ userId: c.both }); // the retrieve preview: no client ⇒ sentinel
+    expect(preview).not.toContain(factA);
+    expect(preview).not.toContain(factB);
   });
 });
 
@@ -287,23 +359,24 @@ describe('ADR 0944 — actual nested constructors keep client memory isolated', 
   }
 
   it.each(['subworkflow', 'canvas'] as const)('%s recalls A only for A, isolates B, and keeps an unscoped per-org child at the sentinel', async (method) => {
-    const fact = `NESTED-ALPHA-${method}`;
-    const a = await child(method, { [OPS_STAMP]: { orgId: orgA }, actingUserId: both });
-    expect(a.metadata?.[OPS_STAMP]).toEqual({ orgId: orgA });
+    const c = await freshClients();
+    const fact = `NESTED-ALPHA-${method}-${tag()}`;
+    const a = await child(method, { [OPS_STAMP]: { orgId: c.aOrg }, actingUserId: c.both });
+    expect(a.metadata?.[OPS_STAMP]).toEqual({ orgId: c.aOrg });
     expect(a.metadata?.actingUserId).toBeUndefined();
-    expect(a.metadata?.orgScopeSubject).toBe(both);
+    expect(a.metadata?.orgScopeSubject).toBe(c.both);
     await runNode({ runId: a.runId, task: 'Remember the client constraint', reply: fact });
-    const a2 = await child(method, { [OPS_STAMP]: { orgId: orgA }, actingUserId: both });
+    const a2 = await child(method, { [OPS_STAMP]: { orgId: c.aOrg }, actingUserId: c.both });
     expect(await runNode({ runId: a2.runId, task: 'Recall the client constraint', reply: 'A recalled' })).toContain(fact);
-    const b = await child(method, { [OPS_STAMP]: { orgId: orgB }, actingUserId: both });
+    const b = await child(method, { [OPS_STAMP]: { orgId: c.bOrg }, actingUserId: c.both });
     expect(await runNode({ runId: b.runId, task: 'Recall for B', reply: `NESTED-BETA-${method}` })).not.toContain(fact);
-    const none = await child(method, { actingUserId: both });
+    const none = await child(method, { actingUserId: c.both });
     const prompt = await runNode({ runId: none.runId, task: 'No client', reply: `NESTED-NOWHERE-${method}` });
     expect(prompt).not.toContain(fact);
     expect(prompt).toContain("this client's shared memory");
     expect(await contents(agentMemoryScope(AGENT))).toEqual([]);
     expect(await contents(`${agentMemoryScope(AGENT)}:no-org`)).toEqual([]);
-    for (const org of [orgA, orgB]) expect((await contents('org:' + org)).join('\n')).not.toContain(`NESTED-NOWHERE-${method}`);
+    for (const org of [c.aOrg, c.bOrg]) expect((await contents('org:' + org)).join('\n')).not.toContain(`NESTED-NOWHERE-${method}`);
   });
 
   it.each(['subworkflow', 'canvas'] as const)('%s rechecks the causing member after child creation, even for an agent with shared defaults', async (method) => {
@@ -318,7 +391,9 @@ describe('ADR 0944 — actual nested constructors keep client memory isolated', 
     expect(prompt).not.toContain(unique);
     expect(prompt).toContain("this client's shared memory");
     expect((await contents('org:' + orgA)).join('\n')).not.toContain(`NESTED-DENIED-${method}`);
-    expect(await contents(agentMemoryScope(SHARED_AGENT))).toEqual([]);
+    const shared = (await contents(agentMemoryScope(SHARED_AGENT))).join('\n');
+    expect(shared).not.toContain(unique);
+    expect(shared).not.toContain(`NESTED-DENIED-${method}`);
   });
 
   it('missing/foreign runs and malformed stamps never recall or write the shared agent fallback', async () => {
@@ -326,7 +401,7 @@ describe('ADR 0944 — actual nested constructors keep client memory isolated', 
     await runNode({ runId: valid, agentId: SHARED_AGENT, actor: both, task: 'Remember shared canary', reply: 'SHARED-HANDLE-CANARY' });
     expect((await contents(agentMemoryScope(SHARED_AGENT))).join('\n')).toContain('SHARED-HANDLE-CANARY');
     const foreign = `run-foreign-memory-${randomBytes(5).toString('hex')}`;
-    await storage.insertRun({ runId: foreign, workflowId: 'w', tenantId: 'other-tenant', status: 'running', inputs: {}, metadata: {}, configurable: {}, createdAt: 'x', updatedAt: 'x' });
+    await storage.insertRun({ runId: foreign, workflowId: 'w', tenantId: 'other-tenant', status: 'running', inputs: {}, metadata: {}, configurable: {}, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
     const malformed = await stampedRun({ [OPS_STAMP]: { approvalId: 'no-client' } });
     const badSibling = await stampedRun({ [OPS_STAMP]: { orgId: orgA }, campaignOrchestration: null });
     for (const runId of ['missing-memory-run', foreign, malformed, badSibling]) {

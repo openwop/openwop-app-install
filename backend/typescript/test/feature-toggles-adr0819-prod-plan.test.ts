@@ -7,6 +7,10 @@
  * the toggle alone, so a free-plan tenant read a full brief through chat while
  * every HTTP route for the same feature returned the plan 403. Written RED
  * against `origin/main` source.
+ *
+ * Tracker TST-DCA-2. Red when the campaign-brief tool's `featureEnabled` reads the
+ * toggle alone (`resolveToggle`) instead of the access resolver `resolveOne`
+ * (grade-tests w70 probe `pp-brief-gate`).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -17,7 +21,7 @@ import { CAMPAIGN_BRIEF_GET_TOOL_ID } from '../src/features/campaign-brief/agent
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createOrg } from '../src/host/accessControlService.js';
-import { createBrief } from '../src/features/campaign-brief/briefService.js';
+import { createBrief, type BriefInput } from '../src/features/campaign-brief/briefService.js';
 
 const TENANT = 'default';
 let server: http.Server;
@@ -34,7 +38,8 @@ beforeAll(async () => {
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { void (server.address() as AddressInfo); res(); }); });
   for (const id of ['billing', 'campaign-brief']) { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); }
   const org = await createOrg({ tenantId: TENANT, createdBy: 'u-1', name: 'Acme', ownerSubject: 'u-1' });
-  briefId = (await createBrief(TENANT, org.orgId, 'u-1', { name: 'Launch Brief', productName: 'Acme' } as never)).id;
+  const input: BriefInput = { name: 'Launch Brief', productName: 'Acme' };
+  briefId = (await createBrief(TENANT, org.orgId, 'u-1', input)).id;
 });
 afterAll(async () => {
   delete process.env.OPENWOP_BILLING_BUNDLE_PRICES;
@@ -49,6 +54,7 @@ describe('ADR 0819 S1 on the prod plan shape — a priced-not-free feature throu
       .executeTool({ name: CAMPAIGN_BRIEF_GET_TOOL_ID, input: { briefId } });
     expect(out.content, 'the brief leaked through chat').not.toContain('Launch Brief');
     expect(out.isError).toBe(true);
+    expect((JSON.parse(out.content) as { error?: string }).error).toBe('feature_disabled');
   });
 
   it('positive control: the same call serves an entitled tenant (the host operator)', async () => {

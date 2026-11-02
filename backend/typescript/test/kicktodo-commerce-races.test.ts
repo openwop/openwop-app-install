@@ -3,8 +3,21 @@
  * interleaved DETERMINISTICALLY: `interleavedStorage` runs the competing call to
  * completion between the first call's read and its write (see the helper), so each
  * case reproduces the lost update every time rather than by microtask luck.
+ *
+ * TST-DJB-2 (grade-tests wave 71). Red when: an entitlement grant is a blind put or
+ * lets an older order take the pointer (ARCH-H1); a refund revokes a row a newer
+ * order re-pointed; the share-policy bump is a blind put; the seller approval id is
+ * random; a rejected request cannot be re-requested; an affiliate code claim is a
+ * blind put or adopts a code bound to another subject; a seat link is a blind put
+ * or refuses the same cohort.
+ *
+ * HONEST CEILING (recorded): one seller request ⇒ one inbox card is carried by the
+ * derived approval id (`sellerApprovalIdFor`, which `createConnectSellerApproval`
+ * dedupes on) — a random id is red. The request-row CAS is a second line this
+ * interleaving cannot isolate: with the derived id a blind put writes the SAME
+ * approval id, so dropping the CAS alone stays green (measured, wave 71).
  */
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { registerGoalVerifier } from '../src/features/goals/goalVerifiers.js';
@@ -28,6 +41,8 @@ beforeAll(async () => {
   initHostExtPersistence(race.storage);
   registerGoalVerifier('kicktodo:progress-evidence', async () => ({ satisfied: false, confidence: 0, runId: 'r' }));
 });
+// A hook a case armed but never fired must not leak into the next case.
+afterEach(() => { race.interleaveAfterRead(() => false, async () => undefined); });
 
 async function soldChallenge(T: string): Promise<{ challengeId: string; productId: string }> {
   const draft = await createDraft({

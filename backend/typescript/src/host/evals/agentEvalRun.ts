@@ -114,6 +114,14 @@ export interface AgentEvalMeta {
   suitePack?: string;
   suiteDigest?: string;
   agentId: string;
+  /** ADR 1014 D5 — the agent version this eval ran (recorded on every eval). */
+  agentVersion?: string;
+  /** ADR 1014 D5 — the caller NAMED that version (`configurable.agentVersion`): the
+   *  trials dispatch exactly it, and a deployment eval gate holds the run to it. */
+  agentVersionPinned?: boolean;
+  /** ADR 1014 M6 — `agentVersion` is what the deployment served when the eval was
+   *  created (flag on): the trials dispatch exactly it, though it was not named. */
+  agentVersionServed?: boolean;
   baselineRunId?: string;
   /** Model pin (`configurable.ai`) or the scripted mock (`configurable.mockProvider`). */
   model?: { provider?: string; model?: string; credentialRef?: string };
@@ -603,12 +611,17 @@ async function runTrial(ctx: AgentEvalContext, task: EvalTaskDef, trialIndex: nu
     borrowedRecall: false,
   });
 
+  // The version lives in `metadata.eval.agentVersion`: `resolvedAgentVersion` is for a
+  // CHANNEL resolution only (v2 def), and this event is on the certified eval path.
   await emit(run.runId, 'agent.invocation.started', { invocationId, agentId: meta.agentId, source: 'run-api' });
   const started = Date.now();
   const dispatch = ctx.dispatch ?? runAgentDispatchLive;
   const result = await dispatch(
     {
       agentId: meta.agentId,
+      // ADR 1014 D5 — an eval that named its version tests exactly that version.
+      // ADR 1014 M6 — so does one created while the deployment served a version.
+      ...((meta.agentVersionPinned || meta.agentVersionServed) && meta.agentVersion ? { version: meta.agentVersion } : {}),
       tenantId,
       task: task.input,
       availableTools: [...builtinAgentToolIds()],

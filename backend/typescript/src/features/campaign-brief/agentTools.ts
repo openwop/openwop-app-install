@@ -26,17 +26,18 @@
  * pattern) since a chat-time tool scope carries no `storage`/`hostSuite`.
  */
 
+import { isTerminalRunStatus } from '@openwop/openwop';
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
 import { startWorkflowRun, type StartRunDeps } from '../../host/runStarter.js';
-import { claimIgnition, recordIgnitionRun, releaseIgnition, ignitionKey } from '../../host/ignitionGuard.js';
+import { claimIgnition, recordIgnitionRun, releaseIgnition, ignitionKey, reclaimAfterFinishedRun } from '../../host/ignitionGuard.js';
 import { surfaceDispatchedRun, type TurnRunDispatchSink } from '../../host/turnRunDispatch.js';
 import { createLogger } from '../../observability/logger.js';
 import { orgScopeGranted } from './routes.js';
 import { getBrief, validateBrief } from './briefService.js';
 import { isTargetingPlatform, TARGETING_PLATFORMS } from './targetingService.js';
 import { MARKET_INTEL_WORKFLOW_ID, KERNEL_WORKFLOW_ID } from './intelWorkflows.js';
-import { untrustedToolError } from '../../host/agentToolKit.js';
+import { untrustedToolError, launchRefusalResult } from '../../host/agentToolKit.js';
 
 const log = createLogger('campaign-brief.agent-tools');
 
@@ -136,6 +137,8 @@ export async function runGetBriefTool(input: Record<string, unknown>, scope: Too
         personaIds: b.personaIds,
         channels: b.channels,
         kernel: b.kernel ?? null,
+        // ADR 1020 D8 — a stale kernel is not used by generation; say so.
+        kernelStale: b.kernelStale === true,
       },
       validation: validateBrief(b),
     }),
@@ -185,15 +188,31 @@ async function guardBriefAction(
 export async function runResearchRunTool(deps: StartRunDeps, input: Record<string, unknown>, scope: ToolScope): Promise<ToolResult> {
   const guard = await guardBriefAction(input, scope);
   if (!guard.ok) return guard.result;
-  const platformInput = typeof input.platform === 'string' ? input.platform.trim() : '';
+  const platformInput = typeof input.platform === 'string' ? input.platform.trim().toLowerCase() : '';
+  // ADR 1020 (CS70WF-18) — an unknown platform is a typed refusal; it used to
+  // become `meta` silently. Absent still defaults to meta, as the tool says.
+  if (platformInput && !isTargetingPlatform(platformInput)) {
+    return toolError('validation_error', 'Pass a `platform` this tool supports, or leave it out for meta.', { validPlatforms: [...TARGETING_PLATFORMS] });
+  }
   const platform = isTargetingPlatform(platformInput) ? platformInput : 'meta';
-  // HIGH-1 ignition dedup — a repeated research.run on the same brief inside the
-  // window reuses the run already started.
-  const key = ignitionKey('campaign-brief.research.run', guard.briefId);
+  // ADR 1020 (grade-ux H3) — angles argue the APPROVED, current kernel. Refuse
+  // before starting, rather than after the evidence step has already saved.
+  const current = await getBrief(scope.tenantId, guard.briefId);
+  if (!current?.kernel) {
+    return toolError('kernel_required', 'This brief has no approved messaging kernel yet. Generate and approve the kernel first; research angles argue it.');
+  }
+  if (current.kernelStale) {
+    return toolError('kernel_stale', 'The brief changed after its messaging kernel was approved. Regenerate and approve the kernel first; research angles argue it.');
+  }
+  // HIGH-1 ignition dedup — a repeated research.run on the same brief AND
+  // platform inside the window reuses the run already started. (The key used to
+  // omit the platform, so a google run within the window returned the meta run.)
+  const key = ignitionKey('campaign-brief.research.run', guard.briefId, platform);
   const claim = await claimIgnition(scope.tenantId, key);
   if (!claim.claimed) {
     return { content: JSON.stringify({ runId: claim.existingRunId ?? null, ignited: false, note: 'an identical run was started moments ago — reusing it' }) };
   }
+  let startError: unknown;
   const runId = await startWorkflowRun(deps, {
     tenantId: scope.tenantId,
     workflowId: MARKET_INTEL_WORKFLOW_ID,
@@ -207,19 +226,23 @@ export async function runResearchRunTool(deps: StartRunDeps, input: Record<strin
     // DATA-4 — a startWorkflowRun THROW must also release the claim; coerce to
     // null so the shared failure handler below runs.
     log.warn('market_intel_dispatch_threw', { tenantId: scope.tenantId, briefId: guard.briefId, error: err instanceof Error ? err.message : String(err) });
+    startError = err;
     return null;
   });
   if (!runId) {
     // CFPT-2 / DATA-4 — the run never started (null OR a throw); release the claim
     // so an honest retry isn't blocked for the dedup window by a latch over a failure.
     await releaseIgnition(scope.tenantId, key);
+    // ADR 1020 D5 — a plan, budget or run-limit refusal keeps its code.
+    const refused = launchRefusalResult(startError);
+    if (refused) return refused;
     return toolError('dispatch_failed', 'The market-intel workflow could not start.');
   }
   await recordIgnitionRun(scope.tenantId, key, runId);
   const agentId = scope.agentProfileId ?? STRATEGIST_AGENT_ID;
   await surfaceDispatchedRun(scope, deps.storage, { runId, agentId, workflowId: MARKET_INTEL_WORKFLOW_ID, workflowName: 'Market intel research' }, 'campaign-brief-agent-run');
   log.info('market_intel_dispatched', { tenantId: scope.tenantId, briefId: guard.briefId, platform, runId });
-  return { content: JSON.stringify({ runId, briefId: guard.briefId, platform, note: 'Research pipeline started (VOC → angles → targeting → your approval). Curate the results in the brief\'s Intel tab.' }) };
+  return { content: JSON.stringify({ runId, briefId: guard.briefId, platform, note: 'Research pipeline started (VOC → angles → targeting → your review). Each result is saved to the brief\'s Intel tab as it is found; curate it there.' }) };
 }
 
 // ── ACTION: generate-kernel (ignite the messaging-kernel workflow) ──────────
@@ -229,10 +252,19 @@ export async function runGenerateKernelTool(deps: StartRunDeps, input: Record<st
   // HIGH-1 ignition dedup — a repeated generate-kernel on the same brief inside
   // the window reuses the run already started.
   const key = ignitionKey('campaign-brief.generate-kernel', guard.briefId);
-  const claim = await claimIgnition(scope.tenantId, key);
+  let claim = await claimIgnition(scope.tenantId, key);
+  // ADR 1020 (grade-ux H2) — "reject it and ask the Strategist to regenerate"
+  // must start a NEW run: the dedup window only covers a run that is still going.
+  if (!claim.claimed && claim.existingRunId) {
+    const prior = await deps.storage.getRun(claim.existingRunId).catch(() => null);
+    if (prior && isTerminalRunStatus(prior.status) && (await reclaimAfterFinishedRun(scope.tenantId, key, prior.runId))) {
+      claim = { claimed: true };
+    }
+  }
   if (!claim.claimed) {
     return { content: JSON.stringify({ runId: claim.existingRunId ?? null, ignited: false, note: 'an identical run was started moments ago — reusing it' }) };
   }
+  let startError: unknown;
   const runId = await startWorkflowRun(deps, {
     tenantId: scope.tenantId,
     workflowId: KERNEL_WORKFLOW_ID,
@@ -246,12 +278,16 @@ export async function runGenerateKernelTool(deps: StartRunDeps, input: Record<st
     // DATA-4 — a startWorkflowRun THROW must also release the claim; coerce to
     // null so the shared failure handler below runs.
     log.warn('kernel_dispatch_threw', { tenantId: scope.tenantId, briefId: guard.briefId, error: err instanceof Error ? err.message : String(err) });
+    startError = err;
     return null;
   });
   if (!runId) {
     // CFPT-2 / DATA-4 — the run never started (null OR a throw); release the claim
     // so an honest retry isn't blocked for the dedup window by a latch over a failure.
     await releaseIgnition(scope.tenantId, key);
+    // ADR 1020 D5 — a plan, budget or run-limit refusal keeps its code.
+    const refused = launchRefusalResult(startError);
+    if (refused) return refused;
     return toolError('dispatch_failed', 'The messaging-kernel workflow could not start.');
   }
   await recordIgnitionRun(scope.tenantId, key, runId);
@@ -306,8 +342,9 @@ export function registerCampaignBriefAgentTools(deps: StartRunDeps): void {
       name: CAMPAIGN_BRIEF_RESEARCH_RUN_TOOL_ID,
       description:
         'Ignite the market-intel research pipeline for a brief: extract voice-of-customer evidence from its knowledge base → '
-        + 'generate cited ad angles → build a platform targeting pack → STOP at a human approval gate. Every item cites its '
-        + 'source. Requires workspace:write. Pass a `platform` ('
+        + 'generate cited ad angles → build a platform targeting pack → STOP at a human review checkpoint. Each result is saved '
+        + 'to the brief\'s Intel tab as it is found (the human curates it there); every item cites its source. Requires '
+        + 'workspace:write. Pass a `platform` ('
         + `${TARGETING_PLATFORMS.join(', ')}; defaults to meta). Returns the started \`runId\`.`,
       inputSchema: {
         type: 'object',
@@ -330,9 +367,9 @@ export function registerCampaignBriefAgentTools(deps: StartRunDeps): void {
       description:
         'Generate the messaging kernel for a brief — the headline, supporting statement, proof points, CTAs, and tone every '
         + 'channel echoes — grounded in the brief\'s knowledge base (with citations) and brand voice. Validate the brief '
-        + 'first. Requires workspace:write. The generated kernel is SAVED onto the brief for review; the run then stops at '
-        + 'an approval gate before continuing, and finalizing into a campaign stays a separate human act. Returns the '
-        + 'started `runId`.',
+        + 'first. Requires workspace:write. The run stops at an approval gate showing the generated kernel; it is saved onto '
+        + 'the brief only if the human approves it (a rejection saves nothing), and finalizing into a campaign stays a '
+        + 'separate human act. Returns the started `runId`.',
       inputSchema: {
         type: 'object',
         properties: { briefId: { type: 'string', description: 'The campaign brief to generate the kernel for.' } },

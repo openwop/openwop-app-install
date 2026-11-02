@@ -457,11 +457,11 @@ describe('ADR 0464 — host fan-out wiring (eraseSubject reaches host stores)', 
     await smem.addSubjectNote(T, personSubject(A_RAW), 'fact');
 
     const res = await eraseSubject(T, A);
-    // ADR 0942 adds autonomy-policy attribution to the 31 existing erasers:
-    // exactly 32 erasers `registerHostSubjectErasers`
+    // ADR 0942 adds autonomy-policy attribution to the 31 existing erasers, and
+    // ADR 1014 D8 adds user-agent revisions: exactly 33 erasers `registerHostSubjectErasers`
     // registers (host/hostSubjectErasers.ts). Adding or removing one there must
     // update this number — a dropped eraser is no longer silently tolerated.
-    expect(res.total).toBe(32);
+    expect(res.total).toBe(33);
     expect(res.failed).toBe(0);
 
     expect((await kanban.getCard(card.id))?.assigneeId).toBe(ERASED);

@@ -44,10 +44,11 @@
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { makeMcpClient, _resetMcpNegotiation } from '../src/host/mcpClient.js';
-import { _resetMcpClientCache } from '../src/host/mcpClientCache.js';
+import { makeMcpClient, McpError, _resetMcpNegotiation } from '../src/host/mcpClient.js';
+import { _mcpClientCacheSize, _resetMcpClientCache } from '../src/host/mcpClientCache.js';
 import { MCP_CURRENT_VERSION } from '../src/host/mcpProfile.js';
 import type { Storage } from '../src/storage/storage.js';
+import { openStorage } from '../src/storage/index.js';
 
 interface Seen {
   method: string;
@@ -67,8 +68,16 @@ class SlowPeer {
   private port = 0;
   /** ms to hold a `tools/call` before answering. */
   stallMs = 0;
-  /** When set, `tools/call` answers as SSE and cuts the connection mid-frame. */
+  /** When set, `breakMethod` answers as SSE and cuts the connection mid-frame. */
   breakStream = false;
+  /** Which method `breakStream` breaks. */
+  breakMethod = 'tools/call';
+  private waiters = new Map<string, Array<() => void>>();
+  /** Resolves once the peer has RECEIVED `method` (now, or already). */
+  received(method: string): Promise<void> {
+    if (this.seen.some((s) => s.method === method)) return Promise.resolve();
+    return new Promise((resolve) => { this.waiters.set(method, [...(this.waiters.get(method) ?? []), resolve]); });
+  }
   /** Answer `notifications/cancelled` with method-not-found, like the suite's
    *  fake server does for every method it does not implement. */
   refuseCancelNotification = true;
@@ -82,6 +91,8 @@ class SlowPeer {
         const headers: Record<string, string> = {};
         for (const [k, v] of Object.entries(req.headers)) if (typeof v === 'string') headers[k.toLowerCase()] = v;
         this.seen.push({ method: String(rpc.method), id: rpc.id, params: rpc.params ?? {}, headers });
+        for (const w of this.waiters.get(String(rpc.method)) ?? []) w();
+        this.waiters.delete(String(rpc.method));
 
         if (rpc.method === 'notifications/cancelled') {
           if (this.refuseCancelNotification) {
@@ -95,7 +106,7 @@ class SlowPeer {
 
         const complete = { resultType: 'complete', content: [{ type: 'text', text: 'ok' }], isError: false };
 
-        if (rpc.method === 'tools/call' && this.breakStream) {
+        if (rpc.method === this.breakMethod && this.breakStream) {
           // A `text/event-stream` response whose frame never terminates, then
           // the socket dies. This is the "broken response stream" §B describes.
           res.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -111,7 +122,10 @@ class SlowPeer {
             id: rpc.id ?? null,
             result: rpc.method === 'server/discover'
               ? { resultType: 'complete', supportedVersions: [MCP_CURRENT_VERSION], capabilities: {}, ttlMs: 1000, cacheScope: 'public' }
-              : complete,
+              : rpc.method === 'tools/list'
+                // A CACHEABLE list, so the never-cached leg below is about a path that caches.
+                ? { resultType: 'complete', tools: [{ name: 'echo' }], ttlMs: 60_000, cacheScope: 'private' }
+                : complete,
           }));
         };
         if (rpc.method === 'tools/call' && this.stallMs > 0) setTimeout(answer, this.stallMs);
@@ -124,7 +138,7 @@ class SlowPeer {
   }
 
   endpoint(): string { return `http://127.0.0.1:${this.port}`; }
-  reset(): void { this.seen.length = 0; this.stallMs = 0; this.breakStream = false; this.refuseCancelNotification = true; }
+  reset(): void { this.seen.length = 0; this.stallMs = 0; this.breakStream = false; this.breakMethod = 'tools/call'; this.refuseCancelNotification = true; this.waiters.clear(); }
   async stop(): Promise<void> {
     if (!this.server) return;
     const s = this.server;
@@ -133,12 +147,15 @@ class SlowPeer {
   }
 }
 
-const storage = {} as Storage;
+/** A real memory store, not `{} as Storage`: the client only touches it to stamp a
+ *  run's connection use, and an untyped stand-in would hide any new read. */
+let storage: Storage;
 let peer: SlowPeer;
 
 beforeAll(async () => {
   process.env.OPENWOP_TEST_SEAM_ENABLED = 'true';
   process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true';
+  storage = await openStorage('memory://');
   peer = new SlowPeer();
   await peer.start();
 });
@@ -162,12 +179,15 @@ const client = (overrides: Partial<Parameters<typeof makeMcpClient>[0]> = {}): R
 /** Wait until the peer has RECEIVED a method, so a cancel lands mid-flight
  *  rather than racing the request out of the door. */
 async function waitForPeer(method: string, timeoutMs = 2_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (peer.seen.some((s) => s.method === method)) return;
-    await new Promise((r) => setTimeout(r, 5));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      peer.received(method),
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`peer never received ${method}`)), timeoutMs); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
   }
-  throw new Error(`peer never received ${method}`);
 }
 
 describe('RFC 0153 — an in-flight outbound call is cancellable', () => {
@@ -260,9 +280,9 @@ describe('RFC 0153 §B — reconnect is STATELESS: no resumption, a fresh id, on
 
   it('a BROKEN response stream is a typed failure — never a silent resumption', async () => {
     peer.breakStream = true;
-    await expect(client().invokeTool(SERVER_ID, 'echo', { text: 'a' })).rejects.toMatchObject({
-      code: expect.stringMatching(/^mcp_(bad_response|request_failed)$/) as unknown as string,
-    });
+    const err = await client().invokeTool(SERVER_ID, 'echo', { text: 'a' }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(McpError);
+    expect((err as McpError).code).toMatch(/^mcp_(bad_response|request_failed)$/);
     // Exactly ONE attempt reached the peer. A resumption — or an internal retry
     // — would show as a second request, and for an effectful `tools/call` that
     // is a duplicate side effect, not a nicety.
@@ -290,22 +310,29 @@ describe('RFC 0153 §B — reconnect is STATELESS: no resumption, a fresh id, on
   });
 
   it('a broken stream is NEVER cached, so a later read cannot serve a partial', async () => {
+    // Aimed at the path that CACHES. `invokeTool` writes no cache at all, so a
+    // broken `tools/call` could never leave a partial behind; `listTools` does
+    // (mcpClient.ts listTools → writeMcpCache), so its stream is the one broken.
     peer.breakStream = true;
-    await expect(client({ actingUserId: 'ada' }).invokeTool(SERVER_ID, 'echo', {})).rejects.toBeDefined();
+    peer.breakMethod = 'tools/list';
+    await expect(client({ actingUserId: 'ada' }).listTools(SERVER_ID)).rejects.toBeDefined();
+    expect(_mcpClientCacheSize(), 'the failed read left nothing a later read could serve').toBe(0);
     peer.breakStream = false;
-    // `tools/list` has its own path; the assertion is that the failed call left
-    // nothing behind that a subsequent read could pick up.
     const listed = await client({ actingUserId: 'ada' }).listTools(SERVER_ID);
-    expect(Array.isArray(listed.tools)).toBe(true);
+    expect(listed.tools).toEqual([{ name: 'echo' }]);
+    expect(peer.seen.filter((s) => s.method === 'tools/list'), 'the second read went to the wire').toHaveLength(2);
+    // Positive control: the healthy read DOES cache, so the zero above is meaningful.
+    expect(_mcpClientCacheSize()).toBe(1);
   });
 
-  it('the mount never mints a session — two independent requests agree without one', async () => {
-    // The inbound half of "stateless": if the host required session state, the
-    // second call would need something the first handed it. Two clients, no
-    // shared state, identical answers.
-    const a = await client({ actingUserId: 'ada' }).invokeTool(SERVER_ID, 'echo', { text: 'x' });
-    const b = await client({ actingUserId: 'grace' }).invokeTool(SERVER_ID, 'echo', { text: 'x' });
-    expect(a.result).toEqual(b.result);
+  it('the client never sends a session id — two independent callers need no shared state', async () => {
+    // What this asserts is the OUTBOUND half of "stateless": no request this host
+    // makes carries `Mcp-Session-Id`, so two callers share nothing. (The title used
+    // to say "the mount", and compared two results from a static peer, which could
+    // not differ.)
+    await client({ actingUserId: 'ada' }).invokeTool(SERVER_ID, 'echo', { text: 'x' });
+    await client({ actingUserId: 'grace' }).invokeTool(SERVER_ID, 'echo', { text: 'x' });
+    expect(peer.seen.filter((s) => s.method === 'tools/call')).toHaveLength(2);
     for (const s of peer.seen) {
       expect(Object.keys(s.headers), 'the current profile has no sessions').not.toContain('mcp-session-id');
     }

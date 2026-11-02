@@ -17,7 +17,10 @@ describe('G4 — a member share-link MINT needs the owning feature\'s plan, not 
     const deck = await createCanvasForTenant(FREE_TENANT, { canvasTypeId: 'canvas.slides', name: 'Deck' });
     const refused = await free.post(`/host/openwop-app/sharing/orgs/${encodeURIComponent(free.orgId)}/links`, { resourceType: 'slides_canvas', resourceId: deck.canvasId });
     expect(refused.status, JSON.stringify(refused.body)).toBe(403);
-    expect(refused.body?.details?.feature ?? refused.body?.feature).toBe('slides');
+    // The PLAN refusal specifically (errorEnvelope: code in `error`, facts in
+    // `details`) — not the uniform 404 a toggle-off answers, nor any other 403.
+    expect(refused.body?.error).toBe('forbidden');
+    expect(refused.body?.details).toMatchObject({ feature: 'slides', reason: 'plan' });
 
     const op = await workspace(OPERATOR_TENANT);
     const opDeck = await createCanvasForTenant(OPERATOR_TENANT, { canvasTypeId: 'canvas.slides', name: 'Deck' });

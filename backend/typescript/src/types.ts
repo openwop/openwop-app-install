@@ -360,8 +360,14 @@ export interface ChatSessionRecord {
    *  clobbers a manual rename. `'default'` (or absent) = the substring placeholder,
    *  still auto-titleable; `'auto'` = an LLM title was written (don't re-run);
    *  `'user'` = the user renamed it (never overwrite). Additive; legacy/absent ⇒
-   *  treated as `'default'`. */
-  titleSource?: 'default' | 'auto' | 'user';
+   *  treated as `'default'`.
+   *
+   *  ADR 1019 adds two values. `'given'` = named at creation by its source (a board,
+   *  project, notebook, channel, DM, branch, import, …): never auto-titled, and
+   *  `refreshEntityChatTitle` keeps following its entity. `'claimed'` = the one
+   *  auto-title model call was taken (D2); it stays if that call failed, so the
+   *  placeholder is kept and the call is never repeated. */
+  titleSource?: 'default' | 'auto' | 'user' | 'given' | 'claimed';
 }
 
 /** One message inside a chat session. Content is a JSON string (the
@@ -882,6 +888,11 @@ export type OpenwopErrorCode =
   | 'pack_integrity_failure'
   | 'unsupported_runtime'
   | 'conflict'
+  // ADR 1005 D7 — RFC 0082 §E: a promotion whose cited eval evidence is not a
+  // completed, passed eval of the agent (422; in the v2 error envelope).
+  | 'eval_gate_unmet'
+  // RFC 0254 §A — a transition the deployment record's state refuses (409).
+  | 'deployment_state_conflict'
   // ADR 0305 grade pass — the canvas optimistic-concurrency conflict (409), so the
   // editor's stale-save path is a typed envelope, never a 500 internal_error.
   | 'canvas_version_conflict'
@@ -929,11 +940,7 @@ export type OpenwopErrorCode =
   // (500, since 2.0, RFC 0176 §A.3: "a run whose log the host cannot translate
   // is not readable"). Raised at the storage seat when an era-2 row carries a
   // type the codemap does not name on its v1 side and that has no vendor prefix.
-  | 'event_type_unmapped'
-  // RFC 0021 §"Trust boundary" / RFC 0209 §C.12 (ADR 0749) — an approval bound
-  // to an A2UI surface that untrusted content touched cannot be resolved (403).
-  // Not in the v2 registry, so major 2 carries it vendor-prefixed.
-  | 'untrusted_content_blocks_approval';
+  | 'event_type_unmapped';
 
 /**
  * The envelope as this host BUILDS it — before `v2ErrorCode` translation.

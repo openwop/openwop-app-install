@@ -1,5 +1,11 @@
 /**
  * ADR 0132 Phase 1 — the pure capability-scope resolver + the run.metadata stamp.
+ *
+ * TST-CKC-8 (protected: NEVER-WIDEN, :fork replay guard). Red when: an enabled entry
+ * outside the ceiling is granted, `disabled` stops winning (exact or by namespace),
+ * requireApproval is not clamped to the enabled set, an empty `enabled` is read as
+ * "all", isNarrowing ignores approvals, the stamp re-resolves an already-stamped
+ * run, or a malformed stamp is read.
  */
 import { describe, it, expect } from 'vitest';
 import { resolveCapabilityScope, isNarrowing } from '../src/features/conversation-tools/scopeResolver.js';

@@ -12,14 +12,20 @@
  * the host) and that the addressed receipt carries numbered steps naming the UI
  * controls the user must press. The send-capable case is the negative control: a
  * check that refused everything would pass the first three.
+ *
+ * Tracker TST-BEA-3 (w66). Red when: the pre-dispatch guard in
+ * `actionExecution.ts` is dropped (the three refusals) or always refuses (the
+ * control); the status mapping collapses to `missing`; the 403/401 mapping in
+ * `runFailureReason` drifts; the calendar wording or the connections path changes.
  */
-import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { __clearToggleStore } from '../src/host/featureToggles/service.js';
 import { __resetAssistantStore, getPendingAction } from '../src/features/assistant/assistantService.js';
 import { enqueueActionWithApproval, decideActionViaApproval, contentHashOf } from '../src/features/assistant/actionApproval.js';
 import { credentialFixSteps, runFailureReason } from '../src/features/assistant/actionExecution.js';
 import { upsertOAuthConnection, __setConnectionStatusForTests } from '../src/features/connections/connectionsService.js';
+import type { OAuthTokenMaterial } from '../src/features/connections/oauthFlow.js';
 import { __hostExtStorage } from '../src/host/hostExtPersistence.js';
 import type { NotificationRecord } from '../src/types.js';
 
@@ -35,10 +41,11 @@ beforeAll(async () => {
 });
 
 async function connect(userId: string, scopes: string[]) {
-  return upsertOAuthConnection({
-    tenantId: TENANT, provider: 'google', userId,
-    tokens: { accessToken: 'at-fake', refreshToken: 'rt-fake', scopes, expiresAt: new Date(Date.now() + 3_600_000).toISOString() } as never,
-  });
+  const tokens: OAuthTokenMaterial = {
+    accessToken: 'at-fake', refreshToken: 'rt-fake', tokenType: 'Bearer', scopes,
+    expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+  };
+  return upsertOAuthConnection({ tenantId: TENANT, provider: 'google', userId, tokens });
 }
 
 async function approveSend(approver: string) {
@@ -98,9 +105,12 @@ describe('approved email.send — credential checked before dispatch', () => {
     const action = await approveSend('u-send');
     const row = await getPendingAction(TENANT, action.actionId);
     expect(row?.executionRunId, 'a send-capable credential must dispatch').toBeTruthy();
-    // The fake token is refused downstream; the run, not the check, decides.
-    await vi.waitFor(async () => expect((await getPendingAction(TENANT, action.actionId))?.status).toBe('failed'), { timeout: 10_000, interval: 50 }).catch(() => undefined);
-  }, 30_000);
+    // What the dispatched run then does with the fake token is the run's
+    // business (covered by `runFailureReason` below), not this check's. A
+    // run-failure receipt (if it lands this fast) carries the run link; the
+    // check's own refusal never does, and there must be none of those.
+    expect((await receiptsFor('u-send', action.actionId)).filter((n) => n.actionUrl === undefined)).toEqual([]);
+  });
 });
 
 describe('a dispatched send the provider refuses gets the same steps', () => {

@@ -361,7 +361,7 @@ export function registerArtifactTypeSeamRoutes(app: Express, deps?: RunProduceDe
       registerWorkflow(definition);
 
       const run = buildRunRecord({ workflowId, tenantId: SEAM_TENANT, inputs: {}, now: new Date().toISOString() });
-      await insertRunWithStartContext(deps.storage, run, { definition });
+      await insertRunWithStartContext(deps.storage, run, { definition, admission: { plan: 'exempt:conformance-seam' } });
       dispatchRunInBackground({ storage: deps.storage, run, definition, hostSuite: deps.hostSuite });
 
       // Await terminal so the caller can read the event log immediately. Bounded:

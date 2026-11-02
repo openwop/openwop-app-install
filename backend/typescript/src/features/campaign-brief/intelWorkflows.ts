@@ -1,112 +1,52 @@
 /**
- * Market-intel research chain (ADR 0403 Phase 4) — extract-voc →
- * generate-angles → build-targeting → human approval, as a
- * `BackendFeature.builtinWorkflows` entry (the CHANNEL_WORKFLOWS / ADR 0072
- * precedent: restart-safe, cross-instance, composing this feature's OWN pack
- * nodes — NOT a new in-tree workflow namespace).
+ * The two Campaign Brief workflows:
  *
- * Correction note vs the ADR text: the ADR said "a `tmpl.*`-tagged builtin";
- * feature-owned real-I/O workflows live on the feature's builtinWorkflows seam
- * (tmpl.* stays deterministic-stub-only) — recorded in the ADR implementation log.
+ *  - the messaging kernel (CFP-1): generate-kernel → human approval →
+ *    promote-kernel. The kernel is saved onto the brief only by promote-kernel,
+ *    after the approval (ADR 1020 D8), so a rejection saves nothing.
+ *  - market intel (ADR 0403 Phase 4): extract-voc → generate-angles →
+ *    build-targeting → a review checkpoint. The research is saved to the brief's
+ *    Intel tab as it is produced (angles and targeting read the stored evidence);
+ *    the checkpoint is where a person curates it, and approving it changes
+ *    nothing stored (ADR 1020 D8 correction: staging the research is filed as
+ *    `CS70WF-36`).
  *
- * Correction note (2026-08-30, ADR 0472 P4): the `BackendFeature.builtinWorkflows`
- * SEAM referenced above (and at the `@` blocks below) is RETIRED — the field is
- * gone (declaring one is a TypeScript error). These `KERNEL_WORKFLOWS` /
- * `MARKET_INTEL_WORKFLOWS` arrays are now the chain-backed SSoT sources, registered
- * at boot via `registerLegacyDefsChainBacked(...)` (features/index.ts, ADR 0472 P4);
- * they remain restart-safe / cross-instance and compose this feature's own pack
- * nodes exactly as before, only the registration lane changed.
+ * Both workflows ARE the `campaign-brief` chain pack
+ * (`examples/workflow-chain-packs/campaign-brief/pack.json`), registered
+ * chain-backed under these stable ids by `registerLegacyDefsChainBacked`
+ * (`features/index.ts`; ADR 0472 P4). This module holds only what that
+ * registrar, the feature gate and the launcher tools read: the ids and each
+ * node's output role. It used to carry full in-tree definitions that had drifted
+ * from the pack (no provider/model inputs, unversioned typeIds, metadata the
+ * registrar dropped) and cited the retired `builtinWorkflows` seam (ADR 1020 D7).
  *
  * @see docs/adr/0403-market-intel-pipeline.md
+ * @see docs/adr/1020-campaign-studio-end-to-end-honesty.md
  */
 
-import type { WorkflowDefinition } from '../../executor/types.js';
-
-const NODES = 'feature.campaign-brief.nodes';
+/** What `registerLegacyDefsChainBacked` reads: the id and the output roles it
+ *  restores onto the expansion (every other role is cleared). */
+type RoleMap = { workflowId: string; nodes: ReadonlyArray<{ nodeId: string; outputRole?: 'primary' | 'secondary' }> };
 
 export const MARKET_INTEL_WORKFLOW_ID = 'campaign-studio.market-intel';
-
-/**
- * CFP-1 — the messaging-kernel workflow (the flagship #4). `generate-kernel`
- * (assembleContext → callAI → setKernel, all in the surface) → a human approval
- * gate. Before CFP-1 the `generate-kernel` node had NO igniter anywhere (no
- * route, no containing workflow, not a chat tool) — the Campaign Brief
- * Strategist's `openwop:campaign-brief.generate-kernel` action tool now ignites
- * THIS workflow via `startWorkflowRun`, and the gate renders inline in the
- * parent run so the human approves the kernel (never a bare auto-persist claim).
- * Same builtinWorkflows seam as market-intel — restart-safe, cross-instance,
- * composing this feature's OWN pack nodes.
- */
 export const KERNEL_WORKFLOW_ID = 'campaign-studio.messaging-kernel';
 
-export const KERNEL_WORKFLOWS: ReadonlyArray<WorkflowDefinition> = [
-  {
-    workflowId: KERNEL_WORKFLOW_ID,
-    nodes: [
-      {
-        nodeId: 'generate_kernel',
-        typeId: `${NODES}.generate-kernel`,
-        outputRole: 'secondary',
-        inputs: { briefId: { type: 'variable', variableName: 'briefId' } },
-      },
-      {
-        nodeId: 'approve',
-        typeId: 'core.approvalGate',
-        outputRole: 'primary',
-        config: { prompt: 'Review the generated messaging kernel — the headline, supporting statement, proof points, CTAs, and tone every channel will echo. Approve it before generating channel assets, or ask the Strategist to regenerate.' },
-      },
-    ],
-    edges: [
-      { edgeId: 'e_kernel_approve', sourceNodeId: 'generate_kernel', targetNodeId: 'approve' },
-    ],
-    variables: [
-      { name: 'briefId', type: 'string', description: 'The campaign brief to generate the messaging kernel for.', required: true },
-    ],
-    metadata: { kind: 'messaging-kernel', feature: 'campaign-brief' },
-  },
-];
+/** The kernel run's primary output is the SAVED kernel (promote-kernel), not the
+ *  approval decision; the generated draft is secondary. */
+export const KERNEL_WORKFLOWS: ReadonlyArray<RoleMap> = [{
+  workflowId: KERNEL_WORKFLOW_ID,
+  nodes: [
+    { nodeId: 'generate_kernel', outputRole: 'secondary' },
+    { nodeId: 'promote', outputRole: 'primary' },
+  ],
+}];
 
-export const MARKET_INTEL_WORKFLOWS: ReadonlyArray<WorkflowDefinition> = [
-  {
-    workflowId: MARKET_INTEL_WORKFLOW_ID,
-    nodes: [
-      {
-        nodeId: 'extract_voc',
-        typeId: `${NODES}.extract-voc`,
-        outputRole: 'secondary',
-        inputs: { briefId: { type: 'variable', variableName: 'briefId' } },
-      },
-      {
-        nodeId: 'generate_angles',
-        typeId: `${NODES}.generate-angles`,
-        outputRole: 'secondary',
-        inputs: { briefId: { type: 'variable', variableName: 'briefId' } },
-      },
-      {
-        nodeId: 'build_targeting',
-        typeId: `${NODES}.build-targeting`,
-        outputRole: 'secondary',
-        inputs: {
-          briefId: { type: 'variable', variableName: 'briefId' },
-          platform: { type: 'variable', variableName: 'platform' },
-        },
-      },
-      {
-        nodeId: 'approve',
-        typeId: 'core.approvalGate',
-        outputRole: 'primary',
-        config: { prompt: 'Review the extracted evidence, angles, and targeting pack — every item cites its source. Curate in the brief\'s Intel tab before generating channel assets.' },
-      },
-    ],
-    edges: [
-      { edgeId: 'e_voc_angles', sourceNodeId: 'extract_voc', targetNodeId: 'generate_angles' },
-      { edgeId: 'e_angles_targeting', sourceNodeId: 'generate_angles', targetNodeId: 'build_targeting' },
-      { edgeId: 'e_targeting_approve', sourceNodeId: 'build_targeting', targetNodeId: 'approve' },
-    ],
-    variables: [
-      { name: 'briefId', type: 'string', description: 'The campaign brief to research.', required: true },
-      { name: 'platform', type: 'string', description: 'Targeting platform: meta | google | linkedin | tiktok.', required: true },
-    ],
-    metadata: { kind: 'market-intel', feature: 'campaign-brief' },
-  },
-];
+export const MARKET_INTEL_WORKFLOWS: ReadonlyArray<RoleMap> = [{
+  workflowId: MARKET_INTEL_WORKFLOW_ID,
+  nodes: [
+    { nodeId: 'extract_voc', outputRole: 'secondary' },
+    { nodeId: 'generate_angles', outputRole: 'secondary' },
+    { nodeId: 'build_targeting', outputRole: 'secondary' },
+    { nodeId: 'approve', outputRole: 'primary' },
+  ],
+}];

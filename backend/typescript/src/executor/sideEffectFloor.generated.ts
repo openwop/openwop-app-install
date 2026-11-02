@@ -29,18 +29,18 @@
  * ADR 0572, not here: a build-only invariant forbids `src/` from referencing
  * it, and that guard matches the filename in ANY spelling, comments included.)
  *
- * Manifest census at generation time (824 distinct typeIds):
- *    319  side-effect
- *    308  action
+ * Manifest census at generation time (814 distinct typeIds):
+ *    317  side-effect
+ *    301  action
  *    113  pure
  *     57  read
  *     16  streaming-output
- *     11  gate
+ *     10  gate
  *
- * Floor 395 = served 318 + held 77:
- *     31  held: ai-invocation-log
- *     20  held: ai-opaque-not-logged
- *     25  held: deferred-role-semantics
+ * Floor 392 = served 324 + held 68:
+ *     34  held: ai-invocation-log
+ *      9  held: ai-opaque-not-logged
+ *     24  held: deferred-role-semantics
  *      1  held: unresolved
  */
 
@@ -61,21 +61,13 @@ export const MANIFEST_SIDE_EFFECT_FLOOR: ReadonlySet<string> = new Set([
   'agent.skill.invoke',
   'agent.spawn',
   'agent.swarm.execute',
-  'ai.process.synthesize',
   'ai.research.web',
-  'brand.persona.discover',
-  'brand.persona.generate',
-  'brand.persona.keywordStrategy',
   'brand.persona.publish',
   'brand.persona.review',
   'brand.persona.validate',
-  'brand.theme.analyze',
-  'brand.theme.discovery',
-  'brand.theme.generate',
   'brand.theme.implement',
   'brand.theme.publish',
   'brand.theme.review',
-  'brand.theme.templates',
   'brand.theme.validate',
   'coordination.compete',
   'coordination.consensus',
@@ -88,10 +80,7 @@ export const MANIFEST_SIDE_EFFECT_FLOOR: ReadonlySet<string> = new Set([
   'core.agents.memory-window',
   'core.agents.output-parser-auto-fix',
   'core.agents.run',
-  'core.ai.awaitEnvelope',
-  'core.ai.callPrompt',
   'core.ai.chatCompletion',
-  'core.ai.generateFromPrompt',
   'core.ai.structuredOutput',
   'core.ai.toolCalling',
   'core.chat.approvalGate',
@@ -293,13 +282,22 @@ export const MANIFEST_SIDE_EFFECT_FLOOR: ReadonlySet<string> = new Set([
   'feature.assistant.nodes.compose-briefing',
   'feature.assistant.nodes.enqueue-action',
   'feature.campaign-autopilot.nodes.start-stage',
+  'feature.campaign-brief.nodes.build-targeting',
+  'feature.campaign-brief.nodes.extract-voc',
+  'feature.campaign-brief.nodes.generate-angles',
+  'feature.campaign-brief.nodes.promote-kernel',
+  'feature.campaign-channels.nodes.create-creative-briefs',
   'feature.campaign-channels.nodes.publish-ad-variants',
   'feature.campaign-channels.nodes.publish-email-sequence',
   'feature.campaign-channels.nodes.render-concepts',
+  'feature.campaign-connectors.nodes.audience-sync',
   'feature.campaign-connectors.nodes.dispatch-conversions',
+  'feature.campaign-connectors.nodes.import-csv',
   'feature.campaign-connectors.nodes.push-catalog-feed',
+  'feature.campaign-connectors.nodes.sync',
   'feature.campaign-intel.nodes.apply-reallocation',
   'feature.campaign-intel.nodes.enforce-caps',
+  'feature.campaign-intel.nodes.pacing-check',
   'feature.campaign-intel.nodes.propose-reallocation',
   'feature.campaign-journeys.nodes.send-sms',
   'feature.campaign-ops.nodes.client-note-propose',
@@ -422,7 +420,6 @@ export const MANIFEST_SIDE_EFFECT_FLOOR: ReadonlySet<string> = new Set([
   'kanban.board.review',
   'kanban.resource.monitor',
   'kanban.task.assign',
-  'kanban.task.decompose',
   'kanban.timeline.plan',
   'kanban.workflow.automate',
   'knowledge.augment-prompt',
@@ -642,13 +639,19 @@ export const MANIFEST_FAST_PATH_SERVED: ReadonlySet<string> = new Set([
   'feature.assistant.nodes.compose-briefing',
   'feature.assistant.nodes.enqueue-action',
   'feature.campaign-autopilot.nodes.start-stage',
+  'feature.campaign-brief.nodes.promote-kernel',
+  'feature.campaign-channels.nodes.create-creative-briefs',
   'feature.campaign-channels.nodes.publish-ad-variants',
   'feature.campaign-channels.nodes.publish-email-sequence',
   'feature.campaign-channels.nodes.render-concepts',
+  'feature.campaign-connectors.nodes.audience-sync',
   'feature.campaign-connectors.nodes.dispatch-conversions',
+  'feature.campaign-connectors.nodes.import-csv',
   'feature.campaign-connectors.nodes.push-catalog-feed',
+  'feature.campaign-connectors.nodes.sync',
   'feature.campaign-intel.nodes.apply-reallocation',
   'feature.campaign-intel.nodes.enforce-caps',
+  'feature.campaign-intel.nodes.pacing-check',
   'feature.campaign-intel.nodes.propose-reallocation',
   'feature.campaign-journeys.nodes.send-sms',
   'feature.campaign-ops.nodes.client-note-propose',
@@ -798,21 +801,13 @@ export const MANIFEST_DECLARED_TYPE_IDS: ReadonlySet<string> = new Set([
   'agent.skill.invoke',
   'agent.spawn',
   'agent.swarm.execute',
-  'ai.process.synthesize',
   'ai.research.web',
-  'brand.persona.discover',
-  'brand.persona.generate',
-  'brand.persona.keywordStrategy',
   'brand.persona.publish',
   'brand.persona.review',
   'brand.persona.validate',
-  'brand.theme.analyze',
-  'brand.theme.discovery',
-  'brand.theme.generate',
   'brand.theme.implement',
   'brand.theme.publish',
   'brand.theme.review',
-  'brand.theme.templates',
   'brand.theme.validate',
   'coordination.compete',
   'coordination.consensus',
@@ -832,10 +827,7 @@ export const MANIFEST_DECLARED_TYPE_IDS: ReadonlySet<string> = new Set([
   'core.agents.tool-http',
   'core.agents.tool-mcp',
   'core.agents.tool-workflow',
-  'core.ai.awaitEnvelope',
-  'core.ai.callPrompt',
   'core.ai.chatCompletion',
-  'core.ai.generateFromPrompt',
   'core.ai.structuredOutput',
   'core.ai.toolCalling',
   'core.chat.approvalGate',
@@ -1193,8 +1185,10 @@ export const MANIFEST_DECLARED_TYPE_IDS: ReadonlySet<string> = new Set([
   'feature.campaign-brief.nodes.list-hooks',
   'feature.campaign-brief.nodes.list-personas',
   'feature.campaign-brief.nodes.list-targeting-packs',
+  'feature.campaign-brief.nodes.promote-kernel',
   'feature.campaign-brief.nodes.validate',
   'feature.campaign-channels.nodes.content-quality-check',
+  'feature.campaign-channels.nodes.create-creative-briefs',
   'feature.campaign-channels.nodes.generate',
   'feature.campaign-channels.nodes.publish-ad-variants',
   'feature.campaign-channels.nodes.publish-creative-briefs',
@@ -1576,7 +1570,6 @@ export const MANIFEST_DECLARED_TYPE_IDS: ReadonlySet<string> = new Set([
   'kanban.board.review',
   'kanban.resource.monitor',
   'kanban.task.assign',
-  'kanban.task.decompose',
   'kanban.timeline.plan',
   'kanban.workflow.automate',
   'knowledge.augment-prompt',

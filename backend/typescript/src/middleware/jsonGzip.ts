@@ -29,22 +29,45 @@ import { contextEconomy } from '../host/contextEconomy.js';
 /** Bodies smaller than this aren't worth the CPU to compress. */
 const MIN_GZIP_BYTES = 1024;
 
-/** Does the request's `Accept-Encoding` permit gzip (and not disable it q=0)? */
+/**
+ * Does the request's `Accept-Encoding` permit gzip? The most specific entry
+ * wins (RFC 9110 §12.5.3): an explicit `gzip` decides on its own q-value, and
+ * `*` decides only when gzip is not named. So `gzip;q=0, *` refuses and
+ * `*;q=0, gzip` accepts (ADR 1003 D6 — the first version let whichever entry
+ * came first decide).
+ */
 export function acceptsGzip(acceptEncoding: string | undefined): boolean {
   if (!acceptEncoding) return false;
+  let wildcard: boolean | undefined;
   for (const part of acceptEncoding.split(',')) {
-    const [enc, ...params] = part.trim().split(';');
-    if (enc.trim().toLowerCase() !== 'gzip' && enc.trim() !== '*') continue;
+    const [rawEnc, ...params] = part.trim().split(';');
+    const enc = rawEnc.trim().toLowerCase();
+    if (enc !== 'gzip' && enc !== '*') continue;
     const q = params.map((p) => p.trim()).find((p) => p.startsWith('q='));
-    if (q && Number(q.slice(2)) === 0) return false; // explicitly disabled
-    return true;
+    const allowed = !(q && Number(q.slice(2)) === 0);
+    if (enc === 'gzip') return allowed;
+    wildcard = allowed;
   }
-  return false;
+  return wildcard ?? false;
+}
+
+/** A strong validator must differ between encodings (RFC 9110 §8.8.1), so a
+ *  route's own strong ETag is weakened on the compressed representation.
+ *  Express's freshness check compares weakly, so revalidation still 304s. */
+function weakenEtag(res: Response): void {
+  const etag = res.getHeader('ETag');
+  if (typeof etag === 'string' && etag.length > 0 && !etag.startsWith('W/')) res.setHeader('ETag', `W/${etag}`);
 }
 
 /**
  * Express middleware: wrap `res.json` to gzip the serialized body when safe.
  * No-op when `contextEconomy().transport` is off — `res.json` is left untouched.
+ *
+ * ADR 1003 D6 — both paths hand the body to Express rather than ending the
+ * response here. The first version called `res.end` directly, which skipped
+ * `res.send`: every JSON GET lost its automatic ETag and the `req.fresh` → 304
+ * check, so a route that set an ETag and then called `res.json` could never
+ * answer a revalidation with 304.
  */
 export function jsonGzipMiddleware() {
   return (req: Request, res: Response, next: NextFunction): void => {
@@ -56,23 +79,24 @@ export function jsonGzipMiddleware() {
     res.json = (body: unknown): Response => {
       // Don't touch an already-encoded response (e.g. a route that pre-compressed).
       if (res.getHeader('Content-Encoding')) return originalJson(body);
-      const raw = Buffer.from(JSON.stringify(body), 'utf8');
       // Always advertise that the representation varies by encoding so a shared
       // cache never serves a gzipped body to a non-gzip client.
       res.vary('Accept-Encoding');
-      if (raw.length < MIN_GZIP_BYTES) {
-        // Below threshold: send identity JSON, but keep the Content-Type res.json sets.
-        res.setHeader('Content-Type', 'application/json; charset=utf-8');
-        res.removeHeader('Content-Length');
-        res.end(raw);
-        return res;
-      }
+      const text = JSON.stringify(body);
+      // `res.json(undefined)` serializes to nothing; Express sends an empty body.
+      if (text === undefined) return originalJson(body);
+      const raw = Buffer.from(text, 'utf8');
+      // Below threshold: identity JSON, through Express's own path.
+      if (raw.length < MIN_GZIP_BYTES) return originalJson(body);
+      // Synchronous by design: a multi-MB body costs event-loop milliseconds
+      // while this lever is on (stated in ADR 1003 D6).
       const gz = gzipSync(raw);
+      weakenEtag(res);
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
       res.setHeader('Content-Encoding', 'gzip');
-      res.setHeader('Content-Length', String(gz.length));
-      res.end(gz);
-      return res;
+      // `res.send` sets Content-Length, generates the ETag when none is set, and
+      // answers 304 when the request is fresh.
+      return res.send(gz);
     };
     next();
   };

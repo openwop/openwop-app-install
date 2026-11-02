@@ -3,13 +3,22 @@
  *
  * One workflow, one node declaring `auth: { type: "oauth2", provider, scopes }`.
  * The provider's token endpoint is the guarded-egress chokepoint, faked here.
- * Legs run in order because credentials persist between them.
+ *
+ * Tracker TST-CQE-1 (w68). Every leg seeds its OWN state: it clears the run
+ * owner's slack connections and starts its own run (`waitingRun`), or seeds the
+ * connection it needs (`seedSlackConnection`). Until w68 the legs shared one run
+ * and one connection and reddened under `--sequence.shuffle`.
+ * Sabotage-witnessed: red when a declined outcome is not honoured, when the
+ * auth-expired event or the `expired` reason is dropped, when connectUrl skips
+ * the run-owner check, when an "authorized" resume skips the resolve-time
+ * re-check, when the A2A projection ignores the credential kind, and when the
+ * gate runs without the facet advertised.
  */
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { bareRunId } from './support/bareRunId.js';
@@ -32,6 +41,7 @@ import { locateRepoSchemasDir } from '../src/host/_repoPath.js';
 import { __setConnectionStatusForTests, listConnections, revokeConnection, upsertOAuthConnection } from '../src/features/connections/connectionsService.js';
 import { projectRunStatusToTaskState } from '../src/host/a2aTaskStore.js';
 import { projectTaskRecordToA2aTask10 } from '../src/host/a2aCodec10.js';
+import type { A2aTaskRecord } from '../src/host/a2aTaskStore.js';
 
 let server: http.Server;
 let BASE = '';
@@ -42,7 +52,10 @@ const WF = `cred-wf-${Date.now()}`;
 const NODE = 'use-credential';
 const PUBLIC_BASE = 'https://host.example';
 
-type Ev = { type: string; payload?: Record<string, unknown> };
+type Ev = {
+  type: string;
+  payload?: { kind?: string; key?: string; data?: { connectUrl?: string; reason?: string } & Record<string, unknown>; resumeValue?: unknown; error?: unknown } & Record<string, unknown>;
+};
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -110,9 +123,36 @@ function v2SuspendRequestValidator(): (x: unknown) => boolean {
   return (x) => v(x) as boolean;
 }
 
+let subject = '';
+/** The run owner every dev-token run is stamped with (read once from a real run). */
 async function mySubject(): Promise<string> {
+  if (subject) return subject;
   const run = await storage.getRun(bareRunId(await startRun()));
-  return String((run?.metadata as Record<string, unknown>).actingUserId);
+  const acting = run?.metadata?.['actingUserId'];
+  subject = typeof acting === 'string' ? acting : '';
+  expect(subject).not.toBe('');
+  return subject;
+}
+
+/** Revoke every slack connection the run owner holds, so a run WAITS on the ask. */
+async function clearSlack(): Promise<void> {
+  const owner = await mySubject();
+  for (const c of await listConnections('default', owner)) await revokeConnection('default', c.connectionId);
+}
+
+/** A fresh run, started with no credential, settled on its credential ask. */
+async function waitingRun(): Promise<string> {
+  await clearSlack();
+  const runId = await startRun();
+  expect(await settle(runId, (s) => s.startsWith('waiting') || s === 'completed' || s === 'failed')).toBe('waiting-input');
+  return runId;
+}
+
+async function seedSlackConnection() {
+  return upsertOAuthConnection({
+    tenantId: 'default', provider: 'slack', userId: await mySubject(),
+    tokens: { accessToken: 'at', refreshToken: 'rt', tokenType: 'bearer', scopes: ['chat:write'], expiresAt: new Date(Date.now() + 3_600_000).toISOString() },
+  });
 }
 
 describe('RFC 0199 §C.1 — without the facet, nothing changes', () => {
@@ -125,20 +165,17 @@ describe('RFC 0199 §C.1 — without the facet, nothing changes', () => {
 });
 
 describe('RFC 0199 §C — the credential interrupt (facet advertised)', () => {
-  beforeAll(() => { process.env.OPENWOP_OAUTH_ADVERTISE = 'true'; });
-
-  let runId = '';
+  beforeEach(() => { process.env.OPENWOP_OAUTH_ADVERTISE = 'true'; });
 
   it('§C.2/§C.3 — no credential: the run waits on a closed, schema-valid credential ask', async () => {
-    runId = await startRun();
-    expect(await settle(runId, (s) => s.startsWith('waiting') || s === 'completed' || s === 'failed')).toBe('waiting-input');
+    const runId = await waitingRun();
     const ask = (await events(runId)).find((e) => e.type === 'interrupt.requested');
     expect(ask?.payload?.kind).toBe('credential');
     // interrupt.md §Re-entry — the key derives from the run, the node and the
     // visit (loop row 3, P2 — interrupt.md §Events moved every kind onto `interruptRequestKey`; this was
     // the bare node id, which named no run).
     expect(ask?.payload?.key).toBe(`${runId.split('/').pop()}:${NODE}:${NODE}`);
-    const data = ask?.payload?.data as Record<string, unknown>;
+    const data = ask?.payload?.data ?? {};
     expect(data).toMatchObject({ provider: 'slack', scopes: ['chat:write'], reason: 'missing' });
     // The canonical, version-agnostic vendor root (ADR 0652) — it outlives `/v1`.
     expect(String(data.connectUrl)).toBe(`${PUBLIC_BASE}/host/openwop-app/connections/connect/${encodeURIComponent(bareRunId(runId))}/${NODE}`);
@@ -146,6 +183,7 @@ describe('RFC 0199 §C — the credential interrupt (facet advertised)', () => {
   });
 
   it('§C.4 — a caller\'s "authorized" is re-checked: 400 validation_error on resumeValue while nothing resolves', async () => {
+    const runId = await waitingRun();
     const r = await resolve(runId, { outcome: 'authorized' });
     expect(r.status).toBe(400);
     const body = (await r.json()) as { error: string; details?: { field?: string } };
@@ -155,47 +193,52 @@ describe('RFC 0199 §C — the credential interrupt (facet advertised)', () => {
   });
 
   it('§C.4/§C.6 — the resume is closed: a credential cannot ride it', async () => {
-    expect((await resolve(runId, { outcome: 'authorized', token: 'xoxb-secret' })).status).toBe(400);
-    expect((await resolve(runId, { outcome: 'maybe' })).status).toBe(400);
+    const runId = await waitingRun();
+    for (const resumeValue of [{ outcome: 'authorized', token: 'xoxb-secret' }, { outcome: 'maybe' }]) {
+      const r = await resolve(runId, resumeValue);
+      expect(r.status, JSON.stringify(resumeValue)).toBe(400);
+      expect(((await r.json()) as { error: string }).error, JSON.stringify(resumeValue)).toBe('validation_error');
+    }
+    expect(await settle(runId, () => true)).toBe('waiting-input');
   });
 
   it('§C.3 — connectUrl is not pre-authenticated: anonymous gets no authorization URL', async () => {
+    const runId = await waitingRun();
     const r = await fetch(`${BASE}/host/openwop-app/connections/connect/${bareRunId(runId)}/${NODE}`, { redirect: 'manual' });
-    expect(r.status).toBeGreaterThanOrEqual(400);
-    expect(r.headers.get('location') ?? '').not.toContain('slack.com');
+    expect(r.status).toBe(401);
+    expect(r.headers.get('location')).toBeNull();
   });
 
   it('§C.3 — connectUrl refuses a user other than the run\'s owner (no authorization URL)', async () => {
-    const other = await startRun();
-    await settle(other, (s) => s === 'waiting-input');
+    const other = await waitingRun();
     const run = await storage.getRun(bareRunId(other));
-    await storage.updateRun(bareRunId(other), { metadata: { ...(run!.metadata as Record<string, unknown>), actingUserId: 'someone-else' } });
+    await storage.updateRun(bareRunId(other), { metadata: { ...(run?.metadata ?? {}), actingUserId: 'someone-else' } });
     const r = await fetch(`${BASE}/host/openwop-app/connections/connect/${bareRunId(other)}/${NODE}`, { headers: H, redirect: 'manual' });
     expect(r.status).toBe(403);
+    expect(((await r.json()) as { error: string }).error).toBe('forbidden');
     expect(r.headers.get('location')).toBeNull();
   });
 
   it('a recorded DECLINE wins over a credential that appeared since (never silently overridden)', async () => {
-    const subject = await mySubject();
-    await upsertOAuthConnection({ tenantId: 'default', provider: 'slack', userId: subject, tokens: { accessToken: 'at', refreshToken: 'rt', scopes: ['chat:write'], expiresAt: new Date(Date.now() + 3_600_000).toISOString() } as never });
+    const runId = await waitingRun();
+    await seedSlackConnection();
     expect((await resolve(runId, { outcome: 'declined' })).status).toBeLessThan(300);
     expect(await settle(runId, (s) => s === 'failed' || s === 'completed')).toBe('failed');
     const failed = (await events(runId)).find((e) => e.type === 'node.failed');
-    expect((failed?.payload?.error as { code?: string })?.code).toBe('connector_auth_declined');
-    for (const c of await listConnections('default', subject)) await revokeConnection('default', c.connectionId);
+    const error = failed?.payload?.error;
+    expect(error && typeof error === 'object' && 'code' in error ? error.code : undefined).toBe('connector_auth_declined');
   });
 
   it('§C.4 — the owner opens connectUrl, consents, and the HOST resolves the interrupt: the run completes', async () => {
-    const run2 = await startRun();
-    expect(await settle(run2, (s) => s === 'waiting-input')).toBe('waiting-input');
+    const run2 = await waitingRun();
     // Open the EXACT connectUrl the interrupt carries (its canonical `/host/…` path), on this test server.
     const ask = (await events(run2)).find((e) => e.type === 'interrupt.requested');
-    const connectUrl = String((ask?.payload?.data as { connectUrl?: string }).connectUrl).replace(PUBLIC_BASE, BASE);
+    const connectUrl = String(ask?.payload?.data?.connectUrl).replace(PUBLIC_BASE, BASE);
     const open = await fetch(connectUrl, { headers: H, redirect: 'manual' });
     expect(open.status).toBe(302);
     const authorizeUrl = new URL(open.headers.get('location') ?? '');
     expect(authorizeUrl.host).toBe('slack.com');
-    const state = authorizeUrl.searchParams.get('state')!;
+    const state = authorizeUrl.searchParams.get('state') ?? '';
     const cb = await fetch(`${BASE}/host/openwop-app/connections/slack/callback?state=${encodeURIComponent(state)}&code=abc`, { headers: H, redirect: 'manual' });
     expect(cb.status).toBe(302);
     expect(cb.headers.get('location')).toContain('connected=slack');
@@ -205,10 +248,9 @@ describe('RFC 0199 §C — the credential interrupt (facet advertised)', () => {
   });
 
   it('§C.2(b) — a terminal refresh failure emits connector.auth_expired BEFORE the credential ask (reason: expired)', async () => {
-    const subject = await mySubject();
-    const [conn] = await listConnections('default', subject);
-    expect(conn).toBeDefined();
-    await __setConnectionStatusForTests(conn!.connectionId, 'needs-reconsent');
+    await clearSlack();
+    const conn = await seedSlackConnection();
+    await __setConnectionStatusForTests(conn.connectionId, 'needs-reconsent');
     const run3 = await startRun();
     expect(await settle(run3, (s) => s === 'waiting-input' || s === 'completed' || s === 'failed')).toBe('waiting-input');
     const evs = await events(run3);
@@ -217,8 +259,8 @@ describe('RFC 0199 §C — the credential interrupt (facet advertised)', () => {
     const asked = evs.findIndex((e) => e.type === 'interrupt.requested');
     expect(expired).toBeGreaterThanOrEqual(0);
     expect(expired).toBeLessThan(asked);
-    expect(evs[expired]?.payload).toMatchObject({ provider: 'slack', credentialRef: conn!.connectionId });
-    expect((evs[asked]?.payload?.data as { reason?: string }).reason).toBe('expired');
+    expect(evs[expired]?.payload).toMatchObject({ provider: 'slack', credentialRef: conn.connectionId });
+    expect(evs[asked]?.payload?.data?.reason).toBe('expired');
   });
 });
 
@@ -235,10 +277,11 @@ describe('RFC 0199 §D.1 — A2A projection', () => {
   });
 
   it('the 1.0 Task carries TASK_STATE_AUTH_REQUIRED, the status message and interrupt kind', () => {
-    const task = projectTaskRecordToA2aTask10({
+    const rec: A2aTaskRecord = {
       taskId: 't1', runId: 't1', state: 'auth-required', interruptKind: 'credential',
       statusMessage: 'Authorize slack (chat:write): https://host.example/c/r/n', updatedAt: '2026-09-26T00:00:00Z',
-    } as never);
+    };
+    const task = projectTaskRecordToA2aTask10(rec);
     const status = task.status as { state: string; message?: { parts: { text: string }[] } };
     expect(status.state).toBe('TASK_STATE_AUTH_REQUIRED');
     expect(status.message?.parts[0]?.text).toContain('https://host.example/c/r/n');

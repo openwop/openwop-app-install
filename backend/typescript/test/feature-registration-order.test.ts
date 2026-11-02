@@ -5,6 +5,10 @@
  * If this pin fails, form email opt-ins silently skip (no grant recorded) —
  * an innocent reordering/alphabetization would break consent capture with no
  * error anywhere. Architect-review finding (2026-07-10).
+ *
+ * Tracker: TST-DBE-4. Red when: email or service-desk is registered before
+ * crm, or an entry is undefined (probes w70g2-ro-*). The `> 100` length floor
+ * is a non-vacuity check (136 entries on 2026-10-30), not a ratchet.
  */
 import { describe, expect, it } from 'vitest';
 import { BACKEND_FEATURES } from '../src/features/index.js';

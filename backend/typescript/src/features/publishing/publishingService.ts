@@ -417,6 +417,14 @@ export async function listPublicNavPages(orgId: string): Promise<Array<{ slug: s
   ).map(({ page }) => ({ slug: page.slug, title: page.title }));
 }
 
+/** ADR 1015 — whether the org has a published, non-post page at `slug` (the
+ *  site runtime links the consent banner to the workspace's own privacy page
+ *  only when one exists). */
+export async function hasPublishedPage(orgId: string, slug: string): Promise<boolean> {
+  const { rows } = await listPublishedWithSeo(orgId);
+  return rows.some(({ page }) => page.slug === slug && page.kind !== 'post');
+}
+
 /**
  * ADR 0824 D4 — what the platform origin's `/robots.txt` tells crawlers.
  *

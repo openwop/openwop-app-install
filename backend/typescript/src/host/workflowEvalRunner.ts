@@ -258,7 +258,10 @@ async function dispatchCase(
   run.metadata.launchResolved = 'head';
   // RESERVED post-strip stamp (grade-code M5) — only the runner marks eval runs.
   run.metadata.eval = { evalSetId: set.evalSetId, caseId: c.caseId, resultId: keyParts.resultId };
-  await insertRunWithStartContext(deps.storage, run, { definition });
+  // ADR 0987 D3 — an eval case tests a definition: no plan unit (ADR 0821), and
+  // no caller slot, because the runner bounds its own cases (`CASE_STRIDE`) and a
+  // case refused after the 202 would be a failed verdict, not a 429.
+  await insertRunWithStartContext(deps.storage, run, { definition, admission: { plan: 'exempt:eval-case' } });
   seedRunVariables(run.runId, definition.variables, deferredConfigurableInputs(definition, run.configurable, c.inputs ?? {}));
   input.onRunMinted?.(run.runId);
 

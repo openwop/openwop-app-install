@@ -30,6 +30,7 @@ import {
   MCP_META_CLIENT_CAPABILITIES,
   MCP_META_PROTOCOL_VERSION,
 } from '../src/host/mcpProfile.js';
+import { readKeyTenants } from '../src/middleware/apiKeyTenants.js';
 
 let server: http.Server;
 let BASE: string;
@@ -97,38 +98,24 @@ describe('RFC 0153 §D — the cross-caller cache leg, driven locally', () => {
   it('a per-caller list is cacheScope private (the assertion the corpus leg makes)', async () => {
     const mine = await toolsList(PRIMARY);
     const theirs = await toolsList(SECONDARY);
-    expect(['public', 'private']).toContain(mine.cacheScope);
-    const same = JSON.stringify(mine.tools) === JSON.stringify(theirs.tools);
-    if (!same) {
-      // The §D rule: a list that differs per caller MUST be private. A public
-      // list that differs is cross-context cache poisoning.
-      expect(mine.cacheScope).toBe('private');
-      expect(theirs.cacheScope).toBe('private');
-    } else {
-      // Byte-identical lists are legitimately cacheable either way — but this
-      // host derives `tools/list` from a tenant-scoped registry, so `private` is
-      // the honest answer regardless (ADR 0553 P2 decision 4).
-      expect(mine.cacheScope).toBe('private');
-    }
+    // §D: a list that can differ per caller MUST be private (a public one that
+    // differs is cross-context cache poisoning). This host derives `tools/list`
+    // from a tenant-scoped registry, so BOTH callers are answered `private`
+    // whether or not today's two lists happen to be equal (ADR 0553 P2 decision 4).
+    expect(mine.cacheScope).toBe('private');
+    expect(theirs.cacheScope).toBe('private');
   });
 
   it('the two callers are genuinely different authorization contexts', async () => {
     // The property the WHOLE fix depends on. If both keys resolved to the same
-    // principal/tenant the leg would execute and be unable to fail. Asserted
-    // through a tenant-scoped route rather than by re-deriving the key table,
-    // which would restate the premise instead of checking it.
-    const whoami = async (bearer: string): Promise<string | undefined> => {
-      const res = await fetch(`${BASE}/runs?limit=1`, { headers: { authorization: `Bearer ${bearer}` } });
-      return res.headers.get('x-openwop-tenant') ?? undefined;
-    };
-    // Not every build echoes a tenant header; the load-bearing assertion is that
-    // the scoped key is NOT a wildcard operator, which the mount answering 200
-    // for both plus distinct configured scopes already establishes. Kept as a
-    // documented no-op rather than a fake assertion when the header is absent.
-    const a = await whoami(PRIMARY);
-    const b = await whoami(SECONDARY);
-    if (a !== undefined && b !== undefined) expect(a).not.toBe(b);
-    expect(KEYS, 'the second key must be tenant-scoped, never a second `:*`').toContain(':conformance-secondary');
+    // tenant authority the leg would execute and be unable to fail. Asserted
+    // through the host's OWN parse of the configured key map (the table the auth
+    // middleware authenticates against), not by re-reading this file's literal.
+    // (An earlier version read an `x-openwop-tenant` response header that this
+    // host never emits, so its assertion could not run.)
+    const table = readKeyTenants();
+    expect(table.get(PRIMARY), 'the operator key is the wildcard').toEqual(['*']);
+    expect(table.get(SECONDARY), 'the second key must be tenant-scoped, never a second `:*`').toEqual(['conformance-secondary']);
     expect(KEYS.split(',').filter((e) => e.endsWith(':*'))).toHaveLength(1);
   });
 });

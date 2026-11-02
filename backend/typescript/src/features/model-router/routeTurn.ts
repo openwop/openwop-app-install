@@ -5,8 +5,12 @@
  * subject to a capability FILTER (an attachment turn NEVER routes to a non-vision
  * target — the ADR invariant) and cooldown STICKINESS (a recently-chosen target
  * stays, to avoid thrashing). Pure + deterministic — no dispatch, no I/O, no clock
- * (the caller passes `now`). The dispatch call-site + the `run.metadata` replay
- * stamp are Phase 3; this is the testable core.
+ * (the caller passes `now`).
+ *
+ * ADR 1016 — evaluated on EVERY exchange (never stamped), and a target is
+ * eligible only if this turn can call it: the conversation's own provider
+ * (`TurnFeatures.dispatchProvider`) and a model the catalog lists (the probe
+ * answers `null` for an unlisted one). Vision is judged per MODEL.
  */
 
 export type RuleCondition =
@@ -75,8 +79,10 @@ export interface ModelRouterConfig {
    *  run's explicit model. (This docblock previously said the fallback "SHOULD be
    *  vision-capable" while `eligible()` twelve lines below called the same rule a MUST —
    *  one file, two strengths for one invariant, and the weaker wording sat on the one
-   *  lane that was not enforced. That contradiction is how the gap survived.) */
-  fallback: RoutingTarget;
+   *  lane that was not enforced. That contradiction is how the gap survived.)
+   *  ADR 1016 D5 — OPTIONAL: with none, a turn no rule matches keeps the
+   *  conversation's own model instead of overriding every member's choice. */
+  fallback?: RoutingTarget;
   /** Sticky window: a target chosen within this many ms is re-used. 0/undef = off. */
   cooldownMs?: number;
 }
@@ -93,6 +99,11 @@ export interface TurnFeatures {
    *  board rooms, 'workspace', 'channel'; ADR 0130 Phase 6). Absent for 1:1 /
    *  ungrouped chats and for surfaces with no conversation meta. */
   conversationKind?: string;
+  /** ADR 1016 D4 — the ONE provider this conversation's credential can call
+   *  (`dispatchableProviderOf`). A target naming any other provider is
+   *  ineligible: routing it would 422 every turn (`explicit_ref_wrong_provider`)
+   *  or send the key to the wrong vendor. Absent = unconstrained (pure tests). */
+  dispatchProvider?: string;
 }
 
 export interface RouteState {
@@ -103,18 +114,25 @@ export interface RouteState {
 export interface RouteDecision {
   target: RoutingTarget;
   reason: 'cooldown' | 'rule' | 'fallback';
+  /** The index of the rule that fired (`reason: 'rule'` only) — the preview's answer. */
+  ruleIndex?: number;
 }
 
-/** Capability probe: provider → its supported capability ids (RFC 0031). */
-export type CapabilityProbe = (provider: string) => readonly string[];
+/** Capability probe: a target → its capability ids (RFC 0031 vocabulary), or
+ *  `null` when the catalog does not list that model for that provider (ADR 1016
+ *  D4: an unlisted model is never routed to). */
+export type CapabilityProbe = (provider: string, model: string) => readonly string[] | null;
 
 function eligible(t: RoutingTarget, features: TurnFeatures, probe: CapabilityProbe): boolean {
+  if (features.dispatchProvider !== undefined && t.provider !== features.dispatchProvider) return false;
+  const caps = probe(t.provider, t.model);
+  if (caps === null) return false;
   // An attachment turn MUST route to a vision-capable target (ADR 0130 invariant).
   // The capability id is the RFC 0031 §C / RFC 0055 canonical `vision-input`
   // (model accepts image content) — corrected from the non-canonical `vision`
   // the probe never advertised (CHAT-FIRST-PORT A8: nothing satisfied it, so an
   // attachment turn always fell through to the fallback and the rule never fired).
-  if (features.hasAttachment && !probe(t.provider).includes('vision-input')) return false;
+  if (features.hasAttachment && !caps.includes('vision-input')) return false;
   return true;
 }
 
@@ -133,12 +151,13 @@ function matches(when: RuleCondition, features: TurnFeatures): boolean {
  *  is still eligible), then the first matching + eligible rule, then the fallback —
  *  which is filtered TOO (ADR 0714 D1).
  *
- *  Returns `null` when NO eligible target exists, i.e. the turn carries an attachment
- *  and even the fallback is not vision-capable. Null means "do not route": the caller
- *  keeps the run's explicit provider/model, which is exactly this router's documented
- *  OFF posture. Routing to a target we have just judged ineligible would make the
- *  router the proximate cause of the turn's failure AND freeze that target into
- *  `run.metadata.modelRoute`, which `:fork` then replays verbatim forever.
+ *  Returns `null` when NO eligible target exists: no rule matched an eligible
+ *  target and there is no eligible fallback (none configured, another provider,
+ *  an unlisted model, or not vision-capable on an attachment turn). Null means
+ *  "do not route": the caller keeps the conversation's own provider/model, which
+ *  is exactly this router's documented OFF posture. Routing to a target we have
+ *  just judged ineligible would make the router the proximate cause of the
+ *  turn's failure.
  *
  *  NOTE (ADR 0714, MRC-6): the cooldown branch below is unreachable in production —
  *  the one production caller passes no `state`. It is retained (and filtered) so that
@@ -156,15 +175,16 @@ export function routeTurn(
   ) {
     return { target: state.lastTarget, reason: 'cooldown' };
   }
-  for (const rule of config.rules) {
+  for (const [ruleIndex, rule] of config.rules.entries()) {
     if (matches(rule.when, features) && eligible(rule.target, features, probe)) {
-      return { target: rule.target, reason: 'rule' };
+      return { target: rule.target, reason: 'rule', ruleIndex };
     }
   }
   // ADR 0714 D1 — the fallback is NOT exempt from the invariant `eligible()` states.
   // Before this, it was the one lane that escaped, so an attachment turn on a tenant
   // whose fallback is text-only routed to a non-vision target and that decision was
   // then STAMPED durably.
-  if (!eligible(config.fallback, features, probe)) return null;
+  // ADR 1016 D5 — no fallback configured ⇒ the turn keeps its own model.
+  if (!config.fallback || !eligible(config.fallback, features, probe)) return null;
   return { target: config.fallback, reason: 'fallback' };
 }

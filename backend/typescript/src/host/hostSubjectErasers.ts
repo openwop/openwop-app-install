@@ -39,6 +39,7 @@ import { registerTeamsDeliveryErasure } from './teamsApprovalDelivery.js';
 import { registerReviewDecisionErasure } from './reviewDecisionLedger.js';
 import { registerProposalPolicyErasure } from './workflowProposalPolicy.js';
 import { registerWorkflowRevisionErasure } from './workflowRevisions.js';
+import { registerUserAgentRevisionErasure } from './userAgentRevisions.js';
 import { registerDebugPinErasure } from './workflowDebugPins.js';
 import { registerEvalSetErasure } from './workflowEvalSets.js';
 import { registerEvalSuiteErasure } from './evals/suiteStore.js';
@@ -83,6 +84,7 @@ export function registerHostSubjectErasers(): void {
   registerAgentProfileTwinErasure();
   registerProposalPolicyErasure(); // ADR 0464 §2.1 — the ADR 0473 auto-approve policy store
   registerWorkflowRevisionErasure(); // ADR 0474 — revision-history attribution (`createdBy` redacted)
+  registerUserAgentRevisionErasure(); // ADR 1014 D8 — user-agent revisions the subject wrote (deleted unless serving)
   registerDebugPinErasure(); // ADR 0475 — debug pins DELETED (pinned output may quote the subject)
   registerEvalSetErasure(); // ADR 0477 — eval set/result attribution redacted (tenant work-product)
   registerEvalSuiteErasure(); // ADR 0889 — agent eval suite attribution redacted (tenant work-product)

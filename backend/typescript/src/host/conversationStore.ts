@@ -473,7 +473,13 @@ function composeBoardGroupMeta(
 /** GRADE-D7 — refresh an ENTITY-bound chat session's title after the entity was
  *  renamed (boards, projects): the title is set only at session creation, so a
  *  rename left the rail stale forever. Title-source-guarded — never clobbers a
- *  user rename (`titleSource !== 'default'`) — and a no-op when unchanged. */
+ *  user rename — and a no-op when unchanged.
+ *
+ *  ADR 1019 D1 — follows `'given'` (named by its entity at creation) as well as the
+ *  legacy `'default'`. An `'auto'` title on an ENTITY-bound room (meta carries
+ *  `ownerSubject` or `boardId`) is the ADR 0151 autotitler's damage, not a person's
+ *  choice, so it is repaired here too: the next open puts the entity's name back and
+ *  marks it `'given'`. `'user'` and `'claimed'` are never touched. */
 export async function refreshEntityChatTitle(
   storage: import('../storage/storage.js').Storage,
   tenantId: string,
@@ -481,9 +487,23 @@ export async function refreshEntityChatTitle(
   expectedTitle: string,
 ): Promise<void> {
   const session = await storage.getChatSession(tenantId, sessionId);
-  if (!session || session.title === expectedTitle) return;
-  if ((session.titleSource ?? 'default') !== 'default') return;
-  await storage.updateChatSession(tenantId, sessionId, { title: expectedTitle, updatedAt: now() });
+  if (!session) return;
+  const source = session.titleSource ?? 'default';
+  if (source === 'auto') {
+    const meta = await getConversationMeta(tenantId, sessionId);
+    if (!meta?.ownerSubject && !meta?.boardId) return;
+  } else if (source !== 'default' && source !== 'given') {
+    return;
+  }
+  // Conditional on the source just read, so a person's rename landing between the read
+  // and the write keeps both its title and its 'user' source.
+  if (session.title === expectedTitle) {
+    // Same name: only stamp a legacy row's provenance — no `updatedAt`, so opening a
+    // room never reorders the rail.
+    if (source !== 'given') await storage.claimChatSessionTitleSource(tenantId, sessionId, source, 'given');
+    return;
+  }
+  await storage.casChatSessionTitle(tenantId, sessionId, { title: expectedTitle, titleSource: 'given', updatedAt: now() }, source);
 }
 
 /** ADR 0278 GRADE-13 — release a conversation's generic owner binding. Used when

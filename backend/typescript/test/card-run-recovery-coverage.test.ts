@@ -15,6 +15,14 @@
  * non-adopter: a new file could import `moveCard`, move a card to Working, stamp
  * nothing, and an import-based check would still pass. So this derives from the
  * CALL SITE and then asserts the stamp exists in the same file.
+ *
+ * grade-tests w67 (TST-CBR-3): the stamp check is scoped to ONE object literal
+ * under a key recovery reads (`heartbeat: { … boardId: … cardId: … }` /
+ * `approval: { … }`). It used to accept any `boardId` within 200 chars of a
+ * `cardId` anywhere in the file, which the move/claim call's own arguments
+ * satisfied, so deleting the pointer from the run stamp stayed green. Red when:
+ * a pick site's stamp loses `boardId`/`cardId`; a third file moves a card into
+ * Working (NO-GROWTH); the reader stops accepting either stamp key.
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -35,6 +43,13 @@ const OWNERS = new Set(['host/kanbanService.ts', 'host/cardRunRecovery.ts']);
  * `applyBoardCommand` (`columnId: working.id`, grade-code KSCD-5).
  */
 const MOVE_TO_WORKING = /moveCard\([^)]*\bworking\b[^)]*\)|claimCardForRun\(|columnId:\s*working\b/i;
+
+/**
+ * A `{boardId, cardId}` pointer written INSIDE one object literal under a key
+ * `cardPointerFromRunMetadata` reads (`[^{}]*` keeps the match within that
+ * literal, so a nearby call's arguments cannot satisfy it).
+ */
+const STAMP_UNDER_KNOWN_KEY = /\b(?:heartbeat|approval)\s*:\s*\{[^{}]*\bboardId\s*:[^{}]*\bcardId\s*:/;
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {
@@ -59,7 +74,7 @@ describe('ADR 0535 P4 — every pick site is recoverable', () => {
       // carries a card pointer — i.e. the same file stamps boardId + cardId
       // into run metadata. Both known sites do (`metadata.heartbeat` /
       // `metadata.approval`).
-      const stampsPointer = /boardId[\s\S]{0,200}?cardId|cardId[\s\S]{0,200}?boardId/.test(source);
+      const stampsPointer = STAMP_UNDER_KNOWN_KEY.test(source);
       if (!stampsPointer) offenders.push(rel);
     }
 

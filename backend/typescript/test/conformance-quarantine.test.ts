@@ -8,6 +8,12 @@
  * degrades into decoration.
  *
  * See `conformance/QUARANTINE.md` for the reasoning and the burn-down.
+ *
+ * Tracker TST-CJA-8 (grade-tests w68). Red when: `maxEntries` is raised above the
+ * entry count; ci.sh stops running the major-2 conformance lane; or run.ts stops
+ * honouring OPENWOP_CONFORMANCE_NO_QUARANTINE. MEASURED 2026-10-29: maxEntries 0 ==
+ * entries 0, so the per-entry cases below loop over nothing today — they guard the
+ * NEXT entry by construction (recorded ceiling, not a defect).
  */
 
 import { existsSync, readFileSync } from 'node:fs';
@@ -96,6 +102,7 @@ describe('ADR 0550 P1 — quarantine hygiene', () => {
   it('the harness still honours the no-quarantine escape hatch', () => {
     // Being able to see the REAL state is what keeps the ledger honest.
     const runTs = readFileSync(join(BACKEND, 'conformance', 'run.ts'), 'utf8');
-    expect(runTs).toContain('OPENWOP_CONFORMANCE_NO_QUARANTINE');
+    // The live branch, not a mention: the token also appears in a comment.
+    expect(runTs).toMatch(/if \(process\.env\.OPENWOP_CONFORMANCE_NO_QUARANTINE !== '1'\)/);
   });
 });

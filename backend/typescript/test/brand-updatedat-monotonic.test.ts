@@ -3,6 +3,9 @@
  * save must MOVE it. A millisecond clock does not: two saves in one millisecond
  * shared a token and a stale editor's save passed the check, silently
  * overwriting the other edit (the intermittent `brand-route` BR-SP-5 failure).
+ *
+ * TST-BBR-6 (w66 g4, sabotage-witnessed). Red when the same-millisecond branch
+ * uses `>` instead of `>=` (the token would not move).
  */
 import { describe, expect, it } from 'vitest';
 import { nextUpdatedAt } from '../src/features/brand/brandService.js';

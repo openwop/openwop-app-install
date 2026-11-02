@@ -2,7 +2,7 @@
  * A2uiV09Surface — renders a folded A2UI v0.9 surface (RFC 0209, ADR 0749)
  * inside the existing chat A2UI card (`../A2uiSurfaceCard.tsx`). Not a new chat
  * panel: the card registry mounts it for `ui.a2ui-surface` exactly as it mounts
- * the 0.9.1 tree, and its actions ride the same resume/exchange handlers.
+ * the 0.9.1 tree, and its action rides the same resume handler.
  *
  * Invariants (each has a probe in `../__tests__/`):
  *  - render-needs-root   — nothing of the surface renders, and no action is
@@ -10,9 +10,9 @@
  *  - no-code-exec        — every string is a React text node; unknown content
  *    was refused by `profile.ts` before this file sees it.
  *  - no-network-egress   — the profile has no URL-bearing component, and the
- *    only side effect is `onAction('resolve' | 'exchange', value)`.
- *  - action-confinement  — a Button's event name picks between exactly those
- *    two; the value is its `context` resolved against the data model, or the
+ *    only side effect is `onAction('resolve', value)`.
+ *  - action-confinement  — a Button can only resume its interrupt; the value is
+ *    its `context` resolved against the data model, or the
  *    whole model when it has none (RFC 0209 §C.10).
  *
  * Deliberate choices:
@@ -31,9 +31,10 @@ import { Notice } from '../../../ui/Notice.js';
 import { TextField, TextareaField, SelectField, CheckboxField } from '../../../ui/Field.js';
 import type { CardProps } from '../../registry/types.js';
 import { getAt, setAt, type SurfaceState } from './fold.js';
-import type { Binding, DynString, DynValue, RequiredCheck, V09Component } from './profile.js';
+import type { Binding, DynString, RequiredCheck, V09Component } from './profile.js';
 
 const MAX_DEPTH = 32;
+const INPUTS: ReadonlySet<string> = new Set(['TextField', 'CheckBox', 'ChoicePicker', 'DateTimeInput']);
 
 /**
  * ADR 0755 (WIT-A2UI-1) — the most elements one surface may EXPAND to. The
@@ -135,10 +136,8 @@ export function A2uiV09Surface({ state, onAction, isLoading }: { state: SurfaceS
     const c = state.components.get(id);
     return !!c && 'checks' in c && (c.checks ?? []).some((k) => checkFails(k, model));
   });
-  // A failing required check gates SUBMISSION (`resume` carries the data
-  // model); an `exchange` is a conversation turn — asking a question must not
-  // wait on the form being complete.
-  const disabledFor = (name: 'resume' | 'exchange'): boolean => isLoading === true || (name === 'resume' && failing);
+  // A failing required check gates SUBMISSION (`resume` carries the data model).
+  const disabled = isLoading === true || failing;
   const errorFor = (c: V09Component): string | undefined => {
     if (!('checks' in c) || !touched.has(c.id)) return undefined;
     return (c.checks ?? []).find((k) => checkFails(k, model))?.message;
@@ -168,12 +167,16 @@ export function A2uiV09Surface({ state, onAction, isLoading }: { state: SurfaceS
     || (b.accessibility?.label !== undefined ? resolve(b.accessibility.label) : '')
     || t('a2uiV09ActionFallback');
 
-  const submit = (ctx: Record<string, DynValue> | undefined): unknown => {
-    if (!ctx) return model;
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(ctx)) out[k] = isBinding(v) ? getAt(model, v.path) : v;
-    return out;
-  };
+  // ADR 1013 D4 — the resume value: each reachable input answers the question
+  // that shares its id.
+  const submit = (): unknown => ({
+    answers: [...reachable].flatMap((id) => {
+      const c = state.components.get(id);
+      if (!c || !INPUTS.has(c.component)) return [];
+      const answer = valueOf(c);
+      return answer === undefined ? [] : [{ id, answer }];
+    }),
+  });
 
   const render = (id: string, depth: number, path: ReadonlySet<string>): JSX.Element | null => {
     const c = state.components.get(id);
@@ -294,11 +297,10 @@ export function A2uiV09Surface({ state, onAction, isLoading }: { state: SurfaceS
             key={id}
             className="u-self-start"
             variant={BUTTON_VARIANT[c.variant ?? 'default'] ?? 'secondary'}
-            disabled={disabledFor(c.action.event.name)}
-            {...(c.action.event.name === 'resume' && failing && isLoading !== true ? { 'aria-describedby': hintId } : {})}
-            // a2ui-action-confinement: resume the interrupt or send an exchange —
-            // the registry binds these two to the host APIs; nothing else exists.
-            onClick={() => void onAction(c.action.event.name === 'exchange' ? 'exchange' : 'resolve', submit(c.action.event.context))}
+            disabled={disabled}
+            {...(failing && isLoading !== true ? { 'aria-describedby': hintId } : {})}
+            // a2ui-action-confinement: resume the interrupt; nothing else exists.
+            onClick={() => void onAction('resolve', submit())}
           >
             {labelOf(c, inner)}
           </Button>

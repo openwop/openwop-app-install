@@ -52,7 +52,10 @@ export type LiveSyncPlatform = 'meta' | 'google' | 'tiktok' | 'linkedin';
 export type SyncScope = 'dispatched' | 'account';
 export interface SyncFailure { adAccountId?: string; platformCampaignId?: string; reason: string; retryAfterS?: number }
 export interface SyncResult {
-  outcome: 'synced' | 'cooldown' | 'no_dispatches' | 'no_accounts' | 'not_verified';
+  /** ADR 1022 D7 — `sync_failed`: no ad account returned data (a 502). */
+  outcome: 'synced' | 'cooldown' | 'no_dispatches' | 'no_accounts' | 'not_verified' | 'sync_failed';
+  /** `sync_failed`: the first account's reason. */
+  reason?: string;
   retryAtIso?: string;
   platform?: string;
   scope?: SyncScope;
@@ -70,7 +73,14 @@ export interface SyncResult {
 /** Live pull of the 7-day look-back per the org's connector settings. 429 ⇒ cooldown. */
 export async function syncNow(orgId: string, platform: LiveSyncPlatform): Promise<SyncResult> {
   const res = await fetch(`${base}/sync`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ orgId, platform }) }));
-  if (res.status === 429) return (await res.json()) as SyncResult;
+  // 429 = cooldown and 502 = sync_failed: both carry the outcome body. A 502
+  // from the front door is HTML; only a body with an outcome is a result
+  // (CP71UX-6), anything else is the ordinary typed error.
+  if (res.status === 429 || res.status === 502) {
+    let body: SyncResult | undefined;
+    try { body = (await res.clone().json()) as SyncResult; } catch { /* an HTML gateway page: not a result */ }
+    if (body && typeof body.outcome === 'string') return body;
+  }
   return asJson<SyncResult>(res, 'syncNow');
 }
 
@@ -138,8 +148,11 @@ export async function removePixel(orgId: string, platform: PixelPlatform): Promi
 
 
 // ── R2 CC-SP-13 — data freshness ────────────────────────────────────────────
-export async function getSyncStatus(orgId: string): Promise<Array<{ platform: string; lastSyncAt: string }>> {
-  return (await asJson<{ platforms: Array<{ platform: string; lastSyncAt: string }> }>(await fetch(`${base}/orgs/${encodeURIComponent(orgId)}/sync-status`, fetchOpts({ headers: authedHeaders() })), 'getSyncStatus')).platforms;
+/** ADR 1022 D7 — `lastSuccessAt` is when an account last returned data;
+ *  `lastSyncAt` is only the cooldown claim and is never shown as freshness. */
+export interface SyncStatus { platform: string; lastSyncAt: string; lastSuccessAt?: string; lastAttempt?: { at: string; outcome: 'ok' | 'partial' | 'failed'; reason?: string } }
+export async function getSyncStatus(orgId: string): Promise<SyncStatus[]> {
+  return (await asJson<{ platforms: SyncStatus[] }>(await fetch(`${base}/orgs/${encodeURIComponent(orgId)}/sync-status`, fetchOpts({ headers: authedHeaders() })), 'getSyncStatus')).platforms;
 }
 
 // ── R2 CC-SP-6 — the conversions relay queue, finally REACHABLE ─────────────

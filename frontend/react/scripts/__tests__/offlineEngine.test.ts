@@ -401,6 +401,47 @@ describe('ADR 0873 D4–D7 — the engine, run against a simulated worker', () =
     expect(w.preload.enabled).toBe(true);
   });
 
+  // OFF-PROD-1 (Book AI P39, bookai-ea): over a real CDN every precache request
+  // shares one HTTP/2 connection, and an UNREAD body holds its share of the
+  // connection's flow-control window. Holding every Response unread until all of
+  // them arrived filled the window, so the rest never arrived and install hung
+  // (bookai-prod: 119 requested, 6 answered). This network releases a response
+  // only while fewer than WINDOW bodies are unread, as that connection did.
+  it('install completes when the network delivers a response only after earlier bodies are read (HTTP/2 window)', async () => {
+    const WINDOW = 2;
+    const files: Record<string, string> = { ...FILES };
+    for (let i = 0; i < 6; i += 1) files[`/assets/chunk-${i}.js`] = `c${i}`;
+    let unread = 0;
+    const waiting: (() => void)[] = [];
+    // A granted slot counts as unread at once, before its response is built.
+    const release = () => { while (unread < WINDOW && waiting.length) { unread += 1; waiting.shift()!(); } };
+    const inner = site(files);
+    const windowed: Network = async (req) => {
+      await new Promise<void>((go) => { waiting.push(go); release(); });
+      const origin = await inner(req);
+      const type = origin.headers.get('content-type') ?? 'text/plain';
+      const text = await origin.text();
+      let done = false;
+      const body = new ReadableStream<Uint8Array>({
+        pull(ctrl) {
+          ctrl.enqueue(new TextEncoder().encode(text));
+          ctrl.close();
+          if (!done) { done = true; unread -= 1; release(); }
+        },
+      }, { highWaterMark: 0 });
+      return new Response(body, { headers: { 'content-type': type } });
+    };
+    const w = bootWorker(generateServiceWorker(tableFor('v1', Object.keys(files))), windowed);
+    const outcome = await Promise.race([
+      w.lifecycle('install').then(() => 'installed'),
+      new Promise((done) => setTimeout(() => done('hung'), 1_000)),
+    ]);
+    expect(outcome, 'install must not wait on bodies it has not read').toBe('installed');
+    const shell = w.caches.caches.get(`${OFFLINE_CACHE_PREFIX}shell-v1`)!;
+    expect([...shell.store.keys()].map((u) => new URL(u).pathname).sort()).toEqual(Object.keys(files).sort());
+    expect(await (await shell.match('/assets/chunk-5.js'))!.text(), 'the stored body is the real one').toBe('c5');
+  });
+
   it('install is atomic: a script answered with HTML (the ** rewrite) stores NOTHING', async () => {
     const files: Record<string, string> = { ...FILES };
     const net = site(files);

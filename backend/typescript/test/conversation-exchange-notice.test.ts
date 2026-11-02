@@ -8,6 +8,9 @@
  * is mocked here so the test pins EXACTLY the route's serialization: whatever
  * the handler returns as `notice` must reach the ack body verbatim (and stay
  * absent when the handler returns none).
+ *
+ * TST-CKB-3. Red when: the route drops `result.notice` from the ack (case 1) or
+ * always writes a `notice` key (case 2).
  */
 import { describe, expect, it, beforeAll, afterAll, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -54,11 +57,12 @@ async function api<T = Record<string, unknown>>(path: string, init: RequestInit 
 async function openGateRun(workflowId: string): Promise<string> {
   await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({ workflowId, nodes: [{ nodeId: 'gate', typeId: 'core.conversationGate', config: { prompt: 'x' } }], edges: [] }) });
   const runId = (await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs: { provider: 'mock', model: 'mock-1' }, tenantId: '_anon' }) })).body.runId;
-  for (let i = 0; i < 60; i++) {
-    await new Promise((r) => setTimeout(r, 20));
+  // Wait for the gate to suspend; a run that never suspends FAILS here rather than
+  // letting the exchange below fail for an unrelated reason.
+  await vi.waitFor(async () => {
     const s = (await api<{ status: string }>(`/runs/${runId}`)).body.status;
-    if (s.startsWith('waiting')) break;
-  }
+    if (!s.startsWith('waiting')) throw new Error(`run ${runId} not suspended yet (${s})`);
+  }, { timeout: 3000, interval: 20 });
   return runId;
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.campaign-channels",
-  "version": "1.1.0",
+  "version": "1.4.0",
   "kind": "workflow-chain",
   "description": "The five campaign channel child workflows (ADR 0157) — generate→approve DAGs the orchestration fans out over — migrated from the deprecated builtins (ADR 0472 P4). chainIds keep the original ids.",
   "keywords": [
@@ -12,7 +12,7 @@
   "chains": [
     {
       "chainId": "campaign-studio.channel.landing-page",
-      "version": "1.1.0",
+      "version": "1.4.0",
       "label": "Landing page",
       "description": "Generate a campaign landing page from the brief, then approve.",
       "parameters": {
@@ -36,11 +36,22 @@
           "briefId"
         ]
       },
+      "producedVariables": [
+        {
+          "name": "channelResult",
+          "producedBy": "generate",
+          "type": "object",
+          "description": "This channel's result, {channel, draft} or {channel, skipped, reason}; an orchestration maps it out (ADR 1020 D2)."
+        }
+      ],
       "dag": {
         "nodes": [
           {
             "id": "generate",
-            "typeId": "feature.campaign-channels.nodes.generate@1.2.0",
+            "typeId": "feature.campaign-channels.nodes.generate@1.5.0",
+            "config": {
+              "skipDisabledChannel": true
+            },
             "inputs": {
               "briefId": "{{params.briefId}}",
               "channel": "landing_page",
@@ -52,21 +63,41 @@
             "id": "approve",
             "typeId": "core.approvalGate@1.0.0",
             "config": {
-              "prompt": "Review the generated landing page."
+              "prompt": "Review the generated landing page. Approve it to keep it; reject it to discard it."
+            }
+          },
+          {
+            "id": "skipped",
+            "typeId": "core.noop@1.0.0",
+            "name": "Channel not enabled",
+            "inputs": {
+              "summary": "Skipped: this brief does not enable the landing page channel, so nothing was generated."
             }
           }
         ],
         "edges": [
           {
             "from": "generate",
-            "to": "approve"
+            "to": "approve",
+            "condition": {
+              "type": "falsy",
+              "left": "skipped"
+            }
+          },
+          {
+            "from": "generate",
+            "to": "skipped",
+            "condition": {
+              "type": "truthy",
+              "left": "skipped"
+            }
           }
         ]
       }
     },
     {
       "chainId": "campaign-studio.channel.ad-variants",
-      "version": "1.1.0",
+      "version": "1.4.0",
       "label": "Ad variants",
       "description": "Generate ad variants per platform, then approve — accept all or refine a platform set.",
       "parameters": {
@@ -90,11 +121,22 @@
           "briefId"
         ]
       },
+      "producedVariables": [
+        {
+          "name": "channelResult",
+          "producedBy": "generate",
+          "type": "object",
+          "description": "This channel's result, {channel, draft} or {channel, skipped, reason}; an orchestration maps it out (ADR 1020 D2)."
+        }
+      ],
       "dag": {
         "nodes": [
           {
             "id": "generate",
-            "typeId": "feature.campaign-channels.nodes.generate@1.2.0",
+            "typeId": "feature.campaign-channels.nodes.generate@1.5.0",
+            "config": {
+              "skipDisabledChannel": true
+            },
             "inputs": {
               "briefId": "{{params.briefId}}",
               "channel": "ad_variants",
@@ -106,22 +148,42 @@
             "id": "approve",
             "typeId": "core.approvalGate@1.0.0",
             "config": {
-              "prompt": "Review the generated ad variants — accept all or refine a platform set.",
+              "prompt": "Review the generated ad variants. Approve them to keep them; reject them to discard them.",
               "itemsFrom": "platformSets"
+            }
+          },
+          {
+            "id": "skipped",
+            "typeId": "core.noop@1.0.0",
+            "name": "Channel not enabled",
+            "inputs": {
+              "summary": "Skipped: this brief does not enable the ad variants channel, so nothing was generated."
             }
           }
         ],
         "edges": [
           {
             "from": "generate",
-            "to": "approve"
+            "to": "approve",
+            "condition": {
+              "type": "falsy",
+              "left": "skipped"
+            }
+          },
+          {
+            "from": "generate",
+            "to": "skipped",
+            "condition": {
+              "type": "truthy",
+              "left": "skipped"
+            }
           }
         ]
       }
     },
     {
       "chainId": "campaign-studio.channel.email-sequence",
-      "version": "1.1.0",
+      "version": "1.4.0",
       "label": "Email sequence",
       "description": "Generate a campaign email sequence, then approve — accept all or refine specific emails.",
       "parameters": {
@@ -145,11 +207,22 @@
           "briefId"
         ]
       },
+      "producedVariables": [
+        {
+          "name": "channelResult",
+          "producedBy": "generate",
+          "type": "object",
+          "description": "This channel's result, {channel, draft} or {channel, skipped, reason}; an orchestration maps it out (ADR 1020 D2)."
+        }
+      ],
       "dag": {
         "nodes": [
           {
             "id": "generate",
-            "typeId": "feature.campaign-channels.nodes.generate@1.2.0",
+            "typeId": "feature.campaign-channels.nodes.generate@1.5.0",
+            "config": {
+              "skipDisabledChannel": true
+            },
             "inputs": {
               "briefId": "{{params.briefId}}",
               "channel": "email_sequence",
@@ -161,22 +234,42 @@
             "id": "approve",
             "typeId": "core.approvalGate@1.0.0",
             "config": {
-              "prompt": "Review the generated email sequence — accept all or refine specific emails.",
+              "prompt": "Review the generated email sequence. Approve it to keep it; reject it to discard it.",
               "itemsFrom": "emails"
+            }
+          },
+          {
+            "id": "skipped",
+            "typeId": "core.noop@1.0.0",
+            "name": "Channel not enabled",
+            "inputs": {
+              "summary": "Skipped: this brief does not enable the email sequence channel, so nothing was generated."
             }
           }
         ],
         "edges": [
           {
             "from": "generate",
-            "to": "approve"
+            "to": "approve",
+            "condition": {
+              "type": "falsy",
+              "left": "skipped"
+            }
+          },
+          {
+            "from": "generate",
+            "to": "skipped",
+            "condition": {
+              "type": "truthy",
+              "left": "skipped"
+            }
           }
         ]
       }
     },
     {
       "chainId": "campaign-studio.channel.creative-briefs",
-      "version": "1.1.0",
+      "version": "1.4.0",
       "label": "Creative briefs",
       "description": "Generate creative briefs per format, then approve — accept all or refine a format.",
       "parameters": {
@@ -200,11 +293,22 @@
           "briefId"
         ]
       },
+      "producedVariables": [
+        {
+          "name": "channelResult",
+          "producedBy": "generate",
+          "type": "object",
+          "description": "This channel's result, {channel, draft} or {channel, skipped, reason}; an orchestration maps it out (ADR 1020 D2)."
+        }
+      ],
       "dag": {
         "nodes": [
           {
             "id": "generate",
-            "typeId": "feature.campaign-channels.nodes.generate@1.2.0",
+            "typeId": "feature.campaign-channels.nodes.generate@1.5.0",
+            "config": {
+              "skipDisabledChannel": true
+            },
             "inputs": {
               "briefId": "{{params.briefId}}",
               "channel": "creative_briefs",
@@ -216,22 +320,62 @@
             "id": "approve",
             "typeId": "core.approvalGate@1.0.0",
             "config": {
-              "prompt": "Review the generated creative briefs — accept all or refine a format.",
+              "prompt": "Review the generated creative briefs. Approve to add them to your Creative Briefs page as drafts; reject to discard them.",
               "itemsFrom": "briefs"
+            }
+          },
+          {
+            "id": "skipped",
+            "typeId": "core.noop@1.0.0",
+            "name": "Channel not enabled",
+            "inputs": {
+              "summary": "Skipped: this brief does not enable the creative briefs channel, so nothing was generated."
+            }
+          },
+          {
+            "id": "create_briefs",
+            "typeId": "feature.campaign-channels.nodes.create-creative-briefs@1.0.0",
+            "name": "Create the approved briefs",
+            "inputs": {
+              "briefId": "{{params.briefId}}"
             }
           }
         ],
         "edges": [
           {
             "from": "generate",
-            "to": "approve"
+            "to": "approve",
+            "condition": {
+              "type": "falsy",
+              "left": "skipped"
+            }
+          },
+          {
+            "from": "generate",
+            "to": "skipped",
+            "condition": {
+              "type": "truthy",
+              "left": "skipped"
+            }
+          },
+          {
+            "from": "approve",
+            "to": "create_briefs"
+          },
+          {
+            "from": "generate.draft",
+            "to": "create_briefs.draft",
+            "condition": {
+              "type": "falsy",
+              "left": "skipped"
+            }
           }
         ]
       }
     },
     {
       "chainId": "campaign-studio.channel.social-posts",
-      "version": "1.1.0",
+      "version": "1.4.0",
       "label": "Social posts",
       "description": "Generate social posts, then approve — accept all or refine specific posts.",
       "parameters": {
@@ -255,11 +399,22 @@
           "briefId"
         ]
       },
+      "producedVariables": [
+        {
+          "name": "channelResult",
+          "producedBy": "generate",
+          "type": "object",
+          "description": "This channel's result, {channel, draft} or {channel, skipped, reason}; an orchestration maps it out (ADR 1020 D2)."
+        }
+      ],
       "dag": {
         "nodes": [
           {
             "id": "generate",
-            "typeId": "feature.campaign-channels.nodes.generate@1.2.0",
+            "typeId": "feature.campaign-channels.nodes.generate@1.5.0",
+            "config": {
+              "skipDisabledChannel": true
+            },
             "inputs": {
               "briefId": "{{params.briefId}}",
               "channel": "social_posts",
@@ -271,15 +426,35 @@
             "id": "approve",
             "typeId": "core.approvalGate@1.0.0",
             "config": {
-              "prompt": "Review the generated social posts — accept all or refine specific posts.",
+              "prompt": "Review the generated social posts. Approve them to keep them; reject them to discard them.",
               "itemsFrom": "posts"
+            }
+          },
+          {
+            "id": "skipped",
+            "typeId": "core.noop@1.0.0",
+            "name": "Channel not enabled",
+            "inputs": {
+              "summary": "Skipped: this brief does not enable the social posts channel, so nothing was generated."
             }
           }
         ],
         "edges": [
           {
             "from": "generate",
-            "to": "approve"
+            "to": "approve",
+            "condition": {
+              "type": "falsy",
+              "left": "skipped"
+            }
+          },
+          {
+            "from": "generate",
+            "to": "skipped",
+            "condition": {
+              "type": "truthy",
+              "left": "skipped"
+            }
           }
         ]
       }

@@ -124,7 +124,7 @@ beforeAll(async () => {
     runId: `run-b-${randomBytes(4).toString('hex')}`, workflowId: 'wf.any', tenantId: TENANT, status: 'completed', inputs: {},
     metadata: { campaignOrchestration: stampCampaignRun(campaignB, { role: 'spine' }) }, configurable: {}, createdAt: now, updatedAt: now,
   };
-  await insertRunWithStartContext(storage, run);
+  await insertRunWithStartContext(storage, run, { admission: { plan: 'exempt:test-fixture' } });
   runB = run.runId;
 }, 120_000);
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
@@ -258,7 +258,7 @@ describe('ADR 0962 recovery — binding and payload privacy', () => {
     const id = `conflicting-source-${randomBytes(4).toString('hex')}`;
     const now = new Date().toISOString();
     await insertRunWithStartContext(storage, { runId: id, workflowId: 'wf.any', tenantId: TENANT, status: 'completed', inputs: {},
-      metadata: { campaignOrchestration: stampCampaignRun(campaignB, { role: 'spine' }) }, configurable: {}, createdAt: now, updatedAt: now });
+      metadata: { campaignOrchestration: stampCampaignRun(campaignB, { role: 'spine' }) }, configurable: {}, createdAt: now, updatedAt: now }, { admission: { plan: 'exempt:test-fixture' } });
     await expect(mcpGetCampaign({ tenantId: TENANT, runId: id, actingUserId: operatorUserId }, orgA, campaignA.id)).rejects.toMatchObject({ httpStatus: 404 });
   });
 
@@ -267,7 +267,7 @@ describe('ADR 0962 recovery — binding and payload privacy', () => {
     const id = `private-gate-run-${randomBytes(4).toString('hex')}`;
     const now = new Date().toISOString();
     await insertRunWithStartContext(storage, { runId: id, workflowId: 'wf.any', tenantId: TENANT, status: 'waiting-approval', inputs: {},
-      metadata: { campaignOrchestration: stampCampaignRun(campaignA, { role: 'spine' }) }, configurable: {}, createdAt: now, updatedAt: now });
+      metadata: { campaignOrchestration: stampCampaignRun(campaignA, { role: 'spine' }) }, configurable: {}, createdAt: now, updatedAt: now }, { admission: { plan: 'exempt:test-fixture' } });
     const interruptId = `private-gate-${randomBytes(4).toString('hex')}`;
     await storage.insertInterrupt({ interruptId, runId: id, nodeId: 'review', kind: 'approval', token: 'PRIVATE-BEARER-TOKEN',
       data: { title: 'PRIVATE-CLIENT-PAYLOAD', prompt: 'PRIVATE-CREDENTIAL-TEXT', requiredApprovals: 1 }, createdAt: now });

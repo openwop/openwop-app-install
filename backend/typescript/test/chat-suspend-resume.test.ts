@@ -10,6 +10,22 @@
  *  - redacts a pasted secret in the resume value at the boundary (architect
  *    finding #1),
  *  - emits the approval card exactly once across suspend+resume (idempotency).
+ *
+ * Owners: interrupt.md §"key field"; ADR 0582 §9 (the gate's verb), ADR 0936
+ * (the resume-boundary scrub). Tracker TST-CEC-13.
+ * Red when (w67g3, witnessed): the resume stops re-invoking the node (it is
+ * marked completed with the raw value under `output` instead); the approval
+ * card's idempotency key stops being deterministic per run+node.
+ * Redaction is held by MORE THAN ONE layer: dropping the executor's resume-time
+ * `scrubResumeValue` alone left the planted key out of the bundle (w67 round 1).
+ * The marker the bundle carries is `<<redacted:credential-shape>>`, i.e.
+ * `byok/ephemeralRunSecrets.ts` `CREDENTIAL_SHAPE_RE` (the shared credential-shape
+ * pass), so that marker is what the case pins. Recorded double guard (two files):
+ * with that pass removed, `byok/textRedaction.ts` `sanitizeFreeText` still turns
+ * the key into `sk-***`, so "the key is absent" alone cannot show one layer; the
+ * positive control (the rest of the feedback, with the credential-shape marker)
+ * reds when the credential-shape pass is dropped, and also when the value is
+ * dropped entirely.
  */
 
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
@@ -67,7 +83,7 @@ async function startGateRun(workflowId: string, resumeValue: Record<string, unkn
   const token = ints.body.interrupts.find((i) => i.nodeId === 'gate')?.token;
   expect(token, 'an open interrupt token for the gate').toBeTruthy();
   const resolve = await jsonFetch(`/interrupts/${token}`, { method: 'POST', body: JSON.stringify({ resumeValue }) });
-  expect([200, 202, 204]).toContain(resolve.status);
+  expect(resolve.status, JSON.stringify(resolve.body)).toBe(200);
 
   const done = await pollStatus(runId);
   expect(done.status, 'run completes after resume').toBe('completed');
@@ -82,14 +98,17 @@ describe('ctx.suspend re-invoke resume', () => {
     // Re-invoke proof: the node ran again and produced its shaped outputs, not
     // a raw {input: {decision:'accept'}} from a mark-completed resume.
     expect(out.approved).toBe(true);
-    expect(out.action ?? out.decision).toBeDefined();
-    expect((out as Record<string, unknown>).input).toBeUndefined();
+    expect(out.decision).toBe('accept');
+    // A mark-completed resume would carry the raw value under `output`.
+    expect(out.output).toBeUndefined();
   });
 
   it('redacts a pasted secret in the resume value (architect finding #1)', async () => {
     const planted = 'sk-ant-api03-PLANTEDKEYPLANTEDKEYPLANTEDKEYPLANTEDKEYPLANTEDKEY00';
     const { bundleText } = await startGateRun('chat.gate.redact', { decision: 'refine', feedback: `change this, my key is ${planted} btw` });
     expect(bundleText.includes(planted), 'the pasted key MUST NOT reach the event log').toBe(false);
+    // Positive control: the feedback itself reached the log, redacted in place.
+    expect(bundleText).toContain('change this, my key is <<redacted:credential-shape>> btw');
   });
 
   it('emits the approval card exactly once across suspend + resume (idempotency)', async () => {

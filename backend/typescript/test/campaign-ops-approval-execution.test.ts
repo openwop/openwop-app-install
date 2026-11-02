@@ -19,9 +19,13 @@
  * Also witnesses that the same change asked for DIFFERENT pages is not a
  * duplicate (every case here proposes identical intents for its own page).
  *
- * Sabotage, each run 2026-10-19 and each red: dropping the hash check, the
- * asset-version check, separation of duties, the read-back compare (always
- * "confirmed"), and the reconcile read before a retry.
+ * Tracker: TST-CBA-1 (/grade-tests wave 67). Red when (each probe-witnessed,
+ * 2026-10-29): the hash check in `approval.ts` decideAs is dropped (mismatch
+ * case); the moved-asset check is skipped (stale case); separation of duties is
+ * skipped (self-approval case); `writerOf` returns the proposer instead of the
+ * approver (happy case: `updatedBy` and the CMS authority); the read-back compare
+ * always confirms (liar case); a job is `finished` on any confirmed step (partial
+ * case); the reconcile read before a retry is skipped (timeout case).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -100,8 +104,9 @@ const approve = (cookie: string, approvalId: string, hash: string) =>
 async function settledJob(approvalId: string): Promise<Job> {
   return vi.waitFor(async () => {
     const r = await call<{ job: Job | null }>(operatorCookie, 'GET', ops(`/approvals/${approvalId}/job`));
-    expect(r.body.job?.finishedAt, r.raw).toBeTruthy();
-    return r.body.job!;
+    const job = r.body.job;
+    if (!job?.finishedAt) throw new Error(`job not settled: ${r.raw}`);
+    return job;
   }, { timeout: 10_000, interval: 25 });
 }
 
@@ -178,6 +183,9 @@ describe('ADR 0925 — completion comes from reading the destination back', () =
     const page = await getPage(TENANT, orgA, a.pageId);
     expect(page?.sections[0].data.heading).toBe('Happy page — Thursday, Nov 5');
     expect(page?.status).toBe('published'); // the in-place edit of a live page is its publish
+    // Written under the APPROVER's own CMS authority, never the proposer's.
+    expect(page?.updatedBy).toBe(approverId);
+    expect(job.actingUserId).toBe(approverId);
   });
 
   it('one destination failing is visible: needs_attention, never finished', async () => {

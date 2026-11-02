@@ -11,8 +11,13 @@
  *     no node.suspended event, no open interrupts (ADR 0033 unchanged).
  *
  * Plus unit coverage of the fail-closed resume parser.
+ *
+ * Tracker TST-CJB-4 (grade-tests w68). Red when: an interactive run no longer
+ * suspends (`interactiveSession`/`suspend` guard short-circuited); the resume key
+ * loses its nodeId; or the resume parser accepts anything but an exact
+ * `{action:'connected'}`.
  */
-import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import { describe, expect, it, beforeAll, afterAll, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
@@ -39,6 +44,12 @@ async function jsonFetch<T = unknown>(path: string, init: RequestInit = {}): Pro
 }
 
 interface BundleEvent { type?: string; nodeId?: string; payload?: Record<string, unknown> }
+
+/** The connector node's terminal event: its type and the error code it carries. */
+function bqOutcome(events: BundleEvent[]): { type?: string; code?: unknown } {
+  const ev = [...events].reverse().find((e) => e.nodeId === 'bq' && (e.type === 'node.failed' || e.type === 'node.completed'));
+  return { type: ev?.type, code: (ev?.payload?.['error'] as { code?: unknown } | undefined)?.code };
+}
 
 async function pollStatus(runId: string): Promise<{ status: string; events: BundleEvent[] }> {
   let status = 'pending';
@@ -88,12 +99,13 @@ describe('connect-to-continue (ADR 0189 P1)', () => {
     expect(it0?.data?.__resumeKey ?? it0?.data?.key).toBe('conn:bq:bigquery');
 
     const resolve = await jsonFetch(`/interrupts/${it0?.token}`, { method: 'POST', body: JSON.stringify({ resumeValue: { action: 'skip' } }) });
-    expect([200, 202, 204]).toContain(resolve.status);
+    expect(resolve.status).toBe(200);
 
     const done = await pollStatus(runId);
     // Skip degrades to TODAY'S graceful no-connection outcome: the bigquery
     // node maps it to a node failure, so the run fails exactly as headless.
-    expect(['failed', 'completed']).toContain(done.status);
+    expect(done.status).toBe('failed');
+    expect(done.events.filter((e) => e.type === 'interrupt.resolved' && e.nodeId === 'bq')).toHaveLength(1);
     const bundle = JSON.stringify(done.events);
     expect(bundle).toContain('connector_no_connection');
   });
@@ -118,7 +130,11 @@ describe('connect-to-continue (ADR 0189 P1)', () => {
 
     const b = await startRun('conn.parity.b');
     const doneB = await pollStatus(b);
+    expect(doneA.status).toBe('failed');
     expect(doneA.status).toBe(doneB.status);
+    // Same terminal outcome on the connector node itself, not just the run status.
+    expect(bqOutcome(doneA.events)).toEqual(bqOutcome(doneB.events));
+    expect(bqOutcome(doneB.events).type).toBe('node.failed');
   });
 });
 
@@ -147,10 +163,17 @@ describe('connect-to-continue expiry → skip (lazy, CAS-claimed)', () => {
       const sus = await pollStatus(runId);
       expect(sus.status.startsWith('waiting'), `should suspend, was ${sus.status}`).toBe(true);
 
-      // Wait past the 1s deadline, then hit the open-interrupts read (the chat's
-      // poll) — the lazy path claims + resumes-as-skip.
-      await new Promise((r) => setTimeout(r, 1300));
-      const first = await jsonFetch<{ interrupts: unknown[] }>(`/host/openwop-app/runs/${bareRunId(runId)}/interrupts`);
+      // Move the clock past the 1s deadline (only Date is faked, only for this
+      // read), then hit the open-interrupts read (the chat's poll) — the lazy
+      // path claims + resumes-as-skip.
+      vi.useFakeTimers({ toFake: ['Date'] });
+      let first: { status: number; body: { interrupts: unknown[] } };
+      try {
+        vi.setSystemTime(Date.now() + 5_000);
+        first = await jsonFetch<{ interrupts: unknown[] }>(`/host/openwop-app/runs/${bareRunId(runId)}/interrupts`);
+      } finally {
+        vi.useRealTimers();
+      }
       expect(first.body.interrupts, 'expired prompt drops out of the open listing').toHaveLength(0);
 
       // A second concurrent-style read must not double-resume; the run settles
@@ -159,7 +182,7 @@ describe('connect-to-continue expiry → skip (lazy, CAS-claimed)', () => {
       const done = await pollStatus(runId);
       expect(done.status.startsWith('waiting')).toBe(false);
       const resolved = done.events.filter((e) => e.type === 'interrupt.resolved' && e.nodeId === 'bq');
-      expect(resolved.length, 'resolved exactly once (CAS claim)').toBeLessThanOrEqual(1);
+      expect(resolved.length, 'resolved exactly once (CAS claim)').toBe(1);
       expect(JSON.stringify(done.events)).toContain('connector_no_connection');
     } finally {
       if (prev === undefined) delete process.env.OPENWOP_CONNECTION_PROMPT_TIMEOUT_SEC;

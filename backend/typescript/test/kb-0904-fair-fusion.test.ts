@@ -21,6 +21,16 @@
  *  - `nativeScore` + `fusedRank` ride along;
  *  - the eval harness reproduces `scripts/kb-eval/baseline.json` exactly (local-hash is
  *    deterministic, so any retrieval change shows up as a diff here first).
+ *
+ * Tenants `t-fair` and `t-floor` are seeded ONCE in `beforeAll` and only READ by the
+ * cases (they used to be seeded inside cases 1 and 4, so a shuffled run read an
+ * unseeded tenant).
+ *
+ * Tracker TST-DHK-1 (wave 71). Red when: the merge sorts by raw score
+ * (`w71g3-kf-rawsort`); the threshold or `ragQuery` floor reads the mode-scaled
+ * score (`kf-threshold`, `kf-rag`); BM25 relevance is unsaturated (`kf-bm25`);
+ * `fusedRank` stops counting (`kf-rank`); the tokenizer keeps diacritics
+ * (`kf-fold`); `nativeScore` collapses onto the calibrated value (`kf-native-r2`).
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { mkdtempSync, readFileSync } from 'node:fs';
@@ -39,6 +49,11 @@ const here = dirname(fileURLToPath(import.meta.url));
 beforeAll(async () => {
   initInMemorySurfaces({ dataDir: mkdtempSync(join(tmpdir(), 'openwop-kb0904-')) });
   initHostExtPersistence(await openStorage('memory://'));
+  await mixedTenant('t-fair');
+  await seed('t-floor', 'h', 'hybrid', [
+    ['Cold chain', 'Cold-chain pallets stay between 2 and 8 degrees Celsius from dock to truck.'],
+    ['Forklifts', 'Forklift certification renews every three years.'],
+  ]);
 });
 
 const ORG = 'org-a';
@@ -63,7 +78,6 @@ async function mixedTenant(tenantId: string): Promise<void> {
 
 describe('ADR 0904 D4 — tenantRetrieve fuses collections fairly', () => {
   it('a dense exact hit is not buried under a reranked collection’s loose matches', async () => {
-    await mixedTenant('t-fair');
     const r = await tenantRetrieve('t-fair', { query: 'ZX-4471 migration lock runbook', resultLimit: 4 }, KB_MAINTENANCE_CALLER);
     expect(r?.chunks.length).toBeGreaterThan(0);
     // Precondition: the reranked collection's NATIVE score dwarfs the dense cosine, so a
@@ -97,13 +111,11 @@ describe('ADR 0904 D4 — tenantRetrieve fuses collections fairly', () => {
       expect(c.relevanceScore).toBeLessThanOrEqual(1);
       expect(typeof c.nativeScore).toBe('number');
     }
+    // "Kept apart": the reranked collection's native score is on its own scale.
+    expect(r!.chunks.some((c) => c.nativeScore !== c.relevanceScore), 'nativeScore must not be the calibrated value').toBe(true);
   });
 
   it('scoreThreshold applies to the calibrated relevance — a hybrid collection survives a 0.2 floor', async () => {
-    await seed('t-floor', 'h', 'hybrid', [
-      ['Cold chain', 'Cold-chain pallets stay between 2 and 8 degrees Celsius from dock to truck.'],
-      ['Forklifts', 'Forklift certification renews every three years.'],
-    ]);
     const r = await tenantRetrieve('t-floor', { query: 'cold-chain pallets degrees', resultLimit: 5, scoreThreshold: 0.2 }, KB_MAINTENANCE_CALLER);
     // Hybrid native scores are RRF (≈0.03): a raw-score threshold dropped every chunk.
     expect(r!.chunks.map((c) => c.documentTitle)).toContain('Cold chain');

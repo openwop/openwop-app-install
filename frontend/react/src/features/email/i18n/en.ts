@@ -179,7 +179,14 @@ export const messages = {
   senderAdminOnly: 'Only workspace admins can change the sender address.',
   senderUnconfiguredAskAdmin: 'Campaigns can\'t send yet — a workspace admin needs to set the sender address.',
   testSendRateLimited: 'Too many test sends — try again in {{minutes}} min.',
-  senderUnconfiguredNotice: 'Campaigns can\'t send yet — set the verified sender address below (and connect SendGrid under Connections).',
+  senderUnconfiguredNotice: 'Campaigns can\'t send yet — set the verified sender address below.',
+  // ADR 0994 — the send-blocked banner names the providers from provider-status.
+  sendBlockedSenderAndProvider: 'Campaigns can\'t send yet — set the verified sender address below and connect an email provider ({{providers}}) under <0>Connections</0>.',
+  sendBlockedSenderAndProviderAskAdmin: 'Campaigns can\'t send yet — a workspace admin needs to set the sender address, and an email provider ({{providers}}) must be connected under <0>Connections</0>.',
+  sendBlockedProvider: 'Campaigns can\'t send yet — connect an email provider ({{providers}}) under <0>Connections</0>.',
+  providerName_postmark: 'Postmark',
+  providerName_smtp: 'SMTP (e.g. Amazon SES)',
+  providerName_sendgrid: 'SendGrid',
 
   // Toasts / errors
   loadFailed: 'Failed to load.',

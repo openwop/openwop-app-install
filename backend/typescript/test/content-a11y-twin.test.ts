@@ -1,9 +1,17 @@
 /**
- * ADR 0363 P3 — the backend content-a11y rules twin. These cases use the SAME
- * fixtures as the FE `a11y/__tests__/contentA11y.test.ts` so the FE↔BE twin can't
- * drift (same model → same kind/wcag). The backend returns locale-free issues.
- * The one deliberate parser narrowing (oklch/named skip on BE) is asserted
- * separately below, not hidden inside a "mirror" fixture.
+ * ADR 0363 P3 — the backend content-a11y rules twin. These cases COPY the
+ * fixtures of the FE `a11y/__tests__/contentA11y.test.ts` (same model → same
+ * kind/wcag). Because they are copies, a change to the FE checker never reds this
+ * file: it pins the BACKEND rules, and FE↔BE drift is NOT detected here (separate
+ * builds, no shared module). The backend returns locale-free issues. The one
+ * deliberate parser narrowing (oklch/named skip on BE) is asserted separately
+ * below, not hidden inside a "mirror" fixture.
+ *
+ * TST-CKA-4. Red when: an empty alt stops counting as missing (case 1), a one-level
+ * skip is allowed (case 2), "click here" stops being generic (case 3), the AA
+ * threshold for normal text drops to 3:1 (case 4 — the #949494/#fff pair, ratio
+ * ≈ 3.03, computed by hand), an unparseable colour is no longer skipped (cases 4–5),
+ * nodeRef is dropped (case 6), or coerce defaults a heading to anything but 1 (case 7).
  */
 import { describe, it, expect } from 'vitest';
 import { checkContentA11y, coerceContentA11yModel, type ContentA11yModel } from '../src/host/contentA11y.js';
@@ -33,6 +41,11 @@ describe('backend contentA11y twin', () => {
     expect(checkContentA11y({ ...empty, colorPairs: [{ fg: '#777777', bg: '#808080' }] })).toEqual([{ kind: 'low-contrast', severity: 'warning', wcag: '1.4.3' }]);
     expect(checkContentA11y({ ...empty, colorPairs: [{ fg: '#000000', bg: '#ffffff' }] })).toEqual([]);
     expect(checkContentA11y({ ...empty, colorPairs: [{ fg: 'not-a-color', bg: '#fff' }] })).toEqual([]); // FE also skips this
+    // The threshold itself: #949494 on #ffffff — L(#94)=((148/255+0.055)/1.055)^2.4 ≈ 0.2962,
+    // ratio = 1.05 / 0.3462 ≈ 3.03 (by hand). Fails AA for normal text (4.5), passes for
+    // large text (3) — so this pair separates the two thresholds.
+    expect(checkContentA11y({ ...empty, colorPairs: [{ fg: '#949494', bg: '#ffffff' }] })).toEqual([{ kind: 'low-contrast', severity: 'warning', wcag: '1.4.3' }]);
+    expect(checkContentA11y({ ...empty, colorPairs: [{ fg: '#949494', bg: '#ffffff', large: true }] })).toEqual([]);
   });
 
   it('deliberate BE-only narrowing: oklch/named colors skip (fail-safe) — the FE parses oklch, the twin does not', () => {

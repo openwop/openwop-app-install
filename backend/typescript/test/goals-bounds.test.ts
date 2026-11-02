@@ -9,9 +9,18 @@
  *  - cost: contributing-run spend crossing `maxCostUsd` at bind time flips the
  *    goal; re-binding the same run never double-counts.
  *  - replayed evaluations never increment iterations or flip state.
+ *
+ * TST-DEE-2 — red when: the iteration bound moves off the exact landing, a
+ * satisfied final verdict loses to the bound, a replay increments, the
+ * wall-clock pre-check is skipped (judge invoked), the cost flip moves, a negative
+ * `costUsd` is accepted, or a re-bound run is counted twice. Same-run dedup is a
+ * DOUBLE GUARD in `bindContributingRun`: the pre-lookup check (GL2CD-11) and the
+ * in-CAS `ids.includes(runId)` re-check; either alone holds the claim, so the
+ * witnessing probe breaks the shared state both read (the run id is never
+ * recorded in `contributingRunIds`). The wall-clock leg fakes only `Date`.
  */
 
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
@@ -45,6 +54,8 @@ afterAll(async () => {
 });
 
 afterEach(() => __clearGoalVerifiers());
+
+interface ErrBody { error: string; message: string }
 
 async function api<T = Record<string, unknown>>(path: string, init: RequestInit = {}): Promise<{ status: number; body: T }> {
   const res = await fetch(`${BASE}${path}`, {
@@ -111,6 +122,7 @@ describe('iterations bound', () => {
     // Terminal now — a further evaluation is refused, judge not re-invoked.
     const third = await evaluate(id, 'h3');
     expect(third.status).toBe(409);
+    expect(third.body).toMatchObject({ error: 'conflict', message: 'Goal is `bound-exceeded` — a judge may only evaluate an active goal.' });
     expect(calls).toBe(2);
   });
 
@@ -139,13 +151,20 @@ describe('wall-clock bound', () => {
       calls++;
       return { satisfied: true, confidence: 1, runId: 'run-c' };
     });
-    const id = await createGoalWith({ runTimeoutMs: 5 }, 'vb:clock');
-    await new Promise((r) => setTimeout(r, 25));
-    const { status } = await evaluate(id, 'h1');
-    expect(status).toBe(409);
-    expect(calls).toBe(0);
-    const g = await api<{ state: string }>(`/host/openwop-app/goals/${id}`);
-    expect(g.body.state).toBe('bound-exceeded');
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-04-01T09:00:00.000Z'));
+      const id = await createGoalWith({ runTimeoutMs: 5 }, 'vb:clock');
+      vi.setSystemTime(new Date('2026-04-01T09:00:00.006Z')); // 6 ms > 5 ms bound
+      const res = await api<ErrBody>(`/host/openwop-app/goals/${id}/evaluate`, { method: 'POST', body: JSON.stringify({ snapshotRef: 'ev:h1', snapshotHash: 'h1' }) });
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({ error: 'conflict', message: 'Goal bound exceeded (wallclock) — the goal is now `bound-exceeded`.' });
+      expect(calls).toBe(0);
+      const g = await api<{ state: string }>(`/host/openwop-app/goals/${id}`);
+      expect(g.body.state).toBe('bound-exceeded');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -154,17 +173,22 @@ describe('cost bound', () => {
     registerGoalVerifier('vb:cost', async () => ({ satisfied: false, confidence: 0, runId: 'r' }));
     const id = await createGoalWith({ maxCostUsd: 2 }, 'vb:cost');
 
-    expect((await bindRun(id, 'run:a', 0.9)).body.state).toBe('active');
+    // Cent-sensitive: a double-counted rebind (0.99 twice) crosses the cap one
+    // bind early; a dropped cent on run:c leaves it under.
+    expect((await bindRun(id, 'run:a', 0.99)).body.state).toBe('active');
     // Re-binding run:a is idempotent — its cost must count exactly once.
-    expect((await bindRun(id, 'run:a', 0.9)).body.state).toBe('active');
-    expect((await bindRun(id, 'run:b', 0.9)).body.state).toBe('active'); // 1.8 ≤ 2
-    expect((await bindRun(id, 'run:c', 0.3)).body.state).toBe('bound-exceeded'); // 2.1 > 2
+    expect((await bindRun(id, 'run:a', 0.99)).body.state).toBe('active');
+    expect((await bindRun(id, 'run:b', 0.99)).body.state).toBe('active'); // 1.98 ≤ 2
+    expect((await bindRun(id, 'run:c', 0.03)).body.state).toBe('bound-exceeded'); // 2.01 > 2
+    const g = await api<{ progress: { contributingRunIds: string[] } }>(`/host/openwop-app/goals/${encodeURIComponent(id)}`);
+    expect(g.body.progress.contributingRunIds).toEqual(['run:a', 'run:b', 'run:c']);
   });
 
   it('costUsd is validated (negative → 400)', async () => {
     registerGoalVerifier('vb:v', async () => ({ satisfied: false, confidence: 0, runId: 'r' }));
     const id = await createGoalWith({ maxCostUsd: 1 }, 'vb:v');
-    const { status } = await bindRun(id, 'run:neg', -1);
-    expect(status).toBe(400);
+    const res = await bindRun(id, 'run:neg', -1);
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ error: 'validation_error', message: 'Field `costUsd` must be a non-negative number.' });
   });
 });

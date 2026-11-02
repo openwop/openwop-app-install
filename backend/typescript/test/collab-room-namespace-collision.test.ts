@@ -14,6 +14,10 @@
  * collision becomes live with no test to notice.
  *
  * These legs pin the property, not the prose.
+ *
+ * TST-CFC-4. Red when: `createCanvasForTenant` mints anything but `canvas-…`; the
+ * create route reads a caller-supplied canvas id (by property OR destructuring);
+ * canvas rooms become namespaced too (leg 4 — a deliberate premise check, see it).
  */
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -56,6 +60,8 @@ describe('WFMC-1 — a canvas can never mint into the wf: room namespace', () =>
     const createArm = routes.slice(from, to);
     expect(createArm.length, 'a non-empty arm, or this leg is vacuous').toBeGreaterThan(200);
     expect(createArm).not.toMatch(/body\.canvasId/);
+    // …nor by destructuring: `const { canvasId } = req.body` dodges the property spelling.
+    expect(createArm).not.toMatch(/\{[^}]*\bcanvasId\b[^}]*\}\s*=\s*(?:req\.)?body\b/);
   });
 
   it('EVERY canvas-id mint in canvasSurface is the `canvas-` literal (the class, not one site)', () => {
@@ -69,7 +75,7 @@ describe('WFMC-1 — a canvas can never mint into the wf: room namespace', () =>
     const server = readFileSync(join(SRC, 'host', 'collab', 'collabServer.ts'), 'utf8');
     // workflow rooms prefixed, canvas rooms RAW — if this ever became two-sided the
     // legs above would be belt-and-braces rather than the actual guard.
-    expect(server).toMatch(/kind === 'workflow-collab' \? `wf:\$\{resourceId\}` : resourceId/);
+    expect(server, 'PREMISE CHECK, not a regression: if canvas rooms are now namespaced too, the canvas-prefix legs above are belt-and-braces — update this file\'s header and this leg').toMatch(/kind === 'workflow-collab' \? `wf:\$\{resourceId\}` : resourceId/);
   });
 
   it('control: the workflow id grammar PERMITS `:`, so the hazard is real at the grammar level', () => {

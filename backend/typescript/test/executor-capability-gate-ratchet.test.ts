@@ -21,6 +21,10 @@
  *
  * (2) was observed RED against unmodified source: `ads` and `callVideoGenerator`
  * were not routed through any wrapper.
+ *
+ * Tracker: TST-DBC-1. Red when: the executor adds an undeclared ctx key or
+ * drops a declared one, a gated key bypasses its wrapper, a gated key names a
+ * non-toggle feature, or a row loses its reason (probes w70g2-cg-*).
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -55,10 +59,13 @@ function ctxLiteralKeys(): Map<string, string> {
         let e: ts.Expression = p.expression;
         while (ts.isParenthesizedExpression(e)) e = e.expression;
         if (ts.isConditionalExpression(e)) {
-          for (const branch of [e.whenTrue, e.whenFalse]) {
-            let b: ts.Expression = branch;
+          // Nested conditionals (`a ? {…} : b ? {…} : {}`) are walked branch by branch.
+          const branches: ts.Expression[] = [e.whenTrue, e.whenFalse];
+          while (branches.length > 0) {
+            let b = branches.shift()!;
             while (ts.isParenthesizedExpression(b)) b = b.expression;
             if (ts.isObjectLiteralExpression(b)) collect(b);
+            else if (ts.isConditionalExpression(b)) branches.push(b.whenTrue, b.whenFalse);
             else throw new Error(`unhandled spread branch in ctx literal: ${b.getText(sf).slice(0, 80)}`);
           }
         } else if (ts.isObjectLiteralExpression(e)) {

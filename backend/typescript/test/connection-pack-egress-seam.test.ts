@@ -15,6 +15,11 @@
  *
  * @see docs/adr/0169-rfc-0120-provider-apihosts-witness.md
  * @see src/routes/connectionPackSeam.ts
+ *
+ * Tracker TST-CJB-7 (grade-tests w68). Red when: the seam family is mounted without
+ * OPENWOP_TEST_SEAM_ENABLED; a provider with no apiHosts or an unresolved provider
+ * stops failing closed with its own code; matching becomes a substring test; or a
+ * missing `provider` stops being a 400 validation_error.
  */
 
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
@@ -83,8 +88,10 @@ describe('RFC 0120 §10 — connection-packs/egress-check seam (enabled)', () =>
       it('400s on missing provider / requestHost', async () => {
         const r1 = await fetch(`${BASE}${base}/egress-check`, { method: 'POST', headers: H, body: JSON.stringify({ provider: 'meta-ads' }) });
         expect(r1.status).toBe(400);
+        expect(((await r1.json()) as { error?: string }).error).toBe('validation_error');
         const r2 = await fetch(`${BASE}${base}/egress-check`, { method: 'POST', headers: H, body: JSON.stringify({ requestHost: 'facebook.com' }) });
         expect(r2.status).toBe(400);
+        expect(((await r2.json()) as { error?: string }).error).toBe('validation_error');
       });
 
       it('install alias is reachable (the behavioral leg installs before probing)', async () => {
@@ -92,8 +99,12 @@ describe('RFC 0120 §10 — connection-packs/egress-check seam (enabled)', () =>
           method: 'POST', headers: H,
           body: JSON.stringify({ manifest: { name: 'x', version: '1.0.0', kind: 'connection', engines: { openwop: '>=1.0.0' }, provider: {} } }),
         });
-        // Reachable (not 404) — a malformed manifest still returns a structured non-404 result.
-        expect(res.status).not.toBe(404);
+        // Reachable — a malformed manifest returns the structured install outcome
+        // (installed:false + a validation_error), not a 404 and not a throw.
+        expect(res.status).toBe(200);
+        const out = (await res.json()) as { installed?: boolean; errors?: Array<{ code?: string }> };
+        expect(out.installed).toBe(false);
+        expect(out.errors?.[0]?.code).toBe('validation_error');
       });
     });
   }

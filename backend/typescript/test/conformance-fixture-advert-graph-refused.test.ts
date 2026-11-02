@@ -11,6 +11,11 @@
  *
  * The fixture below is the corpus file's graph, inline, so the executor half of
  * this test does not depend on the vendored copy (the loader test reads that).
+ *
+ * Tracker: TST-CGK-3. Red when (host/index.ts): `fixtureIsAdvertisable` stops
+ * withholding a refused graph, or `fixtureGraphRefused` stops returning true for a
+ * graph `topologicalOrder` rejects. The refused-set literal is two-sided: a newly
+ * refused OR newly accepted vendored fixture reds it.
  */
 import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -23,24 +28,48 @@ import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { ensureNodesRegistered } from '../src/bootstrap/nodes.js';
 import { executeRun } from '../src/executor/executor.js';
 import { fixtureGraphRefused, listLoadedConformanceFixtures } from '../src/host/index.js';
-import type { WorkflowDefinition } from '../src/executor/types.js';
+import type { EdgeDef, WorkflowDefinition } from '../src/executor/types.js';
 import type { RunRecord } from '../src/types.js';
 
 /** conformance-approval-reject-loopback (2.43.1), normalised the way the loader does. */
-const LOOPBACK = {
+const LOOPBACK_EDGES: EdgeDef[] = [
+  { edgeId: 'start-gate', sourceNodeId: 'start', targetNodeId: 'gate', triggerRule: 'any_success' },
+  { edgeId: 'gate-revise', sourceNodeId: 'gate', targetNodeId: 'revise', triggerRule: 'any_failed' },
+  { edgeId: 'revise-gate', sourceNodeId: 'revise', targetNodeId: 'gate', triggerRule: 'any_success' },
+];
+const LOOPBACK: WorkflowDefinition = {
   workflowId: 'conformance-approval-reject-loopback',
   nodes: [
     { nodeId: 'start', typeId: 'core.noop', config: {} },
     { nodeId: 'gate', typeId: 'core.approvalGate', config: { actions: ['accept', 'reject'] } },
     { nodeId: 'revise', typeId: 'core.noop', config: {} },
   ],
-  edges: [
-    { id: 'start-gate', sourceNodeId: 'start', targetNodeId: 'gate', triggerRule: 'any_success' },
-    { id: 'gate-revise', sourceNodeId: 'gate', targetNodeId: 'revise', triggerRule: 'any_failed' },
-    { id: 'revise-gate', sourceNodeId: 'revise', targetNodeId: 'gate', triggerRule: 'any_success' },
-  ],
+  edges: LOOPBACK_EDGES,
   settings: { timeout: 0, maxLoopbackIterations: 2 },
-} as unknown as WorkflowDefinition;
+};
+
+/** A vendored fixture file, as much of it as the graph predicate reads. */
+interface VendoredFixture {
+  id?: string;
+  workflowId?: string;
+  nodes?: Array<{ id?: string; nodeId?: string; typeId?: string; config?: Record<string, unknown> }>;
+  edges?: Array<{ id?: string; edgeId?: string; sourceNodeId: string; targetNodeId: string; triggerRule?: EdgeDef['triggerRule'] }>;
+}
+/** Normalise a vendored fixture the way the loader does (corpus `id` → host `nodeId`/`edgeId`). */
+function normalise(raw: VendoredFixture): WorkflowDefinition {
+  return {
+    workflowId: raw.workflowId ?? raw.id ?? '',
+    nodes: (raw.nodes ?? []).map((n) => ({ nodeId: n.nodeId ?? n.id ?? '', typeId: n.typeId ?? '', ...(n.config ? { config: n.config } : {}) })),
+    ...(raw.edges ? {
+      edges: raw.edges.map((e) => ({
+        edgeId: e.edgeId ?? e.id ?? `${e.sourceNodeId}-${e.targetNodeId}`,
+        sourceNodeId: e.sourceNodeId,
+        targetNodeId: e.targetNodeId,
+        ...(e.triggerRule ? { triggerRule: e.triggerRule } : {}),
+      })),
+    } : {}),
+  };
+}
 
 beforeAll(() => {
   ensureNodesRegistered();
@@ -66,23 +95,24 @@ describe('a fixture the executor refuses is not advertised', () => {
   });
 
   it('polarity: an RFC 0022 dispatch loop and a plain DAG are NOT refused', () => {
-    const dispatchLoop = {
+    const dispatchLoop: WorkflowDefinition = {
       workflowId: 'x',
       nodes: [{ nodeId: 'sup', typeId: 'core.dispatch', config: {} }, { nodeId: 'w', typeId: 'core.noop', config: {} }],
-      edges: [{ id: 'a', sourceNodeId: 'sup', targetNodeId: 'w' }, { id: 'b', sourceNodeId: 'w', targetNodeId: 'sup' }],
-    } as unknown as WorkflowDefinition;
+      edges: [{ edgeId: 'a', sourceNodeId: 'sup', targetNodeId: 'w' }, { edgeId: 'b', sourceNodeId: 'w', targetNodeId: 'sup' }],
+    };
     expect(fixtureGraphRefused(dispatchLoop)).toBe(false);
-    const dag = { ...LOOPBACK, edges: LOOPBACK.edges!.slice(0, 2) } as WorkflowDefinition;
+    const dag: WorkflowDefinition = { ...LOOPBACK, edges: LOOPBACK_EDGES.slice(0, 2) };
     expect(fixtureGraphRefused(dag)).toBe(false);
     // No edges ⇒ the implicit linear chain, which cannot cycle.
-    expect(fixtureGraphRefused({ ...LOOPBACK, edges: undefined } as unknown as WorkflowDefinition)).toBe(false);
+    const { edges: _loopEdges, ...noEdges } = LOOPBACK;
+    expect(fixtureGraphRefused(noEdges)).toBe(false);
   });
 
   it('over every vendored fixture, the predicate withholds exactly the graphs the executor refuses', () => {
     const dir = join(import.meta.dirname, '..', '..', '..', 'conformance-fixtures');
     const docs = readdirSync(dir).filter((f) => f.endsWith('.json')).map((f) => {
-      const raw = JSON.parse(readFileSync(join(dir, f), 'utf8')) as { id?: string; workflowId?: string; nodes?: Array<{ id?: string; nodeId?: string }> };
-      return { ...raw, workflowId: raw.workflowId ?? raw.id, nodes: (raw.nodes ?? []).map((n) => ({ ...n, nodeId: n.nodeId ?? n.id ?? '' })) } as unknown as WorkflowDefinition;
+      const raw: VendoredFixture = JSON.parse(readFileSync(join(dir, f), 'utf8'));
+      return normalise(raw);
     });
     expect(docs.length, 'non-vacuity: fixtures are vendored').toBeGreaterThan(20);
     const refused = docs.filter((d) => fixtureGraphRefused(d)).map((d) => d.workflowId);

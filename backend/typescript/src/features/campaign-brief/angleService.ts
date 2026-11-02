@@ -12,7 +12,7 @@
  * @see docs/adr/0403-market-intel-pipeline.md
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
 import { cleanContent, cleanString } from '../../host/boundedStrings.js';
@@ -116,9 +116,32 @@ export async function persistAngles(
     throw new OpenwopError('validation_error', `A generation persists at most ${MAX_PER_GENERATION} angles.`, 413, { max: MAX_PER_GENERATION });
   }
   const now = new Date().toISOString();
-  const rows: AdAngle[] = items.map((item) => ({ id: randomUUID(), tenantId, orgId, briefId, ...item, createdBy, createdAt: now }));
-  for (const row of rows) await angles.put(row);
-  return rows;
+  // ADR 1020 D10 (CS70WF-14) — a content-derived id + put-if-absent (the VOC
+  // `evidenceId` precedent): a retry, a replay fork or a second research run that
+  // argues the SAME claim from the SAME proof returns the stored angle instead of
+  // appending a duplicate set (the ids were random). An angle that already exists
+  // is returned AS STORED: the new candidate's hook variants are not merged in
+  // (hooks reach the org hook bank on their own deterministic ids either way).
+  const out: AdAngle[] = [];
+  const seen = new Set<string>();
+  for (const item of items) {
+    const id = angleId(tenantId, briefId, item.claim, item.proofRefs);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const row: AdAngle = { id, tenantId, orgId, briefId, ...item, createdBy, createdAt: now };
+    if (await angles.putIfAbsent(row)) { out.push(row); continue; }
+    const stored = await getAngle(tenantId, briefId, id);
+    out.push(stored ?? row);
+  }
+  return out;
+}
+
+/** ADR 1020 D10 — the angle's identity: tenant, brief, the normalized claim and
+ *  the sorted proof refs. Whitespace and case in the claim do not make a new angle. */
+export function angleId(tenantId: string, briefId: string, claim: string, proofRefs: readonly string[]): string {
+  const norm = claim.replace(/\s+/g, ' ').trim().toLowerCase();
+  const refs = [...new Set(proofRefs)].sort().join(',');
+  return `ang-${createHash('sha256').update(`${tenantId}::${briefId}::${norm}::${refs}`, 'utf8').digest('hex').slice(0, 32)}`;
 }
 
 export async function listAngles(tenantId: string, briefId: string): Promise<AdAngle[]> {

@@ -34,6 +34,15 @@
  * workspace, switch into it — and assert BOTH directions. The refusal cases are the
  * point: a guard widened without observing what it still refuses is exactly the
  * shape of gap that produced this defect.
+ *
+ * Sabotage-witnessed (grade-tests w74): `requireOrgScope` reading `user.tenantId`
+ * instead of `tenantOf(req)` reds the owner, written, absent and second-copy cases;
+ * returning the home tenant to the handler reds the written and second-copy cases;
+ * dropping the org-tenant check in `assertOrgScope` reds the outsider and
+ * cross-workspace cases; the `documents/locate` copy reading the home tenant reds the
+ * second-copy case. A refusal is asserted by its body (`not_found`,
+ * "Organization not found."), not by the status alone, because a toggle-off 404
+ * answers with the same status.
  */
 
 import http from 'node:http';
@@ -45,6 +54,8 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 
 let BASE: string;
 let server: http.Server;
+const ENV_KEYS = ['OPENWOP_STORAGE_DSN', 'OPENWOP_SESSION_SECRET', 'OPENWOP_TEST_AUTH_ENABLED', 'OPENWOP_DEMO_MODE', 'OPENWOP_AUTH_DISABLE_COOKIES'] as const;
+const savedEnv = new Map<string, string | undefined>(ENV_KEYS.map((k) => [k, process.env[k]]));
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -62,12 +73,26 @@ beforeAll(async () => {
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
   }
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+afterAll(async () => {
+  await new Promise<void>((res) => server.close(() => res()));
+  for (const [k, v] of savedEnv) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+});
 
-interface Res<T = any> { status: number; body: T }
+interface Res<T> { status: number; body: T }
+interface WorkspaceBody { workspaceId: string }
+interface SwitchBody { active: string }
+interface OrgBody { org?: { orgId: string }; orgId?: string }
+interface FormRow { formId: string; tenantId: string; title: string }
+interface FormsBody { forms?: FormRow[] }
+interface FormCreated extends Partial<FormRow> { form?: FormRow }
+interface DocCreated { documentId?: string; document?: { documentId: string } }
+interface LocateBody { orgId: string }
+interface ErrorBody { error: string; message: string }
+const ORG_NOT_FOUND: ErrorBody = { error: 'not_found', message: 'Organization not found.' };
 function client() {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  // One boundary: the parsed JSON is typed by the caller's `T` (the route's shape).
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
@@ -77,9 +102,10 @@ function client() {
     const single = res.headers.get('set-cookie');
     const setCookies: string[] = typeof h.getSetCookie === 'function' ? h.getSetCookie() : single ? [single] : [];
     for (const sc of setCookies) { const m = /(__session=[^;]+)/.exec(sc); if (m) cookie = m[1]; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    const parsed: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    return { status: res.status, body: parsed as T };
   };
-  return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
+  return { get: <T>(p: string) => call<T>('GET', p), post: <T>(p: string, b?: unknown) => call<T>('POST', p, b) };
 }
 
 let n = 0;
@@ -96,21 +122,21 @@ async function signIn(c: ReturnType<typeof client>): Promise<void> {
 /** A REAL `ws:` shared workspace, created + owned + switched into through the routes.
  *  The switch is what makes active !== personal, which is the whole point. */
 async function sharedWorkspace(c: ReturnType<typeof client>): Promise<string> {
-  const ws = await c.post('/host/openwop-app/workspaces', { name: `WS ${n++}` });
+  const ws = await c.post<WorkspaceBody>('/host/openwop-app/workspaces', { name: `WS ${n++}` });
   expect(ws.status, JSON.stringify(ws.body)).toBe(201);
   expect(ws.body.workspaceId, 'must be a real shared workspace, not a personal tenant').toMatch(/^ws:/);
-  const sw = await c.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws.body.workspaceId)}/switch`);
+  const sw = await c.post<SwitchBody>(`/host/openwop-app/workspaces/${encodeURIComponent(ws.body.workspaceId)}/switch`);
   expect(sw.status, JSON.stringify(sw.body)).toBe(200);
   expect(sw.body.active).toBe(ws.body.workspaceId);
   return ws.body.workspaceId;
 }
 
 async function createOrg(c: ReturnType<typeof client>): Promise<string> {
-  const org = await c.post('/host/openwop-app/orgs', { name: `Org ${n++}` });
+  const org = await c.post<OrgBody>('/host/openwop-app/orgs', { name: `Org ${n++}` });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   const orgId = org.body.org?.orgId ?? org.body.orgId;
   expect(orgId, 'org creation must yield an id').toBeTruthy();
-  return orgId;
+  return orgId ?? '';
 }
 
 describe('ADR 0508 — org-scoped features inside a real shared workspace', () => {
@@ -120,7 +146,7 @@ describe('ADR 0508 — org-scoped features inside a real shared workspace', () =
     await sharedWorkspace(c);
     const orgId = await createOrg(c);
 
-    const res = await c.get(ORG_SCOPED(orgId));
+    const res = await c.get<FormsBody>(ORG_SCOPED(orgId));
     // 200 specifically. `not.toBe(404)` would also accept a 403, which is a DIFFERENT
     // wrong answer — it would mean the tenant was fixed but the subject still missed
     // the membership row, and the bug would read as fixed while access stayed denied.
@@ -128,9 +154,10 @@ describe('ADR 0508 — org-scoped features inside a real shared workspace', () =
       res.status,
       `the owner must reach their own org in their own workspace; got ${res.status} ${JSON.stringify(res.body)}`,
     ).toBe(200);
+    expect(Array.isArray(res.body.forms), 'a 200 must carry the forms list').toBe(true);
   });
 
-  it('a NON-MEMBER is refused — the widened guard still fences outsiders', async () => {
+  it('an OUTSIDER (another tenant) is refused 404 — the widened guard still fences outsiders', async () => {
     const owner = client();
     await signIn(owner);
     await sharedWorkspace(owner);
@@ -140,13 +167,14 @@ describe('ADR 0508 — org-scoped features inside a real shared workspace', () =
     const outsider = client();
     await signIn(outsider);
 
-    const res = await outsider.get(ORG_SCOPED(orgId));
+    const res = await outsider.get<ErrorBody>(ORG_SCOPED(orgId));
     // 404, not 403: no-existence-leak is the intended semantic for an org outside the
     // tenant the caller is acting in.
     expect(
       res.status,
       `an outsider must not reach another workspace's org; got ${res.status} ${JSON.stringify(res.body)}`,
     ).toBe(404);
+    expect(res.body).toMatchObject(ORG_NOT_FOUND);
   });
 
   it('a member of workspace A cannot reach an org in workspace B — cross-workspace isolation', async () => {
@@ -162,11 +190,12 @@ describe('ADR 0508 — org-scoped features inside a real shared workspace', () =
     await signIn(b);
     await sharedWorkspace(b);
 
-    const res = await b.get(ORG_SCOPED(orgInA));
+    const res = await b.get<ErrorBody>(ORG_SCOPED(orgInA));
     expect(
       res.status,
       `workspace B must not reach workspace A's org; got ${res.status} ${JSON.stringify(res.body)}`,
     ).toBe(404);
+    expect(res.body).toMatchObject(ORG_NOT_FOUND);
   });
 
   it('a row WRITTEN in a shared workspace is stored under the WORKSPACE, not the caller home tenant', async () => {
@@ -178,7 +207,7 @@ describe('ADR 0508 — org-scoped features inside a real shared workspace', () =
     const ws = await sharedWorkspace(c);
     const orgId = await createOrg(c);
 
-    const created = await c.post(ORG_SCOPED(orgId), { title: 'Round trip', fields: [] });
+    const created = await c.post<FormCreated>(ORG_SCOPED(orgId), { title: 'Round trip', fields: [] });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     const row = created.body.form ?? created.body;
     expect(
@@ -188,9 +217,9 @@ describe('ADR 0508 — org-scoped features inside a real shared workspace', () =
 
     // And it must be readable back through the same org-scoped route — write and
     // read agreeing on the tenant is the property, not either one alone.
-    const list = await c.get(ORG_SCOPED(orgId));
+    const list = await c.get<FormsBody>(ORG_SCOPED(orgId));
     expect(list.status).toBe(200);
-    const ids = (list.body.forms ?? []).map((f: { formId: string }) => f.formId);
+    const ids = (list.body.forms ?? []).map((f) => f.formId);
     expect(ids, 'the row written here must be readable here').toContain(row.formId);
   });
 
@@ -199,7 +228,7 @@ describe('ADR 0508 — org-scoped features inside a real shared workspace', () =
     await signIn(a);
     await sharedWorkspace(a);
     const orgInA = await createOrg(a);
-    const madeInA = await a.post(ORG_SCOPED(orgInA), { title: 'Secret A', fields: [] });
+    const madeInA = await a.post<FormCreated>(ORG_SCOPED(orgInA), { title: 'Secret A', fields: [] });
     expect(madeInA.status, JSON.stringify(madeInA.body)).toBe(201);
 
     // A second workspace owned by a different human, with its own org.
@@ -208,9 +237,9 @@ describe('ADR 0508 — org-scoped features inside a real shared workspace', () =
     await sharedWorkspace(b);
     const orgInB = await createOrg(b);
 
-    const listB = await b.get(ORG_SCOPED(orgInB));
+    const listB = await b.get<FormsBody>(ORG_SCOPED(orgInB));
     expect(listB.status).toBe(200);
-    const titles = (listB.body.forms ?? []).map((f: { title: string }) => f.title);
+    const titles = (listB.body.forms ?? []).map((f) => f.title);
     expect(titles, "workspace B must not see workspace A's rows").not.toContain('Secret A');
   });
 
@@ -226,14 +255,15 @@ describe('ADR 0508 — org-scoped features inside a real shared workspace', () =
     await sharedWorkspace(c);
     const orgId = await createOrg(c);
 
-    const doc = await c.post(`/host/openwop-app/documents/orgs/${encodeURIComponent(orgId)}/documents`, {
+    const doc = await c.post<DocCreated>(`/host/openwop-app/documents/orgs/${encodeURIComponent(orgId)}/documents`, {
       title: 'Locate me', kind: 'doc', format: 'markdown',
     });
     expect(doc.status, JSON.stringify(doc.body)).toBe(201);
     const documentId = doc.body.documentId ?? doc.body.document?.documentId;
     expect(documentId, 'document creation must yield an id').toBeTruthy();
+    if (!documentId) throw new Error('document creation yielded no id');
 
-    const located = await c.get(`/host/openwop-app/documents/locate/${encodeURIComponent(documentId)}`);
+    const located = await c.get<LocateBody>(`/host/openwop-app/documents/locate/${encodeURIComponent(documentId)}`);
     expect(
       located.status,
       `a document created in this workspace must be locatable from it; got ${located.status} ${JSON.stringify(located.body)}`,
@@ -248,10 +278,11 @@ describe('ADR 0508 — org-scoped features inside a real shared workspace', () =
     await signIn(c);
     const orgId = await createOrg(c);
 
-    const res = await c.get(ORG_SCOPED(orgId));
+    const res = await c.get<FormsBody>(ORG_SCOPED(orgId));
     expect(
       res.status,
       `a personal-tenant org must still resolve; got ${res.status} ${JSON.stringify(res.body)}`,
     ).toBe(200);
+    expect(Array.isArray(res.body.forms), 'a 200 must carry the forms list').toBe(true);
   });
 });

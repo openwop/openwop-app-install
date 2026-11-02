@@ -3,6 +3,12 @@
  * the list carries the edge summary, delete reports its outcome, status and
  * retry are org-scoped (another org's hostname 404s), and force-delete on a
  * row that is not stuck releasing is refused.
+ *
+ * Tracker TST-CXA-3. The org scope is witnessed with a SAME-TENANT second org
+ * (a cross-tenant caller is refused by the tenant check first): red when
+ * `getDomain` drops its `orgId` comparison (customDomains.ts). Also red when the
+ * unready-provider reason is dropped from the edge summary, or force-delete is
+ * allowed on a row that is not stuck releasing.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -28,13 +34,23 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+/** The fields these cases read, across the domain routes' JSON bodies. */
+interface Body {
+  orgId?: string;
+  user?: { tenantId?: string };
+  edge?: { provider: string; ready: boolean; reason?: string };
+  domain?: { hostname: string };
+  outcome?: string;
+  error?: string;
+  message?: string;
+}
+interface Res { status: number; body: Body }
 function client() {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out: Body = res.status === 204 ? {} : ((await res.json().catch(() => ({}))) as Body);
     return { status: res.status, body: out };
   };
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b), del: (p: string) => call('DELETE', p) };
@@ -44,7 +60,7 @@ async function marketer(): Promise<{ user: ReturnType<typeof client>; orgId: str
   const user = client();
   const login = await user.post('/host/openwop-app/test/login', { email: `cd-${Date.now()}-${n++}@acme.test` });
   const org = await user.post('/host/openwop-app/orgs', { name: 'Domain Co' });
-  return { user, orgId: org.body.orgId, tenantId: login.body.user?.tenantId ?? '' };
+  return { user, orgId: org.body.orgId ?? '', tenantId: login.body.user?.tenantId ?? '' };
 }
 
 const mgmt = (orgId: string, sfx = ''): string => `/host/openwop-app/custom-domains/orgs/${encodeURIComponent(orgId)}/domains${sfx}`;
@@ -64,7 +80,7 @@ describe('ADR 0906 P3 — domain routes', () => {
       const { user, orgId } = await marketer();
       const res = await user.get(mgmt(orgId));
       expect(res.body.edge).toMatchObject({ provider: 'gcp-certificate-manager', ready: false });
-      expect(res.body.edge.reason).toMatch(/CERT_MAP/);
+      expect(res.body.edge?.reason).toBe('OPENWOP_CUSTOM_DOMAIN_CERT_MAP is not set');
     } finally { delete process.env.OPENWOP_CUSTOM_DOMAIN_EDGE; }
   });
 
@@ -74,12 +90,34 @@ describe('ADR 0906 P3 — domain routes', () => {
     expect((await a.user.post(mgmt(a.orgId), { hostname: 'shop.p3brand.test' })).status).toBe(201);
     const status = await a.user.get(mgmt(a.orgId, '/shop.p3brand.test/status'));
     expect(status.status).toBe(200);
-    expect(status.body.domain.hostname).toBe('shop.p3brand.test');
-    expect((await b.user.get(mgmt(b.orgId, '/shop.p3brand.test/status'))).status).toBe(404);
-    expect((await b.user.post(mgmt(b.orgId, '/shop.p3brand.test/retry'))).status).toBe(404);
-    expect((await a.user.del(mgmt(a.orgId, '/shop.p3brand.test?force=1'))).status).toBe(409);
+    expect(status.body.domain?.hostname).toBe('shop.p3brand.test');
+    // SAME tenant, OTHER org: the caller is a member of both, so only the org
+    // comparison in getDomain can refuse.
+    const other = await a.user.post('/host/openwop-app/orgs', { name: 'Other Co' });
+    expect(other.status).toBe(201);
+    const otherOrgId = other.body.orgId ?? '';
+    for (const res of [
+      await a.user.get(mgmt(otherOrgId, '/shop.p3brand.test/status')),
+      await a.user.post(mgmt(otherOrgId, '/shop.p3brand.test/retry')),
+    ]) {
+      expect(res.status).toBe(404);
+      expect(res.body).toMatchObject({ error: 'not_found', message: 'Domain not found.' });
+    }
+    // Cross-tenant as well.
+    for (const res of [
+      await b.user.get(mgmt(b.orgId, '/shop.p3brand.test/status')),
+      await b.user.post(mgmt(b.orgId, '/shop.p3brand.test/retry')),
+    ]) {
+      expect(res.status).toBe(404);
+      expect(res.body).toMatchObject({ error: 'not_found', message: 'Domain not found.' });
+    }
+    const force = await a.user.del(mgmt(a.orgId, '/shop.p3brand.test?force=1'));
+    expect(force.status).toBe(409);
+    expect(force.body).toMatchObject({ error: 'conflict', message: 'Force removal is only available after 3 failed release attempts.' });
     const del = await a.user.del(mgmt(a.orgId, '/shop.p3brand.test'));
     expect(del.status).toBe(200);
     expect(del.body.outcome).toBe('deleted');
+    const after = await a.user.get(mgmt(a.orgId));
+    expect(JSON.stringify(after.body)).not.toContain('shop.p3brand.test');
   });
 });

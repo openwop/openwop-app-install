@@ -10,6 +10,19 @@
  * `routes/approvals.ts` did: a new approval kind fails the build until its audience is
  * stated. My own ADR enumerated 6 of the 14 tenant-scoped kinds — the prose undercounted
  * and the ratchet is what catches that.
+ *
+ * Overlaps, kept on purpose: leg 1 repeats at runtime what the
+ * `Record<ApprovalKind, Audience>` annotation already makes a tsc error (a
+ * missing or extra key), so the ratchet holds even in a lane that skips
+ * typecheck. Leg 4 is implied by leg 2's literal `toEqual`s (w66 aud-ref went
+ * red in leg 2, not leg 4, because `claude-code-permission` still carries the
+ * variant); it stays as the statement of WHY the type is discriminated.
+ *
+ * TST-BXF-1. Red when: a kind is added to or removed from the table without its
+ * twin in APPROVAL_KINDS (w66 aud-extra, aud-missing), a scoped kind becomes
+ * null or changes scope (aud-content, aud-dealer), `run-proposal` stops being
+ * tenant-wide, or `assistant-action` loses its conditional variant (aud-runprop,
+ * aud-assist).
  */
 import { describe, expect, it } from 'vitest';
 import { APPROVAL_KINDS } from '../src/host/approvalService.js';

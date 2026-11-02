@@ -18,6 +18,7 @@ import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { listChain, __resetAuditChain } from '../src/host/auditChainService.js';
 import { recordConsent, mergeConsentCategories, __resetConsentStore } from '../src/features/consent/consentService.js';
+import { stripComments } from './helpers/stripComments.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CONSENT_SRC = join(HERE, '..', 'src', 'features', 'consent');
@@ -51,7 +52,7 @@ describe('ADR 0657 D11 — consent audit rows carry a subject HASH, never the ra
     let sites = 0;
     const offenders: string[] = [];
     for (const f of files) {
-      const src = readFileSync(join(CONSENT_SRC, f), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+      const src = stripComments(readFileSync(join(CONSENT_SRC, f), 'utf8'));
       for (const m of src.matchAll(/appendAudit\s*\(/g)) {
         sites += 1;
         const open = src.indexOf('{', m.index);

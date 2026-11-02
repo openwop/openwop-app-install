@@ -17,6 +17,10 @@
  *
  * No prior test anywhere asserts this event from a live run — the docblocks in
  * cad/campaign-studio/drawings tests mention it in prose only.
+ *
+ * TST-BZD-16 (grade-tests w66). Red when the documents pack stops emitting, stops marking
+ * a registered type `registered`, or emits for an UNBOUND template. Honest ceiling: run
+ * settle is a bounded status poll (no hook exists to await a background run).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -99,8 +103,6 @@ async function jsonFetch<T = unknown>(path: string, init: RequestInit = {}): Pro
 function defFor(workflowId: string, templateId: string): WorkflowDefinition {
   return {
     workflowId,
-    name: 'G8 emission probe',
-    version: '1.0.0',
     nodes: [{
       nodeId: 'gen',
       typeId: 'feature.documents.nodes.generate-from-template',
@@ -116,7 +118,7 @@ function defFor(workflowId: string, templateId: string): WorkflowDefinition {
       },
     }],
     edges: [],
-  } as unknown as WorkflowDefinition;
+  };
 }
 
 async function runToCompletion(workflowId: string): Promise<{ runId: string; status: string; events: Array<{ type: string; payload?: Record<string, unknown> }> }> {

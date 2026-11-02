@@ -13,7 +13,7 @@
  * (bucketing.ts), so a run can stamp its variant and replay it verbatim.
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { DurableCollection } from '../hostExtPersistence.js';
 import { canonicalize } from '../auditChainService.js';
 import { isSellableBundleFeature } from '../featureBundles.js';
@@ -40,7 +40,129 @@ const store = new DurableCollection<ToggleConfig>('feature-toggle', (c) => c.id)
  * Restore the whole seam — registrar, array and dispatch — if a feature again
  * needs to tear down side-effects on an OFF flip; do not re-add the registrar
  * alone.
+ *
+ * RESTORED as a write seam, ADR 0951 P2.5 (session replay must delete an
+ * organization's recordings when replay is turned off, and re-enabling must not
+ * revive them). Unlike the removed one it fires after EVERY stored write (save,
+ * delete, retire, tenant enable/disable, tenant purge), not only a global
+ * `status` change. A listener failure is logged and never fails the toggle
+ * write; a listener must therefore also reconcile on its own schedule.
+ *
+ * CORRECTED (ADR 0951 P2 review, finding 1): the seam used to pass only the ids,
+ * so a listener re-read LIVE state when it ran. A listener that outlived its
+ * budget, a process that died before it ran, or an admin who wrote again within
+ * seconds then resolved a LATER state, and an OFF that happened was never seen.
+ * Each write now carries what was written (`rows`: each id's stored row after
+ * the write, `null` when the override was removed) and a `writeId`, and a
+ * feature may register an INTENT that is awaited BEFORE the store write (a throw
+ * fails the write) and told when that write did not land. The core resolves
+ * nothing for a feature: `resolveWrittenToggle` is the same pure resolution as
+ * a live read, applied to the written row.
  */
+export interface ToggleWrite {
+  /** Minted per write attempt; the intent and the listener see the same id. */
+  writeId: string;
+  ids: readonly string[];
+  tenantId?: string;
+  /** Each id's stored row after the write; `null` = no stored row (the code default applies). */
+  rows: Readonly<Record<string, ToggleConfig | null>>;
+}
+export type ToggleWriteListener = (write: ToggleWrite) => Promise<void>;
+/** `prepare` is awaited before the store write (a throw fails the write);
+ *  `abandon` is called, best-effort, when that write did not land. */
+export interface ToggleWriteIntent { prepare: (write: ToggleWrite) => Promise<void>; abandon?: (write: ToggleWrite) => Promise<void> }
+const writeListeners = new Map<string, ToggleWriteListener>();
+const writeIntents = new Map<string, ToggleWriteIntent>();
+/** Register by name (a repeated boot overwrites its own slot). */
+export function registerToggleWriteListener(name: string, listener: ToggleWriteListener): void {
+  writeListeners.set(name, listener);
+}
+/** Register by name (a repeated boot overwrites its own slot). */
+export function registerToggleWriteIntent(name: string, intent: ToggleWriteIntent): void {
+  writeIntents.set(name, intent);
+}
+/** How the written row resolves for `subject` (null when `id` was not written
+ *  or is not a registered toggle). The same resolution as a live read. */
+export function resolveWrittenToggle(write: Pick<ToggleWrite, 'rows'>, id: string, subject: ToggleSubject): ResolvedAssignment | null {
+  if (!Object.prototype.hasOwnProperty.call(write.rows, id)) return null;
+  const def = getToggleDefault(id);
+  if (!def) return null;
+  const row = write.rows[id];
+  return resolveConfig(row ? mergeStoredOverDefault(def, row) : def, subject);
+}
+function toggleWrite(rows: Record<string, ToggleConfig | null>, tenantId?: string): ToggleWrite {
+  return { writeId: randomUUID(), ids: Object.keys(rows), ...(tenantId ? { tenantId } : {}), rows };
+}
+async function prepareToggleWrite(write: ToggleWrite): Promise<void> {
+  if (write.ids.length === 0) return;
+  try {
+    for (const intent of writeIntents.values()) await intent.prepare(write);
+  } catch (err) {
+    // An earlier intent may already hold a marker for a write that now fails.
+    await abandonToggleWrite(write);
+    throw err;
+  }
+}
+async function abandonToggleWrite(write: ToggleWrite): Promise<void> {
+  for (const [name, intent] of writeIntents) {
+    await intent.abandon?.(write).catch((err: unknown) => {
+      log.warn('feature_toggle_write_intent_abandon_failed', { intent: name, ids: write.ids.join(','), error: err instanceof Error ? err.message : String(err) });
+    });
+  }
+}
+/**
+ * Run the store step of a prepared write. A step that throws has an unknown
+ * outcome: the store may have committed before it failed. So the rows are read
+ * back. If none landed, the write is abandoned. If all landed, listeners are
+ * notified. If only some landed, an intent is prepared for those rows and then
+ * the original is abandoned. If the read-back fails, the intent stays in place,
+ * because a leftover intent is only conservative and dropping one could lose an
+ * OFF that did land. The step's error is rethrown in every case.
+ */
+async function storeToggleWrite<T>(write: ToggleWrite, step: () => Promise<T>): Promise<T> {
+  try {
+    return await step();
+  } catch (err) {
+    await settleThrownToggleWrite(write);
+    throw err;
+  }
+}
+async function settleThrownToggleWrite(write: ToggleWrite): Promise<void> {
+  const landed: string[] = [];
+  try {
+    for (const id of write.ids) if (revisionOf(await store.get(id)) === revisionOf(write.rows[id] ?? null)) landed.push(id);
+  } catch (err) {
+    log.warn('feature_toggle_write_outcome_unknown', { ids: write.ids.join(','), error: err instanceof Error ? err.message : String(err) });
+    return;
+  }
+  if (landed.length === 0) { await abandonToggleWrite(write); return; }
+  if (landed.length === write.ids.length) { await notifyToggleWrite(write); return; }
+  const part = toggleWrite(Object.fromEntries(landed.map((id) => [id, write.rows[id] ?? null])), write.tenantId);
+  try { await prepareToggleWrite(part); } catch { return; }
+  await abandonToggleWrite(write);
+  await notifyToggleWrite(part);
+}
+
+/** A toggle write waits at most this long per listener. A slower listener keeps
+ *  running and is logged, so it cannot stall an admin save or an account purge. */
+export const TOGGLE_WRITE_LISTENER_BUDGET_MS = 2_000;
+async function notifyToggleWrite(write: ToggleWrite): Promise<void> {
+  const { ids } = write;
+  if (ids.length === 0) return;
+  for (const [name, listener] of writeListeners) {
+    const fail = (err: unknown): void => {
+      log.error('feature_toggle_write_listener_failed', { listener: name, ids: ids.join(','), error: err instanceof Error ? err.message : String(err) });
+    };
+    let timer: NodeJS.Timeout | undefined;
+    const run = listener(write).then(() => 'done' as const, (err: unknown) => { fail(err); return 'done' as const; });
+    const budget = new Promise<'late'>((resolve) => { timer = setTimeout(() => resolve('late'), TOGGLE_WRITE_LISTENER_BUDGET_MS); });
+    try {
+      if (await Promise.race([run, budget]) === 'late') {
+        log.warn('feature_toggle_write_listener_slow', { listener: name, ids: ids.join(','), budgetMs: TOGGLE_WRITE_LISTENER_BUDGET_MS });
+      }
+    } finally { clearTimeout(timer); }
+  }
+}
 
 /** The effective config for one toggle: stored override layered over the
  *  feature-declared default. A stored override only applies while the feature
@@ -145,8 +267,11 @@ export async function deleteConfig(
   }
   if (!stored) return null;
   const def = getToggleDefault(id);
-  await store.delete(id);
+  const write = toggleWrite({ [id]: null });
+  await prepareToggleWrite(write);
+  await storeToggleWrite(write, () => store.delete(id));
   log.info('feature_toggle_override_deleted', { id, deletedBy, storedStatus: stored.status, revertsTo: def?.status ?? null });
+  await notifyToggleWrite(write);
   return def ?? null;
 }
 
@@ -214,16 +339,22 @@ export async function saveConfig(
     // row overrode, so a later compiled-default change surfaces as drift.
     ...(def ? { overriddenDefaultStatus: def.status } : {}),
   };
+  const write = toggleWrite({ [config.id]: next });
   if (opts.expectedRevision !== undefined) {
     // ADR 0819 §5 — the revision check IS the write: a CAS against the exact
     // row the editor loaded. A compare-then-put would only narrow the race.
     const stored = await store.get(config.id);
-    if (revisionOf(stored) !== opts.expectedRevision || !(await store.compareAndSwap(stored, next))) {
+    if (revisionOf(stored) !== opts.expectedRevision) throw revisionConflict(config.id, revisionOf(stored));
+    await prepareToggleWrite(write);
+    if (!(await storeToggleWrite(write, () => store.compareAndSwap(stored, next)))) {
+      await abandonToggleWrite(write);
       throw revisionConflict(config.id, revisionOf(await store.get(config.id)));
     }
   } else {
-    await store.put(next);
+    await prepareToggleWrite(write);
+    await storeToggleWrite(write, () => store.put(next));
   }
+  await notifyToggleWrite(write);
   // Return the EFFECTIVE config (declared metadata merged back from code) so the
   // API response is complete even though the stored row is lean.
   return def ? mergeStoredOverDefault(def, next) : next;
@@ -239,9 +370,16 @@ export async function saveConfig(
  */
 export async function retireToggleOverrides(ids: readonly string[]): Promise<string[]> {
   const removed: string[] = [];
-  for (const id of ids) {
-    if (await store.delete(id)) removed.push(id);
-  }
+  const present: string[] = [];
+  for (const id of ids) if (await store.get(id)) present.push(id);
+  const write = toggleWrite(Object.fromEntries(present.map((id) => [id, null])));
+  await prepareToggleWrite(write);
+  await storeToggleWrite(write, async () => {
+    for (const id of present) {
+      if (await store.delete(id)) removed.push(id);
+    }
+  });
+  await notifyToggleWrite({ ...write, ids: removed, rows: Object.fromEntries(removed.map((id) => [id, null])) });
   return removed;
 }
 
@@ -279,7 +417,10 @@ export async function enableTenantOverride(
       updatedAt: new Date().toISOString(),
       updatedBy: actor,
     };
-    if (await store.compareAndSwap(stored, next)) return 'enabled';
+    const write = toggleWrite({ [id]: next }, tenantId);
+    await prepareToggleWrite(write);
+    if (await storeToggleWrite(write, () => store.compareAndSwap(stored, next))) { await notifyToggleWrite(write); return 'enabled'; }
+    await abandonToggleWrite(write);
     // Lost the race — another writer changed the row; re-read and retry.
   }
   throw new Error(`enableTenantOverride: CAS contention on toggle '${id}' after ${MAX_TRIES} attempts`);
@@ -313,7 +454,10 @@ export async function disableTenantOverride(
       updatedAt: new Date().toISOString(),
       updatedBy: actor,
     };
-    if (await store.compareAndSwap(stored, next)) return 'disabled';
+    const write = toggleWrite({ [id]: next }, tenantId);
+    await prepareToggleWrite(write);
+    if (await storeToggleWrite(write, () => store.compareAndSwap(stored, next))) { await notifyToggleWrite(write); return 'disabled'; }
+    await abandonToggleWrite(write);
   }
   throw new Error(`disableTenantOverride: CAS contention on toggle '${id}' after ${MAX_TRIES} attempts`);
 }
@@ -331,14 +475,17 @@ export async function disableTenantOverride(
  */
 export async function purgeTenantOverrides(tenantId: string): Promise<string[]> {
   if (!tenantId) return [];
-  const touched: string[] = [];
+  const nexts: ToggleConfig[] = [];
   for (const cfg of await store.list()) {
     if (!cfg.tenantOverrides || !(tenantId in cfg.tenantOverrides)) continue;
     const { [tenantId]: _removed, ...rest } = cfg.tenantOverrides;
-    await store.put({ ...cfg, tenantOverrides: rest });
-    touched.push(cfg.id);
+    nexts.push({ ...cfg, tenantOverrides: rest });
   }
-  return touched;
+  const write = toggleWrite(Object.fromEntries(nexts.map((cfg) => [cfg.id, cfg])), tenantId);
+  await prepareToggleWrite(write);
+  await storeToggleWrite(write, async () => { for (const cfg of nexts) await store.put(cfg); });
+  await notifyToggleWrite(write);
+  return nexts.map((cfg) => cfg.id);
 }
 
 // ── Feature dependency lifecycle (ADR 0194) ───────────────────────────────────

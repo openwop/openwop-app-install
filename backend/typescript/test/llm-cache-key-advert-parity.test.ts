@@ -26,16 +26,27 @@
  * between §C landing and ADR 0549 P3. This is the mechanical guard that stops it
  * recurring: the seam that reports the host's recipe and the constant that
  * advertises it are compared against the SAME function `callAI` uses.
+ *
+ * TST-DKD-4 (grade-tests wave 72) — CORRECTION. An ADR 0812 P3c-0 edit deleted
+ * the advertisement leg, saying `replayDeterminism` "exists only in the retired
+ * v1 document (the v2 root carries no such record)". That was false: the v2 root
+ * serves it (`routes/discovery.ts` `v2MultiAgentFamily`, executionModel version
+ * >= 4), so the property this file is named for went unguarded. The leg is
+ * restored against the v2 root. And every expected value is now a LITERAL:
+ * importing `SEMANTIC_REQUEST_RECIPE_V2` and recomputing the digest with
+ * `semanticRequestDigestV2` made the oracle move with any change to either (w72
+ * probes lc-const / lc-advert were vacuous). The digest literal was captured
+ * once (2026-10-31) from this PROBE; the golden-vector contract for the recipe
+ * itself is `semantic-request-digest-v2.test.ts` (overlap with the "which
+ * fields change the key" legs is recorded dedupe-needs-human-ask; both kept).
+ * Red when: the advert names another recipe (lc-advert), the seam reports or
+ * computes another recipe (lc-seam-recipe, lc-seam-digest, lc-const).
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
-import {
-  semanticRequestDigestV2,
-  SEMANTIC_REQUEST_RECIPE_V2,
-} from '../src/providers/llmCacheKey.js';
 
 let server: http.Server;
 let BASE: string;
@@ -51,7 +62,12 @@ beforeAll(async () => {
   // below has nothing to read — it originally skipped on `version < 4` and
   // passed while asserting nothing, caught by sabotaging the advert to
   // `homegrown-v9` and watching it stay green.
+  // CORRECTED (w72): the version is the highest N with EVERY phase 1..N on
+  // (`multiAgentExecutionModelVersion`), so phase 2 is required too — with only
+  // base + PHASE_4 the host serves version 1 and no `replayDeterminism` at all.
+  // (Phase 3 is implied by PHASE_4.)
   process.env.OPENWOP_MULTI_AGENT_EXECUTION_MODEL = 'true';
+  process.env.OPENWOP_MULTI_AGENT_EXECUTION_MODEL_PHASE_2 = 'true';
   process.env.OPENWOP_MULTI_AGENT_EXECUTION_MODEL_PHASE_4 = 'true';
   const app = await createApp({
     port: 0,
@@ -71,6 +87,7 @@ beforeAll(async () => {
 afterAll(async () => {
   delete process.env.OPENWOP_TEST_SEAM_ENABLED;
   delete process.env.OPENWOP_MULTI_AGENT_EXECUTION_MODEL;
+  delete process.env.OPENWOP_MULTI_AGENT_EXECUTION_MODEL_PHASE_2;
   delete process.env.OPENWOP_MULTI_AGENT_EXECUTION_MODEL_PHASE_4;
   await new Promise<void>((res) => server.close(() => res()));
 });
@@ -96,17 +113,32 @@ async function seam(body: Record<string, unknown>): Promise<{ cacheKey: string; 
   return (await res.json()) as { cacheKey: string; recipe: string };
 }
 
+/** RFC 0150 §C v2 — the canonical recipe since replay.md adopted it. */
+const CANONICAL_RECIPE = 'openwop-semantic-request-v2';
+/** The v2 digest of PROBE, captured once (2026-10-31) — a literal, so a recipe
+ *  change cannot move the expectation with it. */
+const PROBE_DIGEST_V2 = 'b8d3304e343970ac53f3cc7cb486b5f2ac91147262c57994abca3f5688fd9f93';
+
 describe('ADR 0549 P3 — the advertised recipe is the recipe the host computes', () => {
-  // ADR 0812 P3c-0 — the discovery-advert leg is deleted: `multiAgent.executionModel.replayDeterminism`
-  // exists only in the retired v1 document (the v2 root carries no such record); the seam legs below remain.
+  // CORRECTED (w72): the v2 root DOES serve `multiAgent.executionModel.replayDeterminism`
+  // (version >= 4, set in beforeAll); the ADR 0812 P3c-0 note that deleted this leg was wrong.
+  it('the v2 root advertises spec-rfc-0041, and the seam computes the canonical recipe', async () => {
+    const res = await fetch(`${BASE}/.well-known/openwop`, { headers: { 'OpenWOP-Version': '2' } });
+    expect(res.status).toBe(200);
+    const root = (await res.json()) as { multiAgent?: { executionModel?: { version?: number; replayDeterminism?: { llmCacheKeyRecipe?: unknown } } } };
+    expect(root.multiAgent?.executionModel?.version).toBeGreaterThanOrEqual(4);
+    // RFC 0041 §A: `spec-rfc-0041` claims the CANONICAL recipe — honest only while
+    // the host computes RFC 0150 §C v2.
+    expect(root.multiAgent?.executionModel?.replayDeterminism?.llmCacheKeyRecipe).toBe('spec-rfc-0041');
+    expect((await seam(PROBE)).recipe).toBe(CANONICAL_RECIPE);
+  });
+
   it('the seam reports the CANONICAL recipe, and reports which one', async () => {
     const { cacheKey, recipe } = await seam(PROBE);
-    expect(recipe).toBe(SEMANTIC_REQUEST_RECIPE_V2);
-    // Not a shape check: the exact digest, recomputed through the same function
-    // `callAI` uses. A seam that drifted to any other recipe fails here rather
-    // than in a peer's replay six months from now.
-    expect(cacheKey).toBe(semanticRequestDigestV2(PROBE));
-    expect(cacheKey).toMatch(/^[0-9a-f]{64}$/);
+    expect(recipe).toBe(CANONICAL_RECIPE);
+    // Not a shape check: the exact v2 digest of PROBE. A seam that drifted to
+    // any other recipe fails here rather than in a peer's replay months later.
+    expect(cacheKey).toBe(PROBE_DIGEST_V2);
   });
 
   it('the three fields v1 wrongly excluded DO change the seam key', async () => {

@@ -2,6 +2,11 @@
  * Code Export (ADR 0173) — generator UNIT tests (pure, no boot) + a ROUTE harness
  * (toggle gate, RBAC, IDOR/404, target validation, export → capability-token download,
  * unmapped-component → warning). Extends app-builder; output is a Media asset token.
+ *
+ * TST-CFB-3. Red when: HTML escaping drops `<`/`>`; an unknown target passes
+ * `isExportTarget`; export needs only `workspace:read`; the `code-export` toggle is
+ * not consulted; an unmapped component stops warning; a canvas in ANOTHER tenant
+ * is exportable.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -13,6 +18,7 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { __putCanvasForTest } from '../src/host/canvasSurface.js';
 import { generate, EXPORT_TARGETS } from '../src/features/app-builder/export/generators.js';
 import { buildAppBuilderSurface } from '../src/features/app-builder/surface.js';
+import type { BundleScope } from '../src/host/inMemorySurfaces.js';
 
 // ── pure generator unit tests (no app boot needed) ──────────────────────────
 const SAMPLE = {
@@ -77,13 +83,18 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+interface ExportBody {
+  assetToken?: string; fileCount?: number; fileName?: string; serveUrl?: string; warnings?: string[];
+  orgId?: string; user?: { userId: string };
+  error?: string; message?: string; details?: { field?: string };
+}
+interface Res { status: number; body: ExportBody }
 function client() {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = (res.status === 204 ? {} : await res.json().catch(() => ({}))) as ExportBody;
     return { status: res.status, body: out };
   };
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
@@ -98,8 +109,8 @@ async function ownerWithMember(role: string): Promise<{ owner: ReturnType<typeof
   const member = client();
   const mr = await member.post('/host/openwop-app/test/login', { email: `ce-${Date.now()}-${n++}@acme.test`, tenantId });
   const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
-  const orgId = org.body.orgId;
-  await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: mr.body.user.userId, roles: [role] });
+  const orgId = org.body.orgId ?? '';
+  await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: mr.body.user?.userId, roles: [role] });
   return { owner, member, orgId, tenantId };
 }
 const ep = (orgId: string, canvasId: string) => `/host/openwop-app/app-builder/orgs/${encodeURIComponent(orgId)}/canvases/${encodeURIComponent(canvasId)}/export`;
@@ -111,10 +122,13 @@ async function seedCanvas(tenantId: string, canvasId: string): Promise<void> {
 describe('code-export route', () => {
   it('404s when the code-export toggle is off', async () => {
     await enable('code-export', 'off');
-    const { owner, orgId, tenantId } = await ownerWithMember('owner');
-    await seedCanvas(tenantId, 'cv-off');
-    expect((await owner.post(ep(orgId, 'cv-off'), { target: 'html-css' })).status).toBe(404);
-    await enable('code-export', 'on');
+    try {
+      const { owner, orgId, tenantId } = await ownerWithMember('owner');
+      await seedCanvas(tenantId, 'cv-off');
+      expect((await owner.post(ep(orgId, 'cv-off'), { target: 'html-css' })).status).toBe(404);
+    } finally {
+      await enable('code-export', 'on');
+    }
   });
 
   it('owner exports → a capability token that downloads a zip', async () => {
@@ -131,14 +145,24 @@ describe('code-export route', () => {
     const dl = await fetch(`${BASE}${r.body.serveUrl}`);
     expect(dl.status).toBe(200);
     expect(dl.headers.get('content-type')).toContain('zip');
+    // …and the bytes ARE a zip (local-file-header magic), not an error page.
+    expect([...new Uint8Array(await dl.arrayBuffer()).slice(0, 4)]).toEqual([0x50, 0x4b, 0x03, 0x04]);
   });
 
   it('rejects an invalid target (400) and an unknown canvas (404)', async () => {
     await enable('code-export', 'on');
     const { owner, orgId, tenantId } = await ownerWithMember('owner');
     await seedCanvas(tenantId, 'cv2');
-    expect((await owner.post(ep(orgId, 'cv2'), { target: 'svelte' })).status).toBe(400);
+    const bad = await owner.post(ep(orgId, 'cv2'), { target: 'svelte' });
+    expect(bad.status).toBe(400);
+    expect(bad.body.error).toBe('validation_error');
+    expect(bad.body.details?.field).toBe('target');
     expect((await owner.post(ep(orgId, 'nope'), { target: 'html-css' })).status).toBe(404);
+    // IDOR: a canvas that EXISTS in another tenant is the same uniform 404.
+    const stranger = await ownerWithMember('owner');
+    await seedCanvas(stranger.tenantId, 'cv-foreign');
+    expect((await stranger.owner.post(ep(stranger.orgId, 'cv-foreign'), { target: 'html-css' })).status).toBe(201); // positive control
+    expect((await owner.post(ep(orgId, 'cv-foreign'), { target: 'html-css' })).status).toBe(404);
   });
 
   it('viewer cannot export (403)', async () => {
@@ -149,16 +173,18 @@ describe('code-export route', () => {
   });
 });
 
+const DEFAULT_SCOPE: BundleScope = { tenantId: 'default' };
+
 describe('ctx.features[app-builder].export surface (ADR 0173 Phase 2)', () => {
   it('exports an inline app model → a token, with warnings', async () => {
-    const surface = buildAppBuilderSurface({ tenantId: 'default' } as Parameters<typeof buildAppBuilderSurface>[0]);
+    const surface = buildAppBuilderSurface(DEFAULT_SCOPE);
     const out = (await surface.export({ target: 'html-css', app: SAMPLE })) as { assetToken: string; fileCount: number; warnings: string[] };
     expect(out.assetToken).toBeTruthy();
     expect(out.fileCount).toBeGreaterThan(0);
     expect(out.warnings.some((w) => w.includes('mysteryWidget'))).toBe(true);
   });
   it('rejects an unknown target', async () => {
-    const surface = buildAppBuilderSurface({ tenantId: 'default' } as Parameters<typeof buildAppBuilderSurface>[0]);
+    const surface = buildAppBuilderSurface(DEFAULT_SCOPE);
     await expect(surface.export({ target: 'cobol', app: SAMPLE })).rejects.toMatchObject({ code: 'validation_error' });
   });
 });

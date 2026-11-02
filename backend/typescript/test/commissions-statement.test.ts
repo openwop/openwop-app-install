@@ -2,6 +2,11 @@
  * Sales Commissions — Phase 2 (statement computation).
  * Unit: effectiveRate (accelerator selection) + periodContains (Q/month bounds).
  * Route: base computation over CRM won deals, cap scaling, subject-scoped reads.
+ *
+ * TST-CFE-3. Red when: accelerators sort lowest-first; the period's YEAR or month
+ * range is ignored; the statement list or by-id read stops scoping to the rep;
+ * deals of another owner are counted; the cap stops scaling; a plan with an
+ * approved statement deletes, or its drafts stop cascading; a draft pays.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -37,6 +42,8 @@ describe('commissions — periodContains', () => {
     expect(periodContains('2026-03-15', '2026-02')).toBe(false);
     expect(periodContains(undefined, '2026-Q1')).toBe(false);
     expect(periodContains('2025-12-31', '2026-Q1')).toBe(false);
+    // Same quarter MONTHS, wrong YEAR: only the year check can refuse it.
+    expect(periodContains('2025-02-15', '2026-Q1')).toBe(false);
   });
 });
 
@@ -53,14 +60,19 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+interface Stmt { statementId: string; planId: string; status: string; total: number; approvedBy?: string }
+interface StmtBody extends Partial<Stmt> {
+  user?: { userId: string }; orgId?: string; lines?: unknown[]; statements?: Stmt[];
+  review?: { approvalId: string }; error?: string; message?: string;
+}
+interface Res { status: number; body: StmtBody }
 interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> }
 function client(): Client {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = (res.status === 204 ? {} : await res.json().catch(() => ({}))) as StmtBody;
     return { status: res.status, body: out };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), del: (p) => call('DELETE', p) };
@@ -72,10 +84,10 @@ async function scenario(): Promise<{ admin: Client; rep: Client; rep2: Client; o
   const admin = client();
   await admin.post('/host/openwop-app/test/login', { email: `a-${Date.now()}-${n++}@acme.test`, tenantId });
   const rep = client();
-  const repId = (await rep.post('/host/openwop-app/test/login', { email: `r-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
+  const repId = (await rep.post('/host/openwop-app/test/login', { email: `r-${Date.now()}-${n++}@acme.test`, tenantId })).body.user?.userId ?? '';
   const rep2 = client();
-  const rep2Id = (await rep2.post('/host/openwop-app/test/login', { email: `r2-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
-  const orgId = (await admin.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+  const rep2Id = (await rep2.post('/host/openwop-app/test/login', { email: `r2-${Date.now()}-${n++}@acme.test`, tenantId })).body.user?.userId ?? '';
+  const orgId = (await admin.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId ?? '';
   for (const [subject, who] of [[repId, 'rep'], [rep2Id, 'rep2']] as const) {
     await admin.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: who, subject, roles: ['editor'] });
   }
@@ -98,7 +110,7 @@ async function wonDeal(admin: Client, orgId: string, title: string, amount: numb
 async function approveStatementViaReview(c: Client, B: string, statementId: string): Promise<Res> {
   const submit = await c.post(`${B}/statements/${encodeURIComponent(statementId)}/approve`);
   if (submit.status !== 202) return submit;
-  return c.post(`/host/openwop-app/reviews/approval:${submit.body.review.approvalId}/actions/approve`);
+  return c.post(`/host/openwop-app/reviews/approval:${submit.body.review?.approvalId}/actions/approve`);
 }
 
 describe('commissions — statement computation + subject-scoped reads', () => {
@@ -111,10 +123,10 @@ describe('commissions — statement computation + subject-scoped reads', () => {
     await wonDeal(admin, orgId, 'Other-period', 5000, repId, '2026-05-01'); // Q2 — excluded
     await wonDeal(admin, orgId, 'Rep2', 9000, rep2Id, '2026-02-10'); // other rep — excluded
 
-    const computed = await admin.post(`${B}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
+    const computed = await admin.post(`${B}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
     expect(computed.status, JSON.stringify(computed.body)).toBe(201);
     expect(computed.body.lines).toHaveLength(2); // only repId's Q1 won deals
-    expect(computed.body.total).toBeCloseTo(150); // (1000+2000) * 5%
+    expect(computed.body.total).toBe(150); // (1000+2000) * 5%, quantised
     expect(computed.body.status).toBe('draft');
 
     // Subject-scoping: the rep sees only their own; rep2 sees none; admin sees all.
@@ -122,10 +134,10 @@ describe('commissions — statement computation + subject-scoped reads', () => {
     expect((await rep2.get(`${B}/statements`)).body.statements).toHaveLength(0);
     expect((await admin.get(`${B}/statements`)).body.statements).toHaveLength(1);
     // rep2 cannot read the rep's statement by id (no existence leak)
-    expect((await rep2.get(`${B}/statements/${encodeURIComponent(computed.body.statementId)}`)).status).toBe(404);
-    expect((await rep.get(`${B}/statements/${encodeURIComponent(computed.body.statementId)}`)).status).toBe(200);
+    expect((await rep2.get(`${B}/statements/${encodeURIComponent(computed.body.statementId ?? '')}`)).status).toBe(404);
+    expect((await rep.get(`${B}/statements/${encodeURIComponent(computed.body.statementId ?? '')}`)).status).toBe(200);
     // a rep cannot compute (payout-affecting → manage-only)
-    expect((await rep.post(`${B}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' })).status).toBe(403);
+    expect((await rep.post(`${B}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: repId, period: '2026-Q1' })).status).toBe(403);
   });
 
   it('applies a per-rule cap by scaling lines', async () => {
@@ -133,26 +145,26 @@ describe('commissions — statement computation + subject-scoped reads', () => {
     const B = cbase(orgId);
     const plan = (await admin.post(`${B}/plans`, { name: 'Capped', currency: 'USD', assignment: { kind: 'rep', ref: repId }, effectiveFrom: '2026-01-01', rules: [{ basis: 'deal-won', type: 'percentage', rate: 10, cap: 100 }] })).body;
     await wonDeal(admin, orgId, 'Big', 5000, repId, '2026-02-10'); // 10% = 500, capped to 100
-    const s = (await admin.post(`${B}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' })).body;
-    expect(s.total).toBeCloseTo(100);
+    const s = (await admin.post(`${B}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: repId, period: '2026-Q1' })).body;
+    expect(s.total).toBe(100);
   });
 
   it('refuses to delete a plan with approved/paid statements; cascades drafts (COMM-DATA-1)', async () => {
     const { admin, orgId, repId } = await scenario();
     const B = cbase(orgId);
-    const mkPlan = async (): Promise<string> => (await admin.post(`${B}/plans`, { name: 'P', currency: 'USD', assignment: { kind: 'rep', ref: repId }, effectiveFrom: '2026-01-01', rules: [{ basis: 'deal-won', type: 'fixed', rate: 100 }] })).body.planId;
+    const mkPlan = async (): Promise<string> => (await admin.post(`${B}/plans`, { name: 'P', currency: 'USD', assignment: { kind: 'rep', ref: repId }, effectiveFrom: '2026-01-01', rules: [{ basis: 'deal-won', type: 'fixed', rate: 100 }] })).body.planId ?? '';
     await wonDeal(admin, orgId, 'D', 1000, repId, '2026-02-10');
 
     // Plan A: a DRAFT statement does NOT block deletion — it cascades away.
     const planA = await mkPlan();
     await admin.post(`${B}/plans/${planA}/statements/compute`, { subjectId: repId, period: '2026-Q1' });
     expect((await admin.del(`${B}/plans/${planA}`)).status).toBe(200);
-    expect((await admin.get(`${B}/statements`)).body.statements.filter((s: any) => s.planId === planA)).toHaveLength(0); // draft cascaded
+    expect((await admin.get(`${B}/statements`)).body.statements?.filter((s) => s.planId === planA)).toHaveLength(0); // draft cascaded
 
     // Plan B: an APPROVED statement BLOCKS deletion (payout record must survive) → 409.
     const planB = await mkPlan();
-    const sid = (await admin.post(`${B}/plans/${planB}/statements/compute`, { subjectId: repId, period: '2026-Q1' })).body.statementId;
-    await approveStatementViaReview(admin, B, sid); // draft→approved through the shared reviews gate
+    const sid = (await admin.post(`${B}/plans/${planB}/statements/compute`, { subjectId: repId, period: '2026-Q1' })).body.statementId ?? '';
+    expect((await approveStatementViaReview(admin, B, sid)).status).toBe(200); // draft→approved through the shared reviews gate
     const blocked = await admin.del(`${B}/plans/${planB}`);
     expect(blocked.status, JSON.stringify(blocked.body)).toBe(409);
     // the approved statement is untouched
@@ -164,7 +176,7 @@ describe('commissions — statement computation + subject-scoped reads', () => {
     const B = cbase(orgId);
     const plan = (await admin.post(`${B}/plans`, { name: 'P', currency: 'USD', assignment: { kind: 'rep', ref: repId }, effectiveFrom: '2026-01-01', rules: [{ basis: 'deal-won', type: 'fixed', rate: 100 }] })).body;
     await wonDeal(admin, orgId, 'D', 1000, repId, '2026-02-10');
-    const sid = (await admin.post(`${B}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' })).body.statementId;
+    const sid = (await admin.post(`${B}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: repId, period: '2026-Q1' })).body.statementId ?? '';
     const S = `${B}/statements/${encodeURIComponent(sid)}`;
 
     // Cannot skip approval: draft → pay is a 409.
@@ -176,7 +188,7 @@ describe('commissions — statement computation + subject-scoped reads', () => {
     const submit = await admin.post(`${S}/approve`);
     expect(submit.status, JSON.stringify(submit.body)).toBe(202);
     expect((await admin.get(S)).body.status).toBe('draft'); // not applied until the gate resolves
-    const decide = await admin.post(`/host/openwop-app/reviews/approval:${submit.body.review.approvalId}/actions/approve`);
+    const decide = await admin.post(`/host/openwop-app/reviews/approval:${submit.body.review?.approvalId}/actions/approve`);
     expect(decide.status, JSON.stringify(decide.body)).toBe(200);
     expect(decide.body.status).toBe('approved');
     // The applied effect: statement approved + approver stamped, through the gate.
@@ -187,6 +199,6 @@ describe('commissions — statement computation + subject-scoped reads', () => {
     expect((await admin.post(`${S}/approve`)).status).toBe(409);
     // Now pay; then recompute is refused (409 — a paid statement is frozen).
     expect((await admin.post(`${S}/pay`)).body.status).toBe('paid');
-    expect((await admin.post(`${B}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' })).status).toBe(409);
+    expect((await admin.post(`${B}/plans/${plan.planId ?? ''}/statements/compute`, { subjectId: repId, period: '2026-Q1' })).status).toBe(409);
   });
 });

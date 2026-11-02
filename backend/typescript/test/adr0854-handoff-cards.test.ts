@@ -104,7 +104,7 @@ describe('ADR 0854 D2 — handoff cards', () => {
     await insertRunWithStartContext(storage, {
       runId, workflowId: 'wf.test.hc', tenantId: s.tenantId, status: 'pending', inputs: {},
       metadata: { kanban: { boardId: s.boardId, cardId: s.cardId } }, configurable: {}, createdAt: now, updatedAt: now,
-    });
+    }, { admission: { plan: 'exempt:test-fixture' } });
     const record = normalizeHandoffRecord({ intent: 'worker task' }, 'agent')!;
     await notifyHandoffRecorded({ tenantId: s.tenantId, record, origin: { kind: 'run', runId, ref: 'dispatch:e1:w' } });
     expect(await systemTexts(s.projectChat)).toHaveLength(0);

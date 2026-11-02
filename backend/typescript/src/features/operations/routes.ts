@@ -74,6 +74,7 @@ import { sessionSecretConfigError, apiKeyConfigError } from '../../middleware/au
 import { storageProbeError } from '../../routes/health.js';
 import { snapshotSseStreams } from '../../host/sseChannel.js';
 import { snapshotRateLimits } from '../../middleware/rateLimit.js';
+import { buildAdmissionSummary } from '../../host/admissionSummary.js';
 import { buildDaemonStatus } from '../../routes/daemonStatus.js';
 import { APP_VERSION } from '../../version.js';
 
@@ -299,6 +300,15 @@ export function registerOperationsRoutes(deps: RouteDeps): void {
         perInstance: true,
         fetchedAt: new Date().toISOString(),
       });
+    } catch (err) { next(err); }
+  });
+
+  // ── ADR 0987 D6 — run admission: caps, refusals since boot, posture and the
+  //    bounded holding count. Superadmin-only; counts and configuration only. ──
+  app.get(`${BASE}/admission/summary`, async (req, res, next) => {
+    try {
+      requireSuperadmin(req);
+      res.json({ ...(await buildAdmissionSummary(storage)), fetchedAt: new Date().toISOString() });
     } catch (err) { next(err); }
   });
 

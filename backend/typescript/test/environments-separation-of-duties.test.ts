@@ -11,6 +11,12 @@
  * `owner` member, so a one-admin workspace is the DEFAULT state. An unconditional
  * distinct-approver rule would brick promotion for every new tenant that enables
  * the gate — a gate with no exit, which is its own defect.
+ *
+ * TST-DAC-6. Every case builds its own workspace. Red when (sabotage-witnessed,
+ * wave 70): the decide path stops comparing decider to proposer; the sole-admin
+ * exit is removed; `promote` stops recording `requestedBy`; the environments
+ * route stops checking the caller's scope; a pre-ADR (proposer-less) row is
+ * refused.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -28,29 +34,44 @@ let server: http.Server;
 let ORIGIN = '';
 let n = 0;
 
+/** The union of the response fields this file reads (each route fills a subset). */
+interface Body {
+  error?: string;
+  message?: string;
+  status?: string;
+  hash?: string;
+  user?: { userId: string };
+  approval?: { approvalId: string };
+  items?: Array<{ approvalId: string; envPromotion?: { requestedBy?: string } }>;
+  environments?: Array<{ name: string; currentSnapshot: string | null }>;
+  snapshots?: Array<{ hash: string }>;
+}
+interface R { status: number; body: Body }
 interface C {
   userId: string;
-  get: (p: string) => Promise<{ status: number; body: any }>;
-  post: (p: string, b?: unknown) => Promise<{ status: number; body: any }>;
-  patch: (p: string, b?: unknown) => Promise<{ status: number; body: any }>;
-  del: (p: string) => Promise<{ status: number; body: any }>;
+  get: (p: string) => Promise<R>;
+  post: (p: string, b?: unknown) => Promise<R>;
+  patch: (p: string, b?: unknown) => Promise<R>;
+  del: (p: string) => Promise<R>;
 }
 
 async function loginTo(tenantId: string, who: string): Promise<C> {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: any }> => {
+  const call = async (method: string, path: string, body?: unknown): Promise<R> => {
     const res = await fetch(`${ORIGIN}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    return { status: res.status, body: res.status === 204 ? {} : (((await res.json().catch(() => ({}))) ?? {}) as Body) };
   };
   const r = await call('POST', '/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
+  const userId = r.body.user?.userId;
+  if (!userId) throw new Error(`test login returned no user: ${JSON.stringify(r.body)}`);
   return {
-    userId: r.body.user.userId,
+    userId,
     get: (p) => call('GET', p), post: (p, b) => call('POST', p, b),
     patch: (p, b) => call('PATCH', p, b), del: (p) => call('DELETE', p),
   };
@@ -87,7 +108,8 @@ async function workspace(admins: number): Promise<{ ws: string; actors: C[] }> {
   const a = actors[0]!;
   expect([200, 201]).toContain((await a.post(`${B}/ensure-chain`)).status);
   const snap = await a.post(`${B}/snapshots`, { sourceEnv: 'dev' });
-  const hash = snap.body.hash as string;
+  const hash = snap.body.hash ?? '';
+  expect(hash).not.toBe('');
   expect([200, 201]).toContain((await a.post(`${B}/rollback`, { env: 'dev', snapshotHash: hash })).status);
   expect((await a.patch(`${B}/settings`, { requireApprovalForPromotion: true })).status).toBe(200);
   return { ws, actors };
@@ -110,8 +132,7 @@ describe('ADR 0732 D1 — the proposer is recorded', () => {
     const gated = await actors[0]!.post(`${B}/promote`, { fromEnv: 'dev' });
     expect(gated.status).toBe(202);
     const inbox = await actors[0]!.get(`${APPR}?status=pending`);
-    const row = (inbox.body.items as Array<{ approvalId: string; envPromotion?: { requestedBy?: string } }>)
-      .find((a) => a.approvalId === gated.body.approval.approvalId);
+    const row = (inbox.body.items ?? []).find((a) => a.approvalId === gated.body.approval?.approvalId);
     expect(row, 'the approval must render in the shared inbox').toBeTruthy();
     expect(row?.envPromotion?.requestedBy, 'the proposer must be recorded').toBe(actors[0]!.userId);
   });
@@ -123,7 +144,8 @@ describe('ADR 0732 D2/D3 — self-approval is refused ONLY when a distinct appro
     const [a, b] = actors as [C, C];
     const gated = await a.post(`${B}/promote`, { fromEnv: 'dev' });
     expect(gated.status).toBe(202);
-    const id = gated.body.approval.approvalId as string;
+    const id = gated.body.approval?.approvalId ?? '';
+    expect(id).toMatch(/^appr:/);
 
     const self = await a.post(`${APPR}/${id}/claim`);
     expect(self.status, `proposer self-approved: ${JSON.stringify(self.body)}`).toBe(403);
@@ -131,13 +153,13 @@ describe('ADR 0732 D2/D3 — self-approval is refused ONLY when a distinct appro
 
     // ...and the refusal did NOT consume the approval.
     const still = await a.get(`${APPR}?status=pending`);
-    expect((still.body.items as Array<{ approvalId: string }>).some((x) => x.approvalId === id)).toBe(true);
+    expect((still.body.items ?? []).some((x) => x.approvalId === id)).toBe(true);
 
     // The EXIT: the other admin can decide, and the pointer moves.
     const other = await b.post(`${APPR}/${id}/claim`);
     expect(other.status, `distinct approver refused: ${JSON.stringify(other.body)}`).toBe(200);
     expect(other.body.status).toBe('approved');
-    const envs = (await a.get(`${B}`)).body.environments as Array<{ name: string; currentSnapshot: string | null }>;
+    const envs = (await a.get(`${B}`)).body.environments ?? [];
     expect(envs.find((e) => e.name === 'staging')?.currentSnapshot, 'the approved move must apply').toBeTruthy();
   });
 
@@ -146,7 +168,7 @@ describe('ADR 0732 D2/D3 — self-approval is refused ONLY when a distinct appro
     const a = actors[0]!;
     const gated = await a.post(`${B}/promote`, { fromEnv: 'dev' });
     expect(gated.status).toBe(202);
-    const claim = await a.post(`${APPR}/${gated.body.approval.approvalId}/claim`);
+    const claim = await a.post(`${APPR}/${gated.body.approval?.approvalId ?? ''}/claim`);
     expect(claim.status, `a sole admin was bricked: ${JSON.stringify(claim.body)}`).toBe(200);
     expect(claim.body.status).toBe('approved');
   });
@@ -168,7 +190,7 @@ describe('ENVC-6 — EVERY mutating environments door refuses a non-admin member
     const { ws, actors } = await workspace(1);
     const viewer = await loginTo(ws, 'viewer-doors');
     await createMember({ orgId: ws, tenantId: ws, displayName: 'VD', subject: viewer.userId, roles: ['viewer'] });
-    const doors: Array<[string, () => Promise<{ status: number; body: any }>]> = [
+    const doors: Array<[string, () => Promise<R>]> = [
       ['create', () => viewer.post(`${B}`, { name: `e${n++}` })],
       ['ensure-chain', () => viewer.post(`${B}/ensure-chain`)],
       ['protection', () => viewer.patch(`${B}/dev/protection`, { protection: 'open' })],
@@ -180,16 +202,22 @@ describe('ENVC-6 — EVERY mutating environments door refuses a non-admin member
     ];
     for (const [name, call] of doors) {
       const r = await call();
+      // The SCOPE refusal itself — a 403 from any other gate would not prove the admin door.
       expect(r.status, `${name} let a viewer through: ${JSON.stringify(r.body)}`).toBe(403);
+      expect(r.body.error, name).toBe('forbidden_scope');
+      expect(r.body.message, name).toBe('Missing required scope: host:members:manage');
     }
     // Non-vacuity: the READ doors are open to the SAME viewer, so the 403s above
     // are the admin gate and not a blanket refusal of this caller. `preview` is a
     // `workspace:read` door by design (`routes.ts:185`) — it belongs here, not in
     // the admin list, which is why the first draft of this leg mis-filed it.
     expect((await viewer.get(`${B}`)).status).toBe(200);
-    expect((await viewer.get(`${B}/snapshots`)).status).toBe(200);
-    const prev = await viewer.post(`${B}/preview`, { fromEnv: 'dev', toEnv: 'staging' });
-    expect(prev.status, `preview is a read door: ${JSON.stringify(prev.body)}`).not.toBe(403);
+    const snaps = await viewer.get(`${B}/snapshots`);
+    expect(snaps.status).toBe(200);
+    const snapshotHash = snaps.body.snapshots?.[0]?.hash ?? '';
+    expect(snapshotHash, 'the workspace helper captured a snapshot').not.toBe('');
+    const prev = await viewer.post(`${B}/preview`, { toEnv: 'staging', snapshotHash });
+    expect(prev.status, `preview is a read door: ${JSON.stringify(prev.body)}`).toBe(200);
 
     // The POSITIVE control this leg is named for: an ADMIN passes the same admin
     // doors, so the eight 403s above are the RBAC gate and not a broken surface.
@@ -212,7 +240,7 @@ describe('ADR 0732 D5 — a pre-ADR row (no proposer) still decides, loudly', ()
       tenantId: ws,
       toEnv: 'staging',
       fromEnv: 'dev',
-      snapshotHash: ((await a.post(`${B}/snapshots`, { sourceEnv: 'dev' })).body as { hash: string }).hash,
+      snapshotHash: (await a.post(`${B}/snapshots`, { sourceEnv: 'dev' })).body.hash ?? '',
       proposal: 'legacy row',
     });
     expect(legacy.envPromotion?.requestedBy, 'the legacy shape has no proposer').toBeUndefined();

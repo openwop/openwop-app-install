@@ -20,7 +20,12 @@
  *
  * Sabotage: editing a value in a generated copy reds the first case; changing
  *   `copyDefaults.linkedin` reds the LinkedIn pin; pointing a template at a row
- *   its size does not satisfy reds the template case.
+ *   its size does not satisfy reds the template case (w73 probes cs-gen,
+ *   cs-ratio, cs-sizes, cs-hardmax — all witnessed).
+ *
+ * Recorded duplicate (protected, kept): "generated copies are current" is the
+ *   same check `scripts/ci.sh` runs as `node scripts/gen-content-rules.mjs
+ *   --check`; both are in the gate (human-ask row TST-DQB-2).
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -132,7 +137,6 @@ describe('ADR 0946 P1 — the channel spec table', () => {
     const policyRules = ids(a.outputs.riskFlags);
     const validateRules = ids(b.outputs.report.checks);
     expect(policyRules).toEqual(['claims-guarantee', 'claims-income']);
-    expect(policyRules.length).toBeGreaterThan(0);
     expect(validateRules).toEqual(policyRules);
   });
 

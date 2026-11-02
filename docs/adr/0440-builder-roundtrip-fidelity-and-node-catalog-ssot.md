@@ -194,5 +194,13 @@ route.
 ## Open questions
 
 1. Should the `validateWorkflowDefinition` whitelist widen to the full `WorkflowNode` schema? Separate ADR. Forcing function: the first pack or chain that ships a node carrying `agent` or `credentialsRef` — today none do.
+
+   > **CORRECTION 2026-10-30 (ADR 1005 D5) — answered for `agent` only.** RFC 0082
+   > channel binding needs a node's `agent` to survive registration, so the
+   > validator now keeps it, validated (`agentId` required, `version` XOR
+   > `channel`, `channel` only while `agents.deployment` is advertised). No shipped
+   > pack node carried `agent` (`workflow-node-field-tripwire.test.ts`), so no
+   > stored definition changes. The other fields stay dropped and this question
+   > stays open for them.
 2. Should `NodeRegistry` modules declare optional config/input/output schemas so `buildNodeCatalog` emits them for `local` rows, giving host nodes real Inspector fields? Additive to P3.
 3. ~~Should P2's guard refuse, or auto-fork to a new `workflowId`?~~ **Resolved: neither.** A falsifying test showed the harm is bounded and already fail-closed, so P2 ships as disclosure — see the correction note under P2. Auto-fork was rejected separately: minting a definition implicitly behind a debounced autosave would silently change the identity of the thing the author is editing.

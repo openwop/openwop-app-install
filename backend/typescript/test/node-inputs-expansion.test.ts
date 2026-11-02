@@ -56,6 +56,13 @@ describe('ADR 0237 — validateWorkflowDefinition preserves node.inputs', () => 
         nodes: [{ nodeId: 'n1', typeId: 'core.noop', inputs: 'nope' }],
       }),
     ).toThrow(OpenwopError);
+    // …and it is THIS refusal, not an earlier validator's.
+    expect(() =>
+      validateWorkflowDefinition({
+        workflowId: 'wf.inputs.bad',
+        nodes: [{ nodeId: 'n1', typeId: 'core.noop', inputs: 'nope' }],
+      }),
+    ).toThrow('nodes[0].inputs MUST be an object when present.');
   });
 });
 

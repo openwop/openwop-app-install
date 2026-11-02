@@ -13,11 +13,16 @@
  * Uses `legacyDbAtVersion` rather than a hand-rolled schema, per that fixture's
  * own warning: a hand-rolled table models a database that has never existed,
  * and doing so caused three consecutive breaks (#1851, #1868).
+ *
+ * Scope: sqlite 39 only; the postgres twin (mig 37) is not exercised here.
+ * Tracker TST-CXC-4. Red when mig 39's rename is skipped (`hasLegacyColumn`
+ * branch off — rows and PK unreadable under the new name) or runs
+ * unconditionally (a re-run throws on the missing legacy column).
  */
 
 import { describe, expect, it } from 'vitest';
 import type Database from 'better-sqlite3';
-import { applyMigrations, LATEST_SCHEMA_VERSION } from '../src/storage/sqlite/schema.js';
+import { applyMigrations, LATEST_SCHEMA_VERSION, MIGRATIONS } from '../src/storage/sqlite/schema.js';
 import { legacyDbAtVersion } from './_legacyDbFixture.js';
 
 /**
@@ -118,7 +123,14 @@ describe('ADR 0549 P3 — invocation_log identity migration (sqlite 39)', () => 
   it('the migration is actually reached by the runner', () => {
     // Guard against the `recipient_role` drift class: a migration that exists
     // but sits above the cap never executes, and every assertion above would
-    // then be testing the fixture's own DDL.
+    // then be testing the fixture's own DDL. Asserted on the RUNNER's own
+    // record: replaying from 38 lands on the latest version, past 39.
+    expect(typeof MIGRATIONS[39]).toBe('function');
     expect(LATEST_SCHEMA_VERSION).toBeGreaterThanOrEqual(39);
+    const db = dbAtV38WithLegacyColumn();
+    applyMigrations(db);
+    const row = db.prepare(`SELECT version FROM __schema_version WHERE id = 1`).get() as { version: number };
+    expect(row.version).toBe(LATEST_SCHEMA_VERSION);
+    db.close();
   });
 });

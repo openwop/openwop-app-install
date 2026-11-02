@@ -3,6 +3,11 @@
  * Verifies the loader: installs a kind:"connection" pack into the provider
  * registry, rejects credential material (§B.2), enforces §B.6 precedence/conflict,
  * and that the discovery doc advertises capabilities.connections.packsSupported.
+ *
+ * Tracker TST-CJB-10 (grade-tests w68). Red when: an older/prerelease pack of the
+ * same provider id is not refused (the §B.6 semverGte check); the token-endpoint
+ * exemption stops being a FULL path; the §B.2 scan is skipped on boot load; an
+ * oauth2 pack is not refreshable; or discovery stops advertising packsSupported.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -21,14 +26,14 @@ function writePack(root: string, dir: string, manifest: unknown): void {
   writeFileSync(join(d, 'pack.json'), JSON.stringify(manifest));
 }
 
-const githubPack = (id = 'ct-github', version = '1.0.0') => ({
+const githubPack = (id = 'ct-github', version = '1.0.0', displayName = 'GitHub (test)') => ({
   name: `core.openwop.connections.${id}`,
   version,
   kind: 'connection',
   engines: { openwop: '>=1.0.0' },
   provider: {
     id,
-    displayName: 'GitHub (test)',
+    displayName,
     category: 'dev',
     auth: {
       kind: 'oauth2', authFlow: 'pkce', scopeModel: 'groups',
@@ -78,13 +83,14 @@ describe('RFC 0095 connection-pack loader (T3)', () => {
 
   it('two packs with same provider id: older loses with connection_provider_conflict (§B.6)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'owp-conflict-'));
-    writePack(dir, 'a-new', githubPack('ct-dup', '2.0.0'));
-    writePack(dir, 'b-old', githubPack('ct-dup', '1.0.0'));
+    // Distinct labels per version, so WHICH definition stayed is observable.
+    writePack(dir, 'a-new', githubPack('ct-dup', '2.0.0', 'GitHub v2'));
+    writePack(dir, 'b-old', githubPack('ct-dup', '1.0.0', 'GitHub v1'));
     // readdir order is name-sorted: a-new (2.0.0) installs first, then b-old (1.0.0) conflicts.
     try {
       const { errors } = loadConnectionPacks({ roots: [dir] });
       expect(errors.some((e) => e.code === 'connection_provider_conflict')).toBe(true);
-      expect(getProvider('ct-dup')?.label).toBe('GitHub (test)'); // the 2.0.0 one stayed
+      expect(getProvider('ct-dup')?.label).toBe('GitHub v2'); // the 2.0.0 one stayed
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -92,11 +98,12 @@ describe('RFC 0095 connection-pack loader (T3)', () => {
 
   it('a PRERELEASE pack does NOT silently supersede a release of the same id (§B.6; myndhyve-1 937c)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'owp-prerelease-'));
-    writePack(dir, 'a-release', githubPack('ct-pre', '1.0.0'));      // installs first (name-sorted)
-    writePack(dir, 'b-prerelease', githubPack('ct-pre', '1.0.0-alpha.1')); // 1.0.0-alpha.1 < 1.0.0
+    writePack(dir, 'a-release', githubPack('ct-pre', '1.0.0', 'GitHub release'));      // installs first (name-sorted)
+    writePack(dir, 'b-prerelease', githubPack('ct-pre', '1.0.0-alpha.1', 'GitHub prerelease')); // 1.0.0-alpha.1 < 1.0.0
     try {
       const { errors } = loadConnectionPacks({ roots: [dir] });
       expect(errors.some((e) => e.code === 'connection_provider_conflict')).toBe(true);
+      expect(getProvider('ct-pre')?.label).toBe('GitHub release'); // the release definition stayed
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -133,30 +140,27 @@ describe('RFC 0095 connection-pack loader (T3)', () => {
     }
   });
 
-  it('discovery doc advertises connections.packsSupported (§C)', async () => {
-    process.env.OPENWOP_STORAGE_DSN = 'memory://';
-    process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
-    const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-    const server: http.Server = await new Promise((res) => { const s = app.listen(0, '127.0.0.1', () => res(s)); });
-    const PORT = (server.address() as AddressInfo).port;
-    try {
+  describe('booted app (one boot shared by the two route cases)', () => {
+    let server: http.Server;
+    let PORT = 0;
+    beforeAll(async () => {
+      process.env.OPENWOP_STORAGE_DSN = 'memory://';
+      process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
+      const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+      server = await new Promise((res) => { const s = app.listen(0, '127.0.0.1', () => res(s)); });
+      PORT = (server.address() as AddressInfo).port;
+    });
+    afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+
+    it('discovery doc advertises connections.packsSupported (§C)', async () => {
       // ADR 0812 — the v2 root's `connections` family, at the document root.
       const r = await fetch(`http://127.0.0.1:${PORT}/.well-known/openwop`, { headers: { 'OpenWOP-Version': '2' } });
       const doc = await r.json() as { connections?: { packsSupported?: boolean } };
       expect(doc.connections?.packsSupported).toBe(true);
-    } finally {
-      await new Promise<void>((res) => server.close(() => res()));
-    }
-  });
+    });
 
-  it('the in-tree example pack auto-loads at boot, and an unknown provider → connection_provider_unresolved (§B.6, Option C)', async () => {
-    process.env.OPENWOP_STORAGE_DSN = 'memory://';
-    process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
-    const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-    const server: http.Server = await new Promise((res) => { const s = app.listen(0, '127.0.0.1', () => res(s)); });
-    const PORT = (server.address() as AddressInfo).port;
-    const hdrs = { 'content-type': 'application/json', authorization: 'Bearer dev-token' };
-    try {
+    it('the in-tree example pack auto-loads at boot, and an unknown provider → connection_provider_unresolved (§B.6, Option C)', async () => {
+      const hdrs = { 'content-type': 'application/json', authorization: 'Bearer dev-token' };
       // examples/connection-packs/github auto-loaded → `github` resolvable, honest oauthConfigured:false (no host creds).
       const provs = await (await fetch(`http://127.0.0.1:${PORT}/host/openwop-app/providers`, { headers: hdrs })).json() as { providers: { id: string; reach: string; oauthConfigured?: boolean }[] };
       const gh = provs.providers.find((p) => p.id === 'github');
@@ -176,10 +180,8 @@ describe('RFC 0095 connection-pack loader (T3)', () => {
         body: JSON.stringify({ provider: 'doesnotexist', kind: 'api_key', secret: 'x', scope: 'user' }),
       });
       expect(res.status).toBe(404);
-      const body = await res.json() as { error?: string; code?: string };
-      expect(body.error ?? body.code).toBe('connection_provider_unresolved');
-    } finally {
-      await new Promise<void>((res) => server.close(() => res()));
-    }
+      const body = await res.json() as { error?: string };
+      expect(body.error).toBe('connection_provider_unresolved');
+    });
   });
 });

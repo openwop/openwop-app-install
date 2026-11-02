@@ -6,6 +6,11 @@
  * stale installed pack silently shadowing the updated in-repo copy on a dev machine).
  * The loader must WARN (`workflow_chain_pack_duplicate_content_drift`) on that state
  * while keeping the precedence winner — never an error, never a behavior change.
+ *
+ * TST-CCF-1. Red when: the drift / upgraded / older-kept events are renamed or
+ * downgraded from WARN; a higher chain or pack version stops winning; the superseded
+ * copy stays in `installed`; the operator-override pin is auto-upgraded; or a
+ * prerelease outranks its release.
  */
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -57,6 +62,11 @@ function loadCapturingStdout(): string {
   return lines.join('');
 }
 
+/** The event, logged at WARN — the level IS the claim (`info` is what hid WF-DUP-2). */
+function expectWarn(out: string, event: string): void {
+  expect(out).toMatch(new RegExp(`"level":"warn"[^\\n]*${event}|${event}[^\\n]*"level":"warn"`));
+}
+
 function bumpPatch(v: string): string {
   const [maj, min, pat] = v.split('-')[0].split('.').map(Number);
   return `${maj}.${min}.${(pat ?? 0) + 1}`;
@@ -96,7 +106,7 @@ describe('WF-DUP-1 — same-pack duplicate content-drift detection', () => {
     });
     const out = loadCapturingStdout();
     expect(out).not.toContain('workflow_chain_pack_duplicate_chain_upgraded');
-    expect(out).toContain('workflow_chain_pack_duplicate_content_drift');
+    expectWarn(out, 'workflow_chain_pack_duplicate_content_drift');
     const manifest = JSON.parse(readFileSync(SEED_PACK, 'utf8'));
     expect(getChain(manifest.chains[0].chainId)?.chain.description).toBe('NEWER chain in the higher-precedence root');
   });
@@ -104,7 +114,7 @@ describe('WF-DUP-1 — same-pack duplicate content-drift detection', () => {
   it('a same-version shadow with DRIFTED content warns and keeps the precedence winner', () => {
     seedRoots((m) => { m.chains[0].description = 'DRIFTED copy — version not bumped'; });
     const out = loadCapturingStdout();
-    expect(out).toContain('workflow_chain_pack_duplicate_content_drift');
+    expectWarn(out, 'workflow_chain_pack_duplicate_content_drift');
     // The higher-precedence rootA copy wins — the drifted description never registers.
     const manifest = JSON.parse(readFileSync(SEED_PACK, 'utf8'));
     const kept = getChain(manifest.chains[0].chainId);
@@ -113,7 +123,7 @@ describe('WF-DUP-1 — same-pack duplicate content-drift detection', () => {
 
   it('a DIFFERENT-version shadow stays the quiet precedence path even when content differs', () => {
     seedRoots((m) => {
-      (m as unknown as { version: string }).version = '0.0.1-stale';
+      m.version = '0.0.1-stale';
       m.chains[0].description = 'older copy';
     });
     const out = loadCapturingStdout();
@@ -185,7 +195,7 @@ describe('WF-DUP-2 — duplicate resolution is version-aware', () => {
     try {
       const out = loadCapturingStdout();
       expect(getChain(chainId)?.packVersion).toBe('1.0.0');
-      expect(out).toContain('workflow_chain_pack_duplicate_older_kept');
+      expectWarn(out, 'workflow_chain_pack_duplicate_older_kept');
       expect(out).toContain('operator_override_root');
       expect(out).toContain('9.9.9'); // the version it is NOT running is named
       expect(out).not.toContain('workflow_chain_pack_duplicate_upgraded');

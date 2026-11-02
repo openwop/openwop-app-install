@@ -1760,17 +1760,17 @@ export async function replanClarify(ctx) {
         { component: 'action.button', id: 'confirm', label: 'Continue', action: { target: 'resume' } },
       ],
     };
-    const values = await ctx.suspend({
+    const resumed = await ctx.suspend({
       reason: 'clarification',
       resumeKey: 'replan-clarify',
-      // Free-text fallback for any consumer that doesn't render A2UI surfaces.
-      question: str(clarification.question),
-      catalogVersion: '0.9.1',
-      surface,
+      // ADR 1013 D3 — the question is the fallback for a consumer that doesn't
+      // render forms; the form's one input answers it by id.
+      questions: [{ id: str(field.id), question: str(clarification.question) }],
+      form: { catalogVersion: '0.9.1', surface },
     });
     // Fold the participant's answer into the pending command's single unfilled
     // slot; the completed command is the sole entry of the applied revision.
-    const answer = values ? values[field.id] : undefined;
+    const answer = Array.isArray(resumed?.answers) ? resumed.answers.find((a) => a?.id === str(field.id))?.answer : undefined;
     // XCH-RC-3 — the answer is checked against what was offered before it
     // fills the command: a value outside `field.options` (or a malformed date)
     // is a typed failure, never a command built from an unoffered value.

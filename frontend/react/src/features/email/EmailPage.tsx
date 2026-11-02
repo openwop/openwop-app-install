@@ -13,7 +13,7 @@ import { Trans, useTranslation } from 'react-i18next';
 import { confirm } from '../../ui/confirm.js';
 import { Modal } from '../../ui/Modal.js';
 import { TextField } from '../../ui/Field.js';
-import { formatNumber, formatRelativeTime } from '../../i18n/format.js';
+import { formatList, formatNumber, formatRelativeTime } from '../../i18n/format.js';
 import { PageHeader } from '../../ui/PageHeader.js';
 import { Notice } from '../../ui/Notice.js';
 import { StateCard } from '../../ui/StateCard.js';
@@ -41,6 +41,8 @@ type AudienceMode = 'all' | 'stage' | 'segment';
 const campChip = (s: Campaign['status']): string => (s === 'sent' || s === 'approved' ? 'chip chip--success' : s === 'sending' || s === 'in_review' ? 'chip chip--warning' : 'chip chip--muted');
 const SKIP_REASONS = new Set(['no_email', 'consent', 'suppressed', 'frequency']);
 
+/** ADR 0994 — the providers with a display name in `providerName_*`; any other id renders as-is. */
+const KNOWN_EMAIL_PROVIDERS: readonly string[] = ['postmark', 'smtp', 'sendgrid'];
 const sendChip = (s: SendLog['status']): string => (s === 'sent' ? 'chip chip--success' : s === 'failed' ? 'chip chip--danger' : 'chip chip--muted');
 
 export function EmailPage(): JSX.Element {
@@ -419,6 +421,23 @@ export function EmailPage(): JSX.Element {
     return <StateCard icon={<LockIcon />} title={t('notEnabledTitle')} body={t('notEnabledBody')} />;
   }
 
+  // ADR 0994 — sending needs a sender AND a connected provider (Postmark, SMTP or
+  // SendGrid). The banner names only what actually blocks, and lists the
+  // providers from provider-status rather than a hard-coded vendor. An unknown
+  // (loading or failed) provider read never claims "not connected".
+  const providerName = (id: string): string => (KNOWN_EMAIL_PROVIDERS.includes(id) ? t(`providerName_${id}`) : id);
+  const providerMissing = providerStatus !== null && providerStatus !== 'error'
+    && providerStatus.providers.length > 0 && !providerStatus.providers.some((p) => p.connected);
+  const providerChoices = providerStatus && providerStatus !== 'error'
+    ? formatList(providerStatus.providers.map((p) => providerName(p.provider)), { type: 'disjunction' })
+    : '';
+  const senderMissing = senderConfigured === false;
+  const sendBlockedKey = senderMissing && providerMissing
+    ? (senderCanEdit ? 'sendBlockedSenderAndProvider' : 'sendBlockedSenderAndProviderAskAdmin')
+    : senderMissing ? (senderCanEdit ? 'senderUnconfiguredNotice' : 'senderUnconfiguredAskAdmin')
+    : providerMissing ? 'sendBlockedProvider'
+    : null;
+
   const orgPicker = orgs && orgs.length > 0 ? (
     <select value={orgId} onChange={(e) => chooseOrg(e.target.value)} className="u-w-auto" aria-label={t('ui:orgPickerLabel')}>{orgs.map((o) => <option key={o.orgId} value={o.orgId}>{o.name}</option>)}</select>
   ) : undefined;
@@ -446,7 +465,11 @@ export function EmailPage(): JSX.Element {
         icon={<GlobeIcon />}
       >
         <>
-          {senderConfigured === false ? <Notice variant="info" announce={t(senderCanEdit ? 'senderUnconfiguredNotice' : 'senderUnconfiguredAskAdmin')}>{t(senderCanEdit ? 'senderUnconfiguredNotice' : 'senderUnconfiguredAskAdmin')}</Notice> : null}
+          {sendBlockedKey ? (
+            <Notice variant="info" announce={t(sendBlockedKey, { providers: providerChoices }).replace(/<\/?0>/g, '')}>
+              <Trans i18nKey={sendBlockedKey} ns="email" values={{ providers: providerChoices }} components={[<Link key="connections" to="/access?tab=connections" className="inline-link" />]} />
+            </Notice>
+          ) : null}
 
           {/* EM-UX-27 — a FAILED provider-status read renders a failed state
               with retry, never absence: "unknown" must not look like "not
@@ -468,7 +491,7 @@ export function EmailPage(): JSX.Element {
               <div className="u-flex u-wrap u-gap-2 u-items-center">
                 {providerStatus.providers.map((p) => (
                   <span key={p.provider} className={`chip ${p.connected ? 'chip--success' : 'chip--muted'}`}>
-                    {p.provider}{p.connected ? ` — ${t('providerConnected')}` : ` — ${t('providerNotConnected')}`}
+                    {providerName(p.provider)}{p.connected ? ` — ${t('providerConnected')}` : ` — ${t('providerNotConnected')}`}
                     {providerStatus.defaultProvider === p.provider ? ` · ${t('providerDefault')}` : ''}
                   </span>
                 ))}
@@ -612,7 +635,7 @@ export function EmailPage(): JSX.Element {
                   <select disabled aria-label={t('audienceSegmentLabel')}><option>{t('loadingSegments')}</option></select>
                 ) : segments.length === 0 ? (
                   <span className="u-label-sm muted">
-                    <Trans i18nKey="noSegmentsCta" ns="email" components={{ 0: <Link to="/crm" className="inline-link" /> }} />
+                    <Trans i18nKey="noSegmentsCta" ns="email" components={[<Link to="/crm" className="inline-link" />]} />
                   </span>
                 ) : (
                   <select value={campSegment} onChange={(e) => setCampSegment(e.target.value)} aria-label={t('audienceSegmentLabel')}>

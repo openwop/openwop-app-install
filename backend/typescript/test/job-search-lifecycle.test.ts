@@ -6,6 +6,16 @@
  * negative: no code path sends, sabotage-verified". A negative property is the
  * kind a test suite most easily pretends to check, so both are asserted over
  * behaviour and over the module's own code with comments stripped.
+ *
+ * Tracker TST-DHC-4 (wave 71). Red when: the follow-up or draft insert stops
+ * being a CAS (`w71g3-lc-cas`, `lc-draftcas`); a replay re-decides
+ * (`lc-replay`); completion deletes the row (`lc-complete`); not-yet-due rows
+ * surface (`lc-due`); an un-followed stage schedules (`lc-stage`); the fence
+ * can be closed from inside (`lc-fence`) or a body is stored bare
+ * (`lc-fencedstore`); approval stops stamping (`lc-approve`); subject erasure
+ * stops filtering by subject (`lc-erasefu-r2`, `lc-erasedr-r2`: a second
+ * subject's rows must survive). The CONCURRENT cases are witnessed by the CAS
+ * probes; `Promise.all` does not force the calls to interleave.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -18,6 +28,7 @@ import {
 } from '../src/features/job-search/lifecycle/drafts.js';
 import { __resetHostExtPersistence, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
+import { stripComments } from './helpers/stripComments.js';
 
 const T = 'user:t-life';
 const ME = 'user:me';
@@ -27,7 +38,7 @@ const srcOf = (file: string): string =>
   readFileSync(join(process.cwd(), 'src', 'features', 'job-search', 'lifecycle', file), 'utf8');
 /** Code only. Scanning prose finds the sentence that FORBIDS a thing and calls it a violation. */
 const codeOf = (file: string): string =>
-  srcOf(file).replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  stripComments(srcOf(file));
 
 beforeEach(() => { __resetHostExtPersistence(); initHostExtPersistence(openSqliteStorage(':memory:')); });
 
@@ -89,8 +100,11 @@ describe('ADR 0546 D1/P2 — one follow-up per application per stage, EVER', () 
 
   it('erases with the subject', async () => {
     await sched();
+    await sched({ subjectId: 'user:other' });
     await eraseSubjectFollowUps(T, ME);
-    expect(await followUps.listByPrefix(`${T}:`)).toHaveLength(0);
+    expect(await followUps.listByPrefix(`${T}:${ME}:`)).toHaveLength(0);
+    // Another subject's follow-up is not theirs to erase.
+    expect(await followUps.listByPrefix(`${T}:user:other:`)).toHaveLength(1);
   });
 });
 
@@ -173,7 +187,10 @@ describe('ADR 0546 D5/P5 — warm intros are drafts too', () => {
 
   it('erases with the subject', async () => {
     await putDraft({ tenantId: T, dealId: DEAL, kind: 'warm-intro', subjectId: ME, body: 'x', now: Date.now() });
+    await putDraft({ tenantId: T, dealId: DEAL, kind: 'warm-intro', subjectId: 'user:other', body: 'y', now: Date.now() });
     await eraseSubjectDrafts(T, ME);
     expect(await listDrafts(T, ME)).toHaveLength(0);
+    // Another subject's draft is not theirs to erase.
+    expect(await listDrafts(T, 'user:other')).toHaveLength(1);
   });
 });

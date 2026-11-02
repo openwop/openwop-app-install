@@ -36,6 +36,7 @@ import { collectSources } from './workbench/sources.js';
 import { WorkbenchActionsContext } from './workbench/workbenchActions.js';
 import { DEFAULT_ASSISTANT_ID } from './activeAgents/constants.js';
 import { useScopeToAgent } from './activeAgents/useScopeToAgent.js';
+import { useDefaultChatAgent, useWorkspaceChatAgent } from './useWorkspaceChatAgent.js';
 import { SparklesIcon } from '../ui/icons/index.js';
 import { toast } from '../ui/toast.js';
 import { useChatSession } from './hooks/useChatSession.js';
@@ -66,6 +67,7 @@ import { useChannelMessageActions } from './conversations/useChannelMessageActio
 import { submitChannelPost } from './conversations/channelSubmit.js';
 import { useNotificationStore } from '../notifications/notificationStore.js';
 import { confirm } from '../ui/confirm.js';
+import { useClarificationAnswer } from './hooks/useClarificationAnswer.js';
 
 // localStorage keys for rail persistence — keeps the user's "which
 // tab" / "which run is focused" choice across page reloads.
@@ -158,7 +160,7 @@ interface Props {
 // fallback (matching TabChatDeck's keying).
 export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, tenantId = 'anon' }: Props): JSX.Element {
   const { t } = useTranslation('chat');
-  const { session, isSending, thinkingAgentId, error, send, cancel, emitSystem, upsertTranscriptTurn, refreshNewestMessages, reset, resolveInterrupt, runWorkflowMention, cancelWorkflowRun, regenerate, setFeedback, loadSessionFromBackend, hasOlderMessages, isLoadingEarlier, loadEarlierMessages, activeAgents } = useChatSession();
+  const { session, isSending, isHydrating, thinkingAgentId, error, send, cancel, emitSystem, upsertTranscriptTurn, refreshNewestMessages, reset, resolveInterrupt, runWorkflowMention, cancelWorkflowRun, regenerate, setFeedback, loadSessionFromBackend, hasOlderMessages, isLoadingEarlier, loadEarlierMessages, activeAgents } = useChatSession();
   const commentsContext = useCommentsContext(); // ADR 0021 ext — inline per-message comments (null when off/no org)
   // Stable regenerate handler (GAP-ANALYSIS E14): an inline arrow here made a
   // new function each render, defeating MessageBubble's memo. useCallback keeps
@@ -214,7 +216,9 @@ export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, t
   const workbench = useWorkbench(tenantId, initialRailTab === 'progress' ? 'run' : null);
   // ADR 0768 B4 — lets a turn's receipt open this shell's Sources tab.
   const selectWorkbenchTab = workbench.select; // stable (useCallback in useWorkbench)
-  const workbenchActions = useMemo(() => ({ openSources: () => selectWorkbenchTab('sources') }), [selectWorkbenchTab]);
+  const openWorkbenchArtifact = workbench.openArtifact; // stable (useCallback in useWorkbench)
+  // ADR 1017 D2 — and open an artifact a chat tool saved during a turn.
+  const workbenchActions = useMemo(() => ({ openSources: () => selectWorkbenchTab('sources'), openArtifact: openWorkbenchArtifact }), [selectWorkbenchTab, openWorkbenchArtifact]);
   const openWorkbenchRun = workbench.openRun;
   // Track the last non-null tab so the chat-header toggle can reopen
   // the rail to whichever panel the user was last looking at, rather
@@ -479,6 +483,7 @@ export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, t
     // FW2-UX-1 — the hook re-reads when the turn SETTLES (both are needed for that).
     messageCount: session.messages.length, isSending, continueRef: approvalContinueRef,
   });
+  const answerClarification = useClarificationAnswer({ send, config, baseSendOptions: getSubmitExtras });
   // ADR 0768 D2 — judge attachments by the model that will ACTUALLY answer (the
   // per-message override, else the default).
   const { supportsImageInput, supportsPdfInput } = attachmentCaps(config.provider, config.model, selectedModel);
@@ -487,6 +492,12 @@ export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, t
   // Subject), when this is a project group chat; drives the "Convene the team"
   // affordance below.
   const activeConversation = sessionsCollection.sessions.find((s) => s.sessionId === session.id);
+  // ADR 0975 D12 — an empty chat in a workspace that declares a chat agent opens on it.
+  const workspaceChatAgent = useWorkspaceChatAgent(tenantId !== 'anon');
+  useDefaultChatAgent({
+    agentId: workspaceChatAgent, explicitScope: scopeAgentId, activateAgent: activeAgents.activateAgent,
+    agentEntries, session, isHydrating, conversationType: activeConversation?.type,
+  });
   const conveneProjectId = activeConversation?.ownerSubject?.kind === 'project' ? activeConversation.ownerSubject.id : null;
   const conveneAgentCount = (activeConversation?.participants ?? []).filter((p) => p.subjectRef.startsWith('agent:')).length;
 
@@ -874,6 +885,7 @@ export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, t
           supportsPdfInput={supportsPdfInput}
           composerModifiers={composerModifiers}
           onResolveInterrupt={resolveInterrupt}
+          onAnswerClarification={answerClarification}
           progress={{ focusedMessageId: workbench.tab === 'run' ? focusedWorkflowMessageId : null, onOpen: openProgressForRun }}
           onRegenerate={onRegenerate}
           onBranchFrom={(fromSeq) => { void onBranchFrom(fromSeq); }}

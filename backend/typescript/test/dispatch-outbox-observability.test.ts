@@ -23,6 +23,13 @@
  * at once proves neither. The `run-missing` and `discharged` legs below are
  * therefore each isolated to ONE reason, and the run-status leg explicitly
  * clears the dispatch lease first.
+ *
+ * TST-CWB-2. Red when (sabotage-witnessed, wave 69): any recovery outcome label
+ * is changed (run-missing / discharged / retried+dead / orphan lane / dispatched);
+ * the backlog gauges are skipped on an empty pass or report the post-drain
+ * residue; age is reported in ms or counts dead rows; the oldest-pending read
+ * picks the newest row; redrive keeps the spent attempt budget or loses the
+ * `status = 'dead'` predicate.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -31,7 +38,7 @@ import { join } from 'node:path';
 import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import type { RunRecord } from '../src/types.js';
-import type { HostAdapterSuite } from '../src/host/index.js';
+import { createHostAdapterSuite, type HostAdapterSuite, type WorkflowCatalog } from '../src/host/index.js';
 import { sweepDispatchOutbox, sweepOrphanedRuns } from '../src/host/runDispatchSweeper.js';
 import { insertRunWithStartContext } from '../src/host/runInsert.js';
 import { setEventLogBackend } from '../src/executor/eventLog.js';
@@ -67,16 +74,17 @@ function makeRun(over: Partial<RunRecord> & { runId: string }): RunRecord {
   };
 }
 
-function stubHostSuite(getWorkflow?: () => Promise<{ workflowId: string; definition: unknown } | null>): HostAdapterSuite {
+/** The REAL host suite with only its workflow catalog replaced — typed, no cast. */
+function stubHostSuite(getWorkflow?: WorkflowCatalog['getWorkflow']): HostAdapterSuite {
   return {
+    ...createHostAdapterSuite({ storage }),
     workflowCatalog: {
       getWorkflow: getWorkflow ?? (async () => ({
         workflowId: 'wf-1',
         definition: { workflowId: 'wf-1', nodes: [{ nodeId: 'a', typeId: 'core.noop' }], edges: [] },
       })),
     },
-    providerPolicyResolver: undefined,
-  } as unknown as HostAdapterSuite;
+  };
 }
 
 async function flush(times = 20): Promise<void> {
@@ -137,8 +145,8 @@ describe('ADR 0551 P2 — backlog depth and oldest age', () => {
     // is the backlog that existed — which is the number an operator is asking
     // about. Taken at the END of the pass it would be 0 on every healthy tick,
     // and a queue that is never observed to be non-empty is unmonitorable.
-    await insertRunWithStartContext(storage, makeRun({ runId: 'r1' }), { enqueueDispatch: true });
-    await insertRunWithStartContext(storage, makeRun({ runId: 'r2' }), { enqueueDispatch: true });
+    await insertRunWithStartContext(storage, makeRun({ runId: 'r1' }), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true });
+    await insertRunWithStartContext(storage, makeRun({ runId: 'r2' }), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true });
     // The LATER of the two due times, not the first row's. Each row's grace
     // window runs from its OWN insert, so under load the two land in different
     // milliseconds and a `now` taken from r1 leaves r2 not yet due — one row
@@ -162,7 +170,7 @@ describe('ADR 0551 P2 — backlog depth and oldest age', () => {
   });
 
   it('age is measured from the row CREATION, in seconds, and never negative', async () => {
-    await insertRunWithStartContext(storage, makeRun({ runId: 'old' }), { enqueueDispatch: true });
+    await insertRunWithStartContext(storage, makeRun({ runId: 'old' }), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true });
     const row = (await storage.getDispatchOutbox('old'))!;
     const createdMs = Date.parse(row.createdAt);
 
@@ -179,7 +187,7 @@ describe('ADR 0551 P2 — backlog depth and oldest age', () => {
   });
 
   it('counts dead rows separately — a dead intent is NOT backlog', async () => {
-    await insertRunWithStartContext(storage, makeRun({ runId: 'doomed' }), { enqueueDispatch: true });
+    await insertRunWithStartContext(storage, makeRun({ runId: 'doomed' }), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true });
     const deps = { storage, hostSuite: stubHostSuite(async () => null) };
     let at = (await storage.getDispatchOutbox('doomed'))!.nextAttemptAt;
     for (let i = 0; i < 5; i++) {
@@ -201,7 +209,7 @@ describe('ADR 0551 P2 — backlog depth and oldest age', () => {
 
 describe('ADR 0551 P2 — lease.recovered classifies what the worker DID', () => {
   it('counts a real dispatch', async () => {
-    await insertRunWithStartContext(storage, makeRun({ runId: 'go' }), { enqueueDispatch: true });
+    await insertRunWithStartContext(storage, makeRun({ runId: 'go' }), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true });
     const due = (await storage.getDispatchOutbox('go'))!.nextAttemptAt;
     expect(await sweepDispatchOutbox({ storage, hostSuite: stubHostSuite() }, 'w1', due)).toBe(1);
     await flush();
@@ -209,7 +217,7 @@ describe('ADR 0551 P2 — lease.recovered classifies what the worker DID', () =>
   });
 
   it('counts a duplicate delivery as DISCHARGED — refusing to double-start is healthy', async () => {
-    await insertRunWithStartContext(storage, makeRun({ runId: 'dup' }), { enqueueDispatch: true });
+    await insertRunWithStartContext(storage, makeRun({ runId: 'dup' }), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true });
     const due = (await storage.getDispatchOutbox('dup'))!.nextAttemptAt;
     await sweepDispatchOutbox({ storage, hostSuite: stubHostSuite() }, 'w1', due);
     await flush();
@@ -226,7 +234,7 @@ describe('ADR 0551 P2 — lease.recovered classifies what the worker DID', () =>
   });
 
   it('counts an intent whose run vanished', async () => {
-    await insertRunWithStartContext(storage, makeRun({ runId: 'gone' }), { enqueueDispatch: true });
+    await insertRunWithStartContext(storage, makeRun({ runId: 'gone' }), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true });
     const due = (await storage.getDispatchOutbox('gone'))!.nextAttemptAt;
     await storage.deleteRun('gone');
 
@@ -235,7 +243,7 @@ describe('ADR 0551 P2 — lease.recovered classifies what the worker DID', () =>
   });
 
   it('separates a bounded RETRY from the terminal give-up', async () => {
-    await insertRunWithStartContext(storage, makeRun({ runId: 'unresolvable' }), { enqueueDispatch: true });
+    await insertRunWithStartContext(storage, makeRun({ runId: 'unresolvable' }), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true });
     const deps = { storage, hostSuite: stubHostSuite(async () => null) };
     let at = (await storage.getDispatchOutbox('unresolvable'))!.nextAttemptAt;
     for (let i = 0; i < 5; i++) {
@@ -259,7 +267,7 @@ describe('ADR 0551 P2 — lease.recovered classifies what the worker DID', () =>
     // at all). Sharing a counter without the `lane` label would make a spike
     // unattributable to either mechanism.
     const old = new Date(NOW - 3_600_000 * 0.5).toISOString();
-    await insertRunWithStartContext(storage, makeRun({ runId: 'orphan', createdAt: old, updatedAt: old }));
+    await insertRunWithStartContext(storage, makeRun({ runId: 'orphan', createdAt: old, updatedAt: old }), { admission: { plan: 'exempt:test-fixture' } });
     expect(await sweepOrphanedRuns({ storage, hostSuite: stubHostSuite() }, 'w1', NOW)).toBe(1);
     await flush();
     expect(recoveries()).toEqual([{ lane: 'orphan', outcome: 'dispatched' }]);
@@ -268,7 +276,7 @@ describe('ADR 0551 P2 — lease.recovered classifies what the worker DID', () =>
 
 describe('ADR 0551 P2 — redrive is a compare-and-set', () => {
   async function makeDeadRow(runId: string): Promise<void> {
-    await insertRunWithStartContext(storage, makeRun({ runId }), { enqueueDispatch: true });
+    await insertRunWithStartContext(storage, makeRun({ runId }), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true });
     const deps = { storage, hostSuite: stubHostSuite(async () => null) };
     let at = (await storage.getDispatchOutbox(runId))!.nextAttemptAt;
     for (let i = 0; i < 5; i++) {
@@ -297,6 +305,10 @@ describe('ADR 0551 P2 — redrive is a compare-and-set', () => {
     expect(await storage.claimDispatchOutbox('w1', NOW, 60_000, 10)).toHaveLength(1);
   });
 
+  // Not a forced race: better-sqlite3 runs each statement synchronously, so the
+  // two calls never interleave. The claim holds because the `status = 'dead'`
+  // predicate lives IN the writing statement — dropping it reds this case and
+  // the next (w69g3-ob-redrive-cas).
   it('CONCURRENT double-redrive produces exactly ONE re-queued row', async () => {
     await makeDeadRow('raced');
     const [a, b] = await Promise.all([
@@ -314,7 +326,7 @@ describe('ADR 0551 P2 — redrive is a compare-and-set', () => {
   });
 
   it('refuses a row that is not dead, and one that does not exist', async () => {
-    await insertRunWithStartContext(storage, makeRun({ runId: 'alive' }), { enqueueDispatch: true });
+    await insertRunWithStartContext(storage, makeRun({ runId: 'alive' }), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true });
     // A pending row is NOT redrivable: resetting its attempts would silently
     // extend a budget the worker is still spending.
     expect(await storage.redriveDispatchOutbox('alive', NOW, 'nope')).toBe(false);
@@ -326,8 +338,8 @@ describe('ADR 0551 P2 — redrive is a compare-and-set', () => {
 describe('ADR 0551 P2 — the stats read is an aggregate, not a page count', () => {
   it('counts the whole table and finds the OLDEST pending row', async () => {
     const older = new Date(NOW - 3_600_000).toISOString();
-    await insertRunWithStartContext(storage, makeRun({ runId: 'a', createdAt: older, updatedAt: older }), { enqueueDispatch: true });
-    await insertRunWithStartContext(storage, makeRun({ runId: 'b' }), { enqueueDispatch: true });
+    await insertRunWithStartContext(storage, makeRun({ runId: 'a', createdAt: older, updatedAt: older }), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true });
+    await insertRunWithStartContext(storage, makeRun({ runId: 'b' }), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true });
 
     const stats = await storage.dispatchOutboxStats();
     expect(stats).toEqual({ pending: 2, dead: 0, oldestPendingCreatedAt: older });
@@ -335,7 +347,7 @@ describe('ADR 0551 P2 — the stats read is an aggregate, not a page count', () 
 
   it('listing is capped while the counts are not — so a deep queue is reported honestly', async () => {
     for (let i = 0; i < 3; i++) {
-      await insertRunWithStartContext(storage, makeRun({ runId: `p${i}` }), { enqueueDispatch: true });
+      await insertRunWithStartContext(storage, makeRun({ runId: `p${i}` }), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true });
     }
     expect((await storage.listDispatchOutbox({ status: 'pending', limit: 2 }))).toHaveLength(2);
     expect((await storage.dispatchOutboxStats()).pending).toBe(3);

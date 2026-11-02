@@ -4,12 +4,27 @@
  * only through the mock seam): OpenAI multipart /images/edits shape (image +
  * optional mask parts, key in the header only), Replicate per-op default
  * models + data-URI inputs, and the upscale scale threading.
+ *
+ * TST-CVG-25. Default model ids are pinned as LITERALS (not read from the
+ * product's `REPLICATE_OP_DEFAULT_MODELS`), so a typo in that table is red. Red
+ * when: the mask part is dropped or always sent, the key reaches a form field,
+ * provider errors lose their typed prefix, an op routes to the wrong model,
+ * background-remove sends a prompt, or the upscale scale is not threaded.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   dispatchImageEditOpenAI, dispatchImageEditReplicate, dispatchImageUpscaleReplicate,
-  REPLICATE_OP_DEFAULT_MODELS,
+  REPLICATE_DEFAULT_BASE_URL,
 } from '../src/providers/dispatchImages.js';
+
+/** The curated defaults, written out by hand (ADR 0401 P3). */
+const EXPECTED_MODELS = {
+  edit: 'black-forest-labs/flux-dev',
+  inpaint: 'stability-ai/stable-diffusion-inpainting',
+  'background-remove': 'lucataco/remove-bg',
+  upscale: 'nightmareai/real-esrgan',
+} as const;
+const predictionsUrl = (model: string): string => `${REPLICATE_DEFAULT_BASE_URL}/models/${model}/predictions`;
 
 const PNG_B64 = Buffer.from('89504e470d0a1a0a', 'hex').toString('base64');
 const OUT_BYTES = Buffer.from('89504e47', 'hex');
@@ -61,9 +76,9 @@ describe('dispatchImageEditOpenAI', () => {
 describe('dispatchImageEditReplicate', () => {
   it('routes each op to its curated default model with data-URI inputs', async () => {
     for (const [op, expectedModel] of [
-      ['edit', REPLICATE_OP_DEFAULT_MODELS.edit],
-      ['inpaint', REPLICATE_OP_DEFAULT_MODELS.inpaint],
-      ['background-remove', REPLICATE_OP_DEFAULT_MODELS['background-remove']],
+      ['edit', EXPECTED_MODELS.edit],
+      ['inpaint', EXPECTED_MODELS.inpaint],
+      ['background-remove', EXPECTED_MODELS['background-remove']],
     ] as const) {
       const { calls } = fakeFetch((url) => {
         if (url.includes('/predictions')) return json({ status: 'succeeded', output: ['https://replicate.delivery/x/o.png'] });
@@ -75,7 +90,7 @@ describe('dispatchImageEditReplicate', () => {
         ...(op === 'inpaint' ? { maskBase64: PNG_B64 } : {}),
       });
       const create = calls[0]!;
-      expect(create.url, op).toContain(`/models/${expectedModel}/predictions`);
+      expect(create.url, op).toBe(predictionsUrl(expectedModel));
       const input = (JSON.parse(String(create.init?.body)) as { input: Record<string, unknown> }).input;
       expect(String(input.image)).toMatch(/^data:image\/png;base64,/);
       if (op === 'inpaint') expect(String(input.mask)).toMatch(/^data:image\/png;base64,/);
@@ -94,7 +109,7 @@ describe('dispatchImageUpscaleReplicate', () => {
     const images = await dispatchImageUpscaleReplicate({ apiKey: 'k', imageBase64: PNG_B64, mimeType: 'image/png', scale: 4 });
     expect(images.length).toBe(1);
     const create = calls[0]!;
-    expect(create.url).toContain(`/models/${REPLICATE_OP_DEFAULT_MODELS.upscale}/predictions`);
+    expect(create.url).toBe(predictionsUrl(EXPECTED_MODELS.upscale));
     const input = (JSON.parse(String(create.init?.body)) as { input: Record<string, unknown> }).input;
     expect(input.scale).toBe(4);
   });

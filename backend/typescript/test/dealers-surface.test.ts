@@ -4,6 +4,11 @@
  * host:dealers:manage; system run denied; reads open to tenant-scoped runs.
  * Packs: node + agent manifests validate; the write is side-effectful + kept out
  * of the advisory agent's allowlist; index.mjs exports the node functions.
+ *
+ * TST-CUD-4. Red when the governed write skips the acting-user check (system run)
+ * or the host:dealers:manage check — each refusal is asserted by its OWN message,
+ * since both throw `forbidden_scope` — or when the advisory agent's allowlist
+ * gains the write tool.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -30,14 +35,18 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+interface Res<T> { status: number; body: T }
+/** The union of the response fields these routes return (each call reads only its own). */
+interface Body {
+  user: { userId: string }; orgId: string; companyId: string; dealerId: string; token: string;
+  registrations: Array<{ regId: string }>;
+}
 function client(withCookie = true) {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async (method: string, path: string, body?: unknown): Promise<Res<Body>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(withCookie && cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    if (withCookie) for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    if (withCookie) for (const c of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]!; }
+    return { status: res.status, body: (res.status === 204 ? {} : await res.json().catch(() => ({}))) as Body };
   };
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
 }
@@ -57,16 +66,20 @@ describe('dealers P3 — governed surface write + reads', () => {
     const dealerId = (await owner.post(`${B}/dealers`, { name: 'D', companyId })).body.dealerId;
     const token = (await owner.post(`${B}/dealers/${dealerId}/portal-token`)).body.token;
     await client(false).post(`/host/openwop-app/partner/${token}/register`, { dealTitle: 'X', companyName: 'Y' });
-    const regId = (await owner.get(`${B}/registrations`)).body.registrations[0].regId;
+    const regId = (await owner.get(`${B}/registrations`)).body.registrations[0]!.regId;
 
     const surfaceFor = (actingUserId?: string) => buildDealerSurface({ tenantId, ...(actingUserId ? { actingUserId } : {}), runId: `run-${n++}` });
     // reads are open
     expect((await surfaceFor(editorId).listDealers!({ orgId })).dealers).toHaveLength(1);
     // approve — editor (no manage) DENIED, system run DENIED, owner SUCCEEDS
-    await expect(surfaceFor(editorId).approveRegistration!({ orgId, regId })).rejects.toMatchObject({ code: 'forbidden_scope' });
-    await expect(surfaceFor(undefined).approveRegistration!({ orgId, regId })).rejects.toMatchObject({ code: 'forbidden_scope' });
-    const out = await surfaceFor(ownerId).approveRegistration!({ orgId, regId }) as { registration: { status: string } };
-    expect(out.registration.status).toBe('approved');
+    await expect(surfaceFor(editorId).approveRegistration!({ orgId, regId }))
+      .rejects.toMatchObject({ code: 'forbidden_scope', message: 'Missing required scope: host:dealers:manage' });
+    await expect(surfaceFor(undefined).approveRegistration!({ orgId, regId }))
+      .rejects.toMatchObject({ code: 'forbidden_scope', message: expect.stringMatching(/system runs denied/) });
+    // neither refusal decided anything
+    expect((await owner.get(`${B}/registrations`)).body.registrations[0]).toMatchObject({ regId, status: 'pending' });
+    const out = await surfaceFor(ownerId).approveRegistration!({ orgId, regId });
+    expect(out).toMatchObject({ success: true, registration: { regId, status: 'approved' } });
   });
 });
 

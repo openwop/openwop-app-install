@@ -26,10 +26,9 @@
  * that already reads the v2 shape (`subscriptionProviders`, `InMemoryHostBanner`)
  * keeps working.
  *
- * KNOWN, DELIBERATE GAPS. v2 does not advertise `envelopes.reliability` (an
- * optional family this host does not claim at major 2), and has no
- * `capabilities.profiles[]` interrupt-profile list. Both are read only by the
- * wire-diagnostics `CapabilitiesPanel`, which then shows the v2 truth: a dash.
+ * KNOWN, DELIBERATE GAP. v2 has no `capabilities.profiles[]` interrupt-profile
+ * list. Only the wire-diagnostics `CapabilitiesPanel` reads it, and it then shows
+ * the v2 truth: a dash.
  */
 
 /** v2 family metadata that has no v1 counterpart (`declaration.json` stamps). */
@@ -65,7 +64,7 @@ function family(v: unknown): Json | undefined {
   return out;
 }
 
-/** A nested facet (`envelopes.reasoning`, `memory.attribution`) whose presence is its claim. */
+/** A nested facet (`aiProviders.reasoning`, `memory.attribution`) whose presence is its claim. */
 function facet(parent: Json | undefined, key: string): void {
   if (parent && isObj(parent[key])) parent[key] = { supported: true, ...(parent[key] as Json) };
 }
@@ -87,8 +86,9 @@ export function adaptV2Capabilities(doc: unknown): HostCapabilities {
   const surfaces = isObj(ext['openwop-app.host-surfaces']) ? ext['openwop-app.host-surfaces'].surfaces : undefined;
 
   const auth = { ...(family(v2.auth) ?? {}), profiles: profilesFromLanes(v2.auth) };
-  const envelopes = family(v2.envelopes);
-  facet(envelopes, 'reasoning');
+  const aiProviders = family(v2.aiProviders);
+  facet(aiProviders, 'reasoning');
+  facet(aiProviders, 'reliability');
   const memory = family(v2.memory);
   facet(memory, 'attribution');
   const limits = family(v2.limits);
@@ -98,10 +98,9 @@ export function adaptV2Capabilities(doc: unknown): HostCapabilities {
     auth,
     feedback: family(v2.feedback),
     prompts: family(v2.prompts),
-    envelopes,
     memory,
     modelCapabilities: family(v2.modelCapabilities),
-    aiProviders: family(v2.aiProviders),
+    aiProviders,
     ...(Array.isArray(surfaces) ? { hostSurfaces: surfaces } : {}),
     ...(limits ? { limits } : {}),
   };

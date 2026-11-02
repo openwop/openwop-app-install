@@ -10,10 +10,21 @@
  * validator could see them. And validateAppDoc accepted unknown keys that the
  * artifact schema refuses, so the two gates disagreed.
  *
- * MEASURED: 19 of these 22 tests are red against origin/main d812ae704's pack
- * and validator. The other three are guards that held before and must keep
+ * MEASURED: 19 of the original 22 tests were red against origin/main d812ae704's
+ * pack and validator. The other three are guards that held before and must keep
  * holding: the fixture is valid, render does not mutate its input, and a
- * mid-edit screen with no name is still accepted.
+ * mid-edit screen with no name is still accepted. The ABR-REPAIR-2 block (5 cases)
+ * was added later; 27 cases now.
+ *
+ * Sabotage-witnessed (grade-tests w74): rebuilding the payload or a component from a
+ * fixed field list, dropping the per-screen deep copy (the caller's `props` are then
+ * rewritten by the rename remap), slugging an already-valid id, skipping any rename
+ * remap (guards, share overrides, `source.<id>` binding paths), skipping the render
+ * gate, the validator's unknown-key / hex / sample-row / trigger checks, repair's
+ * facet carry-over, its lost-facet feedback, or its typed failure code each reds the
+ * case(s) that name it.
+ *
+ * The pack is untyped `.mjs`; its import is the file's one boundary cast.
  */
 import { describe, expect, it } from 'vitest';
 import { validateAppDoc } from '../validateAppDoc.js';
@@ -22,6 +33,7 @@ import { registerAppBuilderComponents } from '../componentCatalog.js';
 registerAppBuilderComponents();
 
 type NodeFn = (ctx: unknown) => Promise<{ status: string; outputs: Record<string, unknown> }>;
+// The one boundary cast: the pack ships no type declarations.
 const pack = async () => (await import('../../../../../../packs/feature.app-builder.nodes/index.mjs')) as unknown as Record<string, NodeFn>;
 
 /** A host surface whose validate is the REAL editor gate. */
@@ -94,10 +106,20 @@ describe('ABR-RENDER-1 — render carries every facet (it used to erase them)', 
 
   it('does not mutate the caller’s object (a run snapshot is delivered by reference)', async () => {
     const { render } = await pack();
+    // A rename the remap must follow, so render rewrites `navigateTo` / guards /
+    // connectors — in its OWN copy, never in the caller's objects.
     const input = fullDoc();
-    input.screens = [{ id: 'Home Screen', name: 'Home' }];
-    await render({ inputs: { app: input } });
+    const screens = input.screens as Record<string, unknown>[];
+    screens[0]!.id = 'Home Screen';
+    screens[1]!.id = 'Detail Page';
+    ((screens[0]!.components as Record<string, unknown>[])[0]!.props as Record<string, unknown>).navigateTo = 'Detail Page';
+    const before = JSON.parse(JSON.stringify(input)) as Record<string, unknown>;
+    const res = await render({ inputs: { app: input } });
+    // Positive control: the OUTPUT did follow the rename.
+    const outHome = ((res.outputs.artifact as { payload: Record<string, unknown> }).payload.screens as { components: Record<string, unknown>[] }[])[0]!;
+    expect((outHome.components[0]!.props as Record<string, unknown>).navigateTo).toBe('detail-page');
     expect((input.screens as { id: string }[])[0]!.id).toBe('Home Screen');
+    expect(input).toEqual(before);
   });
 
   it('a renamed id is followed by every reference to it (actions, guards, binds, binding paths, share overrides)', async () => {
@@ -125,6 +147,7 @@ describe('ABR-RENDER-1 — render carries every facet (it used to erase them)', 
     expect((out.dataSources as { id: string }[])[0]!.id).toBe('products');
     expect((outHome.components[2]!.props as Record<string, unknown>).bind).toBe('products');
     expect(out.sharePolicy).toEqual({ sampleData: 'include', perSource: { products: true } });
+    expect(outHome.components[1]!.bindings).toEqual({ text: { path: 'source.products.title' } });
   });
 
   it('an id that is already valid is kept verbatim (slugging used to lowercase `Products`)', async () => {

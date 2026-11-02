@@ -20,9 +20,9 @@
  * ── History: the loader rewrite that used to sit in front of this ───────────
  *
  * Until suite 1.136.0 the fixture spelled its node `core.ai.callPrompt`, which
- * on THIS host is the `vendor.myndhyve.ai` pack's prompt-library node
- * (`packs/vendor.myndhyve.ai/index.mjs`): it requires `config.promptId`, never
- * reads `config.mcp`, and failed `prompt_not_found` on this fixture. Hijacking
+ * on THIS host was the `vendor.myndhyve.ai` pack's prompt-library node (pack
+ * deleted, ADR 1007): it required `config.promptId`, never
+ * read `config.mcp`, and failed `prompt_not_found` on this fixture. Hijacking
  * that typeId globally would have broken a real node for every workflow using
  * it, so the fixture LOADER (`host/index.ts`) rewrote that ONE node onto the id
  * below, under this file's own `config.mcp` predicate. openwop#1060 (suite

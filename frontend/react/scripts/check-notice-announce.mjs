@@ -601,7 +601,15 @@ const NEW_BASELINE = readGateBaseline(
   // 130 → 129 (2026-10-17): CM-3/CS-4 (KickTodo wave 4H) — CommunityPage's `error`
   // Notice is gone: the load failure is an announcing Notice with Retry gated on
   // `loadFailed`, and save/review failures announce their own copy. Row deleted.
-  scanningRealTree ? 129 : 0,
+  // 129 → 127 (2026-10-31): MR66UX-8 (feature loop round 2 row 66, ADR 1016) —
+  // the model-router page's silent `error` Notice is gone: a failed read shows
+  // ONE announcing warning (the `loadFailed` guard). Row deleted. Measured 127
+  // after the deletion (the tree already carried one unit of slack), so the
+  // baseline drops to the measurement, not by one.
+  // 127 → 126 (2026-11-01): CP71UX-12 (feature loop round 2 row 71, ADR 1022) —
+  // the campaign-connectors page's top `error` Notice now passes `announce`.
+  // Row deleted.
+  scanningRealTree ? 126 : 0,
 );
 /** (file, flag) -> the recorded ceiling. */
 const NEW_COHORT = new Map(LEGACY_SILENT_READ_SITES.map(([f, flag, n]) => [`${f}${SITE_SEP}${flag}`, n]));

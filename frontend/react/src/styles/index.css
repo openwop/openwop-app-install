@@ -9,6 +9,7 @@
  */
 @import './foundations/tokens.css';
 @import './global.css';
+@import './features/visitor-consent.css';
 @import './chrome/admin.css';
 @import './primitives/adr0510.css';
 @import './features/showcase.css';

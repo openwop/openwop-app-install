@@ -1,7 +1,10 @@
 /**
  * Public embeddable chat widget (ADR 0127, backlog B19) — a domain-allowlisted,
- * capability-token-gated public gateway over the EXISTING chat (ADR 0073
- * EmbeddedConversation), NOT a second chat component.
+ * capability-token-gated public gateway. The visitor UI is a thin vanilla-JS embed on
+ * the customer's page (`publicGateway.ts` EMBED_JS), and every model call it causes
+ * runs server-side through the shared managed dispatch / `runChatToolLoop`. (This used
+ * to say it ran "over the EXISTING chat (ADR 0073 EmbeddedConversation)"; it never
+ * did — ADR 1018 records why the in-app panel is not the public client.)
  *
  * Toggle: `chat-widget`, default ON, per tenant. ADR 0820 §8.2 restored it (the
  * ADR 0134 graduation had removed it, and PUB-5 recorded "no wholesale tenant

@@ -9,6 +9,13 @@
  * This locks the invariant with a hash-SAFE credential detector (a legit
  * content-hash — `workflowPinsDomain` emits one — must NOT trip it) proven both
  * ways, plus a scan over every SHIPPED domain's captured payload.
+ *
+ * TST-DAC-2. The detector cases are self-tests of the guard (test-local code, no
+ * product subject); the product claim is the last case, which scans every
+ * shipped domain's REAL export over a SEEDED tenant (a published workflow pin).
+ *
+ * Red when (sabotage-witnessed, wave 70): a shipped domain's export emits a
+ * credential-shaped value — unconditionally, or only for seeded rows.
  */
 import { beforeEach, afterAll, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -21,6 +28,10 @@ import {
   type ConfigDomainPayload,
 } from '../src/host/configDomains.js';
 import { ENVIRONMENTS_CONFIG_DOMAINS } from '../src/features/environments/feature.js';
+import { recordOwnership, setPublishedRevision } from '../src/host/workflowOwnership.js';
+import { recordRevision } from '../src/host/workflowRevisions.js';
+import { revisionHashOf } from '../src/host/definitionHash.js';
+import type { WorkflowDefinition } from '../src/executor/types.js';
 
 /**
  * Does a captured leaf VALUE look like a live credential? Matched by known
@@ -100,13 +111,11 @@ describe('ENVC-8 — the credential detector is hash-safe AND catches real leaks
   });
 });
 
-// Honesty note: the shipped domains export EMPTY on an unseeded tenant (seeding
-// each owner service — toggles/funnels/pins — is disproportionate here), so their
-// per-domain scan is not a live-output regression guard on its own. The guard's
-// TEETH are: (a) the detector, proven + sabotage-verified above; (b) the synthetic
-// leaker below, proving the scan catches a real leak; (c) auto-enrolment via the
-// shared ENVIRONMENTS_CONFIG_DOMAINS const, so v2's connection-ref domain is scanned
-// the moment it is added to the feature — with a realistic non-empty payload witness.
+// The guard's TEETH: (a) the detector, proven both ways above; (b) the synthetic
+// leaker below, proving the scan catches a real leak; (c) the shipped domains'
+// REAL exports over a seeded tenant; (d) auto-enrolment via the shared
+// ENVIRONMENTS_CONFIG_DOMAINS const, so v2's connection-ref domain is scanned the
+// moment it is added to the feature.
 describe('ENVC-8 — the secret-scan catches a leaking domain; every feature-registered domain is enrolled', () => {
   it('a synthetic domain whose export() leaks a credential IS caught by the scan (the guard is real)', async () => {
     // The realistic mis-implementation: a connection-ref domain that captures the
@@ -123,11 +132,15 @@ describe('ENVC-8 — the secret-scan catches a leaking domain; every feature-reg
   });
 
   it('the shipped domains are registered + scanned; a realistic non-empty payload also scans clean (non-vacuous)', async () => {
-    // The shipped domains export EMPTY on an unseeded tenant (seeding each owner
-    // service — toggles/funnels/pins — is out of scope), so add a synthetic domain
-    // emitting the realistic SHAPE a config export carries — a content-hash,
-    // funnel/workflow ids, statuses, a connection REF — so the scan runs over a
-    // NON-empty payload and proves it doesn't false-positive on those legit values.
+    // Seed REAL state for a shipped domain: one published workflow pin, so the
+    // `workflow-pins` export is non-empty and the scan reads what it really emits.
+    const def: WorkflowDefinition = { workflowId: 'wf-envc8', nodes: [{ nodeId: 'n1', typeId: 'core.noop', config: {} }], edges: [] };
+    await recordOwnership('t-envc8', 'wf-envc8', { nodeCount: 1 });
+    await recordRevision('t-envc8', def, {});
+    expect(await setPublishedRevision('t-envc8', 'wf-envc8', revisionHashOf(def))).toBe(true);
+    // Plus a synthetic domain emitting the realistic SHAPE a config export carries
+    // — a content-hash, funnel/workflow ids, statuses, a connection REF — proving
+    // the scan doesn't false-positive on those legit values.
     const richSafe: ConfigDomain = {
       id: 'synthetic-safe', label: 'Synthetic realistic-safe', restore: 'apply-only',
       async export() {
@@ -142,14 +155,16 @@ describe('ENVC-8 — the secret-scan catches a leaking domain; every feature-reg
     };
     for (const d of [...SHIPPED, richSafe]) registerConfigDomain(d);
     const registered = listConfigDomains();
-    expect(registered).toHaveLength(SHIPPED.length + 1); // the 3 shipped ARE scannable (+ v2 when added here)
-    let scannedNonEmpty = 0;
+    expect(registered).toHaveLength(SHIPPED.length + 1); // every shipped domain is scannable (+ v2 when added there)
+    const scannedNonEmpty: string[] = [];
     for (const d of registered) {
       const payload = await d.export('t-envc8');
-      if (stringLeaves(payload).length > 0) scannedNonEmpty += 1;
+      if (stringLeaves(payload).length > 0) scannedNonEmpty.push(d.id);
       const leaks = stringLeaves(payload).filter(looksLikeSecret);
       expect(leaks, `${d.id} export() leaked a credential-shaped value`).toEqual([]);
     }
-    expect(scannedNonEmpty).toBeGreaterThan(0); // the scan actually examined a non-empty payload (not vacuous)
+    // The scan examined a SHIPPED domain's real, non-empty output (not only the synthetic one).
+    expect(scannedNonEmpty).toContain('workflow-pins');
+    expect(scannedNonEmpty).toContain('synthetic-safe');
   });
 });

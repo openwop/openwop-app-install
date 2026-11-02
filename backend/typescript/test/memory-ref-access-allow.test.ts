@@ -172,13 +172,19 @@ describe('F3(c) — the legitimate reads a signed-in human must still get', () =
     // Without this, the two allows above could be satisfied by a gate that had
     // been loosened to permit everything — which is the failure mode in the
     // opposite direction from the one this file was written for.
-    const { c } = await signIn();
+    const { c, tenantId } = await signIn();
     const { writeMemoryEntry, listMemoryEntries } = await import('../src/host/inMemorySurfaces.js');
     const victim = 'f3c-victim-user';
-    await writeMemoryEntry('default', `user:${victim}`, { content: 'victim private fact', tags: [] });
+    // Seeded in the CALLER'S OWN tenant — the one the route reads. (It used to be
+    // seeded in 'default', which this caller's request never reads, so the row
+    // could not have leaked whatever the gate did.)
+    await writeMemoryEntry(tenantId, `user:${victim}`, { content: 'victim private fact', tags: [] });
+    // Precondition: the row really is there to leak.
+    expect(await listMemoryEntries(tenantId, `user:${victim}`)).toHaveLength(1);
 
-    const res = await c.get<{ error?: string }>(`/host/openwop-app/memory?memoryRef=user:${victim}`);
+    const res = await c.get<{ error?: string; entries?: unknown }>(`/host/openwop-app/memory?memoryRef=user:${victim}`);
     expect(res.status).toBe(404);
-    expect(await listMemoryEntries('default', `user:${victim}`)).toHaveLength(1);
+    expect(res.body.error).toBe('not_found');
+    expect(res.body.entries).toBeUndefined();
   });
 });

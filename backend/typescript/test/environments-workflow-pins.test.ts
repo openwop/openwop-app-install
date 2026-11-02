@@ -8,9 +8,23 @@
  *    workflow) and surface through applyToLive's per-domain 409
  *  - cross-tenant isolation: a snapshot restored on tenant B never touches
  *    tenant A's pins, and B's import fails NAMED on A's workflowIds
+ *  - diff() counts only well-formed revision refs: a plaintext/secret-shaped
+ *    value never reaches a diff (ENVC-8 / ENVP-1, moved here from the retired
+ *    `env-grade-probe.test.ts`)
+ *
+ * TST-DAC-7. The concurrent-restore case FORCES its race with a test-side
+ * storage proxy (no product seam): `recordOwnership` is parked right after it
+ * read the old row, the pin restore lands, then the autosave resumes.
+ *
+ * Red when (sabotage-witnessed, wave 70): export includes unpublished rows; the
+ * foreign-owner check or the revision-tenancy check is dropped; a pruned
+ * revision is applied; malformed entries stop failing named; the HASH_RE
+ * filter admits any string; `recordOwnership` writes blind instead of CAS;
+ * `setPublishedRevision` succeeds on a missing row.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
+import type { Storage } from '../src/storage/storage.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { workflowPinsDomain } from '../src/features/environments/domains/workflowPinsDomain.js';
 import { recordOwnership, getOwned, setPublishedRevision } from '../src/host/workflowOwnership.js';
@@ -27,8 +41,11 @@ function def(workflowId: string, marker: string): WorkflowDefinition {
     nodes: [{ nodeId: 'n1', typeId: 'core.noop', config: { marker } }],
     edges: [],
     metadata: { name: workflowId },
-  } as unknown as WorkflowDefinition;
+  };
 }
+
+/** One-shot hold on the NEXT read of a key ending in `suffix` (test-side race forcing). */
+let hold: { suffix: string; arrived: () => void; release: Promise<void> } | null = null;
 
 /** Register ownership + a revision for (tenant, wf, marker); returns the hash. */
 async function seed(tenantId: string, workflowId: string, marker: string): Promise<string> {
@@ -40,18 +57,37 @@ async function seed(tenantId: string, workflowId: string, marker: string): Promi
 
 beforeAll(async () => {
   const storage = await openStorage('memory://');
-  initHostExtPersistence(storage);
+  const parked = new Proxy(storage, {
+    get(target, prop, receiver) {
+      if (prop === 'kvGet') {
+        return async (key: string) => {
+          const value = await target.kvGet(key);
+          const h = hold;
+          if (h && key.endsWith(h.suffix)) {
+            hold = null;
+            h.arrived();
+            await h.release; // the caller resumes holding the value it read BEFORE the hold
+          }
+          return value;
+        };
+      }
+      const v = Reflect.get(target, prop, receiver) as unknown;
+      return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+    },
+  }) as Storage;
+  initHostExtPersistence(parked);
 });
 afterAll(() => { /* memory:// dies with the process */ });
 
 describe('workflow-pins config domain (ADR 0479)', () => {
   it('export captures ONLY published rows, deterministically', async () => {
-    const h1 = await seed(T, 'wf-pub', 'v1');
-    await seed(T, 'wf-unpub', 'v1'); // owned, never published
-    expect(await setPublishedRevision(T, 'wf-pub', h1)).toBe(true);
+    const TE = 'org:pins-export'; // own tenant: other cases publish pins on T
+    const h1 = await seed(TE, 'wf-pub', 'v1');
+    await seed(TE, 'wf-unpub', 'v1'); // owned, never published
+    expect(await setPublishedRevision(TE, 'wf-pub', h1)).toBe(true);
 
-    const a = await workflowPinsDomain.export(T);
-    const b = await workflowPinsDomain.export(T);
+    const a = await workflowPinsDomain.export(TE);
+    const b = await workflowPinsDomain.export(TE);
     expect(a).toEqual({ 'wf-pub': h1 });
     expect(JSON.stringify(a)).toBe(JSON.stringify(b)); // deterministic
   });
@@ -115,18 +151,32 @@ describe('workflow-pins config domain (ADR 0479)', () => {
   it('recordOwnership does NOT clobber a concurrent pin restore (grade-fix H2)', async () => {
     const hK = await seed(T, 'wf-cas', 'v1');
     await setPublishedRevision(T, 'wf-cas', hK);
-    // Simulate the race: a builder autosave's recordOwnership interleaves with
-    // a pin restore. The blind get→put form dropped the just-set pin; the CAS
-    // form preserves it (or the loser retries and re-reads it).
     const hK2 = await seed(T, 'wf-cas', 'v2');
-    await Promise.all([
-      recordOwnership(T, 'wf-cas', { nodeCount: 2, name: 'renamed by autosave' }),
-      setPublishedRevision(T, 'wf-cas', hK2),
-    ]);
+    // FORCE the race: the autosave's recordOwnership reads the row (pin hK) and
+    // is parked; the pin restore to hK2 lands; then the autosave resumes with its
+    // stale read. A blind get→put would write hK back; the CAS form must not.
+    let arrived!: () => void;
+    let release!: () => void;
+    const arrivedP = new Promise<void>((r) => { arrived = r; });
+    hold = { suffix: `workflow:ownership:${T}:wf-cas`, arrived, release: new Promise<void>((r) => { release = r; }) };
+    try {
+      const autosave = recordOwnership(T, 'wf-cas', { nodeCount: 2, name: 'renamed by autosave' });
+      await Promise.race([
+        arrivedP,
+        new Promise<never>((_, rej) => setTimeout(() => rej(new Error('recordOwnership never read the row — the race was not forced')), 2000)),
+      ]);
+      expect(await setPublishedRevision(T, 'wf-cas', hK2)).toBe(true);
+      release();
+      await autosave;
+    } finally {
+      hold = null;
+      release();
+    }
     const row = await getOwned(T, 'wf-cas');
-    // The pin must survive the concurrent recordOwnership — never silently
-    // cleared/reverted (the B4 half-truth ADR 0479 closes).
+    // The pin survives, AND the autosave's own write landed (it retried, not dropped).
     expect(row?.publishedRevision).toBe(hK2);
+    expect(row?.name).toBe('renamed by autosave');
+    expect(row?.nodeCount).toBe(2);
   });
 
   it('setPublishedRevision fails closed on a missing ownership row', async () => {
@@ -140,6 +190,16 @@ describe('workflow-pins config domain (ADR 0479)', () => {
       { 'wf-2': 'c'.repeat(64), 'wf-3': 'd'.repeat(64) },
     );
     expect(d).toEqual({ added: 1, changed: 1, removed: 1 });
+  });
+
+  it('diff ignores a non-hash (secret-shaped) value — ENVC-8 / ENVP-1', () => {
+    // A plaintext secret beside one valid hash ref; `to` is empty. Only the ref
+    // counts as removed: the secret-shaped value never reaches the diff.
+    const d = workflowPinsDomain.diff(
+      { leaked: 'sk-live-PLAINTEXT-SECRET-should-never-be-captured', real: 'a1b2c3d4e5f6a1b2c3d4e5f6' },
+      {},
+    );
+    expect(d).toEqual({ added: 0, changed: 0, removed: 1 });
   });
 
   it('service round-trip: snapshot → pin moves → applyToLive restores it (domain reports ok)', async () => {
@@ -164,7 +224,7 @@ describe('workflow-pins config domain (ADR 0479)', () => {
   it('malformed payload entries FAIL NAMED — never a silent green apply (code-review M2)', async () => {
     const hE = await seed(T, 'wf-e', 'e1');
     await setPublishedRevision(T, 'wf-e', hE);
-    await expect(workflowPinsDomain.import(T, { 'wf-e': 'not-a-hash!', bogus: 42 } as never))
+    await expect(workflowPinsDomain.import(T, { 'wf-e': 'not-a-hash!', bogus: 42 }))
       .rejects.toThrow(/malformed revision reference/);
     expect((await getOwned(T, 'wf-e'))?.publishedRevision).toBe(hE); // untouched
   });

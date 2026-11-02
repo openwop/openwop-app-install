@@ -13,7 +13,7 @@ import { WorkspaceSwitcher } from './WorkspaceSwitcher.js';
 import { ChevronLeftIcon, ChevronRightIcon, MoreHorizontalIcon, SearchIcon, SettingsIcon } from '../ui/icons/index.js';
 import { LanguageSwitcher } from '../i18n/LanguageSwitcher.js';
 import { ThemeToggle } from '../ui/ThemeToggle.js';
-import { A11yPrefsControl } from '../ui/A11yPrefsControl.js';
+import { A11yPrefsButton } from './A11yPrefsButton.js';
 import { navItemIsActive, GROUP_LABEL_KEYS } from './features.js';
 import { IconButton } from '../ui/IconButton.js';
 import { useFocusTrap } from '../ui/useFocusTrap.js';
@@ -286,7 +286,7 @@ export function Sidebar({ netOpen, onToggleNet }: { netOpen: boolean; onToggleNe
           <ThemeToggle />
           {accountPresent === false && (
             <>
-              <A11yPrefsControl />
+              <A11yPrefsButton />
               <LanguageSwitcher />
             </>
           )}

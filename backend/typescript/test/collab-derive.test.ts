@@ -9,6 +9,13 @@
  *    `canvas_room_live`;
  *  - an external write with NO live room INVALIDATES the CRDT store (snapshot
  *    pruned + seed re-claimable — host.canvas is the authority again).
+ *
+ * TST-CFC-2. Red when: the derive validator gate is dropped (RTCC-3); the
+ * document-room veto, the local external-write apply, the extwrite apply, the
+ * invalidation's seed-claim prune, the lease expiry check, the delete cascade,
+ * the consecutive-collab prune, the anti-entropy peer check, the converged-skip,
+ * the F1 claim restore, the derive's `collab` provenance, the CAS-miss merge, the
+ * local relay or the snapshot restore is removed.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -21,7 +28,7 @@ import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { attachCollabWebSocket, __resetCollabConns, claimCollabSeed, __resetCollabSeedClaims } from '../src/host/collab/collabServer.js';
-import { __resetCollabRooms, hasCollabSnapshot, hasLiveRoomGlobal, __deliverExtWrite, __putCollabLease, __clearCollabLeases, sweepOrphanedCollabUpdates, __stopCollabLeaseHeartbeat, __stopCollabUpdateSweep } from '../src/host/collab/collabRoom.js';
+import { __resetCollabRooms, listLiveRooms, hasCollabSnapshot, hasLiveRoomGlobal, __deliverExtWrite, __putCollabLease, __clearCollabLeases, sweepOrphanedCollabUpdates, __stopCollabLeaseHeartbeat, __stopCollabUpdateSweep } from '../src/host/collab/collabRoom.js';
 import { deleteCanvasForTenant } from '../src/host/canvasSurface.js';
 import { replaceRootFromState, defaultDeriveState, type CollabShape } from '../src/host/collab/collabStateMirror.js';
 import { pmDocFromYFragment, deriveDocumentState } from '../src/features/document-editor/pmFromY.js';
@@ -230,8 +237,10 @@ describe('grade-pass remediations (ADR 0359 B1/B2/I4/I5)', () => {
     const c = client(cookie, canvas.canvasId);
     await c.opened;
     await sleep(200);
-    // The write lands durably first (as it would via another instance's hook)…
-    await updateCanvasForTenant(tenantId, canvas.canvasId, { title: 'From B', shapes: [] });
+    // The write lands durably first, as a RAW store write (`source: 'collab'` skips the
+    // local after-hook) — so this room does NOT already have it, as on a peer instance…
+    await updateCanvasForTenant(tenantId, canvas.canvasId, { title: 'From B', shapes: [] }, { merge: 'replace', source: 'collab' });
+    expect(c.doc.getMap<unknown>('doc').get('title')).not.toBe('From B'); // control: only the signal can move it
     // …then the peer signal arrives with a FOREIGN origin id.
     await __deliverExtWrite(JSON.stringify({ canvasId: canvas.canvasId, originId: 'other-instance' }));
     await until(async () => c.doc.getMap<unknown>('doc').get('title') === 'From B');
@@ -257,7 +266,8 @@ describe('grade-pass remediations (ADR 0359 B1/B2/I4/I5)', () => {
     const r1 = await updateCanvasForTenant(tenantId, canvas.canvasId, { title: 'v1', shapes: [] }, { merge: 'replace', snapshot: { capturedBy: 'collab', force: true }, source: 'collab' });
     const { pruneConsecutiveCollabVersions } = await import('../src/host/canvasSurface.js');
     const r2 = await updateCanvasForTenant(tenantId, canvas.canvasId, { title: 'v2', shapes: [] }, { merge: 'replace', snapshot: { capturedBy: 'collab', force: true }, source: 'collab' });
-    if (r2) await pruneConsecutiveCollabVersions(tenantId, canvas.canvasId, r2.newVersion);
+    expect(r2).not.toBeNull();
+    await pruneConsecutiveCollabVersions(tenantId, canvas.canvasId, r2!.newVersion);
     const versions = await listCanvasVersions(tenantId, canvas.canvasId);
     const collabVersions = versions.filter((v) => v.capturedBy === 'collab');
     expect(collabVersions.length).toBe(1);
@@ -336,6 +346,9 @@ describe('grade-pass code findings (CODE-1/3/7)', () => {
     const { cookie } = await login();
     const res = await fetch(`${BASE}/host/openwop-app/canvas-collab/_debug`, { headers: { cookie } });
     expect(res.status).toBe(403);
+    const body = (await res.json()) as { error?: string; message?: string };
+    expect(body.error).toBe('forbidden');
+    expect(body.message).toBe('The collaboration debug surface requires a superadmin principal.');
   });
 });
 
@@ -465,6 +478,12 @@ describe('grade-pass 3b (code findings 1/2/5)', () => {
     await __persistRoomForTest(canvas.canvasId);
     const after = await __getCollabSnapshotRow(canvas.canvasId);
     expect(after?.updatedAt).toBe(theirs?.updatedAt); // we did NOT re-write
+    // …and did not take the merge path either: the merge path counts a miss and
+    // leaves the room dirty for a rescheduled save that would land AFTER the read above.
+    const room = listLiveRooms().find((x) => x.canvasId === canvas.canvasId);
+    expect(room).toBeDefined();
+    expect(room?.persistMisses).toBe(0);
+    expect(room?.dirty).toBe(false);
     c.ws.close();
     await sleep(300);
   });
@@ -509,7 +528,9 @@ describe('RTCC-2 / RTCC-3 — collab snapshot trust boundary (the derive gate is
 
     // (2) DURABLE CHOKE holds — the derive gate skipped the invalid state, so
     // host.canvas keeps its last VALID value; the invalid title never lands.
-    await sleep(600); // let the eviction derive run (and skip)
+    // Wait for the eviction to FINISH (it deletes the room after its forced derive),
+    // so the negative below is read after the derive ran, not before.
+    await until(async () => !listLiveRooms().some((x) => x.canvasId === canvas.canvasId));
     const durable = await getCanvasForTenant(tenantId, canvas.canvasId);
     expect(durable?.state.title).toBe('valid-original');
   });

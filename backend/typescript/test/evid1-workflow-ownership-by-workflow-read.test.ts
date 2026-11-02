@@ -12,8 +12,14 @@
  * the statement-timeout error) and asserts the three request-path questions
  * still answer — and answer EXACTLY what the scan answered, on the ids built to
  * fool a text pre-filter.
+ *
+ * TST-DAD-7. Cases never mutate shared rows (the remove case seeds and removes
+ * its own pair) and the trap state resets per case, so the file passes shuffled.
+ * Red when (sabotage-witnessed, wave 70): `ownersOf` scans the whole table; the
+ * exact `workflowId ===` check after the text pre-filter is dropped;
+ * `isAuthoredByOtherTenant` counts the caller's own row as foreign.
  */
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
@@ -62,22 +68,31 @@ beforeAll(async () => {
   await recordOwnership('user:erin', 'naïve-flow', { name: 'Non-ASCII id', nodeCount: 1 });
 });
 
+beforeEach(() => { armed = false; fullScans.length = 0; narrowed.length = 0; });
+
 describe('EVID-1 — by-workflow ownership reads are narrowed in the database', () => {
   it('PREMISE: the trap fires — a full scan of the namespace throws while armed', async () => {
-    armed = true;
     const { DurableCollection } = await import('../src/host/hostExtPersistence.js');
     const probe = new DurableCollection<{ key: string }>('workflow:ownership', (r) => r.key);
-    await expect(probe.list()).rejects.toThrow(/statement timeout/);
-    armed = false; fullScans.length = 0;
+    armed = true;
+    try {
+      await expect(probe.list()).rejects.toThrow(/statement timeout/);
+    } finally {
+      armed = false;
+    }
+    expect(fullScans).toEqual([PREFIX]);
   });
 
   it('isAuthoredByOtherTenant answers without a full scan, and reads only candidate rows', async () => {
-    armed = true; narrowed.length = 0;
-    expect(await isAuthoredByOtherTenant('user:zed', 'report')).toBe(true);       // alice owns it
-    expect(await isAuthoredByOtherTenant('user:alice', 'report')).toBe(false);    // only its owner
-    expect(await isAuthoredByOtherTenant('user:zed', 'nobody-owns-this')).toBe(false);
-    expect(await isAuthoredByOtherTenant('user:carol', 'shared-twice')).toBe(true); // dave also owns it
-    armed = false;
+    armed = true;
+    try {
+      expect(await isAuthoredByOtherTenant('user:zed', 'report')).toBe(true);       // alice owns it
+      expect(await isAuthoredByOtherTenant('user:alice', 'report')).toBe(false);    // only its owner
+      expect(await isAuthoredByOtherTenant('user:zed', 'nobody-owns-this')).toBe(false);
+      expect(await isAuthoredByOtherTenant('user:carol', 'shared-twice')).toBe(true); // dave also owns it
+    } finally {
+      armed = false;
+    }
     expect(fullScans).toEqual([]);
     expect(narrowed.length).toBe(4);
     // 46 rows in the table; a question about one id never pulls more than a handful.
@@ -94,23 +109,29 @@ describe('EVID-1 — by-workflow ownership reads are narrowed in the database', 
   });
 
   it('isAuthoredByAnyTenant and removeOwnershipByWorkflowId take the same narrowed read', async () => {
+    // Its OWN pair (removing the shared fixture would starve the other cases).
+    await recordOwnership('user:frank', 'remove-twice', { name: 'F', nodeCount: 1 });
+    await recordOwnership('user:gina', 'remove-twice', { name: 'G', nodeCount: 1 });
     armed = true;
-    expect(await isAuthoredByAnyTenant('shared-twice')).toBe(true);
-    expect(await isAuthoredByAnyTenant('nobody-owns-this')).toBe(false);
-    expect(await removeOwnershipByWorkflowId('shared-twice')).toBe(2);
-    armed = false;
+    try {
+      expect(await isAuthoredByAnyTenant('remove-twice')).toBe(true);
+      expect(await isAuthoredByAnyTenant('nobody-owns-this')).toBe(false);
+      expect(await removeOwnershipByWorkflowId('remove-twice')).toBe(2);
+    } finally {
+      armed = false;
+    }
     expect(fullScans).toEqual([]);
-    expect(await getOwned('user:carol', 'shared-twice')).toBeNull();
-    expect(await getOwned('user:dave', 'shared-twice')).toBeNull();
+    expect(await getOwned('user:frank', 'remove-twice')).toBeNull();
+    expect(await getOwned('user:gina', 'remove-twice')).toBeNull();
     // Nothing else was removed.
     expect((await listOwned('user:alice')).map((r) => r.workflowId)).toEqual(['report']);
     expect(await getOwned('user:bob', 'report-weekly')).not.toBeNull();
+    expect(await getOwned('user:carol', 'shared-twice')).not.toBeNull();
   });
 
   it('an id the text filter cannot narrow losslessly falls back to the full scan and is still CORRECT', async () => {
     // Fail-closed: a non-ASCII id must never be answered "nobody owns it" by a
     // filter that could not see it. Unarmed, so the fallback scan is allowed.
-    fullScans.length = 0;
     expect(await isAuthoredByOtherTenant('user:zed', 'naïve-flow')).toBe(true);
     expect(await isAuthoredByOtherTenant('user:erin', 'naïve-flow')).toBe(false);
   });

@@ -35,7 +35,10 @@ describe('buildMermaidSrcdoc — no-script static sandbox', () => {
 describe('svgHeightPx', () => {
   it('reads the height attribute, capped', () => {
     expect(svgHeightPx('<svg height="240" >')).toBe(248);
-    expect(svgHeightPx('<svg height="5000">')).toBe(1200); // cap
+    // ADR 1017 — the frame is inert (it cannot scroll itself), so it takes the whole
+    // diagram and the parent figure scrolls; the cap is only a guard.
+    expect(svgHeightPx('<svg height="5000">')).toBe(5008);
+    expect(svgHeightPx('<svg height="50000">')).toBe(8000); // cap
   });
   it('falls back to viewBox, then a default', () => {
     expect(svgHeightPx('<svg viewBox="0 0 100 180">')).toBe(188);

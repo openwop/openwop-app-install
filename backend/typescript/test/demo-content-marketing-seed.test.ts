@@ -5,6 +5,11 @@
  * transition + experiment), forms + submissions, email templates + campaigns +
  * engagement, the campaign cluster (a confirmed brief with a kernel), and a
  * document library — seeded idempotently and cleared clean.
+ *
+ * TST-CUE-2. Cases 2–3 are the ADR 0838 D1 cross-tenant witnesses. Red when the
+ * document id drops its per-tenant namespace (tenant A loses its rows), when a
+ * re-seed ignores legacy-id documents or campaigns, or when a re-seed re-creates
+ * documents.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -26,6 +31,8 @@ import { listBriefs } from '../src/features/campaign-brief/briefService.js';
 import { listDocuments } from '../src/features/documents/documentsService.js';
 
 const ON = { status: 'on' as const, bucketUnit: 'tenant' as const };
+/** `seedDemoContentMarketing(...).created` on a fresh tenant — MEASURED 2026-10-29. */
+const MEASURED_CREATED = 45;
 
 beforeAll(async () => {
   initHostExtPersistence(await openStorage('memory://'));
@@ -44,7 +51,7 @@ describe('demo-content-marketing seeder', () => {
     const orgId = (await (await import('../src/host/accessControlService.js')).listOrgs(tenantId))[0]!.orgId;
 
     const first = await seedDemoContentMarketing(tenantId);
-    expect(first.created).toBeGreaterThan(20);
+    expect(first.created).toBe(MEASURED_CREATED);
 
     // Brand + a 6-page CMS site with a published page.
     expect((await listBrands(tenantId, orgId)).some((b) => b.id === 'brand-solstice')).toBe(true);
@@ -78,7 +85,7 @@ describe('demo-content-marketing seeder', () => {
 
     // Round-trips.
     const third = await seedDemoContentMarketing(tenantId);
-    expect(third.created).toBeGreaterThan(20);
+    expect(third.created).toBe(MEASURED_CREATED);
   });
 
   // ADR 0838 D1 — the seeder used the SAME `doc:demo-cm-<slug>` (and email

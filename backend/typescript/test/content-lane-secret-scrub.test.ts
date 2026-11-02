@@ -19,9 +19,9 @@ import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { cleanContent, cleanString, contentUrl, refuseIfScrubbed } from '../src/host/boundedStrings.js';
 import { findCredentialShape, scrubSecretShaped } from '../src/host/redactSecrets.js';
-import { createPage, validateSection } from '../src/features/cms/cmsService.js';
+import { createPage, listPages, validateSection } from '../src/features/cms/cmsService.js';
 import { putSeo } from '../src/features/publishing/publishingService.js';
-import { createProduct } from '../src/features/commerce/commerceService.js';
+import { createProduct, listProducts } from '../src/features/commerce/commerceService.js';
 import { createBookingLink } from '../src/features/crm/entities/bookingLinks.js';
 import { createShow } from '../src/features/podcasts/podcastsService.js';
 import { upsertReview } from '../src/features/marketplace/reviewService.js';
@@ -95,6 +95,10 @@ describe('every migrated content path: kept byte for byte, or a typed refusal', 
     const page = await createPage({ tenantId: T, orgId: O, title: `Release ${HASH}`, createdBy: 'u' });
     expect(page.title).toBe(`Release ${HASH}`);
     await refused(createPage({ tenantId: T, orgId: O, title: `Key ${KEY}`, createdBy: 'u' }), 'title');
+    // "Nothing is stored": the refused page is not in the org's list (the kept one is).
+    const titles = (await listPages(T, O)).map((pg) => pg.title);
+    expect(titles).toContain(`Release ${HASH}`);
+    expect(titles.filter((t) => t.startsWith('Key '))).toEqual([]);
     const canonical = `https://kicktodo.example/blog/plans-that-adapt-without-erasing-progress-${HASH}`;
     const seo = await putSeo(T, O, page.pageId, 'u', { canonicalUrl: canonical, metaDescription: `ref ${HASH}` });
     expect(seo).toMatchObject({ canonicalUrl: canonical, metaDescription: `ref ${HASH}` });
@@ -105,6 +109,8 @@ describe('every migrated content path: kept byte for byte, or a typed refusal', 
     const p = await createProduct({ tenantId: T, orgId: O, createdBy: 'u', type: 'physical', name: 'Box', description: `SKU ${HASH}`, price: 100, attributes: [{ label: 'Hash', value: HASH.slice(0, 60) }] });
     expect(p.description).toBe(`SKU ${HASH}`);
     await refused(createProduct({ tenantId: T, orgId: O, createdBy: 'u', type: 'physical', name: 'Box', description: KEY, price: 100 }), 'description');
+    // Nothing is stored: only the kept product exists (exact id).
+    expect((await listProducts(T, O)).filter((x) => x.name === 'Box').map((x) => x.productId)).toEqual([p.productId]);
   });
 
   it('booking link (description, video link)', async () => {
@@ -150,7 +156,7 @@ describe('every migrated content path: kept byte for byte, or a typed refusal', 
   it('brand identity (footer text, a data-URI favicon)', async () => {
     const favicon = `data:image/svg+xml;base64,${'PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4'.repeat(2)}`;
     const b = await createBrand(T, O, 'u', { name: 'Acme', identity: { footerText: `Build ${HASH}`, logo: { faviconSrc: favicon } } });
-    const id = (b as unknown as { identity?: { footerText?: string; logo?: { faviconSrc?: string } } }).identity;
+    const id = b.identity;
     expect(id?.footerText).toBe(`Build ${HASH}`);
     expect(id?.logo?.faviconSrc).toBe(favicon);
     await refused(createBrand(T, O, 'u', { name: 'Acme 2', identity: { footerText: KEY } }), 'footerText');

@@ -40,7 +40,10 @@ import { maybeCaptureExecuteTool } from './evals/toolBoundary.js';
 import type { NodeContext, NodeModule, NodeOutcome } from '../executor/types.js';
 import { handoffPromptBlock } from './handoff/handoffRecord.js';
 import { collectRunContextBlocks } from './runContextProviders.js';
-import { runAgentDispatchLive, AgentNotFoundError, type AgentEvent, type AgentKnowledgeRetrieve, type AgentMemoryPort } from './agentDispatch.js';
+import { runAgentDispatchLive, AgentNotFoundError, AgentVersionUnavailableError, type AgentDispatchRequest, type AgentEvent, type AgentKnowledgeRetrieve, type AgentMemoryPort } from './agentDispatch.js';
+import { SuspendSignal } from '../executor/suspendSignal.js';
+import { readClarificationStamp, runClarifyingDispatch } from './agentClarificationTurn.js';
+import { ASK_USER_TOOL } from './clarificationLift.js';
 import { createLogger } from '../observability/logger.js';
 import { createAgentToolProvider, builtinAgentToolIds } from './agentToolProvider.js';
 import { resolveAgentIdentity } from './agentIdentity.js';
@@ -60,6 +63,7 @@ import { authorizeRunConversationWrite } from './runConversationWrite.js';
 import { hostExtStorage } from './hostExtPersistence.js';
 import { buildLaneFirewall } from './laneFirewall.js';
 import { frozenAgentBindingFor, isUnresolvedBinding, type RunAgentBinding } from './runAgentBindings.js';
+import { canonicalAgentId } from '../executor/agentIdAliases.js';
 
 export const AGENT_RUNNER_TYPE_ID = 'local.openwop-app.agent-runner';
 
@@ -162,6 +166,8 @@ const agentRunnerNode: NodeModule = {
     if (!ctx.callAI || !ctx.callAIWithTools) {
       return { status: 'failure', error: { code: 'no_model_available', message: 'agent-runner has no provider adapter wired on this run.' } };
     }
+    const callAI = ctx.callAI;
+    const callAIWithTools = ctx.callAIWithTools;
     // The SAME built-in tool catalog + executor the agent-dispatch route uses —
     // tenant/run-scoped (CTI-1). No second executor. ADR 0277 P2 — the profile
     // id scopes the knowledge tools to the agent's bound collections.
@@ -196,6 +202,9 @@ const agentRunnerNode: NodeModule = {
         const decision = await suspend({
           kind: 'approval',
           key: `agent-hitl:${verdict.entry.rosterId}`,
+          // ADR 1001 D3.2 — served from its own resolved row on a LATER
+          // re-entry (a clarification's resume seeds only the latest answer).
+          durable: true,
           actions: ['approve', 'reject'],
           prompt: `Let ${verdict.entry.persona} run workflow '${ctx.workflowId}'? It is on the agent's approval list.`,
         });
@@ -388,10 +397,26 @@ const agentRunnerNode: NodeModule = {
     const replayGuard = createReplayToolGuard(ctx.runId
       ? await maybeCaptureExecuteTool(toolProvider.executeTool, { tenantId: ctx.tenantId, runId: ctx.runId, agentId: runnerIdentity.agentId, segment: ctx.nodeId, lane: 'run' })
       : toolProvider.executeTool);
-    const executeTool = replayGuard.executeTool;
+    // ADR 1009 — before the tool runs, so a tool that fails after reading still
+    // counts. Same rule as ADR 1001 D4: any tool output is untrusted to the model.
+    const executeTool: typeof replayGuard.executeTool = async (call) => {
+      await ctx.markUntrustedContext?.();
+      return replayGuard.executeTool(call);
+    };
+    // ADR 1014 D3 — the node's own agent runs the version its pin recorded; any
+    // other unpinned agent runs what `stable` serves, recorded once per run (M6), so
+    // a resume or a fork never draws again.
+    const ownPin = ctx.agentVersion !== undefined && ctx.nodeAgent?.agentId !== undefined && canonicalAgentId(runnerIdentity.agentId) === canonicalAgentId(ctx.nodeAgent.agentId);
+    let runVersion: string | undefined = ownPin ? ctx.agentVersion : undefined;
+    if (!ownPin && ctx.pinServedAgent) {
+      const served = await ctx.pinServedAgent(runnerIdentity.agentId);
+      if (!served.ok) return { status: 'failure', retryable: false, error: served.error };
+      runVersion = served.version;
+    }
     try {
-      const result = await runAgentDispatchLive(
+      const dispatch = (extra: Pick<AgentDispatchRequest, 'clarification' | 'resumeFrom'>) => runAgentDispatchLive(
         {
+          ...extra,
           // ADR 0277 — dispatch the RESOLVED manifest id, never the raw input. A
           // roster id (`host:<slug>`) is a legitimate thing to hand this node (it
           // is what a DM's participant and a scheduled job's attribution carry),
@@ -403,20 +428,25 @@ const agentRunnerNode: NodeModule = {
           // The reply below still authors as the id we were GIVEN, so a DM whose
           // participant is `agent:host:<slug>` keeps matching its own author.
           agentId: runnerIdentity.agentId,
+          ...(runVersion !== undefined ? { version: runVersion } : {}),
+          drawKey: `${ctx.runId}|${ctx.nodeId}`, // ADR 1014 D4 — outside a run body only
           tenantId: ctx.tenantId, // ADR 0379 P2 — user agents live under the tenant key
           task,
           // Offer the host's built-in tool ids; `runAgentDispatchLive` §A14-filters
           // them to the agent's allowlist (+ the ADR 0104 override) inside. ADR 0458
           // P2 — an explicit `offerTools` (e.g. the sim stage's []) REPLACES the
           // catalog, confining the surface without a racy stored override.
-          availableTools: offerTools ?? [...builtinAgentToolIds()],
+          // ADR 1001 D7 — the chat-only ask is never offered on the run lane,
+          // which asks through the RFC 0021 envelope instead.
+          availableTools: (offerTools ?? [...builtinAgentToolIds()]).filter((t) => t !== ASK_USER_TOOL),
           ...(ctx.compaction ? { compaction: ctx.compaction } : {}),
         },
         {
-          callAI: ctx.callAI,
-          ...(ctx.callAIWithTools ? { callAIWithTools: replayGuard.guardModelRound(ctx.callAIWithTools) } : {}),
+          callAI,
+          callAIWithTools: replayGuard.guardModelRound(callAIWithTools),
           resolveTool: toolProvider.resolveTool,
           executeTool,
+          ...(ctx.markUntrustedContext ? { onUntrustedContext: ctx.markUntrustedContext } : {}),
           // ADR 0150 — gate the SENSITIVE tools on the run lane (see the hook build above).
           firewall,
           // ADR 0102 — resolve this standing agent's tool permissions for the
@@ -449,20 +479,36 @@ const agentRunnerNode: NodeModule = {
           ...(contextBlocks.length > 0 ? { contextBlocks } : {}),
         },
       );
+      // ADR 1001 — the run lane may pause this turn on a clarification
+      // (only when the run's frozen stamp opted in); otherwise one dispatch.
+      const clarified = await runClarifyingDispatch({
+        ctx,
+        stamp: run && run.tenantId === ctx.tenantId ? readClarificationStamp(run.metadata as Record<string, unknown> | undefined) : null,
+        dispatch,
+        // Surface the loop's RFC 0064 agent.* events onto THIS run's event log so a
+        // subscribed client renders live tool progress on the run bubble. Best-effort
+        // ordering: emit sequentially (observability, not determinism — §Q4).
+        emitEvents: async (r) => {
+          for (const ev of r.events as AgentEvent[]) {
+            const [type, payload] = agentEventToEmit(ev);
+            await ctx.emit(type, payload);
+          }
+        },
+        // ADR 1002 D4 — a replay MISS fails the node, checked after EVERY
+        // dispatch and before a clarification is acted on (ADR 1001 D1.4):
+        // an ask on a diverged replay is never suspended on or shown.
+        afterDispatch: () => {
+          const miss = replayGuard.miss();
+          return miss ? replayMissFailure(miss) : undefined;
+        },
+      });
+      if (clarified.kind === 'failure') return clarified.outcome;
+      const result = clarified.result;
       // ADR 0944 D6 — what this turn recalled, by id (never content).
       if (recordRecall && ctx.runId && clientOrgId && memoryBinding) {
         await recordRecall.write({ tenantId: ctx.tenantId, runId: ctx.runId, nodeId: ctx.nodeId, ordinal: 1, orgId: clientOrgId, scope: memoryBinding.scope });
       }
       replayRecall?.finish();
-      // Surface the loop's RFC 0064 agent.* events onto THIS run's event log so a
-      // subscribed client renders live tool progress on the run bubble. Best-effort
-      // ordering: emit sequentially (observability, not determinism — §Q4).
-      for (const ev of result.events as AgentEvent[]) {
-        const [type, payload] = agentEventToEmit(ev);
-        await ctx.emit(type, payload);
-      }
-      const replayMiss = replayGuard.miss();
-      if (replayMiss) return replayMissFailure(replayMiss);
       if (result.status === 'failed') {
         return { status: 'failure', error: result.error ?? { code: 'agent_dispatch_failed', message: 'agent dispatch failed' } };
       }
@@ -524,6 +570,12 @@ const agentRunnerNode: NodeModule = {
         },
       };
     } catch (err) {
+      // ADR 1001 — a clarification's `ctx.suspend` throws to pause the run; it
+      // is control flow for the executor, never a node failure.
+      if (err instanceof SuspendSignal) throw err;
+      if (err instanceof AgentVersionUnavailableError) {
+        return { status: 'failure', error: { code: 'agent_version_unavailable', message: err.message } };
+      }
       if (err instanceof AgentNotFoundError) {
         return { status: 'failure', error: { code: 'agent_not_found', message: err.message } };
       }

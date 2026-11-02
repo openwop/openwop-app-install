@@ -16,6 +16,17 @@
  *
  * BORN RED: with the 1.0.x `action` role, the replay fork re-runs `create` and fails on
  * its own slug (or, keyed on the fork's run id, mints a second draft).
+ *
+ * DOUBLE GUARD (replay serving): a typeId is served on a replay fork when it is in
+ * the generated `MANIFEST_FAST_PATH_SERVED` OR its module says `sideEffecting`
+ * (`executor/sideEffects.ts isSideEffectingNode`); the pack.json `role` is read only
+ * through the generator. w73 probe dn-served breaks both for `feature.funnels.*`.
+ * The concurrent-create case FORCES the race (both deliveries held past the
+ * existence read) and asserts exactly one delivery is `reused`, so dropping the
+ * insert-if-absent CAS reds it (dn-cas — a blind put of the same id kept the id and
+ * the row count unchanged, which is why id + count alone stayed green); the
+ * cross-org/tenant legs assert the fence's own message, because the
+ * `run_funnel_exists` refusal is also a 409 (dn-tenant).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -29,8 +40,20 @@ import { listFunnels, createFunnel, runFunnelId, getFunnel, publishFunnel } from
 import { createPage } from '../src/features/cms/cmsService.js';
 import { nodes as funnelNodes } from '../../../packs/feature.funnels.nodes/index.mjs';
 import { buildFunnelsSurface } from '../src/features/funnels/surface.js';
+import type { BundleScope } from '../src/host/inMemorySurfaces.js';
+import { DurableCollection } from '../src/host/hostExtPersistence.js';
 import { getSetCookies } from './headerCookies.js';
 import { bareRunId } from './support/bareRunId.js';
+
+const scopeOf = (tenantId: string, runId: string): BundleScope => ({ tenantId, runId });
+/** The cms node pack, loaded the way the runtime does (an absolute file URL, as
+ *  the experiments-pack test does), typed to the shape this file reads. */
+type CmsNode = (ctx: unknown) => Promise<{ status: string; outputs?: Record<string, unknown>; error?: { code: string } }>;
+const CMS_PACK = new URL('../../../packs/feature.cms.nodes/index.mjs', import.meta.url).href;
+const cmsNodes = async (): Promise<Record<string, CmsNode>> => {
+  const mod: { nodes: Record<string, CmsNode> } = await import(CMS_PACK);
+  return mod.nodes;
+};
 
 let server: http.Server;
 let BASE = '';
@@ -71,7 +94,7 @@ beforeAll(async () => {
     const d = getToggleDefault(id);
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
   }
-});
+}, 120_000);
 afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
   delete process.env.OPENWOP_TEST_AUTH_ENABLED;
@@ -132,37 +155,65 @@ describe('ADR 0948 P1 — derived ids', () => {
   const surfaceCtx = (cms: object, runId?: string) => ({ features: { cms }, config: {}, ...(runId ? { runId, nodeId: 'n1' } : {}) });
 
   it('create-draft-page derives its page id; an input pageId is ignored; no run → typed failure', async () => {
-    // @ts-expect-error — untyped .mjs pack module (loaded the way the runtime does; the cms-nodes.test precedent)
-    const { nodes: cmsNodes } = (await import('../../../packs/feature.cms.nodes/index.mjs')) as { nodes: Record<string, (ctx: unknown) => Promise<{ status: string; outputs?: Record<string, unknown>; error?: { code: string } }>> };
+    const nodes = await cmsNodes();
     const calls: Array<Record<string, unknown>> = [];
     const cms = { getPage: async () => null, createDraftPage: async (a: Record<string, unknown>) => { calls.push(a); return { pageId: a.pageId, status: 'draft', title: a.title }; } };
     const sections = [{ type: 'hero', data: { heading: 'H' } }];
-    const ok = await cmsNodes['feature.cms.nodes.create-draft-page']({ ...surfaceCtx(cms, 'run-1'), inputs: { orgId: 'o', title: 'T', sections, pageId: 'page:someone-elses', key: 'step 1!' } });
+    const ok = await nodes['feature.cms.nodes.create-draft-page']!({ ...surfaceCtx(cms, 'run-1'), inputs: { orgId: 'o', title: 'T', sections, pageId: 'page:someone-elses', key: 'step 1!' } });
     expect(ok.status).toBe('success');
     expect(calls[0]!.pageId).toBe('page:run-1:n1:step1');
-    const noRun = await cmsNodes['feature.cms.nodes.create-draft-page']({ ...surfaceCtx(cms), inputs: { orgId: 'o', title: 'T', sections } });
+    const noRun = await nodes['feature.cms.nodes.create-draft-page']!({ ...surfaceCtx(cms), inputs: { orgId: 'o', title: 'T', sections } });
     expect(noRun).toMatchObject({ status: 'failed', error: { code: 'run_context_required' } });
-    const noSections = await cmsNodes['feature.cms.nodes.create-draft-page']({ ...surfaceCtx(cms, 'run-1'), inputs: { orgId: 'o', title: 'T', sections: [] } });
+    const noSections = await nodes['feature.cms.nodes.create-draft-page']!({ ...surfaceCtx(cms, 'run-1'), inputs: { orgId: 'o', title: 'T', sections: [] } });
     expect(noSections).toMatchObject({ status: 'failed', error: { code: 'validation_error' } });
   });
 
   it('a run create is idempotent and race-safe; the same id elsewhere is a 409, never an overwrite', async () => {
     const t = `org:p1-ids-${Date.now()}`;
-    const surface = buildFunnelsSurface({ tenantId: t, runId: 'run-ids' } as never);
-    const [a, b] = await Promise.all([
-      surface.create!({ orgId: 'o1', name: 'Twice', key: 'n2' }),
-      surface.create!({ orgId: 'o1', name: 'Twice', key: 'n2' }),
-    ]) as Array<{ funnelId: string }>;
+    const surface = buildFunnelsSurface(scopeOf(t, 'run-ids'));
+    // Force the race: hold the first delivery's existence read until the second
+    // has made the same read, so both pass it and meet at the insert-if-absent
+    // CAS. The hold FAILS (never sleeps) if the second delivery never arrives.
+    const derived = runFunnelId(t, 'run-ids', 'n2');
+    const realGet = DurableCollection.prototype.get;
+    let arrivals = 0;
+    let release: () => void = () => undefined;
+    const bothArrived = new Promise<void>((res) => { release = res; });
+    const hold = vi.spyOn(DurableCollection.prototype, 'get').mockImplementation(async function (this: DurableCollection<unknown>, id: string) {
+      if (id === derived && arrivals < 2) {
+        arrivals += 1;
+        if (arrivals === 2) release();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([bothArrived, new Promise<never>((_, rej) => { timer = setTimeout(() => rej(new Error('race window: the second delivery never reached its existence read')), 2_000); })])
+          .finally(() => clearTimeout(timer));
+      }
+      return realGet.call(this, id);
+    });
+    let pair: unknown[];
+    try {
+      pair = await Promise.all([
+        surface.create!({ orgId: 'o1', name: 'Twice', key: 'n2' }),
+        surface.create!({ orgId: 'o1', name: 'Twice', key: 'n2' }),
+      ]);
+    } finally { hold.mockRestore(); }
+    expect(arrivals, 'both deliveries passed the existence read before either wrote').toBe(2);
+    const [a, b] = pair as Array<{ funnelId: string; reused?: boolean }>;
     expect(a!.funnelId).toBe(runFunnelId(t, 'run-ids', 'n2'));
     expect(b!.funnelId).toBe(a!.funnelId);
+    // Written ONCE: exactly one delivery inserted, the other lost the
+    // insert-if-absent CAS and was handed the winner's row. Same id + one row is
+    // not enough — two blind puts of the same derived id leave that too.
+    expect([a!.reused === true, b!.reused === true].filter(Boolean)).toHaveLength(1);
     expect(await listFunnels(t, 'o1')).toHaveLength(1);
     // A re-delivery after the first landed: the same draft, not a slug refusal.
     const again = await surface.create!({ orgId: 'o1', name: 'Twice', key: 'n2' }) as { funnelId: string; reused?: boolean };
     expect(again).toMatchObject({ funnelId: a!.funnelId, reused: true });
 
     // The same id in another org (or tenant) never reads or overwrites the row.
-    await expect(createFunnel({ tenantId: t, orgId: 'o2', createdBy: 'x', name: 'Squat', funnelId: a!.funnelId })).rejects.toMatchObject({ httpStatus: 409 });
-    await expect(createFunnel({ tenantId: 'org:other', orgId: 'o1', createdBy: 'x', name: 'Squat', funnelId: a!.funnelId })).rejects.toMatchObject({ httpStatus: 409 });
+    // The fence's own refusal, not `run_funnel_exists` (which also answers 409).
+    const fenced = { httpStatus: 409, message: 'A funnel with this id already exists.', details: {} };
+    await expect(createFunnel({ tenantId: t, orgId: 'o2', createdBy: 'x', name: 'Squat', funnelId: a!.funnelId })).rejects.toMatchObject(fenced);
+    await expect(createFunnel({ tenantId: 'org:other', orgId: 'o1', createdBy: 'x', name: 'Squat', funnelId: a!.funnelId })).rejects.toMatchObject(fenced);
     expect((await getFunnel(t, 'o1', a!.funnelId))?.name).toBe('Twice');
     // Different tenants derive different ids for the same run and key.
     expect(runFunnelId('org:other', 'run-ids', 'n2')).not.toBe(a!.funnelId);
@@ -171,7 +222,7 @@ describe('ADR 0948 P1 — derived ids', () => {
   it('a node run again with new inputs, or after a publish, FAILS — never a stale or live funnel as success', async () => {
     const t = `org:p1-stale-${Date.now()}`;
     const run = (inputs: Record<string, unknown>, nodeId = 'n2') =>
-      funnelNodes['feature.funnels.nodes.create']({ features: { funnels: buildFunnelsSurface({ tenantId: t, runId: 'run-stale' } as never) }, nodeId, inputs: { orgId: 'o1', ...inputs } });
+      funnelNodes['feature.funnels.nodes.create']({ features: { funnels: buildFunnelsSurface(scopeOf(t, 'run-stale')) }, nodeId, inputs: { orgId: 'o1', ...inputs } });
     const first = await run({ name: 'Original' });
     expect(first.status).toBe('success');
     const second = await run({ name: 'Revised' });
@@ -188,7 +239,7 @@ describe('ADR 0948 P1 — derived ids', () => {
     await publishFunnel(t, 'o1', liveId);
     expect(await run({ name: 'Live', steps: [{ kind: 'landing', pageId: page.pageId }] }, 'n9'))
       .toMatchObject({ status: 'failed', error: { code: 'run_funnel_exists' } });
-    const surface = buildFunnelsSurface({ tenantId: t, runId: 'run-stale' } as never);
+    const surface = buildFunnelsSurface(scopeOf(t, 'run-stale'));
     const edit = await funnelNodes['feature.funnels.nodes.set-steps']({ features: { funnels: surface }, inputs: { orgId: 'o1', funnelId: liveId, steps: [] } });
     expect(edit).toMatchObject({ status: 'failed', error: { code: 'funnel_not_draft' } });
     expect((await getFunnel(t, 'o1', liveId))?.steps).toHaveLength(1);
@@ -197,13 +248,12 @@ describe('ADR 0948 P1 — derived ids', () => {
   });
 
   it('create-draft-page fails when the derived id already holds a different or published page', async () => {
-    // @ts-expect-error — untyped .mjs pack module (the cms-nodes.test precedent)
-    const { nodes: cmsNodes } = (await import('../../../packs/feature.cms.nodes/index.mjs')) as { nodes: Record<string, (ctx: unknown) => Promise<{ status: string; error?: { code: string } }>> };
+    const nodes = await cmsNodes();
     const sections = [{ type: 'hero', data: { heading: 'H' } }];
     const stored = (title: string, status: string) => ({ getPage: async () => null, createDraftPage: async (a: Record<string, unknown>) => ({ pageId: a.pageId, status, title }) });
     const ctx = (cms: object, title: string) => ({ features: { cms }, runId: 'r', nodeId: 'n1', inputs: { orgId: 'o', title, sections } });
-    expect((await cmsNodes['feature.cms.nodes.create-draft-page'](ctx(stored('Same', 'draft'), 'Same'))).status).toBe('success');
-    expect(await cmsNodes['feature.cms.nodes.create-draft-page'](ctx(stored('Old title', 'draft'), 'New title'))).toMatchObject({ status: 'failed', error: { code: 'run_page_exists' } });
-    expect(await cmsNodes['feature.cms.nodes.create-draft-page'](ctx(stored('Same', 'published'), 'Same'))).toMatchObject({ status: 'failed', error: { code: 'run_page_exists' } });
+    expect((await nodes['feature.cms.nodes.create-draft-page']!(ctx(stored('Same', 'draft'), 'Same'))).status).toBe('success');
+    expect(await nodes['feature.cms.nodes.create-draft-page']!(ctx(stored('Old title', 'draft'), 'New title'))).toMatchObject({ status: 'failed', error: { code: 'run_page_exists' } });
+    expect(await nodes['feature.cms.nodes.create-draft-page']!(ctx(stored('Same', 'published'), 'Same'))).toMatchObject({ status: 'failed', error: { code: 'run_page_exists' } });
   });
 });

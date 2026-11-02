@@ -3,6 +3,19 @@
  * be sabotage-witnessed on its own (the grade probes in `ws2-grade-probe.test.ts`
  * cover the headline behaviour and would stay green under some single sabotages,
  * because several guards layer).
+ *
+ * D3's tenant scoping of `eraseSubjectKanban` is a DOUBLE GUARD in one function
+ * (`host/kanbanService.ts`): the outer `tenantBoards` filter and the per-card
+ * `board.tenantId !== tenantId` re-check. Removing either alone leaves the foreign
+ * card untouched; the probe that removes both reds "erases private hold prose".
+ *
+ * Tracker TST-DFB-6. Red when (w71g1, witnessed): the daemon serves anon sandboxes;
+ * a mock-archive card or trigger is taken; the order is not stalest-first; claimed
+ * members use up batch slots; budget-refused tenants are re-examined; the pass does
+ * not note its stamps into the cached listing; held cards are picked or ranked; a
+ * person's note holds a card; erasure drops the hold bit, crosses tenants (both
+ * guards), stops retrying, or reports a lost race as success; a restore or note strip
+ * overwrites a person's concurrent edit.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';

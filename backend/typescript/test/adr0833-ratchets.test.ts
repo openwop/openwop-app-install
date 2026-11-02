@@ -35,6 +35,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { stripComments } from './helpers/stripComments.js';
 
 const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src');
 
@@ -48,7 +49,7 @@ function walk(dir: string, out: string[] = []): string[] {
 }
 const FILES = walk(SRC).map((p) => ({ rel: relative(SRC, p).split('\\').join('/'), text: readFileSync(p, 'utf8') }));
 /** Source with line comments and block comments removed (a mention is not a call). */
-const code = (t: string): string => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+const code = (t: string): string => stripComments(t);
 
 describe('D1 — the session cookie is read only where its liveness is decided', () => {
   const ALLOWED: Record<string, string> = {

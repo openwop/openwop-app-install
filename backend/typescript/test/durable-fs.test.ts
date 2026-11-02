@@ -1,3 +1,13 @@
+/**
+ * Durable host.fs adapter (`src/host/durable/durableFs.ts`, Phase 2) — files in
+ * the shared Storage under a per-tenant root, with a path sandbox. TST-CWD-2.
+ * Cross-tenant isolation is durable-isolation.test.ts (CTI-1).
+ *
+ * Red when (sabotage-witnessed, wave 69): absolute paths or `..` escapes stop
+ * throwing `path_outside_sandbox`; `createOnly` overwrites; recursive delete
+ * leaves children; stat stops recognising a virtual directory; list reports a
+ * nested file instead of its directory.
+ */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
@@ -54,8 +64,11 @@ describe('durable fs surface', () => {
   });
 
   it('rejects absolute paths and ..-traversal', async () => {
-    await expect(fs.read({ path: '/etc/passwd' })).rejects.toThrow(/sandbox/);
-    await expect(fs.write({ path: '../escape', contentBase64: b64('x') })).rejects.toThrow(/sandbox/);
-    await expect(fs.read({ path: 'a/../../b' })).rejects.toThrow(/sandbox/);
+    const SANDBOX = { code: 'path_outside_sandbox' };
+    await expect(fs.read({ path: '/etc/passwd' })).rejects.toMatchObject({ ...SANDBOX, message: 'Absolute paths escape the tenant sandbox.' });
+    await expect(fs.write({ path: '../escape', contentBase64: b64('x') })).rejects.toMatchObject({ ...SANDBOX, message: 'Path escapes tenant sandbox.' });
+    await expect(fs.read({ path: 'a/../../b' })).rejects.toMatchObject({ ...SANDBOX, message: 'Path escapes tenant sandbox.' });
+    // Nothing was written outside (or inside) the sandbox by the refused write.
+    expect(await fs.stat({ path: 'escape' })).toEqual({ found: false });
   });
 });

@@ -13,7 +13,7 @@
  * the input each turn a case red.
  */
 import { describe, it, expect, afterEach } from 'vitest';
-import { windowTranscript, transcriptBudgetConfig } from '../src/host/transcriptBudget.js';
+import { windowTranscript, transcriptBudgetConfig, voiceSeedBudgetConfig } from '../src/host/transcriptBudget.js';
 
 interface Turn { id: number; text: string }
 const sizeOf = (t: Turn) => t.text.length;
@@ -23,6 +23,7 @@ const mk = (n: number, len = 10): Turn[] =>
 afterEach(() => {
   delete process.env.OPENWOP_CONTEXT_ECONOMY_TRANSCRIPT_KEEP_TURNS;
   delete process.env.OPENWOP_CONTEXT_ECONOMY_TRANSCRIPT_MAX_CHARS;
+  delete process.env.OPENWOP_CONTEXT_ECONOMY_TRANSCRIPT_STEP_TURNS;
 });
 
 describe('windowTranscript', () => {
@@ -69,16 +70,72 @@ describe('windowTranscript', () => {
 
 describe('transcriptBudgetConfig', () => {
   it('defaults to 20 turns / 24000 chars', () => {
-    expect(transcriptBudgetConfig()).toEqual({ keepLastTurns: 20, maxChars: 24_000 });
+    expect(transcriptBudgetConfig()).toEqual({ keepLastTurns: 20, maxChars: 24_000, stepTurns: 10 });
   });
   it('reads env overrides', () => {
     process.env.OPENWOP_CONTEXT_ECONOMY_TRANSCRIPT_KEEP_TURNS = '6';
     process.env.OPENWOP_CONTEXT_ECONOMY_TRANSCRIPT_MAX_CHARS = '5000';
-    expect(transcriptBudgetConfig()).toEqual({ keepLastTurns: 6, maxChars: 5000 });
+    expect(transcriptBudgetConfig()).toEqual({ keepLastTurns: 6, maxChars: 5000, stepTurns: 3 });
+    process.env.OPENWOP_CONTEXT_ECONOMY_TRANSCRIPT_STEP_TURNS = '4';
+    expect(transcriptBudgetConfig().stepTurns).toBe(4);
   });
   it('ignores invalid env (falls back to defaults)', () => {
     process.env.OPENWOP_CONTEXT_ECONOMY_TRANSCRIPT_KEEP_TURNS = 'nonsense';
     process.env.OPENWOP_CONTEXT_ECONOMY_TRANSCRIPT_MAX_CHARS = '-5';
-    expect(transcriptBudgetConfig()).toEqual({ keepLastTurns: 20, maxChars: 24_000 });
+    process.env.OPENWOP_CONTEXT_ECONOMY_TRANSCRIPT_STEP_TURNS = '0';
+    expect(transcriptBudgetConfig()).toEqual({ keepLastTurns: 20, maxChars: 24_000, stepTurns: 10 });
+  });
+});
+
+// ADR 1003 D2 — the window holds still between steps, so a provider prefix
+// cache can hit. Sabotage: removing the round-up (or rounding DOWN, which
+// breaks the caps) reds these cases.
+describe('windowTranscript — stepped (ADR 1003 D2)', () => {
+  const cfg = { keepLastTurns: 6, maxChars: 1_000_000, stepTurns: 3 };
+
+  it('the first kept turn is stable across appends within a step, then jumps by one step', () => {
+    const firsts: number[] = [];
+    for (let n = 1; n <= 14; n++) firsts.push(windowTranscript(mk(n), cfg, sizeOf).kept[0].id);
+    // Caps alone would give 0,0,0,0,0,0,1,2,3,4,5,6,7,8 (a new prefix every turn).
+    expect(firsts).toEqual([0, 0, 0, 0, 0, 0, 3, 3, 3, 6, 6, 6, 9, 9]);
+  });
+
+  it('never keeps more than the caps allow, and always keeps the newest turn', () => {
+    for (let n = 1; n <= 30; n++) {
+      const { kept, omittedCount } = windowTranscript(mk(n), cfg, sizeOf);
+      expect(kept.length).toBeLessThanOrEqual(cfg.keepLastTurns);
+      // Stepping drops at most stepTurns − 1 turns below what the caps keep.
+      expect(kept.length).toBeGreaterThan(Math.min(n, cfg.keepLastTurns) - cfg.stepTurns);
+      expect(kept[kept.length - 1].id).toBe(n - 1);
+      expect(omittedCount + kept.length).toBe(n);
+    }
+    // Char cap, stepped: 10-char turns under a 35-char cap keep ≤ 3.
+    const r = windowTranscript(mk(10), { keepLastTurns: 20, maxChars: 35, stepTurns: 4 }, sizeOf);
+    expect(r.kept.reduce((a, t) => a + t.text.length, 0)).toBeLessThanOrEqual(35);
+    expect(r.kept[r.kept.length - 1].id).toBe(9);
+  });
+
+  it('stepTurns 1 (or absent) is exactly the original slide-by-one window', () => {
+    for (let n = 1; n <= 12; n++) {
+      const a = windowTranscript(mk(n), { keepLastTurns: 5, maxChars: 1_000_000, stepTurns: 1 }, sizeOf);
+      const b = windowTranscript(mk(n), { keepLastTurns: 5, maxChars: 1_000_000 }, sizeOf);
+      expect(a.kept.map((t) => t.id)).toEqual(b.kept.map((t) => t.id));
+      expect(b.kept[0].id).toBe(Math.max(0, n - 5));
+    }
+  });
+
+  it('is deterministic: the same conversation windows identically every time', () => {
+    const turns = mk(17, 7);
+    expect(windowTranscript(turns, cfg, sizeOf)).toEqual(windowTranscript(turns.map((t) => ({ ...t })), cfg, sizeOf));
+  });
+});
+
+// ADR 1003 D2 — the voice seed is composed once, so it never steps (stepping
+// would only drop turns there). Sabotage: returning the stepped config reds it.
+describe('voiceSeedBudgetConfig', () => {
+  it('keeps the caps and never steps, whatever the step env says', () => {
+    process.env.OPENWOP_CONTEXT_ECONOMY_TRANSCRIPT_KEEP_TURNS = '6';
+    process.env.OPENWOP_CONTEXT_ECONOMY_TRANSCRIPT_STEP_TURNS = '4';
+    expect(voiceSeedBudgetConfig()).toEqual({ keepLastTurns: 6, maxChars: 24_000, stepTurns: 1 });
   });
 });

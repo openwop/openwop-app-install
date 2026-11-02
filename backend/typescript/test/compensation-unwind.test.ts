@@ -23,23 +23,33 @@
  * drives the same logic through the REAL executor, so neither file is the only
  * evidence: a fixture that passed only against a hand-built plan would prove
  * nothing about production.
+ *
+ * Tracker: TST-CGG-2. Red when (compensationUnwind.ts / compensationLedger.ts): the
+ * plan stops excluding completed rows; the replay guard is dropped; a pending
+ * approval skips instead of stopping; a losing claim is treated as won; the retry
+ * loop runs past its budget; the approval gate is bypassed; or the irreversible cap
+ * is removed from the rollup.
  */
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
-import type { recordForwardObligation } from '../src/host/compensationRuntime.js';
 import { openStorage } from '../src/storage/index.js';
 import {
   _resetCompensationLedgerForTest,
+  compensationStatusForRuns,
   compensationStatusForRunTree,
   digestOf,
   nextCompensationOrdinal,
   obligationsForRunTree,
   recordObligation,
+  resolveObligation,
   markPlanRequested,
 } from '../src/host/compensationLedger.js';
+import type { WorkflowDefinition } from '../src/executor/types.js';
+import type { RunRecord } from '../src/types.js';
 import {
   COMPENSATION_DEFAULT_RETRY,
   COMPENSATION_ORDERING_MODEL,
+  type CompensationPolicy,
   type ApprovalOutcome,
   type CompensationDeclaration,
   type CompensationEvent,
@@ -565,19 +575,16 @@ describe('RFC 0151 §D — the batched rollup for a page of snapshots', () => {
   const SUB = 'run-sub';
 
   it('a run with no obligations folds to `none` — the value an advertiser MUST still emit', async () => {
-    const { compensationStatusForRuns } = await import('../src/host/compensationLedger.js');
     const out = await compensationStatusForRuns(T, [ROOT, 'run-never-existed']);
     expect(out.get(ROOT)).toBe('none');
     expect(out.get('run-never-existed')).toBe('none');
   });
 
   it('asks for nothing, scans nothing', async () => {
-    const { compensationStatusForRuns } = await import('../src/host/compensationLedger.js');
     expect((await compensationStatusForRuns(T, [])).size).toBe(0);
   });
 
   it('folds every requested run in ONE pass, and each independently', async () => {
-    const { compensationStatusForRuns, resolveObligation } = await import('../src/host/compensationLedger.js');
     const a = await commit('charge-1');
     await commit('charge-2');
     // One completed, one still `requested` ⇒ the run is `partial` only once the
@@ -587,11 +594,13 @@ describe('RFC 0151 §D — the batched rollup for a page of snapshots', () => {
     await resolveObligation({ tenantId: T, inverseActionId: a.inverseActionId, to: 'started', reason: 'claimed' });
     const batch = await compensationStatusForRuns(T, [ROOT]);
     const single = await compensationStatusForRunTree(T, ROOT);
+    // A literal, not only agreement between two product functions: one row
+    // started, one owed ⇒ `running`.
+    expect(batch.get(ROOT)).toBe('running');
     expect(batch.get(ROOT)).toBe(single);
   });
 
   it('a SUB-run reads its own obligations; the ROOT reads the whole tree', async () => {
-    const { compensationStatusForRuns } = await import('../src/host/compensationLedger.js');
     // The child commits the ONLY compensable effect. Its ordinal is allocated
     // from the root's counter, so its row carries `rootRunId: ROOT`.
     await commit('charge-in-child', { runId: SUB });
@@ -603,13 +612,12 @@ describe('RFC 0151 §D — the batched rollup for a page of snapshots', () => {
     // the statuses carry information again.
     await markPlanRequested(T, ROOT, new Date().toISOString());
     const out = await compensationStatusForRuns(T, [ROOT, SUB]);
-    expect(out.get(ROOT), 'a parent whose child committed the only effect must not read `none`').not.toBe('none');
-    expect(out.get(SUB), 'the child committed it — its own snapshot must not read `none` either').not.toBe('none');
+    expect(out.get(ROOT), 'a parent whose child committed the only effect must not read `none`').toBe('pending');
+    expect(out.get(SUB), 'the child committed it — its own snapshot must not read `none` either').toBe('pending');
     expect(out.get(ROOT)).toBe(await compensationStatusForRunTree(T, ROOT));
   });
 
   it('a row is counted ONCE for its own run — a root does not double-fold its own obligations', async () => {
-    const { compensationStatusForRuns, resolveObligation, obligationsForRunTree } = await import('../src/host/compensationLedger.js');
     const a = await commit('charge-1');
     const b = await commit('charge-2');
     for (const o of [a, b]) {
@@ -625,7 +633,6 @@ describe('RFC 0151 §D — the batched rollup for a page of snapshots', () => {
   });
 
   it('the fold is TENANT-scoped — another tenant\'s obligations never leak into a rollup', async () => {
-    const { compensationStatusForRuns } = await import('../src/host/compensationLedger.js');
     await commit('charge-1');
     const other = await compensationStatusForRuns('some-other-tenant', [ROOT]);
     expect(other.get(ROOT), 'a run id is not a capability — the tenant filter is the boundary').toBe('none');
@@ -682,7 +689,6 @@ describe('RFC 0151 §C — the §21 inverseActions report', () => {
   it('carries the RECORDED input, so a redefined workflow cannot rewrite history', async () => {
     // §B/§F: "an inverse built from a re-derived value is not the inverse of
     // what was done." The input is stamped on the row at mint time.
-    const { recordObligation, obligationsForRunTree } = await import('../src/host/compensationLedger.js');
     await recordObligation({
       tenantId: T,
       runId: ROOT,
@@ -711,7 +717,6 @@ describe('RFC 0151 §C — the §21 inverseActions report', () => {
 
 describe('RFC 0151 UQ4 — an irreversible entry caps the rollup at `partial`', () => {
   async function commitIrreversible(nodeId: string) {
-    const { recordObligation } = await import('../src/host/compensationLedger.js');
     return recordObligation({
       tenantId: T, runId: ROOT, rootRunId: ROOT, nodeId,
       forwardLogicalInvocationId: `${ROOT}:${nodeId}`,
@@ -758,6 +763,10 @@ describe('RFC 0151 UQ4 — an irreversible entry caps the rollup at `partial`', 
     // The refund went through and the email cannot be unsent. `completed` would
     // claim a full unwind for a run that permanently could not have one, and
     // `failed` would erase the refund that did happen.
+    // DOUBLE PATH (recorded): `partial` here is also what the UNCAPPED fold
+    // returns (one completed, one owed). The cap itself is witnessed by the two
+    // cases below, which differ from the uncapped answer; this one pins the
+    // outcome, not the cap.
     expect(result.status).toBe('partial');
   });
 
@@ -780,14 +789,13 @@ describe('RFC 0151 UQ4 — an irreversible entry caps the rollup at `partial`', 
     // up, at which point the run would report a full unwind for an effect that
     // by definition was never undone. Checking the shape first makes that lie
     // unreachable rather than merely unlikely.
-    const { resolveObligation, compensationStatusForRunTree } = await import('../src/host/compensationLedger.js');
     const row = await commitIrreversible('email-1');
     await resolveObligation({ tenantId: T, inverseActionId: row.inverseActionId, to: 'started', reason: 'x' });
     await resolveObligation({ tenantId: T, inverseActionId: row.inverseActionId, to: 'completed' });
     expect(
       await compensationStatusForRunTree(T, ROOT),
       'an irreversible effect can never be reported as fully undone',
-    ).not.toBe('completed');
+    ).toBe('partial');
   });
 });
 
@@ -830,28 +838,28 @@ describe('RFC 0151 UQ4 — an irreversible entry caps the rollup at `partial`', 
  * ADR 0554 uses for the UQ4 join. Reproduced, and closed here.
  */
 describe('RFC 0151 §B (S36) — the EFFECTIVE waive value is stamped at MINT', () => {
+  type WfNode = WorkflowDefinition['nodes'][number];
   const REFUND = { nodeTypeId: 'test.payment.refund' };
-  const node = (compensation: Record<string, unknown>) =>
-    ({ nodeId: 'charge', typeId: 'test.payment.charge', compensation }) as never;
+  const node = (compensation: NonNullable<WfNode['compensation']>): WfNode =>
+    ({ nodeId: 'charge', typeId: 'test.payment.charge', compensation });
 
-  function runRecord(): Parameters<typeof recordForwardObligation>[0]['run'] {
+  function runRecord(): RunRecord {
     return {
       runId: ROOT, tenantId: T, workflowId: 'wf.pay', status: 'running',
       inputs: {}, metadata: {}, configurable: {},
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-    } as Parameters<typeof recordForwardObligation>[0]['run'];
+    };
   }
 
-  async function mint(compensation: Record<string, unknown>, policy?: Record<string, unknown>) {
+  async function mint(compensation: NonNullable<WfNode['compensation']>, policy?: CompensationPolicy) {
     const { recordForwardObligation } = await import('../src/host/compensationRuntime.js');
-    const { obligationsForRunTree } = await import('../src/host/compensationLedger.js');
     await recordForwardObligation({
       run: runRecord(),
       node: node(compensation),
       observedEffectKinds: new Set(['payment'] as const),
       outputs: { chargeId: 'ch_1' },
       rootRunId: ROOT,
-      ...(policy ? { policy: policy as never } : {}),
+      ...(policy ? { policy } : {}),
     });
     const rows = await obligationsForRunTree(T, ROOT);
     expect(rows, 'the mint must produce exactly the row under test').toHaveLength(1);
@@ -916,22 +924,21 @@ describe('RFC 0151 §B (S36) — the EFFECTIVE waive value is stamped at MINT', 
 });
 
 describe('RFC 0151 UQ4 — an irreversibleEffect node MINTS its plan entry', () => {
-  const irreversibleNode = { nodeId: 'send-email', typeId: 'vendor.mail.send', irreversibleEffect: true };
+  const irreversibleNode: WorkflowDefinition['nodes'][number] = { nodeId: 'send-email', typeId: 'vendor.mail.send', irreversibleEffect: true };
 
-  function runRecord(): Parameters<typeof recordForwardObligation>[0]['run'] {
+  function runRecord(): RunRecord {
     return {
       runId: ROOT, tenantId: T, workflowId: 'wf.notify', status: 'running',
       inputs: {}, metadata: {}, configurable: {},
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-    } as Parameters<typeof recordForwardObligation>[0]['run'];
+    };
   }
 
   it('mints a row with `shape: irreversible` and NO inverse node type', async () => {
     const { recordForwardObligation } = await import('../src/host/compensationRuntime.js');
-    const { obligationsForRunTree } = await import('../src/host/compensationLedger.js');
     await recordForwardObligation({
       run: runRecord(),
-      node: irreversibleNode as never,
+      node: irreversibleNode,
       observedEffectKinds: new Set(['network-egress'] as const),
       outputs: { messageId: 'm1' },
       rootRunId: ROOT,
@@ -948,10 +955,9 @@ describe('RFC 0151 UQ4 — an irreversibleEffect node MINTS its plan entry', () 
 
   it('mints NOTHING when the node committed no effect — a hypothetical must not cap a rollup', async () => {
     const { recordForwardObligation } = await import('../src/host/compensationRuntime.js');
-    const { obligationsForRunTree } = await import('../src/host/compensationLedger.js');
     await recordForwardObligation({
       run: runRecord(),
-      node: irreversibleNode as never,
+      node: irreversibleNode,
       observedEffectKinds: new Set(),
       outputs: {},
       rootRunId: ROOT,
@@ -967,11 +973,10 @@ describe('RFC 0151 UQ4 — an irreversibleEffect node MINTS its plan entry', () 
     // The regression in one leg. Without the minting seam this run reports
     // `completed` — a full unwind claimed for a run that sent an email.
     const { recordForwardObligation } = await import('../src/host/compensationRuntime.js');
-    const { compensationStatusForRunTree } = await import('../src/host/compensationLedger.js');
     await commit('charge-1');                                   // compensable
     await recordForwardObligation({                             // not
       run: runRecord(),
-      node: irreversibleNode as never,
+      node: irreversibleNode,
       observedEffectKinds: new Set(['network-egress'] as const),
       outputs: { messageId: 'm1' },
       rootRunId: ROOT,
@@ -990,10 +995,9 @@ describe('RFC 0151 UQ4 — an irreversibleEffect node MINTS its plan entry', () 
 
   it('a replay mints no irreversible row either — §F applies to both shapes', async () => {
     const { recordForwardObligation } = await import('../src/host/compensationRuntime.js');
-    const { obligationsForRunTree } = await import('../src/host/compensationLedger.js');
     await recordForwardObligation({
-      run: { ...runRecord(), forkMode: 'replay', parentRunId: 'run-source' } as never,
-      node: irreversibleNode as never,
+      run: { ...runRecord(), forkMode: 'replay', parentRunId: 'run-source' },
+      node: irreversibleNode,
       observedEffectKinds: new Set(['network-egress'] as const),
       outputs: { messageId: 'm1' },
       rootRunId: ROOT,

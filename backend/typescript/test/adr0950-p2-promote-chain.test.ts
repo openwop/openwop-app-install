@@ -18,7 +18,12 @@
  *
  * Sabotage (run 2026-10-20): dropping `assertPromotionRun` reds 3; recheck
  * against the LAUNCH weights (not the stage's) reds 1 with a spurious SRM
- * breach; ignoring the breach edge (always ramp) reds 2.
+ * breach; ignoring the breach edge (always ramp) reds 2. Re-run w73 (pc2-assert,
+ * pc2-coverage, pc2-cohort, pc2-inprogress witnessed). pc2-gatefail (drop the
+ * all-pass check) was vacuous: a young experiment fails G2 and so has no winner,
+ * and "no winner" refuses it too (DOUBLE GUARD: `!allPass || !winner` in
+ * `checkPromotionAdmission`). The chokepoint case now also refuses a winner whose
+ * G5 fails, which only the all-pass check can refuse.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -84,7 +89,7 @@ beforeAll(async () => {
     restoreBaseline: async (e) => { restored.push(e.experimentId); },
     observe: async (e) => ({ units: unitsFor(e), coverage: 'complete', sourceRetainedSince: null }),
   });
-});
+}, 120_000);
 afterAll(async () => { delete process.env.OPENWOP_EXPERIMENTS_MIN_STAGE_MS; await new Promise<void>((res) => server.close(() => res())); });
 
 /** 28 days of history (control 10%, b 14%), plus today's cohort split by the
@@ -113,7 +118,7 @@ function unitsFor(e: Experiment): UnitObservation[] {
   return out;
 }
 
-const PLAN = {
+const PLAN: NonNullable<Experiment['plan']> = {
   primaryMetric: { kind: 'conversion', name: 'signup' }, guardrails: [{ metric: { kind: 'conversion', name: 'unsubscribe' }, direction: 'up_is_bad' as const, niMargin: 0.02 }],
   baselineRate: 0.1, mde: 0.02, alpha: 0.05, power: 0.8, fdrQ: 0.05, minDays: 7, maxDays: 60, minSamplePerArm: 200, lockedAt: '2026-01-01T00:00:00.000Z', planHash: 'p'.repeat(64),
 };
@@ -124,29 +129,31 @@ async function experiment(tenantId: string, orgId: string, over: Partial<Experim
     experimentId: `exp:p2-${n++}-${Math.random().toString(36).slice(2, 8)}`, tenantId, orgId, name: 'Hero', hypothesis: '',
     surface: { kind: 'test.promote', ref: 'r' }, unit: 'visitor', design: { type: 'ab' },
     arms: [{ key: 'control', ref: null, weight: 50 }, { key: 'b', ref: 'v2', weight: 50 }], mode: 'decide', status: 'running', salt: 's',
-    plan: PLAN as Experiment['plan'], epochs: [{ epoch: 0, weights: { control: 50, b: 50 }, at: started, reason: 'launch' }],
+    plan: PLAN, epochs: [{ epoch: 0, weights: { control: 50, b: 50 }, at: started, reason: 'launch' }],
     createdBy: 'u', createdAt: started, updatedAt: started, startedAt: started, ...over,
   };
   await putExperimentRow(e);
   return e;
 }
 
-// `any`: the JSON wire boundary of a test-only HTTP helper (the adr0832 probe precedent).
-function client(): { call: (method: string, p: string, b?: unknown) => Promise<{ status: number; body: any }> } {
+/** The fields this file reads from the JSON answers. */
+interface Body { user?: { userId: string }; orgId?: string; runId?: string; experimentId?: string; winner?: string; error?: string }
+function client(): { call: (method: string, p: string, b?: unknown) => Promise<{ status: number; body: Body }> } {
   let cookie = '';
   return {
     call: async (method, path, body) => {
       const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
       for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]!; }
-      return { status: res.status, body: await res.json().catch(() => undefined) };
+      const decoded: unknown = await res.json().catch(() => ({}));
+      return { status: res.status, body: (decoded ?? {}) as Body };
     },
   };
 }
 async function workspace() {
   const tenantId = `org:p2-${Date.now()}-${n++}`;
   const owner = client();
-  const ownerId: string = (await owner.call('POST', '/host/openwop-app/test/login', { email: `p2-o-${n++}@acme.test`, tenantId })).body.user.userId;
-  const orgId: string = (await owner.call('POST', '/host/openwop-app/orgs', { name: 'Client' })).body.orgId;
+  const ownerId: string = (await owner.call('POST', '/host/openwop-app/test/login', { email: `p2-o-${n++}@acme.test`, tenantId })).body.user!.userId;
+  const orgId: string = (await owner.call('POST', '/host/openwop-app/orgs', { name: 'Client' })).body.orgId!;
   return { tenantId, orgId, owner, ownerId };
 }
 
@@ -209,8 +216,8 @@ describe('ADR 0950 P2 — 1. the promote chain end to end (the P2 exit)', () => 
     expect(fork.body.runId).toEqual(expect.any(String));
     // A gate-role node reopens its approval in a replay; this is deliberate
     // human control, while effect-role nodes serve their recorded outcomes.
-    await approveGate(fork.body.runId as string);
-    const replayed = await settled(fork.body.runId as string);
+    await approveGate(fork.body.runId!);
+    const replayed = await settled(fork.body.runId!);
     expect(replayed.status, JSON.stringify(replayed.error ?? null)).toBe('completed');
     expect(replayed.parentRunId).toBe(runId);
     const after = (await getExperimentRow(w.tenantId, w.orgId, e.experimentId))!;
@@ -335,6 +342,13 @@ describe('ADR 0950 P2 — 3. the chokepoint', () => {
     expect((await getExperimentRow(w.tenantId, w.orgId, e.experimentId))?.promotionRunId).toBe(first.runId);
     const young = await experiment(w.tenantId, w.orgId, { startedAt: new Date(Date.now() - DAY).toISOString() });
     await expect(startPromotion({ storage, hostSuite }, w.tenantId, w.orgId, young.experimentId, w.ownerId)).rejects.toMatchObject({ details: { reason: 'gate_failed' } });
+    // A failing gate that still HAS a winner: the lift (0.10 → 0.14) is real but
+    // below a 0.05 MDE, so G5 fails while G4 (a winner) passes. Only the all-pass
+    // check refuses it; the young case above is also refused by "no winner".
+    const smallLift = await experiment(w.tenantId, w.orgId, { plan: { ...PLAN, mde: 0.05 } });
+    const refusedSmall = startPromotion({ storage, hostSuite }, w.tenantId, w.orgId, smallLift.experimentId, w.ownerId);
+    await expect(refusedSmall).rejects.toMatchObject({ details: { reason: 'gate_failed', gates: expect.arrayContaining(['G5']) } });
+    await expect(refusedSmall).rejects.toMatchObject({ details: { gates: expect.not.arrayContaining(['G4']) } });
   });
 });
 
@@ -346,16 +360,19 @@ describe('ADR 0950 P2 — 4. the route', () => {
     const sub = getToggleDefault('experiments.auto-promote')!;
     await saveConfig({ ...sub, status: 'off' }, 'test');
     try {
-      expect((await w.owner.call('POST', path(w.orgId, e.experimentId), {})).status).not.toBe(202);
+      const off = await w.owner.call('POST', path(w.orgId, e.experimentId), {});
+      expect([off.status, off.body.error]).toEqual([404, 'not_found']);
     } finally {
       await saveConfig({ ...sub, status: 'on' }, 'test');
     }
-    const otherOrg: string = (await w.owner.call('POST', '/host/openwop-app/orgs', { name: 'Other' })).body.orgId;
-    expect((await w.owner.call('POST', path(otherOrg, e.experimentId), {})).status).toBe(404);
+    const otherOrg: string = (await w.owner.call('POST', '/host/openwop-app/orgs', { name: 'Other' })).body.orgId!;
+    const foreign = await w.owner.call('POST', path(otherOrg, e.experimentId), {});
+    expect([foreign.status, foreign.body.error]).toEqual([404, 'not_found']);
     const viewer = client();
-    const viewerId: string = (await viewer.call('POST', '/host/openwop-app/test/login', { email: `p2-v-${n++}@acme.test`, tenantId: w.tenantId })).body.user.userId;
+    const viewerId: string = (await viewer.call('POST', '/host/openwop-app/test/login', { email: `p2-v-${n++}@acme.test`, tenantId: w.tenantId })).body.user!.userId;
     expect((await w.owner.call('POST', `/host/openwop-app/orgs/${encodeURIComponent(w.orgId)}/members`, { displayName: 'V', subject: viewerId, roles: ['viewer'] })).status).toBe(201);
-    expect((await viewer.call('POST', path(w.orgId, e.experimentId), {})).status).toBe(403);
+    const refused = await viewer.call('POST', path(w.orgId, e.experimentId), {});
+    expect([refused.status, refused.body.error]).toEqual([403, 'forbidden_scope']);
     const ok = await w.owner.call('POST', path(w.orgId, e.experimentId), { holdoutPct: 3 });
     expect(ok.status, JSON.stringify(ok.body)).toBe(202);
     expect(ok.body).toMatchObject({ experimentId: e.experimentId, winner: 'b' });

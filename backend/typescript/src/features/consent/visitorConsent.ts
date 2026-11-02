@@ -66,16 +66,9 @@ export async function visitorAnalyticsAllowed(tenantId: string, sessionKey: stri
   return isAllowed(tenantId, ctx.tokenSubject, 'analytics', { visitor });
 }
 
-/**
- * ADR 0951 D1 — whether a session may be RECORDED for this visitor.
- * `analytics.replay` is strict (`STRICT_EXPLICIT_OPT_IN`), so only a recorded
- * explicit `true` permits — and a record exists only under the `visitor:`
- * subject a consent token names. No token ⇒ no record ⇒ refused, in every
- * region and whatever the tenant's default mode. A tombstoned `sessionKey`
- * stays refused, exactly as for analytics.
- */
-export async function visitorReplayAllowed(tenantId: string, sessionKey: string, ctx: VisitorConsentContext): Promise<boolean> {
-  if (ctx.tokenSubject === undefined) return false;
-  if (sessionKey && await isErasureTombstoned(tenantId, sessionKey)) return false;
-  return isAllowed(tenantId, ctx.tokenSubject, 'analytics.replay', { visitor: { region: ctx.region } });
-}
+// ADR 0951 P2 review #6: there is deliberately no replay predicate here. Whether
+// a visit may be recorded is decided in one place: the upload lane requires the
+// consent token's subject, and `putReplayChunk` records only under that
+// subject's live strict grant generation (`getStrictGrantGeneration`). A second
+// predicate here once said yes to a legacy grant the real gate refuses.
+

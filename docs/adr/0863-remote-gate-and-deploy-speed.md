@@ -1,6 +1,6 @@
 # ADR 0863 — gate and deploy speed on the dev Macs
 
-Status: implemented. D2–D8 are on main. D1 (a remote Cloud Build gate) was piloted and **rejected on cost** on 2026-10-08; the lazy-import experiment remains parked.
+Status: implemented for D2–D8. D1 (a remote Cloud Build gate) was piloted and **rejected on cost** on 2026-10-08. D9, the requested SSH gate rebuild: its libraries are qualified offline and merged INACTIVE. The worker host is a **GCP Linux VM, per-gate on-demand, $200/month cap with auto-stop** (user, 2026-10-31; this replaces the 10-29 deferral). It is not provisioned yet, so no remote gate runs. The lazy-import experiment's later recovery is recorded below.
 
 ## Context
 
@@ -389,3 +389,1054 @@ hoists their static external imports, so they added asynchronous plumbing withou
 removing the production eager loads. No gate-speed or cold-start saving is claimed.
 Existing document import/export, SMTP, data integration and pack validation tests
 are the behavioral gates; full combined CI validation is pending.
+
+## D9 — Rebuild the remote gate over SSH, with explicit trust (2026-10-28)
+
+The user requested rebuilding the archived remote gate on current main, with a
+security review of transport authentication and verdict provenance. The b7
+handoff identifies the larger Mac as the intended worker. This replaces the
+archived transport; it does **not** reinstate the rejected Cloud Build spending,
+create a cloud bucket, grant IAM permissions, or copy the old merge-train scripts.
+
+### Source audit and existing owners
+
+Baseline: `002e1ed1538b841fd739bf67ea6c969f54faada1`. Reference archives:
+`archive/adr-0863-remote-gate` → `a01d7b1216f68701cf5cb6ce2993d132e665293f`
+and `archive/adr-0863-remote-gate-ajv` →
+`0c4fefbbb91fd96a989ec7845f413486f6f9507d`.
+
+Both archives contain Cloud Build submit/reconstruction scripts, not an SSH
+runner. Their useful constraints are a frozen commit, complete required Git
+history/refs, immutable bundle identity, worker-byte verification and a result
+bound to one submission. Their infrastructure defaults, automatic bucket
+creation, `git stash create` snapshot path and `OPENWOP_CI_NO_WAIT=1` are not
+restored. D2/D3 changes already on main must not be overwritten by stale copies.
+
+The existing owners remain: `scripts/merge-train.sh` constructs and verifies the
+candidate; `scripts/ci.sh` is the gate; Hyvemind records exact-tree evidence;
+`preflight-suite.sh` and `ci-claims.sh` coordinate local resource use; the release
+bus reports advisory cross-machine state. No new merge or deploy authority is
+introduced. The proposed SSH controller transports a candidate and reads evidence.
+It cannot merge, deploy, publish, change production configuration, or declare a
+partial lane equivalent to the full gate.
+
+### Trust boundary
+
+1. **Host and account are explicit.** No guessed host, default public endpoint or
+   automatic trust-on-first-use. The operator supplies a verified host-key pin,
+   approved SSH destination, runner ID and approved runner-policy digest. Use
+   batch-mode SSH, strict host-key checking and a dedicated known-hosts file;
+   disable forwarding, proxy commands and ambient SSH configuration surprises.
+   Never use `StrictHostKeyChecking=no`, accept a changed key automatically, copy
+   private keys, or forward an authentication agent.
+2. **Transport trust is not in the returned JSON.** The local SSH controller
+   records the host identity it authenticated. The evidence validator compares
+   that observation with local configuration. A worker's claim that it has a
+   particular host key cannot authenticate itself.
+3. **Worker trust is explicit.** Candidate CI executes repository code. SHA256
+   binding and SSH do not make a compromised worker, malicious contributor, or
+   same-user process unable to forge evidence. This lane initially accepts only
+   reviewed candidates on an explicitly trusted runner under the same code-trust
+   assumptions as the local gate. It is not an untrusted-PR execution sandbox.
+   Do not advertise cryptographic attestation or import a worker-generated GREEN
+   blindly as local Hyvemind evidence.
+4. **Constrain the execution account.** The planned worker account must not carry
+   production credentials, agent-forwarded identities, deploy rights or peer
+   session data. Required private dependency reads use narrowly scoped provisioning.
+   Use an approved fixed runner entry point outside the submitted checkout and a
+   disposable workspace. Actual account/SSH setup and trust pins are prerequisites
+   for a real remote run; this source change does not configure another machine.
+5. **No shell interpolation of submission data.** Pass the request through a
+   bounded data channel to a fixed remote command. Validate identifiers, hashes,
+   revisions and paths as data; never source a submitted env file or execute a
+   returned command. A remote result parser stays on the submitting host.
+
+### Candidate and result contract
+
+- The first lane gates a clean, explicit committed candidate. It refuses dirty
+  or untracked source instead of mutating a shared checkout or taking a stash.
+  Capture the full candidate SHA/tree, current remote-main SHA, required ref
+  manifest digest and source-bundle digest. Determine the required ref set from
+  the existing gate's history/ADR checks; no arbitrary filesystem archive.
+- A random 128-bit request ID and the hash of the exact request bytes bind one
+  attempt. Requests expire within six hours. Reconstructed refs, main, tree and
+  commit must match before installs; the worker returns those observations again
+  after the gate. Never gate a floating branch tip or a peer's working directory.
+- The approved runner policy requires Node 22, real npm 10.9.8 installs in all
+  three workspaces, normal adaptive CI selection and the complete canonical
+  `npm run ci` through Hyvemind 0.2.0. No primary browser opt-out, quick gate,
+  forced Tracegate reuse, copied node_modules or invented Linux pixel baseline.
+  Required WASI/browser assets and platform parity must be qualified first.
+- Return the complete gate log, full Hyvemind evidence and browser ledger with
+  SHA256 digests. Missing, empty, truncated or changed artifacts cannot produce
+  GREEN. The gate must finish within this request's interval, exit zero, retain
+  the same clean tree, and record a full—not partial—canonical pass on the exact
+  candidate. Required browser success and an advisory browser failure remain
+  distinct facts in the returned summary.
+- The local candidate is checked again before accepting the result; the merge
+  train still refreshes all PR heads and main and uses GitHub's head precondition.
+  A moved candidate invalidates acceptance. A stale or unverifiable remote result
+  is an error, not permission to merge or to silently launch a duplicate local gate.
+
+`scripts/lib/remote-gate-result.mjs` is the first rebuilt component: a local,
+dependency-free evidence validator with separate request, artifact and transport
+inputs. Its tests use synthetic fixture evidence, so a passing unit check proves
+the validator's acceptance/rejection behavior, not a real remote gate. The SSH
+controller, worker, reconstruction and merge-train integration are still owed.
+
+### Coordination and lifecycle
+
+The worker's own coordinator retains its existing queue. Remote work observes
+that machine's real gate/claims and never runs through an active e2e phase.
+Announcements and leases are advisory; no repository freeze or deploy hold.
+If unavailable or busy, return a bounded, explicit queued/unavailable result;
+choose a later slot or deliberate local fallback rather than overriding a peer.
+
+An interrupted SSH client reports interruption, never GREEN. Reconnection uses
+the same request ID to inspect an existing run rather than start another. The
+runner records individual owned PID/start identities. Cancellation targets only
+those PIDs after identity rechecking; it never signals a process group, a guessed
+name, or an agent session. Cleanup only removes the request's disposable paths
+and cannot follow a caller-supplied path outside its workspace. Preserve failure
+logs long enough for review; retention is bounded and documented.
+
+### Qualification still required
+
+| Boundary | Required evidence |
+|---|---|
+| Transport | Wrong/missing/changed host key refused before code execution; no agent, credential or port forwarding; hostile request strings remain inert data |
+| Reconstruction | Altered bundle/ref manifest, missing history, wrong SHA/tree/main and unsafe archive paths refused before npm; real clean reconstruction matches the submitting tree |
+| Verdict | Wrong request/runner/policy/head/tree, partial/quick/red gate, stale browser record and modified/missing logs refused; advisory failure preserved |
+| Ownership | Interruption and reconnect do not double-start; PID reuse and unrelated peer processes survive cancellation; no collateral file cleanup |
+| Integration | A real approved-worker full gate plus local acceptance, moved-main/head refusal and canonical merge-train proof; no speed claim without comparable measurements |
+
+The standalone validator checks are not release qualification. Schedule the
+complete change in its own train after implementation and worker configuration.
+Retain both archive tags until the replacement PR is verified merged.
+
+Preparation evidence, 2026-10-28 00:24Z: the dependency-free validator's 28 cases
+passed. Three disposable negative-control copies removed, individually, SSH
+identity comparison, the full-gate requirement and artifact-byte comparison;
+each corresponding rejection test failed with a missing expected exception.
+Candidate source was unchanged by those probes. Shell syntax and whitespace
+checks passed. No SSH connection, remote job, install, browser or full gate was
+run; transport/reconstruction/merge integration remain incomplete.
+
+### Local transport preparation checkpoint — 2026-10-28
+
+`scripts/lib/remote-gate-ssh.mjs` now prepares an argument array for the installed
+OpenSSH client. A closed local configuration names the host, non-root runner
+account, port, identity path, runner policy and an Ed25519 public host key whose
+wire encoding and SHA256 fingerprint are verified. It emits a dedicated
+known-hosts entry and always selects `/usr/local/libexec/openwop-ci-worker`;
+submission data never chooses a shell command. The caller still must create the
+private known-hosts file and perform the authenticated connection. The planner
+deliberately returns a **pin**, not an assertion that authentication occurred.
+
+Ambient SSH configuration, automatic key acceptance, host-key updates, agent and
+port forwarding, proxy commands, multiplexing, interactive/password login and
+environment forwarding are disabled. This initial lane accepts literal DNS/IPv4
+hosts and ordinary Ed25519 keys only. Paths are restricted to literal absolute
+names: OpenSSH parses `-o` values and expands filename tokens independently of
+the process argument boundary, so whitespace, quotes, percent tokens and `..`
+are refused rather than accidentally selecting another known-hosts file.
+
+Evidence: 51 dependency-free result/transport checks pass. The installed client's
+`ssh -G` output confirms its effective options without any network connection.
+The first planner accepted unsafe path syntax; two refusal witnesses failed
+before the path restriction and passed afterward. A separate test expectation
+was corrected to the installed client's `requesttty false` spelling. Temporary
+negative-control copies removing the key comparison, disabling strict host-key
+checking or enabling agent forwarding each turn the relevant checks red; the
+candidate source was unchanged by those probes.
+
+A further effective-configuration witness exposed a credential fallback:
+OpenSSH drops a nonexistent `-i` filename and selects the default user key paths.
+The planner now uses the literal `IdentityFile` option instead, which retains
+the explicitly selected path even when absent. The real `ssh -G` check asserts
+exactly one identity filename and no default user identities. Its original red
+output and the repaired 51-case result are preserved; no key was opened or used
+for authentication during that check.
+
+This is local validation, not a remote gate. Actual wrong-key connection refusal,
+runner/account provisioning, bounded request transport, source reconstruction,
+worker lifecycle, reconnect/cancellation and full-gate/merge integration remain
+required. No private key was read or copied, no remote command was executed, and
+no archive tag was deleted by this checkpoint.
+
+### Git source reconstruction checkpoint — 2026-10-28
+
+The next component transports Git bundles and a ref manifest, never a filesystem
+archive. The local preparer refuses dirty, untracked or shallow source, requires
+the explicit candidate and refreshed `origin/main`, and checks source refs again
+after building the bundle. It does not fetch, create a stash, move a ref or freeze
+other sessions. `check-adr-refs.mjs` reads `git log --all`, while pack-version
+checks use `origin/main`; therefore every frozen ref, including peer-only ADR
+history and annotated release tags, must survive reconstruction. Replace refs
+are refused, since they could change the meaning of object IDs.
+
+The fixed worker library copies the bounded bundle into a new private directory
+and checks its SHA256 before Git reads it. Streaming uses a 1 MiB buffer with a
+1 GiB bundle limit; the manifest is bounded at 8 MiB and 50,000 refs. The runner
+root belongs to the configured account and has no group/other access. Git has a
+private HOME, no ambient config or object-store overrides, no hooks, no network
+protocols and an empty init template. An empty object database must verify the
+complete bundle before refs are created. Bundle heads, commit, tree, main ancestry
+and reconstructed refs must match. Submodules and escaping/dangling symlinks are
+refused before installs. Any failure removes only this attempt's new directory.
+The request schema is shared with the result validator and accepts no command or
+workspace fields.
+
+Qualification uses real temporary Git repositories: exact source round-trip,
+peer-only ADR history, annotated tags, altered-but-valid bundle compression,
+changed ref serialization, wrong identities/tree/main, incomplete history,
+unsafe paths, ambient filter/config injection, and dirty/staged/untracked source
+preservation. The result, transport and source checks total 74 passing cases.
+Four disposable negative controls remove the bundle digest, ref digest, tree
+comparison and clean-source refusal separately; each accepts the otherwise valid
+wrong input and turns its refusal witness red. The controller's final local-head check,
+bounded SSH protocol, worker lifecycle and an approved real remote full gate
+are still required. These local Git checks do not establish remote gate trust or
+performance, and the archive tags remain until the replacement merges.
+
+### D9 transport framing checkpoint — 2026-10-28
+
+Architecture review: Track A, local release-tooling seam. The existing source
+reconstructor still owns Git interpretation, the local result validator owns
+verdict acceptance, and the canonical CI/Hyvemind commands own the gate. No host
+route, OpenWOP wire contract, production permission, scheduler or merge authority
+is introduced. The private-root assertion is shared with source reconstruction.
+
+`remote-gate-frame.mjs` now encodes/receives bounded binary artifacts for the fixed
+SSH worker command. A magic prefix and bounded JSON header declare the exact
+ordered artifact set, byte counts and SHA256 digests. Source frames contain only
+request/refs/bundle; result frames contain only result/evidence/log/browser ledger.
+Names are constants, never received filesystem paths. Request/evidence/result
+JSON are capped at 1 MiB, refs/ledger at 8 MiB, bundles at 1 GiB, logs at 256 MiB,
+and header at 4 KiB. A larger artifact refuses the transfer; it cannot be truncated
+into a green result. Encoding hashes an open regular file before transfer and
+checks its bytes again before emitting the end marker. Reception streams 64 KiB
+slices to a fresh owned 0700 directory with exclusive 0600 files and exposes the
+paths only after hashes, end marker and EOF all pass. Failures remove only that
+transfer directory. Idle and total deadlines plus cancellation bound stalled input.
+
+This is the artifact-transfer layer, not a long-running gate session protocol.
+The future controller must use request status/reconnect before fetching a ready
+result, then require successful SSH exit and local contract validation. It must
+not start this bounded receiver and wait silently through a whole gate. The
+worker lifecycle, acknowledgement/status protocol, account provisioning, real SSH
+qualification and merge-train integration are still owed; no remote gate was run.
+
+Local evidence: 100 combined result/SSH/source/frame checks pass, including 26
+frame checks. A subsequent continuous-input deadline witness passes separately.
+Removing the received digest comparison makes the changed-artifact witness RED;
+removing the final stream-EOF assertion makes the separate-trailing-chunk witness
+RED. The original source was restored byte-for-byte after each experiment.
+Evidence is in the coordinator's `remote0863-frame-*.log` and negative-control
+record; this is scoped tooling evidence, not full application CI. These brief
+checks ran during train258's backend phase with pressure1; no application suite
+or peer browser work was started. All four tooling files are wired into ci.sh.
+
+### D9 job journal preparation — 2026-10-28
+
+The next component is a request-scoped job journal on the explicitly trusted
+worker. An exclusive request directory binds the exact original request bytes.
+Complete, fsynced state records are published by an exclusive hard link under
+immutable sequence names, with each record hashing its predecessor. Competing
+transitions cannot overwrite a winner. This is confined to one request; it is
+not a repository lock, queue override, lease or permission to block peer work.
+
+A reconnect returns the recorded state, including after request expiry. Only an
+unexpired `accepted` request can transition to `starting`, and the worker must
+persist that transition before launching a supervisor. A crash between those
+steps is unresolved, not permission to relaunch. Partial admission, malformed
+history, symlinked/public records and changed request bytes fail closed and are
+preserved for investigation. `running` retains the observed supervisor PID,
+start identity and executable. Terminal states cannot restart. `completed` binds
+a result digest but supplies no GREEN verdict; the independent evidence reader
+must still verify the actual returned artifacts and SSH provenance.
+
+The component does not yet implement the worker supervisor, request/status SSH
+envelopes, cancellation or final local acceptance. In particular, recording a
+PID is not proof that it is safe to signal; the supervisor must recheck process
+identity and establish all owned descendants are gone before recording a
+cancelled state. It must never cancel an agent or a process group. No worker is
+installed on another machine by this checkpoint.
+
+The journal tests are prepared, including two real processes contending for the
+same start transition, restart/reconnect, expiry, identity collision, partial
+admission, history damage, symlink targets and terminal-state refusal. They have
+not been executed while release260 owns the Air's full-gate slot. Syntax checks
+alone do not qualify this journal. Keep both archive tags until the replacement
+is fully qualified and merged.
+
+#### Journal qualification update — 2026-10-28 at 09:17Z
+
+The 18 standalone journal cases now pass. They ran in less than one second while
+release260 was in its full backend lane with normal memory pressure; no browser
+phase or second application suite overlapped. The final concurrency witness
+pauses both real processes at the first file fsync, after reading the same
+accepted state and before publishing the start record. Both then use the actual
+filesystem operation. Replacing the exclusive hard link with an overwriting
+write produces two successful starters instead of one and makes that test RED.
+Removing, separately, the terminal-transition refusal, record symlink refusal
+or history digest check also makes its corresponding witness RED. Source bytes
+were restored after all four probes.
+
+This qualifies the local journal boundary only. It does not establish worker
+process supervision, safe cancellation, authenticated SSH status/reconnect,
+platform build parity, final candidate acceptance or a full remote gate.
+
+
+### D9 local acceptance checkpoint — 2026-10-28
+
+The local reader now inspects the submitting checkout before and after validating
+worker artifacts. It requires the exact HEAD and tree, a clean tracked/untracked
+working tree, and the same locally refreshed origin/main. Git reads use the
+existing isolated configuration so ambient GIT_DIR cannot redirect this check.
+The reader preserves required versus advisory browser results and returns no
+merge authority. It does not write a remote GREEN into the local Hyvemind ledger.
+
+Nine checks exercise actual temporary Git repositories and synthetic returned
+evidence: the unchanged candidate is accepted; a different commit with the same
+tree, an incorrect tree claim, tracked/staged/untracked changes, moved main,
+a nested checkout path and ambient Git redirection are refused. Removing the
+HEAD, main or clean-tree guard separately makes its corresponding test fail.
+All 60 source/result/acceptance checks pass after restoration. The synthetic
+worker evidence is explicitly not a real SSH gate result.
+
+The controller must refresh main before invoking this reader. A local ref alone
+cannot prove the remote has not advanced, and another change can still occur
+after acceptance. The canonical merge train therefore retains its final fresh
+remote-main, PR-head and GitHub head preconditions. Actual worker supervision,
+SSH status/fetch/cancel, controller wiring and a real full remote gate remain
+unqualified; no archive tag is deleted at this checkpoint.
+
+### D9 read-only status/fetch implementation — 2026-10-28
+
+`remote-gate-status.mjs` composes the existing journal and frame encoder. Status
+does not admit unknown requests, repair an unresolved start or launch work;
+existing requests remain inspectable after submission expiry. It exposes the
+request binding and immutable sequence/state without local paths or supervisor
+identities. `artifactsReady` means only that the journal records completion;
+`gateVerified` remains false until the submitting host independently accepts it.
+
+The supervisor's artifact publication destination is the private, fixed
+`<job>/artifacts/` directory with `result.json`, `evidence.json`, `gate.log` and
+`browser.tsv`. Fetch refuses non-completed jobs, symlinks/public artifacts,
+changed result digests and another request's result. The frame encoder now
+accepts optional expected digests and compares them against its own open file
+descriptors before emitting any header, closing the earlier path-read gap.
+Its existing second-pass digest and EOF checks remain in place. Neither status
+nor fetch signals a process or changes a journal entry.
+
+Architecture review (Track A, CI tooling): the journal remains the single job
+state owner; the frame module remains the byte-transfer owner; result acceptance
+and merge authority stay on the submitting host. No product route, OpenWOP wire
+contract, credential mechanism or competing scheduler is introduced. Root and
+trust must come from the installed worker configuration, never submitted JSON.
+This retains D9's trusted-account assumption; it is not a sandbox against a
+compromised worker or another process using that account.
+
+After release260 completed, all 58 status/fetch, frame and job checks passed.
+They use actual private files and frame decoding with synthetic gate payloads.
+Removing the descriptor digest guard or private-artifact guard separately made
+its negative witness RED (the expected refusal disappeared). Both guards were
+restored and all 58 checks passed again. This qualifies those local boundaries,
+not authenticated SSH execution or a real gate result. Full CI,
+the supervisor that atomically publishes artifacts before completion, SSH command
+dispatch, cancellation and an approved real worker run remain required. No worker
+has been provisioned and no archive tag has been deleted.
+
+### D9 artifact publication preparation — 2026-10-28
+
+`remote-gate-publish.mjs` adds the installed supervisor's publication step. The
+existing journal remains the sole visibility commit: fetch refuses everything
+until the `running → completed` CAS succeeds. Publication exclusively creates
+the fixed private `artifacts/` directory, copies only the four allowed files
+through owned non-symlink descriptors, hashes the bytes actually written, and
+fsyncs files/directories before recording completion. The result must name this
+request, candidate, policy and observed zero exit, and its three artifact hashes
+must match the copied bytes. Size limits come from the frame module's single
+exported artifact contract.
+
+An incomplete directory is deliberately retained on every subsequent failure.
+It is unreachable through fetch and cannot be overwritten by a retry or second
+publisher. A concurrent cancellation wins the journal CAS; fully copied files
+then remain unaccepted. Status/reconnect inspect the durable record instead of
+starting another command. `completed` continues to mean that files are ready,
+not that the submitting host has accepted full gate/SSH evidence.
+
+Architecture review (Track A, security-shaped CI tooling): this extends the
+existing journal/frame boundaries rather than adding a scheduler or authority.
+Source directory, recorded owner identity and observed command exit must come
+from the installed supervisor, never network request fields. The implementation
+does not itself observe a process or authenticate the owner; it retains the
+explicit trusted-account assumption. No OpenWOP wire or production configuration
+changes are introduced.
+
+Prepared tests exercise real private files, immutable publication, wrong identity
+and digests, symlink/permission/size refusals, interrupted-output retention,
+cancellation and two actual competing publisher processes. These use synthetic
+gate payloads. At this checkpoint only syntax/diff checks have run: execution
+and negative controls are queued until release train262 releases this Mac's
+test capacity. Full gate, actual supervisor execution, SSH dispatcher/controller,
+process-identity cancellation and approved worker qualification remain owed.
+
+**Qualification update, 2026-10-28 12:06Z:** after train262 completed and the
+release deploy finished its local builds, all 76 publication/status/frame/job
+checks passed, including the 18 new publication cases. Three independent
+negative controls removed the artifact-digest comparison, the private-file mode
+check, and exclusive directory creation. Each corresponding test failed because
+the expected refusal disappeared. The production source was restored byte for
+byte and all 76 checks passed again. This includes actual two-process publication
+contention and actual filesystem/journal/frame boundaries, with synthetic gate
+payloads. Evidence: `remote0863-publication-verification.json` in the acting
+coordinator's release state directory, bound to source commit `ba0785229`.
+No full remote gate, SSH worker activation or archive retirement is claimed.
+
+### D9 cancellation intent preparation — 2026-10-28
+
+Architecture review identified a missing distinction: a cancellation request
+cannot claim that a running supervisor and its descendants have stopped. The
+existing request journal remains the single lifecycle owner; a separate cancel
+file or another lock would create a race with its start/completion CAS.
+
+`requestRemoteGateCancellation` therefore uses that same immutable transition:
+an `accepted` job can become `cancelled` because no caller has acquired its
+start transition. A concurrent starter must observe whether its own CAS won.
+For `starting` or `running`, cancellation records **`cancelling`**, retaining the
+observed supervisor identity. No new start or completed result may follow that
+state. Only the installed supervisor may record `cancelled` after independently
+observing owned-process cleanup; uncertain cleanup becomes `interrupted` and
+retains the cancellation intent in status. The request API sends no signals,
+launches nothing, and accepts no caller PID or filesystem path.
+
+Completion and cancellation compete through the same journal sequence. If
+completion wins first, cancellation returns that completed state unchanged. If
+cancellation wins while the publisher is copying artifacts, its final CAS loses
+and copied artifacts remain non-fetchable. Acknowledged intent is not a cleanup
+receipt. Reconnects, including after request expiry, inspect the existing job;
+unknown or changed request bytes cannot admit or cancel another job.
+
+Thirteen new cases are prepared: unknown/changed identity, accepted cancellation,
+pending startup/running cleanup, expired duplicate requests, terminal states,
+two actual-process races against start/cancel, and a real publisher paused after
+reading `running` while cancellation advances the journal. The latter checks
+that fully copied synthetic artifacts remain unavailable. This is host tooling,
+with no product route, wire contract, production mutation or new execution
+authority. Existing trusted-worker-account assumptions still apply.
+
+These changes and tests are **prepared but not executed** while Air CI267 owns
+the local full-gate slot. Next: run the journal/status/publication/cancellation
+suites; remove the pending-state guard and then the completion transition guard
+in separate negative controls; restore and rerun. Actual supervisor execution,
+PID-identity cleanup, SSH dispatcher/controller, approved worker configuration
+and full local/remote gate qualification are still required. Both archive tags
+remain until the replacement merges.
+
+Cancellation qualification on `469ef1279` completed at 17:14Z on 2026-10-28.
+The journal/status/frame/publication/cancellation suites passed all 89 cases.
+Removing pending cancellation made the two startup/running witnesses fail;
+allowing completion after cancellation separately made both fail. Restoring the
+exact source passed all 89 again. The wrapper exited zero with no owned process
+remaining. `remote0863-cancellation-verification.json` records that exact tree;
+it is not evidence for later changes or actual worker process supervision.
+
+### D9 fixed control dispatch preparation — 2026-10-28
+
+Architecture track A, existing CI tooling owners: the immutable job journal owns
+state, the frame module owns bounded inert transport, and the result reader owns
+artifact validation. The new `remote-gate-control.mjs` composes those owners for
+the installed worker entry point. It creates no execution, merge or deploy path.
+
+The existing frame protocol gains `control` (original `request.json` plus a
+4-KiB `operation.json`) and `status` (a 4-KiB `status.json`). Operations are the
+closed set `status`, `cancel`, and `fetch`; callers cannot supply a command,
+filesystem root, PID, runner policy or alternate worker. Only the installed
+entry point supplies the trusted root, spool root and runner policy. The entire
+frame, its digests, end marker and EOF must validate before a cancellation can
+change the journal. Both idle and total receive time are bounded.
+
+Status and cancellation use the exact original request bytes. Unknown requests
+are never admitted as a side effect of reconnecting. Expired existing jobs remain
+inspectable. Cancellation returns the actual state, which can be `cancelling`;
+it never asserts that processes have stopped. Disconnect after an intent was
+recorded cannot undo that intent; the next connection asks for status. Fetch
+streams only the existing completed, journal-bound result frame. Neither a
+status response nor the presence of artifacts constitutes an accepted green gate.
+
+The handler allocates a private spool and removes only that spool when its
+response generator completes or is closed. It never removes a job directory or
+peer files. An integrating SSH entry point must consume or close that generator
+on transport failure. This retains the explicit trusted-account assumption; it
+does not isolate against a malicious process using the same account.
+
+Nineteen integration witnesses are prepared using real frames, journals and
+private files: unknown/expired reconnect, accepted/running cancellation,
+unrecognized operation/fields/encoding, changed original request, trailing or
+interrupted input before EOF, abort, disconnect after intent, unfinished fetch,
+and completed synthetic artifact transport. The new suite is in canonical CI.
+**Not executed at this checkpoint:** Client271 owns the local gate. Next run
+the six focused suites and independently remove EOF, closed-field, cancellation
+dispatch and spool-cleanup guards, restoring source between probes.
+
+The actual installed SSH dispatcher/controller, PID-identity supervisor,
+approved worker account and real local/remote full gate remain required. The
+existing generic `owned-process.mjs` sends process-group signals and cannot be
+reused unchanged under the PID-only rule. Sampling a process tree alone is not
+proof that a rapidly reparented child was observed; unresolved ownership must
+refuse a cleanup claim. This preparation starts no SSH connection and enables
+no remote execution. Archive tags remain until the replacement merges.
+
+### D9 PID-identity supervisor design — 2026-10-28 (design only, not implemented)
+
+Owner change: the Air's Codex session handed D9 to `openwop-app-d8` on this
+date. The control framing at `676dd42c0` is qualified (a 191/191 baseline over
+all ten remote-gate suites; nine disposable mutants each reddened a named
+witness; the restored copy passed 191/191 again). This section designs the
+installed supervisor, the one component that touches live processes. Nothing
+below is implemented or enabled. Provisioning (host, account, key, policy)
+remains the user's decision before any activation.
+
+**Platform facts measured on the worker class (macOS 26.5, 2026-10-28):**
+- An orphaned child is reparented to `launchd` (ppid 1) within a second. A
+  parent-pointer tree walk therefore loses descendants. Sampling it cannot prove
+  that a fast-reparented child was ever seen.
+- The process group (`pgid`) is inherited and survives reparenting. `ps -o sess`
+  reports 0 for every process, so the session is unusable.
+- `ps eww` / `ps -E` do not reveal another process's environment, even under the
+  same uid. A per-job environment marker cannot be read back, so it is not an
+  ownership proof.
+- `ps -o lstart` has one-second resolution and is printed in the local time
+  zone (the same process read 19:35:24 under `TZ=UTC` and 15:35:24 locally).
+- macOS has no `pidfd` and no child subreaper.
+
+**Identity.** A process identity is the tuple `{pid, startedAt, uid,
+executable}`:
+- `startedAt` is `lstart` read with `TZ=UTC` and `LC_ALL=C` forced in the
+  supervisor's `ps` environment, never inherited.
+- `executable` is the `comm` value.
+
+A PID alone is never an identity. Two readings match only when every field is
+non-empty and equal. If any field is empty or unreadable, the process is
+**unknown**, never "not the same process" (the GATE-CLAIM-1 lesson above: an
+empty reading must not count as evidence). Residual: two processes with equal
+pid, second, uid and comm would need the PID space to wrap within one second.
+This design does not treat that as impossible. It treats it as the stated
+residual of the identity check.
+
+**Ownership.** The supervisor spawns the gate as the leader of a new process
+group (`detached: true`), records its OWN identity as `running.owner`
+(the field already validated by the journal) and the leader in `owned.tsv`, and holds
+the leader **unreaped** until cleanup ends. While the leader is a zombie its PID
+cannot be reused, so signalling the direct child is reuse-free. Membership is
+sampled by group, not by tree: every 2 s and at each cleanup step the supervisor
+lists same-uid processes with `pgid == leader`. It adds each new identity to an
+in-memory owned set and to a per-job `owned.tsv` append log. The group is
+**discovery only**: nothing ever calls `kill(-pgid)`. That honours the PID-only
+rule, which `owned-process.mjs` (a group signaller) does not.
+
+**Signalling.** For each owned identity, the supervisor re-reads the identity
+immediately before `kill(pid, sig)` and signals only on an exact match:
+- TERM first, then KILL after a bounded grace.
+- A mismatch means the PID was reused. That process is not signalled and is
+  recorded as departed, never as stopped.
+- An unreadable identity is not signalled, and makes cleanup uncertain.
+
+A check-then-kill window remains for descendants (not for the unreaped leader).
+It is named as residual R1.
+
+**Proof of cleanup, and when it stays uncertain.** The supervisor may record
+`cancelled` (after cancellation) or proceed to `completed`/`failed` only when
+**all** of the following hold, re-read after a 2-s quiet period:
+1. every owned identity is gone or reads as a different identity;
+2. no process with `pgid == leader` exists, other than the unreaped leader;
+3. no owned identity was ever observed in another process group or session.
+   Such a process escaped discovery (a `setsid`/`setpgid` daemon).
+4. every `ps` read in the cleanup succeeded and parsed.
+
+Any failure records **`interrupted`** with `cleanup: "uncertain"` and a closed
+list of reasons:
+- `identity_unreadable`
+- `escaped_group`
+- `members_remain`
+- `scan_failed`
+- `supervisor_restarted`
+
+`interrupted` never publishes artifacts and never yields GREEN. The client
+reads it as interruption, and a person decides.
+
+Two cases are beyond any sampling design and are therefore never claimed:
+- **Escape before observation:** a descendant calls `setsid` before a sample
+  sees it.
+- **Supervisor restart:** a supervisor that starts and finds its own job
+  `starting`, `running` or `cancelling` cannot rebuild the owned set. It records
+  `interrupted/supervisor_restarted` and never relaunches.
+
+So `cancelled` means "no owned or discoverable process remains". It never means
+"every descendant is proven dead". The ADR states that bound rather than hiding
+it.
+
+**Journal change (the same immutable CAS, no new lock).** `cancelled` and
+`interrupted` gain closed `details`:
+- `cancelled` after `cancelling`: `{ cleanup: "verified", owned: <n> }`.
+- `cancelled` from `accepted`: no details, because no process ever existed.
+- `interrupted`: `{ cleanup: "uncertain", reasons: [...] }`.
+
+`completed` and `failed` also require the four checks above. If they fail,
+`interrupted` wins and the exit code and artifacts become non-fetchable.
+
+**Disconnect.** The supervisor is launched outside the SSH session (its own
+process group, stdio to journal-owned files), so a dropped SSH connection
+neither signals nor reparents-and-kills it. Cancellation arrives only as the
+journal's `cancelling` state, which the supervisor polls. The control API still
+sends no signal.
+
+**Qualification (all offline, on this machine, no SSH):**
+- a real gate stand-in that forks a reparented grandchild;
+- a `setsid` escapee, which must yield `interrupted/escaped_group`, or
+  `members_remain` if it is never seen;
+- a TERM-ignoring child, which must be stopped by KILL;
+- forced PID reuse, simulated by an identity reader that reports a different
+  start time for a live pid: it must not be signalled and must be recorded as
+  departed;
+- an unreadable `ps`, which must yield uncertain, never verified;
+- an unrelated peer process, including one in a different group that runs the
+  same executable, which must survive;
+- a supervisor crash and restart, which must not relaunch;
+- a kill of the SSH-side caller, which must leave the job running.
+
+Each guard gets a disposable negative-control mutant, as in the framing
+qualification. Signals in the tests target only processes the test itself
+spawned.
+
+#### Supervisor implementation checkpoint — 2026-10-28 (offline, macOS)
+
+Review by `openwop-app-14` approved the design above, with two amendments, both
+now applied.
+
+**1. Platform interface.** The identity and signal layer is a per-platform table
+(`remote-gate-process.mjs`: an async `list()` and a single-pid `signal()`). The
+macOS table is the design above. The Linux table refuses ("worker host
+undecided") and is not built until the user chooses a worker host. Qualification
+must run on the OS the worker actually uses. **Linux is what removes R1 and the
+reparent-loss case:**
+- `PR_SET_CHILD_SUBREAPER` makes orphans reparent to the supervisor instead of
+  launchd, so descendants cannot be lost by reparenting;
+- `pidfd_open`/`pidfd_send_signal` bind a signal to the process that was checked,
+  which closes the re-read-to-kill window for every process;
+- `/proc/<pid>/stat` starttime in clock ticks replaces one-second `lstart` (R3).
+On macOS those three remain stated residuals.
+
+**2. Timing parameters.** The sample, quiet and grace intervals are parameters.
+Qualification uses 25 / 60 / 400 ms.
+
+Findings made while implementing, both measured:
+- **`spawnSync` must not be used for scans.** It runs a private libuv loop that
+  consumed the SIGCHLD of the async holder. The holder then stayed an unreaped
+  `<defunct>` process and the supervisor waited forever. Scans are async
+  (`execFile`).
+- **Holder loss gets a sixth reason, `holder_lost`.** Once the holder is gone,
+  discovery stops adopting new group members, because a later group with the
+  same id could belong to a stranger. Members found after that point keep cleanup
+  uncertain (`members_remain`); they are never signalled. Also measured: `comm`
+  is argv[0], and a `uid` can be negative (-2 for system daemons).
+
+Journal: `cancelled` after launch requires `{cleanup: "verified", owned}`.
+`interrupted` requires `{cleanup: "uncertain", reasons}`, drawn from the closed
+set. A passing command whose publication is refused becomes `failed` with exit
+code 70, never `completed`. Boot recovery treats an owner that is gone or
+different as `supervisor_restarted`, and leaves alone an owner that is live or
+unreadable. It abandons `starting` only after 60 s. It never relaunches.
+
+**Qualification on `d6002be68` (macOS 26.5, 2026-10-28).** Run by a dedicated
+wrapper that refuses unless HEAD is the named commit and `scripts/` is clean. It
+runs every suite in a disposable copy of `scripts/`, one test at a time.
+
+- **Baseline:** 211/211 tests passed across 11 suites (the supervisor suite has
+  19).
+- **Mutants:** 20 disposable mutants, applied one at a time, each turned a
+  *named* test red:
+  - 8 framing mutants (control framing as before);
+  - 10 supervisor mutants: group kill; no identity re-read; unknown treated as
+    different; scan failure swallowed; escape unreported; final members
+    ignored; adopting after holder loss; no KILL escalation; uncertain cleanup
+    not recorded as interrupted; recovery ignoring a live owner;
+  - 2 journal mutants: unverified `cancelled`; open reasons.
+- **Restored:** 211/211 again.
+
+On the first wrapper run, "unknown treated as different" reddened only its unit
+witness, "an unparseable row is unknown, never different". The behaviour test
+stayed green because the final scan's unreadable-row guard independently holds
+the verdict. The two guards overlap; this is recorded rather than hidden.
+
+This does not qualify any of the following:
+- the SSH dispatcher/controller;
+- launching the supervisor outside an SSH session;
+- a Linux worker;
+- a real gate.
+No SSH connection was made and no worker was enabled.
+
+**What `cleanup: "verified"` proves (wording fixed 2026-10-28, at review).** It
+means *every process observed in the gate's process group is gone*. It does not
+mean *no descendant survives*. On macOS, a descendant that calls
+`setsid`/`setpgid` before any sample sees it is invisible (R2). The suite pins
+that case as reading `verified`: a stated false green, not a claim. Consumers of
+the journal, status and result must not present `verified` as "no survivors".
+A Linux worker with `PR_SET_CHILD_SUBREAPER` closes R2, because such an escapee
+still reparents to the supervisor. The same wording is in the journal schema's
+doc comment (`CLEANUP_REASONS`, `remote-gate-job.mjs`).
+
+### D9 host decision: DEFERRED (user, 2026-10-29)
+
+The user decided, in the release manager's session (openwop-app-14) and
+relayed to this one, that gates keep running on MacBook-Pro-48 and the
+MacBook Air for now. **There is no remote worker host.** The framing,
+journal, control and supervisor code merges INACTIVE: libraries and
+their self-tests only. No entry point, launchd job, SSH key or host
+config ships, and nothing calls these modules outside `scripts/test-remote-gate-*`.
+The `archive/adr-0863-remote-gate*` tags stay.
+
+Options for a future decision:
+
+| Option | For | Against |
+|---|---|---|
+| **A. Linux VM in GCP `openwop-dev`** (e.g. 16 vCPU / 64 GB) | `PR_SET_CHILD_SUBREAPER` + pidfd + `/proc` starttime close R1, the reparent loss and R3, so `verified` means no survivors; isolated from both Macs; can stop when idle or run on spot | ≈ $0.75–0.80/h on demand for 16 cores (≈ $550/month always on), far less started per gate or on spot. Needs the user's spend approval, a budget cap and a usage mode (always-on vs per-gate). The Linux process table is not built. |
+| **B. The MacBook Air** | No new cost | ≈ 17 GB RAM; gates stopped repeatedly under memory pressure on 2026-10-28; macOS keeps R1, R2 and R3 |
+| **C. Another user-owned machine** | Depends on the machine | Needs OS, cores, RAM and reachability before it can be weighed |
+
+Before ANY option is activated, all of these are required, each in the
+session that acts and with the user's approval there:
+
+1. **Account:** a dedicated non-admin worker account on the host.
+2. **Key:** a new Ed25519 key used only for the gate, stored in Secret Manager
+   (or the host's keychain for the private half). Never in the repo, the
+   release bus or a note.
+3. **SSH restrictions** on the worker's `authorized_keys` entry: forced
+   command (the fixed control dispatch), `from=` the two Macs' addresses,
+   `no-pty`, `no-port-forwarding`, `no-agent-forwarding`, `no-X11-forwarding`.
+4. **Trusted-worker config review** by the release manager: host key pinned,
+   paths, timings, artifact directory.
+5. **Linux only:** the subreaper + pidfd process table, qualified offline
+   the way the macOS one was (baseline, named mutants, restore).
+6. **The SSH dispatcher/controller and launching the supervisor outside the
+   SSH session**, built and qualified (not built yet).
+7. **A dry run** with no real gate jobs: accept, status, cancel and fetch
+   against a no-op command, and a recovery after killing the supervisor.
+
+### D9 host decision: option A, a GCP Linux VM (user, 2026-10-31)
+
+> **Supersedes the 2026-10-29 deferral above.** The user chose, in openwop-app-d8:
+> option A, **per-gate on-demand** (the VM starts for a gate and stops when idle),
+> with a **$200/month budget that stops the VM at 100 %**, after which gates fall
+> back to the Macs. The order agreed with the release manager (openwop-app-14):
+> P1/P2 offline and free; then a host proposal for its config review before
+> anything is created in `openwop-dev`; then a dry run with no real jobs; then a
+> shadow gate compared with a local one; no merge use until the user and the
+> release manager sign off. Every API enable and resource creation is posted to
+> the release bus as it happens.
+
+### D9 P1 checkpoint: the Linux process table — 2026-10-31
+
+`linuxProcessTable()` (`scripts/lib/remote-gate-process.mjs`) closes the three
+macOS residuals:
+
+| Residual | Linux mechanism |
+|---|---|
+| R1 (pid reused between the re-read and the kill) | The signal goes through a **pidfd opened before** the identity re-check; a pidfd keeps naming the process it was opened on, so a reused pid can't receive it. |
+| R2 (an escapee nobody sampled) and the reparent loss | The holder is a Python process that sets `PR_SET_CHILD_SUBREAPER`, so every descendant, including one that ran `setsid`/`setpgid`, stays its descendant. Membership is the holder's descendants plus its group (orphans of a lost holder still count). |
+| R3 (one-second start resolution) | The identity is `boot_id/starttime`, with `starttime` in clock ticks from `/proc/<pid>/stat`, parsed at the last `)` because `comm` may contain spaces and parentheses. |
+
+The supervisor now takes the holder and the membership rule from the platform
+table, and awaits `signal(identity, sig)`. The macOS behaviour is unchanged.
+Python is used because Node has neither `prctl` nor pidfd; both scripts are fixed
+and their argv is data.
+
+**Qualification** (offline, the same method as the macOS record: baseline, each
+named mutant in a throwaway copy must turn a named test red, then restore). Head
+`34b0a4007`:
+- **macOS:** 213/213 baseline, 20/20 mutants killed, 213/213 restored.
+- **Linux** (`node:22-bookworm`, kernel 6.10): the same result twice, once without and
+  once with `--init`. 22/22 mutants killed: 19 shared and 3 Linux-only (no
+  subreaper, no pidfd re-check, group-only membership). The macOS-only
+  escaped-group mutant does not apply on Linux, where subreaper membership
+  makes that reason unreachable while the holder lives.
+
+**Found by the mutant run:** on Linux, "never adopt after the holder is lost"
+survived at first. The test was right about the supervisor and wrong about
+liveness: in a container, node is PID 1 and never reaps orphans, so a killed
+process stays a zombie, and `kill(pid, 0)` reports a zombie as alive. The
+assertion "an unowned process is not signalled" therefore passed whether or not
+it was signalled. The suite's `alive()` now treats a `/proc` state `Z` as dead.
+Both Linux runs kill the mutant.
+
+Still not built or qualified: the worker entry and controller (P2), the host
+and its SSH restrictions (P3), and any real gate.
+
+### D9 P2 checkpoint: worker entry, runner, gate command and controller — 2026-11-01
+
+New, all inactive (nothing outside the self-tests calls them):
+
+| Piece | What it does |
+|---|---|
+| `scripts/remote-gate-worker.mjs` + `lib/remote-gate-worker.mjs` | The forced-command entry. One frame in. A `source` frame is rebuilt, admitted and handed to the launcher, and its status comes back. A `control` frame is answered with status, cancel or fetch. While any job is unfinished it exits 75 (busy) and admits nothing; an unreadable job counts as unfinished. A refused frame exits 65. A failed launch cancels the `accepted` job, so it can't block later ones. |
+| `scripts/remote-gate-runner.mjs` + `lib/remote-gate-runner.mjs` | Started outside the SSH session (`systemd-run --user` on the VM). It supervises the gate, keeps the last 20 gate logs and removes the rebuilt checkout. `--recover` at boot settles jobs a dead runner left: `accepted` older than 10 min is cancelled, and a dead owner becomes `interrupted`. |
+| `scripts/remote-gate-gate.mjs` | The canonical gate as the supervisor's one command: `npm ci` in the three workspaces, then one `hyvemind@0.2.0 gate` (the same command `merge-train.sh` runs). Writes the four fixed artifacts as private files. Missing evidence or a missing ledger row is exit 1. |
+| `lib/remote-gate-controller.mjs` | On the Mac: snapshot, submit, poll status, fetch, then accept with the LOCAL validator. Outcomes are closed: `green`, `red` (the gate ran and failed), or `fallback` with a reason (busy, refused, ssh failed, interrupted, cancelled, timed out, evidence refused, worker fault 70/124). **A fallback means "gate locally", never red.** |
+
+`remoteGateJobStatus` now also reports a failed job's `exitCode`. That is how the
+controller tells a red gate from a worker fault.
+
+**Found and fixed by the end-to-end suite: a latent bug in the qualified
+supervisor.** `runRemoteGateJob` read the journal with the time its job started.
+The worker records a cancellation at its own, later time, and the runner's next
+read rejected that record as "out of order". The runner crashed and the job stayed
+`cancelling` for good. Any real cancellation of a running gate would have done
+this. The supervisor suite never saw it, because it recorded cancellations with
+the same frozen time. `runRemoteGateJob` now takes a `clock` and reads it at every
+journal call. Witness: "a cancellation recorded after the job started is
+honoured". It is red under a frozen-clock mutant and green with the fix.
+
+**Tests:**
+- `scripts/test-remote-gate-e2e.mjs`: 6 cases through the real worker entry,
+  runner, supervisor, gate command, controller and validator. Only `npm`/`npx`
+  are stubs, and the SSH hop is a pipe. The cases are: green accepted; red with
+  its exit code; evidence for another commit refused locally (fallback);
+  busy (fallback, nothing admitted); another runner's request refused before
+  any checkout; timeout cancelled on the worker with verified cleanup.
+- They pass on macOS and on Linux (`node:22-bookworm`, with and without
+  `--init`). All 12 remote-gate test files pass on macOS. Added to `ci.sh`.
+
+**Real SSH, offline** (scratch harness, container sshd at the planned settings:
+`restrict,command="/usr/local/libexec/openwop-ci-worker"`, ed25519 host key only,
+`PermitTTY no`, `DisableForwarding yes`, `PermitUserEnvironment no`), with the
+controller on the Mac using the existing SSH planner: **7/7.**
+- A: green over SSH, accepted locally.
+- B: a wrong pinned host key is refused before any worker code runs, and no job
+  is created.
+- C: a client-chosen command never runs.
+- D: no PTY.
+- E: no remote forwarding.
+- F: an unlisted client key is refused.
+- G: the client cannot redirect the worker's configuration through its environment.
+
+Sabotage: removing `command=` makes C red, because `id; echo PWNED` runs, and
+restoring it makes it green again. Provisioning note: `useradd` leaves the account
+locked (`!`), and sshd without PAM refuses a locked account. The worker account
+needs `usermod -p '*'` (no password, not locked).
+
+### D9 P3 host proposal (for the release manager's config review; nothing created yet)
+
+**(a) Machine, disk, zone, start/stop.**
+- `c2d-standard-16` (16 vCPU AMD Milan, 64 GB) in `us-central1-a`, on demand,
+  about $0.726/h. The C2D quota is 100 vCPUs, none in use. D1 measured E2
+  hyperthreads as slow per core, so a C2D is the one to measure. If it doesn't
+  beat the Macs, that is reported, not hidden.
+- Boot disk: 100 GB `pd-balanced`, about $10/month, also charged while stopped.
+  Debian 12 with Node 22, npm 10.9.8 pinned globally, git, python3, Playwright
+  Chromium with its OS dependencies, and a persistent npm cache.
+- **Start:** the controller runs `gcloud compute instances start` when the VM is
+  `TERMINATED`, then waits for SSH (bounded at 3 min, else fallback). It never
+  starts a VM marked `openwop-ci-disabled`.
+- **Stop:** a systemd timer on the VM powers it off after **15 minutes** with no
+  unfinished job and no SSH session. A guest shutdown is a GCE stop: no CPU
+  charge. Macs never stop it, because another Mac may be mid-gate.
+- Every gate is also bounded by the controller's `maxMs` (3 h, then cancel and
+  fallback) and the supervisor's own `maxMs`.
+
+**(b) Budget action path.**
+- A Billing Budget of **$200/month**, filtered to the resource label
+  `openwop-ci=gate`, alerts at 50, 90 and 100 %, and publishes to the Pub/Sub topic
+  `openwop-ci-budget`.
+- A small Cloud Run function `openwop-ci-budget-stop` (Eventarc on that topic)
+  reads the message. When `costAmount >= budgetAmount`, it stops the instance and
+  sets the metadata `openwop-ci-disabled=budget`, so no Mac restarts it. Gates
+  then fall back to the Macs until the user clears the flag.
+- **Test:** during the dry run, publish a synthetic budget message with cost ≥
+  budget to the topic, then check that the VM stops, the flag is set, and the next
+  controller run returns `fallback`.
+- **Caveat:** budget notifications can lag by hours. The cap is approximate; the
+  15-min idle stop and the 3-h gate bound limit how fast it can overrun.
+
+**(c) IAM bindings created, one by one.**
+1. Service account `openwop-ci-vm@` is attached to the VM with **no roles**
+   and no access scopes. The VM can't call any Google API.
+2. Service account `openwop-ci-budget-stop@` gets a custom role
+   `openwopCiStop` (`compute.instances.get`, `compute.instances.stop`,
+   `compute.instances.setMetadata`), bound **on that one instance**, not the
+   project.
+3. On the topic `openwop-ci-budget`: `roles/pubsub.publisher` for the Billing
+   budget notification service account.
+4. On the function: `roles/run.invoker` for its Eventarc trigger service account,
+   plus `roles/eventarc.eventReceiver` for that account.
+
+No human bindings are added. Starting the VM, the IAP tunnel and the SSH key
+secret use the user's existing project roles.
+
+**(c') Network and key.**
+- A dedicated VPC `openwop-ci`. The default network's `default-allow-ssh` from
+  0.0.0.0/0 must not apply.
+- One ingress rule: tcp:22 from the IAP range `35.235.240.0/20` to the tag
+  `openwop-ci-gate`. Nothing else comes in.
+- An ephemeral external IP for egress only (npm, the Playwright download), which
+  is cheaper than Cloud NAT at this usage.
+- SSH goes through `gcloud compute start-iap-tunnel` to `127.0.0.1:<port>`.
+  The planner is unchanged: literal host, pinned ed25519 host key, `ProxyCommand=none`.
+- Client key: a new ed25519 pair. The private half is stored in Secret Manager
+  `openwop-ci-ssh-key` and fetched to a 0600 file on each Mac. It is never in the
+  repo, a note or the bus.
+- `authorized_keys`: `restrict,command="/usr/local/libexec/openwop-ci-worker",from="35.235.240.0/20"`.
+- `sshd`: `PermitTTY no`, `DisableForwarding yes`, `PermitUserEnvironment no`,
+  `AllowUsers ci`, ed25519 host key only. The worker account is non-admin, with
+  no sudo, and `usermod -p '*'`.
+
+**(d) Evidence, the Tracegate ledger, and fallback.**
+- The gate's evidence comes back in the fetch frame: the Hyvemind record, the
+  gate log and the browser ledger. The Mac validates them locally and **does not
+  import** them into its own Hyvemind or Tracegate ledgers. A Linux run is not a
+  Mac footprint.
+- The VM rebuilds every candidate from a bundle into a fresh `.git`, so its
+  Tracegate has no history and runs every lane whole. That is slower, but no reuse
+  crosses machines.
+- A persistent VM-side ledger, and returning it, is a later, separate decision.
+- **Every outcome other than an actual failed gate is `fallback`:**
+  - unreachable, stopped or budget-disabled VM;
+  - busy;
+  - refused;
+  - interrupted;
+  - cancelled;
+  - timed out;
+  - evidence refused;
+  - worker fault.
+
+  The train then gates locally. Only a remote run that ran and failed is `red`.
+  During the shadow phase, even that is advisory, and the local gate decides.
+
+**Known gap before the gate can be green on Linux:** the `-linux` pixel baselines
+(D1). They will be qualified in the shadow phase, not generated blindly.
+
+### D9 P3 record: the gate VM is built; dry run — 2026-11-01
+
+The release manager reviewed the proposal above, and its six conditions are
+folded in:
+1. no external IP, with Cloud NAT;
+2. the budget function runs as its own account;
+3. the IAP principal is named;
+4. labels are on the VM and its disk;
+5. the VM holds no credentials, runs Shielded VM, and gets unattended upgrades;
+6. the disabled flag is a fallback.
+
+Every resource was posted to the release bus as it was created.
+
+**Created in `openwop-dev`:**
+
+| Resource | Setting |
+|---|---|
+| VPC `openwop-ci` | custom mode; subnet `openwop-ci-us-central1` 10.88.0.0/24 with Private Google Access |
+| Firewall `openwop-ci-allow-iap-ssh` | INGRESS tcp:22 from 35.235.240.0/20 to tag `openwop-ci-gate`. It is the only rule on that network. |
+| Cloud Router `openwop-ci-router` + Cloud NAT `openwop-ci-nat` | Egress only, auto IP, about $5/month at most. Chosen instead of an ephemeral external IP, so the "no external IP" in the approved plan holds. |
+| VM `openwop-ci-gate` | `c2d-standard-16` in **`us-central1-b`**. `-a` had no C2D capacity, and a start can also fail on capacity, which is a fallback. No external IP. Shielded VM (secure boot, vTPM, integrity). Account `openwop-ci-vm@` with **no roles and no scopes**. `block-project-ssh-keys`, OS Login off. Label `openwop-ci=gate` on the VM and its boot disk. |
+| Service account `openwop-ci-vm@` | no roles anywhere |
+| Service account `openwop-ci-budget-stop@` | 1. custom role `openwopCiStop` (instances get/stop/setMetadata) bound **on the instance**; 2. `roles/iam.serviceAccountUser` **on `openwop-ci-vm@` only**; 3. `roles/run.invoker` on the function only |
+| Secret `openwop-ci-ssh-key` | the gate client's private key (version 1). On the Mac it lives in a 0600 file outside the repo. |
+| Topic `openwop-ci-budget` | publisher: `billing-budget-alert@system` (added by Google) |
+| Function `openwop-ci-budget-stop` | gen2. **Runtime and trigger identity are `openwop-ci-budget-stop@`.** Internal ingress, max 1 instance. |
+| Budget `57e3b4e3` | $200/month, project `openwop-dev` + label `openwop-ci=gate`, alerts at 50/90/100 % to the topic |
+
+**Deviation from the reviewed proposal (accepted by the release manager,
+2026-11-01): a fifth IAM binding.**
+- **What:** `roles/iam.serviceAccountUser` for `openwop-ci-budget-stop@`.
+- **Why:** GCE requires actAs on an instance's attached service account to run
+  `setMetadata` on that instance. Without it the budget stop could stop the VM
+  but not set the `openwop-ci-disabled` flag, so a Mac would start it again.
+  Found by the budget dry run (defect 8).
+- **Scope:** bound on the service account `openwop-ci-vm@` **only**, not the
+  project. That account holds no roles and no scopes, so acting as it grants
+  nothing beyond the custom instance role.
+
+**IAP principal:** the user's existing project-Owner account on MacBook-Pro-48.
+No new human binding. A second Mac's account gets
+`roles/iap.tunnelResourceAccessor` on the instance once the user names it.
+
+**Provisioning:** `scripts/remote-gate-vm-startup.sh` as the startup script.
+- Node 22.13.1 is installed from a tarball whose sha256 is pinned; npm is 10.9.8.
+- Playwright's OS dependencies are installed.
+- The worker code is a reproducible `git archive` of the reviewed files. Its
+  sha256 is checked at boot **and is the runner policy pin** the Macs hold, so a
+  request is bound to that exact worker code.
+- sshd accepts one key, for one forced command, from the IAP range only.
+- The VM publishes its ed25519 host key as a guest attribute, read over the
+  authenticated GCE API and pinned.
+- Unattended security upgrades run daily. There is no automatic reboot; a new
+  kernel loads at the next start.
+
+**Dry run results** (live, against the VM):
+
+| Check | Result |
+|---|---|
+| Pinned host key, client key, forced command, through IAP | ✓ The worker answered a malformed frame with 65. |
+| Wrong host key pin | ✓ Immediate `fallback: host key mismatch`, and no job. |
+| Disabled flag (set by hand, then by the budget) | ✓ `fallback: remote gate disabled (…)`, and the VM was not started. |
+| Real submission of `main`, cancelled at 150 s | ✓ `cancelled` mid-gate, with **verified** cleanup (the gate had used ~8 CPU-min in ~3 min). |
+| VM hard reset during a gate | ✓ Boot recovery marked the job `interrupted`. |
+| Synthetic budget message, cost ≥ budget | ✓ Flag set, then the VM stopped, both operations confirmed; the controller falls back. |
+| Red gate log brought home (`log` operation) | ✓ |
+| Idle power-off after 15 min | see below |
+
+**Defects the dry run found, all fixed:**
+1. **No user D-Bus** on the image. `systemd-run --user` and the idle query failed.
+   Worse, the idle check read that failure as *idle*, so it could have powered off
+   a running gate. Now `dbus-user-session` is installed, the user manager is
+   restarted, and the check fails closed: a running worker or runner, or a failed
+   query, counts as busy.
+2. **`gcloud start-iap-tunnel --local-host-port` hung** at "Testing if tunnel
+   connection works" (> 200 s), while `--listen-on-stdin` reached sshd at once.
+   The Mac now runs a small relay on 127.0.0.1 with one `--listen-on-stdin`
+   process per connection. The SSH planner is unchanged: literal host, pinned
+   key, `ProxyCommand=none`.
+3. **Snapshots from a linked worktree were refused.** `bundle create --all` also
+   bundles `worktrees/<name>/HEAD`. Every real candidate is in a worktree.
+4. **"No ref moved during the snapshot" almost never held** in this busy repo.
+   The manifest is now what the bundle recorded. Only the candidate and `main`
+   must be frozen, and they are checked around the bundle.
+5. **A lost submit reply left a real gate running that could not be cancelled.**
+   The Mac waited 15 s; the rebuild takes minutes. Two dry-run submissions were
+   admitted and launched real gates on `main` (no merge, deploy or publish
+   effect). One failed at once on fix 10; the other was stopped by the reset
+   test. Now the submit waits up to 10 min, a lost reply is recovered by asking
+   for status, and any fallback after the source was sent tries to cancel.
+   **Open residual, BLOCKS MERGE USE UNTIL CLOSED:** a job the worker has not
+   admitted yet can't be cancelled, because the journal only knows admitted jobs.
+   If the connection drops after the upload but before admission, the worker can
+   still admit and launch it. It then runs to the runner's 2-hour limit (was 4 h)
+   and the VM reads as busy (fallback for everyone) until it ends. It cannot
+   produce a merge, a deploy or a bus result, but no remote result may be used
+   for merging while this is open.
+6. **A policy upgrade made the worker busy for good.** Jobs journaled under the
+   old pin no longer validated, and an unreadable job counts as unfinished. A job
+   for another runner or policy is now **retired**: a policy changes only at
+   boot, so no live runner can own one.
+7. **No way to read a red gate's log.** Added the `log` control operation: a
+   finished job's kept log, only to the holder of that job's exact request bytes.
+8. **The budget function reported success when `setMetadata` had failed**
+   (`SERVICE_ACCOUNT_ACCESS_DENIED`: an instance with an attached account also
+   needs actAs, hence binding 2 above). It now waits on each GCE operation,
+   errors on failure, and sets the flag before stopping.
+9. **A wrong host key waited out the 3-min SSH bound.** It is now an immediate
+   fallback.
+10. **`lsof` was missing.** Four gate-tooling self-tests failed on the port guard.
+    Now installed, with `procps`, `zip` and `unzip`.
+
+Each fix has a test where a test can hold it: linked worktree (source),
+earlier-policy job (e2e, red under sabotage), lost reply and log (e2e),
+budget-stop operation errors, the flag decision, and the live clock (supervisor).
+
+**Budget caveat (restated):** budget notifications lag by hours. The real
+spend controls are the 15-min idle power-off and the 2-h runner limit, plus the
+controller's 3-h bound.
+
+**Next:** a shadow gate. A full remote gate on a candidate that is also gated
+locally is compared lane by lane, with the Linux pixel baselines as the expected
+gap. The remote result has no merge use until the user and the release manager
+sign off.

@@ -24,7 +24,7 @@ import { getOwned } from '../host/workflowOwnership.js';
 import { listOnlineBuckets } from '../host/workflowEvalOnline.js';
 import { getRegisteredWorkflowAsync } from '../host/workflowsRegistry.js';
 import { requireProtocolScope } from '../host/protocolAuthorization.js';
-import { runQuotaMiddleware, reserveConcurrentSlot } from '../middleware/rateLimit.js';
+import { runQuotaMiddleware } from '../middleware/rateLimit.js';
 import { capabilityGatedTypeIdRefusal } from './runs.js';
 import {
   validateEvalSetBody, putEvalSet, getEvalSet, listEvalSets, deleteEvalSet, listEvalResults,
@@ -133,7 +133,6 @@ export function registerWorkflowEvalRoutes(app: Express, deps: { storage: Storag
           set, definition: def, resultId,
           ...(actingUserId !== undefined ? { actingUserId } : {}),
           onRunMinted: (runId) => {
-            reserveConcurrentSlot(req, runId);
             deps.hostSuite.auditSink.record({
               principalId: req.principal?.principalId ?? 'anonymous',
               action: 'run.create',

@@ -90,15 +90,15 @@ interface Caps {
     hostSurfaces?: HostSurfaceAd[];
     profiles?: string[];
     auth?: { profiles?: string[] };
-    envelopes?: {
+    modelCapabilities?: ModelCapabilitiesAd;
+    /** RFC 0091 — multimodal perception input on `callAI`. The modalities the
+     *  host accepts as ContentParts (text always; image/document/audio gated). */
+    aiProviders?: {
+      input?: { modalities?: string[] };
       reasoning?: EnvelopeReasoningAd;
       reliability?: EnvelopeReliabilityAd;
       tierOneSubsetCompliance?: 'strict' | 'warn' | 'off';
     };
-    modelCapabilities?: ModelCapabilitiesAd;
-    /** RFC 0091 — multimodal perception input on `callAI`. The modalities the
-     *  host accepts as ContentParts (text always; image/document/audio gated). */
-    aiProviders?: { input?: { modalities?: string[] } };
   };
 }
 
@@ -254,7 +254,7 @@ export function CapabilitiesPanel() {
         )}
       </div>
 
-      {/* ── Surfaces & envelopes tier ─────────────────────────────────── */}
+      {/* ── Surfaces & AI providers tier ─────────────────────────────────── */}
       <div className="surface-card">
         <h2>{t('hostSurfaces')}</h2>
         <p className="muted">
@@ -399,30 +399,30 @@ interface EnvelopeRow { key: string; value: JSX.Element; note: JSX.Element }
 /** Flatten the envelope-discipline advertisement into table rows so it renders
  *  through the shared <DataTable> register (was a bespoke cap-table). */
 function envelopeRows(caps: Caps, t: (key: string) => string): EnvelopeRow[] {
-  const env = caps.capabilities?.envelopes;
+  const env = caps.capabilities?.aiProviders;
   return [
     {
-      key: 'envelopes.reasoning.supported',
+      key: 'aiProviders.reasoning.supported',
       value: boolGlyph(env?.reasoning?.supported),
       note: <>{t('envReasoningSupportedNoteLead')} <code>reasoning</code> {t('envReasoningSupportedNoteTail')}</>,
     },
     {
-      key: 'envelopes.reasoning.promptDirective',
+      key: 'aiProviders.reasoning.promptDirective',
       value: env?.reasoning?.promptDirective ? <code>{env.reasoning.promptDirective}</code> : <span className="muted">{t('emDash')}</span>,
       note: <>{t('envReasoningDirectiveNote')}</>,
     },
     {
-      key: 'envelopes.tierOneSubsetCompliance',
+      key: 'aiProviders.tierOneSubsetCompliance',
       value: env?.tierOneSubsetCompliance ? <code>{env.tierOneSubsetCompliance}</code> : <span className="muted">{t('emDash')}</span>,
       note: <>{t('envTierOneNote')}</>,
     },
     {
-      key: 'envelopes.reliability.supported',
+      key: 'aiProviders.reliability.supported',
       value: boolGlyph(env?.reliability?.supported),
       note: <>{t('envReliabilitySupportedNote')}</>,
     },
     {
-      key: 'envelopes.reliability.events',
+      key: 'aiProviders.reliability.events',
       value: env?.reliability?.events?.length ? (
         <span className="cap-chip-list">
           {env.reliability.events.map((e) => <span key={e} className="chip chip--muted">{e}</span>)}
@@ -431,12 +431,12 @@ function envelopeRows(caps: Caps, t: (key: string) => string): EnvelopeRow[] {
       note: <>{t('envReliabilityEventsNote')}</>,
     },
     {
-      key: 'envelopes.reliability.completion.distinguishesTruncation',
+      key: 'aiProviders.reliability.completion.distinguishesTruncation',
       value: boolGlyph(env?.reliability?.completion?.distinguishesTruncation),
       note: <>{t('envTruncationNote')}</>,
     },
     {
-      key: 'envelopes.reliability.completion.truncationBudgetMultiplier',
+      key: 'aiProviders.reliability.completion.truncationBudgetMultiplier',
       value: typeof env?.reliability?.completion?.truncationBudgetMultiplier === 'number'
         ? <code>×{env.reliability.completion.truncationBudgetMultiplier}</code>
         : <span className="muted">{t('emDash')}</span>,

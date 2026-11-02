@@ -9,6 +9,9 @@
  * offsets are pure and empty pages keep their number; a later upsert of
  * non-PDF text over the same document id carries no stale page offsets.
  * Sabotage: `mergePages:true` again ⇒ red; drop `pageOffsets` from the document ⇒ red.
+ *
+ * TST-DJA-2 (grade-tests wave 71). Also red when empty pages add a separator, chunks
+ * lose their page index, or `tenantRetrieve` drops the hit's page.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { mkdtempSync } from 'node:fs';

@@ -6,6 +6,11 @@
  * [2] gets left alone. A regression that silently re-classified a soft-read as a
  * hard-dep would resurrect the phantom-lock anti-pattern ADR 0439 removed, so the
  * counts and the known anchors are pinned here.
+ *
+ * Tracker: TST-DBE-3. Red when: the SUBSCRIBER_ONLY_GATE override is dropped
+ * (email edges flip to [3]), the service-desk→whatsapp override is lost, or the
+ * detector stops seeing a const-aliased or `resolveToggle` literal gate (probes
+ * w70g2-fd-*).
  */
 import { describe, it, expect } from 'vitest';
 // The generator is ESM at the repo root; import it directly.
@@ -47,8 +52,9 @@ describe('ADR 0446 feature-dependency classifier', () => {
     // ADR 0446 F, target-level (2026-08-18): #3326 put ONE resolveOne('email') inside
     // emailService's CRM merge-lifecycle SUBSCRIBER (a relink work-avoidance gate); the
     // exported surface stays ungated, so every inbound email edge is soft. Without the
-    // SUBSCRIBER_ONLY_GATE entry these (then six, five since ADR 0905 removed commerce→email) flip to [3] and this + the [3]==0 test go red
-    // (measured 2026-08-18: `expected 6 to be +0`).
+    // SUBSCRIBER_ONLY_GATE entry these inbound email edges flip to [3] and this +
+    // the [3]==0 test go red (six when measured 2026-08-18, `expected 6 to be +0`;
+    // five since ADR 0905 removed commerce→email).
     for (const a of ['analytics', 'campaign-intel', 'campaign-journeys', 'crm', 'orgs']) {
       expect(isCat(a, 'email', 2)).toBe(true);
     }

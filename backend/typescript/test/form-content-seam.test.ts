@@ -19,11 +19,26 @@
  * through the test-auth seam exactly like the MCP invoke seam's leg does.
  * DOCT-12 — fixtures load into a seam-LOCAL registry; the product catalog
  * (`GET …/form-templates`) must never list `vendor.conformance.form.*`.
+ *
+ * Tracker TST-DCE-4. Red when discovery stops advertising `forms.contentPacks`, the
+ * seam mounts without the env switch, its non-anonymous guard goes, the auth
+ * middleware stops refusing a credential-less protocol call, fixtures load into
+ * the PRODUCT registry, a vendor type stops degrading to text, or an unregistered
+ * template stops being refused (grade-tests w70 probes `fcs-*`).
+ *
+ * DOCT-1 is a DOUBLE GUARD, so its case drives both arms separately: a call with
+ * NO credential stops at the auth middleware's "No credential presented" 401; a
+ * call carrying an ANONYMOUS session reaches the seam's own
+ * `requireNonAnonymousPrincipal` (reason `anonymous_principal_refused`).
+ * Order-independent: every case signs in its own user (see the beforeEach).
+ * Ceilings (by construction, mirroring the published legs): `#3` reads the seam's
+ * own `editable: true`, and `#1/F2` holds because the seam never passes an
+ * `intakeBinding` and the loader refuses one in a template.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
@@ -55,10 +70,19 @@ beforeAll(async () => {
   process.env.OPENWOP_FORM_CONTENT_CONFORMANCE_FIXTURES = join(process.cwd(), '../../conformance-fixtures/form-content');
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 't', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((r) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; r(); }); });
+});
+
+// Every case signs in its OWN user. The env-gate block boots a second app, and
+// `createApp` re-initializes the process-global persistence, so a user created
+// before that boot reads as erased afterwards; a per-case login is written into
+// whatever persistence is current, so the cases hold in any order.
+let n = 0;
+beforeEach(async () => {
+  cookie = '';
   const login = await fetch(`${BASE}/host/openwop-app/test/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ email: `formcontent-seam-${Date.now()}@acme.test` }),
+    body: JSON.stringify({ email: `formcontent-seam-${Date.now()}-${n++}@acme.test` }),
   });
   expect(login.status, await login.clone().text()).toBe(201);
   for (const ck of getSetCookies(login.headers)) {
@@ -73,11 +97,12 @@ afterAll(async () => {
   await new Promise<void>((r) => server.close(() => r()));
 });
 
-const instantiate = async (templateId: string, opts: { withCredential?: boolean } = {}) => {
+const instantiate = async (templateId: string, opts: { withCredential?: boolean; asCookie?: string } = {}) => {
   const withCredential = opts.withCredential !== false;
+  const sent = opts.asCookie ?? (withCredential ? cookie : '');
   const res = await fetch(`${BASE}/host/sample/formcontent/instantiate`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', ...(withCredential && cookie ? { cookie } : {}) },
+    headers: { 'content-type': 'application/json', ...(sent ? { cookie: sent } : {}) },
     body: JSON.stringify({ templateId }),
   });
   return { status: res.status, json: (await res.json()) as Record<string, unknown> };
@@ -153,7 +178,18 @@ describe('RFC 0137 conformance seam — the behavioral witness', () => {
     const { status, json } = await instantiate(BASIC, { withCredential: false });
     expect(status).toBe(401);
     expect(json.error).toBe('unauthenticated');
+    expect(String(json.message)).toContain('No credential presented'); // the middleware arm
     expect(json.formId, 'a refused call must not report a created form').toBeUndefined();
+
+    // The seam's own arm: an ANONYMOUS session (minted on a vendor route) passes
+    // the middleware and must still be refused by the seam's guard.
+    const mint = await fetch(`${BASE}/host/openwop-app/feature-toggles/assignments`);
+    const anon = getSetCookies(mint.headers).map((c) => /(__session=[^;]+)/.exec(c)?.[1]).find((c): c is string => !!c);
+    expect(anon, 'no anonymous session was minted').toBeTruthy();
+    const asAnon = await instantiate(BASIC, { asCookie: anon });
+    expect(asAnon.status).toBe(401);
+    expect((asAnon.json.details as { reason?: string } | undefined)?.reason).toBe('anonymous_principal_refused');
+    expect(asAnon.json.formId).toBeUndefined();
   });
 
   it('DOCT-12: conformance fixtures never reach the product template catalog', async () => {

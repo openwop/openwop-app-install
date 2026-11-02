@@ -1,4 +1,4 @@
-> **Published white-label install bundle.** Auto-synced from `openwop/openwop-app` (source `9a982be0b`). Clone or download the release zip, then follow **[WHITE-LABEL.md](./frontend/react/WHITE-LABEL.md)** to deploy your own. Generated — PRs here are not merged; development happens upstream.
+> **Published white-label install bundle.** Auto-synced from `openwop/openwop-app` (source `92647e421`). Clone or download the release zip, then follow **[WHITE-LABEL.md](./frontend/react/WHITE-LABEL.md)** to deploy your own. Generated — PRs here are not merged; development happens upstream.
 
 # openwop-app — OpenWOP Application
 
@@ -352,6 +352,17 @@ Outlook drafts, OneDrive — is the separate Connections flow below.)
    Add new provider → **Microsoft*** → Enable. Firebase displays the **callback
    URL** to register (`https://<project>.firebaseapp.com/__/auth/handler`) —
    copy it, and leave this tab open.
+
+   > **Content-Security-Policy (ADR 1021).** The app's `frame-src` in
+   > `firebase.json` admits `'self'` and two Google hosts, and **no
+   > `https://*.firebaseapp.com` wildcard**, which would let any frame navigate to
+   > any Firebase project, an attacker's included. If your
+   > `VITE_FIREBASE_AUTH_DOMAIN` is the default `<project>.firebaseapp.com`,
+   > add that **exact** origin (`https://<project>.firebaseapp.com`) to
+   > `frame-src`, never a wildcard. If it is your own custom domain served by
+   > the same Hosting site (recommended, see DEPLOY.md), `'self'` already covers
+   > it. `npm run build` runs `scripts/check-auth-frame-src.mjs`, which fails on
+   > a missing exact origin or on a Firebase wildcard.
 2. **Entra admin center** ([entra.microsoft.com](https://entra.microsoft.com) →
    *App registrations → New registration*): name it, pick the supported account
    types (choose *"any organizational directory + personal Microsoft accounts"*

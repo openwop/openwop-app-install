@@ -9652,6 +9652,12 @@ button.teampage-skill-chip:not(:disabled):hover { background: var(--clay-soft); 
 
 @media (max-width: 479px) {
   .site-shell .public-shell-brand .app-gate-product { display: none; }
+  /* Six mobile tabs at 320px are ~52px each; the item padding left the label
+     44px and ellipsised "Discover" (45) and "Progress" (46) — measured on
+     kicktodo, 2026-11-01. With no inline padding the label has the full cell. */
+  .app-mobile-nav, .site-mobile-nav__primary { padding-inline: 0; }
+  .app-mobile-nav__item, button.app-mobile-nav__item, .site-mobile-nav__item { padding-inline: 0; }
+  .app-mobile-nav__item span, .site-mobile-nav__item span { letter-spacing: -0.02em; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -9666,25 +9672,14 @@ button.teampage-skill-chip:not(:disabled):hover { background: var(--clay-soft); 
 .public-shell .app-footer__links li { display: inline-flex; align-items: center; }
 .public-shell .app-footer__links li + li::before { content: '·' / ''; margin: 0 var(--space-2); color: var(--ink-3); }
 
-/* ADR 0860 D6 — the public visitor consent region. Non-modal, pinned to the bottom
-   of the viewport; Accept and Reject share one button style (equal prominence). */
-.visitor-consent { position: fixed; inset: auto 0 0 0; z-index: 40; padding: var(--space-3); pointer-events: none; }
-.visitor-consent__inner { pointer-events: auto; max-width: 720px; margin: 0 auto; padding: var(--space-4); background: var(--paper); color: var(--ink); border: 1px solid var(--rule); border-radius: var(--radius-lg); box-shadow: 0 8px 24px var(--ink-shadow); display: grid; gap: var(--space-2); }
-.visitor-consent__title { margin: 0; font-size: var(--text-body); font-weight: var(--weight-head); }
-.visitor-consent__body, .visitor-consent__state { margin: 0; font-size: var(--text-sm); line-height: 1.5; color: var(--ink-2); }
-.visitor-consent__actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
-.visitor-consent__replay { display: flex; align-items: flex-start; gap: var(--space-2); margin: 0; font-size: var(--text-sm); line-height: 1.5; color: var(--ink-2); }
-.visitor-consent__replay input { margin-top: 3px; }
-.visitor-consent__replay-label { color: var(--ink); font-weight: var(--weight-head); }
 .heatmap-grid { display: block; width: 100%; max-width: 320px; aspect-ratio: 3 / 5; border: 1px solid var(--rule); border-radius: var(--radius-lg); background: var(--paper-2); }
 .heatmap-meter { width: 100%; max-width: 240px; }
-.visitor-consent__actions > button { flex: 1 1 8rem; }
-.visitor-consent__actions > .visitor-consent__close { flex: 0 0 auto; }
-.visitor-consent__footer-btn { min-height: 24px; background: none; border: 0; padding: 0; font: inherit; color: inherit; letter-spacing: inherit; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
-.visitor-consent__title:focus { outline: none; }
-.visitor-consent__title:focus-visible { outline: 2px solid var(--clay-text); outline-offset: 2px; }
-.visitor-consent__footer-btn:hover { color: var(--ink); }
-.visitor-consent__inline-footer { text-align: center; padding: var(--space-3); font-family: var(--mono); font-size: var(--text-sm); color: var(--ink-3); }
+/* ADR 0951 P2.4 — the inert recording viewer: layout boxes, blanked placeholders, pointer. */
+.replay-stage { display: block; width: 100%; max-width: 720px; max-height: 70vh; border: 1px solid var(--rule); border-radius: var(--radius-lg); background: var(--paper-2); }
+.replay-box { fill: none; stroke: var(--rule); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.replay-mask { fill: var(--ink-3); fill-opacity: 0.35; }
+.replay-pointer { fill: var(--clay); fill-opacity: 0.6; stroke: var(--clay); }
+.replay-pointer--down { fill-opacity: 1; }
 .public-shell .visitor-consent__slot { margin-top: var(--space-2); }
 
 /* ── Staggered load reveal ──────────────────────────────────────────────── */
@@ -10259,6 +10254,13 @@ a.fp-post__share { text-decoration: none; }
 .builder-history-drawer__row { display: flex; flex-direction: column; gap: var(--space-1); padding-block-end: var(--space-2); border-block-end: 1px solid var(--rule); }
 .builder-history-drawer__row:last-child { border-block-end: none; padding-block-end: 0; }
 .builder-history-drawer__hash { font-size: 0.75rem; background: var(--surface-hi); border-radius: var(--radius); padding: 0 var(--space-1); }
+
+/* ADR 1017 D1 — the Run-scripts consent bar sits in the PARENT, above the frame. */
+.mermaid-diagram-scroll { max-height: 75vh; overflow: auto; }
+.artifact-sandbox { display: flex; flex-direction: column; gap: var(--space-2); }
+.artifact-sandbox__bar { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap; }
+.artifact-sandbox__note { margin: 0; font-size: var(--text-sm); color: var(--ink-2); max-width: 60ch; }
+.turn-receipt-artifacts-failed { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-2); margin-top: var(--space-2); }
 
 /* ── Chat artifact workbench (ADR 0069) ───────────────────────────────────
    The durable side surface a chat artifact opens into: preview / raw /

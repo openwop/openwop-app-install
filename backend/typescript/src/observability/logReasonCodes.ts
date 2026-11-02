@@ -28,6 +28,18 @@ export const LOG_REASON_CODES = [
   // ADR 0713 OQ1 — every attempted registry pack install at boot failed
   // (`bootstrap/installRegistryPacks.ts`).
   'registry_install_none_succeeded',
+  // ADR 0994 — why an SMTP send failed (`host/smtpSend.ts` `classifySmtpFailure`).
+  'smtp_auth',
+  'smtp_connect',
+  'smtp_timeout',
+  'smtp_rejected',
+  'smtp_other',
+  // ADR 1018 D8 — why a public chat widget may not answer
+  // (`features/chat-widget/widgetCredential.ts`), logged on `widget_credential_refused`.
+  'widget_no_own_key',
+  'widget_managed_binding',
+  'widget_subscription_binding',
+  'widget_key_unavailable',
 ] as const;
 
 export type LogReasonCode = (typeof LOG_REASON_CODES)[number];

@@ -6,6 +6,13 @@
  * `core.bigquery.query` node calls `ctx.connectors` correctly, maps the
  * BigQuery jobs.query response, stamps deterministic provenance (sql/projectId/jobId),
  * and fails closed (no connector surface, missing config, connector error).
+ *
+ * Tracker TST-BED-3 (w66). Red when: the provider loses `readOnly: true` and
+ * gains a write scope group (double guard: the provider registry refuses a
+ * `readOnly` provider that declares a write group at LOAD, so adding a write
+ * group alone fails the whole file, not a case); the apiHosts pin moves; row mapping, the jobs.query URL, jobId provenance or
+ * the connector error code drift; a missing projectId/sql or connector surface
+ * stops failing closed.
  */
 
 import { describe, expect, it, beforeAll } from 'vitest';
@@ -35,6 +42,7 @@ describe('ADR 0076 §1 — dedicated read-only bigquery provider', () => {
     // Read-only: a read scope, and NO write scope group at all.
     expect((bq?.scopes.read ?? []).flatMap((g) => g.scopes)).toContain('https://www.googleapis.com/auth/bigquery.readonly');
     expect(bq?.scopes.write).toBeUndefined();
+    expect(bq?.readOnly).toBe(true); // the host gate denies PUT/PATCH/DELETE for it
     // apiHosts pinned to the BigQuery API host (override-immune dedicated provider).
     expect(bq?.apiHosts).toContain('bigquery.googleapis.com');
   });
@@ -70,8 +78,10 @@ describe('ADR 0076 §1 — core.bigquery.query node', () => {
       },
     });
     const out = await getNode().execute(ctx);
-    expect(out.status).toBe('success');
-    const o = (out as { outputs: Record<string, unknown> }).outputs;
+    if (out.status !== 'success') throw new Error(`expected success, got ${out.status}`);
+    const outputs = out.outputs;
+    if (typeof outputs !== 'object' || outputs === null) throw new Error('expected an outputs object');
+    const o: Record<string, unknown> = Object.fromEntries(Object.entries(outputs));
     expect(o.rows).toEqual([{ store: 'TX-1', sales: '4200' }, { store: 'TX-2', sales: '5100' }]);
     expect(o.rowCount).toBe(2);
     // Provenance — the "Verify Source" feed (ADR 0078).
@@ -85,15 +95,19 @@ describe('ADR 0076 §1 — core.bigquery.query node', () => {
 
   it('fails closed when the connector surface is absent', async () => {
     const out = await getNode().execute(makeCtx({ config: { projectId: 'p', sql: 'SELECT 1' } }));
-    expect(out.status).toBe('failure');
-    expect((out as { error: { code: string } }).error.code).toBe('host_capability_missing');
+    if (out.status !== 'failure') throw new Error(`expected failure, got ${out.status}`);
+    expect(out.error.code).toBe('host_capability_missing');
   });
 
   it('fails with invalid_config when projectId or sql is missing', async () => {
     const noProj = await getNode().execute(makeCtx({ config: { sql: 'SELECT 1' }, connectors: { invoke: async () => ({ ok: true }) } }));
-    expect(noProj.status).toBe('failure');
+    if (noProj.status !== 'failure') throw new Error(`expected failure, got ${noProj.status}`);
+    expect(noProj.error.code).toBe('invalid_config');
+    expect(noProj.error.message).toContain('projectId');
     const noSql = await getNode().execute(makeCtx({ config: { projectId: 'p' }, connectors: { invoke: async () => ({ ok: true }) } }));
-    expect(noSql.status).toBe('failure');
+    if (noSql.status !== 'failure') throw new Error(`expected failure, got ${noSql.status}`);
+    expect(noSql.error.code).toBe('invalid_config');
+    expect(noSql.error.message).toContain('config.sql');
   });
 
   it('propagates the connector fail-closed error (e.g. no connection)', async () => {
@@ -102,7 +116,7 @@ describe('ADR 0076 §1 — core.bigquery.query node', () => {
       connectors: { invoke: async () => ({ ok: false, error: 'connector_no_connection' }) },
     });
     const out = await getNode().execute(ctx);
-    expect(out.status).toBe('failure');
-    expect((out as { error: { code: string } }).error.code).toBe('connector_no_connection');
+    if (out.status !== 'failure') throw new Error(`expected failure, got ${out.status}`);
+    expect(out.error.code).toBe('connector_no_connection');
   });
 });

@@ -39,7 +39,8 @@ import { resolveAgentToolPermissionSet } from './agentProfileService.js';
 import { effectiveToolAllowlist, resolveAgentToolAllowlistOverride } from './agentToolAllowlistService.js';
 import { applyToolResultTransform, findCompactionMarkerPath, compactionMarkerRefusal, COMPACTION_MARKER_IN_INPUT } from './toolResultTransform.js';
 import { toModelToolResult } from './toModelToolResult.js';
-import { acceptEnvelope, loadEnvelopePayloadSchema } from './envelopeAcceptor.js';
+import { ASK_USER_TOOL, askUserContract, clarificationCorrelationId, liftClarification, clarificationPromptBlock, type LiftedQuestion } from './clarificationLift.js';
+import { renderAskText } from './clarificationChat.js';
 import { tryLenientParse } from './envelopeReliabilityEmit.js';
 import type { CompactionDecision } from '../executor/types.js';
 import { neutralizeUntrusted, fenceUntrustedItems, defangUntrustedFence } from './untrustedContent.js';
@@ -59,6 +60,7 @@ import { resolveModelForClass, type ResolveModelOptions } from './modelClassReso
 import { createLogger } from '../observability/logger.js';
 // ADR 0547 — the ONE validator for the tool-inputSchema class.
 import { validateToolInput, toolSchemaCompiles } from './toolSchemaValidation.js';
+import { agentVersionsServed, resolveServedAgent } from './agentServing.js';
 
 const log = createLogger('host.agentDispatch');
 
@@ -67,13 +69,24 @@ const log = createLogger('host.agentDispatch');
 const DEFAULT_MAX_TOOL_ROUNDS = 5;
 
 /** Shared validator instance. `strict:false` matches the host's other Ajv
- *  call sites (mcpServerRouter, envelopeAcceptor); tool `$id`s are stripped
+ *  call sites (mcpServerRouter); tool `$id`s are stripped
  *  before compile to avoid the long-lived-instance `$id` collision the agent
  *  registry warns about. */
 export class AgentNotFoundError extends Error {
   constructor(public agentId: string) {
     super(`agent '${agentId}' is not installed on this host`);
     this.name = 'AgentNotFoundError';
+  }
+}
+
+/** ADR 1014 D3/D6 — a pinned version this host cannot run as recorded: not
+ *  loadable, or (an archived version) missing a tool its own allowlist names. */
+export class AgentVersionUnavailableError extends Error {
+  constructor(public agentId: string, public version: string, public missingTools: readonly string[] = []) {
+    super(missingTools.length > 0
+      ? `${agentId} ${version} names tools this host does not offer (${missingTools.join(', ')}), so it cannot run as recorded`
+      : `${agentId} ${version} is not available on this host`);
+    this.name = 'AgentVersionUnavailableError';
   }
 }
 
@@ -84,6 +97,11 @@ export interface AgentDispatchRequest {
   provenance?: AgentDispatchProvenance;
   /** The manifest agentId to dispatch. */
   agentId: string;
+  /** ADR 1014 D3 — run exactly this version (a channel pin's), or fail. */
+  version?: string;
+  /** ADR 1014 D4 — keeps one run/conversation on one side of a canary split when
+   *  no version is named and `OPENWOP_AGENT_VERSIONS=on`. Defaults to the agent id. */
+  drawKey?: string;
   /** ADR 0379 P2 — the dispatching tenant. Required to find USER-authored
    *  agents in the (tenant, agentId)-keyed registry; pack agents resolve
    *  without it (a2a + eval paths dispatch pack agents tenant-less). */
@@ -104,6 +122,21 @@ export interface AgentDispatchRequest {
    *  resolves it from the toggle (this path is runless ⇒ no run.metadata stamp,
    *  no replay surface). Absent ⇒ identity (no compaction). */
   compaction?: CompactionDecision;
+  /** ADR 1001 D1, ADR 1006 — the run lane may pause this turn on an
+   *  `openwop:ask-user` call. Set ONLY by `agentRunnerNode`, and only when the
+   *  run's frozen stamp enables it; absent ⇒ the tool is not offered.
+   *  `roundsUsed` counts this node's earlier rounds, so the loop enforces the
+   *  per-node cap. */
+  clarification?: {
+    roundsUsed: number; cap: number; runId: string; nodeId: string;
+    /** D4 — an EARLIER round of this node read untrusted context (its tool
+     *  output is in the transcript this turn continues from). */
+    untrustedContext?: boolean;
+  };
+  /** ADR 1001 D3 — continue a turn paused on a clarification instead of
+   *  re-running it: the checkpointed transcript AFTER the first message (the
+   *  first is rebuilt live, D3.4), then the host's fenced answer message. */
+  resumeFrom?: { transcriptTail: AiCallMessage[]; answerMessage: string };
 }
 
 export interface AgentEvent {
@@ -168,6 +201,13 @@ export interface AgentDispatchResult {
   persona: string;
   modelClass: string;
   status: 'completed' | 'failed' | 'escalated';
+  /** ADR 1001 D1 — the turn stopped to ask a person (status `escalated`, the
+   *  closest existing status: nothing final was produced). Set ONLY when the
+   *  request set `clarification`, which only `agentRunnerNode` does, so the
+   *  host-ext dispatch routes and A2A never see it (pinned by
+   *  `adr1001-clarification-lane-ratchet`). The status union is deliberately
+   *  NOT widened: every serialising caller would have to learn a new value. */
+  clarification?: PendingClarification;
   /** toolAllowlist-filtered surface actually offered to the agent (§A14). */
   toolSurface: string[];
   confidence: number;
@@ -185,6 +225,8 @@ export interface AgentDispatchResult {
   /** ADR 0433 — the caller's provenance, echoed verbatim (never re-resolved,
    *  so a fork reproduces it rather than recomputing against a moved world). */
   provenance?: AgentDispatchProvenance;
+  /** ADR 1001 D1 — set with `error.code === 'cap_breached'`. */
+  capBreach?: { kind: 'clarification'; limit: number; observed: number };
 }
 
 /** RFC 0002 §A14 — intersect the host-offered tools with the agent's allowlist.
@@ -330,6 +372,8 @@ export type ExecuteAgentTool = (
   fromThrow?: true;
   /** TOC2CD-11 — set only by a `toolError` helper: the error's `message` is a host sentence. */
   hostMessage?: true;
+  /** ADR 1001 D7 — end the turn after this call, replying `text`. */
+  endTurn?: { text: string };
 }>;
 
 /** Bound `ctx.callAIWithTools` (a single Anthropic tool-calling round). */
@@ -404,6 +448,9 @@ export type AgentKnowledgeRetrieve = (
 export interface LiveDispatchDeps {
   /** The real provider call (managed or BYOK), already scoped to a run/tenant. */
   callAI: CallAi;
+  /** ADR 1009 — the turn's first message carries untrusted recall or a handoff.
+   *  The run lane stamps the run; absent elsewhere. */
+  onUntrustedContext?: () => Promise<void>;
   /** Provider/model resolution hints. Defaults to `preferManaged: true` so an
    *  agent can take a real turn with no BYOK setup. */
   modelOptions?: ResolveModelOptions;
@@ -876,8 +923,30 @@ export async function runAgentDispatchLive(
   req: AgentDispatchRequest,
   deps: LiveDispatchDeps,
 ): Promise<AgentDispatchResult> {
-  const agent = getAgentRegistry().get(req.agentId, req.tenantId);
-  if (!agent) throw new AgentNotFoundError(req.agentId);
+  // ADR 1014 D3/D4 — a named version, else (flag on) what `stable` serves, else the head.
+  const served = req.version === undefined && agentVersionsServed();
+  const agent = req.version !== undefined
+    ? await getAgentRegistry().resolve(req.agentId, req.tenantId, req.version)
+    : served
+      ? await resolveServedAgent(req.agentId, req.tenantId, req.drawKey ?? req.agentId)
+      : getAgentRegistry().get(req.agentId, req.tenantId);
+  if (!agent) {
+    if ((req.version !== undefined || served) && getAgentRegistry().has(req.agentId, req.tenantId)) {
+      throw new AgentVersionUnavailableError(req.agentId, req.version ?? 'stable');
+    }
+    throw new AgentNotFoundError(req.agentId);
+  }
+  // ADR 1014 D6 — an ARCHIVED version runs with its own allowlist or not at all:
+  // a tool it names that this host no longer offers would otherwise be dropped
+  // silently (`filterTools`). The head keeps today's behaviour.
+  if ((req.version !== undefined || served) && getAgentRegistry().get(req.agentId, req.tenantId)?.packVersion !== agent.packVersion) {
+    // "Does this HOST know the tool", never "did this caller offer it": a caller may
+    // narrow its offer on purpose (`offerTools`, `ask-user` removal), and that is
+    // `filterTools`' business, not a reason to refuse the version (review M4).
+    const offered = new Set(req.availableTools ?? []);
+    const missing = (agent.toolAllowlist ?? []).filter((t) => !offered.has(t) && deps.resolveTool?.(t) === undefined);
+    if (missing.length > 0) throw new AgentVersionUnavailableError(agent.agentId, agent.packVersion, missing);
+  }
 
   const validate = req.validateHandoff !== false;
   // ADR 0104 — apply the super-admin tool-allowlist override (per tenant+agent) to
@@ -919,7 +988,10 @@ export async function runAgentDispatchLive(
   // the model and executes what it calls. Without these deps we fall through to
   // the single completion below (no regression for hosts that don't wire tools).
   const compiledTools = resolveAgentTools(toolSurface, deps.resolveTool);
-  if (compiledTools.length > 0 && deps.callAIWithTools && deps.executeTool) {
+  // ADR 1001 D1 — a run-lane turn that may ask takes the loop even with no tools
+  // of its own: the ask is a tool call. A provider with no tool calling fails
+  // this turn with its typed error instead of guessing (RFC 0256 §E).
+  if ((compiledTools.length > 0 || req.clarification) && deps.callAIWithTools && deps.executeTool) {
     return runToolLoop(agent, req, deps, {
       provider: resolved.provider,
       model: resolved.model,
@@ -931,6 +1003,7 @@ export async function runAgentDispatchLive(
   }
 
   const initial = await buildInitialMessages(agent, req, deps);
+  if (initial.consumedUntrusted) await deps.onUntrustedContext?.();
   const request: AiCallRequest = {
     provider: resolved.provider,
     model: resolved.model,
@@ -1054,6 +1127,26 @@ export interface ChatToolLoopOpts {
    *  (`agent.reasoned` / `agent.toolCalled` / `agent.toolReturned`). A throw is
    *  swallowed — observability must never break the turn. */
   onEvent?: (event: AgentEvent) => void | Promise<void>;
+  /** ADR 1001 D1, ADR 1006 — this run-lane turn may ask through
+   *  `openwop:ask-user` (see `AgentDispatchRequest.clarification`). Absent ⇒ a
+   *  call to it is refused like any tool off the allowlist. */
+  clarification?: { roundsUsed: number; cap: number; runId: string; nodeId: string; untrusted: boolean };
+}
+
+/** ADR 1001 D1 — a turn that stopped to ask the person something. */
+export interface PendingClarification {
+  questions: LiftedQuestion[];
+  data: { questions: Array<{ id: string; question: string; schema: Record<string, unknown> }>; contextType?: string };
+  resumeSchema: Record<string, unknown>;
+  digest: string;
+  correlationId: string;
+  /** 1-based round this ask is. */
+  round: number;
+  /** The loop's messages up to and including the ask, and any note that a
+   *  later call in the ask's round did not run. */
+  messages: AiCallMessage[];
+  /** The turn consumed untrusted or borrowed context (D4: who may answer). */
+  untrusted: boolean;
 }
 
 /** ADR 0132 Phase 3 — a tool call the agent attempted that is gated behind
@@ -1083,6 +1176,11 @@ export interface ChatToolLoopResult {
   /** ADR 0132 Phase 3 — tool calls deferred for per-conversation approval (not
    *  executed). Empty/absent ⇒ none. */
   pendingApprovals?: PendingToolApproval[];
+  /** ADR 1001 D1 — the turn stopped on an accepted clarification. */
+  pendingClarification?: PendingClarification;
+  /** ADR 1001 D1 — set with `error.code === 'cap_breached'`: the numbers the
+   *  node's `cap.breached` event carries (`observed` = the ATTEMPTED round). */
+  capBreach?: { kind: 'clarification'; limit: number; observed: number };
 }
 
 /**
@@ -1101,13 +1199,6 @@ export interface ChatToolLoopResult {
  *     result (ADR 0099) before it re-enters the model context.
  * The loop ends when the model stops calling tools or `maxRounds` is hit.
  */
-/** XCH-ENV-2 (LLM-EXCHANGE-AUDIT Wave 5) — the LIVE RFC 0021 `schema.request`
- *  round-trip the discovery doc has advertised all along. Extracts ONE fenced
- *  JSON envelope from a final (no-tool-calls) assistant reply; only the
- *  `schema.request` kind is handled here (clarifications ride interrupts,
- *  `result` is terminal prose). Returns null when the text carries no
- *  handleable envelope. Host-internal: honors the already-Accepted RFC 0021 —
- *  no new wire surface. */
 /** The managed tier's DAILY allowance, as opposed to an upstream burst limit.
  *  `aiProvidersHost` folds both into `provider_rate_limited` and keeps the
  *  distinction only in `details.managedCode`; a tool turn that drops it tells
@@ -1140,6 +1231,10 @@ export function repeatedCallNote(toolName: string): string {
 
 /** ADR 0975 D6 — a turn that used every round and produced no text. */
 export const TOOL_ROUNDS_EXHAUSTED = 'tool_rounds_exhausted';
+/** ADR 1011 — the registered v2 codes for a round that ended early. */
+const TOOL_CALL_TRUNCATED = 'envelope_truncation_unrecoverable';
+const TOOL_CALL_REFUSED = 'envelope_refusal';
+const TRUNCATED_CALLS_NOTE = 'Your output limit ended that turn before your tool call was complete, so no tool ran. Make fewer or smaller calls.';
 
 /** True when a no-tool-call reply ends on a colon: the shape of an action
  *  announced and not taken. Deliberately narrow — a question, a full stop or a
@@ -1148,24 +1243,6 @@ export function endsOnAnnouncement(text: string | undefined | null): boolean {
   if (!text) return false;
   return /[:：]\s*$/.test(text);
 }
-
-export function extractSchemaRequestEnvelope(text: string): Record<string, unknown> | null {
-  const fences = [...text.matchAll(/```json\s*\n([\s\S]*?)```/g)];
-  for (const m of fences) {
-    try {
-      const candidate: unknown = JSON.parse(m[1]!);
-      if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)
-        && (candidate as { type?: unknown }).type === 'schema.request') {
-        return candidate as Record<string, unknown>;
-      }
-    } catch { /* not JSON — keep scanning */ }
-  }
-  return null;
-}
-
-/** The per-turn `schema.request` cap — matches the `schemaRounds: 3` the
- *  discovery doc advertises (routes/discovery.ts). */
-const SCHEMA_ROUNDS_PER_TURN = 3;
 
 export async function runChatToolLoop(
   opts: ChatToolLoopOpts,
@@ -1205,8 +1282,16 @@ export async function runChatToolLoop(
   let lastText = '';
   let lastData: unknown;
   let rounds = 0;
-  // XCH-ENV-2 — per-turn schema.request budget (the advertised schemaRounds).
-  let schemaRoundsUsed = 0;
+  // ADR 1006 — the one validator-fed repair of a refused `openwop:ask-user`.
+  let clarifyRepaired = false;
+  // ADR 1011 — the one repair of a round cut off by the output limit.
+  let truncationRepaired = false;
+  // ADR 1006 — the ask this round ended on; the node suspends on it.
+  let pendingAsk: PendingClarification | undefined;
+  // ADR 1001 D4 — any tool ran this turn (its output is untrusted context).
+  let toolOutputSeen = false;
+  // ADR 1001 D7 — a tool ended the turn (`openwop:ask-user`); its reply.
+  let endTurnText: string | undefined;
   // ADR 0796 — the one-per-turn "you announced it, now call it" follow-up.
   let announceNudged = false;
   // ADR 0975 D6 — the last call that RAN successfully (name + args hash). A
@@ -1230,56 +1315,44 @@ export async function runChatToolLoop(
     rounds = round + 1;
     let out: AiToolCallResult;
     try {
-      out = await deps.callAIWithTools({ provider, model, systemPrompt, messages: [...messages], credentialRef, tools: toolDefs, ...(opts.webSearch ? { webSearch: true } : {}) });
+      // ADR 1003 D3 — rounds after the first repeat this turn's tools + system
+      // byte-for-byte, so they may carry a conversation cache breakpoint.
+      out = await deps.callAIWithTools({ provider, model, systemPrompt, messages: [...messages], credentialRef, tools: toolDefs, ...(opts.webSearch ? { webSearch: true } : {}), ...(round > 0 ? { cacheConversation: true } : {}) });
     } catch (err) {
       return {
         finalText: lastText, finalData: lastData, events, rounds,
         error: { code: managedLimitCode(err) ?? (err as { code?: string })?.code ?? 'provider_error', message: err instanceof Error ? err.message : String(err) },
       };
     }
+    const calls = out.toolCalls ?? [];
+    // ADR 1011 (RFC 0256 §B) — completion is read before anything in the round is
+    // used. A safety stop is not retried, and its text may echo the prompt.
+    if (calls.length > 0 && out.finishReason === 'content-filter') {
+      for (const call of calls) await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'error', error: { code: TOOL_CALL_REFUSED, message: 'The provider stopped this round; the tool did not run.' } });
+      return {
+        finalText: lastText, finalData: lastData, events, rounds,
+        error: { code: TOOL_CALL_REFUSED, message: `${provider} refused the round that asked for ${calls.length} tool call(s).` },
+        ...(pendingApprovals.length ? { pendingApprovals } : {}),
+      };
+    }
+    // Which call the limit cut cannot be told, so none of the round's calls run.
+    if (calls.length > 0 && out.finishReason === 'length') {
+      for (const call of calls) await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'error', error: { code: TOOL_CALL_TRUNCATED, message: 'The output limit cut this round; the tool did not run.' } });
+      if (truncationRepaired || round >= roundBudget - 1) {
+        return {
+          finalText: lastText, finalData: lastData, events, rounds,
+          error: { code: TOOL_CALL_TRUNCATED, message: `${persona}'s tool call was cut off by the output limit, so no tool ran.` },
+          ...(pendingApprovals.length ? { pendingApprovals } : {}),
+        };
+      }
+      truncationRepaired = true;
+      messages.push({ role: 'user', content: TRUNCATED_CALLS_NOTE });
+      continue;
+    }
     if (typeof out.content === 'string' && out.content) lastText = out.content;
     if (out.data !== undefined) lastData = out.data;
     for (const c of out.citations ?? []) { if (c.url && !citationsByUrl.has(c.url)) citationsByUrl.set(c.url, c); }
-    const calls = out.toolCalls ?? [];
     if (calls.length === 0) {
-      // XCH-ENV-2 (Wave 5): before treating this as the final answer, honor a
-      // fenced `schema.request` envelope — the model asking the app for node
-      // schemas through the advertised RFC 0021 channel. Validate through the
-      // real acceptor (round-capped per the advertised schemaRounds), answer
-      // from the live registry, and continue the loop with the
-      // `schema.response` envelope injected.
-      const reqEnvelope = out.content ? extractSchemaRequestEnvelope(out.content) : null;
-      if (reqEnvelope && schemaRoundsUsed < SCHEMA_ROUNDS_PER_TURN) {
-        schemaRoundsUsed += 1;
-        const outcome = acceptEnvelope(reqEnvelope, { counters: { schemaRounds: { current: schemaRoundsUsed, cap: SCHEMA_ROUNDS_PER_TURN } } });
-        // XCH-F1-3 — defang fence markers in MODEL output before it re-enters the
-        // message array. If a model echoes `BEGIN/END UNTRUSTED CONTENT` while
-        // summarising a fenced tool result, that text becomes conversation history
-        // and a LATER round would read it as a real delimiter — a model-authored
-        // fence spoof, closing the fence early and promoting attacker text to
-        // trusted prompt structure. Same breakout `defangUntrustedFence` already
-        // prevents from INSIDE a fenced payload; this closes the round-trip.
-        messages.push({ role: 'assistant', content: defangUntrustedFence(out.content!) });
-        if (outcome.status === 'accepted') {
-          // Per `schema.request.schema.json`: the payload names an ENVELOPE
-          // KIND, and the host's answer is an OUT-OF-BAND context injection
-          // (`schema.response` is the model's optional ack, not our vehicle).
-          // Node/component/artifact schemas ride the `openwop:schema.lookup`
-          // tool instead — a different, tool-mediated ask-path.
-          const envelopeType = String((reqEnvelope.payload as { envelopeType?: unknown })?.envelopeType ?? '');
-          const schema = loadEnvelopePayloadSchema(envelopeType);
-          await emit({ type: 'agent.reasoned', agentId, reasoning: `${persona} asked for the '${envelopeType}' envelope schema via schema.request (round ${schemaRoundsUsed}/${SCHEMA_ROUNDS_PER_TURN}).` });
-          if (schema) {
-            messages.push({ role: 'user', content: `schema.request answered (correlationId ${String(reqEnvelope.correlationId)}). The JSON Schema for envelope kind '${envelopeType}':\n\`\`\`json\n${JSON.stringify(schema)}\n\`\`\`\nContinue and produce your answer.` });
-          } else {
-            messages.push({ role: 'user', content: `schema.request refused: unknown_envelope_kind — this host ships no schema for '${envelopeType}'. Continue without it.` });
-          }
-        } else {
-          await emit({ type: 'agent.reasoned', agentId, reasoning: `${persona} emitted a schema.request the acceptor did not accept (${outcome.status}).` });
-          messages.push({ role: 'user', content: `Your schema.request envelope was ${outcome.status}${'reason' in outcome && outcome.reason ? ` (${outcome.reason})` : ''}. Correct it or answer without it.` });
-        }
-        continue;
-      }
       // ADR 0796 — an ANNOUNCED action with no tool call. A reply that ends on a
       // colon ("First batch — add the trigger:") is the model about to call a
       // tool and stopping instead; treating it as the final answer leaves the
@@ -1291,7 +1364,7 @@ export async function runChatToolLoop(
       // own follow-up, at most MAX_CONTINUATIONS times per turn, each granting
       // CONTINUATION_ROUNDS more rounds up to a hard cap. Decided from this
       // turn's tool results only, so a replay takes the same branch.
-      if (pendingContinuation && continuations < MAX_CONTINUATIONS && toolDefs.length > 0) {
+      if (out.finishReason !== 'content-filter' && pendingContinuation && continuations < MAX_CONTINUATIONS && toolDefs.length > 0) {
         continuations += 1;
         roundBudget = Math.min(Math.max(roundBudget, round + 1 + CONTINUATION_ROUNDS), maxRounds + MAX_CONTINUATIONS * CONTINUATION_ROUNDS);
         if (out.content) messages.push({ role: 'assistant', content: defangUntrustedFence(out.content) });
@@ -1304,7 +1377,7 @@ export async function runChatToolLoop(
         log.info('unfinished_plan_followup', { agentId, round, continuations, roundBudget });
         continue;
       }
-      if (!announceNudged && toolDefs.length > 0 && round < roundBudget - 1 && endsOnAnnouncement(out.content)) {
+      if (out.finishReason !== 'content-filter' && !announceNudged && toolDefs.length > 0 && round < roundBudget - 1 && endsOnAnnouncement(out.content)) {
         announceNudged = true;
         messages.push({ role: 'assistant', content: defangUntrustedFence(out.content!) });
         messages.push({ role: 'user', content: ANNOUNCED_WITHOUT_CALL_NUDGE });
@@ -1319,6 +1392,60 @@ export async function runChatToolLoop(
     }
     if (out.content) messages.push({ role: 'assistant', content: defangUntrustedFence(out.content) });
     for (const call of calls) {
+      // ADR 1001 D7 — the turn already ended on an earlier call this round: the
+      // rest are recorded as not performed, never run behind the person's back.
+      if (endTurnText !== undefined) {
+        await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'forbidden' });
+        // A run continues after the answer, so the model must not assume it ran.
+        messages.push({ role: 'user', content: `Tool "${call.name}" was not run: your turn ended on your question. Call it again if you still need it.` });
+        continue;
+      }
+      // ADR 1006 — the run lane's ask. It stays in the loop instead of going
+      // through `executeTool`: a run's tool results are served from the replay
+      // log, so an ask must be a pure function of the recorded model round, and
+      // it spends no effect ordinal. No gate applies: asking a person has no
+      // effect, the lift is the validator, and who may answer is decided at the
+      // node (ADR 1001 D4). A chat ask takes the ordinary path below.
+      if (opts.clarification && call.name === ASK_USER_TOOL) {
+        const c = opts.clarification;
+        const askRound = c.roundsUsed + 1;
+        if (c.roundsUsed >= c.cap) {
+          await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'forbidden' });
+          await emit({ type: 'agent.reasoned', agentId, reasoning: `${persona} asked a clarification beyond the cap of ${c.cap} for this step.` });
+          return {
+            finalText: lastText, finalData: lastData, events, rounds,
+            error: { code: 'cap_breached', message: `clarificationRounds cap (${c.cap}) breached: round ${askRound} refused.` },
+            capBreach: { kind: 'clarification', limit: c.cap, observed: askRound },
+          };
+        }
+        const lifted = liftClarification(call.input);
+        if (!lifted.ok) {
+          const message = scrubSecretShaped(lifted.reason);
+          await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'error', error: { code: 'ask_invalid', message } });
+          // The authoring-path rule: ONE error-fed repair, then a typed failure.
+          if (clarifyRepaired) {
+            return {
+              finalText: lastText, finalData: lastData, events, rounds,
+              error: { code: 'clarification_ask_invalid', message: `The clarification request was refused twice: ${message}` },
+            };
+          }
+          clarifyRepaired = true;
+          messages.push({ role: 'user', content: `Tool "${call.name}" refused your question (${message}). Fix it and ask again, or finish without asking.` });
+          continue;
+        }
+        const argsHash = computeArgsHash(call.input);
+        await emit({ type: 'agent.toolCalled', agentId, toolName: call.name, callId: call.id, argsHash, transport: 'native' });
+        await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'ok', durationMs: 0 });
+        await emit({ type: 'agent.reasoned', agentId, reasoning: `${persona} asked ${lifted.questions.length} clarification question(s) (round ${askRound} of ${c.cap}).` });
+        const askText = renderAskText(lifted.questions);
+        messages.push({ role: 'assistant', content: defangUntrustedFence(askText) });
+        endTurnText = askText;
+        pendingAsk = {
+          questions: lifted.questions, data: lifted.data, resumeSchema: lifted.resumeSchema, digest: lifted.digest,
+          correlationId: clarificationCorrelationId(c.runId, c.nodeId, askRound), round: askRound, messages: [], untrusted: c.untrusted || toolOutputSeen,
+        };
+        continue;
+      }
       const compiled = tools.find((t) => t.def.name === call.name);
       // §A14 — a call to a tool not on the allowlist is refused, never executed.
       if (!compiled) {
@@ -1337,6 +1464,18 @@ export async function runChatToolLoop(
       if (scopeEnabled && !scopeEnabled.has(call.name)) {
         await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'forbidden' });
         messages.push({ role: 'user', content: `Tool "${call.name}" is not enabled for this conversation.` });
+        continue;
+      }
+      // ADR 1011 (RFC 0256 §B) — arguments are validated before any gate, so a
+      // person is never asked to approve a call that would then be refused.
+      const v = call.argumentsInvalid ? { ok: false, errors: 'not a JSON object' } : compiled.validate(call.input);
+      if (!v.ok) {
+        // RFC 0064 §E — an argument-validation failure is a non-success where the
+        // tool NEVER RAN and is NOT a gate case: it MUST carry `error` populated +
+        // `status:'error'` (the old `status:'invalid_args'` was never a valid wire
+        // enum member — `ok|error|forbidden|rate_limited`), with NO `durationMs`.
+        await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'error', error: { code: 'invalid_args', message: scrubSecretShaped(`arguments failed validation: ${v.errors ?? 'invalid'}`) } });
+        messages.push({ role: 'user', content: `Tool "${call.name}" arguments failed validation: ${v.errors ?? 'invalid'}.` });
         continue;
       }
       // ADR 0999 D3.2 (TOC2CD-3) — under a `lossy` decision, refuse an input that
@@ -1422,16 +1561,6 @@ export async function runChatToolLoop(
           continue;
         }
       }
-      const v = compiled.validate(call.input);
-      if (!v.ok) {
-        // RFC 0064 §E — an argument-validation failure is a non-success where the
-        // tool NEVER RAN and is NOT a gate case: it MUST carry `error` populated +
-        // `status:'error'` (the old `status:'invalid_args'` was never a valid wire
-        // enum member — `ok|error|forbidden|rate_limited`), with NO `durationMs`.
-        await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'error', error: { code: 'invalid_args', message: scrubSecretShaped(`arguments failed validation: ${v.errors ?? 'invalid'}`) } });
-        messages.push({ role: 'user', content: `Tool "${call.name}" arguments failed validation: ${v.errors ?? 'invalid'}.` });
-        continue;
-      }
       const callKey = `${call.name}\u0000${computeArgsHash(call.input)}`;
       if (callKey === lastRanCall) {
         await emit({ type: 'agent.reasoned', agentId, reasoning: `${persona} repeated ${call.name} with the same arguments; the earlier result was kept, not re-run.` });
@@ -1445,6 +1574,9 @@ export async function runChatToolLoop(
       let execOut: Awaited<ReturnType<ExecuteAgentTool>>;
       try {
         execOut = await deps.executeTool({ name: call.name, input: call.input, callId: call.id });
+        // ADR 1001 D4 — a tool result is untrusted input to the model; a
+        // question asked after reading one may echo it.
+        toolOutputSeen = true;
       } catch (err) {
         // ADR 0764 (CHATCD-3) — a lost lease abandons the node; it is never a tool result.
         if (err instanceof LeaseLostError) throw err;
@@ -1457,6 +1589,7 @@ export async function runChatToolLoop(
       // ADR 0773 B.7 — the latest word from a tool that tracks unfinished work:
       // a string arms the follow-up, `null` (the work is done) disarms it.
       if (!execOut.isError && execOut.continueTurn !== undefined) pendingContinuation = execOut.continueTurn || undefined;
+      if (!execOut.isError && execOut.endTurn) endTurnText = execOut.endTurn.text;
       // A failed call may be retried as-is (transient), and a call that reported
       // unfinished work (`continueTurn`, ADR 0773 B.7) is MEANT to be made again;
       // only a finished success counts as "already answered".
@@ -1503,6 +1636,23 @@ export async function runChatToolLoop(
       // `app-builder.catalog`) in a distrust warning about the very vocabulary
       // the model must author against.
       messages.push({ role: 'user', content: `Result of ${call.name}: ${compactedContent}` });
+    }
+    // ADR 1006 — a run-lane ask ends the loop and the node suspends on it. A tool
+    // the firewall HELD this turn must still escalate (ADR 0150): the caller
+    // checks these before the ask.
+    if (pendingAsk) {
+      return {
+        finalText: lastText, finalData: lastData, events, rounds,
+        pendingClarification: { ...pendingAsk, messages: [...messages] },
+        ...(pendingApprovals.length ? { pendingApprovals } : {}),
+      };
+    }
+    // ADR 1001 D7 — the turn ends here, before another model call, with the
+    // tool's reply as its answer (not `tool_rounds_exhausted`).
+    if (endTurnText !== undefined) {
+      lastText = endTurnText;
+      answered = true;
+      break;
     }
   }
   // WSRCH-3 — observability for provider-native web search: when a turn ASKED for
@@ -1583,6 +1733,7 @@ async function runToolLoop(
   const { provider, model, credentialRef, threshold, toolSurface, tools } = ctx;
   const validate = req.validateHandoff !== false;
   const initial = await buildInitialMessages(agent, req, deps);
+  if (initial.consumedUntrusted) await deps.onUntrustedContext?.();
 
   // ADR 0102 — resolve the standing agent's tool permissions (empty for a
   // pack/manifest agent or when no tenant is supplied ⇒ the gate stays ungated).
@@ -1602,9 +1753,25 @@ async function runToolLoop(
       // ADR 0680 D3 — attribute the compaction savings telemetry.
       tenantId: deps.tenantId,
       provider, model, credentialRef,
-      systemPrompt: withReturnContract(agent),
-      messages: initial.messages,
-      tools,
+      // ADR 1001 D5 — the ask block says only when to ask and how many asks are
+      // left, and is present only when the run opted in.
+      systemPrompt: req.clarification
+        ? `${withReturnContract(agent)}\n\n${clarificationPromptBlock(req.clarification.cap - req.clarification.roundsUsed)}`.trimEnd()
+        : withReturnContract(agent),
+      // ADR 1001 D3.4 — a continuation rebuilds the FIRST message live (recall,
+      // memory and context re-resolve, so a revoked grant holds) and appends
+      // the checkpointed tail plus the fenced answer.
+      messages: req.resumeFrom
+        ? [...initial.messages, ...req.resumeFrom.transcriptTail, { role: 'user', content: req.resumeFrom.answerMessage }]
+        : initial.messages,
+      // D4 — untrusted CONTEXT (the first message, or an earlier round's tool
+      // output in the continued transcript). A person's answer is not counted
+      // here: it decides who may answer the NEXT question only via context.
+      ...(req.clarification ? { clarification: { roundsUsed: req.clarification.roundsUsed, cap: req.clarification.cap, runId: req.clarification.runId, nodeId: req.clarification.nodeId, untrusted: initial.consumedUntrusted || req.clarification.untrustedContext === true } } : {}),
+      // ADR 1006 — the ask is the host's to grant, frozen per run (ADR 1001 D5),
+      // so it does not ride the agent's allowlist. The loop handles the call
+      // before `validate` could run; the lift is its validator.
+      tools: req.clarification ? [...tools, { def: { name: ASK_USER_TOOL, ...askUserContract() }, validate: () => ({ ok: true }) }] : tools,
       agentId: agent.agentId,
       persona: agent.persona,
       ...(typeof deps.maxToolRounds === 'number' ? { maxRounds: deps.maxToolRounds } : {}),
@@ -1639,7 +1806,7 @@ async function runToolLoop(
   });
 
   if (loop.error) {
-    return finish('failed', { error: loop.error });
+    return finish('failed', { error: loop.error, ...(loop.capBreach ? { capBreach: loop.capBreach } : {}) });
   }
 
   // ADR 0150 — a SENSITIVE tool the firewall held for approval (the RUN lane has
@@ -1660,6 +1827,14 @@ async function runToolLoop(
         ...(loop.finalText ? { text: loop.finalText } : {}),
       },
     });
+  }
+
+  // ADR 1001 D1 — the turn stopped to ask a person. Nothing is final yet, so
+  // the §F/§D/verifier tail and the turn summary are skipped; the node
+  // checkpoints and suspends, and the continuation runs the tail.
+  if (loop.pendingClarification) {
+    events.push({ type: 'agent.decided', agentId: agent.agentId, decision: 'escalate', reason: 'awaiting_input' });
+    return finish('escalated', { clarification: loop.pendingClarification });
   }
 
   // XCH-DISP-1 — a tool-using turn is never sent a `responseSchema` (the tools
@@ -1697,7 +1872,10 @@ async function runToolLoop(
     return finish('escalated', { confidence });
   }
   events.push({ type: 'agent.decided', agentId: agent.agentId, decision: 'final', confidence });
-  await persistTurnSummary(agent, req, deps, result, initial.consumedUntrusted);
+  // ADR 1001 review H4 — a continuation's result was shaped by a person's answer
+  // (anyone with approvals:respond, for an unrestricted ask): the summary is
+  // untrusted-derived, so it is recalled fenced, never as trusted memory.
+  await persistTurnSummary(agent, req, deps, result, initial.consumedUntrusted || !!req.resumeFrom);
   return finish('completed', { confidence, result });
 }
 

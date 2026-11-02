@@ -9,6 +9,11 @@
  *
  * Leg 3 is the one the review insisted on: a chain-only value would have been INVISIBLE to
  * the submitter surface, which reads the row and never the chain, making the fix decorative.
+ *
+ * TST-BZA-11 (grade-tests w66). Red when: the chain `outcome` ignores `chainOutcome`
+ * (leg 1), relabels every rejection as superseded (leg 2), or the row-level `superseded`
+ * marker is dropped (leg 3). The outcome is asserted as a parsed field, not a substring —
+ * the note text also contains the word.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -20,9 +25,9 @@ const T = 'tSupersede';
 
 const queue = async (pageId: string): Promise<string> => {
   const a = await createContentApproval({
-    tenantId: T, orgId: 'org-1', pageId, slug: pageId, title: `Page ${pageId}`,
-    proposal: `Publish CMS page "${pageId}"`, requestedBy: 'u-author',
-  } as never);
+    tenantId: T, orgId: 'org-1', pageId, pageTitle: `Page ${pageId}`,
+    proposal: `Publish CMS page "${pageId}"`,
+  });
   return a.approvalId;
 };
 
@@ -42,7 +47,9 @@ describe('ADR 0672 D3 — superseded is not rejected', () => {
     const chain = await listChain(T);
     const entry = chain.find((e) => JSON.stringify(e).includes(id));
     expect(entry, 'the decision must reach the chain at all').toBeTruthy();
-    expect(JSON.stringify(entry), 'the chain must not say the review was REJECTED').toContain('superseded');
+    const json = JSON.stringify(entry);
+    expect(json, 'the chain records the supersession as the OUTCOME').toContain('"outcome":"superseded"');
+    expect(json, 'the chain must not say the review was REJECTED').not.toContain('"outcome":"rejected"');
   });
 
   it('leg 2: a REAL rejection still records `rejected` — the fix is not a blanket relabel', async () => {

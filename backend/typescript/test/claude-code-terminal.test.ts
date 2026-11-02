@@ -6,6 +6,14 @@
  * attaches with a ticket and gets the replay, then live bytes; its keystrokes
  * reach the device; revoking the device closes its socket. Plus every refusal
  * the upgrade boundary owes (D4 items 1–5).
+ *
+ * TST-CFA-5. Red when: a device upgrade carrying an Origin is admitted; a device
+ * may report for a session that is not its own; the heartbeat stops re-asking
+ * whether the key's issuer is live (ADR 0833 D1/S11); the viewer ticket's HMAC or
+ * session binding is not checked; the ticket route stops checking the caller owns
+ * the session; the operator gate is dropped; the launch prompt is stored on the
+ * row; a revoke stops closing the socket; an offline device is not refused; exit
+ * stops marking the session exited.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -44,13 +52,24 @@ beforeEach(async () => {
 });
 afterEach(() => { delete process.env[CLAUDE_CODE_OPERATOR_ENV]; });
 
-interface Res { status: number; body: any }
+interface TermBody {
+  user?: { userId: string }; userId?: string;
+  userCode?: string; deviceCode?: string; token?: string; deviceId?: string;
+  devices?: Array<{ online?: boolean }>;
+  terminal?: { sessionId: string };
+  terminals?: Array<{ sessionId: string; status: string; exitCode?: number | null }>;
+  ticket?: string; path?: string;
+  error?: string; message?: string;
+}
+interface Res { status: number; body: TermBody }
+type Msg = { type: string; sessionId?: string; viewerId?: string; [k: string]: unknown };
 function client() {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    const parsed = (res.status === 204 ? {} : await res.json().catch(() => ({}))) as TermBody;
+    return { status: res.status, body: parsed };
   };
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b), del: (p: string) => call('DELETE', p) };
 }
@@ -74,14 +93,14 @@ async function pairDevice(owner: Awaited<ReturnType<typeof person>>) {
 /** A socket plus a queue of what it received, and a helper to await the next matching message. */
 function open(url: string, headers: Record<string, string> = {}) {
   const ws = new WebSocket(url, { headers });
-  const json: any[] = []; const bin: Buffer[] = [];
-  const waiters: { pred: (m: any) => boolean; resolve: (m: any) => void }[] = [];
+  const json: Msg[] = []; const bin: Buffer[] = [];
+  const waiters: { pred: (m: Msg) => boolean; resolve: (m: Msg) => void }[] = [];
   ws.on('message', (data, isBinary) => {
     if (isBinary) { bin.push(Buffer.from(data as Buffer)); return; }
-    const m = JSON.parse(String(data)); json.push(m);
+    const m = JSON.parse(String(data)) as Msg; json.push(m);
     for (const w of [...waiters]) if (w.pred(m)) { waiters.splice(waiters.indexOf(w), 1); w.resolve(m); }
   });
-  const next = (pred: (m: any) => boolean, ms = 3000) => new Promise<any>((resolve, reject) => {
+  const next = (pred: (m: Msg) => boolean, ms = 3000) => new Promise<Msg>((resolve, reject) => {
     const hit = json.find(pred); if (hit) { resolve(hit); return; }
     const t = setTimeout(() => reject(new Error('timed out waiting for a message')), ms);
     waiters.push({ pred, resolve: (m) => { clearTimeout(t); resolve(m); } });
@@ -112,11 +131,11 @@ describe('ADR 0785 P2 — terminal over real sockets', () => {
     const device = open(`${WS}/host/openwop-app/claude-code/device`, { authorization: `Bearer ${token}` });
     await device.opened;
     await device.next((m) => m.type === 'hello');
-    expect((await owner.c.get(`${BASE_PATH}/devices`)).body.devices[0].online).toBe(true);
+    expect((await owner.c.get(`${BASE_PATH}/devices`)).body.devices?.[0]?.online).toBe(true);
 
     const created = await owner.c.post(`${BASE_PATH}/terminals`, { deviceId, cols: 100, rows: 30, prompt: 'read workflow wf_1 over MCP', approveFromAnywhere: true });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
-    const sessionId = created.body.terminal.sessionId as string;
+    const sessionId = created.body.terminal?.sessionId as string;
     const openMsg = await device.next((m) => m.type === 'open');
     expect(openMsg).toMatchObject({ sessionId, cols: 100, rows: 30, prompt: 'read workflow wf_1 over MCP', approveFromAnywhere: true });
     expect(JSON.stringify(created.body)).not.toContain('read workflow'); // the prompt is never stored on the row
@@ -126,7 +145,7 @@ describe('ADR 0785 P2 — terminal over real sockets', () => {
 
     const t = await owner.c.post(`${BASE_PATH}/terminals/${sessionId}/ticket`);
     expect(t.status).toBe(200);
-    const viewer = open(`${WS}${t.body.path}?ticket=${encodeURIComponent(t.body.ticket)}`, { origin: 'http://localhost:5173' });
+    const viewer = open(`${WS}${t.body.path}?ticket=${encodeURIComponent(t.body.ticket ?? '')}`, { origin: 'http://localhost:5173' });
     await viewer.opened;
     const attach = await device.next((m) => m.type === 'attach' && m.sessionId === sessionId);
     device.ws.send(JSON.stringify({ type: 'replay', sessionId, viewerId: attach.viewerId, data: b64('welcome\r\n') }));
@@ -142,7 +161,7 @@ describe('ADR 0785 P2 — terminal over real sockets', () => {
     device.ws.send(JSON.stringify({ type: 'exit', sessionId, code: 0, requested: false }));
     expect(await viewer.next((m) => m.type === 'exit')).toEqual({ type: 'exit', code: 0, requested: false });
     await new Promise((r) => setTimeout(r, 50));
-    expect((await owner.c.get(`${BASE_PATH}/terminals`)).body.terminals[0]).toMatchObject({ sessionId, status: 'exited', exitCode: 0 });
+    expect((await owner.c.get(`${BASE_PATH}/terminals`)).body.terminals?.[0]).toMatchObject({ sessionId, status: 'exited', exitCode: 0 });
 
     // Revoking the device closes its live socket.
     await owner.c.del(`${BASE_PATH}/devices/${deviceId}`);
@@ -174,11 +193,12 @@ describe('ADR 0785 P2 — terminal over real sockets', () => {
     const devB = open(`${WS}/host/openwop-app/claude-code/device`, { authorization: `Bearer ${db.token}` });
     await devA.opened; await devB.opened;
     await devA.next((m) => m.type === 'hello'); await devB.next((m) => m.type === 'hello');
-    const sA = (await a.c.post(`${BASE_PATH}/terminals`, { deviceId: da.deviceId })).body.terminal.sessionId;
+    const sA = (await a.c.post(`${BASE_PATH}/terminals`, { deviceId: da.deviceId })).body.terminal?.sessionId ?? '';
     // Device B forges an exit for A's session: ignored.
     devB.ws.send(JSON.stringify({ type: 'exit', sessionId: sA, code: 9, requested: false }));
     await new Promise((r) => setTimeout(r, 100));
-    expect((await a.c.get(`${BASE_PATH}/terminals`)).body.terminals[0].status).not.toBe('exited');
+    // Exactly 'opening': A's device never sent `opened`, and B's forged exit must not land.
+    expect((await a.c.get(`${BASE_PATH}/terminals`)).body.terminals?.[0]?.status).toBe('opening');
     devA.ws.close(); devB.ws.close();
   });
 
@@ -192,10 +212,18 @@ describe('ADR 0785 P2 — terminal over real sockets', () => {
 
     const device = open(dev, { authorization: `Bearer ${token}` });
     await device.opened; await device.next((m) => m.type === 'hello');
-    const sessionId = (await owner.c.post(`${BASE_PATH}/terminals`, { deviceId })).body.terminal.sessionId;
+    const sessionId = (await owner.c.post(`${BASE_PATH}/terminals`, { deviceId })).body.terminal?.sessionId ?? '';
     const viewerUrl = `${WS}/host/openwop-app/claude-code/terminal/${sessionId}`;
     expect(await refused(viewerUrl, { origin: 'http://localhost:5173' })).toBe(401);                       // no ticket
-    expect(await refused(`${viewerUrl}?ticket=forged.sig`, { origin: 'http://localhost:5173' })).toBe(401); // forged
+    expect(await refused(`${viewerUrl}?ticket=forged.sig`, { origin: 'http://localhost:5173' })).toBe(401); // unparseable
+    // A REAL ticket with its signature altered: only the HMAC compare can refuse it.
+    const real = (await owner.c.post(`${BASE_PATH}/terminals/${sessionId}/ticket`)).body.ticket ?? '';
+    const [payload, sig] = real.split('.');
+    const tampered = `${payload}.${sig!.slice(0, -2)}${sig!.endsWith('AA') ? 'BB' : 'AA'}`;
+    expect(await refused(`${viewerUrl}?ticket=${encodeURIComponent(tampered)}`, { origin: 'http://localhost:5173' })).toBe(401);
+    // A valid ticket minted for THIS session, presented at ANOTHER session's URL.
+    const other2 = (await owner.c.post(`${BASE_PATH}/terminals`, { deviceId })).body.terminal?.sessionId ?? '';
+    expect(await refused(`${WS}/host/openwop-app/claude-code/terminal/${other2}?ticket=${encodeURIComponent(real)}`, { origin: 'http://localhost:5173' })).toBe(401);
     const other = await person();
     expect((await other.c.post(`${BASE_PATH}/terminals/${sessionId}/ticket`)).status).toBe(404);          // not yours
 
@@ -228,17 +256,17 @@ describe('ADR 0785 P2 — the REAL companion daemon against the real server', ()
     };
     const daemon = new AgentHostDaemon({ apiRoot: BASE, token, root: '/tmp/repo', ptyFactory, WebSocketImpl: globalThis.WebSocket, command: 'claude' });
     daemon.start();
-    for (let i = 0; i < 50 && !(await owner.c.get(`${BASE_PATH}/devices`)).body.devices[0]?.online; i += 1) await new Promise((r) => setTimeout(r, 40));
+    for (let i = 0; i < 50 && !(await owner.c.get(`${BASE_PATH}/devices`)).body.devices?.[0]?.online; i += 1) await new Promise((r) => setTimeout(r, 40));
 
     const created = await owner.c.post(`${BASE_PATH}/terminals`, { deviceId, prompt: 'fix the failing test' });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
-    const sessionId = created.body.terminal.sessionId as string;
+    const sessionId = created.body.terminal?.sessionId as string;
     for (let i = 0; i < 50 && spawned.length === 0; i += 1) await new Promise((r) => setTimeout(r, 20));
     expect(spawned[0]).toMatchObject({ command: 'claude', args: ['fix the failing test'], cwd: '/tmp/repo' });
 
     await new Promise((r) => setTimeout(r, 60)); // the prompt output lands before anyone watches
     const t = await owner.c.post(`${BASE_PATH}/terminals/${sessionId}/ticket`);
-    const viewer = open(`${WS}${t.body.path}?ticket=${encodeURIComponent(t.body.ticket)}`, { origin: 'http://localhost:5173' });
+    const viewer = open(`${WS}${t.body.path}?ticket=${encodeURIComponent(t.body.ticket ?? '')}`, { origin: 'http://localhost:5173' });
     await viewer.opened;
     await new Promise((r) => setTimeout(r, 100));
     expect(viewer.text()).toBe('claude> '); // arrived via REPLAY, exactly once

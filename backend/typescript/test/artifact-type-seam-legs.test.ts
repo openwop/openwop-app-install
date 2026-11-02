@@ -17,6 +17,10 @@
  *
  * Asserting the same properties at the loader is not the same as running them
  * through the path the suite drives. That distinction is the whole finding.
+ *
+ * TST-BZD-22 (grade-tests w66). Red when the canonical-manifest validator is skipped (leg 5),
+ * `registered` is read from the global registry (finding 2), or the projection stops
+ * deriving `displayName` from this install.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';

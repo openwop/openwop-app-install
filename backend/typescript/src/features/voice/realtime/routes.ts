@@ -239,7 +239,7 @@ export function registerRealtimeRoutes(deps: RouteDeps): void {
       const agentVoice = await resolveAgentVoice(tenantId, agentId);
       // RT-2: the agent's allowlisted tools become the realtime session's function declarations.
       // The model may call them; the host bridge (POST …/tool-call) enforces allowlist + firewall.
-      const tools = await resolveAgentToolDecls(tenantId, agentId);
+      const tools = await resolveAgentToolDecls(tenantId, agentId, sessionConversationId);
 
       try {
         const session = await realtimeProvider(config.provider).createSession({
@@ -332,7 +332,7 @@ export function registerRealtimeRoutes(deps: RouteDeps): void {
       // block and then SPEAKS). Refuse before any provider token is minted.
       if (conveneRefusal) throw new OpenwopError('validation_error', conveneRefusal, 422, { field: 'livingPersonaAck' });
       const wireTool = (t: RealtimeToolDecl): Record<string, unknown> => ({ type: 'function', name: t.name, description: t.description, parameters: t.parameters });
-      const agentTools = (await resolveAgentToolDecls(tenantId, agentId)).map(wireTool);
+      const agentTools = (await resolveAgentToolDecls(tenantId, agentId, conversationId)).map(wireTool);
       // ADR 0304 D1 — spoken delegation: an agent-scoped session with at least one OTHER
       // enabled roster agent gets the session-control delegate tool. OpenAI-realtime ONLY
       // (this route): the sideband can re-instruct/re-voice the live session; Gemini's
@@ -359,7 +359,7 @@ export function registerRealtimeRoutes(deps: RouteDeps): void {
               }).catch(() => null);
               if (!composed) return null;
               const targetVoice = await resolveAgentVoice(tenantId, targetId).catch(() => null);
-              const targetTools = (await resolveAgentToolDecls(tenantId, targetId).catch(() => [] as RealtimeToolDecl[])).map(wireTool);
+              const targetTools = (await resolveAgentToolDecls(tenantId, targetId, conversationId).catch(() => [] as RealtimeToolDecl[])).map(wireTool);
               return {
                 agentId: targetId,
                 instructions: composed.instructions,

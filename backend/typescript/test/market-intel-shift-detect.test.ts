@@ -2,9 +2,11 @@
  * ADR 0174 — market-intel.shift-detect node: a deterministic diff of two prior
  * market-research result sets → a MarketShiftAlert. Pure (no ctx.callAI), so it is
  * tested directly with in-memory inputs. Replay-safe by construction.
+ *
+ * Red if the pain-set diff, the 0.15 confidence threshold, the angle delta or the
+ * summary changes; the determinism case reds on any clock/random use (replay).
  */
 import { describe, it, expect } from 'vitest';
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 import { nodes } from '../../../packs/vendor.myndhyve.market-intel-shift-detect/index.mjs';
 
 interface Alert {
@@ -36,14 +38,16 @@ describe('market-intel.shift-detect', () => {
     expect(out.outputs.alert.hasShift).toBe(true);
     expect(out.outputs.alert.newPains.map((p: { quote: string }) => p.quote)).toContain('setup takes forever');
     expect(out.outputs.alert.resolvedPains.map((p: { quote: string }) => p.quote)).toContain('billing is confusing');
-    expect(out.outputs.alert.summary).toMatch(/new pain point/);
+    expect(out.outputs.alert.summary).toBe('Market shift detected: 1 new pain point(s), 1 resolved.');
   });
 
   it('detects intensifying pains (confidence delta) + angle-score deltas', async () => {
-    const prev = { records: [{ quote: 'price too high', tagType: 'objection', confidence: 0.5 }], angles: [{ id: 'value', score: 0.4 }] };
-    const curr = { records: [{ quote: 'price too high', tagType: 'objection', confidence: 0.8 }], angles: [{ id: 'value', score: 0.75 }] };
+    // `support slow` rises by 0.1 — under the 0.15 threshold, so it must NOT intensify.
+    const prev = { records: [{ quote: 'price too high', tagType: 'objection', confidence: 0.5 }, { quote: 'support slow', tagType: 'pain', confidence: 0.5 }], angles: [{ id: 'value', score: 0.4 }] };
+    const curr = { records: [{ quote: 'price too high', tagType: 'objection', confidence: 0.8 }, { quote: 'support slow', tagType: 'pain', confidence: 0.6 }], angles: [{ id: 'value', score: 0.75 }] };
     const out = await run(prev, curr);
     expect(out.outputs.alert.intensifiedPains).toHaveLength(1);
+    expect(out.outputs.alert.intensifiedPains[0].quote).toBe('price too high');
     expect(out.outputs.alert.intensifiedPains[0].delta).toBeCloseTo(0.3, 5);
     expect(out.outputs.alert.angleDeltas[0]).toMatchObject({ angle: 'value', delta: expect.closeTo(0.35, 5) });
     expect(out.outputs.alert.hasShift).toBe(true);

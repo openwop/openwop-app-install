@@ -779,6 +779,10 @@ sources, residency, purpose-propagation).
 - **Source conflict:** when MyndHyve's FEATURES.md and this app's reality disagree,
   the openwop-app architecture wins — this is a *port*, not a clone.
 
+## Future: email approvals
+
+**To consider, not scheduled.** ADR 1009 stops capability links from deciding an approval in a run that read untrusted content, so those people must open the app. We need a new solution for email approvals that keeps the convenience of acting from an inbox without trusting link possession alone. It should cover proving who is deciding, showing what is being approved, and the send-approval flow (ADR 0862).
+
 ## Gap-sweep 2026-07 slate (ADRs 0416–0418)
 
 Sourced by `docs/steward/GAP-SWEEP-2026-07.md` (post-port market-baseline pass) + the

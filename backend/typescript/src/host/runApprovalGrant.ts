@@ -25,27 +25,31 @@ const log = createLogger('host.runApprovalGrant');
 
 export type RunApprovalGrant = (req: Request, run: RunRecord) => Promise<boolean>;
 
-const grants = new Map<string, RunApprovalGrant>();
+/** ADR 0975 D11 — NAMED grants, several per workflow id (see `runStartGrant.ts`). */
+const grants = new Map<string, Map<string, RunApprovalGrant>>();
 
-/** Register the decider predicate for approval gates on runs of `workflowIds`.
- *  One owner per workflow id: a second registration for the same id is a boot bug. */
-export function registerRunApprovalGrant(workflowIds: readonly string[], grant: RunApprovalGrant): void {
+/** Register the decider predicate `name` for approval gates on runs of `workflowIds`.
+ *  A second, different predicate under the same name is a boot bug. */
+export function registerRunApprovalGrant(workflowIds: readonly string[], name: string, grant: RunApprovalGrant): void {
   for (const id of workflowIds) {
-    if (grants.has(id) && grants.get(id) !== grant) throw new Error(`run approval grant for ${id} is already registered`);
-    grants.set(id, grant);
+    const named = grants.get(id) ?? new Map<string, RunApprovalGrant>();
+    if (named.has(name) && named.get(name) !== grant) throw new Error(`run approval grant ${name} for ${id} is already registered`);
+    named.set(name, grant);
+    grants.set(id, named);
   }
 }
 
-/** Does a registered grant admit this caller as a decider on `run`'s gates? */
+/** Does any registered grant admit this caller as a decider on `run`'s gates?
+ *  A grant that throws refuses; the next is still asked. */
 export async function holdsRunApprovalGrant(req: Request, run: RunRecord): Promise<boolean> {
-  const grant = grants.get(run.workflowId);
-  if (!grant) return false;
-  try {
-    return (await grant(req, run)) === true;
-  } catch (err) {
-    log.warn('run_approval_grant_failed', { workflowId: run.workflowId, error: err instanceof Error ? err.message : String(err) });
-    return false;
+  for (const [name, grant] of grants.get(run.workflowId) ?? []) {
+    try {
+      if ((await grant(req, run)) === true) return true;
+    } catch (err) {
+      log.warn('run_approval_grant_failed', { workflowId: run.workflowId, grant: name, error: err instanceof Error ? err.message : String(err) });
+    }
   }
+  return false;
 }
 
 /** Test seam: forget every registration. */

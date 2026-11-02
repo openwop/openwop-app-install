@@ -53,7 +53,12 @@ async function precacheCurrentVersion() {
       // The ** rewrite answers a missing file with 200 text/html; never store that
       // under a script, style or asset name (D6: never HTML for a script).
       if (url !== OFFLINE.shellUrl && isHtml(response)) throw new Error(`${url}: answered with HTML`);
-      return [url, response];
+      // Read the body as it arrives (OFF-PROD-1). Over HTTP/2 every request shares
+      // one connection, and an unread body holds its share of the flow-control
+      // window: holding all of them unread until the last arrived stalled install
+      // on a real CDN. Buffering keeps D6's all-or-nothing store below.
+      const body = await response.blob();
+      return [url, new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers })];
     }));
     for (const [url, response] of entries) {
       if (url !== OFFLINE.shellUrl) await cache.put(url, response);

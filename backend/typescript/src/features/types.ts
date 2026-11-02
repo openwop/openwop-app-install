@@ -108,6 +108,15 @@ export interface BackendFeature {
     id: string;
     /** Human label for the org row. */
     name: string;
+    /**
+     * ADR 0975 D12 — the agent a NEW chat in this workspace opens scoped to, when
+     * nothing else names one (no `?agent=` link, no `@mention`). The SPA reads it
+     * from `/me/workspaces` and scopes the conversation exactly as `?agent=` does,
+     * so the start carries `metadata.agentScope`. It grants nothing: whether a
+     * member may chat with this agent is the feature's own run-start grant
+     * (KickTodo: `kickbotChatGrant.ts`, D11). The user can still switch agents.
+     */
+    chatAgent?: string;
   };
   /** Packs this feature ships, installed via the existing pipeline (ADR §2.4).
    *  NAMES only: each one's version lives in `features/packPins.ts` (ADR 0919),

@@ -54,7 +54,7 @@ export function ProfileSchedulesTab({ workflows }: { workflows: string[] }): JSX
           <Trans
             t={t}
             i18nKey="schedulesNoWorkflowsHint"
-            components={{ 0: <Link to="/profile?tab=workflows" /> }}
+            components={[<Link to="/profile?tab=workflows" />]}
           />
         ),
       }}

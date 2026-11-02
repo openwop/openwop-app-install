@@ -7,10 +7,20 @@
  *
  * The window is forced deterministically with the before-pin test hook.
  *
- * Sabotage-witnessed: dropping the approved-hash compare in `holdTemplateForSend`
- * reds both cases (the edited template is delivered).
+ * Sabotage-witnessed (w73, measured): dropping the approved-hash compare in
+ * `holdTemplateForSend` reds case 2 only, through its draft/closed assert (the
+ * refusal itself still happens: pinSend's live-pin check throws approval_stale but
+ * does not return the campaign to draft). Dropping the `returnToDraft` in pinSend's
+ * catch also reds case 2.
+ *
+ * Case 1 is a DOUBLE GUARD: the hash compare above AND pinSend's approved-review
+ * identity check (`sameReview` — the normal edit's own `invalidateSendReviews`
+ * already closed the review, so the CAS loop refuses with approval_stale). Either
+ * one alone keeps case 1 green. The one edit that breaks both is to blank
+ * `approvedPin` at the top of `pinSend`: case 1 then refuses with `send_changed`
+ * instead (its reason assert reds), and case 2 delivers the edited template.
  */
-import { afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
@@ -35,8 +45,9 @@ beforeAll(async () => {
   await setSenderAddress(T, ORG, 'sender@acme.test', 'owner');
   await createContact({ tenantId: T, name: 'A', email: 'a@x.com', stage: 'lead' });
   const d = getToggleDefault('email-approval-gate'); if (d) await saveConfig({ ...d, status: 'on' }, 'test');
-});
+}, 120_000);
 afterEach(() => { __setBeforePinHookForTests(null); });
+afterAll(async () => { const d = getToggleDefault('email-approval-gate'); if (d) await saveConfig(d, 'test'); }); // back to the shipped default
 
 async function approved(): Promise<{ templateId: string; campaignId: string; approvalId: string }> {
   const tpl = await createTemplate({ tenantId: T, orgId: ORG, name: 'N', subject: 'Approved subject', body: 'B', createdBy: 'editor' });
@@ -74,5 +85,7 @@ describe('approve → edit (in the pin window) → pinSend refuses', () => {
     // The approval row was already decided (approved); the CAMPAIGN loses it.
     expect(await getCampaign(T, ORG, campaignId)).toMatchObject({ status: 'draft', review: { approvalId, outcome: 'closed' } });
     expect((await getApproval(approvalId))?.status).toBe('approved');
+    // The refusal came before the hold: the template is not held for a send that never started.
+    expect((await raw.get(templateId))?.sendHold).toBeUndefined();
   });
 });

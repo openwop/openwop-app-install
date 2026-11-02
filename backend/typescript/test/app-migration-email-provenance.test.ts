@@ -10,6 +10,12 @@
  * and never touches a row that is already stamped or has no email. Idempotent,
  * per-row CAS, never throws. `source:'oidc'` is deliberately NOT 'idp' — the
  * OIDC lane never wrote an email before USERS-20.
+ *
+ * TST-BXB-6. Red when: scim stops mapping to 'idp' (w66 ep-idp), anon: rows stop
+ * reading as personal (ep-personal), a stamped or address-less row is
+ * re-derived (ep-stamped, ep-noemail), the per-row CAS becomes a blind write so
+ * concurrent runs both stamp (ep-cas), or migration 20 stops calling the
+ * backfill (ep-wire).
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';

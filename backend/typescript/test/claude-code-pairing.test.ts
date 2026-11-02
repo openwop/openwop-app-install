@@ -11,6 +11,14 @@
  *     minting keys is an escalation path) — only a human session can;
  *   - the key is returned exactly once, even to two racing polls;
  *   - the only public surface is `/pair/device/*`.
+ *
+ * TST-CFA-1. Red when: the poll's claim CAS becomes a blind `put` (same-tick
+ * case); the device scopes gain `approvals:respond`; `requireHuman` stops
+ * refusing a key principal; the consent-hash or key-ceiling check is dropped;
+ * the start limit keys on `req.ip` instead of `clientIp`; the operator gate or
+ * the toggle check is removed; revoke/list stop filtering by subject; revoking
+ * (or erasing) a device stops revoking its key; `/claude-code` becomes public;
+ * the 429 loses its `Retry-After`.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -53,7 +61,16 @@ beforeEach(async () => {
 });
 afterEach(() => { delete process.env[CLAUDE_CODE_OPERATOR_ENV]; });
 
-interface Res { status: number; body: any }
+interface PairBody {
+  status?: string; token?: string; deviceId?: string; tenantId?: string; interval?: number;
+  error?: string; message?: string; details?: { reason?: string };
+  user?: { userId: string };
+  request?: { label: string; requestedFrom: string; createdAt: string };
+  consent?: { quote: string }; consentHash?: string; workspaceId?: string;
+  devices?: Array<{ deviceId: string; label: string; status: string; keyId?: string }>;
+  deviceCode?: string; userCode?: string; expiresIn?: number; verificationPath?: string;
+}
+interface Res { status: number; body: PairBody }
 function client(bearer?: string) {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
@@ -67,7 +84,8 @@ function client(bearer?: string) {
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    const parsed = (res.status === 204 ? {} : await res.json().catch(() => ({}))) as PairBody;
+    return { status: res.status, body: parsed };
   };
   return {
     get: (p: string) => call('GET', p),
@@ -82,7 +100,7 @@ async function person(tenantId = `org:cc-${Date.now()}-${seq++}`) {
   const subject = `cc-user-${Date.now()}-${seq++}`;
   const r = await c.post('/host/openwop-app/test/login', { subject, tenantId, email: `${subject}@a.test` });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return { c, tenantId, userId: r.body.user.userId as string };
+  return { c, tenantId, userId: r.body.user?.userId as string };
 }
 
 /** A companion: no cookie, no identity — exactly what the public routes serve. */
@@ -142,17 +160,18 @@ describe('ADR 0785 P1 — pair → key → revoke', () => {
     // The approval page sees the device and the consent it binds to.
     const page = await owner.c.get(`${BASE_PATH}/pair/requests/${started.userCode.toLowerCase().replace('-', ' ')}`);
     expect(page.status, JSON.stringify(page.body)).toBe(200);
-    expect(page.body.request.label).toBe('work mac');
-    expect(page.body.consent.quote).toContain('Free, Pro, or Max plan credentials');
+    expect(page.body.request?.label).toBe('work mac');
+    expect(page.body.consent?.quote).toContain('Free, Pro, or Max plan credentials');
     expect(page.body.consentHash).toBe(consentHash());
     // Phishing context: where and when the request started, and which workspace it joins.
-    expect(typeof page.body.request.requestedFrom).toBe('string');
-    expect(Date.parse(page.body.request.createdAt)).toBeGreaterThan(0);
+    expect(page.body.request?.requestedFrom).toMatch(/127\.0\.0\.1/);
+    expect(Date.parse(page.body.request?.createdAt ?? '')).toBeGreaterThan(0);
     expect(page.body.workspaceId).toBe(owner.tenantId);
 
     // A stale consent hash is refused, never silently upgraded.
     const stale = await owner.c.post(`${BASE_PATH}/pair/requests/${started.userCode}/approve`, { consentHash: 'old' });
     expect(stale.status).toBe(409);
+    expect(stale.body.details?.reason).toBe('consent_outdated');
 
     expect((await owner.c.post(`${BASE_PATH}/pair/requests/${started.userCode}/approve`, { consentHash: consentHash() })).status).toBe(204);
 
@@ -174,14 +193,14 @@ describe('ADR 0785 P1 — pair → key → revoke', () => {
 
     const listed = await owner.c.get(`${BASE_PATH}/devices`);
     expect(listed.body.devices).toHaveLength(1);
-    expect(listed.body.devices[0]).toMatchObject({ deviceId: polled.body.deviceId, label: 'work mac', status: 'active' });
-    expect(listed.body.devices[0].keyId).toBeUndefined();
+    expect(listed.body.devices?.[0]).toMatchObject({ deviceId: polled.body.deviceId, label: 'work mac', status: 'active' });
+    expect(listed.body.devices?.[0]?.keyId).toBeUndefined();
 
     expect((await owner.c.del(`${BASE_PATH}/devices/${polled.body.deviceId}`)).status).toBe(204);
     expect(await verifyApiKey(token)).toBeNull();
     const afterRevoke = await client(token).get('/host/openwop-app/developer-keys');
     expect(afterRevoke.status).toBe(401);
-    expect((await owner.c.get(`${BASE_PATH}/devices`)).body.devices[0].status).toBe('revoked');
+    expect((await owner.c.get(`${BASE_PATH}/devices`)).body.devices?.[0]?.status).toBe('revoked');
   });
 
   it('deny ⇒ the companion is told so, and gets no key', async () => {
@@ -240,8 +259,9 @@ describe('ADR 0785 P1 — only a human session holds pairing authority', () => {
 
   it('an anonymous visitor cannot approve', async () => {
     const started = await startPairing();
+    // An anonymous caller is refused by `middleware/auth.ts` before `requireHuman`
+    // runs: this is the boundary claim, not the route's own 401.
     const anon = client();
-    await anon.get('/host/openwop-app/health').catch(() => undefined);
     expect((await anon.post(`${BASE_PATH}/pair/requests/${started.userCode}/approve`, { consentHash: consentHash() })).status).toBe(401);
   });
 
@@ -286,16 +306,24 @@ describe('ADR 0785 P1 — abuse bounds + erasure', () => {
     const started = await startPairing('full');
     const r = await owner.c.post(`${BASE_PATH}/pair/requests/${started.userCode}/approve`, { consentHash: consentHash() });
     expect(r.status).toBe(409);
-    expect(r.body.details?.reason ?? r.body.reason).toBe('key_limit');
+    expect(r.body.error).toBe('conflict');
+    expect(r.body.details?.reason).toBe('key_limit');
     // …and the pairing is still pending, so it can be approved after a revoke.
     expect((await companion().post(`${BASE_PATH}/pair/device/poll`, { deviceCode: started.deviceCode })).body.status).toBe('pending');
   });
 
-  it('rate-limits pairing starts per address', async () => {
+  // The count itself is shared with the X-Forwarded-For case above (both red when
+  // STARTS_PER_WINDOW moves); this case owns the refusal's SHAPE: a typed
+  // `rate_limited` envelope plus the `Retry-After` a companion backs off on.
+  it('rate-limits pairing starts per address, with a Retry-After the companion can honour', async () => {
     const statuses: number[] = [];
-    for (let i = 0; i < 11; i += 1) statuses.push((await companion().post(`${BASE_PATH}/pair/device/start`, { label: `n${i}` })).status);
-    expect(statuses.slice(0, 10).every((s) => s === 201)).toBe(true);
-    expect(statuses[10]).toBe(429);
+    for (let i = 0; i < 10; i += 1) statuses.push((await companion().post(`${BASE_PATH}/pair/device/start`, { label: `n${i}` })).status);
+    expect(statuses.every((s) => s === 201)).toBe(true);
+    const eleventh = await fetch(`${BASE}${BASE_PATH}/pair/device/start`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ label: 'n10' }) });
+    expect(eleventh.status).toBe(429);
+    expect(eleventh.headers.get('retry-after')).toBe('600');
+    const body = (await eleventh.json()) as PairBody;
+    expect(body.error).toBe('rate_limited');
   });
 
   it('the DSAR eraser removes the subject\'s devices and revokes their keys', async () => {
@@ -336,7 +364,7 @@ describe('ADR 0785 P1 — the real companion against the real routes', () => {
     expect(result.status).toBe('approved');
     expect(await verifyApiKey(result.token!)).toBeTruthy();
     const listed = await owner.c.get(`${BASE_PATH}/devices`);
-    expect(listed.body.devices.map((d: { label: string }) => d.label)).toEqual(['companion e2e']);
+    expect((listed.body.devices ?? []).map((d) => d.label)).toEqual(['companion e2e']);
   });
 });
 

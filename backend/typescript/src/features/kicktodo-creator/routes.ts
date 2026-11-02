@@ -448,7 +448,8 @@ export async function factoryRunApprovalGrant(req: Request, run: RunRecord): Pro
  * Any other conversation, agent, or someone else's run still needs the
  * tenant-wide scopes.
  */
-const CHALLENGE_AUTHOR_CHAT_GRANT = 'kicktodo-challenge-author';
+export const CHALLENGE_AUTHOR_CHAT_GRANT = 'kicktodo-challenge-author';
+export const FACTORY_RUN_GRANT = 'kicktodo-factory-run';
 
 export async function challengeAuthorChatStartGrant(req: Request, start: RunStartRequest): Promise<RunStartStamp | null> {
   if (start.metadata.agentScope !== CHALLENGE_AUTHOR_AGENT_ID) return null;
@@ -468,9 +469,9 @@ export async function challengeAuthorChatTurnGrant(req: Request, run: RunRecord)
 }
 
 export function registerKicktodoCreatorRoutes(deps: RouteDeps): void {
-  registerRunApprovalGrant([CHALLENGE_FACTORY_WORKFLOW_ID, LESSON_BATCH_WORKFLOW_ID], factoryRunApprovalGrant);
-  registerRunStartGrant([CONVERSATION_WORKFLOW_ID], challengeAuthorChatStartGrant);
-  registerRunApprovalGrant([CONVERSATION_WORKFLOW_ID], challengeAuthorChatTurnGrant);
+  registerRunApprovalGrant([CHALLENGE_FACTORY_WORKFLOW_ID, LESSON_BATCH_WORKFLOW_ID], FACTORY_RUN_GRANT, factoryRunApprovalGrant);
+  registerRunStartGrant([CONVERSATION_WORKFLOW_ID], CHALLENGE_AUTHOR_CHAT_GRANT, challengeAuthorChatStartGrant);
+  registerRunApprovalGrant([CONVERSATION_WORKFLOW_ID], CHALLENGE_AUTHOR_CHAT_GRANT, challengeAuthorChatTurnGrant);
   // KTFULL-B2 (approvals-side half) — the OWNER states who may decide a
   // `challenge-publish` approval on the GENERIC decision lane (approvals routes,
   // review cards, decide-by-email): the decider must hold the SAME
@@ -493,7 +494,10 @@ export function registerKicktodoCreatorRoutes(deps: RouteDeps): void {
     if (submitter && decidedBy === submitter && !(await operatorSelfApprovalActivation(tenantId, decidedBy))) {
       throw new OpenwopError('forbidden', 'A challenge publication must be decided by someone other than the submitter (separation of duties).', 403, {});
     }
-  });
+  // ADR 0910 D11 correction — this check IS who decides a publication. Without
+  // the flag, `/reviews` also demanded `approvals:respond`, which the activation
+  // role does not carry, so a live operator was refused their own publication.
+  }, { decidesAuthority: true });
   const app: Express = deps.app;
   const wrap = (h: Handler) => async (req: Request, res: Response, next: NextFunction) => {
     try {

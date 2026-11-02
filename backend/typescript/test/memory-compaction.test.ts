@@ -66,7 +66,10 @@ describe('RFC 0012 — compactMemory', () => {
     const result = (await compactMemory(TENANT, ref))!;
     expect(result.outputContent).not.toContain('[BYOK:hk_live_canary_42]');
     expect(result.outputContent).not.toContain('<REDACTED:db-prod-creds>');
-    expect(result.outputContent).toMatch(/\[REDACTED:[^\]]+\]/);
+    // BOTH canonical tokens, exactly: a `/\[REDACTED:…\]/` match is satisfied by
+    // either one alone, so dropping one mapping stayed green (w72 probe).
+    expect(result.outputContent).toContain('[REDACTED:byok]');
+    expect(result.outputContent).toContain('[REDACTED:db-prod-creds]');
   });
 });
 

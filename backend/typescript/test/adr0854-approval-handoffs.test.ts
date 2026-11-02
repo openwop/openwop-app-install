@@ -79,7 +79,7 @@ async function setup() {
   });
   const now = new Date().toISOString();
   const run: RunRecord = { runId: `run-ah-${n++}`, workflowId: wf, tenantId, status: 'pending', inputs: {}, metadata: { approverOrgId: orgId }, configurable: {}, createdAt: now, updatedAt: now };
-  await insertRunWithStartContext(storage, run);
+  await insertRunWithStartContext(storage, run, { admission: { plan: 'exempt:test-fixture' } });
   const def = (await hostSuite.workflowCatalog.getWorkflow(wf))!.definition;
   expect((await executeRun(storage, (await storage.getRun(run.runId))!, def)).status.startsWith('waiting')).toBe(true);
   const [it] = await storage.listOpenInterrupts(run.runId);

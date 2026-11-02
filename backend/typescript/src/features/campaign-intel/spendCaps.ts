@@ -29,12 +29,12 @@ import { createHash, randomUUID } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { onCampaignDeleted } from '../../host/campaignLifecycle.js';
 import { createLogger } from '../../observability/logger.js';
-import { getNotificationEmitter } from '../../notifications/emitter.js';
+import { emitToOrg } from './orgAlerts.js';
 import { currencyExponent, minorToMajor } from '../../host/currencyUnits.js';
 import { OpenwopError } from '../../types.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
 import { adsReaderEnabled } from '../../host/adsWire.js';
-import { listTenantDispatchRecords, type AdPlatform, type AdsAdapter, type AdsCapVerdict, type DispatchLedgerRow } from '../../host/adsAdapter.js';
+import { dispatchBelongsToCampaign, dispatchBelongsToOrg, listTenantDispatchRecords, type AdPlatform, type AdsAdapter, type AdsCapVerdict, type DispatchLedgerRow } from '../../host/adsAdapter.js';
 // Cross-feature READS (the documented pacing.ts precedent).
 import { getCampaign, listCampaigns } from '../campaign-orchestration/campaignService.js';
 import { getConnectorSettings } from '../campaign-connectors/syncService.js';
@@ -72,7 +72,10 @@ export interface SpendCap {
   updatedAt: string;
 }
 
-export interface CapTarget { platform: AdPlatform; adAccountId: string; campaignId: string; orgId?: string }
+/** `orgVerified`: the org is proven (a stamped ledger row, or an org-owned plan
+ *  target), not assumed from the caller's adapter. ADR 1022 D5a trusts only a
+ *  verified org to skip another org's unresolvable cap. */
+export interface CapTarget { platform: AdPlatform; adAccountId: string; campaignId: string; orgId?: string; orgVerified?: boolean }
 
 export interface CapState {
   key: string;
@@ -246,9 +249,7 @@ async function resolveTargets(cap: SpendCap, ledgerRows: readonly DispatchLedger
   const briefIds = new Set((await listCampaigns(cap.tenantId, cap.orgId)).map((c) => c.briefId));
   // A retired MarketingCampaign can still own active platform delivery. Keep
   // its stamped client account covered; current briefs are only a legacy join.
-  const rows = ledgerRows.filter((r) => r.campaignId !== undefined
-    ? r.orgId === cap.orgId
-    : r.briefId !== undefined && briefIds.has(r.briefId) && (r.orgId === undefined || r.orgId === cap.orgId));
+  const rows = ledgerRows.filter((r) => dispatchBelongsToOrg(r, cap.orgId, briefIds));
   const ledger = rows.map(asTarget).filter((t): t is CapTarget => t !== null);
   const configured: Array<{ platform: AdPlatform; adAccountId: string }> = [];
   for (const platform of CAP_PLATFORMS) {
@@ -415,8 +416,8 @@ async function notifyCap(cap: SpendCap, state: CapState, paused: number, pauseEr
     orgId: cap.orgId, capId: cap.capId, ...(cap.scope.kind === 'campaign' ? { campaignId: cap.scope.campaignId } : {}),
   });
   try {
-    await getNotificationEmitter().emit({
-      tenantId: cap.tenantId,
+    // ADR 1022 D8 — the client org's people, not the whole workspace.
+    await emitToOrg(cap.tenantId, cap.orgId, {
       type: 'campaign.spend-cap',
       priority: 'high',
       title: state.status === 'stale' ? 'Spend unreadable: campaigns paused' : 'Spend cap reached: campaigns paused',
@@ -424,7 +425,7 @@ async function notifyCap(cap: SpendCap, state: CapState, paused: number, pauseEr
       // ADR 0952 D4 — the actions that answer this alert; the first is the link.
       actionUrl: actions[0]?.url ?? `/campaigns?tab=campaign-intelligence&org=${encodeURIComponent(cap.orgId)}`,
       metadata: { capId: cap.capId, status: state.status, reason: state.status === 'stale' ? 'spend_unreadable' : 'cap_reached', paused, pauseErrors, actions },
-    });
+    }, { extraSubjects: [cap.createdBy] });
   } catch (e) {
     // The pause already happened; a lost notification must not undo it.
     log.warn('spend cap notification failed', { capId: cap.capId, error: e instanceof Error ? e.message : String(e) });
@@ -442,8 +443,10 @@ export interface PauseOutcome extends CapTarget { outcome: string; error?: strin
 export async function pauseMarketingCampaign(adapter: AdsAdapter, tenantId: string, orgId: string, campaignId: string): Promise<PauseOutcome[] | null> {
   const campaign = await getCampaign(tenantId, campaignId);
   if (!campaign || campaign.orgId !== orgId) return null;
+  // ADR 1022 (CP71WF-17) — the campaign's own rows, never another org's row
+  // that shares a brief id: the one campaign-ownership read.
   const targets = (await listTenantDispatchRecords(tenantId))
-    .filter((r) => r.briefId === campaign.briefId)
+    .filter((r) => dispatchBelongsToCampaign(r, orgId, campaign.id, campaign.briefId))
     .map(asTarget)
     .filter((t): t is CapTarget => t !== null);
   const out: PauseOutcome[] = [];
@@ -536,8 +539,17 @@ export async function hasEnforceableCap(tenantId: string, target: CapTarget): Pr
  *  covered"): every money check below shares this one answer. */
 async function coverage(observed: SpendCap, target: CapTarget, ledgerRows: readonly DispatchLedgerRow[]): Promise<{ targets: ResolvedTargets; accountCovered: boolean } | null> {
   const targets = await resolveTargets(observed, ledgerRows);
-  if (targets.error) throw new OpenwopError('conflict', 'Spend-cap coverage could not be resolved.', 409, { capId: observed.capId });
   const accountCovered = targets.accounts.some((a) => a.platform === target.platform && normAccount(a.adAccountId) === normAccount(target.adAccountId));
+  if (targets.error) {
+    // ADR 1022 D5a — an unresolvable cap is fail-closed for ITS OWN org and for
+    // an account it is known to cover. A broken cap in client B no longer
+    // refuses every launch and budget increase in client A.
+    if (target.orgVerified === true && target.orgId !== undefined && target.orgId !== observed.orgId && !accountCovered) {
+      log.warn('spend_cap_unresolvable_skipped_other_org', { tenantId: observed.tenantId, capId: observed.capId, error: targets.error });
+      return null;
+    }
+    throw new OpenwopError('conflict', 'Spend-cap coverage could not be resolved.', 409, { capId: observed.capId });
+  }
   const covered = observed.scope.kind === 'campaign' ? targets.ledger.some((x) => sameTarget(x, target)) : target.orgId === observed.orgId || accountCovered;
   return covered ? { targets, accountCovered } : null;
 }

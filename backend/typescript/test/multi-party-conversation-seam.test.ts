@@ -18,7 +18,13 @@
  * `not_found`, and the advertised cap is a ceiling the request cannot widen.
  *
  * RFC 0005 §E pins the error CODE, not the status, so these assert on
- * `error.code` exactly as the suite does.
+ * `error.code` exactly as the suite does — AND on the exact refusal message,
+ * because the refusals share that code. In particular the no-`speakerId` rule is
+ * a DOUBLE GUARD: the route's own `speakerId === undefined` check, and behind it
+ * `isParticipant(roster, undefined) === false`, which also refuses with
+ * `validation_error`. A code-only assertion cannot tell which one fired, so
+ * deleting the attribution check stayed green (grade-tests w72, w72g4-mpx-speaker).
+ * The message is what separates them.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -33,6 +39,7 @@ const ROSTER = [{ agentId: 'host:advisor-cfo' }, { agentId: 'host:advisor-cmo' }
 
 interface ErrBody {
   error?: string | { code?: string };
+  message?: string;
   accepted?: boolean;
   conversationId?: string;
 }
@@ -132,28 +139,41 @@ describe('RFC 0101 multi-party conversation seam', () => {
   it("rejects a role:'agent' turn with no speakerId (attribution MUST)", async () => {
     await open(ROSTER);
     const res = await exchange({ role: 'agent', content: 'Who said this?', turnIndex: 1 });
+    expect(res.status).toBe(422);
     expect(errCode(res.body)).toBe('validation_error');
+    expect(res.body.message).toBe("A role:'agent' turn MUST carry a `speakerId`.");
   });
 
   it('rejects a speaker outside the declared roster (membership MUST, fail-closed)', async () => {
     await open(ROSTER);
     const res = await exchange({ role: 'agent', speakerId: 'host:advisor-uninvited', content: 'Barging in.', turnIndex: 1 });
+    expect(res.status).toBe(422);
     expect(errCode(res.body)).toBe('validation_error');
+    expect(res.body.message).toBe('Agent host:advisor-uninvited is not a participant of this multi-party conversation.');
   });
 
   it('rejects a roster over maxParticipants, and the request cannot widen the advertised cap', async () => {
     const tooMany = Array.from({ length: MAX_MULTI_PARTY_PARTICIPANTS + 1 }, (_, i) => ({ agentId: `host:advisor-${i}` }));
 
+    // Literals, not the imported constant: the advertised cap is 8, and the
+    // expected copy must not move with a change to it.
+    expect(MAX_MULTI_PARTY_PARTICIPANTS).toBe(8);
     // Over the host's advertised cap.
-    expect(errCode((await open(tooMany)).body)).toBe('validation_error');
+    const atCap = await open(tooMany);
+    expect(errCode(atCap.body)).toBe('validation_error');
+    expect(atCap.body.message).toBe('A council may seat at most 8 participants (requested 9).');
 
     // Still rejected when the CALLER asks for a bigger cap — the advertised
     // maximum is a ceiling, not a default. A host that honoured the request
     // here would be seating more agents than it advertises it can.
-    expect(errCode((await open(tooMany, 999)).body)).toBe('validation_error');
+    const widened = await open(tooMany, 999);
+    expect(errCode(widened.body)).toBe('validation_error');
+    expect(widened.body.message).toBe('A council may seat at most 8 participants (requested 9).');
 
     // And a request that NARROWS the cap is honoured.
-    expect(errCode((await open(ROSTER, 2)).body)).toBe('validation_error');
+    const narrowed = await open(ROSTER, 2);
+    expect(errCode(narrowed.body)).toBe('validation_error');
+    expect(narrowed.body.message).toBe('A council may seat at most 2 participants (requested 3).');
   });
 
   it('404s an exchange against a conversation that was never opened', async () => {

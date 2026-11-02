@@ -12,6 +12,15 @@
  * The load-bearing leg is `an ADMIN member is 403 on a waive and 200 on a
  * retry`. It is the only assertion in the change that proves the three scope ids
  * are a permission model rather than three strings.
+ *
+ * Tracker: TST-CGF-4. Red when (features/operations/routes.ts): the action route
+ * asks for a fixed scope instead of `scopeForRecoveryAction`; the read drops its
+ * `:start` check; the read stops neutralizing a foreign run to 404; the operations
+ * toggle stops gating; or (compensationOperator.ts) the cross-tenant decision stops
+ * answering `run not found`. The "passes authority" legs assert the EXACT downstream
+ * refusal (the made-up obligation's 404), never "not 403", and the cross-tenant
+ * ACTION leg asserts the route's own `run not found` text — the made-up obligation
+ * would otherwise 404 regardless of the tenant check.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -50,11 +59,13 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res> }
+interface Res<T> { status: number; body: T }
+interface ErrorBody { error: string; message: string; details?: { requiredScope?: string; retriable?: boolean } }
+interface ReadBody { runId: string; obligations: unknown[]; compensationStatus: string; auditChain: { ok: boolean } }
+interface Client { get: <T = ErrorBody>(p: string) => Promise<Res<T>>; post: <T = ErrorBody>(p: string, b?: unknown) => Promise<Res<T>> }
 function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
@@ -64,11 +75,13 @@ function client(): Client {
       const m = /(__session=[^;]+)/.exec(ck);
       if (m) cookie = m[1];
     }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as T;
     return { status: res.status, body: out };
   };
-  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b) };
+  return { get: <T = ErrorBody>(p: string) => call<T>('GET', p), post: <T = ErrorBody>(p: string, b?: unknown) => call<T>('POST', p, b) };
 }
+/** The refusal a request gets once it is PAST authority: the made-up obligation id. */
+const OBLIGATION_NOT_FOUND = { error: 'not_found', message: 'compensation obligation not found' };
 
 let n = 0;
 /**
@@ -86,11 +99,11 @@ let n = 0;
  * which is the thing these tests are about.
  */
 async function signup(c: Client, tenantId: string, shared: boolean, email: string): Promise<string> {
-  const r = await c.post('/host/openwop-app/test/login', {
+  const r = await c.post<{ user: { userId: string } }>('/host/openwop-app/test/login', {
     email, tenantId, ...(shared ? { sharedWorkspace: true } : {}),
   });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return r.body.user.userId as string;
+  return r.body.user.userId;
 }
 
 /**
@@ -134,9 +147,9 @@ async function orgWith(roles: readonly string[]): Promise<{
   await signup(founder, tenantId, false, `cmp-f-${Date.now()}-${n++}@acme.test`);
 
   // The workspace-root org the seam founded. NOT a new one — see (2) above.
-  const orgs = await founder.get('/host/openwop-app/orgs');
+  const orgs = await founder.get<{ orgs: Array<{ orgId: string }> }>('/host/openwop-app/orgs');
   expect(orgs.status, JSON.stringify(orgs.body)).toBe(200);
-  const wsOrgId = (orgs.body.orgs as Array<{ orgId: string }>)
+  const wsOrgId = orgs.body.orgs
     .find((o) => o.orgId === tenantId)?.orgId;
   expect(wsOrgId, `no workspace-root org for ${tenantId}`).toBeTruthy();
 
@@ -163,10 +176,10 @@ async function orgWith(roles: readonly string[]): Promise<{
     nodes: [{ nodeId: 'noop', typeId: 'core.echo', config: {} }],
     edges: [],
   });
-  const create = await founder.post('/runs', { workflowId });
+  const create = await founder.post<{ runId: string }>('/runs', { workflowId });
   expect(create.status, JSON.stringify(create.body)).toBe(201);
 
-  return { founder, members, runId: create.body.runId as string, tenantId };
+  return { founder, members, runId: create.body.runId, tenantId };
 }
 
 const readPath = (runId: string) =>
@@ -196,7 +209,8 @@ describe('ADR 0554 P3 — the scope ladder AT THE WIRE', () => {
     const retry = await admin.post(actionPath(runId), {
       obligationId: 'cmp_whatever', action: 'retry', expectedState: 'requested',
     });
-    expect(retry.status).not.toBe(403);
+    expect(retry.status, JSON.stringify(retry.body)).toBe(404);
+    expect(retry.body).toMatchObject(OBLIGATION_NOT_FOUND);
   });
 
   it('an OWNER member is NOT 403 on a waive — the upper rung actually grants it', async () => {
@@ -208,7 +222,9 @@ describe('ADR 0554 P3 — the scope ladder AT THE WIRE', () => {
       obligationId: 'cmp_whatever', action: 'skip',
       expectedState: 'requested', reason: 'a reason',
     });
-    expect(waive.status, JSON.stringify(waive.body)).not.toBe(403);
+    // Past authority: the made-up obligation's own 404, not some other refusal.
+    expect(waive.status, JSON.stringify(waive.body)).toBe(404);
+    expect(waive.body).toMatchObject(OBLIGATION_NOT_FOUND);
   });
 
   it('an EDITOR member is 403 on every recovery action AND on the read', async () => {
@@ -245,8 +261,8 @@ describe('ADR 0554 P3 — tenant isolation', () => {
     const a = await orgWith([]);
     const b = await orgWith([]);
 
-    const foreign = await b.founder.get(readPath(a.runId));
-    const fiction = await b.founder.get(readPath('run-does-not-exist'));
+    const foreign = await b.founder.get<ErrorBody>(readPath(a.runId));
+    const fiction = await b.founder.get<ErrorBody>(readPath('run-does-not-exist'));
 
     expect(foreign.status).toBe(404);
     expect(fiction.status).toBe(404);
@@ -262,15 +278,26 @@ describe('ADR 0554 P3 — tenant isolation', () => {
       obligationId: 'cmp_x', action: 'skip', expectedState: 'requested', reason: 'r',
     });
     expect(r.status).toBe(404);
+    // The ROUTE's neutralization (the shared §E decision), not the made-up
+    // obligation's 404 — which would answer the same status with the tenant check gone.
+    expect(r.body).toMatchObject({ error: 'not_found', message: 'run not found' });
   });
 
   it('an unauthenticated caller reaches neither route', async () => {
     const { runId } = await orgWith([]);
     const anon = client();  // no login
-    expect((await anon.get(readPath(runId))).status).toBeGreaterThanOrEqual(400);
-    expect((await anon.post(actionPath(runId), {
+    // MEASURED: an unauthenticated caller is not 401'd here — it lands in its own
+    // anonymous tenant, so the run is foreign to it and both routes answer the
+    // same tenant neutralization as any cross-tenant caller. Pinned exactly, so a
+    // route that served an anonymous caller (200, or a different refusal) reds.
+    const read = await anon.get(readPath(runId));
+    expect(read.status).toBe(404);
+    expect(read.body).toMatchObject({ error: 'not_found', message: 'run not found' });
+    const act = await anon.post(actionPath(runId), {
       obligationId: 'cmp_x', action: 'skip', expectedState: 'requested', reason: 'r',
-    })).status).toBeGreaterThanOrEqual(400);
+    });
+    expect(act.status).toBe(404);
+    expect(act.body).toMatchObject({ error: 'not_found', message: 'run not found' });
   });
 });
 
@@ -341,7 +368,7 @@ describe('ADR 0554 P3 — the operations toggle gates the whole surface', () => 
 describe('ADR 0554 P3 — the read model', () => {
   it('returns an EMPTY obligation list plus the chain verdict for a run that owed nothing', async () => {
     const { founder, runId } = await orgWith([]);
-    const r = await founder.get(readPath(runId));
+    const r = await founder.get<ReadBody>(readPath(runId));
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     expect(r.body.runId).toBe(bareRunId(runId));
     expect(r.body.obligations).toEqual([]);

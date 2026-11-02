@@ -17,6 +17,12 @@
  *    `trialFor` eligibility, so the store never promises a trial checkout refuses.
  *
  * Isolated env — its own app boot.
+ *
+ * TST-BBG-3 (w66 g4, sabotage-witnessed). Red when: a free-plan cover counts as
+ * `includedInPlan`; `freeForNow` ignores a narrowing plan list; a grant stops
+ * reading as owned; a plan cover stays purchasable; a past grant or a one-time
+ * bundle still shows a trial; a lapsed plan still entitles. The superadmin case
+ * guards a future regression: `bundleStore` never reads the bypass today.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';

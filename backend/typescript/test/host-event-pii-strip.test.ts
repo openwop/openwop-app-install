@@ -11,6 +11,10 @@
  * Unit-style: fakes for both fanout deps (no real webhook delivery / run
  * execution), a real storage for the durable binding registry + the
  * autonomous-run budget counter `emitHostEvent` also touches.
+ *
+ * Tracker TST-DFC-5. Red when (w71g1, witnessed): the `*Email`/`*Phone` suffix arms are
+ * dropped; either fanout (webhook or triggerData) gets the unstripped payload; the
+ * pattern over-strips non-PII keys such as `entityId`.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';

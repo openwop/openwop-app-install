@@ -10,6 +10,11 @@
  *
  * Kept in its own file so it never conflicts with the grade-tests rewrite of
  * `kicktodo-replan.test.ts`.
+ *
+ * TST-DJD-4 (grade-tests wave 71). Red when `applyRevisionCommands` skips the
+ * pre-flight, or the pre-flight stops running the substitute / move-lane guard: the
+ * daypart and reminder job are then written before the refusal. The fixture is a
+ * typed `ChallengeActivity` (no cast).
  */
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -23,14 +28,15 @@ import { createDraft, publishChallenge } from '../src/features/kicktodo-core/cha
 import { enroll, getEnrollment, materializeOccurrences, __clearEnrollGuards } from '../src/features/kicktodo-core/enrollmentService.js';
 import { applyRevisionCommands, RevisionCommandError } from '../src/features/kicktodo-core/replanService.js';
 import { registerPlanRevisedListener, __resetPlanRevisedListenersForTest } from '../src/host/planRevisedHook.js';
+import type { ChallengeActivity } from '../src/features/kicktodo-core/types.js';
 
 const storage = await openStorage('memory://');
 initHostExtPersistence(storage);
 initInMemorySurfaces({ dataDir: mkdtempSync(join(tmpdir(), 'openwop-kt-replan-atomic-')) });
 
-const ACTIVITY = {
-  stableActivityId: 'run', day: 1, title: 'Run 5k', instructions: 'Run', evidencePolicy: 'attestation' as const,
-  alternatives: [{ stableActivityId: 'walk', title: 'Walk 5k', instructions: 'Walk', evidencePolicy: 'attestation' as const }],
+const ACTIVITY: ChallengeActivity = {
+  stableActivityId: 'run', day: 1, title: 'Run 5k', instructions: 'Run', evidencePolicy: 'attestation',
+  alternatives: [{ stableActivityId: 'walk', title: 'Walk 5k', instructions: 'Walk', evidencePolicy: 'attestation' }],
 };
 
 let revised: string[];
@@ -42,7 +48,7 @@ beforeEach(() => {
 afterEach(() => { __resetPlanRevisedListenersForTest(); });
 
 async function setup(tenant: string, owner: string): Promise<{ enrollmentId: string; cardId: string }> {
-  const draft = await createDraft({ tenantId: tenant, title: 'Atomic', summary: 's', outcome: 'o', durationDays: 5, activities: [ACTIVITY] as never });
+  const draft = await createDraft({ tenantId: tenant, title: 'Atomic', summary: 's', outcome: 'o', durationDays: 5, activities: [ACTIVITY] });
   await publishChallenge(tenant, draft.id, 1);
   const { enrollment } = await enroll({ tenantId: tenant, ownerSubject: owner, challengeId: draft.id, challengeVersion: 1, timezone: 'UTC' });
   // The card id comes from the plan itself — never a literal date (date bomb).

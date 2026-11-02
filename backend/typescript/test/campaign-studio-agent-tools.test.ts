@@ -163,6 +163,30 @@ describe('CFP-1 — render tool: gates, repair-loop errors, persistence', () => 
     expect(JSON.parse(asStranger.content)).toMatchObject({ error: 'forbidden_scope' });
   });
 
+  it('ADR 1020 D15 (CS70WF-25) — over-long, over-cap, invalid and unknown values reach the validator and are REFUSED, never silently trimmed', async () => {
+    const render = async (campaign: Record<string, unknown>) => {
+      const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: CAMPAIGN_STUDIO_RENDER_TOOL_ID, input: { campaign } });
+      return { isError: out.isError, body: JSON.parse(out.content) as { error?: string; errors?: Array<{ path: string }> } };
+    };
+    const ch = { name: 'Email', type: 'email' };
+    const cases: Array<[string, Record<string, unknown>, string]> = [
+      ['a 201-character name', { ...VALID_CAMPAIGN, name: 'n'.repeat(201) }, 'name'],
+      ['a 401-character tactic', { ...VALID_CAMPAIGN, channels: [{ ...ch, tactic: 't'.repeat(401) }] }, 'channels[0].tactic'],
+      ['41 channels', { ...VALID_CAMPAIGN, channels: Array.from({ length: 41 }, (_, i) => ({ name: `C${i}`, type: 'email' })) }, 'channels'],
+      ['a negative budget', { ...VALID_CAMPAIGN, channels: [{ ...ch, budget: -5 }] }, 'channels[0].budget'],
+      ['an unknown channel field', { ...VALID_CAMPAIGN, channels: [{ ...ch, owner: 'x' }] }, 'channels[0].owner'],
+      ['an unknown asset field', { ...VALID_CAMPAIGN, assets: [{ headline: 'H', mood: 'x' }] }, 'assets[0].mood'],
+      ['an unknown top-level field', { ...VALID_CAMPAIGN, budgetTotal: 5 }, 'budgetTotal'],
+      ['a non-text objective', { ...VALID_CAMPAIGN, objective: 5 }, 'objective'],
+    ];
+    for (const [what, campaign, path] of cases) {
+      const r = await render(campaign);
+      expect(r.isError, what).toBe(true);
+      expect(r.body.error, what).toBe('campaign_validation_failed');
+      expect(r.body.errors?.map((e) => e.path), what).toContain(path);
+    }
+  });
+
   it('R2 CS-SP-2 — an unknown channel type / funnel stage is a TYPED failure the model can repair, never a silent substitution', async () => {
     // The old normalizers rewrote "tiktok" → 'content' and unknown stages →
     // 'awareness' BEFORE validation, so ok:true came back for a campaign the

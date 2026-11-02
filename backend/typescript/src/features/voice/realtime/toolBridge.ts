@@ -15,7 +15,6 @@
  */
 import { createAgentToolProvider, createScopedAgentToolProvider } from '../../../host/agentToolProvider.js';
 import { toModelToolResult } from '../../../host/toModelToolResult.js';
-import { getAgentRegistry } from '../../../executor/agentRegistry.js';
 import { resolveAgentToolPermissionSet } from '../../../host/agentProfileService.js';
 import { evaluateToolPermissionSet, agentToolPermissionsEnabled } from '../../../host/agentToolPermissions.js';
 import { effectiveToolAllowlist, resolveAgentToolAllowlistOverride } from '../../../host/agentToolAllowlistService.js';
@@ -27,6 +26,8 @@ import { toolAuthorityHolds } from '../../../host/conversationVisibility.js';
 import { listToolApprovals, approvedToolSets, recordToolApprovalRequested } from '../../conversation-tools/approvalLedger.js';
 import type { RealtimeToolDecl } from './types.js';
 import { createLogger } from '../../../observability/logger.js';
+import { ASK_USER_TOOL } from '../../../host/clarificationLift.js';
+import { resolveServedAgent } from '../../../host/agentServing.js';
 
 const log = createLogger('features.voice.toolBridge');
 
@@ -51,6 +52,7 @@ async function allowlistOf(
   tenantId: string,
   identity: AgentIdentity | null,
   override: readonly string[] | undefined,
+  conversationId?: string | undefined,
 ): Promise<readonly string[]> {
   if (!identity) return [];
   // ADR 0775 D4 — resolve WITHIN the tenant. The old `listManifestAgents().find`
@@ -59,15 +61,18 @@ async function allowlistOf(
   // tenant's same-named agent's tools (`ARWF-5`). `resolve` answers a pack agent
   // by its bare id and a user agent only under its owner tenant, and reads
   // through to storage on a miss.
-  const m = await getAgentRegistry().resolve(identity.agentId, tenantId);
+  // ADR 1014 D4 / M6 — the SAME draw key as the session's prompt (`composeChatContext`:
+  // the conversation, else the agent), so a canary split never gives one version's
+  // prompt with another version's tools.
+  const m = await resolveServedAgent(identity.agentId, tenantId, conversationId ?? identity.agentId);
   return effectiveToolAllowlist(m?.toolAllowlist, override);
 }
 
-async function agentAllowlist(tenantId: string, agentId: string | undefined): Promise<readonly string[]> {
+async function agentAllowlist(tenantId: string, agentId: string | undefined, conversationId?: string): Promise<readonly string[]> {
   const identity = await agentIdentityOf(tenantId, agentId);
   if (!identity) return [];
   const override = await resolveAgentToolAllowlistOverride(tenantId, identity.agentId);
-  return allowlistOf(tenantId, identity, override);
+  return allowlistOf(tenantId, identity, override, conversationId);
 }
 
 /** The realtime tool DECLARATIONS for a session = the agent's allowlist ∩ resolvable builtins.
@@ -76,15 +81,18 @@ async function agentAllowlist(tenantId: string, agentId: string | undefined): Pr
  *  provider egress (the Gemini token setup + the OpenAI session/connect payloads). The model
  *  calls back with the sanitized name; `resolveWireToolName` maps it back to the original id
  *  so allowlist/firewall/executor still see the canonical tool. */
-export async function resolveAgentToolDecls(tenantId: string, agentId: string | undefined): Promise<RealtimeToolDecl[]> {
+export async function resolveAgentToolDecls(tenantId: string, agentId: string | undefined, conversationId?: string): Promise<RealtimeToolDecl[]> {
   const { resolveTool } = createAgentToolProvider({ tenantId: '_decls' });
   const decls: RealtimeToolDecl[] = [];
   // Grade-code ARCD-6 — with ADR 0102 enforcement on, do not OFFER a tool the
   // execute side will refuse.
   const identity = agentId && agentToolPermissionsEnabled() ? await agentIdentityOf(tenantId, agentId) : null;
   const perms = identity ? await resolveAgentToolPermissionSet(tenantId, agentId ?? identity.agentId, identity.agentId) : [];
-  for (const name of await agentAllowlist(tenantId, agentId)) {
+  for (const name of await agentAllowlist(tenantId, agentId, conversationId)) {
     if (perms.length > 0 && !evaluateToolPermissionSet(name, perms).allowed) continue;
+    // ADR 1001 D7 — a spoken turn has no question card, so the chat ask is
+    // never offered here (its run would refuse: voice binds no ask sink).
+    if (name === ASK_USER_TOOL) continue;
     const def = resolveTool(name);
     if (def) decls.push({ name: sanitizeToolName(def.name), description: def.description ?? '', parameters: (def.inputSchema as Record<string, unknown>) ?? { type: 'object' } });
   }
@@ -148,7 +156,7 @@ export async function executeRealtimeToolCall(input: {
   // ADR 0104 — honor the super-admin override on the ENTITLEMENT side too, so a
   // revoked tool can't execute over voice even if a stale decl reached the model.
   const override = identity ? await resolveAgentToolAllowlistOverride(input.tenantId, identity.agentId) : undefined;
-  const allowlist = await allowlistOf(input.tenantId, identity, override);
+  const allowlist = await allowlistOf(input.tenantId, identity, override, input.conversationId);
   const name = resolveWireToolName(allowlist, input.name);
   if (!name) {
     return { status: 'denied', reason: `Tool "${input.name}" is not in this agent's allowlist.` };

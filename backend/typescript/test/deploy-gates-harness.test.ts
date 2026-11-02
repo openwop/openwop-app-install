@@ -40,6 +40,10 @@
  * merge gate vs. the person iterating on backend tests, who is exactly the
  * person who broke it. Deliberately NOT deduped behind an env flag: a
  * conditional skip is how this test would quietly stop running.
+ *
+ * TST-CVB-5. Red when any harness case fails (e.g. preflight Gate 8 stops exiting
+ * 1 on a held cut lock) or the harness runs fewer cases than the floor below
+ * (e.g. its summary line reports 0 passed).
  */
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -91,7 +95,10 @@ describe('deploy gates — the shell harness runs inside the backend suite (DGAT
       // the same vacuity this whole gate exists to prevent.
       expect(stdout).toMatch(/deploy-gates: \d+ passed, 0 failed/);
       const passed = Number(/deploy-gates: (\d+) passed/.exec(stdout)?.[1] ?? 0);
-      expect(passed).toBeGreaterThan(10);
+      // Liveness floor: MEASURED 306 passed on 2026-10-29 (this test, run through
+      // vlock); the floor is that count minus one. A harness change that
+      // legitimately removes cases edits this floor in the same change.
+      expect(passed).toBeGreaterThanOrEqual(305);
     },
     250_000,
   );

@@ -19,11 +19,14 @@
 import { beforeEach, afterAll, describe, expect, it } from 'vitest';
 import express from 'express';
 import http from 'node:http';
-import { ipRateLimitMiddleware, runQuotaMiddleware, reserveConcurrentSlot, _resetRateLimitState , snapshotRateLimits } from '../src/middleware/rateLimit.js';
-import { notifyRunTerminal, _resetRunLifecycle } from '../src/executor/runLifecycle.js';
+import { ipRateLimitMiddleware, refuseRunAdmission, runAdmissionFor, runQuotaMiddleware, _resetRateLimitState , snapshotRateLimits } from '../src/middleware/rateLimit.js';
+import { openStorage } from '../src/storage/index.js';
+import { AdmissionRefusedError, type Storage } from '../src/storage/storage.js';
+import { chargedAdmission, insertRunWithStartContext } from '../src/host/runInsert.js';
 
 let server: http.Server;
 let port: number;
+let store: Storage;
 
 async function startApp(): Promise<{ port: number; close: () => Promise<void> }> {
   const app = express();
@@ -37,14 +40,23 @@ async function startApp(): Promise<{ port: number; close: () => Promise<void> }>
   app.use(ipRateLimitMiddleware());
   app.get('/ping', (_req, res) => res.json({ ok: true }));
   app.post('/runs', runQuotaMiddleware(), (_req, res) => res.status(201).json({ ok: true }));
-  // A route that RESERVES, mirroring what `routes/runs.ts` does. The previous
-  // version of this file said "Need a test route that actually calls
-  // reserveConcurrentSlot… (Done via the synthetic app in startApp())" — it was
-  // not done, and the concurrent-run quota ended up with no coverage at all.
+  // A route that INSERTS, mirroring what `routes/runs.ts` does: the middleware
+  // computes the caller's concurrency scope and the store counts it inside the
+  // insert (ADR 0987 D2/P2). The previous version of this file said "Need a test
+  // route that actually calls reserveConcurrentSlot… (Done via the synthetic app
+  // in startApp())" — it was not done, and the concurrent-run quota ended up with
+  // no coverage at all.
   let seq = 0;
-  app.post('/runs-reserving', runQuotaMiddleware(), (req, res) => {
+  app.post('/runs-reserving', runQuotaMiddleware(), async (req, res) => {
     const runId = `run-${++seq}`;
-    reserveConcurrentSlot(req, runId);
+    const now = new Date().toISOString();
+    try {
+      await insertRunWithStartContext(store, { runId, workflowId: 'wf', tenantId: req.tenantId ?? 't', status: 'running', inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now },
+        { admission: chargedAdmission(runAdmissionFor(req)) });
+    } catch (err) {
+      if (err instanceof AdmissionRefusedError) { refuseRunAdmission(req, res); return; }
+      throw err;
+    }
     res.status(201).json({ runId });
   });
   // Long-lived SSE stream routes — exempt from the per-IP burst bucket when
@@ -86,6 +98,7 @@ describe('P0.4 rate limit', () => {
     process.env.OPENWOP_RATELIMIT_SESSION_CONCURRENT = '100';
     process.env.OPENWOP_RATELIMIT_IP_RUNS_PER_DAY = '100';
     if (server) await new Promise<void>((r) => server.close(() => r()));
+    store = await openStorage('memory://');
     const started = await startApp();
     closeFn = started.close;
   });
@@ -214,14 +227,14 @@ describe('P0.4 rate limit', () => {
    * but this one. A release-path leak would have wedged a user at permanent
    * 429 with nothing red.
    *
-   * These drive the REAL chain — middleware stamps `_sessionKey`, the route
-   * reserves under it, the next request hits the middleware's pre-flight, and
-   * `notifyRunTerminal` frees the slot.
+   * These drive the REAL chain (ADR 0987 P2) — the middleware computes the
+   * session's scope, the route's insert passes it, the store counts the scope's
+   * running runs inside the insert and refuses a full one, and a run reaching a
+   * terminal status frees its slot with no release call.
    */
   it('a session at its concurrent cap is refused, and freeing a slot admits the next run', async () => {
     process.env.OPENWOP_RATELIMIT_SESSION_CONCURRENT = '1';
     _resetRateLimitState();
-    _resetRunLifecycle();
 
     const reserve = (): Promise<Response> => fetch(`http://127.0.0.1:${port}/runs-reserving`, {
       method: 'POST',
@@ -244,8 +257,8 @@ describe('P0.4 rate limit', () => {
     expect(body.details?.reason, 'the CONCURRENT limiter must be the one that fired').toBe('session_concurrent');
 
     // The release path — the half a leak would break, and the half that had
-    // no assertion at all before.
-    notifyRunTerminal(runId, 'completed');
+    // no assertion at all before. The run's own terminal status is the release.
+    await store.updateRun(runId, { status: 'completed', completedAt: new Date().toISOString() });
     const third = await reserve();
     expect(third.status, 'freeing a slot must admit the next run — a leak wedges the session at 429').toBe(201);
   });
@@ -253,7 +266,6 @@ describe('P0.4 rate limit', () => {
   it('one session reaching its cap does not refuse a different session', async () => {
     process.env.OPENWOP_RATELIMIT_SESSION_CONCURRENT = '1';
     _resetRateLimitState();
-    _resetRunLifecycle();
 
     const reserveAs = (tenant: string): Promise<Response> => fetch(`http://127.0.0.1:${port}/runs-reserving`, {
       method: 'POST',

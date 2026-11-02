@@ -12,6 +12,13 @@
  * The HTTP leg drives the real chain the ingest route uses —
  * `openWebhookSecret` → `kmsDecrypt` → the GCP client → `errorEnvelopeMiddleware`
  * — behind a mocked SDK that fails on a script.
+ *
+ * TST-DKB-4 (grade-tests wave 72; incident 2026-10-13, fix 6bba31e25). Red when
+ * (w72 probes): the first transient is not retried (tr-first), a second transient
+ * escapes raw instead of as 503 (tr-second), a non-transient code is retried
+ * (tr-pred), or the 503 loses its `retryAfterSeconds` (tr-retryafter). Each retry
+ * case pays the product's real 100 ms backoff — the GCP client does not expose
+ * `withKmsTransientRetry`'s `backoffMs`, and 4 × 100 ms is proportionate.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';

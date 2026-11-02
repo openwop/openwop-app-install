@@ -41,7 +41,7 @@ function legRow(label: RegExp): HTMLElement {
   return li;
 }
 const ISOLATED = /^Isolated —/;
-const EGRESS = /^Egress-denied —/;
+const EGRESS = /^Requests blocked \(/;
 const ALLOWLIST = /^Allowlist-bound —/;
 
 /** Post a probe message as if it came from the hidden frame. The component

@@ -78,7 +78,7 @@ async function campaignRun(extraMeta: Record<string, unknown> = {}, extra: Parti
     metadata: { campaignOrchestration: stampCampaignRun(campaign, { role: 'optimizer' }), actingUserId: 'u1', ...extraMeta },
     configurable: {}, createdAt: now, updatedAt: now, ...extra,
   };
-  await insertRunWithStartContext(storage, run);
+  await insertRunWithStartContext(storage, run, { admission: { plan: 'exempt:test-fixture' } });
   return (await storage.getRun(run.runId)) ?? run;
 }
 

@@ -10,7 +10,7 @@
 | Bucket | Count | Meaning |
 |---|---|---|
 | Declared (`dependsOn`) | 28 | real hard deps, disable-lock active |
-| Undeclared → always-on target | 115 | correctly undeclared — an always-on dep can never lock (ADR 0439) |
+| Undeclared → always-on target | 117 | correctly undeclared — an always-on dep can never lock (ADR 0439) |
 | **[1] Primitive** (undeclared → toggleable) | **0** | misfiled cross-cutting infra → **extract to a `host/` seam** |
 | **[2] Soft-read** (undeclared → toggleable) | **111** | domain read, target vacuous-when-off → **leave documented** (no lock) |
 | **[3] Hard-dep** (undeclared → toggleable) | **0** | target refuses when off → **declare `dependsOn`** |
@@ -45,7 +45,7 @@ _None._
 | `campaign-orchestration` | `campaign-brief` | static | briefService, types | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `funnels` | `campaign-brief` | static | briefService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `campaign-orchestration` | `campaign-channels` | static | channelWorkflows | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
-| `campaign-intel` | `campaign-connectors` | dyn | performanceService, types, syncService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
+| `campaign-intel` | `campaign-connectors` | dyn | syncService, performanceService, types | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `campaign-ops` | `campaign-connectors` | static | performanceService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `campaign-brief` | `campaign-intel` | dyn | utmGovernance | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `campaign-ops` | `campaign-intel` | static | budgetPlanner | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |

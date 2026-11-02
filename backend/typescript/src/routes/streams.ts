@@ -23,7 +23,6 @@ import { loadReadableRun } from '../host/runAccess.js';
 import { mintRunStreamToken } from '../host/runStreamToken.js';
 import { openSseChannel } from '../host/sseChannel.js';
 import { subscribeRunEventTicks } from '../host/runEventBus.js';
-import { projectA2uiDelivery, a2uiDeltaTransportEnabled, type A2uiDeltaState, type A2uiSurfacePayload } from '../host/a2uiSurfaceDelta.js';
 import { vendorPath } from '../middleware/protocolVersion.js';
 import { projectV2RunIds } from '../host/v2Ids.js';
 import { projectRunSnapshot } from './runs.js';
@@ -185,15 +184,6 @@ export function registerStreamRoutes(app: Express, deps: Deps): void {
         pendingBatch.length = 0;
       };
 
-      // RFC 0114 — opt-in a2ui delta transport. Gated on the SAME predicate as
-      // the capability advert (`a2uiDeltaTransportEnabled()`), so serving and
-      // advertising can never drift (honest-advert rule). Per-connection state
-      // carries the last full surface delivered to THIS subscriber (delta is a
-      // per-subscriber choice). Not applied in the aggregation (`bufferMs>0`)
-      // path — batches carry full events; delta is a live-stream optimization.
-      const a2uiDelta =
-        req.query.a2uiDelta === '1' && a2uiDeltaTransportEnabled() && bufferMs === 0;
-      const a2uiState: A2uiDeltaState = {};
 
       // CS-WF-4 (ADR 0326) — one delivery WATERMARK merges three sources
       // (durable replay, in-proc fanout, cross-instance ticks): an event is
@@ -245,13 +235,12 @@ export function registerStreamRoutes(app: Express, deps: Deps): void {
         if (passesModeFilter(ev, modes)) {
           const wire = onWire(ev);
           if (bufferMs > 0) pendingBatch.push(wire);
-          else deliverEvent(res, wire, a2uiDelta, a2uiState);
+          else writeSseEvent(res, wire);
         }
       };
       // Terminal close applies to the LIVE paths only — exactly the pre-CS-WF-4
-      // semantics: REPLAY delivers past a terminal event (the a2ui emit-surface
-      // seam appends ui events AFTER run.completed; a replay must not truncate
-      // them), while a LIVE terminal flushes + ends the stream.
+      // semantics: REPLAY delivers past a terminal event, while a LIVE terminal
+      // flushes + ends the stream.
       const closeIfTerminal = (ev: EventRecord): void => {
         if (!TERMINAL_EVENT_TYPES.has(ev.type)) return;
         terminalSeen = true;
@@ -405,33 +394,4 @@ function writeSseEvent(res: Response, ev: EventRecord): void {
   res.write(`id: ${ev.sequence}\n`);
   res.write(`event: ${ev.type}\n`);
   res.write(`data: ${JSON.stringify(ev)}\n\n`);
-}
-
-/** True when the event carries a recorded `ui.a2ui-surface` payload. */
-function isA2uiSurfaceEvent(ev: EventRecord): ev is EventRecord & { payload: A2uiSurfacePayload } {
-  const p = ev.payload as Partial<A2uiSurfacePayload> | undefined;
-  return ev.type === 'ui.a2ui-surface' && !!p && typeof p.catalogVersion === 'string' && 'surface' in p;
-}
-
-/**
- * RFC 0114 — deliver an event to ONE subscriber, applying the host-side a2ui
- * delta transport when the subscriber opted in (`?a2uiDelta=1`). The RECORDED
- * event is untouched; this only changes the bytes on THIS connection: a
- * subsequent surface for the chain is sent as a `ui.a2ui-surface.delta` frame
- * (transport-only, never recorded). Everyone else / the first surface / a
- * catalog bump get the full event. Non-a2ui events pass straight through.
- */
-function deliverEvent(res: Response, ev: EventRecord, deltaEnabled: boolean, state: A2uiDeltaState): void {
-  if (deltaEnabled && isA2uiSurfaceEvent(ev)) {
-    const decision = projectA2uiDelivery(state, ev.eventId, ev.payload, true);
-    if (decision.kind === 'delta') {
-      // Transport-only frame; distinct SSE event type so the consumer knows to
-      // apply a patch (then re-validate against the closed catalog, fail-closed).
-      res.write(`id: ${ev.sequence}\n`);
-      res.write(`event: ui.a2ui-surface.delta\n`);
-      res.write(`data: ${JSON.stringify(decision.frame)}\n\n`);
-      return;
-    }
-  }
-  writeSseEvent(res, ev);
 }

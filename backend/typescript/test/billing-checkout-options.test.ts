@@ -13,6 +13,16 @@
  *  5. Keying: `plan:<tier>` / `bundle:<id>` beat `*`; a bare value means `*`; a
  *     value a knob does not accept is ignored (default session, never a guess).
  *  6. The boot warning for `managed` on an API version older than its GA.
+ *
+ * Tracker TST-BEE-1 (w66). Red when any of: target keys stop beating `*`; an
+ * unaccepted value is kept; a bare `true` stops being a boolean; automatic tax
+ * loses `customer_update`; managed carries a forbidden param; token packs
+ * pick up options; promotion codes go out unasked; the boot warning ignores
+ * the API version or its date comparison widens.
+ * Double guard (cross-file, recorded): a no-card trial needs a trial in
+ * BOTH `billingService.createCheckoutSession` (`isSub && trialDays && …`) and
+ * `stripeApi.createStripeCheckoutSession` (`trialPeriodDays && trialWithoutCard`);
+ * removing either alone stays green, and no single edit breaks both.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';

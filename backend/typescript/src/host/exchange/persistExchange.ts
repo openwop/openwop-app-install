@@ -14,6 +14,7 @@ import { appendChannelMessage } from '../channelsRuntime.js';
 import type { ConversationTurn } from '../conversation.js';
 import type { RunRecord } from '../../types.js';
 import type { Storage } from '../../storage/storage.js';
+import type { ServedModel } from '../turnAttribution.js';
 import { stripSecretsFromPersisted } from '../../byok/ephemeralRunSecrets.js';
 import { extractConversationMemory } from '../../features/memory-auto-extract/extractionBinding.js';
 import { llmExtractFacts } from '../../features/memory-auto-extract/memoryExtractor.js';
@@ -82,14 +83,22 @@ export function autotitleAfterExchange(input: {
   userText: string;
   replyText: string;
   storage: Storage;
+  /** ADR 1019 D3 — what served this exchange; the title rides the same credential. */
+  served: ServedModel | undefined;
+  /** ADR 1019 D1 — no earlier user turn in this conversation run. */
+  firstExchange: boolean;
 }): void {
-  const { run, chatSessionId, conversationId, nodeId, userText, replyText, storage } = input;
+  const { run, chatSessionId, conversationId, nodeId, userText, replyText, storage, served, firstExchange } = input;
   const actingUserId = run.metadata?.['actingUserId'];
+  const credentialRef = (run.inputs as { credentialRef?: unknown } | undefined)?.credentialRef;
   const log = getEventLog();
   maybeAutotitleOnFirstExchange({
     tenantId: run.tenantId,
     userId: typeof actingUserId === 'string' && actingUserId.length > 0 ? actingUserId : undefined,
     chatSessionId,
+    firstExchange,
+    credentialRef: typeof credentialRef === 'string' ? credentialRef : undefined,
+    served,
     userText,
     replyText,
     storage,

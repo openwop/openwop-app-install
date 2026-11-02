@@ -14,7 +14,15 @@
  *    wrong OR missing `iss` is refused before any token request.
  *
  * Every refusal is a 4xx (ADR 0753 D1) and is shown to send ZERO token requests:
- * the token endpoint is the guarded-egress chokepoint, counted here.
+ * the token endpoint is the guarded-egress chokepoint, counted here. Each refusal
+ * asserts its exact `reason` (several refusals share a 400), and the success case
+ * reads the stored connection back rather than trusting the redirect text.
+ *
+ * Sabotage witnesses: claiming by read instead of by delete reds §A.2; dropping
+ * the same-Subject check (connections/routes.ts) reds the mismatch case; dropping
+ * the `iss` gate reds all three §A.4 cases; trimming a trailing slash before the
+ * compare reds the slash case; accepting a missing `iss` reds the missing case;
+ * not escaping the refusal target reds the markup case.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -37,6 +45,7 @@ import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import { authorizationResponseIssuerOk, beginAuthorization, callbackRefusalPage, consumePendingAuth } from '../src/features/connections/oauthFlow.js';
+import { listConnections } from '../src/features/connections/connectionsService.js';
 
 let server: http.Server;
 let BASE = '';
@@ -74,18 +83,32 @@ async function bearerSubject(): Promise<string> {
 
 const GOOGLE_ISS = 'https://accounts.google.com';
 
-/** Drive the real callback. `iss: null` omits the parameter. Returns the status
- *  and where the browser is sent (the 302 `location`, or a refusal page's
- *  meta-refresh target). */
-async function callback(state: string, iss: string | null = GOOGLE_ISS, provider = 'google'): Promise<{ status: number; target: string }> {
+interface CallbackResult {
+  status: number;
+  /** Where the browser is sent (the 302 `location`, or the refusal page's meta-refresh target). */
+  target: string;
+  reason: string | null;
+  connectError: string | null;
+  connected: string | null;
+}
+
+/** Drive the real callback. `iss: null` omits the parameter. */
+async function callback(state: string, iss: string | null = GOOGLE_ISS, provider = 'google'): Promise<CallbackResult> {
   const q = new URLSearchParams({ state, code: 'abc', ...(iss !== null ? { iss } : {}) });
   const res = await fetch(`${BASE}/host/openwop-app/connections/${provider}/callback?${q}`, {
     headers: { authorization: `Bearer ${TOKEN}` },
     redirect: 'manual',
   });
-  if (res.status < 400) return { status: res.status, target: res.headers.get('location') ?? '' };
-  const html = await res.text();
-  return { status: res.status, target: (/content="0;url=([^"]+)"/.exec(html)?.[1] ?? '').replace(/&amp;/g, '&') };
+  const target = res.status < 400
+    ? res.headers.get('location') ?? ''
+    : (/content="0;url=([^"]+)"/.exec(await res.text())?.[1] ?? '').replace(/&amp;/g, '&');
+  const params = target ? new URL(target).searchParams : new URLSearchParams();
+  return { status: res.status, target, reason: params.get('reason'), connectError: params.get('connectError'), connected: params.get('connected') };
+}
+
+/** The google connections stored for one user in the `default` tenant. */
+async function googleConnectionsOf(userId: string) {
+  return (await listConnections('default', userId)).filter((c) => c.provider === 'google' && c.userId === userId);
 }
 
 beforeEach(() => {
@@ -103,22 +126,30 @@ describe('RFC 0199 §A.2 — single-use state is an atomic claim', () => {
 describe('RFC 0199 §A.3 — the callback completes only for the initiating Subject', () => {
   it('an authenticated callback whose Subject DIFFERS from the initiator is refused (403 subject_mismatch), with no token request', async () => {
     const { state } = await beginAuthorization({ provider: 'google', tenantId: 'default', userId: 'someone-else', reqOrigin: 'http://localhost:8080' });
-    const { status, target } = await callback(state);
-    expect(status).toBe(403);
-    expect(target).toContain('connectError=google');
-    expect(target).toContain('reason=subject_mismatch');
+    const r = await callback(state);
+    expect(r.status).toBe(403);
+    expect(r.connectError).toBe('google');
+    expect(r.reason).toBe('subject_mismatch');
     expect(tokenRequests).toHaveLength(0);
+    // It stores nothing for either party.
+    expect(await googleConnectionsOf('someone-else')).toEqual([]);
     // The refused callback consumed the state: it cannot be retried under the right user.
     expect(await consumePendingAuth(state)).toBeNull();
   });
 
   it('the SAME Subject with the right `iss` completes: exactly one token request, connected', async () => {
     const me = await bearerSubject();
+    // Only this case completes a grant in this file, so `me` holds no google row yet.
+    expect(await googleConnectionsOf(me)).toEqual([]);
     const { state } = await beginAuthorization({ provider: 'google', tenantId: 'default', userId: me, reqOrigin: 'http://localhost:8080' });
-    const { status, target } = await callback(state);
-    expect([302, 303]).toContain(status);
-    expect(target).toContain('connected=google');
-    expect(tokenRequests).toHaveLength(1);
+    const r = await callback(state);
+    expect(r.status).toBe(302);
+    expect(r.connected).toBe('google');
+    expect(r.reason).toBeNull();
+    // Exactly one egress, and it is Google's token endpoint.
+    expect(tokenRequests).toEqual(['https://oauth2.googleapis.com/token']);
+    // Connected means stored: one google connection, bound to the initiating Subject.
+    expect((await googleConnectionsOf(me)).map((c) => c.userId)).toEqual([me]);
   });
 });
 
@@ -126,25 +157,29 @@ describe('RFC 0199 §A.4 — mix-up defense (RFC 9207 `iss`)', () => {
   it('a WRONG `iss` is refused before any token request', async () => {
     const me = await bearerSubject();
     const { state } = await beginAuthorization({ provider: 'google', tenantId: 'default', userId: me, reqOrigin: 'http://localhost:8080' });
-    const { status, target } = await callback(state, 'https://evil.example');
-    expect(status).toBe(400);
-    expect(target).toContain('reason=iss_mismatch');
+    const r = await callback(state, 'https://evil.example');
+    expect(r.status).toBe(400);
+    expect(r.connectError).toBe('google');
+    expect(r.reason).toBe('iss_mismatch');
     expect(tokenRequests).toHaveLength(0);
   });
 
   it('a slash-suffixed `iss` is NOT the configured issuer (the check is exact; the RFC owner ruled the equivalence only for §B.3(c))', async () => {
     const me = await bearerSubject();
     const { state } = await beginAuthorization({ provider: 'google', tenantId: 'default', userId: me, reqOrigin: 'http://localhost:8080' });
-    expect((await callback(state, `${GOOGLE_ISS}/`)).status).toBe(400);
+    const r = await callback(state, `${GOOGLE_ISS}/`);
+    expect(r.status).toBe(400);
+    expect(r.reason).toBe('iss_mismatch');
     expect(tokenRequests).toHaveLength(0);
   });
 
   it('a MISSING `iss` is refused for a provider whose metadata promises one', async () => {
     const me = await bearerSubject();
     const { state } = await beginAuthorization({ provider: 'google', tenantId: 'default', userId: me, reqOrigin: 'http://localhost:8080' });
-    const { status, target } = await callback(state, null);
-    expect(status).toBe(400);
-    expect(target).toContain('reason=iss_mismatch');
+    const r = await callback(state, null);
+    expect(r.status).toBe(400);
+    expect(r.connectError).toBe('google');
+    expect(r.reason).toBe('iss_mismatch');
     expect(tokenRequests).toHaveLength(0);
   });
 });
@@ -153,7 +188,7 @@ describe('ADR 0753 D1 — the refusal page cannot be turned into markup', () => 
   it('escapes the target as an attribute and renders nothing else of the request', () => {
     const html = callbackRefusalPage('https://app.example/x?a="><script>alert(1)</script>&b=\'');
     expect(html).not.toContain('<script');
-    // the injected quote cannot close the attribute: exactly the two href/content attrs open+close
+    // the injected quote cannot close the attribute: exactly one `url=` attribute value, closed once
     expect(html.match(/url=[^"]*"/g)).toHaveLength(1);
     expect(html).toContain('&quot;&gt;&lt;script&gt;');
   });

@@ -43,6 +43,17 @@ Ship an **`interactive-artifacts` feature (default-OFF, `bucketUnit:tenant`)** t
 This feature deliberately RUNS model-authored code (the opposite of A2UI's declarative-only posture), so the sandbox IS the feature. The non-negotiable invariants:
 
 - **Sandboxed iframe, `sandbox="allow-scripts"` ONLY — never `allow-same-origin`.** Granting both `allow-scripts` + `allow-same-origin` lets the framed script reach back into the parent origin (cookies, `localStorage`, the session) and defeats the sandbox entirely. We grant `allow-scripts` (so HTML/React/Mermaid can run) but **NOT** `allow-same-origin` — the frame is opaque-origin, cannot touch `app.openwop.dev` storage/cookies, cannot read the auth session.
+> **CORRECTED 2026-10-31 (ADR 1017 M1) — "scripts on, network off" is not achievable
+> with a CSP, and this frame was never network-off.** `connect-src 'none'` blocks
+> fetch/XHR/WebSocket, but CSP has no directive for a frame navigating ITSELF, a meta
+> refresh fires, and Chromium does not apply `connect-src` to WebRTC ICE. A headless
+> Chromium probe received a self-navigation, a meta refresh and four STUN packets from
+> an `allow-scripts` frame carrying exactly this CSP. Every grade since Phase 2 called
+> it "no egress". ADR 1017 D1 makes the frame STATIC (`sandbox=""` + `inert`) until the
+> viewer presses Run in the parent chrome, and corrects the claim everywhere it was
+> made; `e2e/artifact-sandbox-egress.spec.ts` measures it in a real browser. The
+> text below is kept as the original reasoning.
+
 - **Strict CSP on the frame document, network-gated by default.** `default-src 'none'; script-src 'unsafe-inline' <vendored libs only>; style-src 'unsafe-inline'; img-src data: <tenant-media-origin>; connect-src 'none'` — **no outbound fetch/XHR/WebSocket** (no exfiltration of anything the frame is fed; no SSRF/tracking-pixel; no calling the backend). The Jan / Open WebUI / LibreChat posture: scripts on, network off.
 - **Served from a separate sandbox origin, not the app origin.** The frame document is delivered via `srcdoc` (or a dedicated `*.sandbox` origin), so even a sandbox-escape can't ride the app's cookies. No app token, no `Authorization` header, ever enters the frame.
 - **React/Mermaid run as vendored libraries, no CDN.** No `script-src` to a remote CDN (that would be both a network-egress hole and a supply-chain vector). React/recharts/mermaid are bundled into the sandbox document.

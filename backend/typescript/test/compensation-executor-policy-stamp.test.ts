@@ -20,6 +20,15 @@
  * that commits a real guarded effect, a definition carrying the policy — and
  * asserts the STAMP on the row the executor minted. Nothing here supplies the
  * policy to the mint by hand; that is the entire point.
+ *
+ * Tracker: TST-CGG-3. Red when: executor.ts drops the `policy:` pass-through into
+ * `recordForwardObligation`; the operator START stops refusing a non-terminal run or
+ * a policy without `operator-request`; the node-executions cap maps to anything but
+ * `cap-breach`; or the rollup reports `pending` for a healthy run that minted.
+ *
+ * Fixtures are typed `WorkflowDefinition`s with real `EdgeDef` edges. (They used to
+ * be cast through `unknown`, which hid `{ from, to }` edges the scheduler ignores —
+ * so the "charge → second" order the cap and cancel legs describe was not wired.)
  */
 import { describe, expect, it, beforeAll, beforeEach, vi } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -44,13 +53,13 @@ import {
   markPlanRequested,
 } from '../src/host/compensationLedger.js';
 import type { WorkflowDefinition } from '../src/executor/types.js';
+import { COMPENSATION_TRIGGERS, type CompensationPolicy, type CompensationTrigger } from '../src/host/compensationUnwind.js';
 import type { Storage } from '../src/storage/storage.js';
 import type { RunRecord } from '../src/types.js';
 
 const T = 'tenant-exec-policy';
 const FORWARD = 'test.compensation.policy.charge';
 const INVERSE = 'test.compensation.policy.refund';
-const SLOW_FORWARD = 'test.payment.charge.slow';
 const HOLD = 'test.compensation.policy.hold';
 let releaseHold: (() => void) | null = null;
 
@@ -76,19 +85,6 @@ beforeAll(async () => {
     async execute(ctx) {
       assertEffectAllowed('payment', `policy-stamp forward ${ctx.nodeId}`);
       return { status: 'success', outputs: { chargeId: 'ch_1' } };
-    },
-  });
-  registry.register({
-    typeId: SLOW_FORWARD,
-    version: '1.0.0',
-    sideEffecting: true,
-    async execute(ctx) {
-      // Deliberately slower than the 1 ms duration cap the breach test sets, so
-      // "the deadline has passed by the next check" is a certainty rather than a
-      // race with the machine.
-      await new Promise((r) => setTimeout(r, 25));
-      assertEffectAllowed('payment', `slow forward ${ctx.nodeId}`);
-      return { status: 'success', outputs: { chargeId: 'ch_slow' } };
     },
   });
   // RFC 0194 — holds the run IN FLIGHT after the compensable step committed,
@@ -127,7 +123,7 @@ async function newRun(workflowId: string): Promise<RunRecord> {
     configurable: {},
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
-  } as RunRecord;
+  };
   await storage.insertRun(run);
   return run;
 }
@@ -138,10 +134,9 @@ async function newRun(workflowId: string): Promise<RunRecord> {
  * on therefore has to arrive from `settings.compensation`, which is what makes
  * this a test of the executor's pass-through rather than of the declaration.
  */
-function def(workflowId: string, policy?: Record<string, unknown>): WorkflowDefinition {
+function def(workflowId: string, policy?: CompensationPolicy): WorkflowDefinition {
   return {
     workflowId,
-    name: 'policy stamp',
     nodes: [{
       nodeId: 'charge',
       typeId: FORWARD,
@@ -149,7 +144,7 @@ function def(workflowId: string, policy?: Record<string, unknown>): WorkflowDefi
     }],
     edges: [],
     ...(policy ? { settings: { compensation: policy } } : {}),
-  } as unknown as WorkflowDefinition;
+  };
 }
 
 describe('S36 — the executor threads settings.compensation into the mint', () => {
@@ -282,18 +277,17 @@ describe('RFC 0151 §C — the unwind invokes what was RECORDED, not what the de
 
     // 2. The workflow is edited: the same node now declares a DIFFERENT
     //    compensator. This is the definition an unwind would resolve today.
-    const edited = def('wf.swap.after.commit', { triggers: ['node-failure'] }) as unknown as {
-      nodes: { compensation?: { nodeTypeId: string } }[];
+    const base = def('wf.swap.after.commit', { triggers: ['node-failure'] });
+    const edited: WorkflowDefinition = {
+      ...base,
+      nodes: base.nodes.map((node) => (node.compensation ? { ...node, compensation: { ...node.compensation, nodeTypeId: SWAPPED } } : node)),
     };
-    for (const node of edited.nodes) {
-      if (node.compensation) node.compensation.nodeTypeId = SWAPPED;
-    }
 
     // 3. Unwind against the EDITED definition.
     await unwindTerminatedRun({
       storage,
-      run: { ...run, status: 'failed' } as RunRecord,
-      definition: edited as unknown as WorkflowDefinition,
+      run: { ...run, status: 'failed' },
+      definition: edited,
     });
 
     // The recorded compensator ran; the swapped-in one never did. Read the row's
@@ -321,9 +315,9 @@ describe('RFC 0151 §E — an operator START is a start, not a resume', () => {
    * omitted `operator-request` could prevent neither. RBAC bounded WHO, nothing
    * bounded WHAT IT APPLIED TO.
    */
-  async function runToCompletion(workflowId: string, triggers: string[]) {
+  async function runToCompletion(workflowId: string, triggers: CompensationTrigger[]) {
     const run = await newRun(workflowId);
-    const result = await executeRun(storage, run, def(workflowId, { triggers } as never));
+    const result = await executeRun(storage, run, def(workflowId, { triggers }));
     expect(result.status).toBe('completed');
     return run;
   }
@@ -334,8 +328,8 @@ describe('RFC 0151 §E — an operator START is a start, not a resume', () => {
     // forward effects are still being produced.
     const out = await resumeUnwindForOperator({
       storage,
-      run: { ...run, status: 'running' } as RunRecord,
-      definition: def('wf.start.running', { triggers: ['node-failure', 'operator-request'] } as never),
+      run: { ...run, status: 'running' },
+      definition: def('wf.start.running', { triggers: ['node-failure', 'operator-request'] }),
     });
     expect(out, 'a start against a live run must be refused').toBeNull();
     const rows = await obligationsForRunTree(T, run.runId);
@@ -346,8 +340,8 @@ describe('RFC 0151 §E — an operator START is a start, not a resume', () => {
     const run = await runToCompletion('wf.start.notrigger', ['node-failure']);
     const out = await resumeUnwindForOperator({
       storage,
-      run: { ...run, status: 'failed' } as RunRecord,
-      definition: def('wf.start.notrigger', { triggers: ['node-failure'] } as never),
+      run: { ...run, status: 'failed' },
+      definition: def('wf.start.notrigger', { triggers: ['node-failure'] }),
     });
     expect(out, 'a policy that omits operator-request must be able to prevent this').toBeNull();
     const rows = await obligationsForRunTree(T, run.runId);
@@ -360,8 +354,8 @@ describe('RFC 0151 §E — an operator START is a start, not a resume', () => {
     const run = await runToCompletion('wf.start.allowed', ['node-failure', 'operator-request']);
     const out = await resumeUnwindForOperator({
       storage,
-      run: { ...run, status: 'failed' } as RunRecord,
-      definition: def('wf.start.allowed', { triggers: ['node-failure', 'operator-request'] } as never),
+      run: { ...run, status: 'failed' },
+      definition: def('wf.start.allowed', { triggers: ['node-failure', 'operator-request'] }),
     });
     expect(out, 'an authorized start on a terminal run must proceed').not.toBeNull();
     const rows = await obligationsForRunTree(T, run.runId);
@@ -376,8 +370,8 @@ describe('RFC 0151 §E — an operator START is a start, not a resume', () => {
     await markPlanRequested(T, run.runId, new Date().toISOString());
     const out = await resumeUnwindForOperator({
       storage,
-      run: { ...run, status: 'failed' } as RunRecord,
-      definition: def('wf.resume.existing', { triggers: ['node-failure'] } as never),
+      run: { ...run, status: 'failed' },
+      definition: def('wf.resume.existing', { triggers: ['node-failure'] }),
     });
     expect(out, 'a requested plan must still be resumable by an operator').not.toBeNull();
   });
@@ -426,8 +420,9 @@ describe('RFC 0151 §B — a mint that FAILS after a committed effect cannot rea
       // The rollup can no longer claim the run owes nothing. `none` was the old
       // answer and is the one this test exists to make unreachable.
       const status = await compensationStatusForRunTree(T, run.runId);
-      expect(status).not.toBe('none');
-      expect(status).not.toBe('completed');
+      // Exact: the un-undoable effect parks for an operator — `manual` (never `none`,
+      // never `completed`).
+      expect(status).toBe('manual');
     } finally {
       spy.mockRestore();
     }
@@ -460,29 +455,25 @@ describe('RFC 0151 §B — the triggers beyond node-failure actually fire', () =
     // bug is what this session keeps finding. Recorded as residue in ADR 0554
     // rather than papered over with a test that passes on a fast box.
     const run = await newRun('wf.trigger.nodecap');
-    await storage.updateRun(run.runId, { configurable: { recursionLimit: 1 } } as never);
+    await storage.updateRun(run.runId, { configurable: { recursionLimit: 1 } });
     const live = (await storage.getRun(run.runId))!;
-    const definition = {
+    const definition: WorkflowDefinition = {
       workflowId: 'wf.trigger.nodecap',
-      name: 'node cap',
       nodes: [
         { nodeId: 'charge', typeId: FORWARD, compensation: { nodeTypeId: INVERSE } },
         { nodeId: 'second', typeId: FORWARD },
       ],
-      edges: [{ from: 'charge', to: 'second' }],
+      edges: [{ edgeId: 'charge-second', sourceNodeId: 'charge', targetNodeId: 'second' }],
       // ONLY cap-breach. Before the trigger was threaded this unwind was
       // labelled `node-failure`, so this policy matched nothing and every
       // obligation stayed at mint state.
       settings: { compensation: { triggers: ['cap-breach'] } },
-    } as unknown as WorkflowDefinition;
+    };
     await executeRun(storage, live, definition);
 
     const rows = await obligationsForRunTree(T, run.runId);
-    expect(rows.length, 'the first node must have committed and minted').toBeGreaterThan(0);
-    expect(
-      rows.every((r) => r.state === 'requested'),
-      'a cap breach with cap-breach declared must not strand every obligation',
-    ).toBe(false);
+    expect(rows, 'the first node must have committed and minted exactly one obligation').toHaveLength(1);
+    expect(rows[0]!.state, 'a cap breach with cap-breach declared must unwind, not strand the obligation').toBe('completed');
   });
 
   it('a CANCEL unwinds under `run-cancel`, and a policy that omits it does not', async () => {
@@ -490,11 +481,11 @@ describe('RFC 0151 §B — the triggers beyond node-failure actually fire', () =
 
     // Cancel a run that is genuinely IN FLIGHT: `charge` has committed (its
     // obligation minted) and `hold` is still executing.
-    const heldDef = (id: string, triggers: string[]) => ({
+    const heldDef = (id: string, triggers: CompensationTrigger[]): WorkflowDefinition => ({
       ...def(id, { triggers }),
       nodes: [...def(id).nodes, { nodeId: 'hold', typeId: HOLD }],
-      edges: [{ from: 'charge', to: 'hold' }],
-    } as unknown as WorkflowDefinition);
+      edges: [{ edgeId: 'charge-hold', sourceNodeId: 'charge', targetNodeId: 'hold' }],
+    });
     const cancelInFlight = async (run: RunRecord, d: WorkflowDefinition) => {
       releaseHold = null;
       const execution = executeRun(storage, run, d);
@@ -511,20 +502,23 @@ describe('RFC 0151 §B — the triggers beyond node-failure actually fire', () =
       expect(log.slice(at + 1).every((ty) => ty.startsWith('compensation.') || ty === 'run.dead_lettered'), `nothing forward after run.cancelled: ${log.join(' ')}`).toBe(true);
     };
 
-    // (a) policy NAMES run-cancel -> the inverse runs.
-    const wanted = await newRun('wf.trigger.cancel.yes');
-    await cancelInFlight(wanted, heldDef('wf.trigger.cancel.yes', ['run-cancel']));
-    const after = await obligationsForRunTree(T, wanted.runId);
-    expect(after[0]!.state, 'a cancel with run-cancel declared must unwind').toBe('completed');
+    try {
+      // (a) policy NAMES run-cancel -> the inverse runs.
+      const wanted = await newRun('wf.trigger.cancel.yes');
+      await cancelInFlight(wanted, heldDef('wf.trigger.cancel.yes', ['run-cancel']));
+      const after = await obligationsForRunTree(T, wanted.runId);
+      expect(after[0]!.state, 'a cancel with run-cancel declared must unwind').toBe('completed');
 
-    // (b) policy OMITS run-cancel -> nothing fires. The trigger list is the
-    //     author's statement about which failures are worth undoing.
-    const notWanted = await newRun('wf.trigger.cancel.no');
-    await cancelInFlight(notWanted, heldDef('wf.trigger.cancel.no', ['node-failure']));
-    const untouched = await obligationsForRunTree(T, notWanted.runId);
-    expect(untouched[0]!.state, 'a policy omitting run-cancel must NOT unwind on cancel').toBe('requested');
-
-    setCompensationDefinitionResolver(null);
+      // (b) policy OMITS run-cancel -> nothing fires. The trigger list is the
+      //     author's statement about which failures are worth undoing.
+      const notWanted = await newRun('wf.trigger.cancel.no');
+      await cancelInFlight(notWanted, heldDef('wf.trigger.cancel.no', ['node-failure']));
+      const untouched = await obligationsForRunTree(T, notWanted.runId);
+      expect(untouched[0]!.state, 'a policy omitting run-cancel must NOT unwind on cancel').toBe('requested');
+    } finally {
+      // The resolver is process-global: never leak it into a later case.
+      setCompensationDefinitionResolver(null);
+    }
   });
 });
 
@@ -552,7 +546,8 @@ describe('RFC 0151 §B — the terminal-cause → trigger mapping, verified by e
     // A mapping that returned a trigger outside the closed vocabulary would be
     // refused at registration and silently never fire — the failure this whole
     // card is about, reintroduced one layer down.
-    const ACCEPTED = new Set(['node-failure', 'run-cancel', 'cap-breach', 'operator-request']);
+    // Read from the policy vocabulary's SSoT, never a hand-copied list.
+    const ACCEPTED = new Set<string>(COMPENSATION_TRIGGERS);
     for (const cause of ['node-failure', 'run-duration-cap', 'node-executions-cap', 'run-cancel'] as const) {
       expect(ACCEPTED.has(compensationTriggerFor(cause)), `${cause} maps outside the vocabulary`).toBe(true);
     }
@@ -583,8 +578,11 @@ describe('RFC 0151 §B — the dispatch chokes do not strand a plan', () => {
     expect(before[0]!.state).toBe('requested');
 
     setCompensationDefinitionResolver(async () => def('wf.dispatch.abandoned', { triggers: ['cap-breach'] }));
-    await unwindOnDispatchTerminal(storage, run.runId, 'dispatch-abandoned');
-    setCompensationDefinitionResolver(null);
+    try {
+      await unwindOnDispatchTerminal(storage, run.runId, 'dispatch-abandoned');
+    } finally {
+      setCompensationDefinitionResolver(null);
+    }
 
     const after = await obligationsForRunTree(T, run.runId);
     expect(after[0]!.state, 'the sweeper giving up must not leave the inverse owed forever').toBe('completed');
@@ -598,8 +596,11 @@ describe('RFC 0151 §B — the dispatch chokes do not strand a plan', () => {
     const run = await newRun('wf.dispatch.nothing');
     let resolverCalls = 0;
     setCompensationDefinitionResolver(async () => { resolverCalls += 1; return null; });
-    await unwindOnDispatchTerminal(storage, run.runId, 'dispatch-failed');
-    setCompensationDefinitionResolver(null);
+    try {
+      await unwindOnDispatchTerminal(storage, run.runId, 'dispatch-failed');
+    } finally {
+      setCompensationDefinitionResolver(null);
+    }
     expect(resolverCalls, 'no obligations means no definition lookup').toBe(0);
   });
 });
@@ -650,9 +651,8 @@ describe('RFC 0151 §B — inputMapping is RESOLVED at plan time, not handed ove
     // inverse cannot be built, so the effect is un-undoable by this host — which
     // is exactly the state the mint-failure marker exists to make visible.
     const run = await newRun('wf.inputmapping.bad');
-    const definition = {
+    const definition: WorkflowDefinition = {
       workflowId: 'wf.inputmapping.bad',
-      name: 'bad mapping',
       nodes: [{
         nodeId: 'charge',
         typeId: FORWARD,
@@ -660,13 +660,14 @@ describe('RFC 0151 §B — inputMapping is RESOLVED at plan time, not handed ove
       }],
       edges: [],
       settings: { compensation: { triggers: ['node-failure'] } },
-    } as unknown as WorkflowDefinition;
+    };
     const result = await executeRun(storage, run, definition);
     // The forward effect still committed — failing the node here would risk a
     // duplicate on retry, the same reasoning as H58c.
     expect(result.status).toBe('completed');
     const status = await compensationStatusForRunTree(T, run.runId);
-    expect(status).not.toBe('none');
-    expect(status).not.toBe('completed');
+    // Exact: the un-undoable effect parks for an operator — `manual` (never `none`,
+    // never `completed`).
+    expect(status).toBe('manual');
   });
 });

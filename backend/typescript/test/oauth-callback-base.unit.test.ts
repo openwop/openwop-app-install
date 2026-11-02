@@ -11,6 +11,16 @@
  *   2. OPENWOP_PUBLIC_BASE_URL          — the SPA origin (local/dev topologies
  *      where backend === app origin).
  *   3. the request origin               — bare local dev.
+ *
+ * Production never falls back to the request origin (case 5): RFC 0199 /
+ * oauth.md rule 5, one fixed redirect URI per provider. The redirect stays on
+ * the registered major-1 twin unless OPENWOP_OAUTH_REDIRECT_UNVERSIONED=true
+ * (ADR 0806 / ADR 0812 KEEP), so that env var is cleared for every case.
+ *
+ * Sabotage witnesses (oauthFlow.ts): ignoring the explicit base reds cases 1
+ * and 5; dropping the trailing-slash strip reds 1 and 2; dropping the
+ * production refusal reds 5; ignoring OPENWOP_PUBLIC_BASE_URL reds 2; dropping
+ * encodeURIComponent reds 4; inverting the major-1 twin choice reds 1–4.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -21,12 +31,15 @@ const REQ_ORIGIN = 'http://localhost:8787';
 describe('OAuth callback base resolution', () => {
   let savedCallbackBase: string | undefined;
   let savedPublicBase: string | undefined;
+  let savedUnversioned: string | undefined;
 
   beforeEach(() => {
     savedCallbackBase = process.env.OPENWOP_OAUTH_CALLBACK_BASE_URL;
     savedPublicBase = process.env.OPENWOP_PUBLIC_BASE_URL;
+    savedUnversioned = process.env.OPENWOP_OAUTH_REDIRECT_UNVERSIONED;
     delete process.env.OPENWOP_OAUTH_CALLBACK_BASE_URL;
     delete process.env.OPENWOP_PUBLIC_BASE_URL;
+    delete process.env.OPENWOP_OAUTH_REDIRECT_UNVERSIONED;
   });
 
   afterEach(() => {
@@ -34,6 +47,8 @@ describe('OAuth callback base resolution', () => {
     else process.env.OPENWOP_OAUTH_CALLBACK_BASE_URL = savedCallbackBase;
     if (savedPublicBase === undefined) delete process.env.OPENWOP_PUBLIC_BASE_URL;
     else process.env.OPENWOP_PUBLIC_BASE_URL = savedPublicBase;
+    if (savedUnversioned === undefined) delete process.env.OPENWOP_OAUTH_REDIRECT_UNVERSIONED;
+    else process.env.OPENWOP_OAUTH_REDIRECT_UNVERSIONED = savedUnversioned;
   });
 
   it('explicit OPENWOP_OAUTH_CALLBACK_BASE_URL wins (the /api rewrite topology)', () => {
@@ -79,7 +94,8 @@ describe('OAuth callback base resolution', () => {
       process.env.OPENWOP_OAUTH_CALLBACK_BASE_URL = 'https://app.openwop.dev/api';
       expect(callbackBaseUrl(REQ_ORIGIN)).toBe('https://app.openwop.dev/api');
     } finally {
-      process.env.NODE_ENV = savedEnv;
+      if (savedEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = savedEnv;
     }
   });
 });

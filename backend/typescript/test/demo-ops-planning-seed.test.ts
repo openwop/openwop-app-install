@@ -4,6 +4,11 @@
  * The connective tissue + exec demo: strategies with live-metric KRs, projects +
  * kanban, priority-matrix, CSM accounts, the Iris assistant graph, and a
  * strategy-bound advisory board — seeded idempotently and cleared clean.
+ *
+ * TST-CUE-7. Red when a re-seed re-creates CSM accounts, or when a seeded account's
+ * stored health score is not the weighted mean of the factors stamped beside it
+ * (R2 CS-SP-4 — the service only requires a score to ACCOMPANY factors, so the
+ * agreement is checked here, recomputed from the stored factors).
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -23,8 +28,11 @@ import { listAccounts } from '../src/features/csm/accountsService.js';
 import { listStakeholders, listCommitments, listMeetings, listPendingActions } from '../src/features/assistant/assistantService.js';
 
 const ON = { status: 'on' as const, bucketUnit: 'tenant' as const };
+/** Counts on a fresh tenant — MEASURED 2026-10-29 (the seed tables are not exported). */
+const MEASURED = { created: 22, stakeholders: 8, commitments: 12 };
 
 let storage: Awaited<ReturnType<typeof openStorage>>;
+const isDemoPayload = (p: unknown): boolean => typeof p === 'object' && p !== null && 'demo' in p && p.demo === true;
 
 beforeAll(async () => {
   storage = await openStorage('memory://');
@@ -42,7 +50,7 @@ describe('demo-ops-planning seeder', () => {
     await seedDemoCrm(tenantId);
 
     const first = await seedDemoOpsPlanning(tenantId);
-    expect(first.created).toBeGreaterThan(10);
+    expect(first.created).toBe(MEASURED.created);
 
     // Strategy with a live-metric-bound KR.
     const strategies = (await listStrategies(tenantId, { includeArchived: true })).filter((s) => s.createdBy === 'demo:ops-planning');
@@ -60,13 +68,18 @@ describe('demo-ops-planning seeder', () => {
     for (const a of seededAccounts) {
       expect(a.healthFactors, a.name).toBeDefined();
       expect(a.healthComputedAt, a.name).toBeDefined();
+      // the stamped score IS the weighted mean of the stamped factors (independent arithmetic)
+      const f = a.healthFactors ?? [];
+      const totalWeight = f.reduce((n, x) => n + x.weight, 0);
+      expect(totalWeight, a.name).toBeGreaterThan(0);
+      expect(a.healthScore, a.name).toBe(Math.round(f.reduce((n, x) => n + x.weight * x.value, 0) / totalWeight));
     }
 
     // Assistant graph (stakeholders / commitments / meetings / 3 pending).
-    expect((await listStakeholders(tenantId)).length).toBeGreaterThanOrEqual(8);
-    expect((await listCommitments(tenantId)).filter((c) => c.source?.externalId?.startsWith('demo-ops-')).length).toBeGreaterThanOrEqual(10);
+    expect((await listStakeholders(tenantId)).length).toBe(MEASURED.stakeholders);
+    expect((await listCommitments(tenantId)).filter((c) => c.source?.externalId?.startsWith('demo-ops-')).length).toBe(MEASURED.commitments);
     expect((await listMeetings(tenantId)).filter((m) => m.calendarEventId?.startsWith('demo-ops-'))).toHaveLength(6);
-    expect((await listPendingActions(tenantId)).filter((a) => (a.payload as { demo?: boolean })?.demo)).toHaveLength(3);
+    expect((await listPendingActions(tenantId)).filter((a) => isDemoPayload(a.payload))).toHaveLength(3);
 
     // Idempotent re-seed.
     const before = await countDemoOpsPlanning(tenantId);
@@ -79,11 +92,11 @@ describe('demo-ops-planning seeder', () => {
     expect(await countDemoOpsPlanning(tenantId)).toBe(0);
     expect((await listProjects(tenantId)).filter((p) => p.name === 'Storefront Revamp')).toHaveLength(0);
     expect((await listAccounts(tenantId)).filter((a) => a.crmRef?.companyId?.startsWith('cmp:demo-crm-'))).toHaveLength(0);
-    expect((await listPendingActions(tenantId)).filter((a) => (a.payload as { demo?: boolean })?.demo)).toHaveLength(0);
+    expect((await listPendingActions(tenantId)).filter((a) => isDemoPayload(a.payload))).toHaveLength(0);
     expect((await listCommitments(tenantId)).filter((c) => c.source?.externalId?.startsWith('demo-ops-'))).toHaveLength(0);
 
     // Round-trips.
     const third = await seedDemoOpsPlanning(tenantId);
-    expect(third.created).toBeGreaterThan(10);
+    expect(third.created).toBe(MEASURED.created);
   });
 });

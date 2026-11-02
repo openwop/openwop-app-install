@@ -16,8 +16,18 @@
  *    on a row being moved never reached its anonymized copy. Sabotage (witnessed):
  *    the pre-A-18 body reds the first two; dropping `revokeAnonymizedCopy` reds
  *    the third.
+ *
+ * Honest ceiling (TST-DJB-1, grade-tests wave 71): `upsertProfile`'s give-back of a
+ * handle it claimed on a LOST profile CAS cannot be witnessed here — the retry
+ * re-claims the SAME handle, so deleting the give-back still leaves one handle held.
+ * It only matters when every retry is exhausted.
+ *
+ * Red when (wave 71 re-probe): the relink check or the profile write is a blind put;
+ * the erasure copies the LISTED row instead of re-reading it; the erasure does not
+ * re-list until a pass finds nothing (the late row is never anonymized); a refund
+ * that finds its row moved does not follow it to the anonymized copy.
  */
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence, DurableCollection } from '../src/host/hostExtPersistence.js';
 import { registerGoalVerifier } from '../src/features/goals/goalVerifiers.js';
@@ -47,6 +57,8 @@ beforeAll(async () => {
   initHostExtPersistence(race.storage);
   registerGoalVerifier('kicktodo:progress-evidence', async () => ({ satisfied: false, confidence: 0, runId: 'r' }));
 });
+// A hook a case armed but never fired must not leak into the next case.
+afterEach(() => { race.interleaveAfterRead(() => false, async () => undefined); });
 
 async function published(T: string, title: string): Promise<string> {
   const draft = await createDraft({
@@ -154,6 +166,9 @@ describe('A-18 eraseSubjectEntitlements — claim, copy, re-check, delete', () =
     expect(await eraseSubjectEntitlements(T, BUYER)).toBe(2);
     expect(race.fired()).toBe(true);
     expect(await listEntitlementsFor(T, BUYER)).toEqual([]);
+    // …and it was MOVED to its tombstone, not just deleted.
+    const tombs = await entitlementRows.listByPrefix(`${T}::erased:`);
+    expect(tombs.map((e) => e.orderId).sort()).toEqual(['ord-1', 'ord-2']);
   });
 
   it('a refund whose row an erasure moves out from under it still revokes the anonymized copy', async () => {

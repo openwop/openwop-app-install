@@ -6,6 +6,12 @@
  * and the JSON is pasted in through the validated routes — a field the validator
  * drops (an unknown hero `visual`, a `layout` outside COLUMN_LAYOUTS, an
  * over-long string) would otherwise publish silently degraded on one path only.
+ *
+ * ADR 0762 (home-launch-story), TST-DEA-2 — red when: the docs twin drifts from
+ * `DEFAULT_SECTIONS`; `validateSections` drops a hero `visual`, a COLUMN_LAYOUTS
+ * member the seed uses, or a locale overlay; or a gated claim phrase lands in the
+ * docs JSON (each sabotage-witnessed, wave 70). The phrase list is hand-kept: no
+ * source-of-truth list of gated phrases exists to import (recorded ceiling).
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -18,12 +24,21 @@ const DOC = fileURLToPath(new URL('../../../docs/site/front-page-story.sections.
 describe('front-page story sections (docs/site)', () => {
   const doc = JSON.parse(readFileSync(DOC, 'utf8')) as { sections: unknown[] };
 
-  it('is the seed, byte for byte (the docs JSON is the seed\'s publishable twin)', () => {
+  it('deep-equals the seed (the docs JSON is the seed\'s publishable twin)', () => {
     expect(doc.sections).toEqual(DEFAULT_SECTIONS);
   });
 
   it('validates without losing a field, in every locale overlay', () => {
-    expect(validateSections(DEFAULT_SECTIONS, 'en')).toEqual(DEFAULT_SECTIONS);
+    const validated = validateSections(DEFAULT_SECTIONS, 'en');
+    expect(validated).toEqual(DEFAULT_SECTIONS);
+    // The overlays ride `localizations` through the same validator — pin that each
+    // survives with its CTA (a dropped overlay would still deep-equal a seed that
+    // also lost it, so check the literal locales and copy).
+    const hero = validated.find((sec) => sec.sectionId === 'sec:story-hero');
+    expect(Object.keys(hero?.localizations ?? {}).sort()).toEqual(['es', 'fr', 'pt-BR']);
+    expect(hero?.localizations?.es?.ctaLabel).toBe('Empieza a crear, sin registro');
+    expect(hero?.localizations?.fr?.ctaLabel).toBe('Commencer, sans inscription');
+    expect(hero?.localizations?.['pt-BR']?.ctaLabel).toBe('Comece a criar, sem cadastro');
   });
 
   it('carries no gated claim phrase', () => {

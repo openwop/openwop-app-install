@@ -10,6 +10,14 @@ import { retiredAssetServePath } from '../src/middleware/protocolVersion.js';
  * `host/assetServePath.ts` is the ONE owner of the media-asset address (ADR
  * 0669). Minted URLs are unversioned, so they survive every major's cut; stored
  * `/v1` URLs are still recognised, and keep resolving after the cut by redirect.
+ *
+ * Tracker TST-BEA-2 (w66). Red when: the retired-path regex widens past 512
+ * token chars; the validator's ANY_MAJOR accepts only `/v1` (asserted on the
+ * ANCHORED `isAssetServePath`; `assetTokenFromUrl` is unanchored, so a `/v7`
+ * URL still yields its token from the unversioned tail and cannot show it);
+ * the stored-src pattern loses its `^`; `canonicalAssetUrls` loses its `g`
+ * flag; `assetServeUrl` mints `/v1`; any backend src line spells a versioned
+ * asset literal (the RATCHET, measured 0 hits on 9a982be0b).
  */
 describe('asset serve path — one owner, version-neutral', () => {
   it('the retired-address exception (protocolVersion.ts) agrees with this module', () => {
@@ -34,6 +42,10 @@ describe('asset serve path — one owner, version-neutral', () => {
     for (const u of ['/host/openwop-app/assets/abcDEF_12-x', '/v1/host/openwop-app/assets/abcDEF_12-x', '/v7/host/openwop-app/assets/abcDEF_12-x', 'https://app.example/v1/host/openwop-app/assets/abcDEF_12-x?w=2']) {
       expect(assetTokenFromUrl(u), u).toBe('abcDEF_12-x');
     }
+    // The any-major claim lives in the anchored validator: the token extractor
+    // matches the unversioned tail of any string, so it cannot tell majors apart.
+    expect(isAssetServePath('/v7/host/openwop-app/assets/abcDEF_12-x')).toBe(true);
+    expect(isAssetServePath('/v12/host/openwop-app/assets/abcDEF_12-x')).toBe(true);
     expect(assetTokenFromUrl('https://evil.example/assets/abc')).toBeNull();
     expect(assetTokenFromUrl(42)).toBeNull();
   });

@@ -19,6 +19,9 @@
  *  - drop the `grantRowExists` guard in `reconcileSeatOrders` → the revoked
  *    buyer is re-seated;
  *  - drop the `reconcileSeatOrders` refund sweep → the stranded refund keeps its seat.
+ *
+ * TST-DJB-4 (grade-tests wave 71). Also red (wave 71) when `confirmSeat` stops
+ * recording the order on the seat.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';

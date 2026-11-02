@@ -3,6 +3,20 @@
  * CRUD + transitions (privileged approval), versions + field diffs, the three
  * build modes, mood-board assembly over media selection, PDF export bytes,
  * approved-only sharing, and cross-tenant IDOR (uniform 404).
+ *
+ * Tracker TST-CQD-3 (w68). Sabotage-witnessed: red when a draft brief may mint a
+ * share link, when an illegal transition is accepted, when brief delete skips
+ * the comment prune, when the SHARED markdown carries the internal needsAsset
+ * note, and when a PATCH may blank sceneDescription.
+ *
+ * DOUBLE GUARD on the mood-board demotion purge (same as
+ * creative-briefs-rbac-purge.test.ts): the route purges the link row AND
+ * `sharingService` darkens a non-approved brief, so `GET /shared/:token` cannot
+ * tell them apart; the case also asserts the row left the org's link list.
+ *
+ * The two CAS cases call the service in-process: `Promise.allSettled` does not
+ * force the writers to interleave, so they assert that every committed write
+ * lands exactly once (version arithmetic), not that a conflict was raced.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -35,14 +49,25 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res { status: number; body: any; raw?: Response }
+/** Every JSON field this file reads (briefs, links, media, comments, shares, ErrorEnvelope). */
+interface Body {
+  error?: string; message?: string; briefId: string; status: string; version: number; orgId: string; token: string;
+  title: string; platformSpec: Record<string, unknown>; directions: unknown[]; sceneDescription: string; assetType: string;
+  changes: Array<{ field: string }>; moodBoard: unknown[]; needsAssetNote?: string; assetId: string;
+  usage: Array<{ refId: string }>; resource: { markdown: string };
+  links: Array<{ resourceType: string; resourceId: string }>;
+}
+interface Res { status: number; body: Body; pdf?: Buffer }
 function client() {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    if (res.headers.get('content-type')?.includes('application/pdf')) return { status: res.status, body: Buffer.from(await res.arrayBuffer()), raw: res };
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    for (const ck of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
+    if (res.headers.get('content-type')?.includes('application/pdf')) return { status: res.status, body: JSON.parse('{}'), pdf: Buffer.from(await res.arrayBuffer()) };
+    // JSON.parse is the typing boundary (every non-PDF route here answers JSON, or 204 with no body).
+    const text = await res.text();
+    const parsed: Body = JSON.parse(text === '' ? '{}' : text);
+    return { status: res.status, body: parsed };
   };
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b), patch: (p: string, b?: unknown) => call('PATCH', p, b), del: (p: string) => call('DELETE', p) };
 }
@@ -62,7 +87,7 @@ async function ownerWithOrg() {
   expect(r.status).toBe(201);
   const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status).toBe(201);
-  return { c, orgId: org.body.orgId as string, tenantId };
+  return { c, orgId: org.body.orgId, tenantId };
 }
 
 describe('creative-briefs lifecycle', () => {
@@ -85,7 +110,9 @@ describe('creative-briefs lifecycle', () => {
     expect(edited.body.version).toBe(2);
 
     // invalid transition draft → approved is a 409.
-    expect((await c.post(CB(orgId, `/briefs/${id}/transition`), { status: 'approved' })).status).toBe(409);
+    const illegal = await c.post(CB(orgId, `/briefs/${id}/transition`), { status: 'approved' });
+    expect(illegal.status).toBe(409);
+    expect(illegal.body.message).toBe('Invalid transition: draft → approved.');
 
     const diff = await c.get(CB(orgId, `/briefs/${id}/diff?from=1&to=2`));
     expect(diff.status).toBe(200);
@@ -93,8 +120,7 @@ describe('creative-briefs lifecycle', () => {
 
     const pdf = await c.post(CB(orgId, `/briefs/${id}/pdf`), {});
     expect(pdf.status).toBe(200);
-    expect(Buffer.isBuffer(pdf.body)).toBe(true);
-    expect(pdf.body.subarray(0, 5).toString()).toBe('%PDF-');
+    expect(pdf.pdf?.subarray(0, 5).toString()).toBe('%PDF-');
   });
 
   it('build modes: extraction projects a kernel; merge overlays a base', async () => {
@@ -127,7 +153,8 @@ describe('creative-briefs lifecycle', () => {
 
     // Draft brief refuses to mint a share link (409 from the resolver).
     const mintDraft = await c.post(`/host/openwop-app/sharing/orgs/${encodeURIComponent(orgId)}/links`, { resourceType: 'creative_brief', resourceId: id });
-    expect([400, 409]).toContain(mintDraft.status);
+    expect(mintDraft.status).toBe(409);
+    expect(mintDraft.body.message).toBe('Only an APPROVED creative brief can be shared.');
 
     await c.post(CB(orgId, `/briefs/${id}/transition`), { status: 'review' });
     await c.post(CB(orgId, `/briefs/${id}/transition`), { status: 'approved' });
@@ -137,7 +164,11 @@ describe('creative-briefs lifecycle', () => {
     // Stranger tenant: uniform 404.
     const stranger = client();
     await stranger.post('/host/openwop-app/test/login', { email: `x-${Date.now()}@t.test`, tenantId: `org:x-${Date.now()}` });
-    expect((await stranger.get(CB(orgId, `/briefs/${id}`))).status).toBe(404);
+    const strangerRead = await stranger.get(CB(orgId, `/briefs/${id}`));
+    expect(strangerRead.status).toBe(404);
+    expect(strangerRead.body.error).toBe('not_found');
+    // Owner control: the same brief IS readable by its owner.
+    expect((await c.get(CB(orgId, `/briefs/${id}`))).body.briefId).toBe(id);
   });
 
   it('mood board assembles from the media library + stamps the needsAsset gap', async () => {
@@ -174,13 +205,16 @@ describe('creative-briefs lifecycle', () => {
 
     const mint = await c.post(SHARE(orgId), { resourceType: 'creative_brief', resourceId: id });
     expect(mint.status, JSON.stringify(mint.body)).toBe(201);
-    const token = mint.body.token as string;
+    const token = mint.body.token;
     expect((await c.get(`/host/openwop-app/shared/${token}`)).status).toBe(200); // live before
+    const linksFor = async (): Promise<number> => (await c.get(SHARE(orgId))).body.links.filter((l) => l.resourceType === 'creative_brief' && l.resourceId === id).length;
+    expect(await linksFor()).toBe(1); // positive control: the list sees the minted row
 
     const after = await c.post(CB(orgId, `/briefs/${id}/moodboard`), { product: 'FlashPick' });
     expect(after.status).toBe(200);
     expect(after.body.status).toBe('draft'); // demoted — no silent mutation of an approved brief
-    expect((await c.get(`/host/openwop-app/shared/${token}`)).status).toBe(404); // link purged
+    expect((await c.get(`/host/openwop-app/shared/${token}`)).status).toBe(404); // dark — either guard
+    expect(await linksFor()).toBe(0); // the ROW is purged, not merely darkened
   });
 
   it('deleting a brief clears its media usage-refs and prunes its comments (CB-CODE-2 / CS-DATA-2/14)', async () => {
@@ -235,7 +269,7 @@ describe('creative-briefs lifecycle', () => {
 
     const shared = await c.get(`/host/openwop-app/shared/${mint.body.token}`);
     expect(shared.status).toBe(200);
-    const md = shared.body.resource.markdown as string;
+    const md = shared.body.resource.markdown;
     expect(md).toContain('Warehouse hero.png'); // resolvable asset renders by NAME
     expect(md).not.toContain('masset:'); // raw/dead asset ids never print
     expect(md).not.toContain('plan a shoot'); // internal needsAssetNote omitted
@@ -244,10 +278,10 @@ describe('creative-briefs lifecycle', () => {
     // The authed PDF path (internal audience) still exports.
     const pdf = await c.post(CB(orgId, `/briefs/${id}/pdf`), {});
     expect(pdf.status).toBe(200);
-    expect(pdf.body.subarray(0, 5).toString()).toBe('%PDF-');
+    expect(pdf.pdf?.subarray(0, 5).toString()).toBe('%PDF-');
   });
 
-  it('concurrent updates never lose a write — CAS retries then 409s (CB-CODE-3)', async () => {
+  it('concurrent updates never lose a write — every committed write bumps the version once (CB-CODE-3)', async () => {
     const { createBrief, updateBrief, getBrief } = await import('../src/features/creative-briefs/creativeBriefsService.js');
     const tenantId = `t-cas-${Date.now()}`;
     const orgId = 'org-cas';

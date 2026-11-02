@@ -1,6 +1,9 @@
 /**
  * ADR 0906 P0 / D5 — the live re-check takes a per-(hostname, slot) claimOnce
  * lease, so N instances check each row once per slot (it used to be N times).
+ *
+ * Tracker TST-CQG-2 (w68). Sabotage-witnessed: red when the claimOnce lease is
+ * ignored, when non-live rows are re-checked, and when the slot stops moving.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';

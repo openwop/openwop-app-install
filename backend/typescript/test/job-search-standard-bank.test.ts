@@ -4,9 +4,18 @@
  * The ADR's verification is "measure what fraction of required fields the seeded
  * bank answers; ship the number". A test that merely asserts `ratio > 0.5` would
  * satisfy the letter and lose the point, so this PRINTS the report and pins the
- * properties that make the number honest: declines are not counted as coverage,
- * fuzzy matches are not counted as coverage, and the special-category field is
- * in the fixture rather than quietly excluded.
+ * properties that make the number honest: declines are not counted as coverage
+ * and the special-category field is in the fixture rather than quietly excluded.
+ * The MEASURED counts are pinned exactly (20/21 full, 14/21 core, wave 71): the
+ * old `ratio > 0.8` floor let a dropped bank question through.
+ *
+ * Tracker TST-DHA-3 (wave 71). Red when: a declined field counts as covered
+ * (`w71g3-sb-declined`); an empty bank covers anything (`sb-empty`); a bank
+ * question is lost (`sb-floor-r2`).
+ * CEILING: "a fuzzy match is not coverage" (`coverageReport`'s
+ * `match !== 'fuzzy'`) is unreachable from the shipped fixtures — every fixture
+ * question resolves by synonym or special category before the fuzzy tier
+ * (`sb-fuzzy` was an equivalent mutant), so it is not claimed here.
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -54,7 +63,13 @@ describe('ADR 0545 P2 — the coverage number, shipped', () => {
     );
 
     expect(full.rows).toHaveLength(ATS_REQUIRED_FIXTURES.length);
-    expect(full.totalRequired).toBeGreaterThan(0);
+    // Measured, not floored: one lost synonym or bank question moves these.
+    expect({ covered: full.totalCovered, required: full.totalRequired, declined: full.totalDeclined })
+      .toEqual({ covered: 20, required: 21, declined: 1 });
+    expect(core.totalCovered).toBe(14);
+    expect(Object.fromEntries(full.rows.map((r) => [r.board, `${r.covered}/${r.required}`]))).toEqual({
+      greenhouse: '5/5', lever: '5/5', ashby: '5/5', workable: '5/6',
+    });
     // The bank exists to answer these; a collapse would mean the synonym table
     // stopped bridging real phrasings.
     expect(full.ratio, 'the seeded bank should answer most required fields').toBeGreaterThan(0.8);

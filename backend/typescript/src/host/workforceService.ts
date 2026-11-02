@@ -259,7 +259,8 @@ export async function seedWorkforceHistory(
     });
     let annotationStoreUnavailable = false;
     for (const gr of history.runs) {
-      await insertRunWithStartContext(storage, gr.record);
+      // ADR 0987 D3 — a seeded historical record; it executes nothing (ADR 0823).
+      await insertRunWithStartContext(storage, gr.record, { admission: { plan: 'exempt:historical-record' } });
       // Annotations (RFC 0056 flavor) are BEST-EFFORT: the workforce surface
       // reads `metadata.outcome`, never annotation records, so a backend without
       // an annotations store (e.g. a Postgres deploy whose schema omits the

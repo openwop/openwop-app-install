@@ -2,6 +2,9 @@
  * ADR 0906 P0 / C6 — one canonical host form. Add strips a trailing dot; the
  * lookup used to strip only the port, so `pages.example.com.` missed its own
  * row. Both now go through `canonicalHost`.
+ *
+ * Tracker TST-CQG-3 (w68). Sabotage-witnessed: red when canonicalHost keeps the
+ * trailing dot, and when it stops lower-casing.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';

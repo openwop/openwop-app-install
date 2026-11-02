@@ -71,11 +71,11 @@ export function PrivacyPage() {
                 home: brand.homeUrl.replace(/^https?:\/\//, '').replace(/\/$/, ''),
                 repo: brand.repoUrl.replace(/^https?:\/\/(www\.)?github\.com\//, '').replace(/\/$/, ''),
               }}
-              components={{
-                0: <a href={brand.homeUrl} className="inline-link" target="_blank" rel="noopener" />,
-                1: <code />,
-                2: <a href={brand.repoUrl} className="inline-link" target="_blank" rel="noopener" />,
-              }}
+              components={[
+                <a href={brand.homeUrl} className="inline-link" target="_blank" rel="noopener" />,
+                <code />,
+                <a href={brand.repoUrl} className="inline-link" target="_blank" rel="noopener" />,
+              ]}
             />
           </p>
         </div>
@@ -91,7 +91,7 @@ export function PrivacyPage() {
             t={t}
             i18nKey="privacyLastUpdated"
             values={{ domain: brand.primaryDomain }}
-            components={{ 0: <code /> }}
+            components={[<code />]}
           />
         </p>
 
@@ -109,7 +109,7 @@ Flags:   HttpOnly; Secure; SameSite=Lax`}
             t={t}
             i18nKey="privacyCookiePayload"
             values={{ payload: '{ sid, tenantId: "anon:<sid>", tier: "anon", iat, exp }' }}
-            components={{ 0: <code />, 1: <code /> }}
+            components={[<code />, <code />]}
           />
         </p>
 
@@ -135,7 +135,7 @@ Flags:   HttpOnly; Secure; SameSite=Lax`}
               <td>{t('privacyRowRunsRetention')}</td>
             </tr>
             <tr>
-              <td><Trans t={t} i18nKey="privacyRowCookieData" components={{ 0: <code /> }} /></td>
+              <td><Trans t={t} i18nKey="privacyRowCookieData" components={[<code />]} /></td>
               <td>{t('privacyRowCookieWhere')}</td>
               <td>{t('privacyRowCookieRetention')}</td>
             </tr>
@@ -157,7 +157,7 @@ Flags:   HttpOnly; Secure; SameSite=Lax`}
           <Trans
             t={t}
             i18nKey="privacyOutboundBody"
-            components={{ 0: <code />, 1: <code />, 2: <code />, 3: <code /> }}
+            components={[<code />, <code />, <code />, <code />]}
           />
         </p>
 
@@ -166,13 +166,13 @@ Flags:   HttpOnly; Secure; SameSite=Lax`}
           <Trans
             t={t}
             i18nKey="privacyLogsBody"
-            components={{ 0: <code />, 1: <code />, 2: <code />, 3: <code /> }}
+            components={[<code />, <code />, <code />, <code />]}
           />
         </p>
 
         <h2>{t('privacyDeleteHeading')}</h2>
         <ol>
-          <li><Trans t={t} i18nKey="privacyDeleteStep1" values={{ domain: brand.primaryDomain }} components={{ 0: <code /> }} /></li>
+          <li><Trans t={t} i18nKey="privacyDeleteStep1" values={{ domain: brand.primaryDomain }} components={[<code />]} /></li>
           <li>{t('privacyDeleteStep2')}</li>
         </ol>
 
@@ -188,11 +188,11 @@ Flags:   HttpOnly; Secure; SameSite=Lax`}
               home: brand.homeUrl.replace(/^https?:\/\//, '').replace(/\/$/, ''),
               repo: brand.repoUrl.replace(/^https?:\/\/(www\.)?github\.com\//, '').replace(/\/$/, ''),
             }}
-            components={{
-              0: <a href={brand.homeUrl} className="inline-link" target="_blank" rel="noopener" />,
-              1: <code />,
-              2: <a href={brand.repoUrl} className="inline-link" target="_blank" rel="noopener" />,
-            }}
+            components={[
+              <a href={brand.homeUrl} className="inline-link" target="_blank" rel="noopener" />,
+              <code />,
+              <a href={brand.repoUrl} className="inline-link" target="_blank" rel="noopener" />,
+            ]}
           />
         </p>
       </div>

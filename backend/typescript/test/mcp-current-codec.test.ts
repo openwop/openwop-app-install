@@ -32,6 +32,7 @@ import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { getSetCookies } from './headerCookies.js';
+import { createMember } from '../src/host/accessControlService.js';
 import { elicitationPlan, isFormSafeSchema } from '../src/host/mcpCurrentCodec.js';
 import {
   MCP_CURRENT_VERSION,
@@ -70,6 +71,8 @@ beforeAll(async () => {
   // single-tenant seam principal is the supported way to have one in a test.
   process.env.OPENWOP_TEST_SEAM_ENABLED = 'true';
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
+  // Only for the same-workspace principal leg (two named users in ONE tenant).
+  process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => {
     server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
@@ -112,6 +115,7 @@ beforeAll(async () => {
 afterAll(async () => {
   delete process.env.OPENWOP_MCP_SERVER_ENABLED;
   delete process.env.OPENWOP_TEST_SEAM_ENABLED;
+  delete process.env.OPENWOP_TEST_AUTH_ENABLED;
   await new Promise<void>((res) => server.close(() => res()));
 });
 
@@ -126,6 +130,8 @@ interface RpcOpts {
 
 async function rpc(method: string, params: Record<string, unknown> = {}, opts: RpcOpts = {}): Promise<{
   status: number;
+  /** The `Mcp-Session-Id` response header — the current profile mints none (§B). */
+  sessionId: string | null;
   result?: Record<string, unknown>;
   error?: { code: number; message: string; data?: Record<string, unknown> };
 }> {
@@ -146,7 +152,7 @@ async function rpc(method: string, params: Record<string, unknown> = {}, opts: R
     if (m?.[1]) cookie = m[1];
   }
   const body = (await res.json()) as { result?: Record<string, unknown>; error?: { code: number; message: string; data?: Record<string, unknown> } };
-  return { status: res.status, ...body };
+  return { status: res.status, sessionId: res.headers.get('mcp-session-id'), ...body };
 }
 
 describe('RFC 0153 §B — stateless routing and discovery', () => {
@@ -159,9 +165,15 @@ describe('RFC 0153 §B — stateless routing and discovery', () => {
     expect((r.result?.tools as Array<{ name: string }>).map((t) => t.name)).toContain(TOOL);
   });
 
-  it('two independent requests from one caller agree — no per-connection state', async () => {
+  it('two independent requests from one caller agree — and neither is handed a session to carry', async () => {
+    // Stateless (§B): the second request needs nothing the first handed back. The
+    // list equality alone cannot fail against a static registry, so the leg's
+    // failable half is the wire: no response may mint an `Mcp-Session-Id`.
     const a = await rpc('tools/list');
     const b = await rpc('tools/list');
+    expect(a.sessionId, 'the current profile mints no session').toBeNull();
+    expect(b.sessionId).toBeNull();
+    expect((a.result?.tools as Array<{ name: string }>).map((t) => t.name)).toContain(TOOL);
     expect(JSON.stringify(b.result?.tools)).toBe(JSON.stringify(a.result?.tools));
   });
 
@@ -402,6 +414,67 @@ describe('RFC 0153 §C.2 — MRTR, host as server', () => {
       inputResponses: { [key]: { action: 'accept', content: { name: 'Ada' } } },
     }, HDR);
     expect(ok.result?.resultType).toBe('complete');
+  });
+
+  it('a requestState minted for ANOTHER principal in the SAME workspace is refused', async () => {
+    // The leg above changes the TENANT too (a cookie-less caller is a fresh anon
+    // workspace), so the run-tenant check and tool visibility refuse it before the
+    // state's principal binding is consulted. Here two named users share ONE
+    // workspace: the run is theirs, the tool is visible to both (asserted), and
+    // only the principal differs.
+    const tenantId = `mrtr-shared-${Date.now()}`;
+    const shared = `mrtr_shared_${Date.now()}`;
+    const loginAs = async (who: string): Promise<{ cookie: string; userId: string }> => {
+      const r = await fetch(`${BASE}/host/openwop-app/test/login`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ email: `${who}-${Date.now()}@acme.test`, tenantId }),
+      });
+      expect(r.status, await r.clone().text()).toBe(201);
+      const { user } = (await r.clone().json()) as { user: { userId: string } };
+      const ck = getSetCookies(r.headers).map((c) => /(__session=[^;]+)/.exec(c)?.[1]).find(Boolean);
+      expect(ck, `${who} got a session`).toBeTruthy();
+      return { cookie: ck!, userId: user.userId };
+    };
+    const ownerLogin = await loginAs('owner');
+    const memberLogin = await loginAs('member');
+    // The second user is a real MEMBER of the workspace (its root org is the tenant).
+    await createMember({ orgId: tenantId, tenantId, displayName: 'member', subject: memberLogin.userId, roles: ['editor'] });
+    const owner = ownerLogin.cookie;
+    const member = memberLogin.cookie;
+    const reg = await fetch(`${BASE}/host/openwop-app/workflows`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: owner },
+      body: JSON.stringify({
+        workflowId: `mcp.mrtr.${shared}`,
+        nodes: [
+          { nodeId: 'expose', typeId: 'core.openwop.mcp.expose-tool', config: { name: shared, description: 'MRTR shared probe', inputSchema: { type: 'object', properties: {} } } },
+          { nodeId: 'ask', typeId: 'core.openwop.mcp.handle-elicitation', config: { message: 'What is your name?', requestedSchema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] } } },
+        ],
+        edges: [{ edgeId: 'expose-to-ask', sourceNodeId: 'expose', targetNodeId: 'ask' }],
+      }),
+    });
+    expect([200, 201], `workflow registration failed: ${await reg.clone().text()}`).toContain(reg.status);
+    const mine = cookie;
+    const hdr = { clientCapabilities: { elicitation: {} }, mcpName: shared };
+    try {
+      cookie = owner;
+      const first = await rpc('tools/call', { name: shared, arguments: {} }, hdr);
+      expect(first.result?.resultType, JSON.stringify(first.error)).toBe('input_required');
+      const key = Object.keys(first.result?.inputRequests as Record<string, unknown>)[0]!;
+      const retry = { name: shared, arguments: {}, requestState: first.result?.requestState, inputResponses: { [key]: { action: 'accept', content: { name: 'Ada' } } } };
+
+      cookie = member;
+      const listed = await rpc('tools/list');
+      expect((listed.result?.tools as Array<{ name: string }>).map((t) => t.name), 'the member can SEE the tool — visibility is not what refuses').toContain(shared);
+      const theirs = await rpc('tools/call', retry, hdr);
+      expect(theirs.error?.code).toBe(-32602);
+
+      cookie = owner;
+      const ok = await rpc('tools/call', retry, hdr);
+      expect(ok.result?.resultType, 'the refusal did not consume the owner\'s gate').toBe('complete');
+    } finally {
+      cookie = mine;
+    }
   });
 
   it('a requestState minted for ANOTHER request digest is refused', async () => {

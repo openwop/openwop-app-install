@@ -4,6 +4,13 @@
  * the tool's input. Red under: not sending the forced tool, reading the text
  * block instead of the tool input, forcing the tool while thinking is on (a
  * documented 400), or no fallback on a tool_choice 400.
+ *
+ * The interleaved-tool refusal is a TRIPLE GUARD (w73, measured: dropping the
+ * start-count check alone stayed green): the content_block_start count/name check,
+ * the input_json_delta index check, and the final `toolBlocks !== 1` count all set
+ * or test the same refusal. The one edit that breaks all three is disabling the
+ * single `anthropic_invalid_structured_tool_response` throw; it reds both refusal
+ * cases. The undeclared-block delta case is ALSO witnessed by the index check alone.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { dispatchChat } from '../src/providers/dispatch.js';
@@ -91,8 +98,14 @@ describe('ADR 0912 — Anthropic forced-tool structured output', () => {
 
   it('with thinking on, the tool is NOT forced (Anthropic refuses that combination)', async () => {
     const seen = stub([() => textReply('{"line":"x"}')]);
-    await dispatchChat({ ...base, model: 'claude-sonnet-4-6', jsonSchema: SCHEMA, reasoningVerbosity: 'full' });
+    const r = await dispatchChat({ ...base, model: 'claude-sonnet-4-6', jsonSchema: SCHEMA, reasoningVerbosity: 'full' });
+    // Thinking really is on in this request (else the case proves nothing)...
+    expect(seen[0]!.body).toHaveProperty('thinking');
+    // ...and neither the tool nor the forcing is sent; the reply is the prompt-hint text.
     expect(seen[0]!.body).not.toHaveProperty('tool_choice');
+    expect(seen[0]!.body).not.toHaveProperty('tools');
+    expect(r.structuredMode).toBe('prompt');
+    expect(r.completion).toBe('{"line":"x"}');
   });
 
   it('a plain call sends no tools', async () => {

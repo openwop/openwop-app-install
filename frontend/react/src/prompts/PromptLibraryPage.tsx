@@ -141,8 +141,8 @@ export function PromptLibraryPage() {
     getCapabilities()
       .then((c) => {
         if (cancelled) return;
-        const caps = (c as { capabilities?: { envelopes?: { tierOneSubsetCompliance?: unknown } } }).capabilities;
-        const v = caps?.envelopes?.tierOneSubsetCompliance;
+        const caps = (c as { capabilities?: { aiProviders?: { tierOneSubsetCompliance?: unknown } } }).capabilities;
+        const v = caps?.aiProviders?.tierOneSubsetCompliance;
         if (v === 'strict' || v === 'warn' || v === 'off') setTierOneCompliance(v);
       })
       .catch(() => { /* best-effort; absence is fine */ });

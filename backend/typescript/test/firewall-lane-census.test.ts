@@ -12,10 +12,15 @@
  *
  * It also pins `buildFirewallHook(` to ONE production caller (`host/laneFirewall.ts`), so
  * the hand-copied posture block cannot come back.
+ *
+ * Tracker TST-DCC-1. Red when a lane stops calling `buildLaneFirewall`, stops
+ * handing `firewall` to its decision point, or `laneFirewall.ts` stops being the
+ * one `buildFirewallHook(` caller (grade-tests w70 probes `fw-*`).
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { stripComments } from './helpers/stripComments.js';
 
 const SRC = join(__dirname, '..', 'src');
 
@@ -31,10 +36,7 @@ function walk(dir: string, out: string[] = []): string[] {
 /** Code with comments removed (block, whole-line AND trailing `// …`), so a call named
  *  in prose is not counted (FW2-CD-3). `://` inside a URL string is left alone. */
 function code(path: string): string {
-  return readFileSync(path, 'utf8')
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/^\s*\/\/.*$/gm, '')
-    .replace(/([^:'"`])\/\/.*$/gm, '$1');
+  return stripComments(readFileSync(path, 'utf8'));
 }
 
 const count = (text: string, re: RegExp): number => (text.match(re) ?? []).length;

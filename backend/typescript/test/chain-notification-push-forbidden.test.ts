@@ -18,6 +18,9 @@
  *
  * ZERO baseline, not a ceiling: unlike the counts this file's siblings ratchet,
  * there is no legitimate instance to grandfather.
+ *
+ * TST-CCC-9. Red when: any chain node uses `notification-push`, or a `notify` node
+ * names no `audience`.
  */
 import { readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -29,7 +32,7 @@ const PACK_DIRS = ['examples/workflow-chain-packs', 'packs'];
 const FORBIDDEN = 'core.openwop.integration.notification-push';
 const REPLACEMENT = 'feature.notifications.nodes.notify';
 
-interface Node { id: string; typeId?: string }
+interface Node { id: string; typeId?: string; config?: { audience?: unknown } }
 interface Chain { chainId: string; dag?: { nodes?: Node[] } }
 
 const chains: { where: string; chain: Chain }[] = [];
@@ -47,7 +50,7 @@ for (const dir of PACK_DIRS) {
 
 describe('the scan reaches a real corpus', () => {
   it('finds chains to inspect', () => {
-    expect(chains.length, 'no chains found — the ratchet is scanning nothing').toBeGreaterThan(50);
+    expect(chains.length, 'no chains found — the ratchet is scanning nothing').toBeGreaterThan(268); // measured 272 (2026-10-29)
   });
 });
 
@@ -73,7 +76,7 @@ describe('notification-push is forbidden in chains', () => {
     const unbound = chains.flatMap(({ chain }) =>
       (chain.dag?.nodes ?? [])
         .filter((n) => n.typeId === REPLACEMENT)
-        .filter((n) => !((n as unknown as { config?: { audience?: unknown } }).config?.audience))
+        .filter((n) => !n.config?.audience)
         .map((n) => `${chain.chainId} :: ${n.id}`));
     expect(unbound, '`audience` is required config: self / tenant / role:<name>').toEqual([]);
   });

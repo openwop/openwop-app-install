@@ -1,6 +1,15 @@
 /**
  * ADR 0137 Phase 2 — the run-store sweep + suggestion upsert (status-preserving) +
  * processDueSweeps (always-on since the 2026-06-24 graduation; daemon stays env-gated).
+ *
+ * This file owns the DAEMON pass (`sweepTenant` / `processDueSweeps`) and the
+ * recurrence threshold. The per-owner authority claims (who sees, scans and
+ * decides a pattern) live in `ambient-work-graph-r2.test.ts` (TST-BNW-1), which
+ * also reds on a status-overwriting upsert through the Scan path.
+ *
+ * TST-BXA-3. Red when: MIN_COUNT drops below 3, a re-sweep overwrites a
+ * dismissed status, or processDueSweeps stops sweeping a listed tenant (w66
+ * probes sw-min / sw-status / sw-pds).
  */
 import { beforeAll, describe, it, expect } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -61,7 +70,10 @@ describe('sweepTenant + upsert (ADR 0137 P2)', () => {
 describe('processDueSweeps (always-on; daemon env-gated)', () => {
   it('sweeps every listed tenant (no per-tenant toggle gate anymore)', async () => {
     for (const i of [1, 2, 3]) await seedRun(`pds${i}`, 'twg-on', ['kb.search', 'email.send']);
-    await processDueSweeps({ storage }, async () => ['twg-on'], Date.parse('2026-06-24T10:00:00Z'));
-    expect((await listSuggestions('twg-on')).length).toBeGreaterThanOrEqual(1);
+    const swept = await processDueSweeps({ storage }, async () => ['twg-on'], Date.parse('2026-06-24T10:00:00Z'));
+    expect(swept).toBe(1);
+    const sugs = await listSuggestions('twg-on');
+    expect(sugs).toHaveLength(1);
+    expect(sugs[0]).toMatchObject({ toolSequence: ['kb.search', 'email.send'], count: 3, status: 'suggested' });
   });
 });

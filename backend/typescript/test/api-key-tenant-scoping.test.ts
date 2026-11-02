@@ -20,6 +20,19 @@
  * ASSERTED AT THE WIRE, through `GET /runs/:runId` — the real bypass path,
  * not the parser's own arithmetic. A test that re-derived the tenant list and
  * compared it to itself would restate the premise instead of checking it.
+ *
+ * ONE server. The auth middleware reads the key map PER REQUEST
+ * (`readKeyTenants()` in middleware/auth.ts), so a case changes
+ * `OPENWOP_API_KEYS` around its own request and restores the file's config in
+ * `finally`. The first version rebooted `createApp` per case and never restored
+ * the env, so a shuffled order left describe 1 running under another case's
+ * keys (w66 grade: order dependence + six needless boots).
+ *
+ * TST-BXC-2. Red when: a bare key or a trailing-colon key is read as `*`
+ * (w66 ks-bare / ks-trailing), the key is split on the FIRST colon (ks-last),
+ * tenant whitespace is kept (ks-trim), the unconfigured dev-token loses its
+ * wildcard (ks-dev), `loadReadableRun` stops comparing the run's tenant
+ * (ks-runaccess), or v2Identity stops refusing a foreign tenant segment (ks-v2).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -52,9 +65,33 @@ const V2 = { 'OpenWOP-Version': '2' };
 /** The tenant each key below acts as: a bare key is `default`, a `:*` key keeps `default` as its request tenant. */
 const CALLER_TENANT: Record<string, string> = { 'k-bare': 'default', 'k-a': 'tenant-a', 'k-b': 'tenant-b', 'k-op': 'default', 'not-a-configured-key': 'default' };
 
+interface RunRead { status: number; error: string | undefined; message: string | undefined }
+
+/** Read RUN_IN_A as `key`, bound under `callerTenant`; the body is always consumed. */
+async function read(key: string, callerTenant: string): Promise<RunRead> {
+  const res = await fetch(`${BASE}${runPath(callerTenant)}`, { headers: { ...V2, authorization: `Bearer ${key}` } });
+  const body = (await res.json().catch(() => ({}))) as { error?: unknown; message?: unknown };
+  return {
+    status: res.status,
+    error: typeof body.error === 'string' ? body.error : undefined,
+    message: typeof body.message === 'string' ? body.message : undefined,
+  };
+}
+
+/** The run-ownership refusal from `loadReadableRun` (v2 wire code `not_found`,
+ *  message naming the run) — not a dead route's 404, whose message differs. */
+const RUN_NOT_FOUND = { status: 404, error: 'not_found', message: `run ${RUN_IN_A} not found` };
+
 async function getRun(key: string): Promise<number> {
-  const res = await fetch(`${BASE}${runPath(CALLER_TENANT[key] ?? 'default')}`, { headers: { ...V2, authorization: `Bearer ${key}` } });
-  return res.status;
+  return (await read(key, CALLER_TENANT[key] ?? 'default')).status;
+}
+
+/** Run `fn` with `OPENWOP_API_KEYS` set to `keys` (or unset when `undefined`, with
+ *  `OPENWOP_API_KEY` unset too), restoring the file's config afterwards. */
+async function withKeys<T>(keys: string | undefined, fn: () => Promise<T>): Promise<T> {
+  if (keys === undefined) delete process.env.OPENWOP_API_KEYS; else process.env.OPENWOP_API_KEYS = keys;
+  delete process.env.OPENWOP_API_KEY;
+  try { return await fn(); } finally { process.env.OPENWOP_API_KEYS = KEYS; }
 }
 
 /** A FILE-backed DSN, deliberately: `memory://` opens a fresh in-memory sqlite
@@ -90,7 +127,7 @@ describe('ADR 0561 — a bare API key is NOT a cross-tenant grant', () => {
   it('a BARE key cannot read another tenant\'s run', async () => {
     // THE regression guard. This returned 200 before ADR 0561, because a bare
     // key was `tenants:['*']` and `loadReadableRun` short-circuits on it.
-    expect(await getRun('k-bare')).toBe(404);
+    expect(await read('k-bare', 'default')).toEqual(RUN_NOT_FOUND);
   });
 
   it('a key scoped to the OWNING tenant can read it', async () => {
@@ -101,7 +138,7 @@ describe('ADR 0561 — a bare API key is NOT a cross-tenant grant', () => {
     // Proves the 404 above is tenant scoping, not a broken key or a route that
     // 404s for everyone — without this the first assertion would pass even if
     // the endpoint were simply dead.
-    expect(await getRun('k-b')).toBe(404);
+    expect(await read('k-b', 'tenant-b')).toEqual(RUN_NOT_FOUND);
   });
 
   it('an EXPLICIT `:*` key still gets the operator principal', async () => {
@@ -111,7 +148,7 @@ describe('ADR 0561 — a bare API key is NOT a cross-tenant grant', () => {
   });
 
   it('an unconfigured key authenticates nothing', async () => {
-    expect(await getRun('not-a-configured-key')).not.toBe(200);
+    expect(await read('not-a-configured-key', 'default')).toMatchObject({ status: 401, error: 'unauthenticated' });
   });
 
   it('v2: a bound id naming ANOTHER tenant is refused 403 id_tenant_mismatch before the route', async () => {
@@ -122,18 +159,10 @@ describe('ADR 0561 — a bare API key is NOT a cross-tenant grant', () => {
 });
 
 describe('ADR 0561 — parsing edge cases resolve toward LESS authority', () => {
-  /** Reboots the host with a different key config and reports what that key can
-   *  reach. Each case is a config an operator could plausibly write. */
-  async function reach(keys: string, key: string, callerTenant: string): Promise<number> {
-    process.env.OPENWOP_API_KEYS = keys;
-    const app = await createApp({ port: 0, storageDsn: DSN, serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-    const s = app.listen(0, '127.0.0.1');
-    await new Promise<void>((res) => s.once('listening', () => res()));
-    const base = `http://127.0.0.1:${(s.address() as AddressInfo).port}`;
-    const res = await fetch(`${base}${runPath(callerTenant)}`, { headers: { ...V2, authorization: `Bearer ${key}` } });
-    await new Promise<void>((r) => s.close(() => r()));
-    return res.status;
-  }
+  /** What `key` can reach when `OPENWOP_API_KEYS` is `keys` — a config an
+   *  operator could plausibly write. Same server; the env is restored after. */
+  const reach = (keys: string, key: string, callerTenant: string): Promise<number> =>
+    withKeys(keys, async () => (await read(key, callerTenant)).status);
 
   it('a trailing colon is a typo, not a wildcard request', async () => {
     // `"k1:"` is the shape an operator produces by half-writing a scope. It
@@ -152,19 +181,10 @@ describe('ADR 0561 — parsing edge cases resolve toward LESS authority', () => 
 });
 
 describe('ADR 0561 — the built-in dev-token fallback is a DIFFERENT case', () => {
-  /** Boots with NO key env at all, so `readKeyTenants` falls back to its
-   *  built-in local-development default. */
-  async function reachWithNoKeyEnv(key: string): Promise<number> {
-    delete process.env.OPENWOP_API_KEYS;
-    delete process.env.OPENWOP_API_KEY;
-    const app = await createApp({ port: 0, storageDsn: DSN, serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-    const s = app.listen(0, '127.0.0.1');
-    await new Promise<void>((res) => s.once('listening', () => res()));
-    const base = `http://127.0.0.1:${(s.address() as AddressInfo).port}`;
-    const res = await fetch(`${base}${runPath('default')}`, { headers: { ...V2, authorization: `Bearer ${key}` } });
-    await new Promise<void>((r) => s.close(() => r()));
-    return res.status;
-  }
+  /** NO key env at all, so `readKeyTenants` falls back to its built-in
+   *  local-development default. */
+  const reachWithNoKeyEnv = (key: string): Promise<number> =>
+    withKeys(undefined, async () => (await read(key, 'default')).status);
 
   it('the UNCONFIGURED dev-token default keeps the wildcard', async () => {
     // Deliberate, and worth pinning because it looks like the bug this ADR
@@ -180,13 +200,6 @@ describe('ADR 0561 — the built-in dev-token fallback is a DIFFERENT case', () 
     // The line this ADR actually draws: configured keys are scoped, whatever
     // they are named. Without this leg, "dev-token is special" could silently
     // become "the string dev-token is always an operator".
-    process.env.OPENWOP_API_KEYS = 'dev-token';
-    const app = await createApp({ port: 0, storageDsn: DSN, serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-    const s = app.listen(0, '127.0.0.1');
-    await new Promise<void>((res) => s.once('listening', () => res()));
-    const base = `http://127.0.0.1:${(s.address() as AddressInfo).port}`;
-    const res = await fetch(`${base}${runPath('default')}`, { headers: { ...V2, authorization: 'Bearer dev-token' } });
-    await new Promise<void>((r) => s.close(() => r()));
-    expect(res.status).toBe(404);
+    expect(await withKeys('dev-token', () => read('dev-token', 'default'))).toEqual(RUN_NOT_FOUND);
   });
 });

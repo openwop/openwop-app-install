@@ -4,10 +4,17 @@
  * in `details.managedCode`; the tool loop used to drop that, so the chat
  * retried after four seconds and then showed "Something went wrong"
  * (ADR 0773 G-10b, case 4, 2026-10-01).
+ *
+ * TST-DKF-2 (grade-tests wave 72). "Not retried" is asserted on BOTH predicates
+ * the tool loop consults — `isProviderRateLimited` and the retry decision
+ * `isTransientProviderFailure`, which re-checks the managed code itself (a
+ * recorded double guard). Red when (w72 probes): the loop drops the managed code
+ * (md-loop), the daily limit reads as a burst (md-burst), or any managed code is
+ * taken as the daily limit (md-code).
  */
 import { describe, expect, it } from 'vitest';
 import { MANAGED_DAILY_LIMIT, managedLimitCode, runChatToolLoop } from '../src/host/agentDispatch.js';
-import { isProviderRateLimited } from '../src/host/conversationToolLoop.js';
+import { isProviderRateLimited, isTransientProviderFailure } from '../src/host/conversationToolLoop.js';
 import { AiProviderError } from '../src/aiProviders/aiProvidersHost.js';
 
 const daily = () => new AiProviderError('provider_rate_limited', 'Daily limit reached (50000 tokens). Resets at 00:00 UTC.', { managedCode: 'daily_limit_reached' });
@@ -19,11 +26,15 @@ describe('the managed daily limit in a tool turn', () => {
     expect(managedLimitCode(burst())).toBeUndefined();
     expect(managedLimitCode(new Error('x'))).toBeUndefined();
     expect(managedLimitCode(null)).toBeUndefined();
+    // Another managed code is not the daily limit.
+    expect(managedLimitCode(new AiProviderError('provider_rate_limited', 'Monthly cap.', { managedCode: 'monthly_limit_reached' }))).toBeUndefined();
   });
 
   it('is not retried as a burst limit, while a real burst still is', () => {
     expect(isProviderRateLimited(daily())).toBe(false);
     expect(isProviderRateLimited(burst())).toBe(true);
+    expect(isTransientProviderFailure(daily())).toBe(false);
+    expect(isTransientProviderFailure(burst())).toBe(true);
   });
 
   it('ends the turn with the daily-limit code, not the folded provider code', async () => {

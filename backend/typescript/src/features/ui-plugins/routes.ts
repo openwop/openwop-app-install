@@ -8,9 +8,9 @@
  *          plus the host's advertised `isolation` (the FE loader reads this so the
  *          mechanism it applies can't drift from the advert — RFC 0119 non-drift).
  *   GET  /v1/host/openwop-app/ui-plugin/packs/:name/plugins/:pluginId/entry
- *        → the plugin's `entry` bytes (size-capped, traversal-safe), served under a
- *          deny-egress CSP header as defense-in-depth. (ADR 0840: the FE now mounts
- *          the per-plugin `frame` by iframe `src`; the header policy is load-bearing.)
+ *        → the plugin's `entry` bytes (size-capped, traversal-safe), under the same
+ *          sandboxing, deny-egress header as the frame (ADR 1021). The FE mounts
+ *          the per-plugin `frame` by iframe `src` (ADR 0840), not this.
  *   POST /v1/host/openwop-app/ui-plugin/demo-artifact
  *        → ensures a per-tenant demo canvas so the reference artifact-viewer plugin
  *          has a real target to `artifact.read` over ui-plugin/1 (tenant-scoped).
@@ -23,7 +23,7 @@
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { tenantOf } from '../featureRoute.js';
-import { markUiPluginOperationsServed, pluginFrameCsp, pluginIframeCsp, uiPluginsCapability } from '../../host/uiPluginRpc.js';
+import { markUiPluginOperationsServed, pluginFrameCsp, uiPluginsCapability } from '../../host/uiPluginRpc.js';
 import { presentationEnabled } from '../../host/hostProfile.js';
 import { requireProtocolScope } from '../../host/protocolAuthorization.js';
 import { dispatchForPlugin } from '../../routes/uiPlugins.js';
@@ -96,18 +96,18 @@ export function registerUiPluginsFeatureRoutes(deps: RouteDeps): void {
     } catch (err) { next(err); }
   });
 
-  // The entry bundle bytes — mounted by the FE loader via srcdoc. Deny-egress CSP as
-  // defense-in-depth; the load-bearing egress denial is the srcdoc's own CSP (FE
-  // `withPluginCsp`) + the opaque-origin sandbox the FE applies. NOTE: on the
-  // `app.openwop.dev/api/**` path this response header is overridden by Firebase
-  // Hosting's global app CSP — the `firebase.json` entry-path rule (ADR 0300) re-asserts
-  // deny-egress there so the defense-in-depth holds end-to-end (this header is
-  // authoritative on the direct Cloud Run origin). Uniform 404 on any miss (no leak).
+  // The entry bundle bytes. The SPA no longer loads them (ADR 0840: plugins mount
+  // only from the per-plugin `frame` below), but the route answers, so it is served
+  // exactly like a frame: ADR 1021 found it sent the deny-egress policy WITHOUT
+  // `sandbox`, so opening it at top level ran plugin script as the host's own origin
+  // (RFC 0117 §2's MUST NOT). `pluginFrameCsp()` carries the sandbox; `firebase.json`
+  // repeats it for the `/api/**` path, where Hosting would otherwise apply the app's
+  // policy. Uniform 404 on any miss (no leak).
   app.get(`${BASE}/packs/:name/plugins/:pluginId/entry`, (req, res, next) => {
     try {
       const entry = getPluginEntry(req.params.name, req.params.pluginId);
       if (!entry) throw new OpenwopError('not_found', 'Unknown plugin entry.', 404, {});
-      res.set('Content-Security-Policy', pluginIframeCsp());
+      res.set('Content-Security-Policy', pluginFrameCsp());
       res.set('X-Content-Type-Options', 'nosniff');
       res.set('Cache-Control', 'public, max-age=300');
       res.type(entry.contentType).send(entry.bytes);

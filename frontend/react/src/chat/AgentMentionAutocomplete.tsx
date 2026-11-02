@@ -177,14 +177,14 @@ export function AgentMentionAutocomplete({
   if (entries.length === 0) {
     return (
       <EmptyPanel listRef={listRef}>
-        <Trans i18nKey="noAgentsInstalled" ns="chat" components={{ 1: <strong /> }} />
+        <Trans i18nKey="noAgentsInstalled" ns="chat" components={[<></>, <strong />]} />
       </EmptyPanel>
     );
   }
   if (matches.length === 0) {
     return (
       <EmptyPanel listRef={listRef}>
-        <Trans i18nKey="noAgentsMatch" ns="chat" values={{ query }} components={{ 1: <code /> }} />
+        <Trans i18nKey="noAgentsMatch" ns="chat" values={{ query }} components={[<></>, <code />]} />
       </EmptyPanel>
     );
   }

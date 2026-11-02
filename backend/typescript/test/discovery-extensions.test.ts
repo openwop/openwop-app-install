@@ -3,6 +3,10 @@
  * `extensions` block (RFC 0169 §A.4; `spec/v2/declaration.json` extensionsKeyPattern +
  * reservedOrgs). Pure unit test: the seam refuses what the wire must never carry and
  * omits (never half-advertises) a record that throws.
+ *
+ * TST-CVF-13. Red when: the key pattern loses its `$` anchor (`acme.thing.extra`
+ * accepted), the reserved-org check or the function check is dropped, or a
+ * throwing record is half-advertised instead of omitted.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { __resetV2Extensions, V2_EXTENSION_KEY, listV2ExtensionKeys, registerV2Extension, v2Extensions } from '../src/host/discoveryExtensions.js';
@@ -21,7 +25,8 @@ describe('registerV2Extension / v2Extensions', () => {
     for (const bad of ['Acme.thing', 'acme', 'acme.', 'acme.Thing', 'acme..thing', 'acme.thing.extra', '-acme.thing']) expect(() => registerV2Extension(bad, () => ({})), bad).toThrow(/key pattern/);
     expect(() => registerV2Extension('openwop.thing', () => ({}))).toThrow(/reserved/);
     expect(() => registerV2Extension('vendor.thing', () => ({}))).toThrow(/reserved/);
-    expect(() => registerV2Extension('acme.thing', {} as never)).toThrow(/function/);
+    // A non-function record reaches the runtime guard without a type cast.
+    expect(() => Reflect.apply(registerV2Extension, undefined, ['acme.thing', {}])).toThrow(/function/);
     expect(V2_EXTENSION_KEY.test('openwop-app.host')).toBe(true);
   });
   it('omits a record that throws and names it in `failed` — never a half-advertised claim', () => {

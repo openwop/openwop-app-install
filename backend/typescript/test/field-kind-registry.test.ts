@@ -3,6 +3,12 @@
  * inversion: extension kinds register from features; built-ins are
  * non-overridable; duplicates rejected; registered kinds are NOT
  * authoring-visible (FIELD_TYPES stays the closed built-in vocabulary).
+ * Second subject, same `buildFieldSpec` seam: ADR 0406 D2's `localizable` flag is
+ * boolean-only and valid only on a `string` field.
+ *
+ * Tracker TST-DCB-3. Red when `buildFieldSpec` admits a registered kind without
+ * `allowExtensionKinds`, when a built-in or duplicate registration is accepted,
+ * or when either `localizable` check goes (grade-tests w70 probes `fk-*`).
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import {

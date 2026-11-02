@@ -30,6 +30,7 @@ import { resolveDefinitionForRun, unwindTerminatedRun } from './compensationRunt
 import { compensationTriggerFor } from './compensationUnwind.js';
 import { createLogger } from '../observability/logger.js';
 import { clearRunSecrets } from '../byok/ephemeralRunSecrets.js';
+import { hostRunInterruptHandler } from './hostRunInterrupts.js';
 
 // The SDK's `TERMINAL_RUN_STATUSES` predicate, re-exported so a caller reading
 // this recipe does not have to know which of the two spellings this file uses.
@@ -113,6 +114,14 @@ export async function cancelRunAndCascade(
       runId: run.runId,
       nodeId: itr.nodeId,
       interruptId: itr.interruptId,
+    });
+  }
+  // ADR 1005 D14 — a host-owned run's gates closed without a decision: let its
+  // handler release what it held (contained, like the gate closes above).
+  const hostHandler = hostRunInterruptHandler(run.workflowId);
+  if (hostHandler) {
+    await hostHandler.onCancelled({ run: current }).catch((err: unknown) => {
+      log.warn('host_run_cancel_release_failed', { runId: run.runId, error: err instanceof Error ? err.message : String(err) });
     });
   }
 

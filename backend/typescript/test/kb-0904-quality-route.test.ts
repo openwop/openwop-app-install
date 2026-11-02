@@ -10,6 +10,10 @@
  *    moved past its vectors stays `stale` across the call, and turns `current` only
  *    after a real search rebuilds it;
  *  - a `provider` collection with no resolvable key reports `available:false` honestly.
+ * Tracker TST-DHK-4 (wave 71): red when `collectionQuality` lists without the
+ * caller (`w71g3-kq-gated`) or the route drops it (`kq-route`), the index state
+ * ignores the signature (`kq-stale`), or an unresolved provider reads available
+ * (`kq-avail`).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -113,6 +117,7 @@ describe('ADR 0904 P0 — GET …/kb/orgs/:orgId/quality', () => {
     // Not in the org at all ⇒ refused at the org scope.
     const stranger = client();
     await stranger.post('/host/openwop-app/test/login', { email: `stranger-${n++}@acme.test`, tenantId });
-    expect([403, 404]).toContain((await stranger.get(path)).status);
+    const refused = await stranger.get(path);
+    expect({ status: refused.status, error: (refused.body as { error?: string } | undefined)?.error }).toEqual({ status: 403, error: 'forbidden_scope' });
   }, 60_000);
 });

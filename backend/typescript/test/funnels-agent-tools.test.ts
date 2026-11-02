@@ -5,6 +5,12 @@
  * sharing the routes' authority: reads FAIL EMPTY without an acting user, the
  * write is DRAFT-ONLY, and no publish/experiment tool is ever registered.
  * Boots the REAL app (the `registerFeatureAgentTool` seam dispatch uses).
+ *
+ * TST-DEB-3 — red when: a read stops failing empty for a turn with no acting
+ * user or with the toggle off, the draft write stops failing typed
+ * (`acting_user_required` / `feature_disabled`), a non-draft funnel becomes
+ * revisable, or the pack allowlist gains a tool. The empty-read cases SEED a real
+ * funnel first, so an empty answer is the gate and not an empty store.
  */
 import http from 'node:http';
 import { readFileSync } from 'node:fs';
@@ -53,8 +59,15 @@ function provider(scope: { actingUserId?: string; runId?: string } = {}) {
 }
 const parse = (content: string): Record<string, unknown> => JSON.parse(content) as Record<string, unknown>;
 
+/** Draft a real funnel through the human-initiated path (toggle must be on). */
+async function seedDraft(name: string): Promise<string> {
+  const created = parse((await provider({ actingUserId: 'u-1' }).executeTool({ name: FUNNELS_DRAFT_TOOL_ID, input: { name } })).content);
+  expect(created).toMatchObject({ status: 'draft' });
+  return created.funnelId as string;
+}
+
 describe('CFP-1 — the funnels agent tools register + the allowlist matches', () => {
-  it('all four tools register into the builtin surface (so dispatch can offer them)', () => {
+  it('all six tools register into the builtin surface (so dispatch can offer them)', () => {
     const ids = builtinAgentToolIds();
     for (const id of ALL_IDS) expect(ids).toContain(id);
   });
@@ -79,10 +92,14 @@ describe('CFP-1 — the funnels agent tools register + the allowlist matches', (
 describe('CFP-1 — authority parity: reads FAIL EMPTY without an acting user', () => {
   it('list/get/step-stats return empty payloads for a turn with no human principal', async () => {
     await setFunnels('on');
+    const funnelId = await seedDraft('No-Actor Seed');
+    // Positive control: the human-initiated turn DOES see the seeded funnel.
+    const seen = parse((await provider({ actingUserId: 'u-1' }).executeTool({ name: FUNNELS_LIST_TOOL_ID, input: {} })).content);
+    expect((seen.funnels as { funnelId: string }[]).map((f) => f.funnelId)).toContain(funnelId);
     const p = provider(); // no actingUserId — a scheduled/system turn
     expect(parse((await p.executeTool({ name: FUNNELS_LIST_TOOL_ID, input: {} })).content)).toEqual({ funnels: [] });
-    expect(parse((await p.executeTool({ name: FUNNELS_GET_TOOL_ID, input: { funnelId: 'x' } })).content)).toEqual({ funnel: null });
-    expect(parse((await p.executeTool({ name: FUNNELS_STEP_STATS_TOOL_ID, input: { funnelId: 'x' } })).content)).toEqual({ steps: {}, days: 0 });
+    expect(parse((await p.executeTool({ name: FUNNELS_GET_TOOL_ID, input: { funnelId } })).content)).toEqual({ funnel: null });
+    expect(parse((await p.executeTool({ name: FUNNELS_STEP_STATS_TOOL_ID, input: { funnelId } })).content)).toEqual({ steps: {}, days: 0 });
   });
 
   it('the draft write FAILS TYPED without an acting user (never a silent no-op)', async () => {
@@ -94,23 +111,28 @@ describe('CFP-1 — authority parity: reads FAIL EMPTY without an acting user', 
 
 describe('CFP-1 — toggle honesty: every tool fails closed when funnels is off', () => {
   it('reads fail EMPTY and only the write stays typed when the toggle is off', async () => {
-    await setFunnels('off');
-    const p = provider({ actingUserId: 'u-1' });
-    // reads: empty (not typed) — the model just sees nothing; the loop is not derailed.
-    const list = await p.executeTool({ name: FUNNELS_LIST_TOOL_ID, input: {} });
-    expect(list.isError).toBeFalsy();
-    expect(parse(list.content)).toEqual({ funnels: [] });
-    const get = await p.executeTool({ name: FUNNELS_GET_TOOL_ID, input: { funnelId: 'x' } });
-    expect(get.isError).toBeFalsy();
-    expect(parse(get.content)).toEqual({ funnel: null });
-    const stats = await p.executeTool({ name: FUNNELS_STEP_STATS_TOOL_ID, input: { funnelId: 'x' } });
-    expect(stats.isError).toBeFalsy();
-    expect(parse(stats.content)).toMatchObject({ steps: {}, days: 0 });
-    // write: typed feature_disabled.
-    const draft = await p.executeTool({ name: FUNNELS_DRAFT_TOOL_ID, input: { funnelId: 'x', name: 'X' } });
-    expect(draft.isError).toBe(true);
-    expect(parse(draft.content)).toMatchObject({ error: 'feature_disabled' });
     await setFunnels('on');
+    const funnelId = await seedDraft('Toggle Seed');
+    await setFunnels('off');
+    try {
+      const p = provider({ actingUserId: 'u-1' });
+      // reads: empty (not typed) — the model just sees nothing; the loop is not derailed.
+      const list = await p.executeTool({ name: FUNNELS_LIST_TOOL_ID, input: {} });
+      expect(list.isError).toBeUndefined();
+      expect(parse(list.content)).toEqual({ funnels: [] });
+      const get = await p.executeTool({ name: FUNNELS_GET_TOOL_ID, input: { funnelId } });
+      expect(get.isError).toBeUndefined();
+      expect(parse(get.content)).toEqual({ funnel: null });
+      const stats = await p.executeTool({ name: FUNNELS_STEP_STATS_TOOL_ID, input: { funnelId } });
+      expect(stats.isError).toBeUndefined();
+      expect(parse(stats.content)).toEqual({ steps: {}, days: 0 });
+      // write: typed feature_disabled.
+      const draft = await p.executeTool({ name: FUNNELS_DRAFT_TOOL_ID, input: { funnelId, name: 'X' } });
+      expect(draft.isError).toBe(true);
+      expect(parse(draft.content)).toMatchObject({ error: 'feature_disabled' });
+    } finally {
+      await setFunnels('on');
+    }
   });
 });
 
@@ -136,6 +158,7 @@ describe('CFP-1 — happy path: draft → list → get → step-stats (draft-onl
   });
 
   it('revising a NON-draft funnel is refused (the public surface stays human-owned)', async () => {
+    await setFunnels('on');
     const p = provider({ actingUserId: 'u-1' });
     const created = parse((await p.executeTool({ name: FUNNELS_DRAFT_TOOL_ID, input: { name: 'To Archive' } })).content);
     const funnelId = created.funnelId as string;
@@ -148,6 +171,7 @@ describe('CFP-1 — happy path: draft → list → get → step-stats (draft-onl
   });
 
   it('a get for a missing funnel is a typed not_found (no existence leak)', async () => {
+    await setFunnels('on');
     const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: FUNNELS_GET_TOOL_ID, input: { funnelId: 'nope' } });
     expect(out.isError).toBe(true);
     expect(parse(out.content)).toMatchObject({ error: 'not_found' });

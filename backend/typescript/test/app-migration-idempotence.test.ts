@@ -23,6 +23,22 @@
  *
  * It exercises the REAL `APP_MIGRATIONS` array, not a fixture; a synthetic set would
  * assert nothing about the migrations that actually ship.
+ *
+ * §THE SECOND WAY IT WAS WRONG (w66 grade). Run against EMPTY storage, nearly every
+ * migration took its "nothing to do" path both times, so "survives a second
+ * execution" was measured only where there was nothing to execute: a migration
+ * that threw on finding its OWN earlier write stayed green (w66 idem-silent). The
+ * store is now seeded with one triggering row per data-driven migration (a CRM
+ * contact → 23; a strategy record and a priority-matrix list → 24; a legacy
+ * unstamped user → 20), so the second execution meets the rows the first one
+ * wrote, and the rows those migrations write must be byte-identical after the
+ * second run. The advisory board is deliberately NOT seeded, so migration 24 also
+ * takes its "not in use" branch on both executions (seeding all three hid that
+ * branch: w66 idem-rerun-r2 read vacuous).
+ *
+ * TST-BXB-3 (MIG-LOCK-1). Red when: a shipped migration throws on a re-run over
+ * its own output (idem-rerun, idem-silent), the runner re-applies the recorded
+ * version (idem-filter), or records a counter other than the latest (idem-counter).
  */
 
 import { describe, expect, it, beforeEach } from 'vitest';
@@ -30,7 +46,8 @@ import {
   runAppMigrations, APP_MIGRATIONS, latestAppMigration, APP_MIGRATION_KEY,
 } from '../src/host/appMigrations.js';
 import { openStorage } from '../src/storage/index.js';
-import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { DurableCollection, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import type { User } from '../src/features/users/usersService.js';
 import type { Storage } from '../src/storage/storage.js';
 
 async function freshStorage(): Promise<Storage> {
@@ -42,6 +59,28 @@ async function freshStorage(): Promise<Storage> {
   return s;
 }
 
+/** The keys the seeded migrations WRITE — compared byte-for-byte across the re-run. */
+const WRITTEN_KEYS = [
+  'hostext:feature-toggle:crm',
+  'hostext:feature-toggle:strategy',
+  'hostext:feature-toggle:priority-matrix',
+];
+/** Left unseeded on purpose: migration 24's not-in-use branch must run (and stay a no-op). */
+const UNSEEDED_TOGGLE = 'hostext:feature-toggle:advisory-board';
+
+/** One triggering row per data-driven migration, so each takes its WRITE path. */
+async function seedTriggers(s: Storage): Promise<void> {
+  await s.kvSet('hostext:crm:contact:c-idem', JSON.stringify({ contactId: 'c-idem', tenantId: 'user:idem' }));
+  await s.kvSet('hostext:strategy:record:r-idem', JSON.stringify({ id: 'r-idem', tenantId: 'user:idem' }));
+  await s.kvSet('hostext:priority-matrix:list:l-idem', JSON.stringify({ id: 'l-idem', tenantId: 'user:idem' }));
+  const legacyUser: User = {
+    userId: 'user:idem-legacy', tenantId: 'ws:idem', principalId: 'saml:idem-legacy', groups: [],
+    source: 'saml', status: 'active', email: 'idem@acme.test',
+    createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+  };
+  await new DurableCollection<User>('users:user', (u) => u.userId).put(legacyUser);
+}
+
 describe('the real APP_MIGRATIONS set is concurrency-safe', () => {
   let storage: Storage;
   beforeEach(async () => { storage = await freshStorage(); });
@@ -49,19 +88,32 @@ describe('the real APP_MIGRATIONS set is concurrency-safe', () => {
   it('fixture guard: there is a non-empty migration set to exercise', () => {
     // Without this the file passes vacuously on an empty array — the exact way a
     // gate stops gating.
-    expect(APP_MIGRATIONS.length).toBeGreaterThan(5);
+    // MEASURED at 9a982be0b: 24 migrations (versions 1-24). A floor, so a new
+    // migration does not red it; far below it the loop below would be guarding
+    // a set that has silently shrunk.
+    expect(APP_MIGRATIONS.length).toBeGreaterThanOrEqual(24);
   });
 
   it('every migration run() survives a SECOND execution against the same storage', async () => {
     // THE property. The version guard does not provide it; concurrent instances all
-    // execute `run()`, so each must tolerate running twice.
+    // execute `run()`, so each must tolerate running twice — over the rows it wrote.
+    await seedTriggers(storage);
     for (const m of APP_MIGRATIONS) {
       await m.run(storage);
+      const afterFirst = await Promise.all(WRITTEN_KEYS.map((k) => storage.kvGet(k)));
       await expect(
         m.run(storage),
         `migration ${m.version} (${m.name}) failed on a second execution — not concurrency-safe`,
       ).resolves.toBeUndefined();
+      expect(
+        await Promise.all(WRITTEN_KEYS.map((k) => storage.kvGet(k))),
+        `migration ${m.version} (${m.name}) rewrote a row on its second execution`,
+      ).toEqual(afterFirst);
     }
+    // Non-vacuity: the seeds really drove the write paths.
+    for (const k of WRITTEN_KEYS) expect(await storage.kvGet(k), `${k} was written by the first execution`).not.toBeNull();
+    // ...and the unseeded feature took the not-in-use branch both times, writing nothing.
+    expect(await storage.kvGet(UNSEEDED_TOGGLE)).toBeNull();
   });
 
   it('running the whole set twice leaves the same recorded version', async () => {

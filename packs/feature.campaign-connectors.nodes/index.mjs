@@ -7,8 +7,9 @@
  * ctx.ads.getAccountMetrics, and hands the rows back to the surface's
  * recordAccountRows — the host owns planning, mapping, dedup and the cooldown.
  * Platforms without a live metrics reader (tiktok + the CSV-only set) still
- * fail structured with connector_not_configured. role:"action". Pure-JS,
- * Node-20 stdlib only.
+ * fail structured with connector_not_configured. ADR 1022 D6: every node that
+ * writes or calls a platform is role:"side-effect" + side-effectful, so a replay
+ * fork serves its recorded outcome. Pure-JS, Node-20 stdlib only.
  */
 
 function ensureConnectors(ctx) {
@@ -56,11 +57,12 @@ export async function sync(ctx) {
     return { status: 'failed', error: { code: 'host_capability_missing', message: 'campaign-connectors sync surface unavailable — update the feature (ADR 0907 D3).' } };
   }
   const syncScope = i.syncScope === 'account' || i.syncScope === 'dispatched' ? i.syncScope : undefined;
-  // Plan BEFORE claiming the cooldown: a no_dispatches / no_accounts probe is a
-  // local read and must not consume the 15-minute window (R2 CC-SP-14).
+  // R2 CC-SP-14 — plan BEFORE claiming the cooldown: planning is a local read
+  // and must not consume the 15-minute window.
   const planned = await cc.planSync({ orgId, platform, syncScope }); // undefined = the org's setting
   if (planned.outcome === 'no_dispatches' || planned.outcome === 'no_accounts') {
-    return { status: 'success', outputs: { outcome: planned.outcome } };
+    const why = planned.outcome === 'no_dispatches' ? 'no campaign launched from this workspace on' : 'no ad account configured for';
+    return { status: 'success', outputs: { outcome: planned.outcome, summary: `Nothing to sync: ${why} ${platform}.` } };
   }
   if (planned.outcome === 'not_verified') return notConfigured('its reader has not been verified against the platform\'s test account yet (ADR 0907 D2)');
   if (planned.outcome !== 'plan') {
@@ -69,10 +71,10 @@ export async function sync(ctx) {
   // SYNC-1: ATOMICALLY claim the cooldown window before hitting the platform.
   const cooldown = await cc.claimSync({ orgId, platform });
   if (cooldown && cooldown.blocked) {
-    return { status: 'success', outputs: { outcome: 'cooldown', retryAtIso: cooldown.retryAtIso } };
+    return { status: 'success', outputs: { outcome: 'cooldown', retryAtIso: cooldown.retryAtIso, summary: `Skipped: ${platform} was synced recently; next sync after ${cooldown.retryAtIso}.` } };
   }
   const plan = planned.plan;
-  const rows = [];
+  const batches = [];
   const failures = [];
   let truncated = false;
   for (const adAccountId of plan.adAccountIds) {
@@ -85,15 +87,32 @@ export async function sync(ctx) {
       continue;
     }
     if (r.truncated) truncated = true;
-    rows.push(...r.rows);
+    batches.push({ adAccountId, rows: r.rows });
   }
-  const persisted = await cc.recordAccountRows({ orgId, plan, rows });
+  // ADR 1022 D1 — the rows go back tagged by account; the host re-plans for
+  // this org and drops any account its own plan does not name. It also records
+  // how the attempt went (D7), failures included.
+  const persisted = await cc.recordAccountRows({ orgId, platform, syncScope: plan.scope, since: plan.since, until: plan.until, batches, failures });
+  // ADR 1022 D7 — never success-with-nothing: no account answered ⇒ a typed
+  // failure. A partial pull succeeds and names its failures.
+  if (batches.length === 0) {
+    const first = failures[0];
+    return { status: 'failed', error: { code: 'sync_failed', message: `No ${platform} ad account returned data (${failures.length} failed${first ? `; first: ${first.reason}` : ''}). Check the connection in Connections.` } };
+  }
+  // CP71CD-3 — the host re-planned and kept none of the accounts that answered
+  // (the ledger or settings changed mid-sync): nothing landed, so not a success.
+  if (batches.length - (persisted.droppedBatches ?? 0) <= 0) {
+    return { status: 'failed', error: { code: 'sync_failed', message: `None of the ${platform} ad accounts read is in this organization's sync plan any more; nothing was recorded.` } };
+  }
+  const imported = persisted.imported ?? 0;
+  // Counts only: this text reaches a notification, so no campaign names or money.
+  const summary = `Synced ${imported} row(s) for ${persisted.campaigns ?? 0} campaign(s) from ${batches.length} of ${plan.adAccountIds.length} ${platform} ad account(s), ${plan.since} to ${plan.until}.${failures.length > 0 ? ` ${failures.length} account(s) failed.` : ''}${truncated ? ' Some results were cut off at the page limit.' : ''}`;
   return {
     status: 'success',
     outputs: {
       outcome: 'synced', platform, scope: plan.scope, since: plan.since, until: plan.until,
-      campaigns: persisted.campaigns ?? 0, imported: persisted.imported ?? 0, deduped: persisted.deduped ?? 0,
-      failures, truncated,
+      campaigns: persisted.campaigns ?? 0, imported, deduped: persisted.deduped ?? 0,
+      failures, truncated, summary,
     },
   };
 }

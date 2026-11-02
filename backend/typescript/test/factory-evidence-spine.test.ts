@@ -11,6 +11,14 @@
  * The spine now fetches content and extracts cited claims from it. These assertions
  * are about WIRING, which is where this class of defect hides: the code was all
  * correct, it simply was not connected.
+ *
+ * Tracker: TST-DBD-2. Red when: the verified claims stop reaching
+ * evidence-graph's `claims` port, the fetched pages stop reaching
+ * extract-claims, a concurrent fan-in edge loses its port, or fetch is
+ * inserted between search and normalize instead of fanning out from search
+ * (probes w70g2-fes-claims / -fes-pages / -fes-unported / -fes-normalize /
+ * -fes-fetchnode-r2). The pack load is asserted in a case, not in `beforeAll`,
+ * so a load error reds one case instead of skipping all of them.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import {
@@ -23,10 +31,10 @@ import {
 
 const FACTORY = 'openwop-app.kicktodo.challenge-factory';
 
+let loadErrors: unknown[] = [];
 beforeAll(() => {
   _resetChainRegistryForTest();
-  const { errors } = loadWorkflowChainPacks({ roots: defaultWorkflowChainPackRoots() });
-  expect(errors).toEqual([]);
+  loadErrors = loadWorkflowChainPacks({ roots: defaultWorkflowChainPackRoots() }).errors;
 });
 
 function factoryDef() {
@@ -45,6 +53,10 @@ function edgesInto(def: ReturnType<typeof factoryDef>, target: string): string[]
 }
 
 describe('Challenge Factory evidence spine', () => {
+  it('the chain packs load without errors', () => {
+    expect(loadErrors).toEqual([]);
+  });
+
   it('READS the sources it found — a fetch step exists', () => {
     const def = factoryDef();
     const typeIds = def.nodes.map((n) => n.typeId);
@@ -99,7 +111,9 @@ describe('Challenge Factory evidence spine', () => {
     // Putting fetch BETWEEN search and normalize would starve normalize of
     // `results`/`engine` — outputs flow along edges, so a serial insert changes
     // what the downstream node receives.
-    const into = edgesInto(factoryDef(), 'normalize');
-    expect(into.some((e) => e.startsWith('search'))).toBe(true);
+    const def = factoryDef();
+    expect(edgesInto(def, 'normalize').some((e) => e.startsWith('search'))).toBe(true);
+    // …and fetch is fed by search too (a parallel branch, not a serial step).
+    expect(edgesInto(def, 'fetch').some((e) => e.startsWith('search'))).toBe(true);
   });
 });

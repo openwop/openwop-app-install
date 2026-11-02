@@ -2,6 +2,14 @@
  * ADR 0335 Phase 2b — the collab seeder-election. The insert-if-absent CAS elects
  * exactly one seeder per canvas; the claim-seed HTTP verb is toggle-gated +
  * tenant-scoped (uniform 404 on a cross-tenant / wrong-type / disabled canvas).
+ *
+ * TST-CFC-6. Red when: the claim becomes a blind write or its key drops the tenant;
+ * a canvas delete stops pruning the claim; claim-seed stops checking the
+ * realtime-collab toggle or the type's own toggle.
+ *
+ * DOUBLE GUARD (named): the cross-tenant 404 is held by `getCanvasForTenant`
+ * (tenant-scoped read) and the `!canvas` check after it; every miss shares one
+ * uniform message by design, so the status is the whole observable.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -40,6 +48,7 @@ let n = 0;
 async function login(): Promise<{ cookie: string; tenantId: string }> {
   const tenantId = `org:seed-${Date.now()}-${n++}`;
   const res = await fetch(`${BASE}/host/openwop-app/test/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: `seed-${Date.now()}-${n++}@a.test`, tenantId }) });
+  expect(res.status).toBe(201);
   let cookie = ''; for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
   return { cookie, tenantId };
 }

@@ -42,6 +42,7 @@ import { buildPodcastFeed, type FeedItemInput } from './podcastFeed.js';
 import { getOrDecodeAudio } from './audioCache.js';
 import { renderShowPrerender, renderEpisodePrerender } from './podcastPrerender.js';
 import { prerenderDisabled, prerenderTtlSeconds } from '../publishing/prerenderService.js';
+import { setPrerenderSecurityHeaders } from '../publishing/siteRuntime.js';
 import { vendorPublicBase } from '../featureRoute.js';
 
 const log = createLogger('features.podcasts.public');
@@ -233,6 +234,7 @@ export function registerPublicPodcastRoutes(deps: RouteDeps): void {
     res.setHeader('Content-Language', languageCode);
     res.vary('Accept-Language, Accept-Encoding');
     res.setHeader('Cache-Control', `public, max-age=${prerenderTtlSeconds()}`);
+    setPrerenderSecurityHeaders(res); // ADR 1015 D7
     res.type('html');
     // A HEAD reports the length a GET would send (it reached this branch only
     // once PODCAST-1a fixed the routing; before, it took the GET path).

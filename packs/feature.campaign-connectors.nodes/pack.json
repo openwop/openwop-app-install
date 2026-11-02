@@ -1,6 +1,6 @@
 {
   "name": "feature.campaign-connectors.nodes",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "kind": "node",
   "description": "Campaign Connectors node pack — `import-csv` (parse a platform CSV export onto the unified metric schema with dedup + computed fields) and `sync` (ADR 0907 D3: a 7-day look-back of daily campaign metrics with conversions and revenue, for the dispatched campaigns or the whole configured ad account, read through the Connections broker via ctx.ads.getAccountMetrics — meta/google live; other platforms stay CSV-first with `connector_not_configured`). `dispatch-conversions` (ADR 0907 D7) delivers the queued server-side conversions on a schedule, re-checking consent per row at send. Over ctx.features['campaign-connectors'] + ctx.ads.",
   "author": "OpenWOP App",
@@ -18,29 +18,36 @@
   "nodes": [
     {
       "typeId": "feature.campaign-connectors.nodes.import-csv",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "label": "Connectors: Import CSV",
-      "description": "Imports a platform CSV export into the campaign performance store (dedup by platform|campaign|adSet|date, computed metrics). Inputs: { orgId, csv, defaultPlatform?, campaignId? }. Output: { imported, deduped, invalid, issues }.",
+      "description": "Imports a platform CSV export into the campaign performance store (dedup by platform|campaign|adSet|date, computed metrics). Inputs: { orgId, csv, defaultPlatform?, campaignId? }. Output: { imported, deduped, invalid, issues }. A replay fork serves the recorded outcome and writes nothing (ADR 1022 D6).",
       "category": "integration",
-      "role": "action",
-      "capabilities": []
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ]
     },
     {
       "typeId": "feature.campaign-connectors.nodes.sync",
-      "version": "1.2.0",
+      "version": "1.3.0",
       "label": "Connectors: Sync (live)",
-      "description": "Pulls a rolling 7-day look-back of daily campaign metrics (spend, impressions, clicks, conversions, revenue) through the acting user's connection: the dispatched campaigns by default, or every campaign of the configured ad accounts when the org's connector settings (or the `syncScope` input) say `account`. Rows replace earlier pulls of the same day, so late conversions settle. 15-min cooldown; per-account best-effort; a page cap is reported as `truncated`. meta/google live; tiktok/linkedin readers exist but return `connector_not_configured` until the operator has verified them against the platform's test account (ADR 0907 D2); other platforms return `connector_not_configured`. Inputs: { orgId, platform, syncScope?: 'dispatched'|'account' }. Output: { outcome: 'synced'|'cooldown'|'no_dispatches'|'no_accounts', scope, since, until, campaigns, imported, deduped, failures[], truncated }.",
+      "description": "Pulls a rolling 7-day look-back of daily campaign metrics (spend, impressions, clicks, conversions, revenue) through the acting user's connection: the dispatched campaigns by default, or every campaign of the configured ad accounts when the org's connector settings (or the `syncScope` input) say `account`. Rows replace earlier pulls of the same day, so late conversions settle. 15-min cooldown; per-account best-effort; a page cap is reported as `truncated`. meta/google live; tiktok/linkedin readers exist but return `connector_not_configured` until the operator has verified them against the platform's test account (ADR 0907 D2); other platforms return `connector_not_configured`. Inputs: { orgId, platform, syncScope?: 'dispatched'|'account' }. The rows go back to the host tagged by ad account; the host re-plans for the org and drops any account its own plan does not name (ADR 1022 D1). A sync where no account returned data FAILS with `sync_failed` (ADR 1022 D7); a partial pull succeeds and lists its failures. A replay fork serves the recorded outcome and reads nothing. Output: { outcome: 'synced'|'cooldown'|'no_dispatches'|'no_accounts', scope, since, until, campaigns, imported, deduped, failures[], truncated, summary } (`summary`: counts only, for a notification).",
       "category": "integration",
-      "role": "action",
-      "capabilities": []
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ]
     },
     {
       "typeId": "feature.campaign-connectors.nodes.audience-sync",
       "category": "integration",
-      "version": "1.0.0",
-      "role": "action",
+      "version": "1.1.0",
+      "role": "side-effect",
       "label": "Sync Segment → Ad Audience",
-      "description": "Uploads a CRM saved segment as a hashed platform custom audience (ADR 0217): consent-checked, suppression-subtracted, SHA-256-hashed members via ctx.ads.syncAudience — behind the ads-audience approval gate (default require-approval; PII-adjacent). Inputs: { segmentId, platform: meta|google, adAccountId, audienceName? }. Output: { platformAudienceId, uploaded, excluded }."
+      "description": "Uploads a CRM saved segment as a hashed platform custom audience (ADR 0217): consent-checked, suppression-subtracted, SHA-256-hashed members via ctx.ads.syncAudience — behind the ads-audience approval gate (default require-approval; PII-adjacent). Inputs: { segmentId, platform: meta|google, adAccountId, audienceName? }. Output: { platformAudienceId, uploaded, excluded }. role:side-effect (ADR 1022 D6): a replay fork serves the recorded outcome; a branch fork re-uploads, held by the approval gate.",
+      "capabilities": [
+        "side-effectful"
+      ]
     },
     {
       "typeId": "feature.campaign-connectors.nodes.push-catalog-feed",

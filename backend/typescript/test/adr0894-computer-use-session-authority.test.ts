@@ -350,7 +350,7 @@ describe('D6 — credential entry is refused, never offered for approval', () =>
 describe('D7 — an apply grant authorises only its grantor, in its own org', () => {
   it("another member's run carrying the victim's applyContext still halts for a human", async () => {
     const t = await team();
-    const ctx = { subjectId: `subj-${n++}`, campaignId: `camp-${n++}`, tier: 'B' as const };
+    const ctx = { subjectId: t.opener, campaignId: `camp-${n++}`, tier: 'B' as const }; // DG-SEC-1: a self-grant
     await createApplyGrant({
       tenantId: t.tenantId, orgId: t.orgA, subjectId: ctx.subjectId, grantedBy: t.opener,
       campaignId: ctx.campaignId, maxSubmits: 5, maxPrepared: 3, ratePerHour: 4,
@@ -362,7 +362,7 @@ describe('D7 — an apply grant authorises only its grantor, in its own org', ()
   });
   it("control: the grantor's own run proceeds under the grant", async () => {
     const t = await team();
-    const ctx = { subjectId: `subj-${n++}`, campaignId: `camp-${n++}`, tier: 'B' as const };
+    const ctx = { subjectId: t.opener, campaignId: `camp-${n++}`, tier: 'B' as const }; // DG-SEC-1: a self-grant
     await createApplyGrant({
       tenantId: t.tenantId, orgId: t.orgA, subjectId: ctx.subjectId, grantedBy: t.opener,
       campaignId: ctx.campaignId, maxSubmits: 5, maxPrepared: 3, ratePerHour: 4,

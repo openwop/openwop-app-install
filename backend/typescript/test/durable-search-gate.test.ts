@@ -14,6 +14,15 @@
  * first is exactly how this stayed dormant for a release:
  *   1. the MECHANISM refuses (the surface throws), and
  *   2. the Factory chain actually ASKS for it (the pack declares durable).
+ *
+ * TST-CWD-6. Red when (sabotage-witnessed, wave 69): the no-adapter branch
+ * returns results instead of throwing (cases 1, 2 and the research() case); the
+ * failed-provider branch degrades to the demo marker (case 3); research() stops
+ * forwarding `suitability`; a chain pack's search node stops declaring durable.
+ * Probe safety: no sabotage here lets research() fetch the demo URL — a
+ * fall-through would reach the real duckduckgo.com, so the probes return before
+ * any fetch. Case 1 and case 2 overlap (case 1's class check is inside case 2's
+ * claim); both are kept in this protected witness — a dedupe-needs-human-ask row.
  */
 
 import { describe, expect, it, beforeAll, afterAll, afterEach } from 'vitest';
@@ -62,8 +71,9 @@ const wr = () => buildHostSurfaceBundle({ tenantId: 'default' }).webResearch;
 
 describe('durable search refuses rather than fabricating evidence', () => {
   it('throws instead of returning the demo marker when no adapter is configured', async () => {
-    await expect(wr().search({ query: 'walking 20 minutes a day', suitability: 'durable' }))
-      .rejects.toBeInstanceOf(DurableSearchUnavailableError);
+    const err = await wr().search({ query: 'walking 20 minutes a day', suitability: 'durable' }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DurableSearchUnavailableError);
+    expect(err).toMatchObject({ code: 'research_adapter_unconfigured', reason: 'no_adapter' });
   });
 
   it('names the reason as a configuration fact, not a transient fault', async () => {
@@ -88,20 +98,22 @@ describe('durable search refuses rather than fabricating evidence', () => {
     process.env.OPENWOP_WEBSEARCH_ENGINE = 'brave';
     const r = await wr().search({ query: 'x', suitability: 'durable' });
     expect(r.engine).toBe('brave');
-    expect(r.results).toHaveLength(1);
+    // The provider's own result, not a substitute.
+    expect(r.results.map((x) => [x.url, x.title])).toEqual([['https://example.com/a', 'Result A']]);
   });
 
   it('leaves the answer-only contract intact — an ordinary lookup still gets the honest demo marker', async () => {
     const r = await wr().search({ query: 'anything' });
     expect(r.engine).toBe('demo');
-    expect(r.results[0]!.url).toContain('duckduckgo.com');
+    expect(r.results.map((x) => x.url)).toEqual(['https://duckduckgo.com/?q=anything']);
   });
 
   it('research() FORWARDS suitability instead of dropping it to answer-only', async () => {
     // The composed op is what an evidence pipeline reaches for; it used to call
     // search() with no suitability at all, making the gate unreachable there.
-    await expect(wr().research({ query: 'x', suitability: 'durable' }))
-      .rejects.toBeInstanceOf(DurableSearchUnavailableError);
+    const err = await wr().research({ query: 'x', suitability: 'durable' }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DurableSearchUnavailableError);
+    expect(err).toMatchObject({ reason: 'no_adapter' });
   });
 });
 

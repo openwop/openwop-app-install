@@ -3,6 +3,14 @@
  * idempotent webhook processor (subscription lifecycle + token-pack credit), the R-1
  * cutover importer (Stripe ids preserved verbatim), the central entitlement resolver
  * (unrestricted when off), and balance draw-down. Boots the app for host-ext persistence.
+ *
+ * Tracker TST-BEE-3 (w66). Red when: the signature check drops its replay
+ * window or its HMAC compare; a concurrent duplicate is told `duplicate`
+ * instead of `in_progress`; a done event re-applies; an unmapped price flips
+ * the tier; clover item periods are ignored; a second card clobbers the
+ * default; a draw exceeds the balance; a percentage coupon is applied as a
+ * fixed amount (amount 80: HALF → 40, TEN → 10); a partially-invalid plan list
+ * narrows.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -170,18 +178,25 @@ describe('checkout session + plan limits (Phases 1/3)', () => {
     await expect(createCheckoutSession('t5', 'price_unknown', null)).rejects.toMatchObject({ code: 'validation_error' });
   });
 
-  it('seat sync, billing coupons, and invoice generation (deferred P2)', async () => {
+  it('seat sync (deferred P2)', async () => {
     await __resetBilling();
-    // seat sync
     const sub = await setSeats('t7', 5);
     expect(sub.quantity).toBe(5);
-    // coupons
-    await createBillingCoupon('t7', 'HALF', 'percentage', 50);
-    await createBillingCoupon('t7', 'TEN', 'fixed', 10);
-    expect(await billingCouponDiscount('t7', 'half', 100)).toBe(50);
-    expect(await billingCouponDiscount('t7', 'TEN', 100)).toBe(10);
-    expect(await billingCouponDiscount('t7', 'NOPE', 100)).toBe(0);
-    // invoice
+  });
+
+  it('billing coupons: percentage vs fixed, case-insensitive lookup (deferred P2)', async () => {
+    await __resetBilling();
+    await createBillingCoupon('t7c', 'HALF', 'percentage', 50);
+    await createBillingCoupon('t7c', 'TEN', 'fixed', 10);
+    // Amount 80 tells the two kinds apart: 50% → 40 (a fixed 50 would be 50); fixed 10 → 10 (10% would be 8).
+    expect(await billingCouponDiscount('t7c', 'half', 80)).toBe(40);
+    expect(await billingCouponDiscount('t7c', 'TEN', 80)).toBe(10);
+    expect(await billingCouponDiscount('t7c', 'NOPE', 80)).toBe(0);
+  });
+
+  it('invoice generation (deferred P2)', async () => {
+    await __resetBilling();
+    await setSeats('t7', 5);
     const inv = await generateInvoice('t7', 250, 'USD');
     expect(inv.amount).toBe(250);
     expect(inv.markdown).toMatch(/Total: 250 USD/);
@@ -222,11 +237,15 @@ describe('checkout session + plan limits (Phases 1/3)', () => {
 
   it('resolveEntitlements surfaces per-tier limits from config when billing is on', async () => {
     process.env.OPENWOP_BILLING_PLAN_LIMITS = JSON.stringify({ free: { workflowRuns: 100 }, team: { workflowRuns: 9999 } });
-    await __resetBilling();
-    await processStripeEvent('t6', { id: 'evt_lim', type: 'customer.subscription.updated', data: { object: { id: 'sub_l', customer: 'cus_l', status: 'active', items: { data: [{ price: { id: 'price_team' } }] } } } });
-    const ent = await resolveEntitlements('t6', true);
-    expect(ent.plan).toBe('team');
-    expect(ent.limits).toEqual({ workflowRuns: 9999 });
-    expect(planLimits('free')).toEqual({ workflowRuns: 100 });
+    try {
+      await __resetBilling();
+      await processStripeEvent('t6', { id: 'evt_lim', type: 'customer.subscription.updated', data: { object: { id: 'sub_l', customer: 'cus_l', status: 'active', items: { data: [{ price: { id: 'price_team' } }] } } } });
+      const ent = await resolveEntitlements('t6', true);
+      expect(ent.plan).toBe('team');
+      expect(ent.limits).toEqual({ workflowRuns: 9999 });
+      expect(planLimits('free')).toEqual({ workflowRuns: 100 });
+    } finally {
+      delete process.env.OPENWOP_BILLING_PLAN_LIMITS;
+    }
   });
 });

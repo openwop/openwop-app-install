@@ -21,6 +21,7 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { getNotificationEmitter, setNotificationBackend } from '../src/notifications/emitter.js';
 import { openStorage } from '../src/storage/index.js';
+import type { NotificationRecord } from '../src/types.js';
 
 // `signal()` is transient — it never inserts — but `getNotificationEmitter()`
 // refuses without a backend installed, so give it a real in-memory one. Using the
@@ -87,15 +88,16 @@ describe('buildRecord carries every declared targeting field', () => {
       actionUrl: '/x',
       metadata: { k: 'v' },
     });
-    for (const [field, expected] of Object.entries({
-      recipientUserId: 'u-1',
-      recipientRole: 'owner',
-      runId: 'run-9',
-      workflowId: 'wf-9',
-      nodeId: 'n-9',
-      actionUrl: '/x',
-    })) {
-      expect((rec as unknown as Record<string, unknown>)[field], `buildRecord dropped \`${field}\``).toBe(expected);
+    const expected: Array<[keyof NotificationRecord, string]> = [
+      ['recipientUserId', 'u-1'],
+      ['recipientRole', 'owner'],
+      ['runId', 'run-9'],
+      ['workflowId', 'wf-9'],
+      ['nodeId', 'n-9'],
+      ['actionUrl', '/x'],
+    ];
+    for (const [field, value] of expected) {
+      expect(rec[field], `buildRecord dropped \`${field}\``).toBe(value);
     }
     expect(rec.metadata).toEqual({ k: 'v' });
   });

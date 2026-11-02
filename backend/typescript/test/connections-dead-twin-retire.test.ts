@@ -14,6 +14,10 @@
  *
  * Negative controls: an ACTIVE twin is kept (it still holds a working
  * credential), and another human's dead row is untouched.
+ *
+ * Tracker TST-CJC-1 (grade-tests w68). Red when: the consent stops calling
+ * retireDeadTwins; or the twin filter drops its non-active, same-human (alias set)
+ * or same-provider condition.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import {
@@ -23,6 +27,7 @@ import {
   __resetConnectionsStore,
 } from '../src/features/connections/connectionsService.js';
 import { createUser, userIdFor } from '../src/features/users/usersService.js';
+import type { OAuthTokenMaterial } from '../src/features/connections/oauthFlow.js';
 import { createApp } from '../src/index.js';
 
 const TENANT = 'twins';
@@ -33,8 +38,8 @@ beforeAll(async () => {
   await __resetConnectionsStore();
 });
 
-const tokens = (scopes: string[]) =>
-  ({ accessToken: 'at', refreshToken: 'rt', scopes, expiresAt: new Date(Date.now() + 3_600_000).toISOString() }) as never;
+const tokens = (scopes: string[]): OAuthTokenMaterial =>
+  ({ accessToken: 'at', refreshToken: 'rt', tokenType: 'Bearer', scopes, expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
 
 /** Two rows for one human, minted before the User row could alias them. */
 async function twinsFor(principal: string, provider: string) {

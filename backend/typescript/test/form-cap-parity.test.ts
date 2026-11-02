@@ -20,6 +20,10 @@
  * private constants — the point is to pin the two literals together, and a
  * constant a test can import is one the loader would have had to export purely for
  * the test's benefit.
+ *
+ * Tracker TST-DCE-2. Red when a loader cap (MAX_OPTIONS, MAX_FIELDS_PER_TEMPLATE),
+ * the editor's CAPS.title or the client's FIELD_TYPES drifts from the service
+ * (grade-tests w70 probes `fcp-*`).
  */
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';

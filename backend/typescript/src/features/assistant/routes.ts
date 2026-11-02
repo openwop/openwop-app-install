@@ -135,7 +135,7 @@ export function registerAssistantRoutes(deps: RouteDeps): void {
     const sessionId = randomUUID();
     const title = 'Workspace';
     const ts = new Date().toISOString();
-    await storage.createChatSession({ sessionId, tenantId, title, createdAt: ts, updatedAt: ts, messageCount: 0 });
+    await storage.createChatSession({ sessionId, tenantId, title, createdAt: ts, updatedAt: ts, messageCount: 0, titleSource: 'given' });
     const meta = await ensureConversationMeta(tenantId, sessionId, {
       type: 'workspace',
       ...(owner ? { ownerUserId: owner } : {}),

@@ -84,8 +84,7 @@ import { classifyProviderOutcome, recordProviderCall } from '../observability/me
 import { checkMediaBudget, recordMediaUsage } from './mediaBudget.js';
 import { getStreamAudioResolver } from './streamAudio.js';
 import { buildProviderUsagePayloadFromTokens, type ProviderUsagePayload } from '../providers/usageEmitter.js';
-import { compactToolSchema } from '../providers/toolSchemaCompaction.js';
-import { contextEconomy } from '../host/contextEconomy.js';
+import { dietToolSurface } from '../providers/toolSchemaCompaction.js';
 import { getInvocationLog, type InvocationRecordKey } from '../executor/invocationLog.js';
 import { stripSecretsFromPersisted } from '../byok/ephemeralRunSecrets.js';
 import { isSubscriptionProhibitedProvider, CLEARED_SUBSCRIPTION_PROVIDERS } from '../byok/subscriptionCredentialScope.js';
@@ -143,6 +142,7 @@ import { createLogger } from '../observability/logger.js';
 // follow-up commit).
 import { buildReasoningDirective } from '@openwop/openwop';
 import { resolveEnvelopeReasoning } from '../host/envelopeReasoningConfig.js';
+import { assertEffectAllowed } from '../host/runEffectContext.js';
 import { getEnvelopeReliabilityConfig } from '../host/envelopeReliabilityConfig.js';
 import { classifyProviderRefusal, describeProviderRefusal, providerRetryBackoffMs, sleepMs, PROVIDER_ERROR_RETRY_REASON } from './providerRefusalRetry.js';
 import { sanitizeFreeText } from '../byok/textRedaction.js';
@@ -215,8 +215,9 @@ export function providerSupportsToolCalling(provider: string): boolean {
 }
 
 /** Route a single tool-calling round to the provider-specific dispatcher. All
- *  return the shared `ToolsRoundResult` shape (A3). */
-function toolsRoundDispatcher(provider: string): (req: ToolsRoundRequest) => Promise<ToolsRoundResult> {
+ *  return the shared `ToolsRoundResult` shape (A3). Exported for the public chat
+ *  widget's BYOK tool lane (ADR 1018 D8), so the selection is not copied. */
+export function toolsRoundDispatcher(provider: string): (req: ToolsRoundRequest) => Promise<ToolsRoundResult> {
   switch (provider) {
     case 'openai':
       return dispatchOpenAIToolsRound;
@@ -780,7 +781,7 @@ function decodeAiToolCallResult(v: Record<string, unknown>): AiToolCallResult | 
     const calls: AiToolUseBlock[] = [];
     for (const c of v.toolCalls) {
       if (!isRecordObject(c) || typeof c.id !== 'string' || typeof c.name !== 'string' || !isRecordObject(c.input)) return null;
-      calls.push({ id: c.id, name: c.name, input: c.input });
+      calls.push({ id: c.id, name: c.name, input: c.input, ...(c.argumentsInvalid === true ? { argumentsInvalid: true as const } : {}) });
     }
     out.toolCalls = calls;
   }
@@ -1203,7 +1204,8 @@ async function callAIWithTools(scope: AdapterScope, req: AiToolCallRequest): Pro
 
 /** The live BYOK tools round behind `callAIWithTools`. */
 async function dispatchByokTools(scope: AdapterScope, req: AiToolCallRequest, credentialCleartext: string): Promise<{ result: AiToolCallResult; usage?: ProviderUsagePayload }> {
-  const toolDietOn = contextEconomy().toolDiet; // ADR 0148 A3
+  // ADR 1012 — the provider runs this search; a replay miss must not reach it.
+  if (req.webSearch) assertEffectAllowed('network-egress', `native-web-search ${req.provider}`);
   const result = await wrapInSpan(scope, req.provider, req.model, async () => {
     const dispatchRound = toolsRoundDispatcher(req.provider);
     return mapDispatchErrors(req.provider, () =>
@@ -1216,12 +1218,11 @@ async function dispatchByokTools(scope: AdapterScope, req: AiToolCallRequest, cr
           // ADR 0148 A3 — tool-surface diet: strip non-functional schema
           // annotations before the catalog reaches the model (gated; off ⇒
           // unchanged). Sibling site: host/conversationToolLoop.ts (managed chat).
-          tools: req.tools.map((t) => ({
-            name: t.name,
-            description: t.description,
-            inputSchema: compactToolSchema(t.inputSchema, toolDietOn),
-          })),
+          // ADR 1003 D4 — through the one funnel that also reports what it did.
+          tools: dietToolSurface(req.tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })), scope.tenantId),
           ...(req.webSearch ? { webSearch: true } : {}),
+          // ADR 1003 D3 — dispatcher hint, outside `toolsRoundDigest`'s preimage.
+          ...(req.cacheConversation ? { cacheConversation: true } : {}),
           // CEC-2 / RFC 0116 §43 — namespace the Anthropic prompt cache by
           // (tenant, cachePrefixId) so a shared-key deployment can't serve one
           // tenant's cached prefix to another (the dispatcher applies the marker
@@ -1340,8 +1341,9 @@ async function callAIWithToolsManaged(scope: AdapterScope, req: AiToolCallReques
 
 /** The live managed tools round behind `callAIWithToolsManaged`. */
 async function dispatchManagedTools(scope: AdapterScope, req: AiToolCallRequest): Promise<{ result: AiToolCallResult; usage?: ProviderUsagePayload }> {
+  // ADR 1012 — see `dispatchByokTools`.
+  if (req.webSearch) assertEffectAllowed('network-egress', `native-web-search ${req.provider}`);
   const userFacingProvider = managedProviderIdFromRef(req.credentialRef!);
-  const toolDietOn = contextEconomy().toolDiet; // ADR 0148 A3, same diet as the BYOK round
   try {
     const round = await dispatchManagedToolsRound({
       userFacingProvider,
@@ -1349,17 +1351,14 @@ async function dispatchManagedTools(scope: AdapterScope, req: AiToolCallRequest)
       runId: scope.runId, // ADR 0821 D4 — see callAIManaged
       ...(scope.actingUserId ? { actingSubject: scope.actingUserId } : {}),
       messages: toChatMessages(req),
-      tools: req.tools.map((t) => ({
-        name: t.name,
-        description: t.description,
-        inputSchema: compactToolSchema(t.inputSchema, toolDietOn),
-      })),
+      // ADR 0148 A3, same diet as the BYOK round (ADR 1003 D4 funnel).
+      tools: dietToolSurface(req.tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })), scope.tenantId),
       ...(req.maxTokens != null ? { maxTokens: req.maxTokens } : {}),
+      ...(req.cacheConversation ? { cacheConversation: true } : {}),
     });
     const usage = await emitProviderUsage(scope, userFacingProvider, userFacingProvider, round.inputTokens, round.outputTokens, (round.cachedReadTokens ?? 0) > 0, round.cachedReadTokens);
     const result: AiToolCallResult = {
-      content: round.text,
-      toolCalls: round.toolUses.map((t) => ({ id: t.id, name: t.name, input: t.input })),
+      ...toolRoundResult(round),
       usage: { inputTokens: round.inputTokens, outputTokens: round.outputTokens },
       model: userFacingProvider,
     };
@@ -2761,6 +2760,11 @@ async function dispatchStructured(
   if (finalReason === PROVIDER_ERROR_RETRY_REASON && lastError instanceof AiProviderError) {
     throw lastError;
   }
+  // host-services.md §Structured output — the repair budget is a cap, on both
+  // exhaustion codes. A provider refusal returned above, so it never reaches this.
+  await scope.emit?.('cap.breached', { kind: 'schema', limit: maxAttempts, observed: maxAttempts }).catch((err) => {
+    log.warn('cap.breached emit failed', { err: err instanceof Error ? err.message : String(err) });
+  });
   const errorCode =
     finalReason === 'truncation'
       ? 'envelope_truncation_unrecoverable'
@@ -2895,14 +2899,22 @@ function toChatMessages(req: AiCallRequest | AiToolCallRequest): readonly ChatMe
   return out;
 }
 
-function normalizeFinishReason(raw: string | undefined): AiCallResult['finishReason'] {
+export function normalizeFinishReason(raw: string | undefined): AiCallResult['finishReason'] {
   if (!raw) return undefined;
   const r = raw.toLowerCase();
   if (['end_turn', 'stop'].includes(r)) return 'stop';
   if (['max_tokens', 'length'].includes(r)) return 'length';
-  if (['safety', 'content_filter'].includes(r)) return 'content-filter';
+  if (['safety', 'content_filter', 'refusal'].includes(r)) return 'content-filter';
   if (['tool_use', 'tool_calls'].includes(r)) return 'tool-call';
   return 'other';
+}
+
+/** ADR 1011 — a provider round as the tool loop reads it. Every adapter that
+ *  hands a round to `runChatToolLoop` uses this, because the loop's completion
+ *  check and argument refusal read `finishReason` and `argumentsInvalid`, and a
+ *  caller that drops them turns both checks off without any error. */
+export function toolRoundResult(round: { text: string; toolUses: AiToolCallResult['toolCalls']; finishReason?: string }): Pick<AiToolCallResult, 'content' | 'toolCalls' | 'finishReason'> {
+  return { content: round.text, toolCalls: round.toolUses, finishReason: normalizeFinishReason(round.finishReason) };
 }
 
 /**

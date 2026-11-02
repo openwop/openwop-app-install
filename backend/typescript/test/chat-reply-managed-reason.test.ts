@@ -12,6 +12,15 @@
  * keeps the original in `details.managedCode`, while the chat reply path sees the RAW
  * ManagedProviderError (MEASURED). The first draft read only one shape; the HTTP legs
  * below are what caught it — the unit legs alone passed.
+ *
+ * Tracker TST-CEC-6. Red when (w67g3, witnessed): the exchange drops `reason`
+ * from the thrown details; `managedTierReason` stops reading a raw
+ * ManagedProviderError's code; it reads a folded error's `code` instead of
+ * `details.managedCode`.
+ * Ceilings: `anonTurn` polls for the gate interrupt (no hook to await); the
+ * `managed_unavailable` leg relies on the test environment holding no managed
+ * provider key, which `resolveProviderKey` reads from the host secret store —
+ * the asserted message ("Free tier …") shows which refusal was reached.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type http from 'node:http';
@@ -57,7 +66,8 @@ afterAll(async () => {
 });
 
 /** The SPA's anonymous chat turn (see anon-chat-owner-resolve.test.ts); returns the turn's status + body. */
-async function anonTurn(): Promise<{ status: number; body: { error?: string; details?: { reason?: string } } }> {
+interface TurnError { error?: string; message?: string; details?: { reason?: string } }
+async function anonTurn(): Promise<{ status: number; body: TurnError }> {
   const me = await fetch(`${base}/host/openwop-app/users/me`);
   const cookie = (me.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
   const v2 = { cookie, 'OpenWOP-Version': '2', 'content-type': 'application/json', accept: 'application/json' };
@@ -73,7 +83,7 @@ async function anonTurn(): Promise<{ status: number; body: { error?: string; det
     await new Promise((r) => setTimeout(r, 50));
   }
   const res = await fetch(`${base}/runs/${projectBoundId(bound)}/interrupts/gate`, { method: 'POST', headers: v2, body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: 'hello' } } }) });
-  return { status: res.status, body: (await res.json()) as { error?: string; details?: { reason?: string } } };
+  return { status: res.status, body: (await res.json()) as TurnError };
 }
 
 describe('the chat turn carries the managed refusal as details.reason (HTTP, real managed path)', () => {
@@ -81,11 +91,17 @@ describe('the chat turn carries the managed refusal as details.reason (HTTP, rea
     process.env.OPENWOP_MANAGED_ANON_SIGNIN_REQUIRED = 'true';
     const r = await anonTurn();
     expect(r.body.details?.reason, JSON.stringify(r.body)).toBe('sign_in_required');
+    expect(r.status).toBe(502);
+    expect(r.body.error).toBe('internal_error');
+    expect(r.body.message).toContain('Sign in to use the free tier.');
   });
 
   it('no free tier configured → details.reason managed_unavailable', async () => {
     process.env.OPENWOP_MANAGED_ANON_SIGNIN_REQUIRED = 'false';
     const r = await anonTurn();
     expect(r.body.details?.reason, JSON.stringify(r.body)).toBe('managed_unavailable');
+    expect(r.status).toBe(502);
+    expect(r.body.error).toBe('internal_error');
+    expect(r.body.message).toContain('Free tier');
   });
 });

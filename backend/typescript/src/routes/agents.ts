@@ -73,6 +73,7 @@ import { OpenwopError, type UserAgentRecord } from '../types.js';
 import { agentVisibleToTenant, resolveAgentForTenant } from '../host/agentVisibility.js';
 import { sendError, sendErrorWithMintedIds } from '../middleware/errorEnvelope.js';
 import { assetServeUrl } from '../host/assetServePath.js';
+import { currentRevision } from '../host/userAgentRevisions.js';
 
 interface AgentRoutesDeps {
   /** When provided, `dispatch` with `live: true` makes a real model turn. */
@@ -135,7 +136,7 @@ function toEntry(a: ResolvedAgentManifest): AgentInventoryEntry {
  *  the list read-through (`listVisibleAgents`) for records that aren't yet in
  *  this instance's boot-hydrated registry. Mirrors `registerUserAgent`'s
  *  projection in `userAgents.ts` (synthetic `user:<tenant>` provenance). */
-function userRecordToEntry(r: UserAgentRecord): AgentInventoryEntry {
+function userRecordToEntry(r: UserAgentRecord, revision: string): AgentInventoryEntry {
   return {
     // RFC 0080 §C — the read-through lane takes the SAME projection. A
     // user-authored agent that declares `memoryShape.longTerm` on a host without
@@ -150,7 +151,7 @@ function userRecordToEntry(r: UserAgentRecord): AgentInventoryEntry {
     description: r.description,
     modelClass: r.modelClass,
     packName: `user:${r.tenantId}`,
-    packVersion: '0',
+    packVersion: revision, // ADR 1014 P5 — the user agent's current revision
     toolAllowlist: r.toolAllowlist ?? [],
     hasHandoffSchemas: false,
     memoryShape: r.memoryShape,
@@ -171,7 +172,7 @@ async function listVisibleAgents(
   if (storage && tenant && tenant !== '*') {
     const known = new Set(entries.map((e) => e.agentId));
     for (const r of await storage.listUserAgents(tenant)) {
-      if (!known.has(r.agentId)) entries.push(userRecordToEntry(r));
+      if (!known.has(r.agentId)) entries.push(userRecordToEntry(r, await currentRevision(tenant, r.agentId)));
     }
   }
   return entries;
@@ -332,6 +333,8 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
         const result = await runAgentDispatchLive(
           {
             ...reqShape,
+            // ADR 1014 M6 — one dispatch is one draw (it used to share the agent id's).
+            drawKey: dispatchRunId,
             // A2 — the host offers its built-in tool ids (intersected with the
             // agent's toolAllowlist inside dispatch, §A14); the caller MAY pin
             // a narrower `availableTools`.

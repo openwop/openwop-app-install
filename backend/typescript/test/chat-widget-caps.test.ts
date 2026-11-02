@@ -4,10 +4,10 @@
  * per-day new-session cap, if an UNSET cap is unbounded, or if concurrent first
  * turns double-count a session.
  */
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, vi } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
-import { checkWidgetTurn } from '../src/features/chat-widget/capsTracker.js';
+import { checkWidgetTurn, MAX_TURNS_PER_SESSION } from '../src/features/chat-widget/capsTracker.js';
 import type { WidgetConfig } from '../src/features/chat-widget/widgetService.js';
 
 function widget(id: string, caps: WidgetConfig['caps']): WidgetConfig {
@@ -56,12 +56,47 @@ describe('checkWidgetTurn', () => {
     expect(overflow.reason).toBe('turn_cap');
   });
 
-  it('ADR 0707 — an EXPLICIT Infinity is still a genuine opt-out (unset !== unbounded)', async () => {
-    // The distinction is the whole point, and it is copied from `checkAnonWrite`: an
-    // operator MAY choose unbounded, but they must SAY so. Absence is not consent.
+  it('ADR 0707 — an EXPLICIT value above the default is honoured (unset !== the operator\'s choice)', async () => {
+    // The distinction is copied from `checkAnonWrite`: an operator MAY choose more than
+    // the default, but they must SAY so. Absence is not consent. (This case used to say an
+    // explicit Infinity was "a genuine opt-out" of the turn cap; the turn ceiling below
+    // ended that for turns. The sessions half still opts out: `maxSessionsPerDay`.)
     const w = widget('w3-explicit', { maxTurnsPerSession: Infinity, maxSessionsPerDay: Infinity });
     for (let i = 0; i < 25; i++) {
-      expect((await checkWidgetTurn(w, 's', '2026-06-24')).allowed, `turn ${i + 1} on an explicitly uncapped widget`).toBe(true);
+      expect((await checkWidgetTurn(w, 's', '2026-06-24')).allowed, `turn ${i + 1} is above the default of 20`).toBe(true);
+    }
+  });
+
+  // The turn CEILING (row 68 follow-up). The token is public and every turn spends the
+  // platform's managed credential, so no stored value, explicit Infinity or env default
+  // may lift turns per session above MAX_TURNS_PER_SESSION.
+  it('clamps a stored over-ceiling turn cap on READ (no migration needed)', async () => {
+    expect(MAX_TURNS_PER_SESSION).toBe(100);
+    for (const stored of [500, Infinity]) {
+      const w = widget(`w-ceiling-${stored}`, { maxTurnsPerSession: stored });
+      let allowed = 0;
+      for (let i = 0; i < MAX_TURNS_PER_SESSION + 3; i++) if ((await checkWidgetTurn(w, 's', '2026-06-28')).allowed) allowed += 1;
+      expect(allowed, `stored ${stored} runs at the ceiling`).toBe(MAX_TURNS_PER_SESSION);
+    }
+  });
+
+  it('an env default above the ceiling is held to it', async () => {
+    const prev = process.env.OPENWOP_WIDGET_TURNS_DEFAULT_PER_SESSION;
+    process.env.OPENWOP_WIDGET_TURNS_DEFAULT_PER_SESSION = '1000';
+    vi.resetModules();
+    try {
+      // A fresh module graph re-reads the env at load; its persistence needs its own init.
+      (await import('../src/host/hostExtPersistence.js')).initHostExtPersistence(await (await import('../src/storage/index.js')).openStorage('memory://'));
+      const fresh = await import('../src/features/chat-widget/capsTracker.js');
+      // The default itself is held (the read clamp below would otherwise mask this one).
+      expect(fresh.DEFAULT_TURNS_PER_SESSION).toBe(fresh.MAX_TURNS_PER_SESSION);
+      const w = widget('w-env-ceiling', {});
+      let allowed = 0;
+      for (let i = 0; i < fresh.MAX_TURNS_PER_SESSION + 3; i++) if ((await fresh.checkWidgetTurn(w, 's', '2026-06-28')).allowed) allowed += 1;
+      expect(allowed).toBe(fresh.MAX_TURNS_PER_SESSION);
+    } finally {
+      if (prev === undefined) delete process.env.OPENWOP_WIDGET_TURNS_DEFAULT_PER_SESSION; else process.env.OPENWOP_WIDGET_TURNS_DEFAULT_PER_SESSION = prev;
+      vi.resetModules();
     }
   });
 
@@ -101,4 +136,15 @@ describe('checkWidgetTurn', () => {
     const results = await Promise.all(Array.from({ length: 10 }, () => checkWidgetTurn(w, 's', '2026-06-24')));
     expect(results.filter((r) => r.allowed).length).toBe(3); // exactly the cap, not more
   });
+
+  it('ADR 1018 D4: concurrent first turns of DIFFERENT sessions admit exactly the day cap', async () => {
+    // RED before D4 (`CW68WF-4`): the day count was READ, the session created, and the
+    // day incremented afterwards, so every concurrent first turn passed the read.
+    const w = widget('w6', { maxSessionsPerDay: 3, maxTurnsPerSession: 5 });
+    const results = await Promise.all(Array.from({ length: 10 }, (_, i) => checkWidgetTurn(w, `conc-${i}`, '2026-06-27')));
+    expect(results.filter((r) => r.allowed).length, 'exactly the cap, not more').toBe(3);
+    expect(results.filter((r) => r.newSession).length).toBe(3);
+    expect(results.filter((r) => !r.allowed).every((r) => r.reason === 'session_cap')).toBe(true);
+  });
 });
+

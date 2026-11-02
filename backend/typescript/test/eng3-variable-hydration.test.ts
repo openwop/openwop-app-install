@@ -11,6 +11,10 @@
  * process: write the bag through one path, drop the in-memory cache (the state
  * a fresh instance starts in), then hydrate from the SAME backing storage and
  * assert every value survives.
+ *
+ * Tracker TST-CXF-3. Red when (variablesRuntime.ts): hydrate stops loading the
+ * stored bag; seed stops persisting; clear stops deleting the stored row; or
+ * hydrate overwrites a bag already live in this instance.
  */
 
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
@@ -29,7 +33,9 @@ import {
 let storage: Storage;
 
 /** Let the fire-and-forget write-through (persistBag) flush to storage. */
-const flush = () => new Promise((r) => setImmediate(r));
+const flush = async (): Promise<void> => {
+  for (let i = 0; i < 5; i += 1) await new Promise((r) => setImmediate(r));
+};
 
 beforeEach(async () => {
   storage = await openStorage('memory://');
@@ -95,9 +101,13 @@ describe('ENG-3 variable-bag hydration across instances', () => {
     seedRunVariables(runId, [{ name: 'x', defaultValue: 'stored' }], {});
     await flush();
 
-    // Live instance mutated x after the persisted snapshot was taken... but for
-    // this test we assert hydrate is a no-op when the run is already cached.
+    // The live bag moves ahead of storage: detach the durable handle while x is
+    // mutated, so storage still holds 'stored' and the two genuinely differ.
+    _setDurableStorageForTesting(null);
     setRunVariable(runId, 'x', 'live-value');
+    _setDurableStorageForTesting(storage);
+    expect(JSON.parse((await storage.kvGet(`runvars:${runId}`)) ?? 'null')).toEqual({ x: 'stored' });
+
     await hydrateRunVariables(runId); // run is in the cache ⇒ early-return, no reload
     expect(snapshotRunVariables(runId)).toEqual({ x: 'live-value' });
   });

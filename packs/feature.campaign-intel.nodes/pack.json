@@ -1,6 +1,6 @@
 {
   "name": "feature.campaign-intel.nodes",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "kind": "node",
   "description": "Campaign Intelligence node pack \u2014 `budget-optimize` (heuristic marginal-ROAS reallocation over the performance store, plus an optional ctx.callAI scenario narrative) and `forecast` (creative-fatigue detection + outcome projection). `enforce-caps` (ADR 0952 D2) is the spend-cap watchdog that pauses ad delivery on a breach. Over ctx.features['campaign-intel']. The natural-language analysis the Campaign Intelligence Analyst calls.",
   "author": "OpenWOP App",
@@ -18,9 +18,9 @@
   "nodes": [
     {
       "typeId": "feature.campaign-intel.nodes.budget-optimize",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "label": "Intel: Budget Optimize",
-      "description": "Recommends budget reallocations (shift spend toward higher ROAS) over the performance store, with an optional AI scenario narrative. Inputs: { orgId, campaignId?, narrate?, provider?, model? }. Output: { recommendation, narrative? }.",
+      "description": "Recommends budget reallocations (shift spend toward higher ROAS) over the performance store, with an optional AI scenario narrative. Inputs: { orgId, campaignId?, narrate?, provider?, model? }. Output: { recommendation, narrative? }. A requested narrative that fails is reported as `narrativeError` (ADR 1022).",
       "category": "integration",
       "role": "action",
       "capabilities": []
@@ -45,10 +45,13 @@
     {
       "typeId": "feature.campaign-intel.nodes.pacing-check",
       "category": "data",
-      "version": "1.0.0",
-      "role": "action",
+      "version": "1.1.0",
+      "role": "side-effect",
       "label": "Budget Pacing Check",
-      "description": "Compares actual spend vs each campaign's budget plan (ADR 0220) and raises band-escalation notifications (80% warning / 100% over \u2014 once per escalation, durable memo dedup). Inputs: { orgId }. Output: { report, alerted[] }."
+      "description": "Compares actual spend vs each campaign's budget plan (ADR 0220) and raises band-escalation notifications (80% warning / 100% over \u2014 once per escalation, durable memo dedup). Inputs: { orgId }. Output: { report, alerted[] }. role:side-effect (ADR 1022 D6): it claims the escalation memo and notifies the client org's people, so a replay fork serves the recorded outcome.",
+      "capabilities": [
+        "side-effectful"
+      ]
     },
     {
       "typeId": "feature.campaign-intel.nodes.enforce-caps",
@@ -85,9 +88,9 @@
     },
     {
       "typeId": "feature.campaign-intel.nodes.plan-budget",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "label": "Intel: Plan Budget from a Goal",
-      "description": "Deterministic '$X budget \u2192 N conversions' feasibility + efficiency-weighted allocation + pacing over the performance store; optional AI narration of the computed numbers (ADR 0357 P1). Inputs: { orgId, totalBudgetMinor, targetConversions, horizonDays?, platforms?, narrate? }.",
+      "description": "Deterministic '$X budget \u2192 N conversions' feasibility + efficiency-weighted allocation + pacing over the performance store; optional AI narration of the computed numbers (ADR 0357 P1). Inputs: { orgId, totalBudgetMinor, targetConversions, horizonDays?, platforms?, narrate? }. A requested narrative that fails is reported as `narrativeError` (ADR 1022).",
       "category": "integration",
       "role": "action",
       "capabilities": []

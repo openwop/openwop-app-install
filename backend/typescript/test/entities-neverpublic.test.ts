@@ -7,6 +7,15 @@
  *            force-set (constructed here via the re-mint path).
  * Plus a positive control: a NON-neverPublic system type still works publicly
  * (cms.page's ADR 0408 Phase D publicRead is not regressed).
+ *
+ * TST-DAA-2. Double guard (recorded): the first case's 404 is held by BOTH
+ * `publicRead !== true` and `neverPublic` in `gatePublicType`; lock 1's
+ * "still 404" leg is also held by lock 2. Each lock is witnessed alone by its
+ * own case. Every case mints its own type, so the file passes shuffled.
+ *
+ * Red when (sabotage-witnessed, wave 70): `updateEntityType` stops refusing
+ * `publicRead` on a neverPublic type (lock 1); `gatePublicType` stops refusing
+ * a neverPublic type that carries `publicRead` (lock 2).
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -39,10 +48,12 @@ describe('ADR 0409 Phase 1 — neverPublic guard', () => {
   });
 
   it('lock 1 — updateEntityType refuses to set publicRead on a neverPublic type', async () => {
-    await expect(updateEntityType({ tenantId: T, name: 'crm.contact', patch: { publicRead: true }, actor: 'sys' }))
-      .rejects.toThrow(/never be made publicly readable/);
-    // Still 404 afterward — the flag never took.
-    await expect(read('crm.contact')).rejects.toMatchObject({ httpStatus: 404, code: 'not_found' });
+    await mintSystemType({ tenantId: T, name: 'crm.lead', displayName: 'Lead', fields: FIELDS, neverPublic: true, actor: 'sys' });
+    await expect(updateEntityType({ tenantId: T, name: 'crm.lead', patch: { publicRead: true }, actor: 'sys' }))
+      .rejects.toMatchObject({ code: 'validation_error', message: expect.stringMatching(/never be made publicly readable/) });
+    // The flag never took (read back), and the anonymous read stays 404.
+    expect((await getEntityType(T, undefined, 'crm.lead'))?.publicRead).not.toBe(true);
+    await expect(read('crm.lead')).rejects.toMatchObject({ httpStatus: 404, code: 'not_found' });
   });
 
   it('lock 2 — the anonymous gate refuses a neverPublic type EVEN IF publicRead is force-set', async () => {

@@ -3,6 +3,11 @@
  * Tenant-trusted reads + the pure deterministic scorer + the voice resolver
  * (the LLM compliance leg stays in the node). Verifies tenant isolation: a brand
  * in another tenant is invisible to this scope.
+ *
+ * TST-BBR-5 (w66 g4, sabotage-witnessed). Red when: the list scans past the
+ * tenant prefix; the by-id read stops being tenant-keyed AND tenant-checked (one
+ * edit breaks both copies); a missing brand's voice is not null; getAppIdentity
+ * stops reading the reserved app brand.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';

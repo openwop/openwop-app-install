@@ -3,6 +3,10 @@
  * (`typeId@x.y.z`, the v2 ids grammar / RFC 0177 §E.1). The validator is the one
  * choke: it normalizes to the bare id the registry and executor key on, keeps the
  * pin in `metadata.nodePins`, and refuses a range or a conflicting pin.
+ *
+ * TST-CUC-3. Red when a ranged pin or a second version of one type is accepted,
+ * when the pin is not stripped to the bare id, or when an unpinned definition is
+ * stamped with an empty `nodePins`.
  */
 import { describe, expect, it } from 'vitest';
 import { validateWorkflowDefinition } from '../src/host/workflowDefinitionValidation.js';

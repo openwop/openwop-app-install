@@ -35,6 +35,7 @@ import {
 } from '../../auth/firebase.js';
 import { getMySecurity, reportFactorEvent, revokeMySessions, type MySecurity } from '../users/usersClient.js';
 import { hardSignOut } from '../../auth/hardSignOut.js';
+import { ReauthCancelledError, withRecentLogin } from '../../auth/reauth.js';
 import { loadErrorMessage } from '../../client/loadErrorMessage.js';
 
 interface PendingEnroll { secretKey: string; otpauthUrl: string }
@@ -106,7 +107,9 @@ export function SecurityPanel(): JSX.Element {
   const startEnroll = async (): Promise<void> => {
     setBusy(true); setError(null);
     try {
-      const next = await startTotpEnrollment();
+      // Firebase may demand a recent sign-in for any factor change; the
+      // re-authentication dialog confirms it in place and the call is retried.
+      const next = await withRecentLogin(() => startTotpEnrollment());
       clearQr();
       const generation = qrGeneration.current;
       setPending(next);
@@ -115,6 +118,8 @@ export function SecurityPanel(): JSX.Element {
       // Not awaited: a slow encode must never hold the panel busy.
       void encodeQr(next.otpauthUrl, generation);
     } catch (e) {
+      // The person closed the sign-in prompt: they chose to stop, nothing to report.
+      if (e instanceof ReauthCancelledError) return;
       // `auth/operation-not-allowed` = the Firebase project hasn't been upgraded
       // to Identity Platform with TOTP enabled — an operator task, say so.
       const codeStr = (e as { code?: string })?.code ?? '';
@@ -126,7 +131,7 @@ export function SecurityPanel(): JSX.Element {
     e.preventDefault();
     setBusy(true); setError(null);
     try {
-      await completeTotpEnrollment(code.trim(), factorName.trim() || t('mfaFactorDefaultName'));
+      await withRecentLogin(() => completeTotpEnrollment(code.trim(), factorName.trim() || t('mfaFactorDefaultName')));
       clearQr();
       setPending(null);
       setCode('');
@@ -136,6 +141,7 @@ export function SecurityPanel(): JSX.Element {
       // NIST 800-63B-4 §4.1.2.1 — notify the subscriber on every bind.
       void reportFactorEvent('bound', (factors?.length ?? 0) + 1);
     } catch (err) {
+      if (err instanceof ReauthCancelledError) return;
       setError(describeAuthError(err));
     } finally { setBusy(false); }
   };
@@ -163,11 +169,12 @@ export function SecurityPanel(): JSX.Element {
     if (!ok) return;
     setBusy(true); setError(null);
     try {
-      await unenrollMfaFactor(f.uid);
+      await withRecentLogin(() => unenrollMfaFactor(f.uid));
       toast.success(t('mfaRemoved'));
       await refresh();
       void reportFactorEvent('unbound', Math.max(0, (factors?.length ?? 1) - 1));
     } catch (err) {
+      if (err instanceof ReauthCancelledError) return;
       setError(describeAuthError(err));
     } finally { setBusy(false); }
   };

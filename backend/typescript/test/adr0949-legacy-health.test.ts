@@ -5,21 +5,24 @@
  * what is under test is the projection, not ingest.
  *
  * Sabotage (run 2026-10-20): `withheld = false` in funnelStats reds the
- * mismatch case.
+ * mismatch case (re-run w73: lh-withhold, lh-stopearly witnessed). Mocks and
+ * fixtures are typed against the real `CollectedEvent` and `Funnel`.
  */
 import { beforeAll, describe, expect, it, vi } from 'vitest';
+import type { CollectedEvent } from '../src/features/cdp/collectService.js';
+import type { Funnel } from '../src/features/funnels/funnelsService.js';
 
-type Evt = { eventType: string; payload: Record<string, unknown>; at: string };
-const events: Evt[] = [];
+const events: CollectedEvent[] = [];
 vi.mock('../src/features/cdp/collectService.js', async (orig) => ({
-  ...(await orig<Record<string, unknown>>()),
-  listCollectedEvents: async () => events,
+  ...(await orig<typeof import('../src/features/cdp/collectService.js')>()),
+  listCollectedEvents: async (): Promise<CollectedEvent[]> => events,
 }));
 vi.mock('../src/features/funnels/funnelsService.js', async (orig) => ({
-  ...(await orig<Record<string, unknown>>()),
-  getFunnel: async () => ({
-    funnelId: 'f1',
-    steps: [{ stepId: 's1', experiment: { experimentId: 'x1', status: 'running', salt: 's', createdAt: '2026-10-01T00:00:00.000Z', variants: [{ key: 'control', pageId: null, weight: 50 }, { key: 'b', pageId: 'p2', weight: 50 }] } }],
+  ...(await orig<typeof import('../src/features/funnels/funnelsService.js')>()),
+  getFunnel: async (): Promise<Funnel> => ({
+    funnelId: 'f1', tenantId: 't', orgId: 'o', name: 'F', slug: 'f', status: 'published',
+    createdBy: 'u', createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z',
+    steps: [{ stepId: 's1', kind: 'landing', pageId: 'p1', experiment: { experimentId: 'x1', status: 'running', salt: 's', createdAt: '2026-10-01T00:00:00.000Z', variants: [{ key: 'control', pageId: null, weight: 50 }, { key: 'b', pageId: 'p2', weight: 50 }] } }],
   }),
 }));
 
@@ -29,14 +32,14 @@ const { createApp } = await import('../src/index.js');
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-});
+}, 120_000);
 const { legacyResultHealth } = await import('../src/host/experiments/legacyHealth.js');
 
 function seed(arm: string, viewed: number, completed: number): void {
   for (let i = 0; i < viewed; i++) {
     const payload = { stepId: 's1', visitor: `${arm}-${i}`, experiment: { experimentId: 'x1', variant: arm } };
-    events.push({ eventType: 'funnel.step_viewed', payload, at: '2026-10-02T00:00:00.000Z' });
-    if (i < completed) events.push({ eventType: 'funnel.step_completed', payload, at: '2026-10-02T01:00:00.000Z' });
+    events.push({ eventId: `v-${arm}-${i}`, tenantId: 't', eventType: 'funnel.step_viewed', payload, piiFields: [], at: '2026-10-02T00:00:00.000Z' });
+    if (i < completed) events.push({ eventId: `c-${arm}-${i}`, tenantId: 't', eventType: 'funnel.step_completed', payload, piiFields: [], at: '2026-10-02T01:00:00.000Z' });
   }
 }
 

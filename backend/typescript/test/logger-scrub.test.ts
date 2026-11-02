@@ -4,6 +4,11 @@
  * a secret-shaped token that slips past call-site redaction can never reach
  * stdout/stderr verbatim. Also verifies emit() never throws into its caller on
  * a malformed (circular) field.
+ *
+ * TST-DKD-3 (grade-tests wave 72). Red when (w72 probes): the field scrub goes
+ * (lg-fields), the msg scrub goes (lg-msg), the catch-branch email mask goes
+ * (lg-catch), the value-shaped PII pass loses its flag wiring (lg-values,
+ * lg-flag), or the never-throw fallback rethrows (lg-throw).
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';

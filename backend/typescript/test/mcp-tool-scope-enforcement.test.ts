@@ -27,7 +27,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { listTools, isToolAllowed, isToolAllowedWith, requiredScopeForTool, type ExposedToolManifest } from '../src/host/mcpServerRegistry.js';
 import { toDescriptor } from '../src/routes/toolCatalog.js';
-import { createMember } from '../src/host/accessControlService.js';
+import { createMember, type Scope } from '../src/host/accessControlService.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import type { Principal } from '../src/types.js';
@@ -190,6 +190,9 @@ describe('ADR 0601 / NBC-3 — a write tool enforces the scope it advertises', (
     // Both branches must actually have been walked, or the loop proves half a
     // property. (The `unclaimed` count is why the ungated sample tool above is
     // registered — sabotage H's first green was exactly this branch being empty.)
+    // MEASURED 2026-10-31 (w72, HEAD 85fba5fa8): claimed = 30, unclaimed = 1. The
+    // floor below (19) is left as-is — protected ratchet, no baseline edit here;
+    // the 11-tool slack is recorded for a human as a ratchet-floor-slack row.
     expect(seen.claimed, 'tools advertising a scope').toBeGreaterThanOrEqual(19);
     expect(seen.unclaimed, 'tools advertising none').toBeGreaterThanOrEqual(1);
   });
@@ -209,7 +212,7 @@ describe('ADR 0788 D1 — a WORKSPACE tool is gated by the launch predicate, nev
   });
 
   it('is refused without launch authority, even for a principal holding workspace:write', async () => {
-    const authority = async () => ['workspace:read', 'workspace:write'] as never;
+    const authority = async (): Promise<readonly Scope[]> => ['workspace:read', 'workspace:write'];
     expect(await isToolAllowedWith(planted, writer, authority, { tenantId: T, workspaceLaunch: false })).toBe(false);
     expect(await isToolAllowedWith(planted, writer, authority)).toBe(false);
     expect(await isToolAllowedWith(planted, writer, authority, { tenantId: T, workspaceLaunch: true })).toBe(true);

@@ -4,6 +4,14 @@
  * CSS-injection controls because Phase 5 inlines these values into a `:root`
  * `<style>` block: colors/fonts must be free of CSS metacharacters, and asset
  * URLs must reject dangerous schemes.
+ *
+ * TST-BBR-1 (w66 g4, sabotage-witnessed). Red when: `safeColor` accepts any
+ * string; `COLOR_FN`'s inner charset admits `;{}` (the fn-form `paper2` fixture);
+ * `FONT_STACK` admits metacharacters; `ASSET_DATA` admits non-image `data:`; the
+ * override map lets a contrast-critical token through; the color key set is
+ * opened; `defaultMode` is not enum-clamped; an all-invalid update stops clearing
+ * the facet. Persistence is bound per case at FILE scope, so both describes pass
+ * in any order.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
@@ -13,11 +21,14 @@ import { createBrand, updateBrand, getBrand, __clearBrands } from '../src/featur
 const TENANT = 'tenant-brand-id';
 const ORG = 'org-1';
 
+// File scope: BOTH describes need a bound store (the per-mode block had none and
+// passed only when it ran second).
+beforeEach(async () => {
+  initHostExtPersistence(openSqliteStorage(':memory:'));
+  await __clearBrands();
+});
+
 describe('brand identity facet (ADR 0170) — sanitization', () => {
-  beforeEach(async () => {
-    initHostExtPersistence(openSqliteStorage(':memory:'));
-    await __clearBrands();
-  });
 
   it('stores a valid identity facet field-for-field', async () => {
     const b = await createBrand(TENANT, ORG, 'u1', {
@@ -93,7 +104,8 @@ describe('brand identity facet (ADR 0170) — sanitization', () => {
               '--color-danger': '#cc2222', // contrast-critical → generator-owned, dropped
               '--cat-ai': '#cc2222', // non-contrast category token → kept
               '--evil-prop': 'oklch(50% 0 0)', // NOT allowlisted → dropped
-              '--paper': 'red;}x{y:1', // allowlisted but injection → dropped
+              '--paper': 'red;}x{y:1', // contrast-critical → generator-owned, dropped before the value check
+              '--cat-flow': 'red;}x{y:1', // allowlisted, non-contrast, but injection → dropped by the value check
             },
             dark: { '--clay': '#0a84ff', '--cat-data': '#0a84ff' },
           },
@@ -108,7 +120,8 @@ describe('brand identity facet (ADR 0170) — sanitization', () => {
     const b = await createBrand(TENANT, ORG, 'u1', {
       name: 'Evil',
       identity: {
-        colors: { accent: 'red;}body{display:none}', paper: '#fff', ink: 'url(http://x)' },
+        // `paper2` is FUNCTION-form: only COLOR_FN's inner charset (no `;{}`) stops it.
+        colors: { accent: 'red;}body{display:none}', paper: '#fff', ink: 'url(http://x)', paper2: 'rgb(0 0 0);}body{display:none}' },
         typography: { serif: 'Geist;}x{color:red', sans: 'Inter, sans-serif' },
       },
     });

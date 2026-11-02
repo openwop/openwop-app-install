@@ -16,6 +16,16 @@
  *    case that discriminates: a PAST cutoff must retain fresh rows.
  *  - JS-DATA-5 — digests age out under `internal` (business content), not
  *    under a subject sweep.
+ *
+ * Tracker TST-DHC-1 (wave 71). Red when: the cascade stops filtering by deal
+ * (`w71g3-di-cascade-other`) or drops its falsy-deal guard (`di-falsydeal-r2` —
+ * rows with an empty deal id are seeded so the
+ * guard is REACHED where the store allows it — the empty-TENANT half is a ceiling,
+ * see the case); the seam fires on a non-deal entity (`di-seam`); erasure
+ * keeps the hash index (`di-hashidx`) or erases another subject (`di-overbroad`);
+ * `putAnswerRow` skips the special-category refusal (`di-special`); a purger
+ * binds the classification as its cutoff (`di-misbind`); the digest purger
+ * ignores its classification (`di-digestclass`).
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -56,10 +66,10 @@ async function seedDealRows(dealId: string): Promise<void> {
   await drafts.put(draft(dealId));
   await jobDigests.put(digest(dealId));
 }
-async function rowsFor(dealId: string): Promise<number> {
-  const f = (await followUps.listByPrefix(`${T}:`)).filter((r) => r.dealId === dealId).length;
-  const d = (await drafts.listByPrefix(`${T}:`)).filter((r) => r.dealId === dealId).length;
-  const g = (await jobDigests.listByPrefix(`${T}:${dealId}:`)).length;
+async function rowsFor(dealId: string, tenantId: string = T): Promise<number> {
+  const f = (await followUps.listByPrefix(`${tenantId}:`)).filter((r) => r.tenantId === tenantId && r.dealId === dealId).length;
+  const d = (await drafts.listByPrefix(`${tenantId}:`)).filter((r) => r.tenantId === tenantId && r.dealId === dealId).length;
+  const g = (await jobDigests.listByPrefix(`${tenantId}:${dealId}:`)).filter((r) => r.tenantId === tenantId).length;
   return f + d + g;
 }
 
@@ -85,8 +95,17 @@ describe('JS-RI-1 — deal-deletion cascade', () => {
     await cascadeDealDeletion(T, 'deal:x');
     expect(await cascadeDealDeletion(T, 'deal:x')).toBe(0); // second run: nothing left
     await seedDealRows('deal:y');
+    // Falsy TENANT: a CEILING, not a witness. The store refuses a row whose
+    // tenant is empty (hostext's tenantOf invariant), so no row exists that the
+    // `:` prefix could reach — the cascade's own guard is defence in depth
+    // behind that invariant (round-1 `di-falsy` was an equivalent mutant).
     expect(await cascadeDealDeletion('', 'deal:y')).toBe(0); // falsy tenant: no sweep
     expect(await rowsFor('deal:y')).toBe(3);
+    // Falsy DEAL id: rows whose dealId is '' exist, and must not be swept.
+    await seedDealRows('');
+    expect(await rowsFor('')).toBe(3);
+    expect(await cascadeDealDeletion(T, '')).toBe(0);
+    expect(await rowsFor('')).toBe(3);
   });
 
   it('rides the ADR 0283 seam: a deal deletion fires it; a CONTACT deletion does not', async () => {

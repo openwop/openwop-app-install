@@ -38,11 +38,15 @@ import { useTranslation } from 'react-i18next';
 import { Button } from '../../ui/Button.js';
 import { Notice } from '../../ui/Notice.js';
 import { announce } from '../../ui/announce.js';
-import { recordChoice, replayOfferedFor, useVisitorConsent } from './visitorConsent.js';
+import { recordChoice, replayOfferedFor } from './visitorConsent.js';
+import { useVisitorConsent } from './useVisitorConsent.js';
 import { PRIVACY_HREF } from '../../brand/privacyHref.js';
 
 
-export function VisitorConsentBanner({ orgId }: { orgId: string }): JSX.Element | null {
+/** `privacyHref` (ADR 1015): where "privacy policy" points. The SPA keeps the
+ *  app's own page; the tenant site runtime passes the workspace's published
+ *  privacy page, or `null` when it has none (no link rather than a dead one). */
+export function VisitorConsentBanner({ orgId, privacyHref = PRIVACY_HREF }: { orgId: string; privacyHref?: string | null }): JSX.Element | null {
   const { t } = useTranslation('site');
   const { regime, choice } = useVisitorConsent(orgId);
   const [open, setOpen] = useState(false);
@@ -109,8 +113,14 @@ export function VisitorConsentBanner({ orgId }: { orgId: string }): JSX.Element 
     const onFocusIn = (e: FocusEvent): void => {
       const region = regionRef.current;
       const from = e.relatedTarget;
-      if (!region || !(e.target instanceof Node) || !region.contains(e.target)) return;
-      if (from instanceof HTMLElement && !region.contains(from) && !returnFocusRef.current) returnFocusRef.current = from;
+      // ADR 1015: inside a shadow root (the site runtime) a document listener sees
+      // the HOST as `target`, and a move from elsewhere in the same shadow root as
+      // coming from the host, so read the real target off the composed path and
+      // never remember the host itself.
+      const target = e.composedPath()[0] ?? e.target;
+      if (!region || !(target instanceof Node) || !region.contains(target)) return;
+      const isHostOfRegion = from instanceof HTMLElement && from.shadowRoot !== null && from.shadowRoot.contains(region);
+      if (from instanceof HTMLElement && !isHostOfRegion && !region.contains(from) && !returnFocusRef.current) returnFocusRef.current = from;
     };
     document.addEventListener('focusin', onFocusIn);
     return () => document.removeEventListener('focusin', onFocusIn);
@@ -195,8 +205,8 @@ export function VisitorConsentBanner({ orgId }: { orgId: string }): JSX.Element 
       <div className="visitor-consent__inner">
         <h2 id={headingId} ref={headingRef} tabIndex={-1} className="visitor-consent__title">{t('consentTitle')}</h2>
         <p className="visitor-consent__body">
-          {t(changing ? 'consentBodyChange' : regime === 'opt-out' ? 'consentBodyOptOut' : 'consentBody')}{' '}
-          <a href={PRIVACY_HREF}>{t('consentPrivacyLink')}</a>
+          {t(changing ? 'consentBodyChange' : regime === 'opt-out' ? 'consentBodyOptOut' : 'consentBody')}
+          {privacyHref ? <>{' '}<a href={privacyHref}>{t('consentPrivacyLink')}</a></> : null}
         </p>
         {changing ? <p className="visitor-consent__state">{t(current ? 'consentStateOn' : 'consentStateOff')}</p> : null}
         {replayOffered && changing ? (

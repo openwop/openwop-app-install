@@ -6,6 +6,11 @@
  * reads on the full scan until a reconcile pass that listed the rows at least
  * `windowMs` after the first pass, and un-verifies on any later unmarked row.
  * `legacy()` is the pre-index writer: the same namespace with no `tenantOf`.
+ *
+ * Tracker TST-DFD-4. Red when (w71g1, witnessed): a repaired row stops resetting a
+ * verified index; the window boundary moves off `>=`; a no-tenant row stops blocking
+ * verification or gets indexed; verification overwrites a concurrent reset (CAS
+ * replaced by a plain set); the slot lease stops gating; a hook failure stops the pass.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';

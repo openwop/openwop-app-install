@@ -47,13 +47,9 @@ import { isSafeActionUrl } from './actionLabels.js';
 import { announce } from '../ui/announce.js';
 import i18n from '../i18n/index.js';
 import { publishReviewSignal } from './signalBus.js';
-import {
-  currentPushBinding,
-  disablePush as disablePushApi,
-  enablePush as enablePushApi,
-  getPushConfig,
-  PushSubscribeError,
-} from './pushSubscription.js';
+// Push is loaded on first use, not with the entry chunk: every caller below is
+// already async and already awaits the network before the browser prompt.
+const pushApi = () => import('./pushSubscription.js');
 
 /** The browser's IANA zone, or undefined where `Intl` cannot say. */
 function browserTimeZone(): string | undefined {
@@ -622,6 +618,7 @@ export const useNotificationStore = create<NotificationStore>((set, get) => ({
       return;
     }
     try {
+      const { getPushConfig, currentPushBinding } = await pushApi();
       const cfg = await getPushConfig();
       if (!cfg.enabled) {
         set({ pushStatus: 'disabled' });
@@ -639,21 +636,24 @@ export const useNotificationStore = create<NotificationStore>((set, get) => ({
   async enablePush() {
     if (get().pushBusy) return false;
     set({ pushBusy: true });
+    let PushSubscribeError: typeof import('./pushSubscription.js').PushSubscribeError | undefined;
     try {
-      const cfg = await getPushConfig();
+      const push = await pushApi();
+      PushSubscribeError = push.PushSubscribeError;
+      const cfg = await push.getPushConfig();
       if (!cfg.enabled || !cfg.vapidPublicKey) {
         set({ pushStatus: 'disabled' });
         return false;
       }
-      await enablePushApi(cfg.vapidPublicKey);
+      await push.enablePush(cfg.vapidPublicKey);
       set({ pushStatus: 'subscribed' });
       return true;
     } catch (err) {
       // ADR 0816 D3 — a typed refusal is a STATE with its own copy beside the
       // button, not a retryable generic error: retrying can never succeed.
-      if (err instanceof PushSubscribeError && err.reason === 'push_endpoint_refused') {
+      if (PushSubscribeError && err instanceof PushSubscribeError && err.reason === 'push_endpoint_refused') {
         set({ pushStatus: 'refused' });
-      } else if (err instanceof PushSubscribeError && err.reason === 'push_endpoint_taken') {
+      } else if (PushSubscribeError && err instanceof PushSubscribeError && err.reason === 'push_endpoint_taken') {
         set({ pushStatus: 'taken' });
       } else {
         set({ error: err instanceof Error ? err.message : String(err) });
@@ -668,7 +668,7 @@ export const useNotificationStore = create<NotificationStore>((set, get) => ({
     if (get().pushBusy) return;
     set({ pushBusy: true });
     try {
-      await disablePushApi();
+      await (await pushApi()).disablePush();
       set({ pushStatus: 'available' });
     } catch (err) {
       set({ error: err instanceof Error ? err.message : String(err) });

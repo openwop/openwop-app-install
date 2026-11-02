@@ -20,7 +20,16 @@ import type { NextFunction, Request, Response } from 'express';
 import { canonicalHost, isPlatformHost, resolveCustomHost } from '../host/customDomains.js';
 import { ownerPublicRuntimeLapsed } from '../host/publicLapse.js';
 import { sendError } from './errorEnvelope.js';
+import { markBoundSite } from '../host/boundSite.js';
+import { clientIp } from '../host/clientIp.js';
 import { VERSION_RESPONSE_HEADER, vendorPath } from './protocolVersion.js';
+
+/** ADR 1015 D5 — visitor-runtime write lanes, counted in their own per-domain
+ *  bucket so a busy recorder cannot use up the page-load budget. */
+const BEACON_PREFIXES = [
+  `${vendorPath('/public-consent')}/`,
+  `${vendorPath('/public-analytics')}/`,
+];
 
 /** Org-bound public prefixes servable on a custom domain. `public-forms` is
  *  deliberately absent in v1: its path carries no orgId to pin (recorded in
@@ -31,6 +40,11 @@ import { VERSION_RESPONSE_HEADER, vendorPath } from './protocolVersion.js';
 const PUBLIC_ORG_PREFIXES = [
   `${vendorPath('/public')}/`,
   `${vendorPath('/public-store')}/`,
+  // ADR 1015 D5 — the visitor runtime's same-origin calls: the consent lane and
+  // the analytics beacons/capture. Both carry the org as the next segment, so the
+  // org-equality check below pins them like the rest. Owner reads live under
+  // `/analytics/orgs/…`, which stays unreachable here.
+  ...BEACON_PREFIXES,
 ];
 
 /** Decode one URL path segment; null on a malformed escape (→ not a document). */
@@ -90,25 +104,67 @@ function orgFromPath(rawPath: string): string | null {
   return null;
 }
 
-// ── ADR 0295 P3 — per-domain fixed-window rate limit (a tenant's viral page
-// must not starve the platform origin; the per-IP bucket still applies too).
+// ── ADR 0295 P3 — per-domain fixed-window rate limits (a tenant's viral page
+// must not starve the platform origin; the global per-IP limiter still applies).
+//
+// CORRECTED 2026-11-01 (ADR 1015 pilot): this used to be ONE bucket per host,
+// charged by EVERY request, 404s included. One scanner (93.123.109.247, ~1,240
+// probes for `.env`, `.git-credentials`, … in one minute right after a cert was
+// issued) spent it, and real visitors got 429 on `/` for that minute: any
+// customer domain could be taken offline by a single prober. Now:
+//   - a request for a path the host does not serve (the guard's own 404) is
+//     charged ONLY to a cheap per-IP "miss" bucket, so a prober throttles itself;
+//   - a served request is charged to a per-(host, client IP) share first, and
+//     only then to the host-wide ceiling, so one IP cannot spend the host's
+//     budget and a distributed flood is still capped.
+// The client IP is `host/clientIp.ts` (the trusted-proxy walk), never a raw
+// X-Forwarded-For.
 const WINDOW_MS = 60_000;
-const domainWindows = new Map<string, { windowStart: number; count: number }>();
-const domainLimit = (): number => {
-  const raw = Number(process.env.OPENWOP_CUSTOM_DOMAIN_REQS_PER_MIN);
-  return Number.isFinite(raw) && raw > 0 ? raw : 600;
-};
+type Windows = Map<string, { windowStart: number; count: number }>;
+/** Host-wide ceilings: bounded by the number of bound hosts. */
+const hostWindows: Windows = new Map();
+/** Per-IP shares and misses: clearing this map (a flood of distinct IPs) only
+ *  resets the shares; the host ceilings above survive it. */
+const ipWindows: Windows = new Map();
 
-function overDomainLimit(host: string, now: number): boolean {
-  const w = domainWindows.get(host);
+const envLimit = (name: string, fallback: number): number => {
+  const raw = Number(process.env[name]);
+  return Number.isFinite(raw) && raw > 0 ? raw : fallback;
+};
+/** Host-wide ceiling for page/asset/store requests (unchanged default). */
+const domainLimit = (): number => envLimit('OPENWOP_CUSTOM_DOMAIN_REQS_PER_MIN', 600);
+/** One client IP's share of a host's page budget. */
+const domainIpLimit = (): number => envLimit('OPENWOP_CUSTOM_DOMAIN_IP_REQS_PER_MIN', 120);
+/** Host-wide ceiling for the visitor-runtime lanes (ADR 1015 D5). */
+const beaconLimit = (): number => envLimit('OPENWOP_CUSTOM_DOMAIN_BEACON_REQS_PER_MIN', 1200);
+/** One client IP's share of a host's beacon budget. */
+const beaconIpLimit = (): number => envLimit('OPENWOP_CUSTOM_DOMAIN_BEACON_IP_REQS_PER_MIN', 240);
+/** Paths no bound host serves, per client IP across all hosts. */
+const missIpLimit = (): number => envLimit('OPENWOP_CUSTOM_DOMAIN_MISS_IP_REQS_PER_MIN', 60);
+
+function over(windows: Windows, key: string, now: number, limit: number, bound: number): boolean {
+  const w = windows.get(key);
   if (!w || now - w.windowStart >= WINDOW_MS) {
-    domainWindows.set(host, { windowStart: now, count: 1 });
-    if (domainWindows.size > 10_000) domainWindows.clear(); // bound the map
-    return false;
+    if (windows.size >= bound) windows.clear(); // bound the map
+    windows.set(key, { windowStart: now, count: 1 });
+    return 1 > limit;
   }
   w.count += 1;
-  return w.count > domainLimit();
+  return w.count > limit;
 }
+
+/** Charge a served request: the IP's share first (a spent share is refused
+ *  WITHOUT touching the host budget), then the host ceiling. */
+function overServed(host: string, ip: string, beacon: boolean, now: number): boolean {
+  const cls = beacon ? 'beacon' : 'page';
+  if (over(ipWindows, `${cls}|${host}|${ip}`, now, beacon ? beaconIpLimit() : domainIpLimit(), 50_000)) return true;
+  return over(hostWindows, `${cls}|${host}`, now, beacon ? beaconLimit() : domainLimit(), 10_000);
+}
+
+/** Test-only: forget every window. */
+export function __resetCustomDomainRateLimitsForTests(): void { hostWindows.clear(); ipWindows.clear(); }
+
+const isBeaconPath = (path: string): boolean => BEACON_PREFIXES.some((p) => path.startsWith(p));
 
 /**
  * ADR 0940 F2 — white-label a response served on a bound customer hostname.
@@ -169,7 +225,23 @@ export function customDomainMiddleware() {
     try {
       if (!bound) { next(); return; } // not a custom domain — untouched
       whiteLabel(res);
-      if (overDomainLimit(host, Date.now())) {
+      // ADR 1015 — record the bound site for the prerender (runtime injection).
+      markBoundSite(res, { tenantId: bound.tenantId, orgId: bound.orgId });
+      // Classify BEFORE charging: a path this host does not serve is the guard's
+      // own 404 and is charged only to the client's miss bucket.
+      const now = Date.now();
+      const ip = clientIp(req);
+      const isDocument = (req.method === 'GET' || req.method === 'HEAD') && documentRewrite(req.path, bound.orgId) !== null;
+      const pathOrg = isDocument ? null : orgFromPath(req.path);
+      if (!isDocument && (pathOrg === null || pathOrg !== bound.orgId)) {
+        if (over(ipWindows, `miss|${ip}`, now, missIpLimit(), 50_000)) {
+          sendError(res, 429, 'rate_limited', 'Too many requests. Try again shortly.');
+          return;
+        }
+        sendError(res, 404, 'not_found', 'Not found.');
+        return;
+      }
+      if (overServed(host, ip, !isDocument && isBeaconPath(req.path), now)) {
         // H27-b — `detail` was a NEW TOP-LEVEL key (`additionalProperties: false`
         // forbids it) carrying what is simply the envelope's `message`.
         sendError(res, 429, 'rate_limited', 'This site is receiving too many requests. Try again shortly.');

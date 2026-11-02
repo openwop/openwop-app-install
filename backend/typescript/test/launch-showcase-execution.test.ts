@@ -1,5 +1,17 @@
-/** Real scheduler, shipped chain and shipped node handlers. Only model replies
- * are deterministic TEST fixtures; no fixture provider ships with the page. */
+/**
+ * Launch showcase (examples/workflow-chain-packs/launch-showcase) — real
+ * scheduler, shipped chain and shipped node handlers. Only model replies are
+ * deterministic TEST fixtures; no fixture provider ships with the page.
+ *
+ * TST-DKE-1 (grade-tests wave 72). Claims: the three deliverables run in
+ * parallel and ALL reach review and polish; the approval gate decides the
+ * handoff (approve → deliver, reject → no deliver); a resumed gate never re-runs
+ * the paid AI steps; the brief never enters a system prompt; the repair loop
+ * feeds validation errors back (XCH-CORE-1, on THIS chain's `emails` schema —
+ * ai-exchange-wave2 covers the loop generically). Red when (w72 probes): a
+ * deliverable→polish edge is dropped (lsx-edge), the approval condition inverts
+ * (lsx-cond), or the repair prompt stops naming the error (lsx-repair).
+ */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -20,9 +32,14 @@ import type { NodeContext, NodeOutcome } from '../src/executor/types.js';
 import { readPackManifest } from './helpers/readPackManifest.js';
 
 const chain = readPackManifest<{ chains: WorkflowChain[] }>(new URL('../../../examples/workflow-chain-packs/launch-showcase/pack.json', import.meta.url)).chains[0] as WorkflowChain;
-const ai = await import(/* @vite-ignore */ new URL('../../../packs/core.openwop.ai/index.mjs', import.meta.url).href);
-const chat = await import(/* @vite-ignore */ new URL('../../../packs/vendor.myndhyve.chat/index.mjs', import.meta.url).href);
-const flow = await import(/* @vite-ignore */ new URL('../../../packs/core.openwop.flow/index.mjs', import.meta.url).href);
+// The shipped pack modules are untyped .mjs; narrow each to the members used.
+type CallAI = (req: { responseSchema: Record<string, unknown>; messages: unknown }) => Promise<{ data: unknown; usage?: { inputTokens: number; outputTokens: number } }>;
+const ai: { structuredOutput(ctx: Record<string, unknown> & { callAI: CallAI }): Promise<{ status: string; outputs: { data: { sequence: unknown[] } } }> } =
+  await import(/* @vite-ignore */ new URL('../../../packs/core.openwop.ai/index.mjs', import.meta.url).href);
+const chat: { approvalGate(ctx: NodeContext): Promise<NodeOutcome> } =
+  await import(/* @vite-ignore */ new URL('../../../packs/vendor.myndhyve.chat/index.mjs', import.meta.url).href);
+const flow: { nodes: Record<string, (ctx: NodeContext) => Promise<NodeOutcome>> } =
+  await import(/* @vite-ignore */ new URL('../../../packs/core.openwop.flow/index.mjs', import.meta.url).href);
 let storage: Storage;
 const observed = new Map<string, Record<string, unknown>>();
 function fixture(schema: Record<string, unknown>, name: string): unknown {
@@ -37,7 +54,7 @@ beforeEach(async () => {
   const registry = getNodeRegistry();
   registry.register({ typeId: 'core.ai.structuredOutput', version: '1.0.0', async execute(ctx) {
     observed.set(ctx.nodeId, ctx.inputs as Record<string, unknown>);
-    return ai.structuredOutput({ ...ctx, callAI: async (req: { responseSchema: Record<string, unknown>; messages: unknown }) => {
+    return ai.structuredOutput({ ...ctx, callAI: async (req) => {
       // Multi-input review/editor context must all survive toMessages.
       expect(JSON.stringify(req.messages)).toContain('A grounded fictional product brief with no testimonials.');
       if (ctx.nodeId.endsWith('_review')) expect(JSON.stringify(req.messages)).toContain('website');
@@ -45,14 +62,14 @@ beforeEach(async () => {
       return { data: fixture(req.responseSchema, 'value'), usage: { inputTokens: 1, outputTokens: 1 } };
     } }) as Promise<NodeOutcome>;
   }});
-  registry.register({ typeId: 'core.chat.approvalGate', version: '1.0.0', execute: (ctx: NodeContext) => chat.approvalGate(ctx) as Promise<NodeOutcome> });
-  registry.register({ typeId: 'core.flow.noop', version: '1.0.0', execute: (ctx: NodeContext) => flow.nodes['core.flow.noop'](ctx) as Promise<NodeOutcome> });
+  registry.register({ typeId: 'core.chat.approvalGate', version: '1.0.0', execute: (ctx: NodeContext) => chat.approvalGate(ctx) });
+  registry.register({ typeId: 'core.flow.noop', version: '1.0.0', execute: (ctx: NodeContext) => flow.nodes['core.flow.noop']!(ctx) });
 });
 describe('launch showcase — real execution', () => {
   it.each(['approve', 'reject'])('parallel deliverables reach review; %s controls handoff', async action => {
     const def = expandChain(chain, { params: { brief: 'A grounded fictional product brief with no testimonials.', provider: 'mock', model: 'test-only' } });
     const now = new Date().toISOString();
-    const run = { runId: `launch-test-${crypto.randomUUID()}`, workflowId: def.workflowId, tenantId:'demo', status:'pending', inputs:{}, configurable:{}, metadata:{}, createdAt:now, updatedAt:now } as RunRecord;
+    const run: RunRecord = { runId: `launch-test-${crypto.randomUUID()}`, workflowId: def.workflowId, tenantId:'demo', status:'pending', inputs:{}, configurable:{}, metadata:{}, createdAt:now, updatedAt:now };
     await storage.insertRun(run);
     const first = await executeRun(storage, run, def);
     expect(first.status, JSON.stringify((await storage.listEvents(run.runId)).filter(e=>e.type==='node.failed'))).toBe('waiting-approval');
@@ -67,7 +84,8 @@ describe('launch showcase — real execution', () => {
     expect(branchStarts).toHaveLength(3); expect(branchEnds).toHaveLength(3);
     expect(Math.max(...branchStarts.map(e=>e.sequence))).toBeLessThan(Math.min(...branchEnds.map(e=>e.sequence)));
     const fresh = (await storage.getRun(run.runId))!;
-    const checkpoint = JSON.parse((fresh as RunRecord & { schedulerSnapshot: string }).schedulerSnapshot);
+    expect(typeof fresh.schedulerSnapshot).toBe('string');
+    const checkpoint = JSON.parse(fresh.schedulerSnapshot!);
     const gate = def.nodes.find(n => n.typeId === 'core.chat.approvalGate')!.nodeId;
     const resumed = await executeRun(storage, fresh, def, { resumeSnapshot: checkpoint, resumeNodeId: gate, resumeKey: gate, resumeStyle:'reinvoke', resumeValue:{ action } });
     expect(resumed.status).toBe('completed');

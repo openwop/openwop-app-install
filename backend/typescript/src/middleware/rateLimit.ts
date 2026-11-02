@@ -32,12 +32,11 @@
  *      an unauthenticated read flood still costs nothing past this middleware.
  *
  *   2. Per-session run quota on POST /v1/runs:
- *      - 10 runs/minute  (sliding window)
- *      - 50 runs/day     (UTC midnight reset)
- *      - 5 concurrent runs (in-flight count, released when the run
- *        terminates — currently approximated by a 60s TTL on the
- *        in-flight set; real production would hook into run.completed
- *        events for exact tracking).
+ *      - 10 runs/minute and 50 runs/day, fixed windows in the SHARED counter
+ *        (ADR 0987 P3, `takeShared`), so every instance draws on one budget.
+ *        Bucket 1 above stays per-process.
+ *      - 5 concurrent runs, counted by the store inside the run insert from
+ *        `pending`/`running` rows (ADR 0987 P2).
  *
  *   3. Per-IP run quota fallback when a request has no session cookie
  *      (Bearer-authed conformance harness bypasses cookies):
@@ -72,8 +71,10 @@ import { createHash } from 'node:crypto';
 import type { Request, RequestHandler } from 'express';
 import { apiKeysConfigured } from './apiKeyTenants.js';
 import { createLogger } from '../observability/logger.js';
-import { onRunTerminal } from '../executor/runLifecycle.js';
 import { clientIp, isDirectLoopback } from '../host/clientIp.js';
+import { takeShared, adjustShared, _resetSharedRateLimitLocal } from '../host/sharedRateLimit.js';
+import { deployProfile } from '../host/deployPosture.js';
+import { admissionRefusalCounts, recordAdmissionRefusal, _resetAdmissionRefusals } from '../host/admissionRefusals.js';
 
 const log = createLogger('middleware.rateLimit');
 
@@ -188,22 +189,8 @@ const ipReqTimes = new Map<string, number[]>();
 const ipReadTimes = new Map<string, number[]>();
 /** ADR 0771 — write timestamps per operator-configured key (keyed by token digest). */
 const keyWriteTimes = new Map<string, number[]>();
-/** ADR 0771 addendum — runs started today per operator-configured key. */
-const keyRunCountsDay = new Map<string, { day: number; count: number }>();
 /** MCP-1 — sliding-window per-principal `tools/call` timestamps (ms). */
 const mcpPrincipalReqTimes = new Map<string, number[]>();
-const sessionRunTimesMin = new Map<string, number[]>();
-const sessionRunCountsDay = new Map<string, { day: number; count: number }>();
-const ipRunCountsDay = new Map<string, { day: number; count: number }>();
-/** In-flight run set per session, keyed for the per-session concurrency cap.
- *  Slots are bound to the real runId and auto-released on the run's terminal
- *  event by `reserveConcurrentSlot` (via `onRunTerminal`); the 60s entry TTL
- *  is only a backstop for a route that forgets to reserve. */
-const sessionInflightRuns = new Map<string, { startedAtMs: number; runId: string }[]>();
-
-function dayBucket(): number {
-  return Math.floor(Date.now() / 86_400_000);
-}
 
 function pruneWindow(times: number[], windowMs: number, now: number): number[] {
   const cutoff = now - windowMs;
@@ -496,143 +483,131 @@ export function apiKeyRateLimitMiddleware(): RequestHandler {
   };
 }
 
-/** Per-session run-quota middleware. Mount on POST /v1/runs only.
- *  Enforces: 10 runs/min sliding window, 50 runs/day, 5 concurrent.
+/** Per-session run-quota middleware for the HTTP run-creation routes.
+ *  Enforces the per-minute window and the per-day count here, and computes the
+ *  concurrency admission the route passes to the run insert.
  *
- *  ADR 0987 D2 — `concurrencyInStore: true` is for a route whose run insert takes
- *  the admission (`runAdmissionFor`): the store counts the scope's running runs
- *  across instances, so the per-process map does NOT gate it (that map counts only
- *  this instance, only for 60 s, and only until a terminal event, so it would
- *  refuse a slot a suspended run had released). Every other mount keeps the map
- *  until ADR 0987 P2 moves it to the store. */
-export function runQuotaMiddleware(opts: { concurrencyInStore?: boolean } = {}): RequestHandler {
+ *  ADR 0987 P2 — concurrency is no longer checked here. The store counts the
+ *  scope's `pending`/`running` runs inside the insert transaction, across every
+ *  instance (D2), so the route passes `runAdmissionFor(req)` to
+ *  `insertRunWithStartContext` and answers an `AdmissionRefusedError` with
+ *  `refuseRunAdmission`. The per-process slot map, its 60 s filter and
+ *  `reserveConcurrentSlot` are deleted: they counted one instance, forgot a run
+ *  after a minute, and never released a run that finished elsewhere. */
+export function runQuotaMiddleware(): RequestHandler {
   return (req, res, next) => {
     if (process.env.OPENWOP_RATELIMIT_DISABLED === 'true') { next(); return; }
-    const limits = loadLimits();
-    const now = Date.now();
-    const today = dayBucket();
-    const key = sessionKey(req);
-    const isSession = key.startsWith('s:');
-
-    // Sliding-window minute check
-    if (isSession && limits.sessionRunsPerMin > 0) {
-      const times = pruneWindow(sessionRunTimesMin.get(key) ?? [], 60_000, now);
-      if (times.length >= limits.sessionRunsPerMin) {
-        const retryIn = (times[0]! + 60_000 - now) / 1000;
-        rejectRateLimited(res, 'session_runs_per_min', retryIn);
-        return;
-      }
-    }
-
-    // ADR 0771 addendum: an OPERATOR-CONFIGURED key (the same predicate as the
-    // keyed write bucket) counts its day's runs on its OWN budget instead of
-    // its tenant's session quota. A certification cut starts hundreds of runs.
-    // MEASURED 2026-09-29: the conformance key hit `session_runs_per_day`
-    // (500) and 108 of 110 non-pass rows in the c3d06c29 bundle were that
-    // 429. Every other caller, and the per-minute and concurrency caps, are
-    // unchanged.
-    const keyId = configuredKeyBucketId(req);
-
-    // Daily total check (keyed, session OR IP path)
-    if (keyId) {
-      if (limits.keyRunsPerDay > 0) {
-        const bucket = keyRunCountsDay.get(keyId);
-        const count = bucket && bucket.day === today ? bucket.count : 0;
-        if (count >= limits.keyRunsPerDay) {
-          const retryIn = ((today + 1) * 86_400 - Math.floor(now / 1000));
-          rejectRateLimited(res, 'key_runs_per_day', retryIn);
-          return;
-        }
-      }
-    } else if (isSession && limits.sessionRunsPerDay > 0) {
-      const bucket = sessionRunCountsDay.get(key);
-      const count = bucket && bucket.day === today ? bucket.count : 0;
-      if (count >= limits.sessionRunsPerDay) {
-        const retryIn = ((today + 1) * 86_400 - Math.floor(now / 1000));
-        rejectRateLimited(res, 'session_runs_per_day', retryIn);
-        return;
-      }
-    } else if (!isSession && limits.ipRunsPerDay > 0) {
-      const bucket = ipRunCountsDay.get(key);
-      const count = bucket && bucket.day === today ? bucket.count : 0;
-      if (count >= limits.ipRunsPerDay) {
-        const retryIn = ((today + 1) * 86_400 - Math.floor(now / 1000));
-        rejectRateLimited(res, 'ip_runs_per_day', retryIn);
-        return;
-      }
-    }
-
-    // Concurrent check. ADR 0771 addendum 2: an operator-configured key's
-    // in-flight runs are their own slot bucket (keyed on the token digest),
-    // not its tenant's 5. MEASURED 2026-09-29: the b29427fef major-1 cut had
-    // every 429 inside one 8 s burst at ~18 creates/min, which failed the
-    // replay-fork FLOOR row when earlier scenarios left runs non-terminal.
-    // Sessions keep `sessionConcurrent`.
-    const slotKey = keyId ?? key;
-    const concurrentCap = keyId ? limits.keyConcurrent : isSession ? limits.sessionConcurrent : 0;
-    if (concurrentCap > 0 && !opts.concurrencyInStore) {
-      const inflight = (sessionInflightRuns.get(slotKey) ?? []).filter((r) => now - r.startedAtMs < 60_000);
-      if (inflight.length >= concurrentCap) {
-        rejectRateLimited(res, keyId ? 'key_concurrent' : 'session_concurrent', 10);
-        return;
-      }
-      sessionInflightRuns.set(slotKey, inflight);
-    }
-
-    // ─── Reserve counters (commit on response 2xx; release on error)
-    // Express patches: spy on res.statusCode at response time.
-    res.once('finish', () => {
-      if (res.statusCode >= 400) return; // refused — don't charge
-      // ADR 0475 (review H3) — batch run creators (bulk redrive) charge one
-      // unit PER MINTED RUN via res.locals.runQuotaUnits; default 1. Without
-      // this, a 25-run redrive request cost the same quota as one run — a
-      // 25× side door around sessionRunsPerMin/Day.
-      const rawUnits = (res.locals as { runQuotaUnits?: unknown }).runQuotaUnits;
-      const units = typeof rawUnits === 'number' && Number.isFinite(rawUnits) && rawUnits >= 1
-        ? Math.floor(rawUnits) : 1;
-      // Commit minute window
-      if (isSession && limits.sessionRunsPerMin > 0) {
-        const times = pruneWindow(sessionRunTimesMin.get(key) ?? [], 60_000, Date.now());
-        for (let i = 0; i < units; i += 1) times.push(Date.now());
-        sessionRunTimesMin.set(key, times);
-      }
-      // Commit daily counter
-      if (keyId) {
-        if (limits.keyRunsPerDay > 0) {
-          const bucket = keyRunCountsDay.get(keyId);
-          if (bucket && bucket.day === today) bucket.count += units;
-          else keyRunCountsDay.set(keyId, { day: today, count: units });
-        }
-      } else if (isSession && limits.sessionRunsPerDay > 0) {
-        const bucket = sessionRunCountsDay.get(key);
-        if (bucket && bucket.day === today) bucket.count += units;
-        else sessionRunCountsDay.set(key, { day: today, count: units });
-      } else if (!isSession && limits.ipRunsPerDay > 0) {
-        const bucket = ipRunCountsDay.get(key);
-        if (bucket && bucket.day === today) bucket.count += units;
-        else ipRunCountsDay.set(key, { day: today, count: units });
-      }
-      // Inflight tracking is wired explicitly via reserveConcurrentSlot
-      // in the runs route — it ties to the actual runId AND auto-
-      // releases on the run's terminal event via runLifecycle. The
-      // middleware no longer pushes a 'pending' placeholder here; the
-      // 60s TTL safety-net stays only as a backstop in case a route
-      // forgets to reserve.
-    });
-    // Stash the session key on the request so the route handler can
-    // call reserveConcurrentSlot with the real runId once it's created.
-    (req as Request & { _sessionKey?: string })._sessionKey = slotKey;
-    // ADR 0987 D2 — the same scope and cap, carried to the run insert, which
-    // counts it from authoritative run state across every instance.
-    if (concurrentCap > 0) {
-      (req as Request & { _runAdmission?: RunAdmission })._runAdmission = {
-        key: createHash('sha256').update(`runs.concurrent\u0000${slotKey}`).digest('hex').slice(0, 32),
-        cap: concurrentCap,
-        reason: keyId ? 'key_concurrent' : 'session_concurrent',
-      };
-    }
-    next();
+    void admitRunWindows(req, res).then((ok) => {
+      if (!ok) return;
+      setRunAdmission(req);
+      next();
+    }, next);
   };
+}
+
+/** ADR 0987 D1 — one run-count window, shared by every instance. */
+interface RunWindow { scope: string; key: string; limit: number; windowS: number; reason: RateLimitReason }
+
+/** Bumped by `_resetRateLimitState` so a test starts on fresh shared rows. */
+let runWindowEpoch = 0;
+
+/**
+ * ADR 0987 D1 / P3 — the per-minute and per-day run windows. They live in the
+ * shared counter (`takeShared`, ADR 0934), so every instance draws on one
+ * budget and a deploy no longer resets it. Before P3 they were per-process maps.
+ *
+ * A unit is TAKEN before the handler runs, so two instances cannot both admit
+ * the last one. The settlement after the response keeps the old charging rule:
+ * a refused request (status >= 400) gets its unit back, and a batch creator is
+ * charged its extra minted runs (`res.locals.runQuotaUnits`, ADR 0475 H3).
+ *
+ * Failure posture (D5): the strict profile (`auth`) is `closed`, so a counter
+ * that cannot answer is a 503 and sustained contention refuses. The evaluation
+ * profiles are `open` and fall back to a per-process window.
+ */
+async function admitRunWindows(req: Request, res: import('express').Response): Promise<boolean> {
+  const limits = loadLimits();
+  const key = sessionKey(req);
+  const isSession = key.startsWith('s:');
+  // ADR 0771 addendum: an operator-configured key counts its day's runs on its
+  // OWN budget instead of its tenant's session quota (a certification cut
+  // starts hundreds of runs). The per-minute cap is unchanged.
+  const keyId = configuredKeyBucketId(req);
+  const salt = `${runWindowEpoch}\u0000`;
+  const windows: RunWindow[] = [];
+  if (isSession && limits.sessionRunsPerMin > 0) {
+    windows.push({ scope: 'runs.session.minute', key: salt + key, limit: limits.sessionRunsPerMin, windowS: 60, reason: 'session_runs_per_min' });
+  }
+  if (keyId) {
+    if (limits.keyRunsPerDay > 0) windows.push({ scope: 'runs.key.day', key: salt + keyId, limit: limits.keyRunsPerDay, windowS: 86_400, reason: 'key_runs_per_day' });
+  } else if (isSession && limits.sessionRunsPerDay > 0) {
+    windows.push({ scope: 'runs.session.day', key: salt + key, limit: limits.sessionRunsPerDay, windowS: 86_400, reason: 'session_runs_per_day' });
+  } else if (!isSession && limits.ipRunsPerDay > 0) {
+    windows.push({ scope: 'runs.ip.day', key: salt + key, limit: limits.ipRunsPerDay, windowS: 86_400, reason: 'ip_runs_per_day' });
+  }
+  if (windows.length === 0) return true;
+
+  const failure = deployProfile() === 'strict' ? 'closed' : 'open';
+  const now = Date.now();
+  const taken: RunWindow[] = [];
+  const refund = (ws: RunWindow[]): void => {
+    for (const w of ws) void adjustShared({ scope: w.scope, key: w.key, windowS: w.windowS, delta: -1, failure, now });
+  };
+  for (const w of windows) {
+    let r;
+    try {
+      r = await takeShared({ scope: w.scope, key: w.key, limit: w.limit, windowS: w.windowS, failure, now });
+    } catch (err) {
+      refund(taken);
+      recordAdmissionRefusal('windows', 'unavailable');
+      throw err;
+    }
+    if (!r.allowed) {
+      refund(taken);
+      recordAdmissionRefusal('windows', w.reason);
+      rejectRateLimited(res, w.reason, r.retryAfterS);
+      return false;
+    }
+    taken.push(w);
+  }
+
+  res.once('finish', () => {
+    if (res.statusCode >= 400) { refund(taken); return; }
+    const rawUnits = (res.locals as { runQuotaUnits?: unknown }).runQuotaUnits;
+    const units = typeof rawUnits === 'number' && Number.isFinite(rawUnits) && rawUnits >= 1 ? Math.floor(rawUnits) : 1;
+    if (units === 1) return;
+    for (const w of taken) void adjustShared({ scope: w.scope, key: w.key, windowS: w.windowS, delta: units - 1, failure, now });
+  });
+  return true;
+}
+
+/** ADR 0987 D6 — run-window refusals since boot, by reason (no keys). The tally
+ *  lives in `host/admissionRefusals.ts` with the other admission families;
+ *  `unavailable` (a strict counter that could not answer) is not a limiter
+ *  reason, so it is left out here and reported by the Operations summary. */
+export function runWindowRefusalCounts(): Readonly<Partial<Record<RateLimitReason, number>>> {
+  const { unavailable: _unavailable, ...byReason } = admissionRefusalCounts().windows;
+  return byReason as Partial<Record<RateLimitReason, number>>;
+}
+
+/** ADR 0987 D2 — the concurrency scope and cap, carried to the run insert, which
+ *  counts it from authoritative run state across every instance. An
+ *  operator-configured key's in-flight runs are their own slot bucket (ADR 0771
+ *  addendum 2); sessions keep `sessionConcurrent`. */
+function setRunAdmission(req: Request): void {
+  const limits = loadLimits();
+  const key = sessionKey(req);
+  const isSession = key.startsWith('s:');
+  const keyId = configuredKeyBucketId(req);
+  const slotKey = keyId ?? key;
+  const concurrentCap = keyId ? limits.keyConcurrent : isSession ? limits.sessionConcurrent : 0;
+  if (concurrentCap > 0) {
+    (req as Request & { _runAdmission?: RunAdmission })._runAdmission = {
+      key: createHash('sha256').update(`runs.concurrent\u0000${slotKey}`).digest('hex').slice(0, 32),
+      cap: concurrentCap,
+      reason: keyId ? 'key_concurrent' : 'session_concurrent',
+    };
+  }
 }
 
 /** ADR 0987 D2 — the concurrency admission `runQuotaMiddleware` computed for this
@@ -648,41 +623,10 @@ export function runAdmissionFor(req: Request): { key: string; cap: number } | un
 }
 
 /** Answer a run insert the store refused for concurrency (`AdmissionRefusedError`)
- *  with the same 429 envelope the in-process check sends. */
+ *  with the rate-limit 429 envelope (`session_concurrent` / `key_concurrent`). */
 export function refuseRunAdmission(req: Request, res: import('express').Response): void {
   const a = (req as Request & { _runAdmission?: RunAdmission })._runAdmission;
   rejectRateLimited(res, a?.reason ?? 'session_concurrent', 10);
-}
-
-/**
- * Bind a session's concurrent-runs slot to the actual runId, and
- * register an auto-release on the run's terminal event. Called from
- * the runs route after the run record is created.
- *
- * Returns a manual release function for paths that need to release
- * before the executor reaches a terminal state (e.g., a creation-
- * time failure that doesn't go through the run.* lifecycle).
- */
-export function reserveConcurrentSlot(req: Request, runId: string): () => void {
-  const key = (req as Request & { _sessionKey?: string })._sessionKey;
-  if (!key) return () => undefined; // no-op for routes outside the runQuotaMiddleware
-  const list = sessionInflightRuns.get(key) ?? [];
-  list.push({ startedAtMs: Date.now(), runId });
-  sessionInflightRuns.set(key, list);
-  let released = false;
-  const release = () => {
-    if (released) return;
-    released = true;
-    const cur = sessionInflightRuns.get(key);
-    if (!cur) return;
-    const next = cur.filter((r) => r.runId !== runId);
-    if (next.length === 0) sessionInflightRuns.delete(key);
-    else sessionInflightRuns.set(key, next);
-  };
-  // Auto-release when the executor emits a terminal event for this run.
-  // The runLifecycle bus fires once per runId and clears listeners.
-  onRunTerminal(runId, release);
-  return release;
 }
 
 // ── Test affordances ──
@@ -691,10 +635,8 @@ export function _resetRateLimitState(): void {
   ipReqTimes.clear();
   ipReadTimes.clear();
   keyWriteTimes.clear();
-  keyRunCountsDay.clear();
   mcpPrincipalReqTimes.clear();
-  sessionRunTimesMin.clear();
-  sessionRunCountsDay.clear();
-  ipRunCountsDay.clear();
-  sessionInflightRuns.clear();
+  runWindowEpoch += 1;
+  _resetSharedRateLimitLocal();
+  _resetAdmissionRefusals();
 }

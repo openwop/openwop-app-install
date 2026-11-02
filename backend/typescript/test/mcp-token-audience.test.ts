@@ -245,20 +245,24 @@ describe('RFC 0153 §E inbound — an RFC 0154 workload credential is audience-c
     await new Promise<void>((r) => mountServer.close(() => r()));
   });
 
-  const post = async (headers: Record<string, string>): Promise<number> => {
+  /** Status + the refusal code. The middleware's 401 carries `{ error: <reason> }`
+   *  (`middleware/workloadIdentity.ts` refuse()), so a leg can say WHICH refusal
+   *  fired — a status alone is satisfied by any 401 at all. */
+  const post = async (headers: Record<string, string>): Promise<{ status: number; error: string | undefined }> => {
     const res = await fetch(`${base}/host/openwop-app/mcp`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'mcp-protocol-version': MCP_CURRENT_VERSION, ...headers },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: { _meta: { 'io.modelcontextprotocol/protocolVersion': MCP_CURRENT_VERSION, 'io.modelcontextprotocol/clientCapabilities': {} } } }),
     });
-    return res.status;
+    const body = (await res.json().catch(() => ({}))) as { error?: unknown };
+    return { status: res.status, error: typeof body.error === 'string' ? body.error : undefined };
   };
 
   it('NO workload credential reaches the mount normally (the control — otherwise every leg below is vacuous)', async () => {
     // The test-seam principal stands in for an authenticated caller here; the
     // point of this leg is that the mount ANSWERS, so a 401 below is
     // attributable to the audience check and not to the mount being shut.
-    expect(await post({})).toBe(200);
+    expect((await post({})).status).toBe(200);
   });
 
   it('a workload credential minted for ANOTHER audience is refused 401 BEFORE the mount runs', async () => {
@@ -270,7 +274,7 @@ describe('RFC 0153 §E inbound — an RFC 0154 workload credential is audience-c
     // anything — the signature is genuine and the audience is not.
     process.env.OPENWOP_WORKLOAD_IDENTITY_AUDIENCE = OTHER_AUDIENCE;
     try {
-      expect(await post({ 'x-openwop-workload-identity': token })).toBe(401);
+      expect(await post({ 'x-openwop-workload-identity': token })).toEqual({ status: 401, error: 'audience_mismatch' });
     } finally {
       process.env.OPENWOP_WORKLOAD_IDENTITY_AUDIENCE = HOST_AUDIENCE;
     }
@@ -279,11 +283,11 @@ describe('RFC 0153 §E inbound — an RFC 0154 workload credential is audience-c
   it('the same credential under the MATCHING audience is admitted — the guard does not simply refuse everything', async () => {
     const { mintWorkloadCredential } = await import('../src/host/workloadIdentity.js');
     const token = await mintWorkloadCredential({ subject: 'worker/probe', tenantId: 'default', scopes: ['runs:read'] });
-    expect(await post({ 'x-openwop-workload-identity': token })).toBe(200);
+    expect((await post({ 'x-openwop-workload-identity': token })).status).toBe(200);
   });
 
   it('a GARBAGE workload credential is refused 401, never ignored', async () => {
     // "Presented but uncheckable" must not degrade to "not presented".
-    expect(await post({ 'x-openwop-workload-identity': 'not-a-credential' })).toBe(401);
+    expect(await post({ 'x-openwop-workload-identity': 'not-a-credential' })).toEqual({ status: 401, error: 'identity_unverified' });
   });
 });

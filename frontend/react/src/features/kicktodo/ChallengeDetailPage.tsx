@@ -373,8 +373,8 @@ export function ChallengeDetailPage() {
                   ) : (
                     <Button variant="accent-solid" disabled={busy}
                       onClick={() => void onEnroll()}
-                      aria-label={busy ? t('enrolling') : `${t('previewAndStart')}: ${c.title}`}>
-                      {busy ? t('enrolling') : t('previewAndStart')}
+                      aria-label={busy ? t('enrolling') : `${t('startChallenge')}: ${c.title}`}>
+                      {busy ? t('enrolling') : t('startChallenge')}
                     </Button>
                   )}
                   {error === 'enroll' && <Notice variant="error" announce={t('enrollError')}>{t('enrollError')}</Notice>}

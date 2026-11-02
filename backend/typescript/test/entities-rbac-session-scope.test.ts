@@ -1,27 +1,22 @@
 /**
- * ENTC-1 (re-scoped) — the entities REST door's three-tier RBAC is DOCUMENTED but
- * not ENFORCED on the session path.
- *
- * `routes.ts:1-13` states the contract normatively:
+ * ENTC-1 / ADR 0731 — TST-DAA-6. The entities (and environments) REST doors
+ * ENFORCE their documented three-tier RBAC on the session path:
  *     read = workspace:read · entity write = workspace:write
  *     type admin = host:members:manage · "missing scope → 403"
- * and names the shape it composes: `resolveEffectiveAccess(tenantId, { subject })`.
  *
- * The code at `routes.ts:151` passes `actingMember ? { memberId } : {}` instead.
- * With NEITHER `memberId` NOR `subject`, `resolveEffectiveAccess` skips the member
- * lookup entirely and returns `{ roles: ['owner'], scopes: OWNER_SCOPES,
- * basis: 'tenant-owner' }` — so for every ordinary session caller the scope check
- * `access.scopes.includes(scope)` passes unconditionally and the advertised 403
- * can never fire.
+ * History: the route used to resolve access with `actingMember ? { memberId } : {}`;
+ * with neither `memberId` nor `subject`, `resolveEffectiveAccess` returns
+ * tenant-owner scopes, so a `viewer` member created types and wrote rows (both
+ * 201). ADR 0731 made the doors resolve the SESSION caller through
+ * `resolveTenantLevelScopes(tenantId, subject)`; these legs are its regression
+ * witnesses. (The empty-options default of `resolveEffectiveAccess` itself is a
+ * grade-code row, TST-DAA-6 / ADR 0731 D5 — the D5 ratchet below keeps route
+ * helpers from calling it that way; this file no longer pins that default.)
  *
- * MEASURED across the repo: ~100 `resolveEffectiveAccess` call sites, and all but
- * entities and environments pass `{ subject }`. This is an outlier, not a house
- * style. The filed row said the CHAT tool "under-enforces vs the REST read door";
- * the direction was wrong — the REST door's strictness is itself an illusion on
- * the session path, so the chat tool was being compared against a gate that does
- * not gate.
- *
- * These legs assert the DOCUMENTED contract, so they are born red.
+ * Red when (sabotage-witnessed, wave 70): the entities or environments route
+ * stops checking `access.scopes.includes(scope)`; `resolveTenantLevelScopes`
+ * grants a shared `ws:` non-member owner scopes; the single-principal exit
+ * (`anon:` / `user:` / `default`) stops being self-owned.
  */
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -34,6 +29,7 @@ import { createApp } from '../src/index.js';
 import { createOrg, createWorkspace, createMember, resolveEffectiveAccess, resolveSubjectScopesUnion, resolveTenantLevelScopes } from '../src/host/accessControlService.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import { stripComments } from './helpers/stripComments.js';
 
 const BASE = '/host/openwop-app/entities';
 let server: http.Server;
@@ -41,22 +37,32 @@ let ORIGIN = '';
 let WS = '';
 let n = 0;
 
-interface Client { userId: string; post: (p: string, b?: unknown) => Promise<{ status: number; body: any }> }
+interface Body { error?: string; message?: string; user?: { userId: string } }
+interface Client { userId: string; post: (p: string, b?: unknown) => Promise<{ status: number; body: Body | undefined }> }
+
+/** The scope refusal itself — not a 403 from some other gate. */
+function expectMissingScope(r: { status: number; body: Body | undefined }, scope: string, why: string): void {
+  expect(r.status, why).toBe(403);
+  expect(r.body?.error).toBe('forbidden_scope');
+  expect(r.body?.message).toBe(`Missing required scope: ${scope}`);
+}
 
 async function loginTo(tenantId: string, who: string): Promise<Client> {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: any }> => {
+  const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: Body | undefined }> => {
     const res = await fetch(`${ORIGIN}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    return { status: res.status, body: res.status === 204 ? undefined : ((await res.json().catch(() => undefined)) as Body | undefined) };
   };
   const r = await call('POST', '/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return { userId: r.body.user.userId, post: (p, b) => call('POST', p, b) };
+  const userId = r.body?.user?.userId;
+  if (!userId) throw new Error(`test login returned no user: ${JSON.stringify(r.body)}`);
+  return { userId, post: (p, b) => call('POST', p, b) };
 }
 
 beforeAll(async () => {
@@ -74,10 +80,13 @@ beforeAll(async () => {
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 describe('ENTC-1 — a VIEWER must not pass the entities write/admin gates', () => {
-  it('the premise: with neither memberId nor subject, resolveEffectiveAccess returns TENANT-OWNER', async () => {
-    const anon = await resolveEffectiveAccess(WS, {});
-    expect(anon.basis, 'this is why the route gate cannot refuse a session caller').toBe('tenant-owner');
-    expect(anon.scopes).toContain('host:members:manage');
+  it('the premise: the route resolver gives a shared-workspace NON-member no scopes at all', async () => {
+    // The question the doors ask (ADR 0731): the session caller's tenant-level
+    // scopes. A logged-in caller with no member row in a `ws:` workspace holds none.
+    const stranger = await loginTo(WS, 'no-member');
+    const level = await resolveTenantLevelScopes(WS, stranger.userId);
+    expect(level.basis).toBe('none');
+    expect(level.scopes).toEqual([]);
   });
 
   it('control: a viewer MEMBER genuinely lacks the write and admin scopes', async () => {
@@ -94,7 +103,7 @@ describe('ENTC-1 — a VIEWER must not pass the entities write/admin gates', () 
     const viewer = await loginTo(WS, 'viewer-types');
     await createMember({ orgId: WS, tenantId: WS, displayName: 'V2', subject: viewer.userId, roles: ['viewer'] });
     const r = await viewer.post(`${BASE}/types`, { name: `t_${n++}`, fields: [{ key: 'title', label: 'Title', type: 'string' }] });
-    expect(r.status, `a viewer created an entity TYPE: ${JSON.stringify(r.body)}`).toBe(403);
+    expectMissingScope(r, 'host:members:manage', `a viewer created an entity TYPE: ${JSON.stringify(r.body)}`);
   });
 
   it('a viewer is REFUSED at the entity-write door (contract: workspace:write → 403)', async () => {
@@ -109,7 +118,7 @@ describe('ENTC-1 — a VIEWER must not pass the entities write/admin gates', () 
     const viewer = await loginTo(WS, 'viewer-rows');
     await createMember({ orgId: WS, tenantId: WS, displayName: 'V3', subject: viewer.userId, roles: ['viewer'] });
     const r = await viewer.post(`${BASE}/types/${typeName}/entities`, { values: { title: 'x' } });
-    expect(r.status, `a viewer wrote an entity row: ${JSON.stringify(r.body)}`).toBe(403);
+    expectMissingScope(r, 'workspace:write', `a viewer wrote an entity row: ${JSON.stringify(r.body)}`);
   });
 });
 
@@ -149,7 +158,7 @@ describe('ADR 0731 — the gate still has an EXIT, and resolves the TENANT-LEVEL
     expect((await resolveEffectiveAccess(WS, { subject: user.userId })).roles, 'no-org resolution is the root row, not first-match').toEqual(['viewer']);
     // ...and the door agrees, deterministically: refused, while a ROOT admin is admitted.
     const refused = await user.post(`${BASE}/types`, { name: `m_${n++}`, fields: [{ key: 'title', label: 'Title', type: 'string' }] });
-    expect(refused.status, `sub-org admin created a type: ${JSON.stringify(refused.body)}`).toBe(403);
+    expectMissingScope(refused, 'host:members:manage', `sub-org admin created a type: ${JSON.stringify(refused.body)}`);
     const rootAdmin = await loginTo(WS, 'root-admin-mo');
     await createMember({ orgId: WS, tenantId: WS, displayName: 'RA', subject: rootAdmin.userId, roles: ['admin'] });
     const made = await rootAdmin.post(`${BASE}/types`, { name: `mo_${n++}`, fields: [{ key: 'title', label: 'Title', type: 'string' }] });
@@ -164,7 +173,7 @@ describe('ADR 0731 D4 — ENVIRONMENTS is the same defect in the same shape', ()
     const viewer = await loginTo(WS, 'viewer-env');
     await createMember({ orgId: WS, tenantId: WS, displayName: 'VE', subject: viewer.userId, roles: ['viewer'] });
     const r = await viewer.post(ENV, { name: `env_${n++}` });
-    expect(r.status, `a viewer created an environment: ${JSON.stringify(r.body)}`).toBe(403);
+    expectMissingScope(r, 'host:members:manage', `a viewer created an environment: ${JSON.stringify(r.body)}`);
   });
 
   it('...and an admin member still passes it (the exit)', async () => {
@@ -192,7 +201,7 @@ describe('ADR 0731 D5 — the CLASS ratchet: a route helper must not resolve aut
   };
 
   const offenders = (files: string[]): string[] => files.filter((f) => {
-    const code = readFileSync(f, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
+    const code = stripComments(readFileSync(f, 'utf8'));
     return /resolveEffectiveAccess\(\s*[A-Za-z_$][\w$.]*\s*,\s*\{\s*\}\s*\)/.test(code);
   }).map((f) => f.slice(SRC.length + 1));
 

@@ -92,6 +92,9 @@ export const SEAM_CALL_SITES: ReadonlyArray<{ file: string; effectKind: string; 
   // ADR 0531 (replay egress follow-up, #5362): the NATIVE web-search leg is a paid provider call that
   // used the plain global fetch, outside every other egress seam.
   { file: 'src/host/headlessAi.ts', effectKind: 'network-egress', seam: 'provider.native-web-search' },
+  // ADR 1012: the other two lanes that hand a search to the provider.
+  { file: 'src/aiProviders/aiProvidersHost.ts', effectKind: 'network-egress', seam: 'provider.native-web-search' },
+  { file: 'src/host/exchange/dispatchTurn.ts', effectKind: 'network-egress', seam: 'provider.native-web-search' },
   // ADR 0954 P3: pre-reservation guards narrow the SAME existing run/inbox
   // owners, just as the campaign ignition guard does. No parallel emitter.
   { file: 'src/features/crm/leadIntel/speedToLead.ts', effectKind: 'dispatch', seam: 'queue.run-start' },

@@ -16,6 +16,10 @@
  * a user-edited prompt, and writes nothing when the record is current.
  * Sabotage-witnessed: deleting a tool mention reds the parity case; making the
  * heal a no-op reds the heal cases.
+ *
+ * TST-DJE-4 (grade-tests wave 71). Also red (wave 71) when the heal re-writes a user
+ * prompt, writes a current record, leaves the old memoryShape, or does not re-
+ * register the healed record in the live registry.
  */
 import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';

@@ -175,7 +175,7 @@ export function registerAdvisoryBoardRoutes(deps: RouteDeps): void {
       const ts = new Date().toISOString();
       let created = true;
       try {
-        await storage.createChatSession({ sessionId, tenantId, title: `${board.name} · board`, createdAt: ts, updatedAt: ts, messageCount: 0 });
+        await storage.createChatSession({ sessionId, tenantId, title: `${board.name} · board`, createdAt: ts, updatedAt: ts, messageCount: 0, titleSource: 'given' });
       } catch (err) {
         const code = (err as { code?: string }).code;
         if (code !== 'SQLITE_CONSTRAINT_PRIMARYKEY' && code !== '23505') throw err; // already exists ⇒ reuse

@@ -1,6 +1,13 @@
 # ADR 0541 — ApplyGrant: auto-submit where submission is first-party, prepare where it is not
 
-Status: Proposed
+Status: Accepted — implemented. P1–P4 shipped in #3116 (`77f8ccbce`, "ADRs 0539–0546, implemented"): P1 the grant
+(`host/applyGrant.ts`), P2 the commit-gate consult (computer-use + job-search), P3 audit rows + replay/fork refusal (D4/D5),
+P4 the issue/list/revoke routes + `ApplyGrantPage`. OQ-3 was decided 2026-10-30 by DG-SEC-1 (#5412): a grant is
+self-consent only (see the OQ-3 correction below).
+
+> **CORRECTED 2026-10-30:** this line read `Proposed` long after #3116 shipped every phase. The batch commit cited the
+> range "ADRs 0539–0546", which the stale-status check does not expand, so nothing flagged it until DG-SEC-1 cited
+> ADR 0541 by number.
 
 Parent: [ADR 0539](0539-job-search-vertical-strategy.md). Extends: `computer-use` (ADR 0454-class
 governed browser sessions), approvals/interrupts, ADR 0447 (obligation ledger — the shape
@@ -193,3 +200,24 @@ needs to travel between hosts** — a run on host A submitting under a grant iss
   yet stops an org-admin granting on behalf of someone who never consented. That is a
   consent question, not an authz one, and it wants a decision before multi-applicant use
   (mirrors ADR 0540 OQ-2).
+
+  > **CORRECTED 2026-10-30 (DG-SEC-1) — "nothing yet stops an org-admin granting on behalf
+  > of someone" was not a gap waiting for a decision. It was a live forgery.** The grants
+  > route took `subjectId` from the request body behind `workspace:write` alone, and
+  > `consultApplyGrant` matched on subject + campaign. So any colleague with write access
+  > could mint an AUTO-SUBMIT grant over a co-worker's campaign, and the autopilot pipeline
+  > would honour it. computer-use's ADR 0894 D7 narrowing (`grantedBy` = the session's
+  > opener) did not help: the forger's own session carried the victim's `applyContext`.
+  > Until OQ-3 is decided, the safe default is **self-consent only**, enforced twice:
+  > - the route forces `subjectId` to the acting user and answers 403 to a body naming
+  >   anyone else, storing nothing;
+  > - `consultApplyGrant`, the one decision point both callers pass, requires
+  >   `grantedBy === subjectId`, so a cross-subject row already in storage authorises
+  >   nothing.
+  >
+  > The list route now shows a member only their own grants, because a job search is
+  > sensitive inside an org. Revocation stays open to any `workspace:write` member, because
+  > it only ever removes authority. **OQ-3 is still open**: delegated consent needs an
+  > explicit, audited consent step by the subject, and it is a new decision, not a flag on
+  > this route. Witness: `test/dg-sec-1-grant-self-consent.test.ts`. The prod count of
+  > cross-subject rows is probe `JS-PROBE-DGSEC1` in `scripts/job-search-prod-probes.sql`.

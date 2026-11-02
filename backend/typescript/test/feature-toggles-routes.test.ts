@@ -3,7 +3,12 @@
  *
  * Proves the wiring end-to-end against a real app: the admin save endpoint
  * persists, the assignments endpoint resolves the saved config for the caller,
- * a saved A/B split yields a sticky variant, and the surface is auth-gated.
+ * a saved A/B split yields an enabled variant, and the surface is auth-gated.
+ * (Stickiness is pure bucketing, unit-tested in `feature-toggles.test.ts`.)
+ *
+ * Tracker TST-DCA-6. Red when `saveConfig` drops the store write, `resolveConfig`
+ * stops assigning variants, the weights-sum check goes, the overridden-default
+ * stamp goes, or `deleteConfig` skips the delete (grade-tests w70 probes `rt-*`).
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -47,9 +52,11 @@ describe('feature-toggle routes (sqlite memory app)', () => {
   }
 
   it('lists the declared default toggle before any override is saved', async () => {
-    const { status, body } = await jsonFetch<{ configs: { id: string; status: string }[] }>('/host/openwop-app/feature-toggles/admin/configs');
+    // Its own id, so the case holds in any order (the other cases save demo.crm).
+    registerToggleDefault({ id: 'demo.listed', status: 'off', bucketUnit: 'user', salt: 'l', category: 'Business Tools', label: 'Listed' });
+    const { status, body } = await jsonFetch<{ configs: { id: string; status: string; overridden: boolean }[] }>('/host/openwop-app/feature-toggles/admin/configs');
     expect(status).toBe(200);
-    expect(body.configs.find((c) => c.id === 'demo.crm')?.status).toBe('off');
+    expect(body.configs.find((c) => c.id === 'demo.listed')).toMatchObject({ status: 'off', overridden: false });
   });
 
   it('admin save → assignments reflects the override', async () => {
@@ -67,7 +74,7 @@ describe('feature-toggle routes (sqlite memory app)', () => {
     expect(crm?.variant).toBeNull(); // no variants ⇒ plain on
   });
 
-  it('a saved A/B split yields a sticky, enabled variant', async () => {
+  it('a saved A/B split yields an enabled variant from that split', async () => {
     await jsonFetch('/host/openwop-app/feature-toggles/admin/configs/demo.crm', {
       method: 'PUT',
       body: JSON.stringify({
@@ -82,7 +89,7 @@ describe('feature-toggle routes (sqlite memory app)', () => {
     const first = await read();
     expect(first.enabled).toBe(true);
     expect(['A', 'B']).toContain(first.variant);
-    expect((await read()).variant).toBe(first.variant); // sticky for the same caller
+    expect((await read()).variant).toBe(first.variant); // the same caller reads the same arm
   });
 
   it('rejects a save whose variant weights do not sum to 100', async () => {
@@ -127,7 +134,8 @@ describe('feature-toggle routes (sqlite memory app)', () => {
   });
 
   it('the admin surface is auth-gated (no bearer ⇒ 401)', async () => {
-    const { status } = await jsonFetch('/host/openwop-app/feature-toggles/admin/configs', {}, false);
+    const { status, body } = await jsonFetch<{ error?: string }>('/host/openwop-app/feature-toggles/admin/configs', {}, false);
     expect(status).toBe(401);
+    expect(body.error).toBe('unauthenticated');
   });
 });

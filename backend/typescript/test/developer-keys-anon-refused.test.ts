@@ -5,6 +5,11 @@
  * visitor could mint an API key. The key was confined to its anonymous tenant
  * (no escalation), but the route's own claim was false. Route-level, because the
  * anonymous principal only exists after the real auth middleware.
+ *
+ * TST-CVE-11. Single guard: `requirePrincipal` in `developer-keys/routes.ts`
+ * (`!subject || anonymous`). An anonymous session passes the auth middleware, so
+ * the 401 is the route's own — asserted by its exact code and message. Red when
+ * the `anonymous` half of that guard is dropped (the anon session then mints).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -23,12 +28,15 @@ beforeAll(async () => {
 }, 120_000);
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
+interface KeysBody { error?: string; message?: string; token?: string }
+
 function cookieClient() {
   let cookie = '';
   const call = async (m: string, p: string, b?: unknown) => {
     const res = await fetch(`${BASE}${p}`, { method: m, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(b !== undefined ? { body: JSON.stringify(b) } : {}) });
     for (const c of getSetCookies(res.headers) as string[]) { const mm = /(__session=[^;]+)/.exec(c); if (mm) cookie = mm[1]; }
-    return { status: res.status, body: await res.json().catch(() => undefined) as any, hasCookie: () => cookie !== '' };
+    const body = (await res.json().catch(() => undefined)) as KeysBody | undefined;
+    return { status: res.status, body, hasCookie: () => cookie !== '' };
   };
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b), hasCookie: () => cookie !== '' };
 }
@@ -40,6 +48,8 @@ describe('developer-keys refuses an anonymous session', () => {
     expect(anon.hasCookie(), 'the anonymous session must exist, or this leg proves nothing').toBe(true);
     const r = await anon.post('/host/openwop-app/developer-keys', { name: 'x' });
     expect(r.status, JSON.stringify(r.body)).toBe(401);
+    expect(r.body?.error).toBe('unauthenticated');
+    expect(r.body?.message).toBe('Managing an API key requires an authenticated principal.');
     expect(r.body?.token).toBeUndefined();
   });
 

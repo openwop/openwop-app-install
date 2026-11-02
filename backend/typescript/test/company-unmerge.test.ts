@@ -4,6 +4,14 @@
  * the source; unmerge restores the source live (its own data was left intact) with its
  * refs, and strips ONLY what the survivor absorbed — fail-closed per field (a survivor
  * value edited since the merge is respected).
+ * Tracker: TST-CGB-2. One-merge-at-a-time lock: ADR 0837 D3.
+ *
+ * Red when: the revert strips a survivor field the user edited after the merge
+ * (`casRevertCompanyAbsorption` dropping its equality check); a deleted survivor
+ * reads as contention (returns false → spurious 409); absorbed tags are not
+ * stripped; or the merge event is not consumed (a second unmerge succeeds instead
+ * of the `already reversed` 409). The 409 assertions pin the message, because the
+ * merge LOCK answers the same 409 with `merge_in_progress`.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
@@ -59,7 +67,7 @@ describe('GEN-7 company unmerge round-trip', () => {
     expect((await getDeal(tenantId, orgId, deal.dealId))!.companyId).toBe(source.companyId); // ref restored
 
     // idempotent: a second unmerge is a conflict
-    await expect(unmergeCompanies(tenantId, orgId, ev.mergeEventId)).rejects.toMatchObject({ httpStatus: 409 });
+    await expect(unmergeCompanies(tenantId, orgId, ev.mergeEventId)).rejects.toMatchObject({ code: 'conflict', httpStatus: 409, message: expect.stringMatching(/already reversed/) });
   });
 
   it('fail-closed: a survivor field EDITED after the merge is left intact on unmerge (source still restored)', async () => {
@@ -99,6 +107,6 @@ describe('GEN-7 company unmerge round-trip', () => {
     expect(res.sourceId).toBe(source.companyId);
     expect((await getCompany(tenantId, orgId, source.companyId))!.mergedInto).toBeUndefined();
     // idempotent: the event is consumed (a second unmerge 409s already-reversed, not retry).
-    await expect(unmergeCompanies(tenantId, orgId, ev.mergeEventId)).rejects.toMatchObject({ httpStatus: 409 });
+    await expect(unmergeCompanies(tenantId, orgId, ev.mergeEventId)).rejects.toMatchObject({ code: 'conflict', httpStatus: 409, message: expect.stringMatching(/already reversed/) });
   });
 });

@@ -192,7 +192,8 @@ export function computeDerived(r: { spend: number; impressions: number; clicks: 
 export interface ParsedRow {
   platform: AdPlatform; campaignName: string; adSet: string; date: string;
   spend: number; impressions: number; clicks: number;
-  /** `null` = the source cannot report it (ADR 0907 D3); CSV rows are always numbers. */
+  /** `null` = the source cannot report it (ADR 0907 D3), including a CSV with no
+   *  column for it (ADR 1022). */
   conversions: number | null; revenue: number | null;
   ctr: number; cpc: number; cvr: number; cpa: number; roas: number;
   /** R2 CC-SP-7 — the account currency, when the export carried one. */
@@ -226,16 +227,21 @@ export function mapAndValidate(
     ];
     const garbage = metrics.find(([, v]) => v === null);
     if (garbage) { issues.push({ row: rowNum, severity: 'error', message: `Unparseable ${garbage[0]} value.` }); return; }
-    const [spend, impressions, clicks, conversions, revenue] = metrics.map(([, v]) => v as number);
+    const [spend, impressions, clicks, conv, rev] = metrics.map(([, v]) => v as number);
+    // ADR 1022 (CP71WF-10) — a column the export does not HAVE is unreported
+    // (null, ADR 0907 D3), not a measured zero: a spend-only export must not
+    // drag ROAS and CVR to 0. An empty CELL in a mapped column is still 0.
+    const conversions = mapping.conversions ? conv : null;
+    const revenue = mapping.revenue ? rev : null;
 
     if (!parsed) { issues.push({ row: rowNum, severity: 'error', message: 'Missing or unparseable date.' }); return; }
     const { iso: date } = parsed;
     if (parsed.ambiguous) ambiguousDates += 1;
     if (parsed.swapped) swappedDates += 1;
     if (date > todayIso) { issues.push({ row: rowNum, severity: 'error', message: 'Date is in the future.' }); return; }
-    if (spend < 0 || impressions < 0 || clicks < 0 || conversions < 0 || revenue < 0) { issues.push({ row: rowNum, severity: 'error', message: 'Negative metric value.' }); return; }
+    if (spend < 0 || impressions < 0 || clicks < 0 || (conversions ?? 0) < 0 || (revenue ?? 0) < 0) { issues.push({ row: rowNum, severity: 'error', message: 'Negative metric value.' }); return; }
     if (clicks > impressions && impressions > 0) issues.push({ row: rowNum, severity: 'warning', message: 'Clicks exceed impressions.' });
-    if (conversions > clicks && clicks > 0) issues.push({ row: rowNum, severity: 'warning', message: 'Conversions exceed clicks.' });
+    if (conversions !== null && conversions > clicks && clicks > 0) issues.push({ row: rowNum, severity: 'warning', message: 'Conversions exceed clicks.' });
 
     const base = { spend, impressions, clicks, conversions, revenue };
     const currency = parseCurrency(cells(row, mapping.currency));

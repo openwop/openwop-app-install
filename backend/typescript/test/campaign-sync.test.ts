@@ -31,7 +31,7 @@ import { listRecords, persistRecords } from '../src/features/campaign-connectors
 import { computeDerived } from '../src/features/campaign-connectors/csvImport.js';
 import { createBrief } from '../src/features/campaign-brief/briefService.js';
 import { finalizeFromBrief } from '../src/features/campaign-orchestration/campaignService.js';
-import type { AdsAdapter, AccountMetricsRow, GetAccountMetricsArgs, GetAccountMetricsResult } from '../src/host/adsAdapter.js';
+import type { AdsAdapter, AccountMetricsRow, DispatchLedgerRow, GetAccountMetricsArgs, GetAccountMetricsResult } from '../src/host/adsAdapter.js';
 
 let BASE: string;
 let server: http.Server;
@@ -52,9 +52,13 @@ const TENANT = 'user:campaign-sync-test';
 const ORG = 'org-sync-1';
 
 const LEDGER = (briefX: string) => [
-  { platform: 'meta' as const, platformCampaignId: 'pc-1', platformAdSetId: 'as-1', platformAdId: 'ad-1', briefId: briefX, campaignName: 'Summer Launch', adAccountId: 'act_1', createdAt: '2026-07-01T00:00:00Z' },
-  { platform: 'meta' as const, platformCampaignId: 'pc-2', platformAdSetId: 'as-2', platformAdId: 'ad-2', briefId: 'brief-y', campaignName: 'Winback', adAccountId: 'act_2', createdAt: '2026-07-01T00:00:00Z' },
-  { platform: 'google' as const, platformCampaignId: 'pc-3', platformAdSetId: 'ag-1', platformAdId: 'ad-3', adAccountId: '123', createdAt: '2026-07-01T00:00:00Z' },
+  // ADR 0941 P2 rows carry their campaign and client org (a real dispatch stamps both).
+  { platform: 'meta' as const, platformCampaignId: 'pc-1', platformAdSetId: 'as-1', platformAdId: 'ad-1', briefId: briefX, campaignName: 'Summer Launch', adAccountId: 'act_1', createdAt: '2026-07-01T00:00:00Z', campaignId: 'mc-1', orgId: ORG },
+  { platform: 'meta' as const, platformCampaignId: 'pc-2', platformAdSetId: 'as-2', platformAdId: 'ad-2', briefId: 'brief-y', campaignName: 'Winback', adAccountId: 'act_2', createdAt: '2026-07-01T00:00:00Z', campaignId: 'mc-2', orgId: ORG },
+  { platform: 'google' as const, platformCampaignId: 'pc-3', platformAdSetId: 'ag-1', platformAdId: 'ad-3', adAccountId: '123', createdAt: '2026-07-01T00:00:00Z', campaignId: 'mc-3', orgId: ORG },
+  // ADR 1022 D1 — ANOTHER client org's dispatch in the same tenant. Before the
+  // fix the sync read act_9 through this org's connection and saved its rows here.
+  { platform: 'meta' as const, platformCampaignId: 'pc-8', platformAdSetId: 'as-8', platformAdId: 'ad-8', briefId: 'brief-other', campaignName: 'Other client', adAccountId: 'act_9', createdAt: '2026-07-01T00:00:00Z', campaignId: 'mc-other', orgId: 'org-other-client' },
 ];
 
 const row = (date: string, campaignId: string, campaignName: string, over: Partial<AccountMetricsRow> = {}): AccountMetricsRow => ({
@@ -64,7 +68,7 @@ const row = (date: string, campaignId: string, campaignName: string, over: Parti
 function fakeAdapter(
   read: (args: GetAccountMetricsArgs) => GetAccountMetricsResult,
   briefX = 'brief-x',
-  ledger = LEDGER(briefX),
+  ledger: DispatchLedgerRow[] = LEDGER(briefX),
 ): { adapter: AdsAdapter; reads: GetAccountMetricsArgs[] } {
   const reads: GetAccountMetricsArgs[] = [];
   const adapter: AdsAdapter = {
@@ -102,7 +106,8 @@ describe('ADR 0907 D3 — runMetricsSync', () => {
       const r = await runMetricsSync(adapter, TENANT, ORG, 'meta');
       expect(r.outcome).toBe('synced');
       if (r.outcome !== 'synced') return;
-      // Both meta accounts in the ledger, one window: 2026-07-08 .. 2026-07-14.
+      // Both of THIS org's meta accounts, one window: 2026-07-08 .. 2026-07-14.
+      // act_9 belongs to another client org and is never read (ADR 1022 D1).
       expect(reads.map((a) => a.adAccountId).sort()).toEqual(['act_1', 'act_2']);
       for (const a of reads) expect({ since: a.since, until: a.until, level: a.level }).toEqual({ since: '2026-07-08', until: '2026-07-14', level: 'campaign' });
       expect(r).toMatchObject({ scope: 'dispatched', since: '2026-07-08', until: '2026-07-14', date: '2026-07-14', campaigns: 1, imported: 2, truncated: false });
@@ -171,6 +176,30 @@ describe('ADR 0907 D3 — runMetricsSync', () => {
       expect(reads.map((a) => [a.adAccountId, a.conversionActionTypes])).toEqual([['act_1', ['lead']]]);
       const names = new Set((await listRecords(T, ORG)).map((x) => x.campaignName));
       expect(names).toEqual(new Set(['Summer Launch', 'Agency legacy campaign']));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('ADR 1022 D1: a pre-0941 row (no org stamp) is this org\'s only through one of its campaigns\' briefs', async () => {
+    const T = 'user:campaign-sync-legacy-join';
+    pinClock();
+    try {
+      const brief = await createBrief(T, ORG, 'test', { name: 'Mine' });
+      await finalizeFromBrief(T, brief, 'test');
+      const otherBrief = await createBrief(T, 'org-elsewhere', 'test', { name: 'Theirs' });
+      await finalizeFromBrief(T, otherBrief, 'test');
+      const legacy = (id: string, briefId: string, acct: string, extra: Record<string, string> = {}) =>
+        ({ platform: 'meta' as const, platformCampaignId: id, platformAdSetId: `as-${id}`, platformAdId: `ad-${id}`, briefId, adAccountId: acct, createdAt: '2026-07-01T00:00:00Z', ...extra });
+      const { adapter, reads } = fakeAdapter(accountReader(), brief.id, [
+        legacy('pc-a', brief.id, 'act_1'),                        // my campaign's brief → mine
+        legacy('pc-b', otherBrief.id, 'act_7'),                   // another org's campaign's brief → not mine
+        legacy('pc-c', 'brief-never-finalized', 'act_6'),          // no campaign can prove an owner → excluded
+        legacy('pc-d', brief.id, 'act_5', { orgId: 'org-elsewhere' }), // names another org → not mine
+      ]);
+      const r = await runMetricsSync(adapter, T, ORG, 'meta');
+      expect(r.outcome).toBe('synced');
+      expect(reads.map((a) => a.adAccountId)).toEqual(['act_1']);
     } finally {
       vi.useRealTimers();
     }
@@ -260,7 +289,10 @@ describe('ADR 0215 — sync route', () => {
   }
 
   it('validates the platform, requires org write, and reports honestly on an empty ledger', async () => {
-    const tenantId = `user:cs-route-${Date.now()}`;
+    // NOT a personal `user:` tenant: there every signed-in caller is its
+    // implicit owner (the shared org check, ADR 1022 CP71WF-11), so a peer could
+    // never be refused and this would test nothing.
+    const tenantId = `cs-route-${Date.now()}`;
     const owner = client();
     const login = await owner.post('/host/openwop-app/test/login', { email: `cs-${Date.now()}@acme.test`, tenantId });
     expect(login.status).toBe(201);

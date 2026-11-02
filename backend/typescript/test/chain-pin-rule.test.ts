@@ -13,9 +13,14 @@
  *   D4  expansion keeps definitions bare and records the pins in
  *       `metadata.expandedFrom.nodePins`;
  *   D3  a pin the installed version cannot honour is reported as an install gap.
+ *
+ * TST-CCP-4. Each rule above has a probe that reds it. DOUBLE GUARD (recorded): a
+ * node-level RANGE (`@^1`) routes the manifest to the v2 tree, whose schema refuses
+ * it before the host rule runs; the host `chainPinFindings` range branch is the
+ * second guard, witnessed by the unit case.
  */
-import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { afterAll, afterEach, describe, expect, it } from 'vitest';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -40,6 +45,8 @@ import { __setUnpinnedChainPackWaiversForTests } from '../src/host/unpinnedChain
 const WAIVED = 'vendor.test.pin-waived';
 
 afterEach(() => { _resetChainRegistryForTest(); __setUnpinnedChainPackWaiversForTests(null); });
+const tempRoots: string[] = [];
+afterAll(() => { for (const r of tempRoots) rmSync(r, { recursive: true, force: true }); });
 
 type FixtureNode = { id: string; typeId: string; [key: string]: unknown };
 
@@ -57,6 +64,7 @@ function chain(nodes: FixtureNode[], extra: Record<string, unknown> = {}): Workf
 
 function packRoot(name: string, nodes: FixtureNode[]): string {
   const root = mkdtempSync(join(tmpdir(), 'owp-chain-pin-'));
+  tempRoots.push(root);
   mkdirSync(join(root, 'p'), { recursive: true });
   writeFileSync(join(root, 'p', 'pack.json'), JSON.stringify({
     name, version: '1.0.0', kind: 'workflow-chain', engines: { openwop: '>=1.0.0 <3.0.0' },
@@ -147,7 +155,9 @@ describe('ADR 0766 D2 — the vendored/operator loader refuses at register', () 
     __setUnpinnedChainPackWaiversForTests([WAIVED]);
     const waived = WAIVED;
     const out = loadWorkflowChainPacks({ roots: [packRoot(waived, [{ id: 'a', typeId: 'core.flow.noop@^1' }])] });
-    expect(out.errors).toHaveLength(1);
+    // The v2 SCHEMA is the guard that answers (a `@` routes to the v2 tree, whose typeId
+    // grammar refuses a range) — assert that refusal, not just "some error".
+    expect(out.errors).toEqual([expect.objectContaining({ code: 'workflow_chain_pack_manifest_invalid' })]);
     expect(getChain(`${waived}.chain`)).toBeNull();
   });
 
@@ -155,6 +165,7 @@ describe('ADR 0766 D2 — the vendored/operator loader refuses at register', () 
     __setUnpinnedChainPackWaiversForTests([WAIVED]);
     const waived = WAIVED;
     const root = mkdtempSync(join(tmpdir(), 'owp-chain-pin-ext-'));
+    tempRoots.push(root);
     mkdirSync(join(root, 'p'), { recursive: true });
     writeFileSync(join(root, 'p', 'pack.json'), JSON.stringify({
       name: waived, version: '1.0.0', kind: 'workflow-chain', engines: { openwop: '>=1.0.0 <3.0.0' },

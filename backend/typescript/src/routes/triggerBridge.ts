@@ -574,7 +574,8 @@ async function deliverSeamRun(
         createdAt: now,
         updatedAt: now,
       };
-      await insertRunWithStartContext(deps.storage, run, { definition: wf.definition });
+      // The conformance twin of trigger ingest (`deliverSeamRun`).
+      await insertRunWithStartContext(deps.storage, run, { definition: wf.definition, admission: { plan: 'exempt:conformance-seam' } });
       // Awaited, not fire-and-forget: the driver reads `run.started` back
       // immediately, and a detached execution would race it.
       await executeRun(deps.storage, run, wf.definition, {

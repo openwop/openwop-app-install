@@ -2,21 +2,37 @@
  * ADR 0906 P2 — the edge lifecycle (D5): the 5-minute poll leased per
  * (hostname, slot), the 24 h `dns_not_configured` rule, one notification per
  * transition into active/failed, 14-day pending-claim expiry, and the poll
- * finishing a release that failed at delete time.
+ * finishing a release that failed at delete time. TST-CWF-4.
+ *
+ * The emitter mock keeps TWO records: `emitted` dedupes by notificationId (the
+ * product derives that id so two instances finishing the same step produce one
+ * notification — a second guard, recorded), and `rawEmits` counts every call,
+ * so the transition guard (`before.edge.tls === tls` ⇒ no emit) is visible on
+ * its own.
+ *
+ * Red when (sabotage-witnessed, wave 69): the per-(hostname, slot) lease is not
+ * claimed; the 24 h `dns_not_configured` rule is removed or fires early; a
+ * repeated ACTIVE/failed state re-emits; a `releasing` row is not re-released by
+ * the poll, or attempts are miscounted; either copy of the pending-claim expiry
+ * predicate (`edgeWorkDue` / `processEdgeRow`) is removed, or the TTL changes
+ * from 14 days (pinned here as a literal, never read from the product).
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const emitted = vi.hoisted(() => [] as Array<Record<string, unknown>>);
+const { emitted, rawEmits } = vi.hoisted(() => ({
+  emitted: [] as Array<Record<string, unknown>>,
+  rawEmits: [] as Array<Record<string, unknown>>,
+}));
 vi.mock('../src/notifications/emitter.js', async (orig) => ({
   ...(await orig<typeof import('../src/notifications/emitter.js')>()),
-  getNotificationEmitter: () => ({ emit: async (n: Record<string, unknown>) => { if (!emitted.some((e) => e.notificationId === n.notificationId)) emitted.push(n); return n; } }),
+  getNotificationEmitter: () => ({ emit: async (n: Record<string, unknown>) => { rawEmits.push(n); if (!emitted.some((e) => e.notificationId === n.notificationId)) emitted.push(n); return n; } }),
 }));
 
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
 import {
-  __resetCustomDomains, addDomain, getDomain, listDomains, removeDomain,
-  verifyDomain, PENDING_CLAIM_TTL_MS,
+  __resetCustomDomains, addDomain, advanceDomainEdge, getDomain, listDomains, removeDomain,
+  verifyDomain,
 } from '../src/host/customDomains.js';
 import { runCustomDomainEdgePoll } from '../src/host/customDomainSweep.js';
 import type { EdgeCertificateProvider, EdgeStatus } from '../src/host/edgeCertificates/port.js';
@@ -51,11 +67,15 @@ function fakeProvider() {
 }
 
 const T0 = Date.parse('2026-10-17T12:00:00Z');
+/** ADR 0906 D5 — a pending claim expires after 14 days (a literal, not the product constant). */
+const FOURTEEN_DAYS_MS = 14 * 24 * 3600_000;
+const tlsEmits = (list: Array<Record<string, unknown>>) => list.filter((e) => (e.metadata as { kind?: string }).kind === 'custom-domain.tls');
 
 beforeEach(async () => {
   initHostExtPersistence(await openStorage('memory://'));
   await __resetCustomDomains();
   emitted.length = 0;
+  rawEmits.length = 0;
 });
 
 async function live(hostname: string, provider: EdgeCertificateProvider, tenantId = 't1') {
@@ -118,8 +138,9 @@ describe('ADR 0906 D5 — the poll', () => {
       // failed rows are not polled again, and a re-advance does not re-notify
       await runCustomDomainEdgePoll(provider, T0 + 26 * 3600_000);
     } finally { vi.useRealTimers(); }
-    const tls = emitted.filter((e) => (e.metadata as { kind?: string }).kind === 'custom-domain.tls');
+    const tls = tlsEmits(emitted);
     expect(tls).toHaveLength(1);
+    expect(tlsEmits(rawEmits)).toHaveLength(1); // emitted once, not deduped into one
     expect(tls[0]).toMatchObject({ recipientUserId: 'u1', tenantId: 't1', priority: 'high', actionUrl: '/domains' });
   });
 
@@ -129,8 +150,12 @@ describe('ADR 0906 D5 — the poll', () => {
     state.status = { tls: 'active' };
     await runCustomDomainEdgePoll(provider, T0);
     await runCustomDomainEdgePoll(provider, T0 + 10 * 60_000);
+    // A direct re-advance of the settled row reaches the notifier with the SAME
+    // state on both sides — the transition guard must keep it silent.
+    await advanceDomainEdge('pages.example.com', provider);
     expect(emitted).toHaveLength(1);
-    expect(emitted[0]!.title).toContain('HTTPS is ready');
+    expect(rawEmits).toHaveLength(1); // the second poll did not re-emit
+    expect(emitted[0]!.title).toBe('HTTPS is ready for pages.example.com');
   });
 
   it('a pending claim older than 14 days is released; a younger one is kept', async () => {
@@ -141,7 +166,7 @@ describe('ADR 0906 D5 — the poll', () => {
       vi.setSystemTime(T0 + 2 * 24 * 3600_000);
       await addDomain({ tenantId: 't1', orgId: 'o1', createdBy: 'u1', hostname: 'young.example.com' });
     } finally { vi.useRealTimers(); }
-    const report = await runCustomDomainEdgePoll(null, T0 + PENDING_CLAIM_TTL_MS + 3600_000);
+    const report = await runCustomDomainEdgePoll(null, T0 + FOURTEEN_DAYS_MS + 3600_000);
     expect(report.expired).toEqual(['old.example.com']);
     expect((await listDomains('t1', 'o1')).map((d) => d.hostname)).toEqual(['young.example.com']);
   });

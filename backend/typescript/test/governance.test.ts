@@ -10,9 +10,19 @@
  *     enqueue; 'draft-only' records the human decision but dispatches
  *     nothing (audited);
  *   - the audit READ VIEW composes storage.appendAudit rows (no new store).
+ *
+ * TST-DEF-4 — red when: the superadmin gate is dropped from the policy read, an
+ * unknown action kind / negative retention window / non-integer budget is
+ * accepted, a legacy dead retention window is advertised or re-persisted, either
+ * allowlist seam (connect route, credential resolver) or the shared predicate
+ * stops refusing, 'disabled' stops refusing enqueue, a tenant-scoped superadmin
+ * sees another tenant's audit rows, or egress hosts stop being normalised and
+ * de-duplicated. Every refusal asserts its exact code + message (several share
+ * `validation_error`/403). Each case seeds its own state: the governance policy
+ * is reset before every case and the audit-view case writes its own row.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
@@ -47,6 +57,9 @@ beforeAll(async () => {
   // Correction), so there is nothing to enable. This setup used to PUT one and
   // wrote an orphan row that gated nothing; ADR 0819 makes that PUT a 404.
 });
+beforeEach(async () => {
+  await __resetGovernanceStore();
+});
 afterAll(async () => {
   delete process.env.OPENWOP_TEST_AUTH_ENABLED;
   await new Promise<void>((res) => server.close(() => res()));
@@ -65,6 +78,19 @@ function sessionCookieOf(res: Response): string {
     if (m) found = m[1]!;
   }
   return found;
+}
+
+const SUPERADMIN_ONLY = 'Governance administration requires a superadmin principal.';
+
+/** The exact refusal: status + envelope code + message. */
+function refused(r: { status: number; body: unknown }, status: number, error: string, message: string): void {
+  expect(r.status).toBe(status);
+  expect(r.body).toMatchObject({ error, message });
+}
+/** A cookie-auth (non-bearer) request, parsed for `refused`. */
+async function asCookie(path: string, cookie: string, init: RequestInit = {}): Promise<{ status: number; body: unknown }> {
+  const res = await fetch(`${BASE}${path}`, { ...init, headers: { cookie, 'content-type': 'application/json' } });
+  return { status: res.status, body: await res.json().catch(() => undefined) };
 }
 
 async function jf<T = unknown>(path: string, init: RequestInit = {}): Promise<{ status: number; body: T }> {
@@ -86,7 +112,7 @@ describe('policy administration', () => {
       method: 'PUT',
       body: JSON.stringify({ actionPolicy: { 'rm.rf': 'disabled' } }),
     });
-    expect(bad.status).toBe(400);
+    refused(bad, 400, 'validation_error', "Unknown action kind 'rm.rf'.");
 
     const put = await jf<{ policy: { providerAllowlist: string[] } }>('/host/openwop-app/governance/policy', {
       method: 'PUT',
@@ -104,10 +130,7 @@ describe('policy administration', () => {
     expect(login.status).toBe(201);
     const cookie = sessionCookieOf(login);
     expect(cookie).toBeTruthy();
-    const denied = await fetch(`${BASE}/host/openwop-app/governance/policy`, { headers: { cookie } });
-    expect(denied.status).toBe(403);
-
-    await __resetGovernanceStore(); // leave no policy behind for later suites
+    refused(await asCookie('/host/openwop-app/governance/policy', cookie), 403, 'forbidden', SUPERADMIN_ONLY);
   });
 
   it('GOV-2: the admin route persists the retention windows the sweep enforces, and rejects a negative window', async () => {
@@ -128,7 +151,7 @@ describe('policy administration', () => {
       method: 'PUT',
       body: JSON.stringify({ retention: { confidentialPiiDays: -1 } }),
     });
-    expect(bad.status).toBe(400);
+    refused(bad, 400, 'validation_error', '`retention.confidentialPiiDays` MUST be a non-negative number of days.');
 
     await __resetGovernanceStore();
   });
@@ -143,9 +166,10 @@ describe('policy administration', () => {
     await __resetGovernanceStore();
     // Seed a legacy row THROUGH THE SERVICE (the route can no longer create
     // one), which is exactly the shape a pre-COS-2 tenant has on disk.
-    await setGovernancePolicy(TENANT, {
-      retention: { confidentialPiiDays: 365, assistantGraphDays: 30 } as never,
-    }, 'seed');
+    // A non-literal object: the dead key rides through without a cast, exactly as
+    // an old row would (excess-property checks apply to literals only).
+    const legacyRetention = { confidentialPiiDays: 365, assistantGraphDays: 30 };
+    await setGovernancePolicy(TENANT, { retention: legacyRetention }, 'seed');
 
     type P = { policy: { retention?: Record<string, unknown>; providerAllowlist?: string[] }; warnings?: string[] };
     const got = await jf<P>('/host/openwop-app/governance/policy');
@@ -192,7 +216,7 @@ describe('policy administration', () => {
       method: 'PUT',
       body: JSON.stringify({ brandCompliance: { blockPublish: 'nonsense' } }),
     });
-    expect(bad.status).toBe(400);
+    refused(bad, 400, 'validation_error', '`brandCompliance.blockPublish` MUST be one of "off" | "critical" | "threshold".');
 
     // `null` clears it.
     const cleared = await jf<P>('/host/openwop-app/governance/policy', {
@@ -248,8 +272,7 @@ describe('media-budget readout (ADR 0106 Phase 3)', () => {
       body: JSON.stringify({ email: 'media-nonadmin@example.com' }),
     });
     const cookie = sessionCookieOf(login);
-    const denied = await fetch(`${BASE}/host/openwop-app/governance/media-budget`, { headers: { cookie } });
-    expect(denied.status).toBe(403);
+    refused(await asCookie('/host/openwop-app/governance/media-budget', cookie), 403, 'forbidden', SUPERADMIN_ONLY);
   });
 });
 
@@ -298,16 +321,13 @@ describe('media-budget editable override (ADR 0106)', () => {
 
   it('rejects a negative budget (400) and a non-admin (403)', async () => {
     const bad = await jf('/host/openwop-app/governance/media-budget', { method: 'PUT', body: JSON.stringify({ ttsChars: -1 }) });
-    expect(bad.status).toBe(400);
+    refused(bad, 400, 'validation_error', '`ttsChars` MUST be null or a non-negative number.');
 
     const login = await fetch(`${BASE}/host/openwop-app/test/login`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'media-put-nonadmin@example.com' }),
     });
     const cookie = sessionCookieOf(login);
-    const denied = await fetch(`${BASE}/host/openwop-app/governance/media-budget`, {
-      method: 'PUT', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ ttsChars: 5 }),
-    });
-    expect(denied.status).toBe(403);
+    refused(await asCookie('/host/openwop-app/governance/media-budget', cookie, { method: 'PUT', body: JSON.stringify({ ttsChars: 5 }) }), 403, 'forbidden', SUPERADMIN_ONLY);
   });
 });
 
@@ -350,21 +370,16 @@ describe('byok-chat-budget editable override (ADR 0178)', () => {
   });
 
   it('rejects a non-integer/negative cap and an out-of-range pct (400) and a non-admin (403)', async () => {
-    const badCap = await jf('/host/openwop-app/governance/byok-chat-budget', { method: 'PUT', body: JSON.stringify({ dailyTokenCap: -1 }) });
-    expect(badCap.status).toBe(400);
-    const badFloat = await jf('/host/openwop-app/governance/byok-chat-budget', { method: 'PUT', body: JSON.stringify({ dailyTokenCap: 1.5 }) });
-    expect(badFloat.status).toBe(400);
-    const badPct = await jf('/host/openwop-app/governance/byok-chat-budget', { method: 'PUT', body: JSON.stringify({ softWarningPct: 150 }) });
-    expect(badPct.status).toBe(400);
+    const CAP = '`dailyTokenCap` MUST be null or a non-negative integer.';
+    refused(await jf('/host/openwop-app/governance/byok-chat-budget', { method: 'PUT', body: JSON.stringify({ dailyTokenCap: -1 }) }), 400, 'validation_error', CAP);
+    refused(await jf('/host/openwop-app/governance/byok-chat-budget', { method: 'PUT', body: JSON.stringify({ dailyTokenCap: 1.5 }) }), 400, 'validation_error', CAP);
+    refused(await jf('/host/openwop-app/governance/byok-chat-budget', { method: 'PUT', body: JSON.stringify({ softWarningPct: 150 }) }), 400, 'validation_error', '`softWarningPct` MUST be null or a number in [0, 100].');
 
     const login = await fetch(`${BASE}/host/openwop-app/test/login`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'byok-put-nonadmin@example.com' }),
     });
     const cookie = sessionCookieOf(login);
-    const denied = await fetch(`${BASE}/host/openwop-app/governance/byok-chat-budget`, {
-      method: 'PUT', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ dailyTokenCap: 5 }),
-    });
-    expect(denied.status).toBe(403);
+    refused(await asCookie('/host/openwop-app/governance/byok-chat-budget', cookie, { method: 'PUT', body: JSON.stringify({ dailyTokenCap: 5 }) }), 403, 'forbidden', SUPERADMIN_ONLY);
     await __resetGovernanceStore();
   });
 });
@@ -381,11 +396,11 @@ describe('provider allowlist — one predicate, both seams', () => {
     await setGovernancePolicy(TENANT, { providerAllowlist: ['google'] }, 'test-admin');
 
     // Seam 1 — connect route refuses new non-allowlisted connections.
-    const refused = await jf('/host/openwop-app/connections', {
+    const refusedZoom = await jf('/host/openwop-app/connections', {
       method: 'POST',
       body: JSON.stringify({ provider: 'zoom', kind: 'bearer', secret: 'z-token-1234567', scope: 'workspace' }),
     });
-    expect(refused.status).toBe(403);
+    refused(refusedZoom, 403, 'forbidden', "Provider 'zoom' is not on this workspace's allowlist.");
 
     // Seam 2 — the broker's resolve choke point (which the http egress seam
     // and the Slack adapter both flow through) withholds the EXISTING
@@ -430,10 +445,17 @@ describe('per-kind action policy at the assistant seams', () => {
   });
 
   it('the audit read view serves assistant rows to the admin', async () => {
-    const res = await jf<{ items: Array<{ action: string }> }>('/host/openwop-app/governance/audit?actionPrefix=assistant.');
+    // Seed this case's OWN row — never rely on an earlier case's audit trail.
+    await __hostExtStorage()!.appendAudit({
+      timestamp: new Date().toISOString(),
+      action: 'assistant.action.approved',
+      resource: 'assistant-action:audit-view-own-row',
+      payload: { approvalId: 'audit-view', tenantId: TENANT },
+    });
+    const res = await jf<{ items: Array<{ action: string; resource?: string }> }>('/host/openwop-app/governance/audit?actionPrefix=assistant.');
     expect(res.status).toBe(200);
-    expect(Array.isArray(res.body.items)).toBe(true);
-    expect(res.body.items.some((i) => i.action.startsWith('assistant.action.'))).toBe(true);
+    expect(res.body.items.find((i) => i.resource === 'assistant-action:audit-view-own-row')?.action).toBe('assistant.action.approved');
+    expect(res.body.items.every((i) => i.action.startsWith('assistant.'))).toBe(true);
   });
 
   it('a TENANT-SCOPED superadmin sees only its own tenant\'s audit rows (wildcard sees all)', async () => {
@@ -482,7 +504,8 @@ describe('per-kind action policy at the assistant seams', () => {
 
 describe('scheduler job metadata trust boundary (confused-deputy fix)', () => {
   it('strips spoofed actingUserId + attribution keys and stamps the authenticated principal', async () => {
-    const created = await jf<{ job: { jobId: string; metadata?: Record<string, unknown> } } & { jobId?: string; metadata?: Record<string, unknown> }>(
+    type Job = { jobId: string; metadata?: Record<string, unknown> };
+    const created = await jf<{ job?: Job } & Partial<Job>>(
       '/host/openwop-app/scheduler/jobs',
       {
         method: 'POST',
@@ -499,8 +522,7 @@ describe('scheduler job metadata trust boundary (confused-deputy fix)', () => {
       },
     );
     expect(created.status, JSON.stringify(created.body)).toBe(201);
-    const raw = (created.body as Record<string, unknown>).job ?? created.body;
-    const job = raw as { jobId: string; metadata?: Record<string, unknown> };
+    const job = created.body.job ?? created.body;
     expect(job.metadata?.actingUserId).toBeTruthy();
     expect(job.metadata?.actingUserId).not.toBe('victim-user');
     expect(job.metadata?.heartbeat).toBeUndefined();
@@ -518,18 +540,19 @@ describe('egress firewall rules (ADR 0187)', () => {
 
     const put = await jf<{ mode: string; hosts: string[] }>('/host/openwop-app/governance/egress-rules', {
       method: 'PUT',
-      body: JSON.stringify({ mode: 'allowlist', hosts: ['  API.Example.com ', 'example.com'] }),
+      // Case/whitespace/trailing-dot variants of ONE host, so de-dup is exercised.
+      body: JSON.stringify({ mode: 'allowlist', hosts: ['  API.Example.com ', 'example.com', 'api.example.com.'] }),
     });
     expect(put.status).toBe(200);
     expect(put.body.mode).toBe('allowlist');
     expect(put.body.hosts).toEqual(['api.example.com', 'example.com']); // normalized + de-duped
 
     const get = await jf<{ mode: string; hosts: string[] }>('/host/openwop-app/governance/egress-rules');
-    expect(get.body.mode).toBe('allowlist');
+    expect(get.body).toMatchObject({ mode: 'allowlist', hosts: ['api.example.com', 'example.com'] });
 
-    const badMode = await jf('/host/openwop-app/governance/egress-rules', { method: 'PUT', body: JSON.stringify({ mode: 'nope', hosts: [] }) });
-    expect(badMode.status).toBe(400);
-    const badHosts = await jf('/host/openwop-app/governance/egress-rules', { method: 'PUT', body: JSON.stringify({ mode: 'off', hosts: 'x' }) });
-    expect(badHosts.status).toBe(400);
+    refused(await jf('/host/openwop-app/governance/egress-rules', { method: 'PUT', body: JSON.stringify({ mode: 'nope', hosts: [] }) }), 400, 'validation_error', '`mode` MUST be one of "off" | "allowlist" | "denylist".');
+    refused(await jf('/host/openwop-app/governance/egress-rules', { method: 'PUT', body: JSON.stringify({ mode: 'off', hosts: 'x' }) }), 400, 'validation_error', '`hosts` MUST be an array of strings.');
+    // Leave the default `off` for any later case or file run.
+    expect((await jf('/host/openwop-app/governance/egress-rules', { method: 'PUT', body: JSON.stringify({ mode: 'off', hosts: [] }) })).status).toBe(200);
   });
 });

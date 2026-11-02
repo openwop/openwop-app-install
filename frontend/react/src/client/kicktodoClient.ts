@@ -435,6 +435,20 @@ export async function setSnooze(enrollmentId: string, snoozed: boolean): Promise
   return json<Enrollment>(res);
 }
 
+/** Leave a challenge: POST …/enrollments/:id/abandon. The enrollment becomes
+ *  `abandoned` and stays listed; check-ins and journal entries are kept. A
+ *  re-enroll in the same version returns this same left enrollment (the id is
+ *  derived from owner + challenge + version), so it cannot be restarted.
+ *  Pinned by backend `kicktodo-leave-keeps-record.test.ts`. */
+export async function abandonEnrollment(enrollmentId: string): Promise<Enrollment> {
+  const res = await fetch(`${B()}/enrollments/${encodeURIComponent(enrollmentId)}/abandon`, {
+    ...fetchOpts({}),
+    method: 'POST',
+    headers: authedHeaders({ 'content-type': 'application/json' }),
+  });
+  return json<Enrollment>(res);
+}
+
 /** ADR 0443 R3 — one dated Plan item. `completed` is real-check-in truth for
  *  past/today; future rows are the DERIVED plan, never asserted as fact. */
 export interface PlanItem {

@@ -1,17 +1,22 @@
 /**
- * ADR 0128 Phase 2 + IART-6 — SECURITY tests for the sandboxed interactive-artifact frame.
- * These assert the isolation invariants that keep untrusted HTML from touching the
- * parent, ON THE RENDERED IFRAME (not just the exported constants): no
- * allow-same-origin, a no-egress CSP with `img-src data:` only, no referrer, the body
- * only in srcdoc, and the 512,000-char body cap at its boundary. The frame is
- * always-on (the interactive-artifacts toggle was removed), so no feature gate is mocked.
+ * ADR 0128 Phase 2 + IART-6 + ADR 1017 D1 — SECURITY tests for the sandboxed
+ * interactive-artifact frame. These assert the isolation invariants that keep untrusted
+ * HTML from touching the parent or the network, ON THE RENDERED IFRAME (not just the
+ * exported constants): STATIC by default (`sandbox=""` + `inert`, the only mode with no
+ * egress — ADR 1017 M1 measured self-navigation, meta refresh and WebRTC leaving an
+ * `allow-scripts` frame), scripts only after the viewer's Run (consent keyed so it never
+ * carries to other content), no allow-same-origin in either mode, the CSP with
+ * `img-src data:` only, no referrer, the body only in srcdoc, and the 512,000-char body
+ * cap at its boundary. The frame is always-on, so no feature gate is mocked.
  *
  * Posture values are pinned as LITERALS (never built from the exported constants),
  * so a loosened constant moves the product and not the expectation.
  */
 import { describe, it, expect, afterEach } from 'vitest';
-import { render, cleanup } from '@testing-library/react';
+import { render, cleanup, fireEvent, screen } from '@testing-library/react';
 import { SandboxedArtifactFrame, buildArtifactSrcdoc, ARTIFACT_SANDBOX, ARTIFACT_CSP } from '../SandboxedArtifactFrame.js';
+
+const runButton = (): HTMLElement => screen.getByRole('button', { name: /run ?scripts/i });
 
 afterEach(cleanup);
 
@@ -32,14 +37,78 @@ function bodyOf(srcdoc: string): string {
 }
 
 describe('SandboxedArtifactFrame — isolation invariants', () => {
-  it('sandboxes WITHOUT allow-same-origin (opaque origin, no parent/cookie access) and sends no referrer', () => {
+  it('ADR 1017 D1: renders STATIC by default — sandbox="" and inert, so nothing runs, is clicked or leaves', () => {
     const { container } = render(<SandboxedArtifactFrame body={EVIL} />);
     const iframe = container.querySelector('iframe')!;
-    expect(iframe.getAttribute('sandbox')).toBe('allow-scripts');
+    expect(iframe.getAttribute('sandbox')).toBe('');
+    expect(iframe.hasAttribute('inert')).toBe(true);
     expect(iframe.getAttribute('referrerpolicy')).toBe('no-referrer');
+    // The Run control is in the PARENT, never inside the untrusted document.
+    expect(iframe.contains(runButton())).toBe(false);
+    expect(runButton().getAttribute('aria-describedby')).toBeTruthy();
   });
 
-  it('injects a no-egress CSP (default-src none, img-src data: only) into the RENDERED frame', () => {
+  it('ADR 1017 D1: Run remounts the frame with allow-scripts ONLY (never allow-same-origin), not inert; Stop returns to static', () => {
+    const { container } = render(<SandboxedArtifactFrame body={EVIL} />);
+    const before = container.querySelector('iframe')!;
+    fireEvent.click(runButton());
+    const running = container.querySelector('iframe')!;
+    // A NEW element: the browser reads sandbox flags only at navigation.
+    expect(running).not.toBe(before);
+    expect(running.getAttribute('sandbox')).toBe('allow-scripts');
+    expect(running.hasAttribute('inert')).toBe(false);
+    expect(running.getAttribute('referrerpolicy')).toBe('no-referrer');
+    fireEvent.click(screen.getByRole('button', { name: /stop ?scripts/i }));
+    const stopped = container.querySelector('iframe')!;
+    expect(stopped.getAttribute('sandbox')).toBe('');
+    expect(stopped.hasAttribute('inert')).toBe(true);
+  });
+
+  // Grade-ux B1 — `inert` hides the static frame from assistive tech, so the parent
+  // carries its text (parsed without running anything; scripts never become text).
+  it('ADR 1017 D1: the static frame has a screen-reader text alternative, without script text', () => {
+    const { container } = render(<SandboxedArtifactFrame body={'<h1>Quarterly plan</h1><script>steal()</script><p>Ship it</p>'} />);
+    const alt = container.querySelector('.sr-only');
+    expect(alt?.textContent).toContain('Quarterly plan Ship it');
+    expect(alt?.textContent).not.toContain('steal');
+    // The text is a text node — never parsed into the parent as markup.
+    expect(container.querySelector('h1')).toBeNull();
+    fireEvent.click(runButton());
+    expect(container.querySelector('.sr-only')).toBeNull();
+  });
+
+  // Grade-ux re-grade #4 — content with no scripts, links or controls is shown in full
+  // by the static preview, so the viewer is never asked to grant network-capable
+  // scripts for nothing.
+  it('ADR 1017 D1: static-only content offers no Run button and says it is complete', () => {
+    render(<SandboxedArtifactFrame body="<h2>Plan</h2><p>Three steps.</p>" />);
+    expect(screen.queryByRole('button', { name: /run ?scripts/i })).toBeNull();
+    expect(screen.getByText(/artifactStaticComplete|shows all of it/)).toBeTruthy();
+    cleanup();
+    render(<SandboxedArtifactFrame body={'<a href="https://x.example">x</a>'} />);
+    expect(runButton()).toBeTruthy();
+  });
+
+  it('ADR 1017 D1: consent never carries to other content — a new body (default key) or a new consentKey starts static', () => {
+    const { container, rerender } = render(<SandboxedArtifactFrame body="<p>a</p><script>x()</script>" />);
+    fireEvent.click(runButton());
+    expect(container.querySelector('iframe')!.getAttribute('sandbox')).toBe('allow-scripts');
+    rerender(<SandboxedArtifactFrame body="<p>b</p><script>x()</script>" />);
+    expect(container.querySelector('iframe')!.getAttribute('sandbox')).toBe('');
+    cleanup();
+
+    // A stable key keeps consent across body changes (the viewer's own live-edit draft)…
+    const keyed = render(<SandboxedArtifactFrame body="<p>a</p><script>x()</script>" consentKey="art-1:r1" />);
+    fireEvent.click(runButton());
+    keyed.rerender(<SandboxedArtifactFrame body="<p>a, edited</p><script>x()</script>" consentKey="art-1:r1" />);
+    expect(keyed.container.querySelector('iframe')!.getAttribute('sandbox')).toBe('allow-scripts');
+    // …and a different key (another artifact or revision) drops it.
+    keyed.rerender(<SandboxedArtifactFrame body="<p>a, edited</p><script>x()</script>" consentKey="art-2:r1" />);
+    expect(keyed.container.querySelector('iframe')!.getAttribute('sandbox')).toBe('');
+    expect(keyed.container.querySelector('iframe')!.hasAttribute('inert')).toBe(true);
+  });
+
+  it('injects the CSP (default-src none, img-src data: only) into the RENDERED frame — it blocks fetch and images, not self-navigation (ADR 1017 M1)', () => {
     expect(ARTIFACT_CSP).toBe(CSP_LITERAL);
     const srcdoc = renderedSrcdoc(EVIL);
     // The rendered frame carries the exact policy, in <head>, before the untrusted body.
@@ -68,7 +137,7 @@ describe('SandboxedArtifactFrame — isolation invariants', () => {
     expect(huge).toBe('a'.repeat(512_000)); // the (truncated) content still renders
   });
 
-  it('ARTIFACT_SANDBOX is allow-scripts only', () => {
+  it('ARTIFACT_SANDBOX (the running mode) is allow-scripts only', () => {
     // Redundant with the rendered-attribute case above; kept (protected security file).
     expect(ARTIFACT_SANDBOX).toBe('allow-scripts');
   });

@@ -4,6 +4,13 @@
  * validation, and delete. The happy-path round-trip (which needs a STORED secret, blocked here
  * by the test harness's lack of a tenant KMS — same reason byok secret routes aren't route-
  * tested) is covered by the service test `headless-ai.test.ts`.
+ *
+ * TST-BBY-1 (w66 g4, sabotage-witnessed). Each refusal asserts its exact MESSAGE,
+ * because every check in `validateHeadlessSpec` answers the same 400
+ * `validation_error`. Red when: the provider check is removed (the bad ref would
+ * otherwise answer the same 400); the stored-ref check (`refs.includes`) is removed
+ * (the resolves-now check behind it still refuses, but with a different message);
+ * GET stops returning null when unset; DELETE stops answering 204.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -26,7 +33,7 @@ beforeAll(async () => {
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 function getSetCookies(h: Headers): string[] { const v = (h as { getSetCookie?: () => string[] }).getSetCookie?.(); return v ?? (h.get('set-cookie') ? [h.get('set-cookie')!] : []); }
-interface Res<T = { default?: { provider?: string; model?: string; credentialRef?: string } | null; error?: string }> { status: number; body: T }
+interface Res<T = { default?: { provider?: string; model?: string; credentialRef?: string } | null; error?: string; message?: string }> { status: number; body: T }
 function client() {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
@@ -50,15 +57,16 @@ describe('/byok/ai-default route (ADR 0110)', () => {
   it('PUT 400s when the credentialRef is not one of the caller\'s stored secrets (scope-bounded)', async () => {
     const c = await loggedIn('aid-badref');
     const r = await c.put(AID, { provider: 'google', model: 'gemini-2.0-flash', credentialRef: 'never-stored' });
-    expect(r.status).toBe(400);
-    expect(r.body.error).toBe('validation_error');
+    expect([r.status, r.body.error, r.body.message]).toEqual([400, 'validation_error', 'credentialRef is not a stored BYOK secret for this workspace.']);
     // and nothing got persisted
     expect((await c.get(AID)).body.default).toBeNull();
   });
 
   it('PUT 400s on an unknown provider before touching the secret store', async () => {
     const c = await loggedIn('aid-badprov');
-    expect((await c.put(AID, { provider: 'cohere', model: 'x', credentialRef: 'r' })).status).toBe(400);
+    const r = await c.put(AID, { provider: 'cohere', model: 'x', credentialRef: 'r' });
+    expect([r.status, r.body.error]).toEqual([400, 'validation_error']);
+    expect(r.body.message).toMatch(/^provider MUST be one of: /);
   });
 
   it('DELETE on an unset default is a no-op 204', async () => {

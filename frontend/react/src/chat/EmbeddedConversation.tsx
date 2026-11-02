@@ -32,6 +32,7 @@ import { runCoreSubmit } from './lib/chatSubmit.js';
 import { registerDefaultCommands } from './registry/defaultCommands.js';
 import { getProvider } from '../byok/lib/providers.js';
 import type { BYOKActiveConfig } from '../byok/lib/useBYOKConfig.js';
+import { useClarificationAnswer } from './hooks/useClarificationAnswer.js';
 
 registerDefaultCommands();
 
@@ -161,6 +162,17 @@ export function EmbeddedConversation({
 
   const [gateError, setGateError] = useState<string | null>(null);
 
+  const sendClarification = useClarificationAnswer({ send, config });
+  // The embed's gate applies to an answer as to any send.
+  const answerClarification = useCallback(async (askId: string, data: unknown, answers: unknown) => {
+    if (beforeSend) {
+      const verdict = await beforeSend(session.id, session.conversationRunId);
+      if (!verdict.ok) { setGateError(verdict.reason); return; }
+    }
+    setGateError(null);
+    await sendClarification(askId, data, answers);
+  }, [beforeSend, sendClarification, session.id, session.conversationRunId]);
+
   const onUserSubmit = useCallback(async (text: string, attachments?: readonly ContentPart[]) => {
     if (beforeSend) {
       const verdict = await beforeSend(session.id, session.conversationRunId);
@@ -225,6 +237,7 @@ export function EmbeddedConversation({
         agentEntries={agentEntries}
         supportsPdfInput={supportsPdfInput}
         onResolveInterrupt={resolveInterrupt}
+        onAnswerClarification={answerClarification}
         onRegenerate={onRegenerate}
         onFeedback={setFeedback}
         onReconfigureBYOK={onReconfigureBYOK}

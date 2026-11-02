@@ -25,15 +25,19 @@
  * the baseline reds 3; dropping the decision log reds 4;
  * taking the CMS baseline from the newest row of any origin, or dropping the
  * finalize claim, reds 5; dropping `rolled_back` from `assigningAt` reds 6.
+ * Re-run w73 (rr-layout, rr-shrink, rr-samestage, rr-holdout, rr-log, rr-claim,
+ * rr-rolledback — all witnessed). rr-claim was witnessed with an UNFORCED race,
+ * which may have been scheduling luck; the race is now forced (both finalizers
+ * held past their first row read, arrivals asserted, failing fallback).
  */
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import { assignWeightedVariant, rampLayout } from '../src/host/variantAssignment.js';
 import { applyRamp, finalize, rollback } from '../src/host/experiments/promote.js';
 import { assignAt } from '../src/host/experiments/runFreeze.js';
 import { getExperimentRow, putExperimentRow } from '../src/host/experiments/store.js';
+import { DurableCollection } from '../src/host/hostExtPersistence.js';
 import { listChain, verifyChain } from '../src/host/auditChainService.js';
-import type { Experiment } from '../src/host/experiments/types.js';
 import { createPage, getPage, listVersions, offerSeedVersion, transitionPage, updatePage } from '../src/features/cms/cmsService.js';
 import { assignVisitorArm, getExperiment as getPageExperiment } from '../src/features/cms/pageExperimentsService.js';
 import { createDraft, launch, lockPlan } from '../src/features/experiments/experimentsService.js';
@@ -43,7 +47,7 @@ let n = 0;
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-});
+}, 120_000);
 
 const PLAN = { primaryMetric: { kind: 'conversion', name: 'signup' }, guardrails: [], baselineRate: 0.1, mde: 0.02, alpha: 0.05, power: 0.8, fdrQ: 0.05, minDays: 7, maxDays: 30 };
 const ctx = (over: Partial<{ actor: string; runId: string; now: string }> = {}) => ({ actor: 'u-1', now: '2026-10-20T00:00:00.000Z', ...over });
@@ -151,9 +155,32 @@ describe('ADR 0950 P1 — 2/3/4. ramp, finalize, rollback, the decision log', ()
     await expect(applyRamp(s.tenantId, s.orgId, s.id, { stage: 2, winner: 'b', winnerPct: 90, holdoutPct: 5 }, ctx())).rejects.toMatchObject({ details: { reason: 'holdout_changed' } });
     // A seed offer is now the newest version row; it was never the live page.
     const live = (await getPage(s.tenantId, s.orgId, s.page.pageId))!;
-    await offerSeedVersion(live, { title: 'LP', sections: [{ type: 'hero', data: { heading: 'Seed offer' } }] as never }, 'seed');
+    await offerSeedVersion(live, { title: 'LP', sections: [{ sectionId: live.sections[0]!.sectionId, type: 'hero', data: { heading: 'Seed offer' } }] }, 'seed');
     expect((await listVersions(s.tenantId, s.orgId, s.page.pageId))[0]!.origin).toBe('seed');
-    const [a, b] = await Promise.all([finalize(s.tenantId, s.orgId, s.id, ctx()), finalize(s.tenantId, s.orgId, s.id, ctx())]);
+    // Force the race: both finalizers must read the row before either finalizes,
+    // so each passes the early `finalizedAt` return and only the finalize claim
+    // inside the row CAS can keep the second from shipping. The hold FAILS if the
+    // second finalizer never reaches its read.
+    const realGet = DurableCollection.prototype.get;
+    let arrivals = 0;
+    let release: () => void = () => undefined;
+    const bothRead = new Promise<void>((res) => { release = res; });
+    const hold = vi.spyOn(DurableCollection.prototype, 'get').mockImplementation(async function (this: DurableCollection<unknown>, key: string) {
+      if (key.endsWith(`::${s.id}`) && arrivals < 2) {
+        arrivals += 1;
+        if (arrivals === 2) release();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([bothRead, new Promise<never>((_, rej) => { timer = setTimeout(() => rej(new Error('race window: the second finalizer never read the row')), 2_000); })])
+          .finally(() => clearTimeout(timer));
+      }
+      return realGet.call(this, key);
+    });
+    let pair: Array<Awaited<ReturnType<typeof finalize>>>;
+    try {
+      pair = await Promise.all([finalize(s.tenantId, s.orgId, s.id, ctx()), finalize(s.tenantId, s.orgId, s.id, ctx())]);
+    } finally { hold.mockRestore(); }
+    expect(arrivals, 'both finalizers read the row before either finalized').toBe(2);
+    const [a, b] = pair;
     expect([a.outcome, b.outcome].sort()).toEqual(['existing', 'finalized']);
     const row = (await getExperimentRow(s.tenantId, s.orgId, s.id))!;
     expect(row.promotion?.baselineRef).toBe(s.baselineVersion);
@@ -179,7 +206,10 @@ describe('ADR 0950 P1 — 2/3/4. ramp, finalize, rollback, the decision log', ()
   it('a non-running or legacy experiment cannot ramp', async () => {
     const s = await cmsPromotion();
     const row = (await getExperimentRow(s.tenantId, s.orgId, s.id))!;
-    await putExperimentRow({ ...row, status: 'stopped' } as Experiment);
+    await putExperimentRow({ ...row, status: 'stopped' });
     await expect(applyRamp(s.tenantId, s.orgId, s.id, { stage: 1, winner: 'b', winnerPct: 90, holdoutPct: 2 }, ctx())).rejects.toMatchObject({ details: { reason: 'not_running' } });
+    // Running again, but legacy: refused by the Decide check, not the status one.
+    await putExperimentRow({ ...row, status: 'running', legacy: true });
+    await expect(applyRamp(s.tenantId, s.orgId, s.id, { stage: 1, winner: 'b', winnerPct: 90, holdoutPct: 2 }, ctx())).rejects.toMatchObject({ details: { reason: 'not_decide' } });
   });
 });

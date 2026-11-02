@@ -8,6 +8,13 @@
  *    `onFirewallDecision` (P1 observability);
  *  - a `deny` verdict is forbidden and also observed;
  *  - an `allow` verdict executes the tool and fires NO decision record (no noise).
+ *
+ * The "not executed" halves overlap `test/capability-firewall-loop.test.ts` (both
+ * protected; kept). The `onFirewallDecision` record is asserted only here.
+ *
+ * Red when (w74g4-fl-* probes, wave 74): the loop ignores a `deny` or a `require-approval`
+ * verdict; a held call is not collected as a pending approval; the deny or the
+ * require-approval verdict is not recorded; an allowed call is recorded.
  */
 import { describe, it, expect } from 'vitest';
 import { runChatToolLoop, type CompiledTool, type ChatToolLoopOpts } from '../agentDispatch.js';

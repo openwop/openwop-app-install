@@ -12,6 +12,11 @@
  * `listEvents` at contract 1 and contract 2, each validated against that major's
  * package `$defs`. Plus: a row stored in the PRE-change shape still projects to
  * a valid v2 payload (history is never rewritten).
+ *
+ * TST-BZA-3 (grade-tests w66). Red when: the writer stores `interruptId` instead of the
+ * v1 `gateId`; the major-2 projection drops `resolvedBy` or the `overrideReason`; or the
+ * projection's already-projected guard is removed (an already-v2 payload carrying a
+ * cause `reason` would be rewritten into `overrideReason`).
  */
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -27,7 +32,6 @@ import { __awaitRunResumeChainForTests, __resolveAndResumeForTests } from '../sr
 import { projectV2Payload } from '../src/storage/v2PayloadProjection.js';
 import { projectV2RunIds } from '../src/host/v2Ids.js';
 import type { InterruptRecord, RunRecord } from '../src/types.js';
-import type { WorkflowDefinition } from '../src/executor/types.js';
 import { registerWorkflow as registerHostWorkflow } from '../src/host/workflowsRegistry.js';
 import { ensureNodesRegistered } from '../src/bootstrap/nodes.js';
 import { defsFor } from './support/runEventDefs.js';
@@ -43,10 +47,10 @@ const V2 = defsFor(2)('approval.overridden');
 const TENANT = 'default';
 ensureNodesRegistered();
 registerHostWorkflow({
-  workflowId: 'wf.ovr', name: 'override', version: '1.0.0',
+  workflowId: 'wf.ovr',
   nodes: [{ nodeId: 'gate', typeId: 'core.noop', config: {} }, { nodeId: 'after', typeId: 'core.noop', config: {} }],
   edges: [{ edgeId: 'e1', sourceNodeId: 'gate', targetNodeId: 'after' }],
-} as unknown as WorkflowDefinition);
+});
 
 describe('approval.overridden — one stored payload, legal on both majors', () => {
   it('a live override writes the closed v1 shape and reads back valid at contract 1 AND contract 2', async () => {
@@ -83,7 +87,11 @@ describe('approval.overridden — one stored payload, legal on both majors', () 
     const legacy = { interruptId: 'int-legacy-0000000000000000000000', principal: 'boss', reason: 'expedite', bypassedQuorum: false };
     const wire = projectV2RunIds(projectV2Payload('approval.overridden', legacy, { runId: 'r1', nodeId: 'gate' }, TENANT), TENANT);
     expect(V2(wire), `v2: ${JSON.stringify(V2.errors)} ← ${JSON.stringify(wire)}`).toBe(true);
-    expect(projectV2Payload('approval.overridden', projectV2Payload('approval.overridden', legacy, { runId: 'r1', nodeId: 'gate' }, TENANT), { runId: 'r1', nodeId: 'gate' }, TENANT),
-      'idempotent: the fan-out projects twice').toEqual(projectV2Payload('approval.overridden', legacy, { runId: 'r1', nodeId: 'gate' }, TENANT));
+    // Idempotency over a payload that is ALREADY in the v2 shape and carries a cause
+    // `reason` (RFC 0186 §A.2): it must come back unchanged. Re-projecting the legacy
+    // row's own output could not discriminate — without the guard it yields the same keys.
+    const alreadyV2 = { interruptId: 'int-legacy-0000000000000000000000', nodeId: 'gate', kind: 'approval', decision: 'overridden', action: 'accept', reason: 'timeout' };
+    expect(projectV2Payload('approval.overridden', alreadyV2, { runId: 'r1', nodeId: 'gate' }, TENANT),
+      'idempotent: an already-projected payload is returned as-is').toEqual({ interruptId: 'int-legacy-0000000000000000000000', nodeId: 'gate', kind: 'approval', decision: 'overridden', action: 'accept', reason: 'timeout' });
   });
 });

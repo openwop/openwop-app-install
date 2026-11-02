@@ -43,6 +43,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { stripComments } from './helpers/stripComments.js';
 
 const REPO = join(process.cwd(), '..', '..');
 
@@ -50,9 +51,6 @@ const REPO = join(process.cwd(), '..', '..');
  *  present. A review probe proved the earlier version green after replacing
  *  `inputs?: …` with `// inputs field removed` — this repo's own
  *  `ratchet-gates-count-comments` lesson, recurring inside the ratchet. */
-function stripComments(src: string): string {
-  return src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ');
-}
 
 /**
  * Field names declared inside a source slice.
@@ -235,7 +233,7 @@ describe('the three node-field writers declare the same contract', () => {
   it('the builder READS back every field it emits', () => {
     // `id`/`kind`/`name`/`position` are builder-local; compare only the wire
     // fields the emit site produces.
-    const wireFields = new Set(['config', 'inputs', 'outputRole', 'compensation', 'irreversibleEffect']);
+    const wireFields = new Set(['config', 'inputs', 'outputRole', 'compensation', 'irreversibleEffect', 'agent']);
     const emitted = [...roundTrip].filter((f) => wireFields.has(f)).sort();
     const read = [...roundTripRead].filter((f) => wireFields.has(f)).sort();
     expect(read, 'the builder emits a field its own reader drops — lost on the next save').toEqual(emitted);
@@ -252,7 +250,14 @@ describe('the three node-field writers declare the same contract', () => {
     // A template is auto-laid-out on first open, then persists (ADR 0770 P3 owns
     // carrying pack layout). Listed, not hidden: a new field still fails here.
     const BUILDER_LAYOUT = new Set(['name', 'position']);
-    expect([...producer].sort()).toEqual([...ingest].filter((f) => !BUILDER_LAYOUT.has(f)).sort());
+    // ADR 1005 — a second named exception: `agent` (RFC 0082 §B). The RFC 0013
+    // `FragmentNode` is closed and has no `agent`, so a chain cannot carry a
+    // binding and expansion has nothing to emit. It reaches a node only through a
+    // POSTed definition (the builder or the API). Revisit when a chain RFC adds it.
+    const NOT_CHAIN_EXPRESSIBLE = new Set(['agent']);
+    expect([...producer].sort()).toEqual(
+      [...ingest].filter((f) => !BUILDER_LAYOUT.has(f) && !NOT_CHAIN_EXPRESSIBLE.has(f)).sort(),
+    );
   });
 
   it('the builder emits every field the host validator accepts', () => {
@@ -285,8 +290,10 @@ describe('the three node-field writers declare the same contract', () => {
     // this pin was silently one field short of the truth.
     // `name` + `position` (ADR 0770 D4) joined on 2026-09-28: the builder's layout,
     // dropped here until then, so every reopen re-gridded the canvas.
+    // `agent` (RFC 0082 §B, ADR 1005) joined on 2026-10-30: the validator used
+    // to drop it, so a channel binding never reached the executor.
     expect([...ingest].sort()).toEqual([
-      'compensation', 'config', 'inputs', 'irreversibleEffect', 'name', 'nodeId', 'outputRole', 'position', 'typeId',
+      'agent', 'compensation', 'config', 'inputs', 'irreversibleEffect', 'name', 'nodeId', 'outputRole', 'position', 'typeId',
     ]);
   });
 });

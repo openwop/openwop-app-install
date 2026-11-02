@@ -59,7 +59,7 @@ async function insertRun(metadata: Record<string, unknown>): Promise<RunRecord> 
     runId: `r-p1b-auto-${n++}-${Math.random().toString(36).slice(2, 8)}`, workflowId: 'wf.p1b', tenantId: T, status: 'running', inputs: {},
     metadata, configurable: {}, createdAt: now, updatedAt: now,
   };
-  await insertRunWithStartContext(storage, run);
+  await insertRunWithStartContext(storage, run, { admission: { plan: 'exempt:test-fixture' } });
   return (await storage.getRun(run.runId)) ?? run;
 }
 /** A campaign run stamped through the real seam; the acting requester is u1. */

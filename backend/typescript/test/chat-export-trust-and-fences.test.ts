@@ -88,7 +88,6 @@ describe('ADR 0698 D2 — imported content cannot control the export STRUCTURE',
 describe('ADR 0698 D1 — the trust stamp must not be re-described as a fence', () => {
   it('leg 5: no chat-export source claims row-level fencing while no consumer exists', () => {
     const consumers = [
-      codeOf(join(SRC, 'host', 'envelopeAcceptor.ts')),
       codeOf(join(SRC, 'host', 'agentKnowledgeComposition.ts')),
     ].join('\n');
     // Guard against the fix going stale: if someone DOES add a chat-message consumer,

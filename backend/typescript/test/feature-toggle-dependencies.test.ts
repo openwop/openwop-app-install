@@ -7,13 +7,24 @@
  *    OFF while an enabled dependent needs it returns 409 with the blocking ids; the
  *    /admin/dependencies projection reflects the live lock. Backend is the authority
  *    (the lock is observable only through the HTTP boundary), so it is tested there.
+ *
+ * Every route case restores the toggles it touches to their registered defaults
+ * in `afterEach` (through the service, so the lock cannot refuse the restore), so
+ * a failing case cannot leave state that reddens the next one.
+ *
+ * Tracker: TST-DBE-9. Red when: the global or per-tenant disable-lock arm is
+ * dropped, the route ignores the blockers, pack presence misreports a mounted
+ * pack, recommendedOff lists enabled targets, or dependency lists stop deduping
+ * (probes w70g2-td-*).
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
+import { saveConfig } from '../src/host/featureToggles/service.js';
 import {
+  getToggleDefault,
   getFeatureDependencies,
   getFeatureDependents,
   registerFeatureDependencies,
@@ -98,6 +109,14 @@ describe('feature disable-lock (sqlite memory app)', () => {
 
   afterAll(async () => {
     await new Promise<void>((res) => server.close(() => res()));
+  });
+
+  // Restore every toggle these cases flip (overrides included) to its default.
+  afterEach(async () => {
+    for (const id of ['email', 'forms', 'documents', 'consent', 'crm']) {
+      const d = getToggleDefault(id);
+      if (d) await saveConfig(d, 'test');
+    }
   });
 
   async function jsonFetch<T = unknown>(path: string, init: RequestInit = {}): Promise<{ status: number; body: T }> {

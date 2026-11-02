@@ -1,11 +1,18 @@
 /**
  * modelClass → (provider, model) resolution (host/modelClassResolver.ts).
  * Runs against the real providers.json catalog.
+ *
+ * A manifest agent declares only a `modelClass`; this mapping is what gives a
+ * live turn a model to call (used by the agent-dispatch lanes, e.g. ADR 0939's
+ * Work-Twin agents and ADR 0943's campaign agent team). What breaks: a class
+ * resolving to a model the catalog does not have (the call 404s at the
+ * provider), an explicit pin being overridden, an unknown class failing instead
+ * of falling back to chat, or `preferManaged` not reaching the managed tier.
  */
 
 import { describe, expect, it } from 'vitest';
 import { resolveModelForClass } from '../src/host/modelClassResolver.js';
-import { getProviderConfig } from '../src/providers/catalog.js';
+import { getDefaultModel, getProviderConfig } from '../src/providers/catalog.js';
 
 /** A resolved (provider, model) must actually exist in the catalog. */
 function assertReal(r: { provider: string; model: string } | null) {
@@ -22,7 +29,7 @@ describe('resolveModelForClass', () => {
     }
   });
 
-  it('reasoning resolves to a different (stronger) model than chat', () => {
+  it('reasoning resolves to a different model than chat', () => {
     const chat = resolveModelForClass('chat')!;
     const reasoning = resolveModelForClass('reasoning')!;
     expect(reasoning.model).not.toBe(chat.model);
@@ -61,9 +68,11 @@ describe('resolveModelForClass', () => {
     expect(r!.provider).toBe('openwop-free');
   });
 
-  it('a non-default class still resolves to a real model under an explicit anthropic pin', () => {
+  it('an explicit provider pin ignores the class — it resolves to that provider\'s default', () => {
+    // Step 1 of the resolver: a pin wins outright, so `extraction` does not pick
+    // its per-class model here. (Titled before as if the class still mattered.)
     const r = resolveModelForClass('extraction', { provider: 'anthropic' })!;
-    expect(r.provider).toBe('anthropic');
+    expect(r).toEqual({ provider: 'anthropic', model: getDefaultModel('anthropic'), managed: false });
     assertReal(r);
   });
 });

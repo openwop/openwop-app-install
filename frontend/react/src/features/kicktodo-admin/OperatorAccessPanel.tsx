@@ -21,6 +21,7 @@ import {
   activateOperatorAccess, endOperatorAccess, listOperatorActivations, type OperatorActivation,
 } from '../../client/operatorAccessClient.js';
 import { switchWorkspace } from '../../client/workspaceClient.js';
+import { ParticipantRemovalCard } from './ParticipantRemovalCard.js';
 import { fireAuthChanged } from '../../client/config.js';
 import { completeMfaSignIn, MfaRequiredError } from '../../auth/firebase.js';
 import { getFreshIdToken, reauthenticateForStepUp, StepUpUnsupportedError } from '../../auth/stepUp.js';
@@ -170,6 +171,8 @@ export function OperatorAccessPanel(): JSX.Element | null {
             <Button onClick={() => void switchIn()}>{t('operatorSwitch')}</Button>
             <Button variant="secondary" onClick={() => void endNow()}>{t('operatorEnd')}</Button>
           </div>
+          {/* ADR 0910 D12 — only while THIS person's activation is live. */}
+          <ParticipantRemovalCard workspaceId={OPERATOR_WORKSPACE} />
         </div>
       ) : null}
 

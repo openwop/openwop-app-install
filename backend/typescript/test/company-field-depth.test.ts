@@ -1,7 +1,12 @@
 /**
- * CRM-2 — first-class Company firmographics (size / revenue) + the employees→size backfill.
- * Additive optional fields on the KV-blob Company (no SQL migration); fail-closed validation;
- * null-clears; APP_MIGRATION 4 lifts legacy `customFields.employees` onto `size`.
+ * CRM-2 (ADR 0383) — first-class Company firmographics (size / revenue) + the
+ * employees→size backfill. Additive optional fields on the KV-blob Company (no SQL
+ * migration); fail-closed validation; null-clears; APP_MIGRATION 4 lifts legacy
+ * `customFields.employees` onto `size`. Tracker: TST-CGB-1.
+ *
+ * Red when: `optSize` accepts a float; an explicit null stops clearing; the backfill
+ * clobbers an existing `size`, keeps the legacy customField, or lifts a float /
+ * negative `employees` (companies.ts `optSize` / `backfillCompanySizeFromEmployees`).
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -25,9 +30,10 @@ describe('CRM-2 — company size/revenue', () => {
   });
 
   it('validates fail-closed: non-integer/negative size and negative revenue 400', async () => {
-    await expect(mk({ size: 12.5 })).rejects.toMatchObject({ code: 'validation_error' });
-    await expect(mk({ size: -3 })).rejects.toMatchObject({ code: 'validation_error' });
-    await expect(mk({ revenue: -1 })).rejects.toMatchObject({ code: 'validation_error' });
+    // `details.field` names WHICH guard refused — a revenue refusal cannot be satisfied by the size check.
+    await expect(mk({ size: 12.5 })).rejects.toMatchObject({ code: 'validation_error', details: { field: 'size' } });
+    await expect(mk({ size: -3 })).rejects.toMatchObject({ code: 'validation_error', details: { field: 'size' } });
+    await expect(mk({ revenue: -1 })).rejects.toMatchObject({ code: 'validation_error', details: { field: 'revenue' } });
   });
 
   it('update sets values and an explicit null clears them', async () => {

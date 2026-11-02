@@ -8,6 +8,12 @@
  * the absence: the node is not registered, the fire route refuses, and nothing
  * named `conformance.effect-seam.fire` reaches the registry, the ownership
  * index, or the builder / `/` picker listing.
+ *
+ * Tracker TST-CXC-6. DOUBLE GUARD (both in routes/effectSeamFireSeam.ts): the
+ * fire route refuses on the env gate AND on `isResolvable(FIRE_NODE_TYPE)`, so
+ * removing the env gate alone stays green (measured, w69 round 1). The shared
+ * state both read is the node registration: red when the node is registered on
+ * a non-seams boot.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -43,6 +49,7 @@ describe('guardrail 1 — a non-seams boot has no effect-seam node or workflow',
     const seam = SEAM_ROWS[0]?.seam ?? '';
     const res = await fetch(`${base}/host/sample/effect-seams/fire`, { method: 'POST', headers: AUTH, body: JSON.stringify({ seam }) });
     expect(res.status).toBe(404);
+    expect(((await res.json()) as { error?: string }).error).toBe('not_found');
     expect(await getRegisteredWorkflowAsync(fireWorkflowId('default', seam)), 'no transient definition was registered').toBeNull();
     expect(listRegisteredWorkflows().some((w) => w.workflowId.startsWith('conformance.effect-seam.fire'))).toBe(false);
     expect([...(await allOwnershipByWorkflow()).keys()].some((id) => id.startsWith('conformance.effect-seam.fire'))).toBe(false);

@@ -44,6 +44,12 @@
  * it as authoritative — because the two comments below said so — and had to
  * retract a Blocker. The comments now say only what this file checks.
  * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * TST-BBW-1 (w66 g4, sabotage-witnessed). Red when: anything is added to
+ * LEGACY_PINNED_WORKFLOWS (NO-GROWTH, PHASE 3, PHASE 4); a migrated chain's
+ * chainId moves (its reachability row). NO-GROWTH / PHASE 3 / the ≤ 74 floor
+ * are implied by PHASE 4 TERMINAL (quarantine and baseline both empty) and are
+ * kept as the historical record.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync, existsSync } from 'node:fs';

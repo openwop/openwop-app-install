@@ -11,6 +11,15 @@
  * surface and a second place for that no-leak logic to drift. So these tests
  * verify the existing path carries listings correctly — which is the ADR's
  * verification either way ("cross-tenant 404, unpublished 404, rate limit").
+ *
+ * All state is seeded in `beforeAll` and NO case writes: OWNER is published there,
+ * OTHER never is. (The cases used to publish OWNER inside case 2 and rely on run
+ * order — a shuffled run read OWNER before it was published.)
+ *
+ * Tracker TST-DHD-2 (wave 71). Red when: the public gate stops requiring
+ * `publicRead` (`w71g3-pi-gate`); the `filters` length bound goes
+ * (`pi-filters-r2` — the body is VALID JSON over 2048 chars, so the parse no
+ * longer refuses it first).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -25,6 +34,8 @@ const OTHER = 'user:jobs-public-other';
 
 let server: Server;
 let BASE: string;
+
+const UNIFORM_404 = { error: 'not_found', message: 'Not found.' };
 
 const listingsUrl = (tenantId: string) => `${BASE}${PUB}/${encodeURIComponent(tenantId)}/types/${LISTING_TYPE}/entities`;
 
@@ -42,6 +53,8 @@ beforeAll(async () => {
   }
   await upsertListing(OWNER, 'user-1', { title: 'Staff Backend Engineer', companyName: 'Northwind Systems', location: 'Austin, TX' });
   await upsertListing(OTHER, 'user-2', { title: 'Platform Engineer', companyName: 'Harbor Analytics', location: 'Chicago, IL' });
+  // The one publish, done here so no case depends on another having run.
+  await setListingsPublic(OWNER, true, 'user-1');
 }, 180_000);
 
 afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
@@ -50,12 +63,12 @@ describe('ADR 0542 D4 — the public index is opt-in and leaks nothing', () => {
   it('an UNPUBLISHED tenant’s listings are a 404, not an empty list', async () => {
     // An empty 200 would confirm the tenant exists. The uniform 404 is what
     // makes "unpublished" and "no such tenant" indistinguishable.
-    const res = await fetch(listingsUrl(OWNER));
+    const res = await fetch(listingsUrl(OTHER));
     expect(res.status).toBe(404);
+    expect(await res.json()).toMatchObject(UNIFORM_404);
   });
 
   it('after an explicit publish, the listings are readable anonymously', async () => {
-    await setListingsPublic(OWNER, true, 'user-1');
     const res = await fetch(listingsUrl(OWNER));
     expect(res.status).toBe(200);
     const body = (await res.json()) as { entities?: Array<{ values?: Record<string, unknown> }> };
@@ -64,9 +77,11 @@ describe('ADR 0542 D4 — the public index is opt-in and leaks nothing', () => {
   });
 
   it('publishing one tenant does NOT expose another — the cross-tenant case', async () => {
-    // OWNER is published by the test above; OTHER never was.
+    // OWNER is published (beforeAll); OTHER never was. Positive control first.
+    expect((await fetch(listingsUrl(OWNER))).status).toBe(200);
     const res = await fetch(listingsUrl(OTHER));
     expect(res.status, 'a published neighbour must not publish you').toBe(404);
+    expect(await res.json()).toMatchObject(UNIFORM_404);
   });
 
   it('an UNKNOWN tenant is the SAME 404 — no existence oracle', async () => {
@@ -79,7 +94,10 @@ describe('ADR 0542 D4 — the public index is opt-in and leaks nothing', () => {
   });
 
   it('the public projection carries NO actor subjects or storage internals', async () => {
-    const body = await (await fetch(listingsUrl(OWNER))).text();
+    const res = await fetch(listingsUrl(OWNER));
+    expect(res.status, 'the projection read must be the PUBLISHED body, not a 404').toBe(200);
+    const body = await res.text();
+    expect(body).toContain('Staff Backend Engineer');
     for (const leak of ['createdBy', 'updatedBy', 'recordKey', 'tenantId', 'user-1']) {
       expect(body, `public projection leaked ${leak}`).not.toContain(leak);
     }
@@ -90,10 +108,16 @@ describe('ADR 0542 D4 — the public index is opt-in and leaks nothing', () => {
     // would look identical in a signed-in browser and fail for every real reader.
     const res = await fetch(listingsUrl(OWNER), { headers: { cookie: '' } });
     expect(res.status).toBe(200);
+    expect(JSON.stringify(await res.json())).toContain('Staff Backend Engineer');
   });
 
   it('bounds the `filters` query rather than parsing unbounded input', async () => {
-    const res = await fetch(`${listingsUrl(OWNER)}?filters=${'x'.repeat(3000)}`);
+    // VALID JSON over the 2048-char bound: a non-JSON body is refused by the
+    // parse with the same 400, which hid the bound itself.
+    const filters = JSON.stringify(Array.from({ length: 600 }, () => 'x'));
+    expect(filters.length).toBeGreaterThan(2048);
+    const res = await fetch(`${listingsUrl(OWNER)}?filters=${encodeURIComponent(filters)}`);
     expect(res.status).toBe(400);
+    expect(((await res.json()) as { message?: string }).message).toBe('`filters` is too long.');
   });
 });

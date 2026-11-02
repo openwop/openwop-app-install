@@ -16,6 +16,12 @@
  * RECORD, DO NOT SWALLOW: the emit runs regardless, and carries WHY the unwind
  * failed. Losing the compensation failure to save the terminal event would just
  * move the hole.
+ *
+ * TST-DEF-3 — red when `compensationError` stops riding `run.failed` (or rides it
+ * when the unwind succeeded), or EITHER unwind call site in executor.ts is moved
+ * outside its try/catch. The structural check is one function,
+ * `unguardedUnwindSites`, run on the real file AND on the pre-H102 spelling, so
+ * the positive control exercises the same matcher the guard uses.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -30,6 +36,25 @@ beforeEach(async () => {
   setEventLogBackend(storage);
 });
 afterEach(async () => { await storage.close?.(); });
+
+/** 0-based line indexes of every live `await unwindTerminatedRun(` call. */
+function unwindSites(lines: readonly string[]): number[] {
+  return lines.map((l, i) => ({ l, i })).filter(({ l }) => /^[^/]*await unwindTerminatedRun\(/.test(l)).map(({ i }) => i);
+}
+
+/** Every structural violation at an unwind call site: it must sit inside a
+ *  `try {` opened within the 3 lines above, a `} catch` must close within the
+ *  next 12, and an `await emitTerminalFailure(` must follow it. */
+function unguardedUnwindSites(lines: readonly string[]): string[] {
+  const out: string[] = [];
+  for (const unwind of unwindSites(lines)) {
+    const where = `executor.ts:${unwind + 1}`;
+    if (!/try\s*\{/.test(lines.slice(Math.max(0, unwind - 3), unwind).join('\n'))) out.push(`${where}: the unwind call is NOT inside a try block`);
+    if (!/\}\s*catch/.test(lines.slice(unwind, unwind + 12).join('\n'))) out.push(`${where}: no catch immediately after the unwind`);
+    if (lines.findIndex((l, i) => i > unwind && /await emitTerminalFailure\(/.test(l)) <= unwind) out.push(`${where}: emitTerminalFailure does not follow the unwind`);
+  }
+  return out;
+}
 
 async function failedPayload(runId: string): Promise<Record<string, unknown>> {
   const events = await storage.listEvents(runId);
@@ -82,32 +107,24 @@ describe('H102 — the terminal event carries an unwind failure instead of being
     // the guard from the LATER site would have left this green.
     const src = readFileSync(new URL('../src/executor/executor.ts', import.meta.url), 'utf8');
     const lines = src.split('\n');
-    const sites = lines
-      .map((l, i) => ({ l, i }))
-      .filter(({ l }) => /^[^/]*await unwindTerminatedRun\(/.test(l))
-      .map(({ i }) => i);
-
     // NON-VACUITY FLOOR: a refactor that renames or removes the calls must not
     // silently turn this into a test that asserts nothing over an empty set.
-    expect(sites.length, 'expected at least two unwind call sites in executor.ts').toBeGreaterThanOrEqual(2);
-
-    for (const unwind of sites) {
-      const where = `executor.ts:${unwind + 1}`;
-      const before = lines.slice(Math.max(0, unwind - 3), unwind).join('\n');
-      expect(before, `${where}: the unwind call is NOT inside a try block`).toMatch(/try\s*\{/);
-      const after = lines.slice(unwind, unwind + 12).join('\n');
-      expect(after, `${where}: no catch immediately after the unwind`).toMatch(/\}\s*catch/);
-      const emit = lines.findIndex((l, i) => i > unwind && /await emitTerminalFailure\(/.test(l));
-      expect(emit, `${where}: emitTerminalFailure does not follow the unwind`).toBeGreaterThan(unwind);
-    }
+    expect(unwindSites(lines).length, 'expected at least two unwind call sites in executor.ts').toBeGreaterThanOrEqual(2);
+    expect(unguardedUnwindSites(lines)).toEqual([]);
   });
 
   it('...and that matcher can fail (positive control)', () => {
-    // The pre-H102 spelling: bare call, no try, emit still following. If the
-    // matcher above passed on THIS, it would be pinning nothing.
-    const pre = ['    await unwindTerminatedRun({ storage, run, definition });',
-                 '    await emitTerminalFailure({ storage });'];
-    expect(pre.slice(0, 1).join('\n')).not.toMatch(/try\s*\{/);
-    expect(pre.join('\n')).not.toMatch(/\}\s*catch/);
+    // The pre-H102 spelling: bare call, no try, emit still following. The SAME
+    // checker the guard uses must report it — otherwise it would pin nothing.
+    const pre = [
+      '    let compensationError: string | undefined;',
+      '    await unwindTerminatedRun({ storage, run, definition });',
+      '    await emitTerminalFailure({ storage });',
+    ];
+    expect(unwindSites(pre)).toEqual([1]);
+    expect(unguardedUnwindSites(pre)).toEqual([
+      'executor.ts:2: the unwind call is NOT inside a try block',
+      'executor.ts:2: no catch immediately after the unwind',
+    ]);
   });
 });

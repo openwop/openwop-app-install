@@ -17,10 +17,10 @@ import { randomBytes } from 'node:crypto';
 import type { Express, Request, RequestHandler } from 'express';
 import { OpenwopError } from '../../types.js';
 import { sendError } from '../../middleware/errorEnvelope.js';
-import { registerProvider, type ProviderManifest } from './providerRegistry.js';
+import { getProvider, registerProvider, type ProviderManifest } from './providerRegistry.js';
 import { setHostOAuthClient } from './oauthClientStore.js';
 import { beginAuthorization } from './oauthFlow.js';
-import { installConnectionPackManifest } from './connectionPackLoader.js';
+import { installConnectionPackManifest, isSeamMintedProvider } from './connectionPackLoader.js';
 import { authorizationServerMetadataUrls } from './mcpReachVerifier.js';
 import { expireAccessTokenForSeam } from './connectionsService.js';
 import { guardedEgressFetch } from '../../host/webhookEgressGuard.js';
@@ -28,8 +28,9 @@ import { vendorPath } from '../../middleware/protocolVersion.js';
 
 /** The suite's providers (seams-v2): one with an issuer, two issuer-less ones
  *  that §A.4 requires distinct redirect URIs for. Advertised only while seams are
- *  mounted (`oauthAdvertisement.ts`); the seam refuses any other id outside a
- *  `connection` pack, so it can never re-point a real provider. */
+ *  mounted (`oauthAdvertisement.ts`); the seam refuses any other id unless a
+ *  `connection` pack handed to a seam brought that id into being, so it can never
+ *  re-point a real provider. */
 export const SYNTHETIC_OAUTH_PROVIDERS = ['synthetic', 'synthetic-noiss', 'synthetic-noiss-b'] as const;
 
 const subjectOf = (req: Request): string | undefined => req.userId ?? req.principal?.principalId;
@@ -64,6 +65,14 @@ export function registerOAuthConformanceSeams(app: Express, seamAuth: RequestHan
       let provider = str(body.provider);
 
       if (body.connection !== undefined) {
+        // A real provider's id is refused BEFORE the install: a pack that admits
+        // major 1 INSTALLS over a built-in (v1 §B.6), so reading the outcome would
+        // be too late, and pack ownership alone would pass a boot-loaded provider.
+        const held = str((body.connection as { provider?: { id?: unknown } } | null)?.provider?.id);
+        if (held && getProvider(held) && !isSeamMintedProvider(held) && !(SYNTHETIC_OAUTH_PROVIDERS as readonly string[]).includes(held)) {
+          sendError(res, 409, 'connection_provider_conflict', `Provider '${held}' was not created by a conformance seam, so this seam will not configure it.`);
+          return;
+        }
         // The production pack path: schema validation, supersede rules, §B.4 pin.
         // A re-sent pack that does not supersede the installed one is refused as a
         // conflict and the INSTALLED provider stays — which is what the pinning leg

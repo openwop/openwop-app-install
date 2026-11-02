@@ -112,8 +112,18 @@ Ask the release manager for a slot before `close`: it is a train, and its probes
 | Phase | What | Status |
 |---|---|---|
 | P1 | `scripts/batch.sh` (with `next:`, `status --json`, `--accept-risk`, failure packets); `ci.sh` quick mode + `npm run ci:quick`; `merge-train.sh --gate-ref`; the `batch` skill (both mirrors); `scripts/test-batch.sh`, 38 checks, with 11 sabotage witnesses all red, wired into the gate's self-test lane; CLAUDE.md and AGENTS.md | this PR |
+| P2a | Fixes before the first real batch (architect review, 2026-10-30), see the correction below; `scripts/test-batch.sh` 38 → 50 checks, 11 of the 12 new ones red on the P1 script (the twelfth, "the batch landed", is a precondition) | this PR |
 | P2 | First real batch. Measure gates per landed feature, wall time from first merge to `main`, and close rounds, against the same features trained one by one | — |
 | P3 | If P2 shows red closes are common, have `merge` consult the Conductor's train advice and refuse wide-reach PRs by default | — |
+
+> **CORRECTION 2026-10-31 (P2a).** An architect review before the first real batch found four defects in the P1 script. Each would have cost P2 a wrong result:
+>
+> 1. **The bisection assumed `origin/main` was green and never checked.** `find_culprit` starts from "nothing in the batch", treated as green. If `main` was red, every probe was red and the batch's first feature was blamed and reverted. Now the bisection first probes `origin/main` alone (one gate, kept as `baseline-<sha>.green` while `main` stays at that commit). If `main` is red, it stops, names `main`, and reverts nothing.
+> 2. **`merge` did not pin the head it checked.** `gh pr merge` merged whatever head the PR had at that moment, so a push made after the quick checks landed unchecked. It now passes `--match-head-commit <the checked SHA>`. A refused PR is put back on `main` if that is where it came from.
+> 3. **A green `close` deleted the batch branch even when a PR had been opened against it during the gate.** Deleting the base auto-closes that PR for good (the CLAUDE.md stacked-PR hazard). `close` now re-lists open PRs on the branch after the gate. If any exist, it keeps the branch and says to retarget them first.
+> 4. **Nothing measured a batch**, so P2 had no numbers to compare with merge-train runs. Every claimed command, quick check, close gate and bisect probe now writes start/end rows (with rc, PR and feature count) to `<git-common-dir>/batch/<name>/timing.tsv`. `close` prints its wall time and full-gate count.
+>
+> Also: every `git push` in `batch.sh` now passes `--no-verify`. The pre-push hook is a full `npm run ci`, which would have turned each sync, revert and branch delete into an extra gate on a machine that ran `hooks:install`. `batch.sh` runs its own checks before each push.
 
 ## Open questions
 

@@ -14,6 +14,7 @@
  * tool catalog + an MCP/HTTP executor here instead.
  */
 
+import type { ChatClarificationSink } from './clarificationChat.js';
 import { createKnowledgeSurface } from './knowledgeSurface.js';
 import { createWebResearchSurface } from './webResearchSurface.js';
 import { extractToolErrorCode } from './toolHooks.js';
@@ -30,7 +31,7 @@ import { getAgentProfile } from './agentProfileService.js';
 import { createHash } from 'node:crypto';
 import { createCard, ensureSubjectBoard, getCard, notifyBoardChanged, todoColumnOf } from './kanbanService.js';
 import { getRosterEntry } from './rosterService.js';
-import { persistRunArtifact, runArtifactKey } from './runArtifactStore.js';
+import { persistRunArtifact } from './runArtifactStore.js';
 import { chatArtifactRunId } from './chatArtifactScope.js';
 
 export interface BuiltinTool {
@@ -133,7 +134,9 @@ export interface BuiltinTool {
   /** `hostMessage` (TOC2CD-11): set ONLY by a `toolError` helper — the error's
    *  `message` is a host-authored sentence, so the model reads it outside the fence.
    *  `test/toc2cd11-tool-error-message-ratchet.test.ts` holds every such call. */
-  run(input: Record<string, unknown>, scope: BundleScope): Promise<{ content: string; isError?: boolean; continueTurn?: string | null; hostMessage?: true; fromThrow?: true }>;
+  /** `endTurn` (ADR 1001 D7): host-internal. The turn ENDS after this call and
+   *  its reply is `text`; later calls in the same round do not run. */
+  run(input: Record<string, unknown>, scope: BundleScope): Promise<{ content: string; isError?: boolean; continueTurn?: string | null; hostMessage?: true; fromThrow?: true; endTurn?: { text: string } }>;
 }
 
 /**
@@ -556,7 +559,10 @@ const CODE_EXEC: BuiltinTool = {
       // Deterministic key (conversation/user + code hash) ⇒ a retried identical
       // call CAS-dedupes, never a random id on a re-runnable path. BEST-EFFORT: a
       // persist failure must NEVER fail the execution result (log + omit fields).
-      let artifactFields: { artifactId?: string; artifactKey?: string } = {};
+      // ADR 1017 D4 — only that it was saved: the key and the artifact id both name the
+      // tenant and the conversation, and model text stays free of them. The chat shows
+      // the artifact under this turn (D2) through the row's `turnMessageId`.
+      let artifactFields: { artifactSaved?: true } = {};
       try {
         // DATA-1 — the synthetic runId MUST carry the tenant: `runArtifactKey`
         // is `${runId}:${nodeId}` with no tenant dimension and `getRunArtifact`
@@ -587,8 +593,9 @@ const CODE_EXEC: BuiltinTool = {
           // `additionalProperties:false` rejects any stray field).
           output: { artifact: { artifactTypeId: 'code.execution-result', payload: { ...result, language }, title: `${language} execution` } },
           now: new Date().toISOString(),
+          ...(scope.turnMessageId ? { turnMessageId: scope.turnMessageId } : {}),
         });
-        if (persisted) artifactFields = { artifactId: persisted.artifactId, artifactKey: runArtifactKey(runId, nodeId) };
+        if (persisted) artifactFields = { artifactSaved: true };
       } catch { /* best-effort projection — never fail the execution over the artifact */ }
       return { content: JSON.stringify({ ...result, ...artifactFields }) };
     } catch (e) {
@@ -599,9 +606,7 @@ const CODE_EXEC: BuiltinTool = {
 };
 
 /** XCH-ENV-5 (LLM-EXCHANGE-AUDIT Wave 5) — the generic ASK-the-app-for-schemas
- *  tool: the tool-mediated twin of the RFC 0021 `schema.request` envelope
- *  (which the chat loop now also honors, XCH-ENV-2). Serves the wider
- *  universe the envelope responder's payload contract can't: node-type
+ *  tool (ADR 1007: the only one, since `schema.request` is deleted): node-type
  *  schemas (the responder), canvas component catalogs (slides, app-builder,
  *  and every other registered canvas type), and artifact types. Read-only,
  *  tenant-independent (all three registries are host-global). */
@@ -747,6 +752,10 @@ export interface AgentToolCallScope {
    *  realtime voice bridge does not, and its tools take the documented,
    *  behavior-preserving direct-append fallback. */
   onRunDispatched?: TurnRunDispatchSink | undefined;
+  /** ADR 1001 D7 — chat only (see `BundleScope.onClarificationAsk`). */
+  onClarificationAsk?: ChatClarificationSink | undefined;
+  /** ADR 1017 D2 — chat only (see `BundleScope.turnMessageId`). */
+  turnMessageId?: string | undefined;
 }
 
 export function createScopedAgentToolProvider(
@@ -761,6 +770,8 @@ export function createScopedAgentToolProvider(
     ...(scope.orgScopeSubject ? { orgScopeSubject: scope.orgScopeSubject } : {}),
     ...(scope.conversationId ? { conversationId: scope.conversationId } : {}),
     ...(scope.onRunDispatched ? { onRunDispatched: scope.onRunDispatched } : {}),
+    ...(scope.onClarificationAsk ? { onClarificationAsk: scope.onClarificationAsk } : {}),
+    ...(scope.turnMessageId ? { turnMessageId: scope.turnMessageId } : {}),
   });
 }
 

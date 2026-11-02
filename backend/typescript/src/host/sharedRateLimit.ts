@@ -147,3 +147,57 @@ export async function takeShared(t: SharedTake): Promise<SharedTakeResult> {
   if (t.failure === 'closed') return { allowed: false, remaining: 0, resetAt: windowEnd, retryAfterS };
   return degrade(new Error('cas_contention'));
 }
+
+export interface SharedAdjust {
+  scope: string;
+  key: string;
+  windowS: number;
+  /** Units to add (a charge) or remove (a refund). The count never goes below 0. */
+  delta: number;
+  failure: 'closed' | 'open';
+  storage?: Storage;
+  /** The time of the take this adjusts, so it lands in the same window. */
+  now?: number;
+}
+
+/**
+ * ADR 0987 D1 — settle a take after the fact, ignoring the limit: refund the
+ * unit of a request that was refused downstream, or charge the extra units of a
+ * request that minted several runs. It lands in the window `now` falls in, so
+ * pass the take's time. Best effort by design: it runs after the response, so a
+ * failure is logged and never thrown. An `open` adjustment also moves the
+ * per-process fallback window, so a degraded take and its settlement agree.
+ */
+export async function adjustShared(a: SharedAdjust): Promise<void> {
+  if (!SCOPE_RE.test(a.scope)) throw new Error(`sharedRateLimit: invalid scope '${a.scope}'`);
+  if (!(a.windowS > 0) || !Number.isFinite(a.delta) || a.delta === 0) return;
+  const now = a.now ?? Date.now();
+  const windowMs = a.windowS * 1000;
+  const index = Math.floor(now / windowMs);
+  const windowEnd = (index + 1) * windowMs;
+  const id = `${a.scope}:${keyHash(a.key)}:${index}`;
+  const rowKey = `${SHARED_RATE_LIMIT_PREFIX}${id}`;
+  if (a.failure === 'open') {
+    const cur = local.get(id);
+    if (cur && cur.windowEnd === windowEnd) cur.n = Math.max(0, cur.n + a.delta);
+  }
+  try {
+    const storage = a.storage ?? hostExtStorage();
+    let raw = await storage.kvGet(rowKey);
+    for (let attempt = 0; attempt < CAS_ATTEMPTS; attempt += 1) {
+      const n = parseRow(raw)?.n ?? 0;
+      const next: WindowRow = { n: Math.max(0, n + a.delta), windowEnd, updatedAt: new Date(Date.now()).toISOString() };
+      const r = await storage.kvCompareAndSwap(rowKey, raw, JSON.stringify(next));
+      if (r.swapped) return;
+      raw = r.actual;
+    }
+    log.warn('shared_rate_limit_adjust_contention', { scope: a.scope, delta: a.delta });
+  } catch (err) {
+    log.warn('shared_rate_limit_adjust_failed', { scope: a.scope, delta: a.delta, error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+/** Test affordance: forget the per-process fallback windows. */
+export function _resetSharedRateLimitLocal(): void {
+  local.clear();
+}

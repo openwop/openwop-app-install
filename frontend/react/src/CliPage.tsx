@@ -68,7 +68,7 @@ const CATALOG: CatalogEntry[] = [
   {
     group: 'onboard',
     commands: ['--non-interactive'],
-    description: <Trans i18nKey="cliCatOnboard" ns="chrome" components={{ 0: <Cmd /> }} />,
+    description: <Trans i18nKey="cliCatOnboard" ns="chrome" components={[<Cmd />]} />,
   },
   {
     group: 'doctor',
@@ -78,12 +78,12 @@ const CATALOG: CatalogEntry[] = [
   {
     group: 'capabilities',
     commands: [],
-    description: <Trans i18nKey="cliCatCapabilities" ns="chrome" components={{ 0: <Cmd /> }} />,
+    description: <Trans i18nKey="cliCatCapabilities" ns="chrome" components={[<Cmd />]} />,
   },
   {
     group: 'runs',
     commands: ['create', 'get', 'events', 'annotations', 'debug-bundle'],
-    description: <Trans i18nKey="cliCatRuns" ns="chrome" components={{ 0: <Cmd />, 1: <Cmd />, 2: <Cmd />, 3: <Cmd /> }} />,
+    description: <Trans i18nKey="cliCatRuns" ns="chrome" components={[<Cmd />, <Cmd />, <Cmd />, <Cmd />]} />,
   },
   {
     group: 'prompts',
@@ -123,27 +123,27 @@ const CATALOG: CatalogEntry[] = [
   {
     group: 'proposals',
     commands: ['list', 'get', 'revise', 'apply', 'reject', 'archive'],
-    description: <Trans i18nKey="cliCatProposals" ns="chrome" components={{ 0: <strong /> }} />,
+    description: <Trans i18nKey="cliCatProposals" ns="chrome" components={[<strong />]} />,
   },
   {
     group: 'goals',
     commands: ['list', 'get', 'create', 'pause', 'resume', 'abandon'],
-    description: <Trans i18nKey="cliCatGoals" ns="chrome" components={{ 0: <strong />, 1: <strong />, 2: <Cmd /> }} />,
+    description: <Trans i18nKey="cliCatGoals" ns="chrome" components={[<strong />, <strong />, <Cmd />]} />,
   },
   {
     group: 'export / import',
     commands: ['--kinds', '--dry-run'],
-    description: <Trans i18nKey="cliCatExportImport" ns="chrome" components={{ 0: <strong />, 1: <Cmd /> }} />,
+    description: <Trans i18nKey="cliCatExportImport" ns="chrome" components={[<strong />, <Cmd />]} />,
   },
   {
     group: 'triggers',
     commands: ['list', 'get', 'register'],
-    description: <Trans i18nKey="cliCatTriggers" ns="chrome" components={{ 0: <strong />, 1: <strong /> }} />,
+    description: <Trans i18nKey="cliCatTriggers" ns="chrome" components={[<strong />, <strong />]} />,
   },
   {
     group: 'a2a',
     commands: ['status', 'task'],
-    description: <Trans i18nKey="cliCatA2a" ns="chrome" components={{ 0: <Cmd />, 1: <Cmd />, 2: <Cmd /> }} />,
+    description: <Trans i18nKey="cliCatA2a" ns="chrome" components={[<Cmd />, <Cmd />, <Cmd />]} />,
   },
   {
     group: 'approvals',
@@ -153,7 +153,7 @@ const CATALOG: CatalogEntry[] = [
   {
     group: 'governance',
     commands: ['policy', 'audit'],
-    description: <Trans i18nKey="cliCatGovernance" ns="chrome" components={{ 0: <Cmd /> }} />,
+    description: <Trans i18nKey="cliCatGovernance" ns="chrome" components={[<Cmd />]} />,
   },
   {
     group: 'consent',
@@ -178,7 +178,7 @@ const CATALOG: CatalogEntry[] = [
   {
     group: 'auth',
     commands: ['status', 'saml', 'scim'],
-    description: <Trans i18nKey="cliCatAuth" ns="chrome" components={{ 0: <Cmd /> }} />,
+    description: <Trans i18nKey="cliCatAuth" ns="chrome" components={[<Cmd />]} />,
   },
   {
     group: 'mcp',
@@ -188,22 +188,22 @@ const CATALOG: CatalogEntry[] = [
   {
     group: 'connections',
     commands: ['list', 'test', 'authorize', 'oauth-clients'],
-    description: <Trans i18nKey="cliCatConnections" ns="chrome" components={{ 0: <Cmd /> }} />,
+    description: <Trans i18nKey="cliCatConnections" ns="chrome" components={[<Cmd />]} />,
   },
   {
     group: 'workforces',
     commands: ['list', 'metrics', 'governance', 'status'],
-    description: <Trans i18nKey="cliCatWorkforces" ns="chrome" components={{ 0: <Cmd /> }} />,
+    description: <Trans i18nKey="cliCatWorkforces" ns="chrome" components={[<Cmd />]} />,
   },
   {
     group: 'analytics',
     commands: ['summary', 'events', 'collect'],
-    description: <Trans i18nKey="cliCatAnalytics" ns="chrome" components={{ 0: <Cmd /> }} />,
+    description: <Trans i18nKey="cliCatAnalytics" ns="chrome" components={[<Cmd />]} />,
   },
   {
     group: 'cron',
     commands: ['list', 'add', 'enable', 'disable', 'remove'],
-    description: <Trans i18nKey="cliCatCron" ns="chrome" components={{ 0: <Cmd /> }} />,
+    description: <Trans i18nKey="cliCatCron" ns="chrome" components={[<Cmd />]} />,
   },
 ];
 
@@ -248,7 +248,7 @@ const ADAPTERS: Adapter[] = [
   {
     name: 'Signal',
     icon: <PlugIcon size={18} />,
-    note: <Trans i18nKey="cliAdapterSignalNote" ns="chrome" components={{ 0: <Cmd /> }} />,
+    note: <Trans i18nKey="cliAdapterSignalNote" ns="chrome" components={[<Cmd />]} />,
     command: 'openwop relay signal --account +15555550100',
   },
   {
@@ -260,13 +260,13 @@ const ADAPTERS: Adapter[] = [
   {
     name: 'WhatsApp',
     icon: <MessageCircleIcon size={18} />,
-    note: <Trans i18nKey="cliAdapterWhatsappNote" ns="chrome" components={{ 0: <Cmd /> }} />,
+    note: <Trans i18nKey="cliAdapterWhatsappNote" ns="chrome" components={[<Cmd />]} />,
     command: 'openwop relay whatsapp',
   },
   {
     name: 'Discord',
     icon: <TerminalIcon size={18} />,
-    note: <Trans i18nKey="cliAdapterDiscordNote" ns="chrome" components={{ 0: <Cmd />, 1: <Cmd /> }} />,
+    note: <Trans i18nKey="cliAdapterDiscordNote" ns="chrome" components={[<Cmd />, <Cmd />]} />,
     command: 'DISCORD_TOKEN=… openwop relay discord',
   },
 ];
@@ -278,7 +278,7 @@ export function CliPage() {
       <PageHeader
         eyebrow={t('cliEyebrow')}
         title={t('cliTitle')}
-        lede={<Trans t={t} i18nKey="cliLede" components={{ 0: <Cmd />, 1: <strong />, 2: <Cmd /> }} />}
+        lede={<Trans t={t} i18nKey="cliLede" components={[<Cmd />, <strong />, <Cmd />]} />}
         actions={
           <>
             <Button
@@ -302,14 +302,14 @@ openwop --version`}</CommandBlock>
         <p>{t('cliInstallOneOff')}</p>
         <CommandBlock>{`npx -y @openwop/cli@latest --help`}</CommandBlock>
         <p className="muted">
-          <Trans t={t} i18nKey="cliInstallRequires" components={{ 0: <em /> }} />
+          <Trans t={t} i18nKey="cliInstallRequires" components={[<em />]} />
         </p>
       </section>
 
       <section id="point-at-host" className="surface-card u-gap-3">
         <h2>{t('cliPointHeading')}</h2>
         <p>
-          <Trans t={t} i18nKey="cliPointBody" components={{ 0: <Cmd />, 1: <Cmd />, 2: <Cmd /> }} />
+          <Trans t={t} i18nKey="cliPointBody" components={[<Cmd />, <Cmd />, <Cmd />]} />
         </p>
         <CommandBlock>{`export OPENWOP_BASE_URL=https://${brand.primaryDomain}/api
 openwop onboard           # interactive auth + key issuance
@@ -323,49 +323,49 @@ openwop capabilities      # read /.well-known/openwop`}</CommandBlock>
           <Trans
             t={t}
             i18nKey="cliNewCapsBody"
-            components={{
-              0: <Cmd />, 1: <Cmd />, 2: <Cmd />, 3: <Cmd />, 4: <Cmd />, 5: <Cmd />,
-              6: <Cmd />, 7: <Cmd />, 8: <Cmd />, 9: <Cmd />, 10: <Cmd />,
-            }}
+            components={[
+              <Cmd />, <Cmd />, <Cmd />, <Cmd />, <Cmd />, <Cmd />,
+              <Cmd />, <Cmd />, <Cmd />, <Cmd />, <Cmd />,
+            ]}
           />
         </p>
         <div className="card-grid">
           <div className="surface-card u-gap-2">
-            <h3><Trans t={t} i18nKey="cliCardProposalsTitle" components={{ 0: <Cmd /> }} /></h3>
+            <h3><Trans t={t} i18nKey="cliCardProposalsTitle" components={[<Cmd />]} /></h3>
             <p className="muted">
-              <Trans t={t} i18nKey="cliCardProposalsBody" components={{ 0: <strong /> }} />
+              <Trans t={t} i18nKey="cliCardProposalsBody" components={[<strong />]} />
             </p>
             <CommandBlock>{`openwop proposals list --state pending
 openwop proposals apply prop_123`}</CommandBlock>
           </div>
           <div className="surface-card u-gap-2">
-            <h3><Trans t={t} i18nKey="cliCardGoalsTitle" components={{ 0: <Cmd /> }} /></h3>
+            <h3><Trans t={t} i18nKey="cliCardGoalsTitle" components={[<Cmd />]} /></h3>
             <p className="muted">
-              <Trans t={t} i18nKey="cliCardGoalsBody" components={{ 0: <strong />, 1: <strong /> }} />
+              <Trans t={t} i18nKey="cliCardGoalsBody" components={[<strong />, <strong />]} />
             </p>
             <CommandBlock>{`openwop goals create --objective "Keep backlog < 20" \\
   --judge verifier --max-iterations 50`}</CommandBlock>
           </div>
           <div className="surface-card u-gap-2">
-            <h3><Trans t={t} i18nKey="cliCardPortabilityTitle" components={{ 0: <Cmd />, 1: <Cmd /> }} /></h3>
+            <h3><Trans t={t} i18nKey="cliCardPortabilityTitle" components={[<Cmd />, <Cmd />]} /></h3>
             <p className="muted">
-              <Trans t={t} i18nKey="cliCardPortabilityBody" components={{ 0: <strong /> }} />
+              <Trans t={t} i18nKey="cliCardPortabilityBody" components={[<strong />]} />
             </p>
             <CommandBlock>{`openwop export --kinds agent --out estate.json
 openwop import estate.json --dry-run`}</CommandBlock>
           </div>
           <div className="surface-card u-gap-2">
-            <h3><Trans t={t} i18nKey="cliCardTriggersTitle" components={{ 0: <Cmd /> }} /></h3>
+            <h3><Trans t={t} i18nKey="cliCardTriggersTitle" components={[<Cmd />]} /></h3>
             <p className="muted">
-              <Trans t={t} i18nKey="cliCardTriggersBody" components={{ 0: <strong />, 1: <strong /> }} />
+              <Trans t={t} i18nKey="cliCardTriggersBody" components={[<strong />, <strong />]} />
             </p>
             <CommandBlock>{`openwop triggers register --source webhook \\
   --workflow wf.copy.intake.1a2b3c4d --dedup --verification required`}</CommandBlock>
           </div>
           <div className="surface-card u-gap-2">
-            <h3><Trans t={t} i18nKey="cliCardA2aTitle" components={{ 0: <Cmd /> }} /></h3>
+            <h3><Trans t={t} i18nKey="cliCardA2aTitle" components={[<Cmd />]} /></h3>
             <p className="muted">
-              <Trans t={t} i18nKey="cliCardA2aBody" components={{ 0: <Cmd />, 1: <Cmd /> }} />
+              <Trans t={t} i18nKey="cliCardA2aBody" components={[<Cmd />, <Cmd />]} />
             </p>
             <CommandBlock>{`openwop a2a status
 openwop a2a task <taskId>`}</CommandBlock>
@@ -375,7 +375,7 @@ openwop a2a task <taskId>`}</CommandBlock>
           <Trans
             t={t}
             i18nKey="cliNewCapsGated"
-            components={{ 0: <Cmd />, 1: <Cmd />, 2: <Cmd />, 3: <Cmd />, 4: <Cmd />, 5: <Cmd /> }}
+            components={[<Cmd />, <Cmd />, <Cmd />, <Cmd />, <Cmd />, <Cmd />]}
           />
         </p>
       </section>
@@ -393,7 +393,7 @@ openwop a2a task <taskId>`}</CommandBlock>
       <section id="channel-relay" className="surface-card u-gap-3">
         <h2>{t('cliRelayHeading')}</h2>
         <p>
-          <Trans t={t} i18nKey="cliRelayBody" components={{ 0: <Cmd />, 1: <Cmd />, 2: <Cmd /> }} />
+          <Trans t={t} i18nKey="cliRelayBody" components={[<Cmd />, <Cmd />, <Cmd />]} />
         </p>
         <div className="card-grid">
           {ADAPTERS.map((a) => (
@@ -418,11 +418,11 @@ openwop a2a task <taskId>`}</CommandBlock>
           <Trans
             t={t}
             i18nKey="cliSourceBody"
-            components={{
-              0: <a href="https://www.npmjs.com/package/@openwop/cli" />,
-              1: <a href={CLI_REPO} />,
-              2: <strong />,
-            }}
+            components={[
+              <a href="https://www.npmjs.com/package/@openwop/cli" />,
+              <a href={CLI_REPO} />,
+              <strong />,
+            ]}
           />
         </p>
       </section>

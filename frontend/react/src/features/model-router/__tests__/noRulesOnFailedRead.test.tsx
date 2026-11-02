@@ -3,7 +3,8 @@
  *
  * `rules` is `useState<RoutingRule[]>([])` — NOT nullable — so a failed
  * `getRouterConfig` left it `[]` and the page rendered
- * "No rules — every turn uses the fallback target." That is a claim about LIVE
+ * "No rules — every turn uses the fallback target." (ADR 1016 reworded it to
+ * "every message uses its conversation's own model".) That is a claim about LIVE
  * ROUTING BEHAVIOUR made from a read that never arrived, and it contradicted the
  * `loadFailed` warning sitting two lines above it.
  *
@@ -16,27 +17,26 @@
  * Both polarities, because asserting only the ABSENCE of a sentence is vacuous —
  * a page that rendered nothing would satisfy it.
  *
- * Breaks if a failed read renders "No rules — every turn uses the fallback
- * target", leaves the Rules section blank, or if a SUCCESSFUL zero-rule read
+ * Breaks if a failed read renders the zero-rule sentence, leaves the Rules section blank, or if a SUCCESSFUL zero-rule read
  * loses the (then true) sentence.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act } from '@testing-library/react';
 import type { StoredRouterConfig } from '../modelRouterClient.js';
 
-const { getRouterConfig, setRouterConfig, listOrgs } = vi.hoisted(() => ({
-  getRouterConfig: vi.fn(), setRouterConfig: vi.fn(), listOrgs: vi.fn(),
+const { getRouterConfig, setRouterConfig } = vi.hoisted(() => ({
+  getRouterConfig: vi.fn(), setRouterConfig: vi.fn(),
 }));
 vi.mock('../modelRouterClient.js', async (orig) => ({
   ...(await orig<typeof import('../modelRouterClient.js')>()),
-  getRouterConfig, setRouterConfig, listOrgs,
+  getRouterConfig, setRouterConfig,
 }));
 
 import { ModelRouterPage } from '../ModelRouterPage.js';
 
 const NO_RULES: StoredRouterConfig = {
   enabled: true,
-  config: { rules: [], fallback: { provider: 'openai', model: 'gpt-4o' } },
+  config: { rules: [], fallback: { provider: 'openai', model: 'gpt-5.5' } },
 };
 
 /** Render and wait until the config read was issued and settled (not one fixed
@@ -44,16 +44,18 @@ const NO_RULES: StoredRouterConfig = {
  *  arrived before trusting that line). */
 const mount = async (): Promise<void> => {
   render(<ModelRouterPage />);
-  await vi.waitFor(() => expect(getRouterConfig).toHaveBeenCalledWith('o1'));
+  await vi.waitFor(() => expect(getRouterConfig).toHaveBeenCalled());
   await act(async () => {});
 };
 
-const NO_RULES_LINE = /every turn uses the fallback target/i;
+// ADR 1016 — the zero-rule claim now names what happens with no rules: every
+// message keeps its conversation's own model (the fallback only catches messages
+// that rules exist to judge).
+const NO_RULES_LINE = /No rules yet\. Until you add one, every message uses its conversation.s own model/i;
 
 afterEach(cleanup);
 beforeEach(() => {
   vi.clearAllMocks();
-  listOrgs.mockResolvedValue([{ orgId: 'o1', name: 'Acme' }]);
   setRouterConfig.mockResolvedValue(NO_RULES);
 });
 
@@ -69,7 +71,7 @@ describe('MR-R2-1 — "no rules" is a claim, and a failed read may not make it',
   });
 
   it('read SUCCEEDS with zero rules: the claim is TRUE and survives (other polarity)', async () => {
-    getRouterConfig.mockResolvedValue(NO_RULES);
+    getRouterConfig.mockResolvedValue({ stored: NO_RULES, canManage: true });
     await mount();
 
     // The "not configured" chip goes away only once a non-null read LANDS, so this

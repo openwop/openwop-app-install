@@ -18,6 +18,8 @@ export interface WorkspaceSummary {
   roles: string[];
   kind: 'personal' | 'shared';
   active: boolean;
+  /** ADR 0975 D12 — a feature-declared default workspace's chat agent (new chats open on it). */
+  chatAgent?: string;
 }
 
 export interface MyWorkspaces {

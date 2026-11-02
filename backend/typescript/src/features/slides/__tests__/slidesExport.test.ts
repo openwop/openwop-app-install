@@ -3,8 +3,17 @@
  * FILE CONTENT (unzipped pptx XML / pdf structure), not just that a function
  * returned — the seam lesson: an export that produces garbage passes any
  * button-level test.
+ *
+ * Expected colours are pinned as LITERALS, not read from SLIDE_THEMES, so a palette
+ * sabotage cannot move the expectation with it. The PDF is asserted structurally only
+ * (page count): pdfkit compresses its content streams, so the PDF case claims one page
+ * per blocks slide and nothing about its text.
+ * Sabotage that turns it red (w74 probes): dropping notes, bullets, the linked-image
+ * placeholder, the slide background or the accent swap; one PDF page for the deck; a
+ * theme or layout missing from the shared module; an asset token that accepts '..';
+ * a non-hex brand channel; the chart placeholder, statCard value or blocks notes.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import JSZip from 'jszip';
 import { renderDeckToPptx, renderDeckToPdf } from '../export/slidesExport.js';
 import { SLIDE_THEMES, assetTokenFromUrl, SLIDE_GEOMETRY } from '../export/slideGeometry.js';
@@ -37,14 +46,18 @@ describe('pptx export — content-level assertions', () => {
     expect(slide2).toContain('Revenue up 12%');
     expect(slide2).toContain('Churn down 0.4pts');
     // Speaker notes land as a REAL notes slide (the headline honesty fix).
-    const notesFiles = Object.keys(zip.files).filter((f) => /^ppt\/notesSlides\/notesSlide\d+\.xml$/.test(f));
-    expect(notesFiles.length).toBeGreaterThan(0);
-    const notes1 = await zip.file(notesFiles[0]!)!.async('string');
+    // Read slide 1's notes part BY NAME (zip key order is not a contract).
+    const notes1 = await zip.file('ppt/notesSlides/notesSlide1.xml')!.async('string');
     expect(notes1).toContain('Welcome everyone to the review.');
   });
 
   it('external image URLs are NEVER fetched — a linked-image placeholder renders instead (SSRF posture)', async () => {
-    const buf = await renderDeckToPptx(deck);
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    let buf: Buffer;
+    try {
+      buf = await renderDeckToPptx(deck);
+      expect(fetchSpy).not.toHaveBeenCalled(); // never fetched — not even attempted
+    } finally { fetchSpy.mockRestore(); }
     const zip = await JSZip.loadAsync(buf);
     const slide5 = await zip.file('ppt/slides/slide5.xml')!.async('string');
     expect(slide5).toContain('Linked image');
@@ -57,7 +70,7 @@ describe('pptx export — content-level assertions', () => {
     const buf = await renderDeckToPptx({ ...deck, theme: 'vibrant' });
     const zip = await JSZip.loadAsync(buf);
     const slide1 = await zip.file('ppt/slides/slide1.xml')!.async('string');
-    expect(slide1).toContain(SLIDE_THEMES['vibrant']!.bg); // 0F0A2E
+    expect(slide1).toContain('0F0A2E'); // the vibrant theme's background
   });
 });
 
@@ -95,21 +108,21 @@ describe('the shared geometry/theme module (the anti-drift source)', () => {
 // ── ADR 0328 Phase 2 — brand theme + the per-slide background accent. ──
 describe('phase 2 — brand palette + background accent', () => {
   it('brandPalette overlays ONLY hex-valid channels onto the default palette', async () => {
-    const { brandPalette, SLIDE_THEMES } = await import('../export/slideGeometry.js');
+    const { brandPalette } = await import('../export/slideGeometry.js');
     const p = brandPalette({ accent: '#AB12CD', paper: 'oklch(0.9 0.1 200)', ink: '#000000' });
     expect(p.accent).toBe('AB12CD');
     expect(p.ink).toBe('000000');
-    expect(p.bg).toBe(SLIDE_THEMES['default']!.bg); // non-hex paper falls back
+    expect(p.bg).toBe('FFFFFF'); // non-hex paper falls back to the default bg
   });
 
   it('an accent-background slide swaps bg/ink in the pptx', async () => {
     const buf = await renderDeckToPptx({
       title: 'D', theme: 'default',
-      slides: [{ layout: 'section', title: 'Big statement', background: 'accent' } as never],
+      slides: [{ layout: 'section', title: 'Big statement', background: 'accent' }],
     });
     const zip = await JSZip.loadAsync(buf);
     const xml = await zip.file('ppt/slides/slide1.xml')!.async('string');
-    expect(xml).toContain(SLIDE_THEMES['default']!.accent); // accent as the slide bg
+    expect(xml).toContain('2563EB'); // the default accent, as the slide bg
   });
 });
 
@@ -129,7 +142,7 @@ describe('phase 3 — blocks slides in both exporters', () => {
         { type: 'chart', props: { spec: JSON.stringify({ title: 'ARR by region', chartType: 'bar' }) } },
         { type: 'image', props: { src: 'https://example.com/x.png' } },
       ],
-    } as never],
+    }],
   };
 
   it('pptx renders block text, bullets, the statCard, the honest chart placeholder, and notes', async () => {
@@ -148,7 +161,7 @@ describe('phase 3 — blocks slides in both exporters', () => {
     expect(await zip.file(notesFiles[0]!)!.async('string')).toContain('Blocks speaker notes.');
   });
 
-  it('pdf renders a blocks slide as a page with its text content', async () => {
+  it('pdf renders a blocks slide as exactly one page', async () => {
     const buf = await renderDeckToPdf(blocksDeck);
     expect(buf.subarray(0, 5).toString()).toBe('%PDF-');
     const pageCount = (buf.toString('latin1').match(/\/Type\s*\/Page[^s]/g) ?? []).length;

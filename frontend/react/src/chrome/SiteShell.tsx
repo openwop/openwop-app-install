@@ -29,6 +29,7 @@ import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { Link, NavLink, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { ConfirmRoot } from '../ui/confirm.js';
+import { ReauthRoot } from '../auth/ReauthRoot.js';
 import { Toaster } from '../ui/toast.js';
 import { GlobalLiveRegion } from '../ui/announce.js';
 import { ErrorBoundary } from '../ui/ErrorBoundary.js';
@@ -246,6 +247,7 @@ export function SiteShell({ children }: { children: ReactNode }): JSX.Element {
       <GlobalLiveRegion />
       <Toaster />
       <ConfirmRoot />
+      <ReauthRoot />
     </div>
   );
 }

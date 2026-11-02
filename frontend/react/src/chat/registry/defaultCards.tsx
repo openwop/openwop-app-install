@@ -7,12 +7,14 @@
  */
 
 import { Button } from '../../ui/Button.js';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { resolveByRun } from '../../client/interruptsClient.js';
 import { registerCard } from './CardRegistry.js';
 import type { CardProps } from './types.js';
 import { ConnectionRequiredCard } from '../cards/ConnectionRequiredCard.js';
+import { ClarificationQuestions } from '../../interrupts/ClarificationQuestions.js';
+import { CLARIFICATION_SKIP, buildClarificationAnswers, parseAgentClarification, type AgentClarification, type ClarifyValues } from '../../interrupts/clarificationModel.js';
 import { TextField, TextareaField } from '../../ui/Field.js';
 import { GateEvidence, hasGateEvidence, isBrowserActionGate } from '../reviews/GateEvidence.js';
 import { Notice } from '../../ui/index.js';
@@ -274,7 +276,43 @@ function ClarificationCard(props: CardProps): JSX.Element {
   if (profile === 'openwop-connection') {
     return <ConnectionRequiredCard {...props} />;
   }
+  // ADR 1001 D8 — an agent's multi-question ask renders the shared field group.
+  const ask = parseAgentClarification((props.payload as InterruptPayload).data);
+  if (ask) return <AgentClarificationCard {...props} ask={ask} />;
   return <FreeTextClarificationCard {...props} />;
+}
+
+function AgentClarificationCard(props: CardProps & { ask: AgentClarification }): JSX.Element {
+  const { ask, onAction, isLoading, context, autoFocus } = props;
+  const { t } = useTranslation('chat');
+  const [values, setValues] = useState<ClarifyValues>({});
+  const firstRef = useRef<HTMLTextAreaElement | HTMLInputElement>(null);
+  const skipHelpId = useId();
+  useEffect(() => { if (autoFocus !== false) firstRef.current?.focus(); }, [autoFocus]);
+  const answers = buildClarificationAnswers(ask.questions, values);
+  return (
+    <div className="card u-bg-surface-2">
+      <GateEyebrow name={context?.nodeName} />
+      <h3 className="u-mbox-b2 u-fs-13">{ask.askedBy ? t('interrupts:clarifyAgentNeedsAnswer', { name: ask.askedBy }) : t('interrupts:clarifyNeedsAnswer')}</h3>
+      <p className="u-mbox-b2 u-fs-12 muted">{t('interrupts:clarifySafety')}</p>
+      <ClarificationQuestions
+        questions={ask.questions}
+        values={values}
+        disabled={isLoading}
+        firstFieldRef={firstRef}
+        onChange={(id, v) => setValues((s) => ({ ...s, [id]: v }))}
+      />
+      <div className="button-row">
+        <Button variant="primary" disabled={isLoading || !answers} onClick={() => { if (answers) onAction('resolve', answers); }}>
+          {t('interrupts:submitAnswer')}
+        </Button>
+        <Button variant="secondary" disabled={isLoading} aria-describedby={skipHelpId} onClick={() => onAction('resolve', CLARIFICATION_SKIP)}>
+          {t('interrupts:clarifySkip')}
+        </Button>
+      </div>
+      <p id={skipHelpId} className="u-fs-12 muted">{t('interrupts:clarifySkipHelp')}</p>
+    </div>
+  );
 }
 
 function FreeTextClarificationCard(props: CardProps): JSX.Element {

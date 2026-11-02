@@ -25,7 +25,7 @@ export const messages = {
   cardDirections: "{{count}} direction(s)",
   open: 'Open',
   emptyTitle: 'No creative briefs yet',
-  emptyBody: 'Create your first visual brief, or generate them from a campaign (the creative-briefs channel).',
+  emptyBody: 'Create your first visual brief, or generate them from a campaign (the creative-briefs channel). Generated briefs appear here after you approve the draft in chat.',
   status_draft: 'draft',
   status_review: 'in review',
   status_approved: 'approved',

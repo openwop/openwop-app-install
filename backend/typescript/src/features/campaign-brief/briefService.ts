@@ -216,6 +216,55 @@ export async function listBriefs(tenantId: string, orgId?: string): Promise<Camp
   return all.filter((b) => !orgId || b.orgId === orgId).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
+/** ADR 1020 (CB-KERNEL-1) — the kernel write is CLOSED-WORLD: a kernel reaches
+ *  the brief only with non-empty headline, supporting statement, primary CTA and
+ *  tone, at least one proof point, and bounded strings. Anything else is a typed
+ *  422 and the stored brief is untouched (it used to persist `args.kernel as
+ *  MessagingKernel` with no check). Returns the kernel rebuilt from known fields. */
+export function cleanKernel(raw: unknown): MessagingKernel {
+  const k = (raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}) as Record<string, unknown>;
+  const text = (v: unknown, max: number): string => (typeof v === 'string' ? v.trim().slice(0, max) : '');
+  const list = (v: unknown, max: number): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && x.trim().length > 0).map((x) => x.trim().slice(0, max)) : []);
+  const kernel: MessagingKernel = {
+    headline: text(k.headline, KERNEL_TEXT_MAX),
+    supportingStatement: text(k.supportingStatement, KERNEL_TEXT_MAX),
+    proofPoints: list(k.proofPoints, KERNEL_TEXT_MAX).slice(0, 20),
+    primaryCta: text(k.primaryCta, KERNEL_TEXT_MAX),
+    secondaryCta: text(k.secondaryCta, KERNEL_TEXT_MAX),
+    tone: text(k.tone, KERNEL_TEXT_MAX),
+    channelTones: k.channelTones && typeof k.channelTones === 'object' && !Array.isArray(k.channelTones)
+      ? Object.fromEntries(Object.entries(k.channelTones as Record<string, unknown>).filter(([, v]) => typeof v === 'string').map(([c, v]) => [c, (v as string).slice(0, KERNEL_TEXT_MAX)]))
+      : {},
+    sourceDocIds: list(k.sourceDocIds, NAME_MAX).slice(0, 50),
+    generatedAt: typeof k.generatedAt === 'string' && k.generatedAt ? k.generatedAt : new Date().toISOString(),
+  };
+  const missing = (['headline', 'supportingStatement', 'primaryCta', 'tone'] as const).filter((f) => !kernel[f]);
+  if (missing.length > 0 || kernel.proofPoints.length === 0) {
+    const all = [...missing, ...(kernel.proofPoints.length === 0 ? ['proofPoints' as const] : [])];
+    throw new OpenwopError('validation_error', `A messaging kernel needs a headline, a supporting statement, a primary call to action, a tone and at least one proof point. Missing: ${all.map((f) => KERNEL_FIELD_LABEL[f]).join(', ')}.`, 422, { reason: 'kernel_invalid', missing: all });
+  }
+  return kernel;
+}
+const KERNEL_TEXT_MAX = 2000;
+const KERNEL_FIELD_LABEL = { headline: 'headline', supportingStatement: 'supporting statement', primaryCta: 'primary call to action', tone: 'tone', proofPoints: 'proof points' } as const;
+
+/** ADR 1020 D8 — record that a generated kernel is waiting for approval in `runId`
+ *  (bookkeeping only; the kernel is not written). A compare-and-swap; a lost race
+ *  re-reads. Returns false when the brief is gone. */
+export async function markKernelReview(tenantId: string, briefId: string, runId: string): Promise<boolean> {
+  for (let attempt = 0; attempt < BRIEF_CAS_ATTEMPTS; attempt++) {
+    const existing = await getBrief(tenantId, briefId);
+    if (!existing) return false;
+    if (existing.kernelReview?.runId === runId) return true;
+    const next: CampaignBrief = { ...existing, kernelReview: { runId, requestedAt: new Date().toISOString() } };
+    if (await briefs.compareAndSwap(existing, next)) return true;
+  }
+  return false;
+}
+
+/** ADR 1020 D11 — bounded re-reads on a lost compare-and-swap before a typed 409. */
+const BRIEF_CAS_ATTEMPTS = 5;
+
 export async function getBrief(tenantId: string, briefId: string): Promise<CampaignBrief | null> {
   const b = await briefs.get(tenantKey(tenantId, briefId));
   return b && b.tenantId === tenantId ? b : null;
@@ -295,8 +344,20 @@ function parseCompetitors(v: unknown): string[] | undefined {
 const PROTECTED_CONTENT_FIELDS = ['name', 'objective', 'brandId', 'personaIds', 'kbCollectionId', 'productName', 'productDescription', 'industryVertical', 'channels', 'messaging', 'budget'] as const;
 
 export async function updateBrief(tenantId: string, briefId: string, input: BriefInput, actor = 'system'): Promise<CampaignBrief | null> {
-  const existing = await getBrief(tenantId, briefId);
-  if (!existing) return null;
+  // ADR 1020 D11 (CS70WF-15) — a compare-and-swap, re-read on a lost race. The
+  // plain get-then-put this replaces could drop a concurrent kernel promotion
+  // (or be dropped by it) without either writer knowing.
+  for (let attempt = 0; attempt < BRIEF_CAS_ATTEMPTS; attempt++) {
+    const existing = await getBrief(tenantId, briefId);
+    if (!existing) return null;
+    const out = await tryUpdateBrief(existing, input, actor);
+    if (out) return out;
+  }
+  throw new OpenwopError('conflict', 'The brief was changed by someone else at the same time. Try again.', 409, { reason: 'brief_write_conflict', briefId });
+}
+
+/** One CAS attempt of `updateBrief`; `null` when another writer won the race. */
+async function tryUpdateBrief(existing: CampaignBrief, input: BriefInput, actor: string): Promise<CampaignBrief | null> {
   const next: CampaignBrief = {
     ...existing,
     name: input.name !== undefined ? cleanString(input.name, NAME_MAX) || existing.name : existing.name,
@@ -330,11 +391,13 @@ export async function updateBrief(tenantId: string, briefId: string, input: Brie
     next.status = 'draft';
     demoted = true;
   }
-  if (contentChanged) {
-    await snapshotBrief(existing, actor); // pin the pre-edit revision
-    next.version = (existing.version ?? 1) + 1;
-  }
-  await briefs.put(next);
+  if (contentChanged) next.version = (existing.version ?? 1) + 1;
+  if (!(await briefs.compareAndSwap(existing, next))) return null;
+  // Pin the pre-edit revision AFTER the swap: a lost race retries, and must not
+  // leave a snapshot of a revision that never got edited. If the snapshot itself
+  // fails (it swallows its errors) the edit stands without its pinned revision —
+  // the lesser loss, and the same posture the snapshot had before.
+  if (contentChanged) await snapshotBrief(existing, actor);
   // Audit/event bookkeeping. A status RAISE to validated/confirmed fires
   // independently of the content branch (grade-code AUDIT-11): a draft set to
   // confirmed in the SAME patch as a content edit used to fall through to
@@ -371,6 +434,7 @@ export async function duplicateBrief(tenantId: string, briefId: string, actor: s
     updatedAt: now,
   };
   delete copy.kernel;
+  delete copy.kernelReview; // the source's pending kernel run is not the copy's
   await briefs.put(copy);
   recordBriefAction('created', copy, actor, { duplicatedFrom: src.id });
   return copy;
@@ -401,14 +465,40 @@ export async function deleteBrief(tenantId: string, briefId: string, actor = 'sy
  *  promotion is now gated on the brief actually validating; an invalid brief
  *  keeps its status (the kernel still saves — it is reviewable content, and the
  *  approval gate + finalize remain the human acts). */
-export async function setKernel(tenantId: string, briefId: string, kernel: MessagingKernel, actor = 'system'): Promise<CampaignBrief | null> {
-  const existing = await getBrief(tenantId, briefId);
-  if (!existing) return null;
-  const validates = validateBrief(existing).valid;
-  const next: CampaignBrief = { ...existing, kernel, kernelStale: false, ...(validates ? { status: 'validated' as const } : {}), updatedAt: new Date().toISOString() };
-  await briefs.put(next);
-  recordBriefAction(validates ? 'validated' : 'kernel_saved', next, actor, { kernelGeneratedAt: kernel.generatedAt });
-  return next;
+export async function setKernel(
+  tenantId: string,
+  briefId: string,
+  kernel: MessagingKernel,
+  actor = 'system',
+  opts: { expectedVersion?: number; expectedPriorKernelAt?: string | null } = {},
+): Promise<CampaignBrief | null> {
+  // ADR 1020 D11 (CS70WF-15) — a compare-and-swap, and, from the workflow lane,
+  // a precondition on the brief revision the kernel was generated FROM. An edit
+  // made while the model was writing used to be stamped `kernelStale:false` on a
+  // kernel built from the pre-edit content. A row written before versioning
+  // reads as version 1, exactly as `updateBrief` counts it.
+  for (let attempt = 0; attempt < BRIEF_CAS_ATTEMPTS; attempt++) {
+    const existing = await getBrief(tenantId, briefId);
+    if (!existing) return null;
+    if (opts.expectedVersion !== undefined && (existing.version ?? 1) !== opts.expectedVersion) {
+      throw new OpenwopError('conflict', 'The brief changed after this messaging kernel was generated (it was edited, or another kernel was approved), so this kernel no longer matches it. Generate the kernel again.', 409, { reason: 'brief_changed', briefId, expectedVersion: opts.expectedVersion, version: existing.version ?? 1 });
+    }
+    // ADR 1020 (grade-code M3) — and on the kernel it would REPLACE: two kernels
+    // generated from the same revision cannot both be approved; the second one
+    // refuses instead of silently replacing the first. Keyed on the stored
+    // kernel's `generatedAt` (null = none), not the content revision, so the
+    // brief's version history keeps meaning "a content edit".
+    if (opts.expectedPriorKernelAt !== undefined && (existing.kernel?.generatedAt ?? null) !== opts.expectedPriorKernelAt) {
+      throw new OpenwopError('conflict', 'The brief changed after this messaging kernel was generated (it was edited, or another kernel was approved), so this kernel no longer matches it. Generate the kernel again.', 409, { reason: 'brief_changed', briefId });
+    }
+    const validates = validateBrief(existing).valid;
+    const next: CampaignBrief = { ...existing, kernel: cleanKernel(kernel), kernelStale: false, ...(validates ? { status: 'validated' as const } : {}), updatedAt: new Date().toISOString() };
+    delete next.kernelReview;
+    if (!(await briefs.compareAndSwap(existing, next))) continue;
+    recordBriefAction(validates ? 'validated' : 'kernel_saved', next, actor, { kernelGeneratedAt: kernel.generatedAt });
+    return next;
+  }
+  throw new OpenwopError('conflict', 'The brief was changed by someone else at the same time. Try again.', 409, { reason: 'brief_write_conflict', briefId });
 }
 
 /** Validate brief completeness + compute the enabled channel set. Pure. */

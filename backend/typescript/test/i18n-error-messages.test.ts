@@ -2,6 +2,9 @@
  * Localized error envelopes (ADR 0143) — unit tests for the pure projector
  * `localizeErrorEnvelope`. The route-level wiring (Accept-Language → middleware
  * → Content-Language) is covered separately in i18n-error-envelope.test.ts.
+ *
+ * Tracker TST-DFE-2. Red when (w71g1, witnessed): existing details are dropped when
+ * `locale` is merged; a no-op returns a copy instead of the same envelope.
  */
 
 import { describe, it, expect } from 'vitest';

@@ -38,6 +38,10 @@
  *
  * @see spec/v1/rest-endpoints.md §"Error response shape"
  * @see src/middleware/errorEnvelope.ts (`sendError`, the ONE emitter)
+ *
+ * Tracker TST-DCC-2. Red when a nested envelope emit appears under src/, when the
+ * health route's exempt marker is removed, or when a second `function sendError(`
+ * appears (grade-tests w70 probes `fer-*`).
  */
 
 import { describe, expect, it } from 'vitest';
@@ -292,7 +296,8 @@ describe('H27 ratchet — no route re-grows the nested error envelope', () => {
     // gap permanently.
     const files = walk(SRC);
     // Non-vacuity: the scan must actually have source to read.
-    expect(files.length).toBeGreaterThan(400);
+    // Liveness floor, not a baseline: MEASURED 2254 non-test .ts files on 2026-10-30.
+    expect(files.length).toBeGreaterThan(2140);
 
     const hits: NestedEmit[] = [];
     for (const f of files) {
@@ -323,7 +328,8 @@ describe('H27 ratchet — no route re-grows the nested error envelope', () => {
 
   it('no flat error body omits `message` or carries a key outside {error,message,details}', () => {
     const files = walk(SRC);
-    expect(files.length).toBeGreaterThan(400);
+    // Liveness floor, not a baseline: MEASURED 2254 non-test .ts files on 2026-10-30.
+    expect(files.length).toBeGreaterThan(2140);
     const hits: ShapeViolation[] = [];
     for (const f of files) {
       hits.push(...findShapeViolations(readFileSync(f, 'utf8'), f.slice(SRC.length + 1)));

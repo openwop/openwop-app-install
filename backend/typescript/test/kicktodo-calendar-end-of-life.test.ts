@@ -22,6 +22,10 @@
  *    in `deleteEnrollmentRow` / calendarSyncService → the job assertions red;
  *  - drop `ownerSubject` from the delete event → the DSAR case leaves the event
  *    (the transport cannot be reached without the owner).
+ *
+ * TST-DJD-1 (grade-tests wave 71): the two failed-remove cases also count the
+ * transport's `remove` calls, so they are red when the remove is never ATTEMPTED
+ * (e.g. the abandon/delete signal is dropped), not only when the ledger rule breaks.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -50,10 +54,11 @@ let enrollmentId = '';
 let goalId = '';
 let events: Map<string, unknown>;
 let failRemove = false;
+let removeCalls = 0;
 
 const transport = (): CalendarTransport => ({
   upsert: async (id, ev) => { events.set(id, ev); },
-  remove: async (id) => { if (failRemove) throw new Error('calendar down'); events.delete(id); },
+  remove: async (id) => { removeCalls += 1; if (failRemove) throw new Error('calendar down'); events.delete(id); },
 });
 
 beforeEach(async () => {
@@ -79,6 +84,7 @@ beforeEach(async () => {
   await syncEnrollmentCalendar(T, OWNER, enrollmentId);
   await setSchedulePreference(T, enrollmentId, OWNER, 'morning');
   await setCalendarSyncEnabled(T, enrollmentId, OWNER, true);
+  removeCalls = 0; // count only what the case under test does
 });
 afterEach(() => {
   __clearCalendarTransport();
@@ -107,6 +113,7 @@ describe('KTINT-1 — written calendar events are removed when the enrollment en
   it('a failed remove on abandon KEEPS the ledger row so a later call can retry', async () => {
     failRemove = true;
     await abandonEnrollment(T, enrollmentId, OWNER);
+    expect(removeCalls, 'abandon must try the remove').toBe(1);
     expect(events.size).toBe(1);
     expect(await ledgerRows()).toHaveLength(1);
   });
@@ -136,6 +143,8 @@ describe('KTINT-1 — written calendar events are removed when the enrollment en
   it('a failed remove on DSAR still drops the ledger row (nothing could ever retry it)', async () => {
     failRemove = true;
     await eraseSubjectEnrollments(T, OWNER);
-    expect(await ledgerRows()).toEqual([]);
+    expect(removeCalls, 'the DSAR must try the remove').toBe(1);
+    expect(events.size).toBe(1); // the remove failed, so the event is still there…
+    expect(await ledgerRows()).toEqual([]); // …and the ledger row is dropped regardless
   });
 });

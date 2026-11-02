@@ -93,7 +93,7 @@ describe('ADR 0942 — a fork inside a spend wait is resumed by the decision', (
       metadata: { campaignOrchestration: stampCampaignRun(campaign, { role: 'optimizer' }), actingUserId: 'u-requester' },
       configurable: {}, createdAt: now, updatedAt: now,
     };
-    await insertRunWithStartContext(storage, src);
+    await insertRunWithStartContext(storage, src, { admission: { plan: 'exempt:test-fixture' } });
     expect((await executeRun(storage, (await storage.getRun(src.runId)) ?? src, def)).status).toBe('waiting-external');
     const [open] = await storage.listOpenInterrupts(src.runId);
     const approvalId = (open?.data as { approvalId?: string } | undefined)?.approvalId;

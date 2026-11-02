@@ -54,11 +54,16 @@ import { getSuspendManager, setSuspendBackend } from '../src/executor/suspendMan
 import { timeoutApprovalGateIfDue } from '../src/executor/approvalGateTimeout.js';
 import { sweepDueTimers } from '../src/executor/timerResume.js';
 import type { Storage } from '../src/storage/storage.js';
-import type { AiProviderPolicy, ProviderPolicyResolver } from '../src/host/index.js';
+import { createHostAdapterSuite, type AiProviderPolicy, type ProviderPolicyResolver } from '../src/host/index.js';
+import type { McpSemanticDeps } from '../src/host/mcpSemantics.js';
 
 let server: http.Server;
 let BASE: string;
 let storage: Storage;
+const savedEnv = {
+  dsn: process.env.OPENWOP_STORAGE_DSN,
+  cookies: process.env.OPENWOP_AUTH_DISABLE_COOKIES,
+};
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -83,6 +88,8 @@ beforeAll(async () => {
 
 afterAll(async () => {
   delete process.env.OPENWOP_A2A_SERVER_ENABLED;
+  if (savedEnv.dsn === undefined) delete process.env.OPENWOP_STORAGE_DSN; else process.env.OPENWOP_STORAGE_DSN = savedEnv.dsn;
+  if (savedEnv.cookies === undefined) delete process.env.OPENWOP_AUTH_DISABLE_COOKIES; else process.env.OPENWOP_AUTH_DISABLE_COOKIES = savedEnv.cookies;
   await new Promise<void>((res) => server.close(() => res()));
 });
 
@@ -241,9 +248,10 @@ describe('ADR 0556 P1 — the REAL unwind drives the compensation metrics', () =
     // unwind ended without emitting it, an operator would see an obligation
     // that started and never resolved — indistinguishable from a hung process.
     const states = attrsOf('openwop.compensation.resolved').map((a) => a.state);
-    expect(states).toContain('started');
-    expect(states).toContain('failed');
-    expect(states).not.toContain('completed');
+    // Exactly one started→failed pair: the retries happen INSIDE the started
+    // attempt (no per-retry transition), and it ends at `failed`, never
+    // `completed`. Measured, then pinned (grade-tests w72).
+    expect(states).toEqual(['started', 'failed']);
   });
 
   it('an UNRESOLVABLE inverse reaches `manual_intervention_required` — the state SLO C1 alerts on', async () => {
@@ -378,25 +386,33 @@ describe('ADR 0556 P1 — A2A request outcomes and version negotiation', () => {
 });
 
 describe('ADR 0556 P1 — MCP request outcomes', () => {
-  const deps = { principal: null, storage: undefined } as unknown as Parameters<typeof mcpDispatch>[1];
+  // Production-shaped deps, typed against the router's own contract. The three
+  // methods driven here (ping, an unserved method, initialize) never reach the
+  // storage/suite/caller, but a cast to the deps type would hide a shape drift.
+  const deps = (): McpSemanticDeps => ({
+    storage,
+    hostSuite: createHostAdapterSuite({ storage }),
+    principal: { principalId: 'metrics-probe', tenants: ['default'], token: 'dev-token' },
+    caller: { principal: undefined, tenantId: 'default', workspaceLaunch: false, async resolveLaunch() { return null; } },
+  });
 
   it('counts an inbound served method', async () => {
-    await mcpDispatch({ jsonrpc: '2.0', id: 1, method: 'ping' }, deps);
+    await mcpDispatch({ jsonrpc: '2.0', id: 1, method: 'ping' }, deps());
     expect(attrsOf('openwop.mcp.request')).toEqual([
       { direction: 'inbound', method: 'ping', outcome: 'ok' },
     ]);
   });
 
   it('folds an unserved method onto `unknown` and reports method_not_found', async () => {
-    await mcpDispatch({ jsonrpc: '2.0', id: 1, method: 'tools/../../call' }, deps);
+    await mcpDispatch({ jsonrpc: '2.0', id: 1, method: 'tools/../../call' }, deps());
     expect(attrsOf('openwop.mcp.request')).toEqual([
       { direction: 'inbound', method: 'unknown', outcome: 'method_not_found' },
     ]);
   });
 
   it('records the initialize version disposition, mismatch separately from served', async () => {
-    await mcpDispatch({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }, deps);
-    await mcpDispatch({ jsonrpc: '2.0', id: 2, method: 'initialize', params: { protocolVersion: '2024-11-05' } }, deps);
+    await mcpDispatch({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }, deps());
+    await mcpDispatch({ jsonrpc: '2.0', id: 2, method: 'initialize', params: { protocolVersion: '2024-11-05' } }, deps());
     // `initialize` exists only on the legacy revision, so a peer that reaches it
     // is served legacy by construction — the population the 2027-08-12
     // retirement needs counted. A mismatch serves nothing.
@@ -480,15 +496,10 @@ describe('ADR 0556 P1 — model-provider calls', () => {
   });
 
   it('counts a successful call by provider', async () => {
-    vi.stubGlobal('fetch', () => Promise.resolve({
-      ok: true,
-      status: 200,
-      json: () => Promise.resolve({
-        choices: [{ message: { content: 'hi', tool_calls: [] }, finish_reason: 'stop' }],
-        usage: { prompt_tokens: 1, completion_tokens: 1 },
-      }),
-      text: () => Promise.resolve(''),
-    } as Response));
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response(JSON.stringify({
+      choices: [{ message: { content: 'hi', tool_calls: [] }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 1, completion_tokens: 1 },
+    }), { status: 200, headers: { 'content-type': 'application/json' } })));
     try { await toolCall(); } finally { vi.unstubAllGlobals(); }
 
     expect(attrsOf('openwop.provider.call')).toEqual([{ provider: 'openai', outcome: 'ok' }]);
@@ -496,12 +507,7 @@ describe('ADR 0556 P1 — model-provider calls', () => {
 
   it('maps an upstream 404 to the CANONICAL code, never the provider body', async () => {
     const leak = 'no such model for key sk-live-CUSTOMER-SECRET on org acme';
-    vi.stubGlobal('fetch', () => Promise.resolve({
-      ok: false,
-      status: 404,
-      json: () => Promise.resolve({}),
-      text: () => Promise.resolve(leak),
-    } as Response));
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response(leak, { status: 404 })));
     try {
       await expect(toolCall()).rejects.toMatchObject({ code: 'model_not_supported' });
     } finally { vi.unstubAllGlobals(); }

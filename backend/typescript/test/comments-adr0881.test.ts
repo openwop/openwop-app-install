@@ -13,6 +13,13 @@
  *  D8  host events for an org-visible target, none for a restricted one.
  *  D9  model-facing prose names every resource type (generated or pinned).
  *  D10 erasure strips a subject from other rows' mentions.
+ *
+ * TST-CFD-1. Red when: the member check on mentions is dropped; a mention is
+ * notified without resolving the target for that person; a reply stops notifying
+ * the thread; a re-resolve re-stamps; an edit re-notifies existing mentions; a
+ * restricted target emits host events; an archived channel accepts a comment or an
+ * edit; erasure leaves the subject in mentions or resolvedBy; editedAt or
+ * resolvedBy stops being stamped.
  */
 
 import http from 'node:http';
@@ -35,6 +42,9 @@ import type { NotificationRecord } from '../src/types.js';
 import { RESOURCE_TYPES, __targetFeatureIds, deleteSubjectComments, getComment, type Comment } from '../src/features/comments/commentsService.js';
 import { registerCommentsAgentTools, COMMENTS_LIST_TOOL_ID, COMMENTS_POST_TOOL_ID } from '../src/features/comments/agentTools.js';
 import { builtinAgentTool } from '../src/host/agentToolProvider.js';
+import type { ConversationMeta } from '../src/host/conversationStore.js';
+
+const ARCHIVED = 'This channel is archived, so its threads are read-only.';
 
 let BASE: string;
 let server: http.Server;
@@ -59,8 +69,10 @@ function client() {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     const h = res.headers as { getSetCookie?: () => string[] };
     for (const c of (typeof h.getSetCookie === 'function' ? h.getSetCookie() : [])) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    const out: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out as T };
+    // Each call site names the shape it reads (`post<Posted>`, `get<ErrBody>`, …):
+    // the JSON is ASSIGNED to that type, not cast through `unknown`.
+    const out = (await res.json().catch(() => undefined)) as T; // a 204's empty body lands as undefined
+    return { status: res.status, body: out };
   };
   return {
     get: <T>(p: string) => call<T>('GET', p),
@@ -125,6 +137,7 @@ describe('D5 — mentions', () => {
     const { owner, pageId, base } = await workspace(0);
     const r = await owner.post<ErrBody>(base, { resourceType: 'cms_page', resourceId: pageId, body: 'hi', mentions: ['user:not-a-member'] });
     expect(r.status).toBe(400);
+    expect(r.body.error).toBe('validation_error');
     expect(r.body.details?.field).toBe('mentions');
     const thread = await owner.get<{ comments: Comment[] }>(`${base}?resourceType=cms_page&resourceId=${pageId}`);
     expect(thread.body.comments).toEqual([]);
@@ -248,17 +261,19 @@ describe('CM2CD-6 — the witnesses /grade-code found missing', () => {
 
   it('an archived channel’s message threads refuse new comments AND edits (409), and stay readable', async () => {
     const { owner, base } = await workspace(0);
-    const ch = await owner.post<{ channel: { channelId?: string; conversationId?: string; sessionId?: string } }>('/host/openwop-app/channels', { name: `arch-${n++}`, visibility: 'public' });
+    const ch = await owner.post<{ channel: ConversationMeta }>('/host/openwop-app/channels', { name: `arch-${n++}`, visibility: 'public' });
     expect(ch.status, JSON.stringify(ch.body)).toBe(201);
-    const id = ch.body.channel.channelId ?? ch.body.channel.conversationId ?? ch.body.channel.sessionId;
+    const id = ch.body.channel.conversationId;
     const resourceId = `${id}#m1`;
     const c = await owner.post<Posted>(base, { resourceType: 'chat_message', resourceId, body: 'before' });
     expect(c.status, JSON.stringify(c.body)).toBe(201);
     expect((await owner.post(`/host/openwop-app/channels/${id}/archive`)).status).toBe(204);
     const add = await owner.post<ErrBody>(base, { resourceType: 'chat_message', resourceId, body: 'after' });
     expect(add.status).toBe(409);
+    expect(add.body).toMatchObject({ error: 'conflict', message: ARCHIVED });
     const edit = await owner.patch<ErrBody>(`${base}/${c.body.commentId}`, { body: 'edited after' });
     expect(edit.status).toBe(409);
+    expect(edit.body).toMatchObject({ error: 'conflict', message: ARCHIVED });
     const read = await owner.get<{ comments: Comment[] }>(`${base}?resourceType=chat_message&resourceId=${encodeURIComponent(resourceId)}`);
     expect(read.body.comments.map((x) => x.body)).toEqual(['before']);
   });

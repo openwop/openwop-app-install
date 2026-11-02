@@ -4,6 +4,11 @@
  * conformance scenarios drive. Verifies the seam-layer functions route
  * through the same §B.2 scan → §A schema → §B.6 precedence path as the boot
  * loader, and the consent planner keeps write a separate step (§B.4).
+ *
+ * Tracker TST-CJB-8 (grade-tests w68). Red when: the §B.2 credential scan is skipped
+ * on the seam install (the generic schema error wins); an installed prerelease
+ * outranks a simulated built-in release; a simulated built-in or an installed
+ * release resolves with the wrong source/version; or an unknown provider resolves.
  */
 import { describe, expect, it } from 'vitest';
 import {

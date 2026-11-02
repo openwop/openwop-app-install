@@ -15,7 +15,7 @@
  * the exchange passes run-derived values and the realtime route passes
  * request-derived ones through the same seam.
  */
-import { getAgentRegistry, type ResolvedAgentManifest } from '../executor/agentRegistry.js';
+import { type ResolvedAgentManifest } from '../executor/agentRegistry.js';
 import { resolveAgentIdentity, type AgentIdentity } from './agentIdentity.js';
 import { composeAgentSystemPrompt, firstNameOf } from './agentPromptScaffold.js';
 import { getConversationMeta, type ConversationMeta } from './conversationStore.js';
@@ -30,11 +30,13 @@ import { resolveBoardContextResult, resolveBoardConveneRefusal } from './boardCo
 import { getUser } from '../features/users/usersService.js';
 import { getProfile } from '../features/profiles/profilesService.js';
 import { loadTurns } from './exchange/loadTurns.js';
-import { transcriptBudgetConfig, windowTranscript } from './transcriptBudget.js';
+import { windowTranscript, voiceSeedBudgetConfig } from './transcriptBudget.js';
 import type { ConversationTurn } from './conversation.js';
 import type { Storage } from '../storage/storage.js';
 import { createLogger } from '../observability/logger.js';
 import { agentVisibleToTenant } from './agentVisibility.js';
+import { resolveServedAgentDetailed } from './agentServing.js';
+import { OpenwopError } from '../types.js';
 
 const logger = createLogger('host.chatContext');
 
@@ -188,7 +190,14 @@ export async function composeChatContext(tenantId: string, input: ComposeChatCon
   // below needs the PROFILE id for registry-form ids too; the resolver's
   // per-tenant TTL cache keeps the per-turn cost to one scan per ~30s.
   const identity = agentId ? await resolveAgentIdentity(tenantId, agentId, { allowReverseScan: true }) : null;
-  const agent = identity ? await getAgentRegistry().resolve(identity.agentId, tenantId) : null;
+  // ADR 1014 D4 — the version this agent's deployment serves (the head unless OPENWOP_AGENT_VERSIONS=on).
+  const served = identity ? await resolveServedAgentDetailed(identity.agentId, tenantId, conversationId ?? identity.agentId) : null;
+  // A deployment that serves nothing runnable refuses the turn (typed), never the
+  // generic prompt in the agent's place (review M5).
+  if (served?.refused) {
+    throw new OpenwopError('conflict', `${identity!.agentId} has no version this host can serve right now.`, 409, { reason: 'agent_version_unavailable', agentId: identity!.agentId });
+  }
+  const agent = served?.agent ?? null;
   const tenantOk = !agent || agentVisibleToTenant(agent, tenantId); // the ONE rule (ADR 0379)
   const [userName, addressName] = await Promise.all([
     resolveCallerDisplayName(tenantId, callerUserId),
@@ -521,7 +530,7 @@ async function loadWindowedTurns(
   if (!runId) return { kept: [], omittedCount: 0 };
   const turns = await loadTurns(storage, runId, conversationId);
   if (turns.length === 0) return { kept: [], omittedCount: 0 };
-  return windowTranscript(turns, transcriptBudgetConfig(), (t) => turnText(t).length);
+  return windowTranscript(turns, voiceSeedBudgetConfig(), (t) => turnText(t).length);
 }
 
 /**

@@ -1,19 +1,23 @@
 /**
- * GRADING PROBE — "CAD" (FEATURES.md ordinal 228, ADR 0388). Evidence only.
- * GREEN + CI-safe. Exercises the closed-world CAD validator `validateCadDoc` (the
- * SSoT mirror of the `canvas.cad` artifact schema) + the untrusted-mesh decode
- * guard in `meshCodec` — the checks that make an untrusted (model- or user-authored)
- * CAD doc + an uploaded mesh safe.
+ * ADR 0388 (CAD) — the closed-world `validateCadDoc` mirror of the `canvas.cad`
+ * schema, and the untrusted-mesh STL length-mismatch guard in `meshCodec`.
+ * Tracker TST-CBM-2 (grade-tests w67; file kept under its historical name).
  *
- * CDP-1 (closed-world reject): an unknown solid kind, an unknown solid field, a
- *     mesh-only field on a NON-mesh solid, and a mesh solid MISSING its `assetRef`
- *     are all rejected (closed enum + per-kind closed world + additionalProperties
- *     mirror). A mesh references a HOST asset by `assetRef` — never an external URL.
- * CDP-2 (SECURITY — mesh decompression-bomb guard): a binary STL that LIES about its
- *     triangle count (declares a billion triangles in a tiny file) is rejected — the
- *     declared count is bounded by the actual byte length, so a small file can never
- *     force a huge allocation (backed by the MAX_MESH_TRIANGLES cap).
- * CDP-3 (control): a well-formed CAD doc validates clean.
+ * CDP-1 closed world, one exact `{path, message}` per sub-claim:
+ *   - an unknown solid kind is refused at `solids[0].kind`
+ *     (red when `validateCadDoc` stops checking `KINDS`; this is the only test
+ *     of that check on `validateCadDoc` — the agent tool's own render node
+ *     refuses the kind first, and cad.test.ts checks the SCHEMA mirror);
+ *   - an unknown field is refused (red when the trailing unknown-field error
+ *     is dropped);
+ *   - a mesh-only field on a box is refused with the mesh-only message (red
+ *     when the `MESH_ONLY_FIELDS` branch is skipped);
+ *   - a mesh without `assetRef` is refused (red when that check is removed).
+ * CDP-2 (security): a binary STL that declares a billion triangles in 200
+ *   bytes is refused as a length mismatch before any allocation (red when the
+ *   `84 + count * 50` length check is skipped — the triangle cap then throws a
+ *   different error). Also covered by meshCodec.test.ts "typed errors: …".
+ * CDP-3 (control): a well-formed doc validates clean.
  */
 import { describe, it, expect } from 'vitest';
 import { validateCadDoc } from '../src/features/cad/validateCadDoc.js';
@@ -32,14 +36,23 @@ function lyingBinaryStl(declaredCount: number): Uint8Array {
 
 describe('ADR 0388 CAD — closed-world + untrusted-mesh hardening (by execution)', () => {
   it('CDP-1: closed-world rejects unknown kind / unknown field / mesh-only-field-on-non-mesh / mesh-without-assetRef', () => {
-    expect(validateCadDoc(model([{ kind: 'dodecahedron' }])).errors.length).toBeGreaterThan(0);
-    expect(validateCadDoc(model([{ kind: 'box', bogusField: 1 }])).errors.length).toBeGreaterThan(0);
-    expect(validateCadDoc(model([{ kind: 'box', assetRef: 'x' }])).errors.length).toBeGreaterThan(0); // mesh-only on a box
-    expect(validateCadDoc(model([{ kind: 'mesh' }])).errors.length).toBeGreaterThan(0); // a mesh requires assetRef
+    expect(validateCadDoc(model([{ kind: 'dodecahedron' }])).errors).toEqual([
+      { path: 'solids[0].kind', message: 'kind must be one of: box, cylinder, sphere, cone, mesh' },
+    ]);
+    expect(validateCadDoc(model([{ kind: 'box', bogusField: 1 }])).errors).toEqual([
+      { path: 'solids[0].bogusField', message: "unknown solid field 'bogusField'" },
+    ]);
+    expect(validateCadDoc(model([{ kind: 'box', assetRef: 'x' }])).errors).toEqual([
+      { path: 'solids[0].assetRef', message: "'assetRef' is only valid on a mesh solid" },
+    ]);
+    expect(validateCadDoc(model([{ kind: 'mesh' }])).errors).toEqual([
+      { path: 'solids[0].assetRef', message: 'a mesh solid requires an assetRef' },
+    ]);
   });
 
   it('CDP-2 (security): a binary STL lying about its triangle count is rejected — a tiny file cannot force a huge allocation', () => {
-    expect(() => parseStl(lyingBinaryStl(1_000_000_000))).toThrow(/mismatch|malformed/i);
+    expect(() => parseStl(lyingBinaryStl(1_000_000_000)))
+      .toThrow('Binary STL length mismatch: 200 bytes for 1000000000 triangles.');
   });
 
   it('CDP-3 (control): a well-formed CAD doc validates clean', () => {

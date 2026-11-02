@@ -80,7 +80,7 @@ export function ProfileWorkflowsTab({ workflows, onSaved }: { workflows: string[
       ) : (
         <>
           <p className="muted u-fs-13 u-mt-0">
-            <Trans t={t} i18nKey="workflowsPortfolioLead" components={{ 0: <strong /> }} />
+            <Trans t={t} i18nKey="workflowsPortfolioLead" components={[<strong />]} />
           </p>
           <div className="card-grid u-mb-4">
             {workflows.map((wfId) => {

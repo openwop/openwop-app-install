@@ -5,9 +5,14 @@
  * dedupes to one listing." These assert it structurally — the id is derived
  * from CONTENT, so a duplicate is unrepresentable rather than merely cleaned up
  * afterwards.
+ *
+ * Tracker TST-DHB-5 (wave 71). Red when: the board (or any copy property)
+ * enters the id (`w71g3-ld-board-r2`); location leaves it (`ld-merge`);
+ * normalisation stops folding punctuation (`ld-norm`); an existing listing is
+ * re-created (`ld-dedupe`); `ext` is dropped (`ld-ext`).
  */
 import { beforeEach, describe, expect, it } from 'vitest';
-import { listingIdFor, upsertListing, listListings, getListing, LISTING_TYPE } from '../src/features/job-search/boards/listing.js';
+import { listingIdFor, upsertListing, listListings, getListing, LISTING_TYPE, type ListingInput } from '../src/features/job-search/boards/listing.js';
 import { getSystemEntity } from '../src/features/entities/entitiesService.js';
 import { __resetHostExtPersistence, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
@@ -38,7 +43,12 @@ describe('ADR 0542 D2 — one job, one listing', () => {
     // If any of these entered the hash, cross-board dedupe would be impossible
     // by construction, so this is the assertion that protects the whole design.
     const base = listingIdFor(posting);
-    expect(listingIdFor({ ...posting })).toBe(base);
+    // Two COPIES of the job that differ in every copy property — board, URL and
+    // the capture time carried in `ext` — must hash to the bare posting's id.
+    const fromLever: ListingInput = { ...posting, sourceBoard: 'lever', sourceUrl: 'https://lever.example/9', ext: { capturedAt: '2026-02-02T00:00:00.000Z' } };
+    const fromGreenhouse: ListingInput = { ...posting, sourceBoard: 'greenhouse', sourceUrl: 'https://gh.example/1', ext: { capturedAt: '2026-03-03T00:00:00.000Z' } };
+    expect(listingIdFor(fromLever)).toBe(base);
+    expect(listingIdFor(fromGreenhouse)).toBe(base);
   });
 
   it('normalises punctuation, case and spacing rather than minting near-duplicates', async () => {
@@ -75,10 +85,16 @@ describe('ADR 0542 D2 — one job, one listing', () => {
     // a private table would not be reachable this way at all.
     const row = await getSystemEntity(TENANT, LISTING_TYPE, listingId!);
     expect(row, 'the row must live in the entities kernel, not a private store').toBeTruthy();
+    expect(row!.entityId).toBe(listingId);
+    expect(row!.values.title).toBe('Staff Backend Engineer');
   });
 
   it('is tenant-isolated — another tenant sees nothing', async () => {
-    await upsertListing(TENANT, ACTOR, posting);
-    expect(await listListings('user:t-other')).toEqual([]);
+    // Both tenants hold a listing, so each read meets the other's row: each
+    // list must be exactly its own id.
+    const mine = await upsertListing(TENANT, ACTOR, posting);
+    const theirs = await upsertListing('user:t-other', ACTOR, { ...posting, title: 'Platform Engineer' });
+    expect((await listListings(TENANT)).map((r) => r.entityId)).toEqual([mine.listingId]);
+    expect((await listListings('user:t-other')).map((r) => r.entityId)).toEqual([theirs.listingId]);
   });
 });

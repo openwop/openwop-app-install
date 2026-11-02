@@ -50,15 +50,18 @@ function checklistCard(items, blocked) {
   });
   return {
     reason: 'clarification',
-    question: `This campaign is not ready for the autopilot yet. Fix the items below, then check again.\n${lines.join('\n')}`,
-    catalogVersion: '0.9.1',
-    surface: {
-      title: 'Campaign autopilot: preflight',
-      components: [
-        { component: 'text', text: 'This campaign is not ready for the autopilot yet. Fix these, then check again:' },
-        ...blocked.map((i) => ({ component: 'text', text: lines[blocked.indexOf(i)] })),
-        { component: 'action.button', id: 'recheck', label: 'Check again', action: { target: 'resume' } },
-      ],
+    // ADR 1013 D3 — the form has no inputs, so it resumes with `answers: []`.
+    questions: [{ id: 'recheck', question: `This campaign is not ready for the autopilot yet. Fix the items below, then check again.\n${lines.join('\n')}` }],
+    form: {
+      catalogVersion: '0.9.1',
+      surface: {
+        title: 'Campaign autopilot: preflight',
+        components: [
+          { component: 'text', text: 'This campaign is not ready for the autopilot yet. Fix these, then check again:' },
+          ...blocked.map((i) => ({ component: 'text', text: lines[blocked.indexOf(i)] })),
+          { component: 'action.button', id: 'recheck', label: 'Check again', action: { target: 'resume' } },
+        ],
+      },
     },
   };
 }

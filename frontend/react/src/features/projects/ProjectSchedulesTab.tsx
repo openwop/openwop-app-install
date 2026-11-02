@@ -46,7 +46,7 @@ export function ProjectSchedulesTab({ projectId, workflows, canWrite }: { projec
       copy={{
         emptyBody: t('schedulesEmptyBody'),
         helper: t('schedulesHelper'),
-        noWorkflowsHint: <Trans i18nKey="schedulesNoWorkflowsHint" ns="projects" components={{ 0: <Link to={`/projects/${projectId}?tab=workflows`} /> }} />,
+        noWorkflowsHint: <Trans i18nKey="schedulesNoWorkflowsHint" ns="projects" components={[<Link to={`/projects/${projectId}?tab=workflows`} />]} />,
       }}
     />
   );

@@ -61,6 +61,17 @@
  * own guard"). Its missing-recipient behaviour is a different defect class.
  *
  * The quarantine is SHRINK-ONLY: a new entry fails the test.
+ *
+ * > CORRECTED 2026-10-29 (/grade-tests w67, TST-CEA-1): the "584 / 175" above is
+ * > stale. MEASURED on 293f5dc71 with the same pin-stripping read: 272 chains,
+ * > 914 chain-node instances, 247 distinct typeIds, 15 table matches of which 10
+ * > are foreign. The floors below were `> 100` and `> 5`; they now sit at the
+ * > measured values, so a corpus or table regression shows instead of hiding
+ * > under a floor a third of the truth.
+ *
+ * Sabotage (w67g3, witnessed): dropping `projectId` from insights-suite's
+ * `core.bigquery.query` reds "no chain outside the shrink-only quarantine";
+ * binding `query` on `digest.topic-watch::search` reds "the quarantine is honest".
  */
 
 import { readdirSync } from 'node:fs';
@@ -199,7 +210,8 @@ function census(): Census {
 describe('GEN-IS-1 — every chain node binds the config its implementation hard-requires', () => {
   it('has a non-vacuous corpus to check (the failure mode that killed PROBE-DOC-4)', () => {
     const c = census();
-    expect(c.scanned, 'no chain packs were scanned — the census is looking at the wrong root').toBeGreaterThan(100);
+    // MEASURED 2026-10-29: 272 chains (w67 TST-CEA-1). A floor at the truth, not a third of it.
+    expect(c.scanned, 'no chain packs were scanned — the census is looking at the wrong root').toBeGreaterThanOrEqual(272);
     // ADR 0599 §Correction 5 — the floor counts FOREIGN matches only. The old
     // `matched > 5` was satisfied at 9, five of which were this feature's own
     // nodes: the table could have covered nothing but itself and still passed.
@@ -209,7 +221,7 @@ describe('GEN-IS-1 — every chain node binds the config its implementation hard
       + `'${OWN_CHAIN_PREFIX}*' — the rule has narrowed back onto the feature that wrote it. `
       + `(Corpus: ${c.nodeInstances} chain-node instances across ${c.distinctTypeIds} distinct typeIds `
       + 'in ' + c.scanned + ' chains. This table is a FLOOR, never a coverage claim.)',
-    ).toBeGreaterThan(5);
+    ).toBeGreaterThanOrEqual(10); // MEASURED 2026-10-29: 10 foreign of 15 matches
   });
 
   it('no chain outside the shrink-only quarantine ships a starved required-config node', () => {

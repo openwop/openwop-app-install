@@ -1,6 +1,6 @@
 {
   "name": "feature.assistant.nodes",
-  "version": "2.0.1",
+  "version": "2.1.0",
   "kind": "node",
   "description": "Executive-Assistant graph/logic node pack. THIN by design \u2014 only the memory-graph + prioritization nodes over ctx.features.assistant + ctx.kanban. Full coverage of the assistant surface: commitment / decision / meeting / stakeholder reads + writes (role:action \u2014 presentational; a replay/fork RE-RUNS them, which is safe because every id is a content hash) alongside the original perception + prioritization + briefing nodes. ALL external I/O (Drive/Gmail/Calendar reads, mail sends) reuses the existing core node packs (core.openwop.{mcp,http,integration}); this pack authors no I/O node.",
   "author": "OpenWOP App",

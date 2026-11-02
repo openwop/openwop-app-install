@@ -1,5 +1,16 @@
 /** ADR 0954 P3 recovery: real SQLite CAS preserves partial settings and
- * stages recipient/editor attribution before publication across erasure. */
+ * stages recipient/editor attribution before publication across erasure.
+ *
+ * Refusal reasons are asserted, not just 409: an erasure that lands before the
+ * stage is refused by the publish-time tombstone read (`sla_settings_subject_erased`);
+ * one that lands during publication disables the staged row, so the publish CAS
+ * loses (`sla_settings_conflict`).
+ *
+ * Sabotage-witnessed (w74 probes sls-*): a blind stage CAS; dropping the
+ * field merge from the saved row; inverting the staged-digest check; skipping
+ * the publish-time tombstone read; staging a NEW agency lead before its
+ * tombstone read; erasure not disabling a staged publication; reading a
+ * pending/disabled row as settings; erasure keeping the editor attribution. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -8,6 +19,7 @@ import { openSqliteStorage } from '../src/storage/sqlite/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import { initHostExtPersistence, __resetHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { eraseSlaSettingsSubjects, getSlaSettings, saveSlaSettings } from '../src/features/crm/leadIntel/speedToLead.js';
+import { ERASED } from '../src/host/subjectErasureRedaction.js';
 
 const tenantId = 'sla-settings-recovery'; const orgId = 'client';
 const primary = `hostext:crm:lead-sla-settings:${tenantId}::${orgId}`;
@@ -55,7 +67,9 @@ describe('lead SLA settings primary', () => {
       }
       return cas(key, expected, next);
     });
-    await expect(saveSlaSettings(tenantId, orgId, { agencyLead: 'erased-lead' }, 'operator')).rejects.toMatchObject({ httpStatus: 409 });
+    await expect(saveSlaSettings(tenantId, orgId, { agencyLead: 'erased-lead' }, 'operator')).rejects.toMatchObject({
+      httpStatus: 409, details: { reason: phase === 'stage' ? 'sla_settings_subject_erased' : 'sla_settings_conflict' },
+    });
     expect(crossed).toBe(true); vi.restoreAllMocks(); await reopen();
     const raw = await storage.kvGet(primary); expect(raw).toBeTruthy(); expect(JSON.parse(raw!).agencyLead).toBeUndefined();
     await expect(getSlaSettings(tenantId, orgId)).rejects.toMatchObject({ details: { reason: 'sla_settings_pending' } });
@@ -65,7 +79,7 @@ describe('lead SLA settings primary', () => {
     await saveSlaSettings(tenantId, orgId, { agencyLead: 'person', timezone: 'UTC' }, 'person');
     await eraseSlaSettingsSubjects(tenantId, 'person'); await reopen();
     const row = await getSlaSettings(tenantId, orgId);
-    expect(row?.agencyLead).toBeUndefined(); expect(row?.updatedBy).not.toBe('person'); expect(row?.timezone).toBe('UTC');
+    expect(row?.agencyLead).toBeUndefined(); expect(row?.updatedBy).toBe(ERASED); expect(row?.timezone).toBe('UTC');
     await expect(saveSlaSettings(tenantId, orgId, { agencyLead: 'person' }, 'operator')).rejects.toMatchObject({ details: { reason: 'sla_settings_subject_erased' } });
   });
 });

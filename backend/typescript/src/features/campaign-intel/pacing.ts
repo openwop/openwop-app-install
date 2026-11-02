@@ -13,7 +13,7 @@
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { onCampaignDeleted } from '../../host/campaignLifecycle.js';
 import { createLogger } from '../../observability/logger.js';
-import { getNotificationEmitter } from '../../notifications/emitter.js';
+import { emitToOrg } from './orgAlerts.js';
 import { listRecords } from '../campaign-connectors/performanceService.js';
 // Cross-feature READ (the documented precedent).
 import { listCampaigns } from '../campaign-orchestration/campaignService.js';
@@ -131,8 +131,9 @@ export async function runPacingCheck(tenantId: string, orgId: string): Promise<P
     if (!(await memos.compareAndSwap(prior, claim))) continue; // another run claimed this escalation
     const actions = alertActions(row.band === 'over' ? 'pacing-over' : 'pacing-warning', { orgId, campaignId: row.campaignId });
     try {
-      await getNotificationEmitter().emit({
-        tenantId,
+      // ADR 1022 D8 — the client org's people, not the whole workspace. Rejects
+      // only when nobody was told, which is when the memo rolls back.
+      await emitToOrg(tenantId, orgId, {
         type: 'campaign.pacing',
         priority: row.band === 'over' ? 'high' : 'normal',
         title: row.band === 'over' ? 'Campaign budget exceeded' : 'Campaign nearing its budget',

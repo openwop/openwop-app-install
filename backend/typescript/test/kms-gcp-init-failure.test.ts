@@ -5,8 +5,17 @@
  * and the host's unhandledRejection policy is drain-and-exit. MEASURED
  * 2026-09-26: one POST /webhooks on a host with no GCP identity took it down.
  * This double reproduces that exact gax shape.
+ *
+ * TST-DKB-3 (grade-tests wave 72; incident 2026-09-26, fix 229d0fcae). Red when:
+ * `initialize()` is not awaited inside the client chain, so the gax re-throw is
+ * an unhandled rejection (w72 probe gi-await), or a failed init is cached and
+ * never retried (gi-reset). Waits are macrotask drains rather than timed sleeps: an
+ * unhandledRejection is emitted after the microtask queue empties.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
+
+/** Let any stray rejection reach `unhandledRejection` (it fires after microtasks drain). */
+const drain = async (): Promise<void> => { for (let i = 0; i < 5; i += 1) await new Promise((r) => setImmediate(r)); };
 
 let initCalls = 0;
 vi.mock('@google-cloud/kms', () => ({
@@ -41,7 +50,7 @@ describe('GCP KMS with no credentials', () => {
     try {
       const kms = createGoogleCloudKmsClient('projects/p/locations/l/keyRings/r/cryptoKeys/k');
       await expect(kms.encrypt(Buffer.alloc(32))).rejects.toThrow(/default credentials/);
-      await new Promise((r) => setTimeout(r, 50)); // let any stray rejection surface
+      await drain(); // let any stray rejection surface
       expect(unhandled).toEqual([]);
     } finally {
       process.off('unhandledRejection', onUnhandled);
@@ -51,7 +60,7 @@ describe('GCP KMS with no credentials', () => {
   it('a failed initialization is retried on the next call, not cached forever', async () => {
     const kms = createGoogleCloudKmsClient('projects/p/locations/l/keyRings/r/cryptoKeys/k');
     await expect(kms.encrypt(Buffer.alloc(32))).rejects.toThrow();
-    await new Promise((r) => setTimeout(r, 10));
+    await drain();
     await expect(kms.encrypt(Buffer.alloc(32))).rejects.toThrow();
     expect(initCalls).toBe(2);
   });

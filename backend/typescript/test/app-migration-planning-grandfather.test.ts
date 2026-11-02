@@ -2,6 +2,13 @@
  * ADR 0892 extension — app migration 24 `grandfather-planning-on-for-existing-users`.
  * strategy / priority-matrix / advisory-board moved on → off. Per toggle: data for
  * that feature and no saved row ⇒ keep it on; otherwise unchanged.
+ *
+ * "Never touches a saved row" is a DOUBLE GUARD (the row-exists `continue` and the
+ * first-write-wins re-check before the write), as in migration 23: a
+ * single-guard sabotage stays green by design (w66 pg-rowexists).
+ *
+ * TST-BXB-5. Red when: the not-in-use check is dropped (pg-inuse), or a
+ * feature's data prefix drifts (pg-prefix, pg-strategy).
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -40,7 +47,9 @@ describe('app migration 24 — grandfather planning surfaces on for installs tha
   it('priority-matrix lists keep priority-matrix on', async () => {
     await storage.kvSet('hostext:priority-matrix:list:l1', JSON.stringify({ id: 'l1', tenantId: 'user:a' }));
     await migration.run(storage);
-    expect((await row('priority-matrix'))?.status).toBe('on');
+    expect(await row('priority-matrix')).toMatchObject({ id: 'priority-matrix', status: 'on', updatedBy: 'app-migration:24' });
+    expect(await row('strategy')).toBeNull();
+    expect(await row('advisory-board')).toBeNull();
   });
 
   it('never touches a saved row, and is idempotent', async () => {

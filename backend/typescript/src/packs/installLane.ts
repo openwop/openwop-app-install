@@ -14,7 +14,11 @@
  * must not import a feature (ADR 0001).
  */
 
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { existsSync, mkdirSync, renameSync, rmSync } from 'node:fs';
+import { ARCHIVE_DIR, archivedVersionDir } from './agentPackArchive.js';
+import { invalidatePackTrustVerdict } from '../host/packTrust.js';
 import { OpenwopError } from '../types.js';
 import { isTombstoned } from '../host/packTombstones.js';
 import { isPackRevoked } from '../host/packRevocations.js';
@@ -110,4 +114,96 @@ export async function installFromConfiguredRegistry(target: InstallTarget): Prom
     log.warn('pack_install_failed', { name: target.name, version: target.version, reason: err instanceof Error ? err.message : String(err) });
     throw translateInstallError(err, target.name, target.version);
   }
+}
+
+// ── ADR 1014 D1 (corrected) — fetch an archived agent-pack version ──────────
+
+/** A background fetch never outlives this; the run path never waits on it. */
+export const ARCHIVE_FETCH_TIMEOUT_MS = 60_000;
+/** After a failure, the same version is not fetched again for this long: a
+ *  permanent refusal (404, integrity, signature, admission) for 6 h, anything else
+ *  (unreachable, timeout) for 10 min. Bounds the load a missing version can cause. */
+const PERMANENT_BACKOFF_MS = 6 * 3_600_000;
+const TRANSIENT_BACKOFF_MS = 10 * 60_000;
+const PERMANENT = /\b404\b|not.?found|integrity|signature|admission|admissible|revoked|tombstone|namespace|pack_content_refused|invalid/i;
+const inflight = new Map<string, Promise<boolean>>();
+const failedUntil = new Map<string, number>();
+
+/** Test seam — clears the single-flight and backoff state. */
+export function __resetArchiveFetchStateForTests(): void {
+  inflight.clear();
+  failedUntil.clear();
+}
+
+/** True when the version's install marker is in place (a whole, verified install). */
+function hasMarker(dir: string): boolean {
+  return existsSync(join(dir, '.openwop-installed.json'));
+}
+
+/**
+ * Install exactly `name@version` into `<packDir>/.versions/<name>/<version>/`
+ * through the same signed, verified installer the boot lane uses. Never touches
+ * the head. It lands in a hidden temp dir first and is renamed into place, so a
+ * reader sees the whole version or none of it.
+ *
+ * Bounded three ways: single-flight per version per instance, held until the
+ * DOWNLOAD settles (not the timeout), so a slow registry never stacks downloads; a
+ * per-version backoff after a failure; and a timeout on what the caller waits for.
+ * Resolves `true` when the version is cached afterwards, `false` otherwise, and
+ * never rejects: callers are background prefetches.
+ */
+export function fetchArchivedVersion(name: string, version: string, opts: { timeoutMs?: number } = {}): Promise<boolean> {
+  const key = `${name}@${version}`;
+  const running = inflight.get(key);
+  const install = running ?? startArchiveFetch(key, name, version);
+  let timer: NodeJS.Timeout | undefined;
+  return Promise.race([
+    install,
+    new Promise<boolean>((res) => { timer = setTimeout(() => res(false), opts.timeoutMs ?? ARCHIVE_FETCH_TIMEOUT_MS); }),
+  ]).finally(() => { if (timer) clearTimeout(timer); });
+}
+
+function startArchiveFetch(key: string, name: string, version: string): Promise<boolean> {
+  const p = (async (): Promise<boolean> => {
+    let tmp: string | undefined;
+    try {
+      const packDir = resolveDefaultPackDir();
+      const final = archivedVersionDir(packDir, name, version);
+      if (final === null) return false;
+      if (hasMarker(final)) return true;
+      if ((failedUntil.get(key) ?? 0) > Date.now()) return false;
+      const target = assertInstallable({ name, version });
+      const parent = join(packDir, ARCHIVE_DIR, name);
+      mkdirSync(parent, { recursive: true });
+      tmp = join(parent, `.tmp-${version}-${randomBytes(4).toString('hex')}`);
+      const registry = process.env.OPENWOP_REGISTRY_URL;
+      await installPackFromRegistry(target, { packDir, destDir: tmp, ...(registry ? { registry } : {}), trustedKeysDir: trustedKeysDir() });
+      // A dir without a marker is a partial or tampered leftover: replace it.
+      if (existsSync(final) && !hasMarker(final)) rmSync(final, { recursive: true, force: true });
+      if (!existsSync(final)) {
+        try {
+          renameSync(tmp, final);
+          tmp = undefined;
+        } catch (err) {
+          // Another process won the race; its copy is as good if it is whole.
+          if (!hasMarker(final)) throw err;
+        }
+      }
+      invalidatePackTrustVerdict(final);
+      failedUntil.delete(key);
+      log.info('fetched archived agent pack version', { name, version });
+      return hasMarker(final);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      failedUntil.set(key, Date.now() + (PERMANENT.test(reason) ? PERMANENT_BACKOFF_MS : TRANSIENT_BACKOFF_MS));
+      log.warn('archived agent pack version fetch failed', { name, version, reason });
+      return false;
+    } finally {
+      if (tmp) {
+        try { rmSync(tmp, { recursive: true, force: true }); } catch { /* best-effort */ }
+      }
+    }
+  })().finally(() => inflight.delete(key));
+  inflight.set(key, p);
+  return p;
 }

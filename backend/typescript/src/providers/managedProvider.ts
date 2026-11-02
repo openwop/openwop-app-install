@@ -882,10 +882,14 @@ export interface ManagedToolsRoundRequest {
   tools: readonly ToolDef[];
   maxTokens?: number;
   signal?: AbortSignal;
+  /** ADR 1003 D3 — see `ToolsRoundRequest.cacheConversation`. */
+  cacheConversation?: boolean;
 }
 export interface ManagedToolsRoundResult {
   text: string;
   toolUses: ToolUseBlock[];
+  /** ADR 1011 — the provider's raw stop reason; the tool loop reads it first. */
+  finishReason?: string;
   inputTokens?: number;
   outputTokens?: number;
   /** ADR 0148 A2 (OQ#3) — tokens served from MiniMax's AUTOMATIC prefix cache
@@ -933,6 +937,7 @@ export async function dispatchManagedToolsRound(req: ManagedToolsRoundRequest): 
     tools: req.tools,
     ...(req.maxTokens != null ? { maxTokens: req.maxTokens } : {}),
     ...(req.signal ? { signal: req.signal } : {}),
+    ...(req.cacheConversation ? { cacheConversation: true } : {}),
   });
   const charged = await recordManagedUsage(req.tenantId, req.userFacingProvider, date, round.inputTokens ?? 0, round.outputTokens ?? 0, req.actingSubject,
     { provider: target.provider, ...(round.cachedReadTokens != null ? { cachedReadTokens: round.cachedReadTokens } : {}), cachedReadWeight: target.cachedReadWeight }, meter);
@@ -941,6 +946,7 @@ export async function dispatchManagedToolsRound(req: ManagedToolsRoundRequest): 
   return {
     text: round.text,
     toolUses: round.toolUses,
+    ...(round.finishReason ? { finishReason: round.finishReason } : {}),
     ...(round.inputTokens != null ? { inputTokens: round.inputTokens } : {}),
     ...(round.outputTokens != null ? { outputTokens: round.outputTokens } : {}),
     ...(round.cachedReadTokens != null ? { cachedReadTokens: round.cachedReadTokens } : {}),

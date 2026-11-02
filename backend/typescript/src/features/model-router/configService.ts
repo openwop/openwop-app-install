@@ -1,10 +1,15 @@
 /**
  * ADR 0130 Phase 2 — `ModelRouterConfig` entity + validation.
  *
- * A per-(tenant, org) rule set for `routeTurn` (Phase 1). The dispatch call-site +
- * the `run.metadata` replay stamp are Phase 3 — this owns the config + validation
- * only. Default OFF (the toggle gates the dispatch stage); with no config, dispatch
- * is unchanged.
+ * ONE rule set per WORKSPACE (ADR 1016 D1) for `routeTurn`. This owns the config
+ * and its validation only. With no config, or `enabled:false`, dispatch is
+ * unchanged.
+ *
+ * ADR 1016 D1 — keyed `${tenantId}:${tenantId}`. It used to be keyed per org
+ * (`${tenantId}:${orgId}`) while the only reader, the chat exchange, looked up the
+ * workspace root, so a config saved for any other org (17 of 30 prod orgs on
+ * 2026-10-31) could never route a turn. The key keeps the old two-part shape so the
+ * root rows written under the old scheme are read unchanged.
  *
  * @see docs/adr/0130-rule-based-model-router.md
  */
@@ -12,7 +17,9 @@ import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
 import { createLogger } from '../../observability/logger.js';
 import type { ModelRouterConfig, RoutingRule, RoutingTarget, RuleCondition } from './routeTurn.js';
-import { ROUTABLE_PROVIDERS, isRoutableProvider } from './routableProviders.js';
+import { ROUTABLE_PROVIDERS, isListedModel, isRoutableProvider } from './routableProviders.js';
+import { ERASED_USER_REF, subjectKeyForms } from '../../host/subjectErasureRedaction.js';
+import type { SubjectEraseReport } from '../../host/subjectErasure.js';
 
 export { ROUTABLE_PROVIDERS, isRoutableProvider } from './routableProviders.js';
 
@@ -32,6 +39,8 @@ function noteRetiredRule(kind: string): void {
 
 export interface StoredRouterConfig {
   tenantId: string;
+  /** Always the workspace itself (`=== tenantId`) since ADR 1016 D1; kept so a
+   *  row written by the per-org scheme for the workspace root still decodes. */
   orgId: string;
   config: ModelRouterConfig;
   enabled: boolean;
@@ -39,7 +48,10 @@ export interface StoredRouterConfig {
   updatedAt: string;
 }
 
-const configs = new DurableCollection<StoredRouterConfig>('modelrouter:config', (c) => `${c.tenantId}:${c.orgId}`);
+const configs = new DurableCollection<StoredRouterConfig>('modelrouter:config', (c) => `${c.tenantId}:${c.orgId}`, undefined, (c) => c.tenantId);
+
+/** ADR 1016 D1 — the one key per workspace, the key the chat exchange reads. */
+const workspaceKey = (tenantId: string): string => `${tenantId}:${tenantId}`;
 
 function asTarget(v: unknown, where: string): RoutingTarget {
   const t = v as { provider?: unknown; model?: unknown } | undefined;
@@ -50,7 +62,13 @@ function asTarget(v: unknown, where: string): RoutingTarget {
   if (!isRoutableProvider(provider)) {
     throw new OpenwopError('validation_error', `${where}.provider '${provider}' is not a routable provider (allowed: ${ROUTABLE_PROVIDERS.join(', ')}).`, 400, { field: `${where}.provider` });
   }
-  return { provider, model: t.model.trim() };
+  const model = t.model.trim();
+  // ADR 1016 D5 — closed world: a typo or a model the catalog does not list can
+  // never become a routing target (it would fail every turn it matched).
+  if (!isListedModel(provider, model)) {
+    throw new OpenwopError('validation_error', `${where}.model '${model}' is not a ${provider} model in the catalog.`, 400, { field: `${where}.model` });
+  }
+  return { provider, model };
 }
 
 /** Validate ONE condition. Returns `null` for a retired-but-tolerated kind (its
@@ -100,15 +118,36 @@ export function validateRouterConfig(input: unknown): ModelRouterConfig {
     if (when === null) return; // retired/inert rule (e.g. legacy `intentIs`) — skip it
     rules.push({ when, target: asTarget(rr.target, `rules[${idx}].target`) });
   });
-  const fallback = asTarget(i.fallback, 'fallback');
-  const cfg: ModelRouterConfig = { rules, fallback };
+  // ADR 1016 D5 — optional: with none, a turn no rule matches keeps its own model.
+  const cfg: ModelRouterConfig = { rules };
+  if (i.fallback !== undefined && i.fallback !== null) cfg.fallback = asTarget(i.fallback, 'fallback');
   if (typeof i.cooldownMs === 'number' && i.cooldownMs > 0) cfg.cooldownMs = Math.floor(i.cooldownMs);
   return cfg;
 }
 
-export async function getRouterConfig(tenantId: string, orgId: string): Promise<StoredRouterConfig | null> {
-  const stored = (await configs.get(`${tenantId}:${orgId}`)) ?? null;
+/** The workspace's config (ADR 1016 D1), or null when none has been saved. */
+/** Workspaces already warned about inert (unlisted-model) targets — bounded so a
+ *  long-lived process cannot grow it without limit; it only rate-limits a log. */
+const warnedUnlisted = new Set<string>();
+function noteUnlistedTargets(stored: StoredRouterConfig): void {
+  if (warnedUnlisted.has(stored.tenantId)) return;
+  const targets = [...stored.config.rules.map((r) => r.target), ...(stored.config.fallback ? [stored.config.fallback] : [])];
+  const unlisted = targets.filter((t) => !isListedModel(t.provider, t.model));
+  if (unlisted.length === 0) return;
+  if (warnedUnlisted.size >= 1000) warnedUnlisted.clear();
+  warnedUnlisted.add(stored.tenantId);
+  // ADR 1016 D5 / MR66CD-6 — a target the catalog no longer lists is never routed
+  // to (`routeTurn` judges it ineligible); say so once, or the rule just stops.
+  log.warn('model_router_unlisted_target_inert', {
+    tenantId: stored.tenantId,
+    targets: unlisted.map((t) => `${t.provider}/${t.model}`),
+  });
+}
+
+export async function getRouterConfig(tenantId: string): Promise<StoredRouterConfig | null> {
+  const stored = (await configs.get(workspaceKey(tenantId))) ?? null;
   if (!stored) return null;
+  noteUnlistedTargets(stored);
   // Tolerate-and-skip on READ too: a config persisted before a rule kind was
   // retired is served (and routed) without the inert rule, so neither the router
   // runtime nor the admin UI ever sees a legacy `intentIs` rule.
@@ -118,11 +157,11 @@ export async function getRouterConfig(tenantId: string, orgId: string): Promise<
   return { ...stored, config: { ...stored.config, rules: kept } };
 }
 
-export async function setRouterConfig(tenantId: string, orgId: string, actor: string, input: unknown): Promise<StoredRouterConfig> {
+export async function setRouterConfig(tenantId: string, actor: string, input: unknown): Promise<StoredRouterConfig> {
   const config = validateRouterConfig(input);
-  const prev = await getRouterConfig(tenantId, orgId);
+  const prev = await getRouterConfig(tenantId);
   const stored: StoredRouterConfig = {
-    tenantId, orgId, config,
+    tenantId, orgId: tenantId, config,
     enabled: prev?.enabled ?? false,
     updatedBy: actor, updatedAt: new Date().toISOString(),
   };
@@ -130,10 +169,24 @@ export async function setRouterConfig(tenantId: string, orgId: string, actor: st
   return stored;
 }
 
-export async function setRouterEnabled(tenantId: string, orgId: string, actor: string, enabled: boolean): Promise<StoredRouterConfig> {
-  const prev = await getRouterConfig(tenantId, orgId);
+export async function setRouterEnabled(tenantId: string, actor: string, enabled: boolean): Promise<StoredRouterConfig> {
+  const prev = await getRouterConfig(tenantId);
   if (!prev) throw new OpenwopError('not_found', 'No router config to enable; set rules first.', 404, {});
   const stored: StoredRouterConfig = { ...prev, enabled, updatedBy: actor, updatedAt: new Date().toISOString() };
   await configs.put(stored);
   return stored;
+}
+
+/**
+ * DSAR (ADR 0464; code grade MR66CD-8) — the routing config is the workspace's,
+ * so it is kept; the person who last saved it (`updatedBy`) becomes the erased-user
+ * tombstone, as the workflow-budget and autonomy-policy stores do. Tenant-scoped:
+ * a principal id is not issuer-qualified.
+ */
+export async function eraseRouterConfigSubject(tenantId: string, subjectKey: string): Promise<SubjectEraseReport> {
+  if (!tenantId || !subjectKey || subjectKey === ERASED_USER_REF) return { rowsTouched: 0 };
+  const stored = await configs.get(workspaceKey(tenantId));
+  if (!stored || !subjectKeyForms(subjectKey).forms.has(stored.updatedBy)) return { rowsTouched: 0 };
+  await configs.put({ ...stored, updatedBy: ERASED_USER_REF });
+  return { rowsTouched: 1 };
 }

@@ -208,14 +208,19 @@ describe('tranche 2 wiring stays wired', () => {
    * visit. The PT-2 catalog-failure warning DOES announce: a failed read is new
    * information the user has no other way to learn (the InvitesSection
    * precedent above), and it only renders when this visit's read failed.
+   * The Leave-challenge failure announces for the same reason: it is an `error`
+   * Notice gated on `leaveFailed`, so it speaks only when the user's own leave
+   * just failed, never from a standing state. Both announcing notices are
+   * failures; a success announce on this page is still 0.
    */
-  it('ProgressPage announces the failed catalog read but never the completed celebration', () => {
+  it('ProgressPage announces only its two failures, never the completed celebration', () => {
     const s = read('features/kicktodo/ProgressPage.tsx');
     const celebration = s.split('\n').filter((l) => l.includes("t('progressCompletionCelebration')"));
     expect(celebration).toHaveLength(1); // the celebration exists — the check is not vacuous
     expect(celebration[0]).not.toMatch(/\bannounce\s*[:=]/);
     expect(announcedSuccess('features/kicktodo/ProgressPage.tsx')).toBe(0);
-    expect(announced('features/kicktodo/ProgressPage.tsx')).toBe(1);
+    expect(announced('features/kicktodo/ProgressPage.tsx')).toBe(2);
     expect(s).toContain("announce={t('progressNamesUnknown')}");
+    expect(s).toContain(`{leaveFailed && <Notice variant="error" announce={t('leaveError')}>`);
   });
 });

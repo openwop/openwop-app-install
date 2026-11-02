@@ -20,6 +20,18 @@
  *
  * `OPENWOP_WEBHOOK_ALLOW_PRIVATE=true` throughout: the receiver is loopback.
  * That flag relaxes the private-address arms, NOT the redirect logic under test.
+ *
+ * TST-DKC-3 (grade-tests wave 72) — w72 corrections, each from a vacuous probe:
+ *  - the per-hop tenant-policy case denied the WHOLE chain (hop 1 and hop 2 were
+ *    the same host), so a hop-1-only check passed it (probe k8-tenant-hop). It
+ *    now redirects 127.0.0.1 → localhost: hop 1 is allowed and served, hop 2 is a
+ *    different host and must be refused on its own evaluation;
+ *  - the redirect bound accepted 2..7 hits, so an off-by-one cap passed (probe
+ *    k8-hopcap). It now pins the exact six hops (initial + MAX_DOWNLOAD_REDIRECTS).
+ * Red when: the scheme arm runs only on hop 1 (k8-perhop), undici follows
+ * redirects itself (k8-follow), the tenant policy is skipped or hop-1-only
+ * (k8-tenant-off, k8-tenant-hop), the cap is applied after buffering
+ * (k8-stream), or the timeout is lost (k8-timeout).
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -57,6 +69,13 @@ beforeAll(async () => {
       // the ONE arm ADR 0607 places OUTSIDE the dev-flag escape, so this is
       // witnessable over plain http — it proves the scheme arm runs PER HOP.
       res.writeHead(302, { location: 'file:///etc/passwd' });
+      res.end();
+      return;
+    }
+    if (url === '/cross-host') {
+      // A redirect to a DIFFERENT host literal (same loopback socket): the tenant
+      // policy evaluated for hop 1 says nothing about it.
+      res.writeHead(302, { location: `http://localhost:${port}/payload` });
       res.end();
       return;
     }
@@ -114,6 +133,9 @@ afterEach(() => {
   delete process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE;
 });
 
+let seq = 0;
+const freshTenant = (): string => `t-ksc8-${process.pid}-${++seq}`;
+
 function outcome(p: Promise<unknown>): Promise<string> {
   return p.then(
     () => 'RESOLVED',
@@ -122,8 +144,6 @@ function outcome(p: Promise<unknown>): Promise<string> {
 }
 
 describe('KSC-8 — the download leg refuses a scheme downgrade mid-redirect', () => {
-  beforeAll(() => undefined);
-
   // WHAT THIS CAN AND CANNOT WITNESS, stated plainly, because the obvious test
   // is not available and writing it anyway would be the defect this file is about.
   //
@@ -159,10 +179,9 @@ describe('KSC-8 — the download leg refuses a scheme downgrade mid-redirect', (
 
   it('an unbounded redirect chain is refused rather than followed 20 deep', async () => {
     process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true';
-    await expect(fetchGuardedBytes(`http://127.0.0.1:${port}/loop0`, 'Probe')).rejects.toThrow(/redirects/i);
-    // Bounded at MAX_DOWNLOAD_REDIRECTS (5) + the initial hop.
-    expect(hits.length).toBeLessThanOrEqual(7);
-    expect(hits.length).toBeGreaterThan(1);
+    await expect(fetchGuardedBytes(`http://127.0.0.1:${port}/loop0`, 'Probe')).rejects.toThrow(/exceeded 5 redirects/);
+    // Exactly the initial hop + MAX_DOWNLOAD_REDIRECTS (5) were fetched; the 7th is refused unfetched.
+    expect(hits).toEqual(['/loop0', '/loop1', '/loop2', '/loop3', '/loop4', '/loop5']);
   });
 
   it('(b) the scheme arm requires https — hop 1 over http is refused with the flag OFF', async () => {
@@ -198,8 +217,10 @@ describe('KSC-8 — the size cap bounds what is READ, not what was already read'
 
   it('POSITIVE CONTROL — a body under the cap still downloads intact', async () => {
     process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true';
-    const bytes = await fetchGuardedBytes(`http://127.0.0.1:${port}/payload`, 'Probe', 256 * 1024);
+    // At the boundary: a cap EQUAL to the body (7 bytes) admits it; one byte less refuses it.
+    const bytes = await fetchGuardedBytes(`http://127.0.0.1:${port}/payload`, 'Probe', 7);
     expect(bytes.toString()).toBe('PAYLOAD');
+    await expect(fetchGuardedBytes(`http://127.0.0.1:${port}/payload`, 'Probe', 6)).rejects.toThrow(/sync cap/);
   });
 });
 
@@ -210,7 +231,7 @@ describe('KSC-8 — the ADR 0187 tenant egress firewall reaches the download leg
   // provider handed back a download URL pointing at it.
   it('a denied host is refused on hop 1', async () => {
     process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true';
-    const tenantId = `t-ksc8-${Math.random().toString(36).slice(2)}`;
+    const tenantId = freshTenant();
     await putEgressRules(tenantId, 'allowlist', ['example.com']); // 127.0.0.1 not on it
     expect(
       await outcome(fetchGuardedBytes(`http://127.0.0.1:${port}/payload`, 'Probe', undefined, { tenantId })),
@@ -223,17 +244,18 @@ describe('KSC-8 — the ADR 0187 tenant egress firewall reaches the download leg
   // any provider that can redirect.
   it('a denied REDIRECT TARGET is refused — the policy is re-evaluated per hop', async () => {
     process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true';
-    const tenantId = `t-ksc8-${Math.random().toString(36).slice(2)}`;
-    // Allow the literal first host, so hop 1 passes and only hop 2 can refuse.
+    const tenantId = freshTenant();
+    // Allow ONLY the literal first host, so hop 1 passes and only hop 2 can refuse.
     await putEgressRules(tenantId, 'allowlist', ['127.0.0.1']);
     const before = await fetchGuardedBytes(`http://127.0.0.1:${port}/same-scheme`, 'Probe', undefined, { tenantId });
-    expect(before.toString(), 'control: with the host allowed, the chain completes').toBe('PAYLOAD');
+    expect(before.toString(), 'control: an allowed same-host chain completes').toBe('PAYLOAD');
 
     hits.length = 0;
-    await putEgressRules(tenantId, 'allowlist', ['example.com']); // now deny it
+    // Hop 1 (127.0.0.1) is allowed and really served; hop 2 (localhost) is not on the list.
     expect(
-      await outcome(fetchGuardedBytes(`http://127.0.0.1:${port}/same-scheme`, 'Probe', undefined, { tenantId })),
+      await outcome(fetchGuardedBytes(`http://127.0.0.1:${port}/cross-host`, 'Probe', undefined, { tenantId })),
     ).toBe('REJECTED:not_on_allowlist');
+    expect(hits, 'hop 1 was served; the refusal was the redirect target').toEqual(['/cross-host']);
   });
 
   it('POSITIVE CONTROL — no tenantId means no policy call, not a silent allow-all', async () => {
@@ -251,13 +273,13 @@ describe('KSC-8 — the download leg is time-bounded', () => {
   // self-rescheduling setTimeout, so one wedged download stalls the whole source.
   it('a body that never completes is aborted rather than hanging', async () => {
     process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true';
-    const started = Date.now();
+    const started = performance.now();
     await expect(
       fetchGuardedBytes(`http://127.0.0.1:${port}/hang`, 'Probe', undefined, { timeoutMs: 300 }),
     ).rejects.toThrow();
     // The bound is what is being witnessed, not the error text: without a signal
     // this promise never settles and the test times out instead of passing.
-    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(performance.now() - started).toBeLessThan(5_000);
   });
 
   it('POSITIVE CONTROL — a prompt response is unaffected by the same bound', async () => {

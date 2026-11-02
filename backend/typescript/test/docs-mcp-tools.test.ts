@@ -5,6 +5,16 @@
  *    precedent).
  *  - SURFACE: ctx.features.docs search/get over the managed docs KB collection.
  *  - llms.txt: published docs listed with absolute /docs URLs.
+ *
+ * TST-CWC-2. Both docs (`install`, `guide`) and one SITE page (`pricing`) are
+ * published in the describe's beforeAll, so no case depends on another's writes.
+ *
+ * Red when (sabotage-witnessed, wave 69): a pack backing node is renamed, the
+ * expose node's inputSchema drifts from the SSoT, or the MCP safety tier changes
+ * (parity cases); the surface builds a non-/docs URL, or `get` returns a
+ * published NON-docs page by slug (the `pricing` leg); the llms.txt line drops
+ * its updated date or ignores OPENWOP_PUBLIC_SITE_NAME; the ROOT door ignores
+ * OPENWOP_PUBLIC_SITE_ORG_ID; the `.md` door drops its *Updated* line.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -60,32 +70,40 @@ describe('ctx.features.docs surface + llms.txt', () => {
     for (const id of ['docs', 'users']) { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); }
     // A REAL tenant + org (getOrg must resolve for the public /docs + llms.txt routes).
     let cookie = '';
-    const call = async (path: string, body: unknown): Promise<any> => {
+    interface CallBody { user?: { tenantId?: string }; tenantId?: string; orgId?: string }
+    const call = async (path: string, body: unknown): Promise<CallBody> => {
       const res = await fetch(`${BASE}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, body: JSON.stringify(body) });
       for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-      return res.json();
+      return (await res.json()) as CallBody;
     };
     const login = await call('/host/openwop-app/test/login', { email: `docsmcp-${Date.now()}@acme.test` });
-    TENANT = login.user.tenantId ?? login.tenantId;
+    TENANT = login.user?.tenantId ?? login.tenantId ?? '';
     const org = await call('/host/openwop-app/orgs', { name: 'Docs Co' });
-    ORG = org.orgId;
+    ORG = org.orgId ?? '';
+    expect(TENANT).not.toBe('');
+    expect(ORG).not.toBe('');
+    // Every case reads these; seeding them here keeps the cases order-independent.
+    await publishDoc('install', 'Installation', 'Run npm install to set up the toolkit.');
+    await publishDoc('guide', 'The Guide', 'How to use it.');
+    // A published SITE page whose slug a docs `get` must NOT return.
+    const site = await createPage({ tenantId: TENANT, orgId: ORG, title: 'Pricing', slug: 'pricing', sections: [{ type: 'hero', data: { heading: 'Plans' } }], createdBy: 'u1' });
+    await transitionPage(TENANT, ORG, site.pageId, 'publish', 'u1');
   });
   afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
   async function publishDoc(slug: string, title: string, body: string): Promise<Page> {
-    const page = await createPage({ tenantId: TENANT, orgId: ORG, title, slug, collection: 'docs', sections: [{ type: 'richText', data: { heading: title, text: body } }] as unknown, createdBy: 'u1' });
+    const page = await createPage({ tenantId: TENANT, orgId: ORG, title, slug, collection: 'docs', sections: [{ type: 'richText', data: { heading: title, text: body } }], createdBy: 'u1' });
     const pub = await transitionPage(TENANT, ORG, page.pageId, 'publish', 'u1');
     await syncDocsPage({ tenantId: TENANT, orgId: ORG, pageId: page.pageId, slug, title, collection: 'docs', event: 'published' });
     return pub!;
   }
 
   it('search returns hits with /docs URLs; get returns the doc by slug', async () => {
-    await publishDoc('install', 'Installation', 'Run npm install to set up the toolkit.');
     const surface = buildDocsSurface({ tenantId: TENANT });
 
     const search = await surface.search({ query: 'install the toolkit' }) as { hits: Array<{ url: string; title: string }> };
-    expect(search.hits.length).toBeGreaterThan(0);
-    expect(search.hits[0]!.url).toBe('/docs/install');
+    expect(search.hits.map((h) => h.url)).toContain('/docs/install');
+    for (const h of search.hits) expect(h.url).toMatch(/^\/docs\/[a-z-]+$/);
 
     const got = await surface.get({ slug: 'install' }) as { doc: { title: string; url: string; text: string } | null };
     expect(got.doc?.title).toBe('Installation');
@@ -94,10 +112,12 @@ describe('ctx.features.docs surface + llms.txt', () => {
 
     const miss = await surface.get({ slug: 'nonexistent' }) as { doc: unknown };
     expect(miss.doc).toBeNull();
+    // A PUBLISHED page that is not in the docs collection is not a doc.
+    const site = await surface.get({ slug: 'pricing' }) as { doc: unknown };
+    expect(site.doc).toBeNull();
   });
 
   it('llms.txt lists published docs with absolute /docs URLs', async () => {
-    await publishDoc('guide', 'The Guide', 'How to use it.');
     const res = await fetch(`${BASE}/host/openwop-app/public/${encodeURIComponent(ORG)}/llms.txt`);
     expect(res.status).toBe(200);
     const txt = await res.text();

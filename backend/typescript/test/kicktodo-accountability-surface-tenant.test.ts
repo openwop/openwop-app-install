@@ -5,6 +5,14 @@
  * so before this a workflow in tenant B could read tenant A's circle feed, list a
  * coach's tenant-A caseload, or raise a proposal on a tenant-A circle, given an id
  * and a subject with a live grant there.
+ *
+ * TST-DJC-2 (grade-tests wave 71). The ADR 0901 run-principal binding is OFF by
+ * default, so `circleInTenant` (surface.ts) is the ONLY guard on feed/propose, and
+ * `coachCaseload`'s `opts.tenantId` filter (cohortService.ts) the only one on the
+ * caseload. The cross-tenant id is a REAL tenant-HOME circle, so the case reaches
+ * the fence. Red when: the `circle.tenantId !== tenant` check is dropped, feed or
+ * propose stop calling it, the surface stops passing `{ tenantId }` to the caseload,
+ * or the caseload filter is dropped.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -22,6 +30,11 @@ const OTHER = 'tenant-acct-surface-other';
 const OWNER = 'user:acct-surface-owner';
 const COACH = 'user:acct-surface-coach';
 let circleId = '';
+
+function recordOf(v: unknown, what: string): Record<string, unknown> {
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) throw new Error(`${what} is not an object: ${JSON.stringify(v)}`);
+  return { ...v };
+}
 
 function surfaceFor(tenantId: string) {
   const scope: BundleScope = { tenantId };
@@ -49,10 +62,14 @@ beforeAll(async () => {
 describe('accountability surface is bound to the run tenant', () => {
   it('the home tenant reads the feed, the caseload and can propose', async () => {
     const s = surfaceFor(HOME);
-    await expect(s.feed!({ circleId, callerSubject: COACH })).resolves.toBeTruthy();
+    const feed = recordOf((await s.feed!({ circleId, callerSubject: COACH })).feed, 'feed');
+    expect(feed.circleId).toBe(circleId);
+    expect(Array.isArray(feed.actions)).toBe(true); // the coach holds `action-status`
     const { caseload } = await s.caseload!({ coachSubject: COACH });
-    expect(Array.isArray(caseload) ? caseload.length : 0).toBe(1);
-    await expect(s.propose!({ circleId, coachSubject: COACH, note: 'try mornings' })).resolves.toBeTruthy();
+    if (!Array.isArray(caseload)) throw new Error('caseload is not an array');
+    expect(caseload.map((r) => recordOf(r, 'caseload row').circleId)).toEqual([circleId]);
+    const proposal = recordOf((await s.propose!({ circleId, coachSubject: COACH, note: 'try mornings' })).proposal, 'proposal');
+    expect(proposal).toMatchObject({ tenantId: HOME, circleId, coachSubject: COACH, state: 'proposed' });
   });
 
   it('another tenant gets nothing: feed and propose are denied, the caseload is empty', async () => {

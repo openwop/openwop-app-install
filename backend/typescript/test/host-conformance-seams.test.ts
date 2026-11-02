@@ -18,6 +18,18 @@
  *   - `POST /host/openwop-app/a2a/tasks/push-config` — RFC 0093 egress-guard a
  *     caller push URL (a2a-push-egress-ssrf).
  *
+ * The trigger-ingestion SSRF drop is a LAYERED guard in `resolveAttachment`
+ * (`host/triggerIngestionService.ts`): the denied-host check, then https-only, then the
+ * pinned-resolution egress dispatcher. The `http://169.254.169.254` fixture is refused
+ * by the first two, so the host check is not individually witnessed here, on purpose:
+ * an https link-local fixture would let a sabotaged guard attempt a real egress.
+ *
+ * Tracker TST-DFC-1. Red when (w71g1, witnessed): credential headers pass into the
+ * in-run envelope; tasks/get misreports the projection; the push-config egress guard
+ * is dropped (asserted as the exact 400 `a2a_push_egress_denied`, which a fallthrough
+ * 404 cannot satisfy); push-config on an absent task stops 404ing; the durable-tasks
+ * flag gate is dropped (asserted by its own message, not the lookup's 404).
+ *
  * @see docs/adr/0034-external-event-trigger-ingestion-host.md
  * @see docs/adr/0035-async-durable-a2a-tasks-host.md
  */
@@ -51,6 +63,7 @@ afterAll(async () => {
 const post = (path: string, body: unknown) =>
   fetch(`${BASE}${path}`, { method: 'POST', headers: H, body: JSON.stringify(body) });
 const get = (path: string) => fetch(`${BASE}${path}`, { headers: H });
+interface ErrorBody { error: string; message: string }
 
 describe('RFC 0099 §F — host-sample trigger ingest seam', () => {
   it('drops an attachment whose resolution hits a private/metadata address (trigger-ingestion-ssrf)', async () => {
@@ -113,12 +126,15 @@ describe('RFC 0100 §2/§4 — host-sample durable A2A task seams', () => {
   it('tasks/get returns 404 for an unknown task', async () => {
     const read = await get('/host/openwop-app/a2a/tasks/run_does_not_exist');
     expect(read.status).toBe(404);
+    expect((await read.json()) as ErrorBody).toMatchObject({ error: 'not_found', message: 'durable task not found' });
   });
 
   it('push-config refuses a private/loopback push URL before any push (a2a-push-egress-ssrf)', async () => {
     const res = await post('/host/openwop-app/a2a/tasks/push-config', { taskId: 'run_x', url: 'http://10.0.0.5/push' });
-    expect(res.status).toBeGreaterThanOrEqual(400);
-    expect(res.status).toBeLessThan(500);
+    // Exact: without the guard the request falls through to the task lookup and 404s,
+    // which a "any 4xx" assertion used to accept.
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as ErrorBody).error).toBe('a2a_push_egress_denied');
   });
 
   it('push-config accepts a public https URL but 404s when the task does not exist', async () => {
@@ -127,6 +143,7 @@ describe('RFC 0100 §2/§4 — host-sample durable A2A task seams', () => {
       url: 'https://caller.example.com/a2a/push',
     });
     expect(res.status).toBe(404); // URL passed the egress guard; the task lookup missed
+    expect((await res.json()) as ErrorBody).toMatchObject({ error: 'not_found', message: 'durable task not found' });
   });
 });
 
@@ -136,6 +153,8 @@ describe('seam gating — 404 when the capability flag is off', () => {
     try {
       const read = await get('/host/openwop-app/a2a/tasks/anything');
       expect(read.status).toBe(404);
+      // The flag gate's own refusal — an unknown task also 404s, so the message decides.
+      expect(((await read.json()) as ErrorBody).message).toContain('a2a durable tasks disabled');
     } finally {
       process.env.OPENWOP_A2A_DURABLE_TASKS = 'true';
     }

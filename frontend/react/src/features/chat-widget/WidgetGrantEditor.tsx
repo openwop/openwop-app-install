@@ -7,17 +7,16 @@
  * The tool picker is populated from the WORKSPACE-SCOPED catalog SSoT (`getToolCatalog`)
  * — the same list `buildToolCatalog` backs, never a second copy.
  *
- * Honest-advertise (ADR 0469 review finding 1): this host wires the `hitl` write
- * control ONLY. `rate-limit-session-cap` is Phase D — NOT offered here, so an operator
- * can't configure a control whose turn-time semantics the backend doesn't yet honor.
- * Writes are therefore always held for approval; the UI states that plainly.
+ * Write controls: `hitl` (held for approval, the default) and, since ADR 0469 Phase D,
+ * `rate-limit-session-cap` (auto-run under a per-session cap, only for a surface with no
+ * egress audiences). (This used to say Phase D was "NOT offered here"; it is.)
  */
 import { Button } from '../../ui/Button.js';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Notice } from '../../ui/Notice.js';
 import { toast } from '../../ui/toast.js';
-import { getToolCatalog, patchWidget, type Widget, type WidgetAnonToolGrant, type WidgetCaps, type AnonWriteControl } from '../../client/chatWidgetClient.js';
+import { getToolCatalog, patchWidget, isWidgetByokRequired, type Widget, type WidgetAnonToolGrant, type WidgetCaps, type AnonWriteControl } from '../../client/chatWidgetClient.js';
 
 interface Props {
   orgId: string;
@@ -103,8 +102,10 @@ export function WidgetGrantEditor({ orgId, widget, onClose, onSaved }: Props): J
       });
       toast.success(t('grantSaved'));
       onSaved();
-    } catch {
-      setError(t('saveError'));
+    } catch (err) {
+      // ADR 1018 D8 — a widget that would answer on the managed key without being a
+      // superadmin workspace is refused; say why in the user's language.
+      setError(t(isWidgetByokRequired(err) ? 'byokRequired' : 'saveError'));
     } finally {
       setSaving(false);
     }

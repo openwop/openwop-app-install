@@ -16,20 +16,21 @@
  * > lives in `visitorConsent.ts` and exists only once the visitor's decision
  * > allows it; the beacon sends the visitor's consent-lane token beside it.
  */
-import { config } from '../../client/config.js';
+import { visitorApiBase } from './visitorApi.js';
 import { consentTokenFor, repairConsentTokenFrom } from './visitorConsent.js';
 
 export { getVisitorKey } from './visitorConsent.js';
 
-/** Fire-and-forget: record one experiment-stamped pageview on the public
- *  analytics beacon. Failures are silent — measurement never breaks the page. */
-export function sendExperimentPageview(
+/** Fire-and-forget: record one pageview on the public analytics beacon,
+ *  stamped with the experiment arm when there is one. Failures are silent —
+ *  measurement never breaks the page. */
+export function sendPageview(
   orgId: string,
   visitorKey: string,
-  experiment: { experimentId: string; variant: string },
+  experiment?: { experimentId: string; variant: string },
 ): void {
   try {
-    const url = `${config.baseUrl}/host/openwop-app/public-analytics/${encodeURIComponent(orgId)}/collect`;
+    const url = `${visitorApiBase()}/host/openwop-app/public-analytics/${encodeURIComponent(orgId)}/collect`;
     void fetch(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -39,8 +40,17 @@ export function sendExperimentPageview(
         path: window.location.pathname,
         sessionKey: visitorKey,
         ...(consentTokenFor(orgId) ? { consentToken: consentTokenFor(orgId) } : {}),
-        experiment: { id: experiment.experimentId, variant: experiment.variant },
+        ...(experiment ? { experiment: { id: experiment.experimentId, variant: experiment.variant } } : {}),
       }),
     }).then((res) => repairConsentTokenFrom(orgId, res)).catch(() => undefined); // grade-code M4
   } catch { /* never break the page for measurement */ }
+}
+
+/** ADR 0236 — the SPA front page's experiment-stamped pageview. */
+export function sendExperimentPageview(
+  orgId: string,
+  visitorKey: string,
+  experiment: { experimentId: string; variant: string },
+): void {
+  sendPageview(orgId, visitorKey, experiment);
 }

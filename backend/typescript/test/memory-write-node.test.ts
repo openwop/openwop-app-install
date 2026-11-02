@@ -11,7 +11,7 @@
  * `media-emit-node.test.ts`, the RFC 0055 §C counterpart.
  */
 
-import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import { describe, expect, it, beforeAll, afterAll, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
@@ -68,7 +68,7 @@ describe('memory-write demo node (RFC 0057 node-attributed producer)', () => {
         edges: [],
       }),
     });
-    expect([200, 201]).toContain(reg.status);
+    expect(reg.status).toBe(201);
 
     const create = await jsonFetch<{ runId: string }>('/runs', {
       method: 'POST',
@@ -77,11 +77,12 @@ describe('memory-write demo node (RFC 0057 node-attributed producer)', () => {
     expect(create.status).toBe(201);
     const { runId } = create.body;
 
-    for (let i = 0; i < 20; i++) {
-      await new Promise((r) => setTimeout(r, 50));
+    // Wait for — and assert — completion; a poll that gave up early would read
+    // a bundle the node had not written to yet.
+    await vi.waitFor(async () => {
       const snap = await jsonFetch<{ status: string }>(`/runs/${runId}`);
-      if (['completed', 'failed', 'cancelled'].includes(snap.body.status)) break;
-    }
+      expect(snap.body.status).toBe('completed');
+    }, { timeout: 10_000, interval: 25 });
 
     const bundle = await jsonFetch<BundleBody>(`/runs/${runId}/debug-bundle`);
     expect(bundle.status).toBe(200);
@@ -93,8 +94,14 @@ describe('memory-write demo node (RFC 0057 node-attributed producer)', () => {
     // RFC 0057 §B: identifiers present, attributed to the node.
     expect(typeof nodeWrite!.payload?.memoryId).toBe('string');
     expect(nodeWrite!.payload?.memoryRef).toBe('tenant-memory');
-    // `memory-attribution-no-content`: the event MUST NOT carry entry content.
-    expect(nodeWrite!.payload?.content, 'memory.written MUST be content-free').toBeUndefined();
+    // `memory-attribution-no-content`: the event MUST NOT carry entry content —
+    // ANYWHERE in the payload. A top-level `.content` check is not enough: the
+    // v2 read projection (`storage/v2PayloadProjection.ts` carryVendorKeys)
+    // moves an undeclared key under `vendor.openwop-app`, so a node that leaked
+    // `content` read back GREEN under the old check (MEASURED w72 probe
+    // mwn-content). Pin the exact key set and the absence of the text itself.
+    expect(Object.keys(nodeWrite!.payload ?? {}).sort(), 'memory.written MUST be content-free').toEqual(['memoryId', 'memoryRef', 'nodeId', 'tags']);
+    expect(JSON.stringify(nodeWrite!.payload)).not.toContain('Demo memory entry');
 
     // The memoryId resolves via the read-side, tagged with the writing node.
     const mem = await jsonFetch<MemoryListBody>('/host/openwop-app/memory');
@@ -102,5 +109,7 @@ describe('memory-write demo node (RFC 0057 node-attributed producer)', () => {
     const entry = mem.body.entries.find((e) => e.id === nodeWrite!.payload!.memoryId);
     expect(entry, 'the attributed memoryId MUST resolve in the ledger').toBeDefined();
     expect(entry!.tags).toContain('node:mem');
+    // …and the CONTENT lives in the ledger, which is where it belongs.
+    expect(entry!.content).toBe('Demo memory entry written by node mem');
   });
 });

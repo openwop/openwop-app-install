@@ -8,6 +8,12 @@
  *
  * These assert the STRUCTURE that makes that true, since the four-toggle split
  * this replaced would have made the vertical partially purchasable.
+ *
+ * Tracker TST-DHB-2 (wave 71). Red when: CRM leaves `dependsOn`
+ * (`w71g3-fo-dep`); the toggle defaults on (`fo-default`); the /status MODULES
+ * advert drops a module directory (`fo-modules`); the "persists nothing"
+ * acknowledgement returns (`fo-ack`); the bundle gains a second feature
+ * (`fo-bundle`).
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
@@ -66,6 +72,12 @@ describe('ADR 0539 — the job-search vertical is one gated, sellable thing', ()
     // must exist on disk, since a declared-but-missing pack fails validation at
     // boot — the phase-ordering trap this guards.
     const repoRoot = join(process.cwd(), '..', '..');
+    // Non-vacuity: the loop below asserts nothing over an empty list. Measured 2
+    // (`feature.job-search.nodes`, `vendor.openwop-app.career-agent.agents`).
+    expect(featureRequiredPacks(jobSearchFeature).map((p) => p.name).sort()).toEqual([
+      'feature.job-search.nodes',
+      'vendor.openwop-app.career-agent.agents',
+    ]);
     for (const p of featureRequiredPacks(jobSearchFeature)) {
       expect(existsSync(join(repoRoot, 'packs', p.name)), `declared pack ${p.name} does not exist on disk`).toBe(true);
       const manifest = JSON.parse(readFileSync(join(repoRoot, 'packs', p.name, 'pack.json'), 'utf8')) as { name: string; version: string };
@@ -88,15 +100,14 @@ describe('ADR 0539 — the job-search vertical is one gated, sellable thing', ()
       });
     expect(existsSync(dir), 'the package moved — this guard is now vacuous').toBe(true);
     const persists = walk(dir).filter((f) => /new DurableCollection|hostExtKv|storage\.(put|set)\b/.test(readFileSync(f, 'utf8')));
-    if (persists.length > 0) {
-      expect(
-        ACKNOWLEDGED_UNSEEDED[JOB_SEARCH_TOGGLE],
-        `job-search now persists (${persists.map((f) => f.split('/').pop()).join(', ')}) — ` +
-          'the "persists nothing" acknowledgement is now FALSE. Ship a demo seeder and remove it.',
-      ).toBeUndefined();
-    } else {
-      expect(ACKNOWLEDGED_UNSEEDED[JOB_SEARCH_TOGGLE], 'storeless ⇒ must stay acknowledged').toBeDefined();
-    }
+    // The package has persisted since ADR 0540 P1, so the storeless branch this
+    // case used to carry can no longer run: assert the premise, then the rule.
+    expect(persists.length, 'the package persists (ADR 0540 P1 onward)').toBeGreaterThan(0);
+    expect(
+      ACKNOWLEDGED_UNSEEDED[JOB_SEARCH_TOGGLE],
+      `job-search persists (${persists.map((f) => f.split('/').pop()).join(', ')}) — ` +
+        'the "persists nothing" acknowledgement is FALSE. Ship a demo seeder instead.',
+    ).toBeUndefined();
   });
 
   it('advertises ONLY the modules that exist — in BOTH directions', () => {

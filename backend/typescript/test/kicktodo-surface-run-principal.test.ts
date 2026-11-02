@@ -29,6 +29,14 @@
  *     binding toggle OFF. The direct-service case and the toggle-OFF case are
  *     the sabotage witnesses for the assertion in `kickbotCoachTurnService.ts`
  *     and for the surface passing `boundActor` regardless of the toggle.
+ *
+ * TST-DKA-3 (grade-tests wave 72) — sabotage-witnessed (w72 probes sr-*): the
+ * subject check, the personOnly branch, the manage short-circuit, the relation /
+ * enrollment / org-manage predicates, the shadow branch, the binder key check,
+ * the service `boundActor` assertion and the surface passing it. With the
+ * binding ON the subject check refuses a D3 attempt BEFORE the service assertion
+ * (a recorded double guard); the toggle-OFF case is the one that isolates the
+ * service. Case 2b pins the closed log field set under a short title.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -204,14 +212,18 @@ describe('1 — completeness: no KickTodo surface method ships unbound', () => {
 
   it('the binder refuses to build a surface with an unbound method or a spec for no method', () => {
     const fn: BoundSurfaceFn = async () => ({});
-    expect(() => bindKicktodoSurface('kicktodo-x', { tenantId: 't' }, { a: fn, b: fn }, { a: { authority: 'none' } } as never)).toThrow(/unbound: \[b\]/);
-    expect(() => bindKicktodoSurface('kicktodo-x', { tenantId: 't' }, { a: fn }, { a: { authority: 'none' }, z: { authority: 'none' } } as never)).toThrow(/no such method: \[z\]/);
+    // The calls are deliberately type-illegal (the spec map must mirror the impl
+    // map), so they go through Reflect.apply — the same runtime call, no cast.
+    expect(() => Reflect.apply(bindKicktodoSurface, undefined, ['kicktodo-x', { tenantId: 't' }, { a: fn, b: fn }, { a: { authority: 'none' } }])).toThrow(/unbound: \[b\]/);
+    expect(() => Reflect.apply(bindKicktodoSurface, undefined, ['kicktodo-x', { tenantId: 't' }, { a: fn }, { a: { authority: 'none' }, z: { authority: 'none' } }])).toThrow(/no such method: \[z\]/);
   });
 
   it('every relation spec carries its predicate', () => {
-    for (const [id, specs] of Object.entries(SPECS)) {
-      for (const [m, s] of Object.entries(specs)) if (s.authority === 'relation') expect(typeof s.relation, `${id}.${m}`).toBe('function');
-    }
+    const relations = Object.entries(SPECS).flatMap(([id, specs]) =>
+      Object.entries(specs).filter(([, s]) => s.authority === 'relation').map(([m, s]) => ({ name: `${id}.${m}`, relation: s.relation })));
+    // Floor: the loop below must have something to check (sendSessionReminder is the reviewed one).
+    expect(relations.map((r) => r.name)).toContain('kicktodo-accountability.sendSessionReminder');
+    for (const r of relations) expect(typeof r.relation, r.name).toBe('function');
   });
 
   it('the methods callable WITHOUT a person are exactly the host jobs’ ops plus the public reads (reviewed table)', () => {
@@ -312,6 +324,21 @@ describe('2 — the subject table (every subject-arg method)', () => {
       }
     });
   }
+});
+
+describe('2b — the shadow log line names no person', () => {
+  // The subject rows above assert this too, but under long generated titles;
+  // this fixed title is the one a probe can key on (TST-DKA-3, w72 probe sr-log-who).
+  it('unbound log carries no subject value', async () => {
+    const s = stubbed('kicktodo-core', { tenantId: P_OFF, actingUserId: CAROL });
+    const logged = await withLog(() => s.surface.today!({ ownerSubject: MALLORY }));
+    expect(logged.error).toBeUndefined();
+    const unbound = logged.lines.filter((l) => l.msg === 'kicktodo_surface_unbound');
+    expect(unbound).toHaveLength(1);
+    expect(Object.keys(unbound[0]!).sort()).toEqual(['component', 'level', 'lane', 'method', 'msg', 'reasonCode', 'surface', 'tenant', 'time'].sort());
+    expect(logged.raw).not.toContain(MALLORY);
+    expect(logged.raw).not.toContain(CAROL);
+  });
 });
 
 describe('3 — the authority kinds, against the real predicates', () => {

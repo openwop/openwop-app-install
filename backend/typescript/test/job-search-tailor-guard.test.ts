@@ -4,9 +4,19 @@
  * A fabricated number, employer or date must fail CLOSED. These are written as
  * attacks rather than examples: each one is a plausible model output that a
  * prompt instruction ("do not invent metrics") would not have stopped.
+ *
+ * Tracker TST-DHB-8 (wave 71). Red when: number normalisation stops folding
+ * commas (`w71g3-tg-norm`); months, years or numbers stop being checked
+ * (`tg-month`, `tg-year`, `tg-fabnum`); the umbrella-employer allowlist is
+ * ignored (`tg-allowed`); an unknown employer is let through (`tg-employer`).
+ * DOUBLE GUARD (recorded): "Northwind Systems and Goldman Sachs" is held by both
+ * the connector set (no `and`, so the run splits) AND one-way containment (a
+ * longer run never matches a shorter known name); either alone holds it
+ * (`tg-and` was an equivalent mutant).
+ * (Wave 71 removed the `extractVerbatim` case: that export has no product caller.)
  */
 import { describe, expect, it } from 'vitest';
-import { guardRewrite, extractVerbatim } from '../src/features/job-search/domain/tailorGuard.js';
+import { guardRewrite } from '../src/features/job-search/domain/tailorGuard.js';
 
 const ORIGINAL = 'Led the billing rewrite at Northwind Systems, cutting p99 latency 40% across 12 services.';
 
@@ -80,17 +90,13 @@ describe('ADR 0540 D4 — a rewrite may NEVER fabricate', () => {
     const v = guardRewrite(ORIGINAL, 'Cut latency 40% across 12 services at Northwind Systems, saving $5M in 2021.');
     expect(v.ok).toBe(false);
     expect(v.violations.length).toBeGreaterThan(1);
+    const kinds = v.violations.map((x) => x.kind);
+    expect(kinds).toContain('fabricated-number');
+    expect(kinds).toContain('fabricated-year');
   });
 
   it('names the offending token, so a repair pass knows what to drop', () => {
     const v = guardRewrite('Managed 3 engineers.', 'Managed 30 engineers.');
     expect(v.violations[0]?.token).toBe('30');
-  });
-});
-
-describe('ADR 0540 D4 — extraction is verbatim', () => {
-  it('returns fields unchanged — parsing never "improves"', () => {
-    const raw = { employer: 'northwind systems', title: 'Sr. SWE', bullet: 'did  the   thing' };
-    expect(extractVerbatim(raw)).toEqual(raw);
   });
 });

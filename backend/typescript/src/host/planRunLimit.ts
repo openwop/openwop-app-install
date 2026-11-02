@@ -33,6 +33,8 @@ import { DurableCollection } from './hostExtPersistence.js';
 import { OpenwopError } from '../types.js';
 import { createLogger } from '../observability/logger.js';
 import { isBillingExemptTenant, PLAN_LIMIT_WORKFLOW_RUNS, resolvePlanLimit } from './planLimitsSeam.js';
+import { deployProfile } from './deployPosture.js';
+import { recordAdmissionRefusal } from './admissionRefusals.js';
 
 const log = createLogger('host.planRunLimit');
 
@@ -61,8 +63,14 @@ const NOOP: PlanRunReservation = { release: async () => undefined };
 /**
  * Reserve one run against the tenant's monthly plan limit, or throw a typed 429
  * `plan_run_limit_reached`. A no-op (nothing counted) when the tenant is exempt
- * or has no limit. FAIL-OPEN on a counter read/write error, the same posture as
- * `workflowBudgetExhausted`: a ledger hiccup must not stop a paying tenant's run.
+ * or has no limit.
+ *
+ * ADR 0987 D5 / Q2 — when the counter cannot answer, the posture follows the
+ * ADR 0981 profile. Under the strict profile (`auth`) the limit is contractual,
+ * so it fails CLOSED: a store error is a 503 `plan_run_limit_unavailable` and
+ * sustained compare-and-swap contention is a 429 `plan_run_limit_contention`.
+ * Nothing is counted either way. Under the evaluation profile it fails OPEN, as
+ * it always did: a ledger hiccup must not stop a demo tenant's run.
  */
 export async function reservePlanRun(tenantId: string, at: Date = new Date()): Promise<PlanRunReservation> {
   if (isBillingExemptTenant(tenantId)) return NOOP;
@@ -76,6 +84,7 @@ export async function reservePlanRun(tenantId: string, at: Date = new Date()): P
       const existing = (await runMonths.get(key)) ?? null;
       const runs = existing?.runs ?? 0;
       if (runs >= limit) {
+        recordAdmissionRefusal('plan', 'plan_run_limit_reached');
         throw new OpenwopError(
           'rate_limited',
           `Your plan allows ${limit} workflow run${limit === 1 ? '' : 's'} per month, and this month's are used. Runs resume on the 1st (UTC), or upgrade your plan.`,
@@ -86,11 +95,21 @@ export async function reservePlanRun(tenantId: string, at: Date = new Date()): P
       const next: RunMonthCount = { tenantId, month, runs: runs + 1, updatedAt: at.toISOString() };
       if (await runMonths.compareAndSwap(existing, next)) return { release: () => releasePlanRun(key) };
     }
-    log.warn('plan_run_limit_contention', { key, attempts: CAS_ATTEMPTS });
+    log.warn('plan_run_limit_contention', { key, attempts: CAS_ATTEMPTS, profile: deployProfile() });
+    if (deployProfile() === 'strict') {
+      recordAdmissionRefusal('plan', 'plan_run_limit_contention');
+      throw new OpenwopError('rate_limited', 'Too many runs are starting at once for this workspace. Try again in a few seconds.', 429,
+        { reason: 'plan_run_limit_contention', retryAfterS: 2 });
+    }
     return NOOP;
   } catch (err) {
     if (err instanceof OpenwopError) throw err;
-    log.warn('plan_run_limit_unavailable', { tenantId, error: err instanceof Error ? err.message : String(err) });
+    log.warn('plan_run_limit_unavailable', { tenantId, profile: deployProfile(), error: err instanceof Error ? err.message : String(err) });
+    if (deployProfile() === 'strict') {
+      recordAdmissionRefusal('plan', 'plan_run_limit_unavailable');
+      throw new OpenwopError('service_unavailable', 'Runs cannot be counted against your plan right now, so this one did not start. Try again in a few seconds.', 503,
+        { reason: 'plan_run_limit_unavailable', retryAfterS: 5 });
+    }
     return NOOP;
   }
 }

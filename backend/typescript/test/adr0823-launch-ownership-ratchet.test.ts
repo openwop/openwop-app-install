@@ -27,6 +27,7 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { stripComments } from './helpers/stripComments.js';
 
 const SRC = 'src';
 
@@ -44,11 +45,12 @@ function tsFiles(dir: string): string[] {
   return out;
 }
 
-/** Source with comments stripped, so prose that NAMES a call never counts. */
+/** Source with comments stripped, so prose that NAMES a call never counts.
+ *  Line comments go FIRST: a `/*` in one (a `/host/x/*` path) would otherwise
+ *  open a block that runs to the next `*\/`, even one inside a string, and hide
+ *  the live code between them. That hid 1,283 lines of `routes/testSeam.ts`. */
 function code(file: string): string {
-  return readFileSync(file, 'utf8')
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/^\s*\/\/.*$/gm, '');
+  return stripComments(readFileSync(file, 'utf8'));
 }
 
 const FILES = tsFiles(SRC).map((f) => ({ rel: relative(SRC, f), src: code(f) }));
@@ -92,6 +94,7 @@ const RUN_MINTERS: Record<string, [number, string]> = {
   'host/workforceService.ts': [1, 'seeds historical records for host-defined workforces; executes nothing'],
   'host/workforceEval.ts': [1, 'eval record under the fixed EVAL_SUITE_ID; executes no workflow definition'],
   'host/anonymousActor.ts': [1, 'synthetic anon-surface run, no workflow definition'],
+  'features/agent-deployments/service.ts': [1, 'ADR 1005 / RFC 0254 §D deployment-management run under the fixed workflowId openwop-app.agent-deployment; it stands for a transition and executes no workflow definition'],
   'host/evals/createEvalRun.ts': [1, 'ADR 0889 eval run under the synthetic eval:<suite> workflowId; drives an agent resolved by resolveAgentForTenant, executes no workflow definition'],
   'routes/artifactTypeSeam.ts': [1, 'test seam with its own inline definition'],
   'routes/compensationSeam.ts': [2, 'test seam with its own inline definition'],

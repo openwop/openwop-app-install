@@ -226,7 +226,7 @@ export function registerConsentRoutes(deps: RouteDeps): void {
       // to on a site that cannot record.
       // Omitted when nothing optional is offered, so a site without replay keeps the
       // ADR 0860 regime-only response exactly.
-      const choices = await offeredVisitorChoices(tenantId);
+      const choices = await offeredVisitorChoices(tenantId, req.params.orgId);
       res.json({ regime: mode, ...(choices.length > 0 ? { choices } : {}) });
     } catch (err) { next(err); }
   });

@@ -18,6 +18,173 @@ Commits by the `/cut-app-release` skill; required upgrade stops are tracked in
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-11-02
+
+A MINOR release under ADR 0052. It removes the AI Envelope from the host, adds
+versioned agent deployments, and adds the model router, a public chat-widget
+conversation lane, agent clarification questions and session replay. Run
+admission now fails closed under `auth`, and model text can no longer become an
+executed tool. It also fixes Campaign Studio's approval and org-ownership paths.
+There are no schema or
+app migrations: schema stays at sqlite 51 / postgres 49 and app migrations stay
+at 24.
+
+### Added
+
+- **Agent deployments and versions (RFC 0082, ADR 1005, ADR 1014).** Each agent
+  version has a deployment record with a lifecycle, channel pins, an eval gate
+  and an operator promotion policy with a 202 approval. Prior agent-pack
+  versions are kept and resolve as `agentId@version`, a pinned version is the
+  version that runs, and user-written agents get revisions. The agent workspace
+  gains a deployment console. Both flags default off: `OPENWOP_AGENT_DEPLOYMENT`
+  and `OPENWOP_AGENT_VERSIONS` (#5399, #5415, #5417, #5444).
+- **Model router (ADR 1016).** One routing config per workspace, decided for
+  each chat message. A rule can only target a callable model (#5427).
+- **Chat widget conversations (ADR 1018).** Visitor threads, operator
+  conversations and an absolute embed snippet, with a ceiling of 100 visitor
+  turns per session. The managed key answers widgets for superadmin tenants only
+  (#5430, #5432, #5437).
+- **Agent clarification questions (ADR 1001, ADR 1006).** An agent missing
+  information only a person has asks through `openwop:ask-user` in a run, or
+  `openwop:chat.ask-user` in chat, and shows one question card on both lanes.
+  The `agent-clarification` and `agent-clarification-chat` toggles stay **off**
+  by default (#5372, #5379, #5413).
+- **Session replay (ADR 0951 P2).** A geometry-only recorder, audited playback,
+  a 10% sample and retention, with consent generations that fence withdrawal.
+  `analytics.session-replay` stays **off** by default (#5398).
+- **Tenant site visitor runtime (ADR 1015).** Custom-domain pages can load one
+  same-origin script behind the `custom-domains.visitor-runtime` sub-toggle,
+  which stays **off** by default. This is what lets a customer site show the
+  consent banner (#5438).
+- **Chat.** A chat turn shows the artifacts its tools saved (ADR 1017, #5428), a
+  new chat's AI title reaches the rail and other tabs (ADR 1019, #5433), and a
+  reply says when the assistant saw only the most recent messages (ADR 1003,
+  #5424).
+- **Campaign Studio.** The brief, Strategist and Channel Generator explain a
+  waiting or stale kernel and say what approving does (ADR 1020, #5434, #5436,
+  #5447). Connectors show the last successful sync, and a failed sync says so
+  (ADR 1022, #5449).
+- **KickTodo.** A live operator can remove a participant, a participant can leave
+  a challenge, and a participant's new chat opens on KickBot (ADR 0910, ADR 0975,
+  #5408, #5420, #5426).
+- Sign-in re-authenticates in place on `requires-recent-login`, then retries
+  (#5392).
+
+### Changed
+
+- **Run admission is shared across instances and fails closed under `auth`
+  (ADR 0987).** Concurrency is counted inside the run insert on every creation
+  lane (#5388), and the per-minute and per-day run windows now live in the
+  shared counter, so a deploy or a second instance no longer resets them
+  (#5403). Under the strict profile (`OPENWOP_DEPLOY_POSTURE=auth`), the run
+  windows and the monthly plan limit **fail closed**: when their counter cannot
+  answer, a run start gets a `503` instead of being let through (#5391, #5403).
+  The evaluation profiles keep failing open. The admission transaction also
+  holds its lock for less time (#5402).
+- **Operations shows run admission (ADR 0987 D6).** A superadmin panel on
+  `/operations` lists each limit's cap, its failure posture, the refusals since
+  the instance started, and the number of runs holding a concurrency slot
+  (#5462).
+- **Interrupt forms (ADR 1013, RFC 0255 §E).** Forms are raised under `data.form`
+  and checked (#5442).
+- **Context economy (ADR 1003).** Adds a stepped transcript window and a
+  tool-loop conversation cache. All levers stay off by default (#5384, #5424).
+- The conformance pin moves to suite 2.46.38.
+
+### Removed
+
+- **The AI Envelope (RFC 0255, ADR 1007).** The host no longer accepts model
+  envelopes or runs the fenced `schema.request` loop. Capabilities drop
+  `envelopes`, `supportedEnvelopes`, `limits.schemaRounds` and
+  `limits.envelopesPerTurn`. The `vendor.myndhyve.ai` pack is deleted, so a
+  stored workflow naming one of its nodes fails with `host_capability_missing`
+  (#5414, #5416).
+- `OPENWOP_A2UI_DELTA_TRANSPORT` and `OPENWOP_CAMPAIGN_FANOUT_PARALLEL` are no
+  longer read.
+
+### Fixed
+
+- **Campaign Studio approvals (ADR 1020).** The orchestration reaches its
+  channels, a kernel is saved only after its approval, and creative briefs are
+  created only after approval (#5434, #5436, #5447).
+- **Campaign org ownership (ADR 1022).** Sync, budget changes and attribution are
+  scoped to the org, and every budget change checks caps (#5449).
+- A run whose every terminal was condition-skipped now fails as
+  `all_terminals_skipped` (#5443).
+- Gallery copies of a chain with sub-chains now pass the parent's mapped inputs
+  to each child. Children used to run with those inputs missing (ADR 1023 D2,
+  #5452).
+- Service-worker install can no longer stall on HTTP/2 (OFF-PROD-1, ADR 0873 D6,
+  #5459).
+- Custom domains rate-limit per client, so one scanner can't take a site offline.
+  New per-IP limits apply to served requests (default 120/min), misses (60/min)
+  and beacons (240/min) (ADR 0295, #5446).
+- Date-only strings render as their calendar date in every zone (#5406), mobile
+  tab labels fit at 320px (#5460), and `<Trans>` slots render (#5396).
+- Two packs that routed the wrong way now route correctly:
+  `marketing.ad-optimization` and `support.sentiment-escalation` (#5386).
+- KickTodo: a live operator can decide their own publication on `/reviews`,
+  circles clients call the mounted prefix, and a participant may chat with KickBot
+  under enforcement (#5390, #5405, #5421).
+- The email send-blocked banner names the providers from provider status, and
+  SMTP failures log a closed-world class (ADR 0994, #5394, #5395).
+- An in-flight duplicate chat exchange returns `409 conflict` (ADR 1001, #5383).
+- CI tooling: remote-gate groundwork (ADR 0863 D9), batch and gate-age fixes, and
+  the entry bundle budget now ignores chunk-hash noise (#5376, #5418, #5429, #5445,
+  #5450, #5451, #5454, #5461).
+
+### Security
+
+- **OAuth seam (DV-SEC-1).** Authorize-start refuses a provider it did not
+  create, so a signed-in caller can't re-point a built-in provider where the test
+  seam is enabled (#5458).
+- **Job-search apply grants (DG-SEC-1).** An apply grant is self-consent at both
+  the route and the lookup (#5412).
+- **Approvals over untrusted content (ADR 1009).** An approval in a run that read
+  untrusted content is decided in the app (#5409).
+- **Replay (ADR 1012).** Provider-executed search is suppressed at dispatch on a
+  replay fork (#5409).
+- **UI plugins (ADR 1021).** The plugin frame's egress is measured and tightened,
+  and the app `frame-src` drops `https://*.firebaseapp.com` (#5440).
+- **Model text never becomes an executed tool (ADR 1010, RFC 0256).** The inline
+  tool-call parser is deleted, so an `<invoke>` block a model repeats from an
+  email or a web page can't run. Tool calls now come only from the provider's
+  structured field (#5464).
+- **Tool-turn admission (ADR 1011 P1, RFC 0256).** A round cut off by the output
+  limit runs no calls, gets one repair, then fails
+  `envelope_truncation_unrecoverable`. A provider refusal fails `envelope_refusal`
+  without a retry. Arguments that aren't a JSON object are refused, and arguments
+  are validated before the approval, permission and firewall gates (#5464).
+- **Erasure (ADR 1014 D8).** Erasing a person reaches the agent text they wrote.
+  A revision a deployment pins during the erasure is kept, redacted (#5457,
+  #5468).
+
+#### Upgrading from 0.9.0
+
+- **No required stop; rolling-safe.** `node scripts/upgrade-plan.mjs 0.9.0`
+  gives one step, 0.9.0 → 0.10.0: back up the database (and object store); the
+  schema permits 0.9.0 instances during the upgrade; remove the two env vars
+  below; start 0.10.0 (sqlite 51 → 51, postgres 49 → 49, app 24 → 24, so no
+  migrations run); check `/readiness`.
+- **`auth` operators, including KickTodo and Book AI: run starts now fail closed.**
+  If the shared counter store is unavailable, starting a run returns
+  `503 service_unavailable` (`plan_run_limit_unavailable` for the monthly plan)
+  rather than proceeding uncounted. This is intended: the limits are contractual
+  under the strict profile. Watch the Operations panel's "window counter could
+  not answer" line after upgrading; it should stay at 0.
+- **Check for the removed pack.** Find stored workflows that use
+  `vendor.myndhyve.ai` nodes before you upgrade. They fail with
+  `host_capability_missing` afterwards.
+- **Check for envelope clients.** Anything reading `envelopes`,
+  `supportedEnvelopes`, `limits.schemaRounds` or `limits.envelopesPerTurn` from
+  capabilities must stop. Unset `OPENWOP_A2UI_DELTA_TRANSPORT` and
+  `OPENWOP_CAMPAIGN_FANOUT_PARALLEL`; both are now ignored.
+- **Check custom-domain traffic.** If many visitors share one IP, raise
+  `OPENWOP_CUSTOM_DOMAIN_IP_REQS_PER_MIN` (default 120).
+- No other configuration changes are required. New behaviour behind flags and
+  toggles stays off unless noted above.
+- After the upgrade, check that `/readiness` reports `version: 0.10.0`.
+
 ## [0.9.0] — 2026-10-29
 
 A MINOR release under ADR 0052. It adds tool-output compaction for child runs

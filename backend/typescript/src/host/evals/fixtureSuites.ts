@@ -19,6 +19,7 @@
  * agent exists only inside an eval run of a fixture suite
  * (`scriptedEvalAgentFor`, read by `createEvalRun`).
  */
+import { agentDeploymentEnabled } from '../agentDeploymentFlag.js';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { getAgentRegistry } from '../../executor/agentRegistry.js';
@@ -47,26 +48,39 @@ export function registerFixtureSuite(id: string, suite: AgentEvalSuite): void {
 
 export function resolveFixtureSuite(ref: string): AgentEvalSuite | null {
   if (!conformanceEvalFixturesEnabled()) return null;
+  if (unlistedFixtureSuites().has(ref.slice(CONFORMANCE_SUITE_PREFIX.length))) return null;
   return fixtures.get(ref) ?? null;
 }
 
 /** The eval-suite fixture ids this host can run (for discovery `fixtures[]`). */
 export function listFixtureSuiteIds(): string[] {
   if (!conformanceEvalFixturesEnabled()) return [];
-  return [...fixtures.keys()].map((k) => k.slice(CONFORMANCE_SUITE_PREFIX.length)).sort();
+  const unlisted = unlistedFixtureSuites();
+  return [...fixtures.keys()].map((k) => k.slice(CONFORMANCE_SUITE_PREFIX.length)).filter((id) => !unlisted.has(id)).sort();
 }
 
 /**
- * Vendored fixtures this host deliberately does NOT list. Listing a fixture in
- * discovery opts the host into its conformance legs, so a fixture whose contract
- * this host does not implement stays unlisted (honest `inapplicable`) rather
- * than listed and failing. Each entry names what is missing (ADR 0983 D6).
+ * Vendored fixtures this host deliberately does NOT list right now. Listing a
+ * fixture in discovery opts the host into its conformance legs, so a fixture whose
+ * contract this host does not implement stays unlisted (honest `inapplicable`)
+ * rather than listed and failing. Each entry names what is missing (ADR 0983 D6)
+ * and, when the host CAN meet the contract under some posture, the condition that
+ * lists it. Re-read per call: the posture is env-driven.
  */
-export const UNLISTED_FIXTURE_SUITES: ReadonlyMap<string, string> = new Map([
-  // RFC 0082 §E: listing it declares an eval-gated promotion policy, and this host
-  // has no agents.deployment facet, so it would be a claim with nothing behind it.
-  ['conformance-eval-gate-failing', 'declares an eval-gated promotion policy (RFC 0082 §E); this host advertises no agents.deployment'],
-]);
+const CONDITIONALLY_UNLISTED: ReadonlyArray<{ id: string; reason: string; listedWhen: () => boolean }> = [
+  // RFC 0082 §E: listing it declares an eval-gated promotion policy for the
+  // scripted agent. ADR 1005 D7 implements that policy, so it is listed exactly
+  // while `agents.deployment` is served (ADR 0984 P2 held it unlisted until then).
+  {
+    id: 'conformance-eval-gate-failing',
+    reason: 'declares an eval-gated promotion policy (RFC 0082 §E); listed only while agents.deployment is advertised (ADR 1005 D7)',
+    listedWhen: agentDeploymentEnabled,
+  },
+];
+
+export function unlistedFixtureSuites(): ReadonlyMap<string, string> {
+  return new Map(CONDITIONALLY_UNLISTED.filter((e) => !e.listedWhen()).map((e) => [e.id, e.reason]));
+}
 
 /** Load `<fixturesDir>/eval-suites/*.json`. A fixture that fails validation is skipped, never half-loaded. */
 export function loadConformanceEvalSuites(fixturesDir: string): number {
@@ -75,7 +89,6 @@ export function loadConformanceEvalSuites(fixturesDir: string): number {
   try { files = readdirSync(join(fixturesDir, 'eval-suites')); } catch { return 0; }
   for (const file of files) {
     if (!file.endsWith('.json')) continue;
-    if (UNLISTED_FIXTURE_SUITES.has(file.slice(0, -'.json'.length))) continue;
     try {
       const suite = validateEvalSuite(JSON.parse(readFileSync(join(fixturesDir, 'eval-suites', file), 'utf8')));
       registerFixtureSuite(file.slice(0, -'.json'.length), suite);

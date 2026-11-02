@@ -81,7 +81,7 @@ async function gateRun(): Promise<{ run: RunRecord; interruptId?: string; status
     metadata: { campaignOrchestration: stampCampaignRun(campaign, { role: 'spine' }), actingUserId: U.requester },
     configurable: {}, createdAt: now, updatedAt: now,
   };
-  await insertRunWithStartContext(storage, run);
+  await insertRunWithStartContext(storage, run, { admission: { plan: 'exempt:test-fixture' } });
   const def = (await hostSuite.workflowCatalog.getWorkflow(WF))?.definition;
   if (!def) throw new Error('gate workflow not registered');
   const stored = (await storage.getRun(run.runId)) ?? run;

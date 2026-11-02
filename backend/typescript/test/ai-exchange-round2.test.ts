@@ -74,7 +74,7 @@ describe('campaign-brief.generate-kernel bounded repair (XCH-CB-3)', () => {
     let calls = 0;
     const replies = [
       { data: { headline: 42 } }, // invalid — headline not a string
-      { data: { headline: 'H', supportingStatement: 'S', proofPoints: [], primaryCta: 'Go', tone: 'bold' } },
+      { data: { headline: 'H', supportingStatement: 'S', proofPoints: ['P'], primaryCta: 'Go', tone: 'bold' } }, // ADR 1020: a kernel needs ≥1 proof point
     ];
     const ctx = {
       features: spyFeatures,

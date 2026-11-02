@@ -40,6 +40,7 @@ import { useChannelRoster, CHANNEL_READ_ONLY_COPY } from '../conversations/useCh
 import { useChannelMessageActions } from '../conversations/useChannelMessageActions.js';
 import { submitChannelPost } from '../conversations/channelSubmit.js';
 import { useScopeToAgent } from '../activeAgents/useScopeToAgent.js';
+import { useDefaultChatAgent } from '../useWorkspaceChatAgent.js';
 import { runCoreSubmit } from '../lib/chatSubmit.js';
 import { buildBoardInterceptor, buildProjectConveneInterceptor, runProjectConvene, type ConveneDeps } from '../conversations/convene.js';
 import { useBoardroomCadence } from '../conversations/useBoardroomCadence.js';
@@ -57,6 +58,7 @@ import type { BYOKActiveConfig } from '../../byok/lib/useBYOKConfig.js';
 import type { ConversationParticipant, ConversationType } from '../../client/chatSessionsClient.js';
 import { messageText, type ChatMessage } from '../types.js';
 import { useRecordDecision } from '../decisions/useRecordDecision.js';
+import { useClarificationAnswer } from '../hooks/useClarificationAnswer.js';
 
 // ADR 0117 Phase 3 — the read-only side-by-side compare view; lazy (zero entry-budget),
 // mirrors ChatSidebar.
@@ -125,6 +127,8 @@ export interface TabSessionProps {
   client?: { orgId: string; name: string };
   /** Scope this tab to an agent on mount (the `?agent=` deep-link, ADR 0140 G3). */
   scopeAgentId?: string;
+  /** ADR 0975 D12 — the active workspace's chat agent; an empty plain chat opens on it. */
+  defaultAgentId?: string;
   onReconfigureBYOK: () => void;
   /** Report this tab's `workflow_run` messages (most-recent first) + a cancel handler up
    *  to the deck, so the deck's shared Runs rail can bind to the ACTIVE tab (ADR 0140 P2).
@@ -146,7 +150,7 @@ export interface TabSessionProps {
 }
 
 function TabSessionImpl({
-  sessionId, config, byokStored, tenantId = 'anon', participants, conversationType, boardId, onSessionIdChange, onStreamingChange, onActivity, onAddParticipant, onRemoveParticipant, onAttachBoard, ownerSubject, client, scopeAgentId, onReconfigureBYOK, onWorkflowRuns, onSources, onOpenConversation, refreshConversations, onRequestClose, onOpenArtifact,
+  sessionId, config, byokStored, tenantId = 'anon', participants, conversationType, boardId, onSessionIdChange, onStreamingChange, onActivity, onAddParticipant, onRemoveParticipant, onAttachBoard, ownerSubject, client, scopeAgentId, defaultAgentId, onReconfigureBYOK, onWorkflowRuns, onSources, onOpenConversation, refreshConversations, onRequestClose, onOpenArtifact,
 }: TabSessionProps): JSX.Element {
   const { t } = useTranslation('chat');
   const handleSessionIdChange = useCallback((newId: string) => onSessionIdChange(sessionId, newId), [onSessionIdChange, sessionId]);
@@ -174,6 +178,10 @@ function TabSessionImpl({
 
   // ?agent= deep-link (ADR 0140 G3): activate the agent in THIS tab's lineup once.
   useScopeToAgent(activeAgents, agentEntries, scopeAgentId ?? null);
+  useDefaultChatAgent({
+    agentId: defaultAgentId ?? null, explicitScope: scopeAgentId, activateAgent: activeAgents.activateAgent,
+    agentEntries, session, isHydrating, conversationType,
+  });
 
   // Per-tab convene (ADR 0140 G3): board summon (`@@<handle>`) works in ANY tab; a bare
   // `@@` convenes the owning project's team only when this is a project chat. Cadence +
@@ -258,6 +266,7 @@ function TabSessionImpl({
     // FW2-UX-1 — the hook re-reads when the turn SETTLES (both are needed for that).
     messageCount: session.messages.length, isSending, continueRef: approvalContinueRef,
   });
+  const answerClarification = useClarificationAnswer({ send, config, baseSendOptions: getSubmitExtras });
   // ADR 0768 D2 — judge attachments by the model that will ACTUALLY answer (the
   // per-message override, else the default).
   const { supportsImageInput, supportsPdfInput } = attachmentCaps(config.provider, config.model, selectedModel);
@@ -555,6 +564,7 @@ function TabSessionImpl({
         supportsPdfInput={supportsPdfInput}
         composerModifiers={tabComposerModifiers}
         onResolveInterrupt={resolveInterrupt}
+        onAnswerClarification={answerClarification}
         onRegenerate={onRegenerate}
         onBranchFrom={(fromSeq) => { void onBranchFrom(fromSeq); }}
         {...(isMultiParty ? { messageActions: channelMessageActions } : { onFeedback: setFeedback })}

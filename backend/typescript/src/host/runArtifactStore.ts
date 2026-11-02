@@ -83,6 +83,12 @@ export interface RunArtifactRecord {
    *  from run-event projection (the owner represents it). */
   linkedArtifactId?: string;
   linkedRevisionId?: string;
+  /** ADR 1017 D2 — the wire message id of the chat turn whose tool wrote this row
+   *  (`turnMessageId(conversationId, agentIndex, 'agent')`). Set only by the chat
+   *  tools, so the chat can show the artifact under that turn. A display link:
+   *  nothing replays from it. Insert-only like the rest of the row, so a re-render
+   *  of identical content in a later turn keeps the first turn's id. */
+  turnMessageId?: string;
 }
 
 const runArtifacts = new DurableCollection<RunArtifactRecord>('runartifact', (a) => a.artifactKey);
@@ -194,8 +200,8 @@ export function displayRunArtifactTitle(row: Pick<RunArtifactRecord, 'title' | '
  *
  *  The envelope's `contentTrust` (if present) is advisory only and intentionally
  *  NOT persisted: the workbench renders `interactive.*` unconditionally inside the
- *  origin-isolated / no-egress sandbox, so these artifacts are untrusted by
- *  construction regardless of the flag.
+ *  origin-isolated sandbox, static until the viewer runs its scripts (ADR 1017),
+ *  so these artifacts are untrusted by construction regardless of the flag.
  *
  *  Document-BACKED envelopes (those carrying a `documentId`, e.g. the documents
  *  `assemble` node) are excluded — they are represented by their Document via the
@@ -211,6 +217,7 @@ export function detectTypedArtifact(value: unknown, nodeId: string): { artifactT
   // IART-3: validate the payload against the registered schema — a malformed typed payload
   // (e.g. a chart missing `chartType`, a non-string where raw text is required) falls through
   // to the generic content path rather than minting a typed artifact that can't render.
+  // ADR 1017 D3 — `checkTypedArtifact` below runs this same check for a chat tool, first.
   const validation = validateArtifact(e.artifactTypeId, e.payload);
   if (!validation.valid) {
     // ADR 0708 D1 — the downgrade is deliberate; its SILENCE was not. This used to be a
@@ -226,6 +233,34 @@ export function detectTypedArtifact(value: unknown, nodeId: string): { artifactT
   }
   const derived = deriveArtifact(e.payload, nodeId);
   return { artifactTypeId: e.artifactTypeId, ...derived, ...(typeof e.title === 'string' && e.title.trim() ? { title: e.title.trim() } : {}) };
+}
+
+/** Why a typed envelope would NOT become a typed artifact, or `ok`. */
+export type TypedArtifactCheck =
+  | { ok: true }
+  | { ok: false; code: 'type_unregistered' | 'typed_invalid' | 'too_large'; message: string; errors?: string[] };
+
+/**
+ * ADR 1017 D3 — the typed path's refusals, as a value a caller can act on. A chat
+ * tool runs this BEFORE persisting, so a payload the store would quietly demote to
+ * an untyped blob comes back to the model as a typed failure instead of "rendered".
+ * The same checks, in the same order, as `detectTypedArtifact` + the size cap in
+ * `persistRunArtifact`: one rule, two readers.
+ */
+export function checkTypedArtifact(artifactTypeId: string, payload: unknown): TypedArtifactCheck {
+  if (!isRegisteredArtifactType(artifactTypeId)) {
+    return { ok: false, code: 'type_unregistered', message: `artifact type is not registered: ${artifactTypeId}` };
+  }
+  const validation = validateArtifact(artifactTypeId, payload);
+  if (!validation.valid) {
+    return { ok: false, code: 'typed_invalid', message: `payload does not match the ${artifactTypeId} schema`, errors: validation.errors ?? [] };
+  }
+  const { content } = deriveArtifact(payload, 'check');
+  const bytes = Buffer.byteLength(content, 'utf8');
+  if (bytes > MAX_INLINE_BYTES) {
+    return { ok: false, code: 'too_large', message: `payload is ${bytes} bytes; the limit is ${MAX_INLINE_BYTES}` };
+  }
+  return { ok: true };
 }
 
 // ── reference detection (resolve-before-serialize) ────────────────────────
@@ -322,6 +357,8 @@ export interface PersistRunArtifactInput {
   role: 'deliverable' | 'gate-preview';
   output: unknown;
   now: string;
+  /** ADR 1017 D2 — see `RunArtifactRecord.turnMessageId`. */
+  turnMessageId?: string | undefined;
 }
 
 type PersistResult = { artifactId: string; revisionId: string } | null;
@@ -373,6 +410,7 @@ async function writeRow(input: PersistRunArtifactInput, row: Partial<RunArtifact
     createdAt: input.now,
     ...(row.linkedArtifactId ? { linkedArtifactId: row.linkedArtifactId } : {}),
     ...(row.linkedRevisionId ? { linkedRevisionId: row.linkedRevisionId } : {}),
+    ...(input.turnMessageId ? { turnMessageId: input.turnMessageId } : {}),
   });
   const won = await runArtifacts.compareAndSwap(null, full);
   if (won) return resultFor(full);

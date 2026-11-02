@@ -56,8 +56,9 @@ describe('ADR 0821 D6 — displayed limits ⊆ enforced limits', () => {
     for (const [key, [file, token]] of Object.entries(ENFORCEMENT_SITES)) {
       expect(read(file), `${key} must be read in ${file}`).toContain(token);
     }
-    // The run limit is reached from the ONE run starter.
-    expect(read('host/runStarter.ts')).toContain('await reservePlanRun(input.tenantId)');
+    // The run limit is charged at the ONE run-insert seam every lane passes
+    // (ADR 0987 P2 moved it there from host/runStarter.ts).
+    expect(read('host/runInsert.ts')).toContain("ctx.admission.plan === 'charge' ? await reservePlanRun(run.tenantId)");
     // The allowance is reached from the managed provider's free-allowance gate.
     expect(read('providers/managedProvider.ts')).toContain('planAllowanceRemaining(tenantId)');
   });

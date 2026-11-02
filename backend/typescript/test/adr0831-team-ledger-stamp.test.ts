@@ -95,7 +95,7 @@ async function boardRun(tenantId: string, boardId: string, actingUserId: string 
     metadata: { kanban: { boardId, cardId: 'c1' }, ...(actingUserId ? { actingUserId } : {}), ...extra },
     configurable: {}, createdAt: now, updatedAt: now,
   };
-  await insertRunWithStartContext(storage, run);
+  await insertRunWithStartContext(storage, run, { admission: { plan: 'exempt:test-fixture' } });
   return (await storage.getRun(run.runId))!;
 }
 

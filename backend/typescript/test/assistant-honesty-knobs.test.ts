@@ -27,12 +27,11 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { stripComments } from './helpers/stripComments.js';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '../../..');
 const FEATURE = join(REPO, 'backend/typescript/src/features/assistant');
 /** Comments out — a comment that names an identifier must not satisfy (or fail) a source pin. */
-const stripComments = (src: string): string =>
-  src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:'"`\\])\/\/[^\n]*/g, '$1');
 
 describe('COS-2 — the dead retention knobs are refused, not silently persisted', () => {
   it('neither field survives on the GovernancePolicy type', () => {

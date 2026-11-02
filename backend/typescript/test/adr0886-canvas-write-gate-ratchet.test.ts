@@ -23,6 +23,7 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { stripComments } from './helpers/stripComments.js';
 
 const SRC = new URL('../src/', import.meta.url).pathname;
 
@@ -37,7 +38,7 @@ function walk(dir: string, out: string[] = []): string[] {
 
 /** Comments out, so a call named in prose is never counted (or hidden). */
 function code(path: string): string {
-  return readFileSync(path, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+  return stripComments(readFileSync(path, 'utf8'));
 }
 
 const MUTATOR = /\b(updateCanvasForTenant|deleteCanvasForTenant|restoreCanvasVersion)\(/g;

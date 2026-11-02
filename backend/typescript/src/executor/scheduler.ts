@@ -443,6 +443,10 @@ export interface RunDisposition {
   suspendedNodeId?: string;
   /** When `status === 'failed'`, the node id that triggered the failure. */
   failedNodeId?: string;
+  /** CS70WF-38 — when `status === 'failed'` because EVERY terminal node was
+   *  skipped by its conditions and no node failed: those terminals. There is no
+   *  failed node to blame, so `failedNodeId` is absent. */
+  skippedTerminals?: string[];
 }
 
 export function inspectDisposition(
@@ -496,9 +500,16 @@ export function inspectDisposition(
   // failures with no error-route), the run failed.
   const anyTerminalCompleted = terminalNodes.some((id) => snapshot.nodeState.get(id) === 'completed');
   if (!anyTerminalCompleted) {
-    const failedId =
-      [...snapshot.nodeState.entries()].find(([, s]) => s === 'failed')?.[0] ?? terminalNodes[0];
-    return { done: true, status: 'failed', failedNodeId: failedId };
+    const failedId = [...snapshot.nodeState.entries()].find(([, s]) => s === 'failed')?.[0];
+    if (failedId !== undefined) return { done: true, status: 'failed', failedNodeId: failedId };
+    // CS70WF-38 — no node failed: every terminal was SKIPPED by its edge
+    // conditions (a guard that declined, a router whose value matched no branch).
+    // The run status stays `failed` (no spec text defines another), but it is
+    // named, with the skipped terminals, instead of blaming a node that was only
+    // skipped (whose missing error the executor reported as "unknown node failure").
+    const skipped = terminalNodes.filter((id) => snapshot.nodeState.get(id) === 'skipped');
+    if (skipped.length > 0) return { done: true, status: 'failed', skippedTerminals: skipped };
+    return { done: true, status: 'failed', failedNodeId: terminalNodes[0] };
   }
   return { done: true, status: 'completed' };
 }

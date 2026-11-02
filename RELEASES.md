@@ -48,6 +48,23 @@ upgrade is neither: list it in `breakingConfig`.
 
 ## Version log
 
+### v0.10.0 — 2026-11-02
+
+- **Required stop:** no. **Rolling-safe:** yes.
+- **Schema:** sqlite 51 / postgres 49 (unchanged) · **App migrations:** 24 (unchanged).
+- The AI Envelope is removed. Stored workflows that use `vendor.myndhyve.ai` nodes
+  fail with `host_capability_missing`, capabilities drop the envelope fields, and
+  two env vars are no longer read.
+- Adds agent deployments and versions, the model router, chat-widget
+  conversations, agent clarification questions and session replay. Agent
+  deployments, agent versions, clarification, replay and the site runtime stay
+  off by default.
+- Under `OPENWOP_DEPLOY_POSTURE=auth`, a run start returns `503` when the shared
+  counter store can't answer. Model text can no longer become an executed tool.
+- Fixes Campaign Studio approval and org-ownership paths, and rate-limits custom
+  domains per client.
+- [CHANGELOG §0.10.0](./CHANGELOG.md#0100--2026-11-02)
+
 ### v0.9.0 — 2026-10-29
 - **Required stop:** no. **Rolling-safe:** yes.
 - **Schema:** sqlite 51 / postgres 49 (unchanged) · **App migrations:** 24 (unchanged).

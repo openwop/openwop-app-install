@@ -25,6 +25,7 @@
 import { describe, expect, it } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
+import { stripComments } from './helpers/stripComments.js';
 
 const SRC = join(import.meta.dirname, '..', 'src');
 
@@ -40,7 +41,7 @@ function files(dir: string): string[] {
 
 /** Source with line and block comments removed, so a comment that names a call is not a call. */
 function code(path: string): string {
-  return readFileSync(path, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`])\/\/.*$/gm, '$1');
+  return stripComments(readFileSync(path, 'utf8'));
 }
 
 /** Split a call's argument list on its TOP-LEVEL commas (a nested call or

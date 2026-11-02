@@ -6,7 +6,15 @@
  *
  * seam ON (OPENWOP_TEST_SEAM_ENABLED) ⇒ the real deferred pipeline
  * (expandChain{deferred} → bare-param override → frozen-def fork replay →
- * composePromptTemplate); seam OFF ⇒ 404 (legs soft-skip).
+ * composePromptTemplate). (Seam OFF ⇒ 404 is the route's registration rule; this
+ * file runs only the ON leg.)
+ *
+ * TST-CCE-1. Red when: the bare-param override stops rebinding the bag; a sensitive
+ * param stops materializing as a `source:"secret"` variable (compose then leaks the
+ * ref instead of `[REDACTED:…]`); the seam's unknown-chain code changes; `format` is
+ * minted on a non-string param; or the inline lane drops `sensitive`.
+ * NOTE (TST-CCX-6, a SEAM limit, not this test's): `forkResolved` is computed by the
+ * same `deferredConfigurableInputs` call as `resolved`, so that leg cannot differ.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -31,6 +39,9 @@ async function post(body: unknown): Promise<{ status: number; body: Record<strin
   return { status: res.status, body: b };
 }
 
+const ENV_KEYS = ['OPENWOP_STORAGE_DSN', 'OPENWOP_AUTH_DISABLE_COOKIES', 'OPENWOP_TEST_SEAM_ENABLED'] as const;
+const savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
+
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
@@ -38,7 +49,11 @@ beforeAll(async () => {
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+afterAll(async () => {
+  await new Promise<void>((res) => server.close(() => res()));
+  // A leaked OPENWOP_TEST_SEAM_ENABLED would turn the seam ON for later files in this worker.
+  for (const k of ENV_KEYS) { const v = savedEnv[k]; if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+});
 
 describe('RFC 0124 deferred-expand witness seam (behavioral, non-vacuous)', () => {
   it('bare-param override rebinds the value; :fork replays it; deferred var composes untrusted (R1/R4)', async () => {

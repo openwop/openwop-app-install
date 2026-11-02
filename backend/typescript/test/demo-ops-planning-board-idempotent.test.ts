@@ -9,6 +9,9 @@
  *
  * Full-app harness + demo mode (like strategy-board-showcase) so the advisor
  * cohort + board actor resolve the same way a real demo deployment runs.
+ *
+ * TST-CUE-6. Red (round-1 probe w69g1-opb-board-guard) when the seeder's
+ * `!gtmExists` handle guard is dropped: the second seed mints `gtm-advisory-2`.
  */
 import http from 'node:http';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -24,6 +27,7 @@ import { listBoards } from '../src/features/advisory-board/service.js';
 
 let server: http.Server;
 const TENANT = 'user:ops-board-idempotent-test';
+const PRIOR_ENV = { dsn: process.env.OPENWOP_STORAGE_DSN, cookies: process.env.OPENWOP_AUTH_DISABLE_COOKIES };
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -38,6 +42,8 @@ beforeAll(async () => {
 });
 afterAll(async () => {
   delete process.env.OPENWOP_DEMO_MODE;
+  if (PRIOR_ENV.dsn === undefined) delete process.env.OPENWOP_STORAGE_DSN; else process.env.OPENWOP_STORAGE_DSN = PRIOR_ENV.dsn;
+  if (PRIOR_ENV.cookies === undefined) delete process.env.OPENWOP_AUTH_DISABLE_COOKIES; else process.env.OPENWOP_AUTH_DISABLE_COOKIES = PRIOR_ENV.cookies;
   await new Promise<void>((res) => server.close(() => res()));
 });
 

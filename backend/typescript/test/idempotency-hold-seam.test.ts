@@ -2,6 +2,15 @@
  * seams-v2 `armIdempotencyHold` (RFC 0213 §B): the next same-key create keeps its
  * Layer-1 claim in flight for holdMs, so a CONCURRENT same-key create meets the
  * production in-flight branch (409 + Retry-After). The seam itself answers only 201.
+ *
+ * Honest ceiling: the hold is a real timer inside the production claim path, so the
+ * concurrent cases send the second create 150 ms into a multi-second hold (a real-time
+ * window, wide on purpose).
+ *
+ * Tracker TST-DFE-4. Red when (w71g1, witnessed): the claim path stops honouring the hold
+ * (no 409); the hold is keyed by tenant alone, so an UNARMED key consumes another key's
+ * hold (asserted by the armed key still producing its 409 afterwards, not by a clock);
+ * the seam stops validating the key grammar.
  */
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
@@ -46,13 +55,25 @@ describe('armIdempotencyHold', () => {
   });
 
   it('an unarmed key is never delayed', async () => {
+    const armed = key();
+    const holdMs = 3_000;
+    const arm = await fetch(`${BASE}/conformance/seams/sample/test/idempotency/hold`, { method: 'POST', headers: H, body: JSON.stringify({ key: armed, holdMs }) });
+    expect(arm.status, await arm.clone().text()).toBe(201);
+    // A DIFFERENT key with a hold armed beside it: created without waiting out the hold...
     const t0 = Date.now();
     expect((await create(key())).status).toBe(201);
-    expect(Date.now() - t0).toBeLessThan(700);
+    expect(Date.now() - t0).toBeLessThan(holdMs);
+    // ...and it did not consume the armed key's hold: that key is still held.
+    const first = create(armed);
+    await new Promise((r) => setTimeout(r, 150));
+    const second = await create(armed);
+    expect(second.status).toBe(409);
+    expect((await first).status).toBe(201);
   });
 
   it('a malformed body is a 400', async () => {
     const r = await fetch(`${BASE}/conformance/seams/sample/test/idempotency/hold`, { method: 'POST', headers: H, body: JSON.stringify({ key: 'short', holdMs: 5 }) });
     expect(r.status).toBe(400);
+    expect(((await r.json()) as { error: string }).error).toBe('validation_error');
   });
 });

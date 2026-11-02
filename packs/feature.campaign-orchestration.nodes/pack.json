@@ -1,6 +1,6 @@
 {
   "name": "feature.campaign-orchestration.nodes",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "kind": "node",
   "description": "Campaign Studio orchestration node pack \u2014 the post-generation pipeline: `consistency-check` (scores generated channel drafts against the messaging kernel, \u226580 advisory) and `finalize` (creates the MarketingCampaign from a confirmed brief over ctx.features['campaign-orchestration']). `campaign-context` reads the run's own campaign for downstream nodes (ADR 0941 P5). Used by the parent orchestration workflow + the Campaign Strategist.",
   "author": "OpenWOP App",
@@ -19,9 +19,9 @@
   "nodes": [
     {
       "typeId": "feature.campaign-orchestration.nodes.consistency-check",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "label": "Campaign: Consistency Check",
-      "description": "Scores cross-asset messaging consistency \u2014 how well each generated channel draft echoes the brief's messaging kernel (\u226580 advisory). Inputs: { briefId, drafts? }. Output: { report }.",
+      "description": "Scores cross-asset messaging consistency \u2014 how well each generated channel draft echoes the brief's messaging kernel (\u226580 advisory). Config: { resultVariables: {<channel>: <run variable>} }. Inputs: { briefId, dispatched }. Reads each completed child's channelResult from the run variables (ADR 1020 D2). Output: { report, channels }. Fails typed: drafts_missing (a completed channel left no result), no_channels_enabled, channels_all_failed. Never passes with nothing to compare.",
       "category": "integration",
       "role": "action",
       "capabilities": []

@@ -15,8 +15,12 @@
  * correct "daily limit reached" look like a bug. So every case here CHARGES the
  * way `prepareManagedDispatch` charges (compose, then increment) and then asks
  * the read.
+ *
+ * DETERMINISM: Date is faked to one UTC day and the cap is pinned to 1000, so the
+ * charge and the read can never straddle 00:00 UTC and `remaining` is checked
+ * against a literal rather than against the product's own cap.
  */
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { configureManagedProvider, describeOwnManagedUsage } from '../src/providers/managedProvider.js';
 import { managedUsageBucket } from '../src/providers/managedUsageScope.js';
 import { openStorage } from '../src/storage/index.js';
@@ -29,7 +33,9 @@ let storage: Storage;
 const WS = 'host-ownusage';                    // shared workspace (multi-principal)
 const A = 'user:aaaa1111';
 const B = 'user:bbbb2222';
-const today = new Date().toISOString().slice(0, 10);
+const today = '2026-06-15';
+const CAP_ENV = 'OPENWOP_MANAGED_DAILY_TOKEN_CAP';
+const priorCap = process.env[CAP_ENV];
 
 /** Charge exactly as `prepareManagedDispatch` does: compose, then increment. */
 async function charge(tenantId: string, subject: string | undefined, tokens: number): Promise<void> {
@@ -37,8 +43,16 @@ async function charge(tenantId: string, subject: string | undefined, tokens: num
 }
 
 beforeAll(async () => {
+  vi.useFakeTimers({ toFake: ['Date'], now: Date.UTC(2026, 5, 15, 12) });
+  process.env[CAP_ENV] = '1000';
   storage = await openStorage('memory://');
   configureManagedProvider({ storage, dataDir: mkdtempSync(join(tmpdir(), 'owp-ownusage-')) });
+});
+
+afterAll(() => {
+  vi.useRealTimers();
+  if (priorCap === undefined) delete process.env[CAP_ENV];
+  else process.env[CAP_ENV] = priorCap;
 });
 
 describe('ADR 0693 phase 5 — the read agrees with the charge', () => {
@@ -59,7 +73,8 @@ describe('ADR 0693 phase 5 — the read agrees with the charge', () => {
     await charge(WS, C, 400);
     const u = await describeOwnManagedUsage(WS, C);
     expect(u).not.toBeNull();
-    expect(u!.remaining).toBe(Math.max(0, u!.dailyTokenCap - 400));
+    expect(u!.dailyTokenCap).toBe(1000);
+    expect(u!.remaining).toBe(600);
     expect(u!.day).toBe(today);
   });
 

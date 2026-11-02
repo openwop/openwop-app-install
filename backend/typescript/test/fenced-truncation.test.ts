@@ -201,6 +201,14 @@ describe('CALL-SITE RATCHET — every handler of fenced text is classified', () 
         + 'cut of the system prompt goes through `truncateFencedContent` and then drops any fence the cut '
         + 'leaves open. Replaced `withoutTranscript.slice(0, 24_000)` in realtime/routes.ts.',
     },
+    'features/chat-widget/visitorThreads.ts': {
+      kind: 'PRODUCES',
+      why:
+        'ADR 1018 D2 — `threadContext` fences each stored visitor turn with `fenceUntrustedBlock` as it '
+        + 'goes back to the model. Its `.slice` calls cut the RAW visitor text and the redacted reply to '
+        + '1,000 chars BEFORE storage (never a fenced string), keep the last N messages (whole messages), '
+        + 'and shorten ids and the operator preview.',
+    },
     'features/brand/scoring.ts': {
       kind: 'PRODUCES',
       why:
@@ -312,6 +320,14 @@ describe('CALL-SITE RATCHET — every handler of fenced text is classified', () 
         + 'bounded when its change was accepted (`ledgerStore.validatePatch`), before any fence '
         + 'existed; nothing here shortens text, fenced or not.',
     },
+    'host/clarificationLift.ts': {
+      kind: 'PRODUCES',
+      why: 'ADR 1001 D4 — `clarificationAnswerMessage` wraps a person\'s answers (and any model-authored choice they picked) in ONE `fenceUntrustedBlock` fence. It refuses an over-long question or choice rather than shortening it; the one `slice` (`contextType`) runs on model text before any fence exists.',
+    },
+    'host/clarificationChat.ts': {
+      kind: 'PRODUCES',
+      why: 'ADR 1001 D7 — `renderChatAnswer` wraps the choices a person picked from a chat ask (model-authored option text) in ONE `fenceUntrustedBlock` fence. Questions and choices were bounded by `liftClarification` (refused, never shortened) before any fence exists; nothing here shortens text.',
+    },
     'host/agentKnowledgeComposition.ts': {
       kind: 'PRODUCES',
       why: 'Neutralizes + fences auto-ingested knowledge items before they enter a turn (ADR 0038 §C). Composition only.',
@@ -357,6 +373,14 @@ describe('CALL-SITE RATCHET — every handler of fenced text is classified', () 
         + 'in `fenceUntrustedBlock`. Nothing shortens a string after it is fenced. The '
         + 'other `slice` in the file bounds the MODEL OUTPUT (`validatePrefix`), which '
         + 'is never fenced text and is refused outright if it echoes a fence marker.',
+    },
+    'features/chat-autotitle/titleGenerator.ts': {
+      kind: 'PRODUCES',
+      why:
+        'ADR 1019 D3 — `buildTitleMessages` cuts the RAW transcript body to MAX_INPUT_CHARS '
+        + 'and THEN fences it with `fenceUntrustedBlock` — cut, then fence — so the END marker '
+        + 'always survives. Nothing shortens the fenced string; the model output is cleaned by '
+        + '`sanitizeTitle`, never fenced. Pinned by `test/chat-autotitle-conversation-credential.test.ts`.',
     },
     'features/memory-auto-extract/memoryExtractor.ts': {
       kind: 'PRODUCES',

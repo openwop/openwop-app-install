@@ -11,13 +11,15 @@
  *  - `checkChannelEligibility` ignoring the pause                            → "the journey refuses"
  *  - the sender-auth check ignoring DMARC                                     → "SPF and DMARC"
  *
- * NOT witnessed by sabotage: the route's `req.cookieSession` check. The only callers without a
- * browser session this harness can produce are unauthenticated, and the auth layer refuses those
- * first (the 401 below), so removing the check reds nothing here. It is defence in depth for an
- * authenticated non-browser caller (an OIDC bearer); recorded, not claimed.
+ *  - the route's `req.cookieSession` person check removed                    → "resume needs a person"
+ *
+ * CORRECTED (grade-tests w73, TST-DRH): this note used to say the auth layer refuses a caller
+ * with no browser session first (a 401), so the route's `req.cookieSession` check could not be
+ * witnessed. MEASURED at 9f4cca7d4: the bare POST is answered 403 `forbidden_scope` /
+ * `person_required` by the route itself, so the case now pins that exact refusal and the check
+ * is the gate it reaches.
  */
 import http from 'node:http';
-import type { AddressInfo } from 'node:net';
 import { randomBytes } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { getSetCookies } from './headerCookies.js';
@@ -41,9 +43,12 @@ beforeAll(async () => {
   process.env.OPENWOP_EMAIL_LINK_BASE_URL = 'https://app.example';
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((r) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; r(); }); });
+  await new Promise<void>((r) => { server = app.listen(0, '127.0.0.1', () => r()); });
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('server has no TCP address');
+  BASE = `http://127.0.0.1:${address.port}`;
   for (const id of ['email', 'crm', 'consent', 'users']) { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); }
-});
+}, 120_000);
 afterAll(async () => { __setSenderAuthResolverForTests(null); await new Promise<void>((r) => server.close(() => r())); });
 
 const T = () => `org:p4-${randomBytes(3).toString('hex')}`;
@@ -104,8 +109,11 @@ function client(): { call: (m: string, p: string, b?: unknown, h?: Record<string
   return {
     call: async (method, path, body, headers = {}) => {
       const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}), ...headers }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-      for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]!; }
-      return { status: res.status, body: (await res.json().catch(() => ({}))) as Record<string, unknown> };
+      for (const c of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]!; }
+      const parsed: unknown = await res.json().catch(() => ({}));
+      const out: Record<string, unknown> = {};
+      if (typeof parsed === 'object' && parsed !== null) for (const [k, v] of Object.entries(parsed)) out[k] = v;
+      return { status: res.status, body: out };
     },
   };
 }
@@ -123,9 +131,12 @@ describe('ADR 0955 D7 — resume needs a person', () => {
     const health = await owner.call('GET', `/host/openwop-app/email/orgs/${orgId}/deliverability`);
     expect(health.status, JSON.stringify(health.body)).toBe(200);
     expect(health.body).toMatchObject({ state: { paused: true }, canResume: true });
-    // No browser session and no credentials: the auth layer refuses (see the header note).
+    // No browser session and no credentials: the route's own person check answers
+    // (MEASURED w73: 403, not an auth-layer 401 — see the header note).
     const bare = await fetch(`${BASE}/host/openwop-app/email/orgs/${orgId}/deliverability/resume`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
-    expect([401, 403]).toContain(bare.status);
+    expect(bare.status).toBe(403);
+    const refusal: unknown = await bare.json();
+    expect(refusal).toMatchObject({ error: 'forbidden_scope', details: { reason: 'person_required' } });
     expect(await senderPaused(tenantId, orgId)).toBe(true);
     const ok = await owner.call('POST', `/host/openwop-app/email/orgs/${orgId}/deliverability/resume`, {});
     expect(ok.status, JSON.stringify(ok.body)).toBe(200);

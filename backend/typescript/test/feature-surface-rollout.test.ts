@@ -3,8 +3,19 @@
  *   1. A SECOND feature surface (ctx.features.crm) reads org-scoped CRM data and
  *      holds tenant isolation (CTI-1) — proving the FeatureModule contract isn't
  *      KB-specific.
- *   2. Discovery advertises the live feature surfaces at the document root
- *      (host.sample.<id>), so a client/pack can discover them (honesty principle).
+ *   2. The feature-surface REGISTRY lists the composed surfaces (kb, crm).
+ *      (CORRECTED in w70: this used to say discovery advertises them at the
+ *      document root — that v1 advert was deleted by ADR 0812 P4, and the case
+ *      has asserted the registry since.)
+ *
+ * Tracker: TST-DBE-8. Red when: the surface projection leaks internal fields
+ * (probe w70g2-sr-proj), the surface reads another tenant's companies
+ * (w70g2-sr-iso, aimed at the seeded tenant — there is no tenant-agnostic list
+ * to sabotage), or a resolved-but-disabled toggle is admitted (w70g2-sr-off).
+ *
+ * Dedupe row TST-DBE-8-DEDUPE (protected, human decision): the crm half of
+ * "lists the composed surfaces" is also caught by case 1 (`features.crm` would
+ * be undefined); its kb half is unique here.
  */
 
 import http from 'node:http';
@@ -46,6 +57,10 @@ describe('ctx.features.crm — the second reference surface', () => {
     const tenantId = 'crm-owner-tenant';
     const orgId = 'org-x';
     await createCompany({ tenantId, orgId, name: 'Private Co', createdBy: 'actor' });
+
+    // Positive control: the owning tenant DOES see it through the same surface.
+    const own = await crmSurface(tenantId).listCompanies!({ orgId });
+    expect((own.companies as Array<{ name: string }>).map((c) => c.name)).toEqual(['Private Co']);
 
     const intruder = crmSurface('crm-other-tenant');
     const out = await intruder.listCompanies!({ orgId }); // same orgId string, different tenant

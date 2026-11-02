@@ -50,10 +50,19 @@
  * The behavioural halves live in `adr0384-shell-url.test.ts`: "a refresh that
  * never settles does NOT disable later refreshes" (starvation) and "a hung
  * origin costs a BOUNDED wait, not a hung request" (the deadline).
+ *
+ * TST-CVD-9. Red when: a module-scope latch loses its clear-on-settle (e.g.
+ * `host/comparisonPage.ts`'s `.catch(() => { ensuring = null })` removed), the
+ * publishing shell latch loses its time bound, the scan stops finding latches
+ * (floor), or the scan's own predicates degrade — the positive control now runs
+ * the REAL `findLatches` over a fixture tree, so it shares the code under test
+ * rather than re-implementing it.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, relative, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { stripComments } from './helpers/stripComments.js';
 
 const SRC = join(__dirname, '..', 'src');
 
@@ -68,8 +77,6 @@ function walk(dir: string): string[] {
 }
 
 /** Comments stripped — a docstring that DESCRIBES the hazard must not read as one. */
-const stripComments = (s: string): string =>
-  s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
 
 interface Latch { rel: string; name: string; clearsOnSettle: boolean; timeBound: boolean }
 
@@ -81,11 +88,11 @@ interface Latch { rel: string; name: string; clearsOnSettle: boolean; timeBound:
  * Narrow beats clever here — a scan that flags everything gets an allowlist,
  * and an allowlist is where this kind of check goes to die.
  */
-function findLatches(): Latch[] {
+function findLatches(root: string = SRC): Latch[] {
   const out: Latch[] = [];
-  for (const file of walk(SRC)) {
+  for (const file of walk(root)) {
     const src = stripComments(readFileSync(file, 'utf8'));
-    const rel = relative(SRC, file).split(sep).join('/');
+    const rel = relative(root, file).split(sep).join('/');
     // Module scope only: the declaration starts at column 0.
     const re = /^let\s+([A-Za-z_$][\w$]*)\s*:\s*[^=;]*Promise<[^;]*>\s*\|\s*null/gm;
     for (const m of src.matchAll(re)) {
@@ -112,10 +119,10 @@ const LATCHES = findLatches();
 describe('detached promise latches cannot wedge forever (#3056)', () => {
   it('the scan actually finds latches — a broken walk would assert nothing', () => {
     // Without this, a regex or path change turns every assertion below into zero
-    // cases and the tripwire passes by describing nothing. Pinned at the real
-    // count; it may move in EITHER direction (a latch removed is as valid as one
-    // added), so this is a liveness floor, not a no-growth ratchet.
-    expect(LATCHES.length).toBeGreaterThanOrEqual(8);
+    // cases and the tripwire passes by describing nothing. MEASURED 16 latches on
+    // 2026-10-29 (read-only replica of this scan over src/); the floor is one
+    // below. A legitimate latch REMOVAL edits this floor in the same change.
+    expect(LATCHES.length).toBeGreaterThanOrEqual(15);
     // …and it must find the two we know about by name, or the shape drifted.
     const names = LATCHES.map((l) => `${l.rel}:${l.name}`);
     expect(names).toContain('features/publishing/routes.ts:shellRefreshing');
@@ -151,21 +158,31 @@ describe('detached promise latches cannot wedge forever (#3056)', () => {
   });
 
   it('the predicate is not just answering true — a never-cleared latch FAILS it', () => {
-    // Positive control. Without it, a predicate that returned `true` for
-    // everything would keep this file green while guarding nothing.
-    const clears = (src: string, name: string): boolean =>
-      new RegExp(`\\.(catch|finally)\\([^;]{0,120}?\\b${name}\\s*=\\s*null`, 's').test(src)
-      || /StartedAt|Deadline|withDeadline|WEDGE_MS/.test(src);
-
-    // Cleared NOWHERE — one failure disables the latch for the process lifetime.
-    expect(clears('let pending: Promise<void> | null = null;\n'
-      + 'export function go() { if (!pending) pending = work(); return pending; }', 'pending'),
-    'a latch cleared nowhere must FAIL').toBe(false);
-
-    // …and both real forms must PASS, or the check is merely strict, not correct.
-    expect(clears('let p: Promise<void> | null = null;\n'
-      + 'p = work().catch((e) => { p = null; throw e; });', 'p'), '.catch form').toBe(true);
-    expect(clears('let p: Promise<void> | null = null;\n'
-      + 'p = work().finally(() => { p = null; });', 'p'), '.finally form').toBe(true);
+    // Positive control over the REAL scan: `findLatches` walks a fixture tree,
+    // so a predicate that returned `true` for everything (or a walk that found
+    // nothing) turns this red instead of keeping the file green.
+    const root = mkdtempSync(join(tmpdir(), 'latch-tripwire-'));
+    try {
+      mkdirSync(join(root, 'host'));
+      // Cleared NOWHERE — one failure disables the latch for the process lifetime.
+      writeFileSync(join(root, 'host', 'never.ts'), 'let pending: Promise<void> | null = null;\n'
+        + 'export function go() { if (!pending) pending = work(); return pending; }\n');
+      writeFileSync(join(root, 'host', 'catcher.ts'), 'let p: Promise<void> | null = null;\n'
+        + 'export function go() { p = work().catch((e) => { p = null; throw e; }); return p; }\n');
+      writeFileSync(join(root, 'host', 'finaller.ts'), 'let q: Promise<void> | null = null;\n'
+        + 'export function go() { q = work().finally(() => { q = null; }); return q; }\n');
+      writeFileSync(join(root, 'host', 'bounded.ts'), 'let r: Promise<void> | null = null;\nlet rStartedAt = 0;\n'
+        + 'export function go() { if (!r) { rStartedAt = Date.now(); r = work(); } return r; }\n');
+      const found = new Map(findLatches(root).map((l) => [`${l.rel}:${l.name}`, l]));
+      expect([...found.keys()].sort()).toEqual(['host/bounded.ts:r', 'host/catcher.ts:p', 'host/finaller.ts:q', 'host/never.ts:pending']);
+      const never = found.get('host/never.ts:pending')!;
+      expect(never.clearsOnSettle || never.timeBound, 'a latch cleared nowhere must FAIL').toBe(false);
+      expect(found.get('host/catcher.ts:p')!.clearsOnSettle, '.catch form').toBe(true);
+      expect(found.get('host/finaller.ts:q')!.clearsOnSettle, '.finally form').toBe(true);
+      const bounded = found.get('host/bounded.ts:r')!;
+      expect([bounded.clearsOnSettle, bounded.timeBound], 'a time bound alone').toEqual([false, true]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

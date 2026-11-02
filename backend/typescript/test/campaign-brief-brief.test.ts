@@ -23,9 +23,12 @@ import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createOrg } from '../src/host/accessControlService.js';
 import type { CampaignBrief, BriefValidationResult } from '../src/features/campaign-brief/types.js';
+import type { Storage } from '../src/storage/storage.js';
+import { markKernelReview } from '../src/features/campaign-brief/briefService.js';
 
 let BASE: string;
 let server: http.Server;
+let storage: Storage;
 let n = 0;
 
 beforeAll(async () => {
@@ -34,13 +37,14 @@ beforeAll(async () => {
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  storage = app.locals.storage as Storage;
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   const d = getToggleDefault('campaign-brief'); if (d) await saveConfig({ ...d, status: 'on' }, 'test');
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 /** The response bodies this file reads (each route fills a subset). */
-interface Body extends Partial<BriefValidationResult> { brief?: CampaignBrief; briefs?: CampaignBrief[]; orgId?: string; user?: { userId: string } }
+interface Body extends Partial<BriefValidationResult> { brief?: CampaignBrief; pendingKernelRunId?: string; briefs?: CampaignBrief[]; orgId?: string; user?: { userId: string } }
 interface Res<T = Body> { status: number; body: T }
 interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> }
 function client(): Client {
@@ -145,5 +149,22 @@ describe('campaign-brief briefs — isolation', () => {
     expect((await stranger.get(`${B}/${id}`)).status).toBe(404);
     expect((await stranger.del(`${B}/${id}`)).status).toBe(404);
     expect((await owner.get(`${B}/${id}`)).status).toBe(200); // the refused delete did not land
+  });
+});
+
+describe('ADR 1020 D8 — a kernel waiting for approval is reported while its run waits', () => {
+  it('GET reports pendingKernelRunId only while the marked run is still waiting-approval', async () => {
+    const { owner, orgId } = await ownerWithOrg();
+    const created = await owner.post(B, { orgId, name: 'Pending kernel', productName: 'P' });
+    const brief = created.body.brief!;
+    const now = new Date().toISOString();
+    await storage.insertRun({ runId: 'run-kernel-pending', workflowId: 'campaign-studio.messaging-kernel', tenantId: brief.tenantId, status: 'waiting-approval', inputs: { briefId: brief.id }, metadata: {}, configurable: {}, createdAt: now, updatedAt: now });
+    expect(await markKernelReview(brief.tenantId, brief.id, 'run-kernel-pending')).toBe(true);
+    const waiting = await owner.get(`${B}/${brief.id}`);
+    expect(waiting.body.pendingKernelRunId).toBe('run-kernel-pending');
+    // Rejected (the run failed): the brief no longer claims a pending kernel.
+    await storage.updateRun('run-kernel-pending', { status: 'failed', updatedAt: new Date().toISOString() });
+    const after = await owner.get(`${B}/${brief.id}`);
+    expect(after.body.pendingKernelRunId).toBeUndefined();
   });
 });

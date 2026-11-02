@@ -4,6 +4,11 @@
  * token moved or the backstop elapsed, and acts on a FRESH read of each due
  * entry, so a stale listing can delay a heartbeat but never run a deleted member
  * or run one a second time.
+ *
+ * Tracker TST-DFB-7. Red when (w71g1, witnessed): the backstop boundary moves; a token
+ * change no longer forces a re-list, or the cache re-lists every call; the pass acts on
+ * the listed snapshot instead of a fresh read, or skips the due re-check; a no-op delete
+ * or a heartbeat stamp bumps the token; a config update does not.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';

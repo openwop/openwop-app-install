@@ -126,6 +126,11 @@ export interface CampaignBrief {
   kernel?: MessagingKernel;
   /** True when the brief changed after a kernel was generated (regen needed). */
   kernelStale: boolean;
+  /** ADR 1020 D8 — the run whose generated kernel is waiting for approval (set when
+   *  generate-kernel stages one, cleared when a kernel is saved). Bookkeeping only:
+   *  the kernel itself is never written before its approval. The brief GET route
+   *  reports it as `pendingKernelRunId` only while that run still waits. */
+  kernelReview?: { runId: string; requestedAt: string };
   /** Monotonic content revision (campaign gap plan §5B B4). Rows written before
    *  versioning read back as 1. */
   version?: number;

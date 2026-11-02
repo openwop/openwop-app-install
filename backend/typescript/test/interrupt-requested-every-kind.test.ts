@@ -14,6 +14,11 @@
  *    sweeper recovery are pinned in adr0751-fork-suspended-checkpoint.test.ts);
  *  - replay divergence skips a request ONLY for a pre-change source that holds
  *    none of that kind, and still catches a real divergence otherwise.
+ *
+ * TST-DGD-2. Red when engine routing keys (`__resume*`) reach the wire, when
+ * approval actions are not normalised (approve → accept), when the clarification
+ * projection changes its question id, and when the replay-divergence skip stops
+ * being per KIND or disappears (sabotage-witnessed, wave 71).
  */
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -43,7 +48,7 @@ import { installRejectedGateRouter } from './support/rejectedGateRouter.js';
 function validatorFor(major: 1 | 2): (payload: unknown) => { ok: boolean; errors: string } {
   const ajv = new Ajv2020({ strict: false, allErrors: true });
   const p = major === 1 ? '' : 'v2/';
-  for (const dep of ['credential-reference.schema.json', ...(major === 2 ? ['ids.schema.json'] : [])]) ajv.addSchema(corpusSchema(`${p}${dep}`) as object);
+  for (const dep of ['credential-reference.schema.json', ...(major === 2 ? ['ids.schema.json', 'interrupt-form.schema.json'] : [])]) ajv.addSchema(corpusSchema(`${p}${dep}`) as object);
   const validate = ajv.compile(corpusSchema(`${p}suspend-request.schema.json`) as object);
   return (payload) => ({ ok: validate(payload) as boolean, errors: JSON.stringify(validate.errors ?? []) });
 }
@@ -121,11 +126,14 @@ installRejectedGateRouter(storage, hostSuite);
 
 beforeAll(() => {
   ensureNodesRegistered();
-  const wf = (id: string, gate: Record<string, unknown>) => registerHostWorkflow({
-    workflowId: id, name: id, version: '1.0.0',
-    nodes: [gate, { nodeId: 'after', typeId: 'core.noop', config: {} }],
-    edges: [{ edgeId: 'e1', sourceNodeId: 'gate', targetNodeId: 'after' }],
-  } as unknown as WorkflowDefinition);
+  const wf = (id: string, gate: WorkflowDefinition['nodes'][number]) => {
+    const def: WorkflowDefinition = {
+      workflowId: id,
+      nodes: [gate, { nodeId: 'after', typeId: 'core.noop', config: {} }],
+      edges: [{ edgeId: 'e1', sourceNodeId: 'gate', targetNodeId: 'after' }],
+    };
+    registerHostWorkflow(def);
+  };
   wf('wf.p2.single', { nodeId: 'gate', typeId: 'core.approvalGate', config: { prompt: 'Approve?', rejectionPolicy: 'single-veto' } });
   wf('wf.p2.quorum', { nodeId: 'gate', typeId: 'core.approvalGate', config: { prompt: 'Approve?', requiredApprovals: 2 } });
   wf('wf.p2.clarify', { nodeId: 'gate', typeId: 'core.clarificationGate', config: { question: 'Which region?' } });
@@ -233,8 +241,9 @@ describe('loop row 3, P2 — interrupt.md §Events — the full order on the rea
 });
 
 // ── replay divergence, pre-change-source compatibility ─────────────────────
+let evSeq = 0;
 const ev = (type: string, nodeId: string, payload: unknown = {}): EventRecord =>
-  ({ eventId: `${type}-${nodeId}-${Math.random()}`, runId: 'r', sequence: 0, type, nodeId, payload, timestamp: '' }) as unknown as EventRecord;
+  ({ eventId: `${type}-${nodeId}-${evSeq++}`, runId: 'r', sequence: 0, type, nodeId, payload, timestamp: '2026-01-01T00:00:00.000Z' });
 
 describe('loop row 3, P2 — interrupt.md §Events — replay divergence and the pre-change source', () => {
   const pre = [ev('node.started', 'gate'), ev('node.suspended', 'gate', { kind: 'approval' })];

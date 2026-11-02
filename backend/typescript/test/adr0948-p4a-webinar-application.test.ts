@@ -11,18 +11,25 @@
  *    `accepted`; no attendance → `declined`; before the event, or a registration from
  *    elsewhere → no outcome (sequential).
  *  - The step-kind list is the same everywhere the model or the UI reads it (parity).
+ *
+ * Every 400 refusal is asserted by its own message: the binding, kind, offer and
+ * publish guards all answer 400. Sabotage (w73, all witnessed): wa-forge,
+ * wa-attended, wa-before, wa-ctx, wa-orgbind, wa-kind, wa-publish, wa-parity.
  */
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { bootPlanningApp, makeClient, enableToggle, uniqEmail, type Client } from './planningHarness.js';
+import { bootPlanningApp, makeClient, enableToggle, uniqEmail, type Client, type Res } from './planningHarness.js';
 import { createPage, transitionPage } from '../src/features/cms/cmsService.js';
 import { createFunnel, updateFunnel, getFunnel, publishFunnel, funnelPublishDigest, FUNNEL_STEP_KINDS } from '../src/features/funnels/funnelsService.js';
 import { upsertMarketingEvent } from '../src/features/webinars/entities/marketingEvent.js';
-import { createForm, recordSubmission } from '../src/features/forms/formsService.js';
+import { createForm, getSubmission, recordSubmission } from '../src/features/forms/formsService.js';
 import { createActivity } from '../src/features/crm/entities/activities.js';
 import { makeLinkValidators } from '../src/features/crm/entities/tasks.js';
+
+/** The public `next` answer and an error envelope, typed at the call sites. */
+interface NextBody { step?: { stepId: string }; error?: string; details?: { code?: string } }
 
 let BASE = '';
 let close: () => Promise<void>;
@@ -33,7 +40,7 @@ const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 beforeAll(async () => {
   const h = await bootPlanningApp(); BASE = h.base; close = h.close;
   for (const id of ['users', 'funnels', 'cms', 'forms', 'crm', 'webinars']) await enableToggle(id, 'on');
-});
+}, 120_000);
 afterAll(async () => { await close(); });
 
 async function world() {
@@ -67,10 +74,10 @@ describe('ADR 0948 P4a — bindings', () => {
     const f = await createFunnel({ tenantId: w.tenantId, orgId: w.orgA, createdBy: 'u', name: `Webinar ${n}`, steps });
     expect(f.steps.map((s) => [s.kind, s.webinar?.marketingEventId ?? s.application?.formId])).toEqual([['webinar', w.pastEvent.eventId], ['application', w.form.formId]]);
 
-    await expect(createFunnel({ tenantId: w.tenantId, orgId: w.orgA, createdBy: 'u', name: 'x1', steps: [{ kind: 'webinar', pageId: p1, webinar: { marketingEventId: w.eventB.eventId } }] })).rejects.toMatchObject({ httpStatus: 400 });
-    await expect(createFunnel({ tenantId: w.tenantId, orgId: w.orgA, createdBy: 'u', name: 'x2', steps: [{ kind: 'application', pageId: p2, application: { formId: w.formB.formId } }] })).rejects.toMatchObject({ httpStatus: 400 });
-    await expect(createFunnel({ tenantId: w.tenantId, orgId: w.orgA, createdBy: 'u', name: 'x3', steps: [{ kind: 'landing', pageId: p1, webinar: { marketingEventId: w.pastEvent.eventId } }] })).rejects.toMatchObject({ httpStatus: 400 });
-    await expect(createFunnel({ tenantId: w.tenantId, orgId: w.orgA, createdBy: 'u', name: 'x4', steps: [{ kind: 'webinar', pageId: p1, offer: { productIds: ['p'] } }] })).rejects.toMatchObject({ httpStatus: 400 });
+    await expect(createFunnel({ tenantId: w.tenantId, orgId: w.orgA, createdBy: 'u', name: 'x1', steps: [{ kind: 'webinar', pageId: p1, webinar: { marketingEventId: w.eventB.eventId } }] })).rejects.toMatchObject({ httpStatus: 400, message: 'Webinar not found in this organization.' });
+    await expect(createFunnel({ tenantId: w.tenantId, orgId: w.orgA, createdBy: 'u', name: 'x2', steps: [{ kind: 'application', pageId: p2, application: { formId: w.formB.formId } }] })).rejects.toMatchObject({ httpStatus: 400, message: 'Form not found in this organization.' });
+    await expect(createFunnel({ tenantId: w.tenantId, orgId: w.orgA, createdBy: 'u', name: 'x3', steps: [{ kind: 'landing', pageId: p1, webinar: { marketingEventId: w.pastEvent.eventId } }] })).rejects.toMatchObject({ httpStatus: 400, message: 'Only a webinar step can bind a webinar.' });
+    await expect(createFunnel({ tenantId: w.tenantId, orgId: w.orgA, createdBy: 'u', name: 'x4', steps: [{ kind: 'webinar', pageId: p1, offer: { productIds: ['p'] } }] })).rejects.toMatchObject({ httpStatus: 400, message: 'An offer belongs on a checkout, upsell or downsell step, not a webinar step.' });
 
     // An editor that does not know the field re-submits without it: kept.
     const digest0 = funnelPublishDigest(f);
@@ -84,7 +91,7 @@ describe('ADR 0948 P4a — bindings', () => {
 
     // Publish refuses a webinar step with no webinar.
     const bare = await createFunnel({ tenantId: w.tenantId, orgId: w.orgA, createdBy: 'u', name: `Bare ${n}`, steps: [{ kind: 'webinar', pageId: p1 }] });
-    await expect(publishFunnel(w.tenantId, w.orgA, bare.funnelId)).rejects.toMatchObject({ httpStatus: 400 });
+    await expect(publishFunnel(w.tenantId, w.orgA, bare.funnelId)).rejects.toMatchObject({ httpStatus: 400, message: 'A webinar step needs a webinar of this organization.' });
   });
 });
 
@@ -101,12 +108,11 @@ describe('ADR 0948 P4a — the server decides a webinar step\'s outcome', () => 
     await publishFunnel(w.tenantId, w.orgA, f.funnelId);
     return f;
   }
-  const next = (w: Awaited<ReturnType<typeof world>>, slug: string, q: Record<string, string>) =>
+  const next = (w: Awaited<ReturnType<typeof world>>, slug: string, q: Record<string, string>): Promise<Res<NextBody>> =>
     w.c.get(`${H}/public/${encodeURIComponent(w.orgA)}/funnels/${encodeURIComponent(slug)}/next?${new URLSearchParams(q).toString()}`);
   async function register(w: Awaited<ReturnType<typeof world>>, funnelId: string, stepId: string): Promise<{ submissionId: string; contactId?: string }> {
     const sub = await recordSubmission(w.form, { email: uniqEmail('visitor') }, { context: { funnelId, stepId } });
     // The CRM sink stamps the contact asynchronously-but-awaited inside recordSubmission.
-    const { getSubmission } = await import('../src/features/forms/formsService.js');
     const stored = await getSubmission(w.tenantId, w.orgA, w.form.formId, sub.submissionId);
     return { submissionId: sub.submissionId, ...(stored?.contactId ? { contactId: stored.contactId } : {}) };
   }
@@ -115,8 +121,7 @@ describe('ADR 0948 P4a — the server decides a webinar step\'s outcome', () => 
     const w = await world();
     const f = await liveFunnel(w, w.pastEvent.eventId);
     const forged = await next(w, f.slug, { from: 'reg', outcome: 'accepted' });
-    expect(forged.status).toBe(400);
-    expect(JSON.stringify(forged.body)).toContain('outcome_server_derived');
+    expect([forged.status, forged.body.error, forged.body.details?.code]).toEqual([400, 'validation_error', 'outcome_server_derived']);
 
     const attendee = await register(w, f.funnelId, 'reg');
     expect(attendee.contactId, 'non-vacuity: the registration names a contact').toBeTruthy();

@@ -6,17 +6,18 @@
  *  1. mermaid runs with `securityLevel: 'strict'` — htmlLabels off, click/script
  *     directives stripped, labels sanitized — producing a sanitized static SVG.
  *  2. that SVG is displayed inside an iframe `srcdoc` with `sandbox=""` (EMPTY — NO
- *     allow-scripts, NO allow-same-origin → null origin, no script execution at all)
- *     and a `default-src 'none'` CSP (no network egress). A static diagram needs no
- *     script, so this is strictly safer than the ADR 0128 artifact frame's
- *     allow-scripts posture: anything that survives strict mode still cannot run or
- *     phone home.
+ *     allow-scripts, NO allow-same-origin → null origin, no script execution at all),
+ *     a `default-src 'none'` CSP, and the `inert` attribute. ADR 1017 measured that a
+ *     `sandbox=""` frame still navigates itself on a click or Tab+Enter over a link;
+ *     `inert` takes clicks and focus away, so nothing that survives strict mode can
+ *     run or phone home. The figcaption below is the text alternative, since `inert`
+ *     also hides the frame from assistive tech.
  *
  * mermaid is lazy-imported (pinned to the `markdown` vite chunk, never the entry).
  * On a parse/render error (e.g. a partial diagram mid-stream) it DEGRADES to the
  * literal code block — never throws, never blanks the message.
  */
-import { memo, useEffect, useState } from 'react';
+import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { CodeBlock } from './CodeBlock.js';
 
@@ -29,13 +30,17 @@ export function buildMermaidSrcdoc(svg: string): string {
   return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${SVG_CSP_FOR_TEST}"><style>html,body{margin:0;padding:0}svg{max-width:100%;height:auto;display:block}</style></head><body>${svg}</body></html>`;
 }
 
+/** ADR 1017 — the frame is `inert`, so it cannot scroll inside itself: it is sized to
+ *  the whole diagram (up to this guard) and the PARENT figure scrolls instead. */
+const MAX_FRAME_PX = 8000;
+
 /** Best-effort intrinsic height from the rendered SVG (height attr or viewBox),
  *  capped — an iframe with sandbox="" can't self-size without a script. */
 export function svgHeightPx(svg: string): number {
   const h = /<svg[^>]*\bheight="([0-9.]+)/.exec(svg);
-  if (h?.[1]) return Math.min(Math.ceil(Number(h[1])) + 8, 1200);
+  if (h?.[1]) return Math.min(Math.ceil(Number(h[1])) + 8, MAX_FRAME_PX);
   const vb = /viewBox="[0-9.]+ [0-9.]+ [0-9.]+ ([0-9.]+)"/.exec(svg);
-  if (vb?.[1]) return Math.min(Math.ceil(Number(vb[1])) + 8, 1200);
+  if (vb?.[1]) return Math.min(Math.ceil(Number(vb[1])) + 8, MAX_FRAME_PX);
   return 360;
 }
 
@@ -94,12 +99,18 @@ function MermaidDiagramImpl({ source }: { source: string }): JSX.Element {
     return () => { live = false; };
   }, [source, themeVersion]);
 
+  // ADR 1017 — React 18 has no `inert` prop; set it before paint.
+  const frameRef = useRef<HTMLIFrameElement>(null);
+  useLayoutEffect(() => { frameRef.current?.setAttribute('inert', ''); }, [svg, failed]);
+
   // Until it renders (or if it fails), show the raw fence — never blank, never throw.
   if (failed || svg === null) return <CodeBlock source={source} language="mermaid" />;
 
   return (
-    <figure className="u-m-0">
+    // A scroll container must be reachable by keyboard (WCAG 2.1.1): a named, focusable region.
+    <figure className="u-m-0 mermaid-diagram-scroll" role="region" aria-label={t('mermaidDiagram')} tabIndex={0}>
       <iframe
+        ref={frameRef}
         className="mermaid-diagram-frame"
         sandbox=""
         srcDoc={buildMermaidSrcdoc(svg)}

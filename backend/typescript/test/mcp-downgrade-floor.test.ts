@@ -108,12 +108,14 @@ describe('RFC 0153 §B inbound — the header-less request is answered from the 
 
 interface Recorded { method: string; revision: string | undefined }
 
-/** A peer that supports ONLY the revisions it is constructed with. */
+/** A peer that supports ONLY the revisions it is constructed with. `advertised`,
+ *  when given, is what its `server/discover` CLAIMS — a peer whose header
+ *  acceptance and self-description disagree. */
 class RevisionPeer {
   readonly calls: Recorded[] = [];
   private server: Server | null = null;
   private port = 0;
-  constructor(private revisions: readonly string[]) {}
+  constructor(private revisions: readonly string[], private readonly advertised?: readonly string[]) {}
 
   setRevisions(next: readonly string[]): void { this.revisions = next; }
 
@@ -143,7 +145,7 @@ class RevisionPeer {
           return;
         }
         const result = rpc.method === 'server/discover'
-          ? { resultType: 'complete', supportedVersions: [...this.revisions], capabilities: {}, ttlMs: 1000, cacheScope: 'public' }
+          ? { resultType: 'complete', supportedVersions: [...(this.advertised ?? this.revisions)], capabilities: {}, ttlMs: 1000, cacheScope: 'public' }
           : rpc.method === 'tools/list'
             ? { resultType: 'complete', tools: [{ name: 'echo' }], ttlMs: 60_000, cacheScope: 'private' }
             : rpc.method === 'initialize'
@@ -304,16 +306,24 @@ describe('RFC 0153 §B outbound — a manifest pin is a downgrade FLOOR', () => 
     // run". The peer here ACCEPTS the current-revision header (so negotiation
     // sees nothing wrong) but does not LIST it — the gap between "accepted our
     // header" and "says it speaks this".
-    peer.setRevisions([MCP_CURRENT_VERSION]);
+    //
+    // CORRECTED (grade-tests w72): this fixture used to be `RevisionPeer([LEGACY])`,
+    // which REFUSES the current header with -32022 — so the refusal came from the
+    // pin floor in `negotiatedCall`, never from the self-description check this
+    // leg names (sabotaging that check left it green). The peer below accepts
+    // both revisions on the header and advertises only the legacy one.
     const original = getProvider(PINNED_ID)!;
-    registerProvider({ ...original, mcpServer: { ...original.mcpServer!, url: peer.endpoint() } });
-    // Re-point the peer's ADVERTISED set without changing what it accepts.
-    const lyingPeer = new RevisionPeer([MCP_LEGACY_VERSION]);
+    const lyingPeer = new RevisionPeer([MCP_CURRENT_VERSION, MCP_LEGACY_VERSION], [MCP_LEGACY_VERSION]);
     await lyingPeer.start();
     registerProvider({ ...original, mcpServer: { url: lyingPeer.endpoint(), transport: 'http', profile: MCP_CURRENT_PROFILE } });
     try {
       // `tools/list` is where a peer's tools would reach a run.
-      await expect(client().listTools(PINNED_ID)).rejects.toMatchObject({ code: 'interop_version_unsupported' });
+      await expect(client().listTools(PINNED_ID)).rejects.toMatchObject({
+        code: 'interop_version_unsupported',
+        message: expect.stringContaining('self-description'),
+      });
+      // The header was ACCEPTED (one current-revision discover), and no tools/list left the host.
+      expect(lyingPeer.calls).toEqual([{ method: 'server/discover', revision: MCP_CURRENT_VERSION }]);
     } finally {
       registerProvider(original);
       await lyingPeer.stop();

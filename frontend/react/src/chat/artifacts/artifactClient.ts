@@ -73,6 +73,15 @@ export async function listRunArtifacts(runId: string): Promise<Array<ArtifactPro
   return res.artifacts;
 }
 
+/** ADR 1017 D2 — the artifacts a chat tool saved during ONE chat turn (the render
+ *  tool, the code-exec tool). The server derives the chat's artifact lanes from the
+ *  conversation run's own stamps and gates every row like `GET /artifacts/:id`. */
+export async function listChatTurnArtifacts(conversationRunId: string, turnMessageId: string): Promise<Array<ArtifactProjection & { runNodeId: string }>> {
+  const q = new URLSearchParams({ conversationRunId, turnMessageId });
+  const res = await http<{ artifacts: Array<ArtifactProjection & { runNodeId: string }> }>(`${BASE}?${q.toString()}`);
+  return res.artifacts;
+}
+
 export async function listArtifacts(opts: { limit?: number; cursor?: string } = {}): Promise<ArtifactPage> {
   const q = new URLSearchParams();
   if (opts.limit != null) q.set('limit', String(opts.limit));

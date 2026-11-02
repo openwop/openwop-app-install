@@ -12,12 +12,21 @@
  * This drives the REAL gated path (the bundle) and asserts BOTH branches:
  *   - an always-on surface resolves (never `host_capability_disabled`);
  *   - a default-OFF toggled surface is still denied (the gate isn't neutered).
+ *
+ * "Resolves" is asserted as "not gate-denied": the gate runs BEFORE the method
+ * body, so a downstream validation/not-found error from the empty args still
+ * proves the gate admitted the call.
+ *
+ * Tracker: TST-DBE-7. Red when: every surface is treated as toggled (the
+ * always-on carve-out is lost — probe w70g2-sg-alwayson), or a resolved-but-
+ * disabled assignment is admitted (w70g2-sg-deny).
  */
 
 import http from 'node:http';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { buildHostSurfaceBundle } from '../src/host/inMemorySurfaces.js';
+import type { FeatureSurface } from '../src/host/featureSurfaces.js';
 
 let server: http.Server;
 
@@ -32,13 +41,14 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 // Invoke a surface's first method with empty args and return the thrown error
 // code (if any). The gate runs BEFORE the method body, so even a downstream
 // validation/not-found error proves the gate did NOT deny.
-const callFirstMethod = async (surface: Record<string, (a: Record<string, unknown>) => Promise<unknown>>): Promise<string | undefined> => {
-  const method = Object.keys(surface)[0]!;
+const callFirstMethod = async (surface: FeatureSurface): Promise<string | undefined> => {
+  const fn = Object.values(surface)[0];
+  if (!fn) throw new Error('surface exposes no method');
   try {
-    await surface[method]!({});
+    await fn({});
     return undefined;
   } catch (err) {
-    return (err as { code?: string }).code;
+    return typeof err === 'object' && err !== null && 'code' in err && typeof err.code === 'string' ? err.code : undefined;
   }
 };
 
@@ -50,8 +60,9 @@ describe('feature-surface gate — always-on carve-out (ADR 0027)', () => {
     'resolves the always-on "%s" surface through the bundle (never host_capability_disabled)',
     async (id) => {
       const bundle = buildHostSurfaceBundle({ tenantId: 'gate-tenant' });
-      const surface = bundle.features[id] as Record<string, (a: Record<string, unknown>) => Promise<unknown>>;
-      expect(surface, `always-on feature '${id}' must expose a surface`).toBeTruthy();
+      const surface = bundle.features[id];
+      expect(surface, `always-on feature '${id}' must expose a surface`).toBeDefined();
+      if (!surface) return;
       const code = await callFirstMethod(surface);
       expect(code, `'${id}' surface must not be gate-denied`).not.toBe('host_capability_disabled');
       expect(code).not.toBe('host_capability_missing');
@@ -63,8 +74,9 @@ describe('feature-surface gate — always-on carve-out (ADR 0027)', () => {
     // enabled it must get the uniform refusal on its surface. (Was
     // priority-matrix, which ADR 0229 flipped ON by default.)
     const bundle = buildHostSurfaceBundle({ tenantId: 'gate-tenant' });
-    const surface = bundle.features['forms'] as Record<string, (a: Record<string, unknown>) => Promise<unknown>>;
-    expect(surface).toBeTruthy();
+    const surface = bundle.features['forms'];
+    expect(surface).toBeDefined();
+    if (!surface) return;
     const code = await callFirstMethod(surface);
     expect(code).toBe('host_capability_disabled');
   });

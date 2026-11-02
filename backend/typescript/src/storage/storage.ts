@@ -517,6 +517,12 @@ export interface Storage {
   getInterrupt(interruptId: string): Promise<InterruptRecord | null>;
   getInterruptByToken(token: string): Promise<InterruptRecord | null>;
   getInterruptByNode(runId: string, nodeId: string): Promise<InterruptRecord | null>;
+  /** ADR 1001 D3.2 — the newest RESOLVED interrupt of this run and node whose
+   *  re-invoke resume key (`data.__resumeKey`) equals `resumeKey`, or null. The
+   *  served-by-key read behind an opt-in `durable` ctx.suspend: a node that
+   *  suspends more than once is re-entered with only the LATEST resolution
+   *  seeded, so an earlier key must be readable from its own resolved row. */
+  getResolvedInterruptByKey(runId: string, nodeId: string, resumeKey: string): Promise<InterruptRecord | null>;
   /** Resolve an interrupt — CONDITIONAL on it still being open (resolved_at
    *  IS NULL). Returns true iff THIS call won the resolve (changed a row), so a
    *  concurrent lazy-timeout + periodic-sweep (or two votes) can't both emit
@@ -815,6 +821,15 @@ export interface Storage {
    * not a policy choice.
    */
   pruneIdempotentResponses(olderThanIso: string): Promise<number>;
+
+  /**
+   * ADR 0987 D6 — runs currently holding a concurrency slot: an admission key and
+   * a status in `ADMISSION_HOLDING_STATUSES`, across every scope. Bounded: it
+   * counts at most `limit` rows (the status-led runs index, never a scan of the
+   * table), so a return of `limit` means "at least `limit`". The keys are
+   * digests, so the count cannot be split by scope family.
+   */
+  countAdmissionHolding(limit: number): Promise<number>;
 
   // ── audit log ──
   /** Total audit rows — the RUNDATA-3 growth gauge (audit_log is unbounded
@@ -1270,6 +1285,16 @@ export interface Storage {
     sessionId: string,
     patch: { title: string; titleSource: NonNullable<ChatSessionRecord['titleSource']>; updatedAt: string },
     expectTitleSource: NonNullable<ChatSessionRecord['titleSource']>,
+  ): Promise<boolean>;
+  /** ADR 1019 D2 — move ONLY `title_source` from `from` to `to` (NULL counts as
+   *  `'default'`), leaving `title` and `updated_at` alone so the rail neither shows
+   *  nor reorders anything. True iff this call made the move: the auto-titler's
+   *  claim on the one model call a chat gets. */
+  claimChatSessionTitleSource(
+    tenantId: string,
+    sessionId: string,
+    from: NonNullable<ChatSessionRecord['titleSource']>,
+    to: NonNullable<ChatSessionRecord['titleSource']>,
   ): Promise<boolean>;
   /** Cascade-delete: drops both the session header AND all messages.
    *  Returns true if a row was removed, false if absent (idempotent). */

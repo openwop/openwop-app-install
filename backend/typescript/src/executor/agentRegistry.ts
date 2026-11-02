@@ -91,6 +91,10 @@ export type AgentSchemaValidator = (value: unknown) => { ok: boolean; errors?: s
 
 type AgentPackResolver = (agentId: string, tenant?: string) => Promise<unknown>;
 
+/** ADR 1014 D2 — loads `<packDir>/.versions/<packName>/<version>/` into the
+ *  versioned map (`registerVersion`). Set by the bootstrap, like the pack resolver. */
+type AgentArchiveResolver = (agentId: string, version: string, packName: string) => Promise<unknown>;
+
 /**
  * ADR 0555 P1 (P0 residue (b)) — an untrusted pack's agents, VISIBLY refused.
  *
@@ -159,6 +163,40 @@ function revoked(agent: ResolvedAgentManifest): boolean {
   return agent.ownerTenant === undefined && isPackRevoked(agent.packName, agent.packVersion);
 }
 
+/** ADR 1014 D2 — archived pack-agent versions, keyed `agentId@version`. Never the
+ *  head: an id with no version (or the head's own version) reads `inProcess`. */
+const versioned = new Map<string, ResolvedAgentManifest>();
+let archiveResolver: AgentArchiveResolver | undefined;
+
+export function setAgentArchiveResolver(r: AgentArchiveResolver | undefined): void {
+  archiveResolver = r;
+}
+
+/** ADR 1014 P5 — loads a USER agent's stored revision into the versioned map. */
+type UserRevisionResolver = (tenant: string, agentId: string, revision: string) => Promise<unknown>;
+let userRevisionResolver: UserRevisionResolver | undefined;
+
+export function setUserAgentRevisionResolver(r: UserRevisionResolver | undefined): void {
+  userRevisionResolver = r;
+}
+
+/** The versioned-map key: a user agent's id repeats across tenants (ADR 0379), so its key carries the tenant. */
+function versionKey(agentId: string, version: string, ownerTenant?: string): string {
+  return ownerTenant !== undefined ? `${userKey(ownerTenant, agentId)}@${version}` : `${agentId}@${version}`;
+}
+
+/** The head, or `agentId@version` exactly: a caller that names a version never
+ *  falls back to other code (ADR 1014 D2/D3). */
+function lookupVersion(agentId: string, tenant: string | undefined, version: string | undefined): ResolvedAgentManifest | null {
+  const head = lookup(agentId, tenant);
+  if (version === undefined) return head;
+  if (head && head.packVersion === version) return head;
+  if (head?.ownerTenant !== undefined) return versioned.get(versionKey(head.agentId, version, head.ownerTenant)) ?? null;
+  const id = canonicalAgentId(agentId);
+  const hit = versioned.get(versionKey(id, version)) ?? (id !== agentId ? versioned.get(versionKey(agentId, version)) : undefined);
+  return hit && !revoked(hit) ? hit : null;
+}
+
 function lookupExact(agentId: string, tenant?: string): ResolvedAgentManifest | null {
   const pack = inProcess.get(agentId);
   if (pack) return revoked(pack) ? null : pack;
@@ -195,19 +233,43 @@ export function getAgentRegistry() {
      *  which is why `tenant` is REQUIRED here, unlike the lookups. */
     remove(agentId: string, tenant: string): boolean {
       registeredAt.delete(userKey(tenant, agentId));
+      // ADR 1014 P5 — its cached revisions go too, so none can resolve after a delete.
+      const prefix = `${userKey(tenant, agentId)}@`;
+      for (const k of [...versioned.keys()]) if (k.startsWith(prefix)) versioned.delete(k);
       return inProcess.delete(userKey(tenant, agentId));
     },
-    has(agentId: string, tenant?: string): boolean {
-      return lookup(agentId, tenant) !== null;
+    /** ADR 1014 D2 — an archived version, keyed `agentId@version` beside the head. */
+    registerVersion(agent: ResolvedAgentManifest): void {
+      versioned.set(versionKey(agent.agentId, agent.packVersion, agent.ownerTenant), agent);
     },
-    /** Synchronous get (in-process only). Tenant-less ⇒ pack agents only. */
-    get(agentId: string, tenant?: string): ResolvedAgentManifest | null {
-      return lookup(agentId, tenant);
+    has(agentId: string, tenant?: string, version?: string): boolean {
+      return lookupVersion(agentId, tenant, version) !== null;
+    },
+    /** Synchronous get (in-process only). Tenant-less ⇒ pack agents only.
+     *  With `version`: that version exactly, or null (ADR 1014 D2). */
+    get(agentId: string, tenant?: string, version?: string): ResolvedAgentManifest | null {
+      return lookupVersion(agentId, tenant, version);
     },
     /** Async resolve — falls through to the pack resolver on miss. As with
      *  the node registry, the resolver typically registers EVERY agent in
      *  the matching pack, so we re-read after it runs. */
-    async resolve(agentId: string, tenant?: string): Promise<ResolvedAgentManifest | null> {
+    async resolve(agentId: string, tenant?: string, version?: string): Promise<ResolvedAgentManifest | null> {
+      if (version !== undefined) {
+        // ADR 1014 D2 — the head (resolved as usual) if it IS that version, else the
+        // archive, else null. Never another version's code.
+        const head = await this.resolve(agentId, tenant);
+        if (head && head.packVersion === version) return head;
+        const hit = lookupVersion(agentId, tenant, version);
+        if (hit || !head) return hit;
+        if (head.ownerTenant !== undefined) {
+          if (!userRevisionResolver) return null;
+          await userRevisionResolver(head.ownerTenant, head.agentId, version);
+        } else {
+          if (!archiveResolver) return null;
+          await archiveResolver(head.agentId, version, head.packName);
+        }
+        return lookupVersion(agentId, tenant, version);
+      }
       const direct = lookup(agentId, tenant);
       // ADR 0775 P3d — a user-agent copy past its TTL is re-read through the
       // resolver (storage): gone ⇒ null, edited ⇒ the new record. A read FAULT keeps
@@ -263,6 +325,7 @@ export function getAgentRegistry() {
     /** Test seam — clears the in-process maps. */
     _resetForTest(): void {
       inProcess.clear();
+      versioned.clear();
       registeredAt.clear();
       refused.clear();
     },

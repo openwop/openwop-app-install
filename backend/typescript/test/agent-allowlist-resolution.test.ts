@@ -21,6 +21,12 @@
  * explicitly widens the surface with a caller-resolved tool. Keep this list
  * SHORT and justified; if it grows, that is the signal the projection seam
  * needs a real design (RFC), not more exemptions.
+ *
+ * Non-vacuity (w73 g4): a pack.json that fails to parse used to be skipped
+ * silently (`catch { continue }`), so its agents were never checked. Parse
+ * failures are now collected and asserted empty, and each case floors the
+ * population it scanned. MEASURED at 9f4cca7d4: 112 agents, 309 allowlist
+ * entries, 812 declared node typeIds.
  */
 import http from 'node:http';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
@@ -44,20 +50,32 @@ interface AgentManifestLite {
   toolAllowlist?: string[];
 }
 
-function agentPacks(): Array<{ pack: string; agents: AgentManifestLite[] }> {
-  const out: Array<{ pack: string; agents: AgentManifestLite[] }> = [];
+interface ManifestLite {
+  agents?: AgentManifestLite[];
+  nodes?: Array<{ typeId?: string; role?: string }>;
+}
+
+/** Every pack manifest under packs/, plus the dirs whose pack.json did not
+ *  parse — those are a FAILURE, never a skip (a skipped manifest is unchecked). */
+function readManifests(): { manifests: Array<{ pack: string; manifest: ManifestLite }>; unparsable: string[] } {
+  const manifests: Array<{ pack: string; manifest: ManifestLite }> = [];
+  const unparsable: string[] = [];
   for (const dir of readdirSync(PACKS_DIR)) {
     const manifestPath = join(PACKS_DIR, dir, 'pack.json');
     if (!existsSync(manifestPath)) continue;
-    let manifest: { agents?: AgentManifestLite[] };
     try {
-      manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { agents?: AgentManifestLite[] };
-    } catch {
-      continue;
+      manifests.push({ pack: dir, manifest: JSON.parse(readFileSync(manifestPath, 'utf8')) as ManifestLite });
+    } catch (err) {
+      unparsable.push(`${dir}: ${err instanceof Error ? err.message : String(err)}`);
     }
-    if (manifest.agents?.length) out.push({ pack: dir, agents: manifest.agents });
   }
-  return out;
+  return { manifests, unparsable };
+}
+
+function agentPacks(): Array<{ pack: string; agents: AgentManifestLite[] }> {
+  return readManifests().manifests
+    .filter(({ manifest }) => (manifest.agents?.length ?? 0) > 0)
+    .map(({ pack, manifest }) => ({ pack, agents: manifest.agents! }));
 }
 
 let server: http.Server;
@@ -71,17 +89,22 @@ beforeAll(async () => {
       res();
     });
   });
-});
+}, 120_000);
 afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
 });
 
 describe('agent-pack toolAllowlist entries resolve to real conversational tools (CFP-1)', () => {
   it('every allowlisted id is offerable by the live tool provider (or documented run-only)', () => {
+    expect(readManifests().unparsable, 'pack.json files that do not parse are unchecked').toEqual([]);
     const universe = new Set(builtinAgentToolIds());
     const failures: string[] = [];
+    let agentCount = 0;
+    let entryCount = 0;
     for (const { pack, agents } of agentPacks()) {
       for (const agent of agents) {
+        agentCount++;
+        entryCount += agent.toolAllowlist?.length ?? 0;
         const agentId = agent.agentId ?? agent.id ?? '<unnamed>';
         const exempt = new Set(RUN_ONLY_EXEMPTIONS[agentId]?.entries ?? []);
         for (const entry of agent.toolAllowlist ?? []) {
@@ -94,22 +117,22 @@ describe('agent-pack toolAllowlist entries resolve to real conversational tools 
       failures,
       `toolAllowlist entries that resolve to NOTHING at dispatch (silently dropped — the agent is toothless):\n${failures.join('\n')}`,
     ).toEqual([]);
+    // Non-vacuity: the scan really read the agent corpus (measured 112 / 309).
+    expect(agentCount).toBeGreaterThanOrEqual(112);
+    expect(entryCount).toBeGreaterThanOrEqual(309);
   });
 
   it('exemptions stay honest: every exempted entry still exists as a declared node', () => {
     // A run-only exemption must at least point at a REAL declared node typeId —
     // otherwise it is a phantom in both lanes and belongs deleted, not exempted.
+    const { manifests, unparsable } = readManifests();
+    expect(unparsable).toEqual([]);
     const declared = new Set<string>();
-    for (const dir of readdirSync(PACKS_DIR)) {
-      const manifestPath = join(PACKS_DIR, dir, 'pack.json');
-      if (!existsSync(manifestPath)) continue;
-      try {
-        const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { nodes?: Array<{ typeId?: string }> };
-        for (const n of manifest.nodes ?? []) if (n.typeId) declared.add(`openwop:${n.typeId}`);
-      } catch {
-        /* ignore unparsable */
-      }
+    for (const { manifest } of manifests) {
+      for (const n of manifest.nodes ?? []) if (n.typeId) declared.add(`openwop:${n.typeId}`);
     }
+    // The case asserts even while RUN_ONLY_EXEMPTIONS is empty (measured 812).
+    expect(declared.size).toBeGreaterThanOrEqual(812);
     for (const [agentId, { entries }] of Object.entries(RUN_ONLY_EXEMPTIONS)) {
       for (const entry of entries) {
         expect(declared.has(entry), `${agentId} exemption ${entry} is not a declared node typeId`).toBe(true);
@@ -132,17 +155,13 @@ describe('agent-pack toolAllowlist entries resolve to real conversational tools 
  */
 describe('projected compute nodes are role:"pure" in their pack manifests (CFPT-7)', () => {
   it('every PROJECTABLE_COMPUTE_NODE_TYPE_IDS entry is a declared node with role "pure"', () => {
+    const { manifests, unparsable } = readManifests();
+    expect(unparsable).toEqual([]);
     const roleOf = new Map<string, string | undefined>();
-    for (const dir of readdirSync(PACKS_DIR)) {
-      const manifestPath = join(PACKS_DIR, dir, 'pack.json');
-      if (!existsSync(manifestPath)) continue;
-      try {
-        const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { nodes?: Array<{ typeId?: string; role?: string }> };
-        for (const n of manifest.nodes ?? []) if (n.typeId) roleOf.set(n.typeId, n.role);
-      } catch {
-        /* ignore unparsable */
-      }
+    for (const { manifest } of manifests) {
+      for (const n of manifest.nodes ?? []) if (n.typeId) roleOf.set(n.typeId, n.role);
     }
+    expect(PROJECTABLE_COMPUTE_NODE_TYPE_IDS.length).toBeGreaterThan(0);
     const failures: string[] = [];
     for (const typeId of PROJECTABLE_COMPUTE_NODE_TYPE_IDS) {
       if (!roleOf.has(typeId)) { failures.push(`${typeId} — not a declared node in any pack manifest`); continue; }

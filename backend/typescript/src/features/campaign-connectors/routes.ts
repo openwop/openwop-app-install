@@ -9,8 +9,9 @@
 import type { Request } from 'express';
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
-import { resolveEffectiveAccess, type Scope } from '../../host/accessControlService.js';
-import { requireFeatureEnabled, requireString, authorizeOrgScope } from '../featureRoute.js';
+import { assertOrgScope, type Scope } from '../../host/accessControlService.js';
+import { resolveCallerUser } from '../users/usersGuards.js';
+import { requireFeatureEnabled, requireString, authorizeOrgScope, requireTenantScope } from '../featureRoute.js';
 import { resolveToggle, resolveOne } from '../../host/featureToggles/service.js';
 import { buildProductFeed, renderFeedXml, getFeedSettings, saveFeedSettings, signedFeedUrl, verifyFeedSignature, pushCatalog, commerceServesStore } from './catalogFeed.js';
 import { publicBaseUrl } from '../featureRoute.js';
@@ -37,11 +38,14 @@ const LABEL = 'Campaign Connectors';
 const tenantOf = (req: Request): string => req.tenantId ?? 'default';
 const actingUserOf = (req: Request): string | undefined => req.userId ?? req.principal?.principalId;
 
+/** ADR 1022 (CP71WF-11) — the shared org check for the body/query-org routes:
+ *  the canonical caller (`resolveCallerUser`) and `assertOrgScope`, the one
+ *  existence + scope predicate `requireOrgScope` uses. The local copy this
+ *  replaces keyed on the raw principal, never checked the org existed, and let a
+ *  subject-less request resolve as the tenant owner. */
 async function requireOrgScopeFor(req: Request, orgId: string, scope: Scope): Promise<void> {
-  const access = await resolveEffectiveAccess(tenantOf(req), { subject: actingUserOf(req), orgId });
-  if (!access.scopes.includes(scope)) {
-    throw new OpenwopError('forbidden_scope', `Missing required scope: ${scope}`, 403, { requiredScope: scope, orgId });
-  }
+  const user = await resolveCallerUser(req);
+  await assertOrgScope(tenantOf(req), user.userId, orgId, scope);
 }
 
 export function registerCampaignConnectorsRoutes(deps: RouteDeps): void {
@@ -76,7 +80,8 @@ export function registerCampaignConnectorsRoutes(deps: RouteDeps): void {
           payload: { tenantId: tenantOf(req), orgId, actor: actingUserOf(req) ?? 'unknown', platform, scope: result.scope, since: result.since, until: result.until, date: result.date, campaigns: result.campaigns, imported: result.imported, failures: result.failures.length, truncated: result.truncated },
         }).catch(() => undefined);
       }
-      res.status(result.outcome === 'cooldown' ? 429 : 200).json(result);
+      // ADR 1022 D7 — a sync where no account answered is a failure, not a 200.
+      res.status(result.outcome === 'cooldown' ? 429 : result.outcome === 'sync_failed' ? 502 : 200).json(result);
     } catch (err) { next(err); }
   });
 
@@ -135,6 +140,10 @@ export function registerCampaignConnectorsRoutes(deps: RouteDeps): void {
       const segmentId = requireString(body.segmentId, 'segmentId');
       const adAccountId = requireString(body.adAccountId, 'adAccountId');
       await requireOrgScopeFor(req, orgId, 'workspace:write');
+      // ADR 1022 (CP71WF-12) — the build reads the TENANT-wide contact list, so
+      // the caller must hold the tenant scope the CRM doors ask, not just write
+      // in one org.
+      await requireTenantScope(req, 'workspace:write');
       const platform = body.platform === 'meta' || body.platform === 'google' ? body.platform : undefined;
       if (!platform) throw new OpenwopError('validation_error', "platform must be 'meta' or 'google'.", 400, { platform: body.platform });
       const upload = await buildAudienceUpload(tenantOf(req), segmentId);

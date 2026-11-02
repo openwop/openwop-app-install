@@ -19,8 +19,15 @@
  * (anon-tenant-lifecycle:135, storage-hostext-activity-live:69), which cannot
  * catch it: `''` and `'2026-07-28 02:22:25+00'` are both strings. This asserts
  * the SHAPE and the ORDERING PROPERTY the sweeper actually depends on.
+ *
+ * The cutoff case is SAME-DAY on purpose: a SPACE-for-`T` render only misorders values
+ * that share a date (a 14-day cutoff differs earlier in the string and could not see
+ * it). Only `Date` is faked; the writes are stamped by the adapter's own clock read.
+ *
+ * Tracker TST-DFD-3. Red when (w71g1, witnessed): the adapter stamps `updated_at` in any
+ * render other than `toISOString()` (both the shape case and the same-day cutoff case).
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
 
@@ -32,6 +39,7 @@ let storage: Storage;
 beforeEach(async () => {
   storage = await openStorage('memory://');
 });
+afterEach(() => { vi.useRealTimers(); });
 
 describe('hostext activity — the shape the teardown comparison relies on', () => {
   it('returns lastHostExtAt as fixed-width ISO-8601 UTC, not merely a string', async () => {
@@ -47,6 +55,10 @@ describe('hostext activity — the shape the teardown comparison relies on', () 
   });
 
   it('a JUST-WRITTEN tenant does not compare as older than a 14-day cutoff', async () => {
+    // Written at noon; the sweeper's comparison is checked against a 14-day cutoff AND a
+    // same-day cutoff one hour earlier — the one a non-ISO render gets wrong.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-07-28T12:00:00.000Z'));
     await storage.kvSet('hostext:t2', JSON.stringify({ tenantId: 'anon:probe-2', x: 1 }));
 
     const rows = await storage.listHostExtTenantActivity('anon:', 100);
@@ -58,12 +70,16 @@ describe('hostext activity — the shape the teardown comparison relies on', () 
     // trusting that the format implies it.
     const cutoffIso = new Date(Date.now() - 14 * 86_400_000).toISOString();
     expect(row!.lastHostExtAt < cutoffIso).toBe(false);
+    const sameDayCutoff = '2026-07-28T11:00:00.000Z';
+    expect(row!.lastHostExtAt < sameDayCutoff, `${row!.lastHostExtAt} vs ${sameDayCutoff}`).toBe(false);
   });
 
   it('orders lexicographically the same way it orders chronologically', async () => {
-    // Two writes with a real gap, so the string compare and the clock must agree.
+    // Two writes one second apart (faked Date), so the string compare and the clock must agree.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-07-28T09:59:59.500Z'));
     await storage.kvSet('hostext:a', JSON.stringify({ tenantId: 'anon:older', x: 1 }));
-    await new Promise((r) => setTimeout(r, 5));
+    vi.setSystemTime(new Date('2026-07-28T10:00:00.500Z'));
     await storage.kvSet('hostext:b', JSON.stringify({ tenantId: 'anon:newer', x: 1 }));
 
     const rows = await storage.listHostExtTenantActivity('anon:', 100);
@@ -73,6 +89,6 @@ describe('hostext activity — the shape the teardown comparison relies on', () 
     expect(newer).toBeDefined();
 
     expect(older.lastHostExtAt < newer.lastHostExtAt).toBe(true);
-    expect(Date.parse(older.lastHostExtAt)).toBeLessThanOrEqual(Date.parse(newer.lastHostExtAt));
+    expect(Date.parse(older.lastHostExtAt)).toBeLessThan(Date.parse(newer.lastHostExtAt));
   });
 });

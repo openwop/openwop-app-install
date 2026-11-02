@@ -11,6 +11,9 @@
  * The default must not move: absent the flag, examples still load. A flag that
  * silently changed the default would take the demo gallery away from every
  * existing deployment.
+ *
+ * TST-CCF-2. Red when: `=0` stops dropping the root; a truthiness test makes other
+ * values suppress it; the default flips; or the override dir loses first precedence.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { defaultWorkflowChainPackRoots } from '../src/host/workflowChainPackLoader.js';

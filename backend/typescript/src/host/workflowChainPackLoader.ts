@@ -1950,6 +1950,79 @@ export function expandChain(authoredChain: WorkflowChain, opts: ExpandOptions = 
 /** RFC 0133 §1 — the max sub-chain nesting depth the host will co-register. */
 export const MAX_SUB_CHAIN_DEPTH = 8;
 
+/**
+ * Un-prefix a DEFERRED expansion's materialized parameter variables back to the
+ * chain's bare launch-contract names (`<chainSlug>_<expansionId>_orgId` → `orgId`),
+ * rewriting every node input that reads them and the RFC 0124 alias map. Mutates
+ * `def`. ADR 1023 D2 — ONE implementation, used by the same-id chain-backed lane
+ * (`buildChainBackedDefinition`) and by the sub-chain child lane
+ * (`coRegisterSubChains`), where the parent's `core.subWorkflow` seeds the child's
+ * bag under the BARE names.
+ */
+export function restoreBareParamNames(def: WorkflowDefinition, chain: WorkflowChain): void {
+  // Grade-trio fix: a bare `endsWith('_<param>')` collides when one param is a
+  // suffix of another (`count` also matches `<pfx>_retry_count`, renaming BOTH to
+  // `count`). Match params LONGEST-FIRST and consume each materialized variable
+  // exactly once, so `retry_count` claims its variable before `count` looks.
+  const props = (chain.parameters as { properties?: Record<string, unknown> }).properties ?? {};
+  const required = new Set((chain.parameters as { required?: string[] }).required ?? []);
+  const consumed = new Set<string>();
+  /** Every variable this loop MOVED: materialized name → the restored bare name. */
+  const renamed = new Map<string, string>();
+  for (const param of Object.keys(props).sort((a, b) => b.length - a.length)) {
+    for (const v of def.variables ?? []) {
+      if (consumed.has(v.name) || !v.name.endsWith(`_${param}`)) continue;
+      const materialized = v.name;
+      v.name = param;
+      consumed.add(param);
+      renamed.set(materialized, param);
+      if (required.has(param)) v.required = true;
+      for (const node of def.nodes) {
+        for (const [port, pv] of Object.entries(node.inputs ?? {})) {
+          const val = pv as { type?: unknown; variableName?: unknown };
+          if (val && val.type === 'variable' && val.variableName === materialized) {
+            (node.inputs as Record<string, unknown>)[port] = { type: 'variable', variableName: param };
+          }
+        }
+      }
+    }
+  }
+
+  // PODWF-1 (ADR 0603 §2) — the rename above moved `variables[]` and every node
+  // input, and left `metadata.deferredParameterAliases` (RFC 0124 G1 — bare param
+  // name → materialized variable name) pointing at the PRE-rename names. That map is
+  // what `deferredConfigurableInputs` translates a run's `configurable` overlay
+  // through, so `POST /v1/runs { configurable: { episodeId: 'ep_A' } }` wrote the key
+  // `podcasts_generate_<hash>_episodeId` — which NO declaration carries — and
+  // `seedRunVariables` dropped it. FAIL-OPEN, not fail-closed: `configurableSchema`
+  // is keyed by the BARE name so validation passes (no 400), the run starts, every
+  // node reads `undefined`, and the failure surfaces deep inside a node with an error
+  // that never names the parameter. MEASURED at 138/138 loaded chains carrying
+  // deferred params — the loader's own output was correct in all 138; this lane
+  // broke every one.
+  //
+  // MERGE the moved values through the rename map. NEVER replace the map: a
+  // `metadata = { ...src.metadata }` copy (the shape ten lines away in
+  // `registerMcpProjectionWorkflows`) DELETES the aliases for params this loop did
+  // not move, trading one silent no-op for another. An entry whose value was not
+  // renamed is left exactly as it was — this loop does not invent a mapping it did
+  // not make.
+  // ADR 1023 (grade-code FN72CD-6) — the SAME merge for `forwardedParamAliases`
+  // (ADR 0964 D2: param → the bag variable a sub-chain inputMapping forwards). Left
+  // pointing at the pre-rename name it was inert only because the bare name was
+  // already in the bag; a stale alias is one refactor from a silent `undefined`.
+  for (const key of ['deferredParameterAliases', 'forwardedParamAliases'] as const) {
+    const aliases = def.metadata?.[key];
+    if (renamed.size > 0 && aliases && typeof aliases === 'object' && !Array.isArray(aliases)) {
+      const map = aliases as Record<string, string>;
+      for (const [bare, varName] of Object.entries(map)) {
+        const moved = renamed.get(varName);
+        if (moved !== undefined) map[bare] = moved;
+      }
+    }
+  }
+}
+
 /** A typed error the from-chain route maps to the wire (`sub_chain_*`). */
 export class SubChainError extends Error {
   constructor(public code: string, message: string) { super(message); this.name = 'SubChainError'; }
@@ -2023,7 +2096,13 @@ async function resolveSubChainRef(ref: string, chain: WorkflowChain, deps: SubCh
  */
 export async function coRegisterSubChains(
   chain: WorkflowChain,
-  opts: { params: Record<string, unknown>; deferred?: boolean; tenantId: string; requiredConfigKeysFor?: (typeId: string) => readonly string[] },
+  opts: {
+    params: Record<string, unknown>; deferred?: boolean; tenantId: string; requiredConfigKeysFor?: (typeId: string) => readonly string[];
+    /** ADR 1023 D2 — this chain is a sub-chain CHILD: its values arrive per run from
+     *  the parent's `core.subWorkflow` inputMapping, seeded into the child's bag under
+     *  the BARE param names. Set only by this function's own recursion. */
+    asChild?: boolean;
+  },
   deps: SubChainDeps,
   depth = 0,
   visited: ReadonlySet<string> = new Set(),
@@ -2039,11 +2118,39 @@ export async function coRegisterSubChains(
     throw new SubChainError('sub_chain_unsupported', 'this host does not support runtime child dispatch (sub-chains)');
   }
 
+  // ADR 1023 D2 (FN72WF-3) — a CHILD expands DEFERRED with bare names. Path A
+  // with `params: {}` (the old child lane) dropped every `{{params.x}}` it could
+  // not resolve, so a gallery copy's child nodes lost `orgId`/`briefId`/… and the
+  // dispatch-seeded values reached nothing. Deferred mode binds each whole-value
+  // token to a variable, and the restore below names it what dispatch seeds.
+  // The expansion id is unchanged: it hashes the same resolved params (defaults)
+  // in both modes — except a SENSITIVE param, which deferred mode drops from the
+  // hash, so a child carrying one is refused here exactly as Path A refused it.
+  if (opts.asChild) {
+    const childProps = ((chain.parameters as { properties?: Record<string, ChainParamSpec> }).properties) ?? {};
+    const sensitive = Object.entries(childProps).filter(([, sp]) => sp['x-openwop-sensitive'] === true).map(([n]) => n);
+    if (sensitive.length > 0) {
+      throw new SubChainError('sub_chain_sensitive_param_unsupported', `sub-chain ${chain.chainId} declares sensitive parameter(s) ${sensitive.join(', ')}, which a child cannot receive from its parent's bag`);
+    }
+  }
   const definition = expandChain(chain, {
     params: opts.params,
-    ...(opts.deferred ? { deferred: true } : {}),
+    ...(opts.deferred || opts.asChild ? { deferred: true } : {}),
     ...(opts.requiredConfigKeysFor ? { requiredConfigKeysFor: opts.requiredConfigKeysFor } : {}),
   });
+  if (opts.asChild) {
+    // A lifted prompt body names its slot with the PREFIXED variable; the restore
+    // renames variables, not minted template text, so the slot would read nothing.
+    // No shipped child does this — refuse rather than mint an empty prompt.
+    if (Array.isArray(definition.metadata?.mintedPromptTemplates) && definition.metadata.mintedPromptTemplates.length > 0) {
+      throw new SubChainError('sub_chain_prompt_param_unsupported', `sub-chain ${chain.chainId} puts a parameter in a prompt body, which a child cannot receive from its parent's bag`);
+    }
+    restoreBareParamNames(definition, chain);
+    // `params` is `{}` here, so a child variable's `defaultValue` can only be the
+    // PACK's declared default, never a person's value (SR-1 is about the latter).
+    // It is kept: Path A froze the same default into the node, and a value the
+    // parent maps still wins (`seedRunVariables` prefers inputs).
+  }
   const nodesWithRef = definition.nodes.filter((n) => typeof (n.config as Record<string, unknown> | undefined)?.subChainRef === 'string');
   if (nodesWithRef.length === 0) return { definition, registeredChildIds: [] };
 
@@ -2070,7 +2177,7 @@ export async function coRegisterSubChains(
     // (their values arrive at dispatch from the parent), so this stays a report.
     const nested = await coRegisterSubChains(
       childChain,
-      { params: {}, tenantId: opts.tenantId, ...(opts.requiredConfigKeysFor ? { requiredConfigKeysFor: opts.requiredConfigKeysFor } : {}) },
+      { params: {}, tenantId: opts.tenantId, asChild: true, ...(opts.requiredConfigKeysFor ? { requiredConfigKeysFor: opts.requiredConfigKeysFor } : {}) },
       deps, depth + 1, nextVisited,
     );
       // RFC 0133 §1.3 (F3 fix, ADR 0472 P4) — a sub-chain child receives its inputs from

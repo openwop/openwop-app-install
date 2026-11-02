@@ -156,7 +156,7 @@ function buildEventTimes(values) {
 /**
  * Build the A2UI clarification surface for an incomplete `calendar.invite`,
  * asking ONLY for the missing essentials (RFC 0102 `ui.a2ui-surface` shape, the
- * `data.surface` the chat's `a2uiInterruptCard` bridge renders). Uses only the
+ * `data.form` the chat's `a2uiInterruptCard` bridge renders). Uses only the
  * day-1 catalog (0.9.1) components — `text`/`field.text`/`field.date`/
  * `field.select`/`action.button` — so the renderer's closed-catalog validation
  * accepts it; the confirm button's `action.target:'resume'` confines the action
@@ -315,6 +315,16 @@ function mergeRescheduleResume(payload, values) {
  * here — no parallel surface. `merge` folds the resumed values back into the
  * payload that the single `enqueueActionWithApproval` path then enqueues.
  */
+function surfaceQuestions(surface, question) {
+  const fields = surface.components.filter((c) => c.component.startsWith('field.'));
+  return fields.map((f, i) => ({ id: f.id, question: i === 0 ? question : f.label }));
+}
+
+function answersById(resumed) {
+  const answers = Array.isArray(resumed?.answers) ? resumed.answers : [];
+  return Object.fromEntries(answers.map((a) => [a.id, a.answer]));
+}
+
 function planClarification(kind, payload) {
   const p = payload && typeof payload === 'object' ? payload : {};
   if (kind === 'calendar.invite') {
@@ -454,7 +464,7 @@ export async function enqueueAction(ctx) {
   // `a2uiInterruptCard` bridge as `local.openwop-app.a2ui-clarify`, instead of
   // enqueuing a half-formed action. `ctx.suspend` (interrupt.md awaitable
   // primitive) raises a `clarification` interrupt whose `data` carries
-  // `{catalogVersion, surface}`; the chat renders the missing-field form, and
+  // `questions` and `form`; the chat renders the missing-field form, and
   // the collected values resume here and merge into the payload before the
   // single enqueue path runs. Strictly additive — gated on the awaitable
   // primitive being present (a real executor run) AND the per-kind dispatcher
@@ -462,15 +472,15 @@ export async function enqueueAction(ctx) {
   if (typeof ctx.suspend === 'function') {
     const plan = planClarification(i.kind, payload);
     if (plan) {
-      const values = await ctx.suspend({
+      const resumed = await ctx.suspend({
         reason: 'clarification',
         resumeKey: plan.resumeKey,
-        // Free-text fallback for any consumer that doesn't render A2UI surfaces.
-        question: plan.question,
-        catalogVersion: A2UI_CATALOG_VERSION,
-        surface: plan.surface,
+        // ADR 1013 D3 — `questions` is the fallback for a consumer that doesn't
+        // render forms, one per field, each answering a form input by id.
+        questions: surfaceQuestions(plan.surface, plan.question),
+        form: { catalogVersion: A2UI_CATALOG_VERSION, surface: plan.surface },
       });
-      payload = plan.merge(values && typeof values === 'object' ? values : {});
+      payload = plan.merge(answersById(resumed));
       const stillMissing = plan.requireAfter ? plan.requireAfter(payload) : null;
       if (stillMissing) {
         throw Object.assign(

@@ -47,7 +47,7 @@ import { createWorkspace, createMember } from '../src/host/accessControlService.
 import { upsertFromPrincipal } from '../src/features/users/usersService.js';
 import { loadOwnedRunForDecision } from '../src/routes/interrupts.js';
 import { RUN_START_GRANT_METADATA_KEY, registerRunStartGrant, resetRunStartGrantsForTests } from '../src/host/runStartGrant.js';
-import { challengeAuthorChatStartGrant } from '../src/features/kicktodo-creator/routes.js';
+import { challengeAuthorChatStartGrant, CHALLENGE_AUTHOR_CHAT_GRANT } from '../src/features/kicktodo-creator/routes.js';
 import { stripCallerAttribution } from '../src/host/runDispatch.js';
 import { CHALLENGE_AUTHOR_AGENT_ID } from '../src/features/kicktodo-creator/challengeAuthorService.js';
 import { CHALLENGE_FACTORY_WORKFLOW_ID } from '../src/features/kicktodo-creator/builtinWorkflows.js';
@@ -125,7 +125,7 @@ describe('ADR 0975 D8 — starting the Challenge Author chat (POST /runs, enforc
     try {
       expect((await startChat({ agentScope: CHALLENGE_AUTHOR_AGENT_ID })).status).toBe(403);
     } finally {
-      registerRunStartGrant([CONVERSATION_WORKFLOW_ID], challengeAuthorChatStartGrant);
+      registerRunStartGrant([CONVERSATION_WORKFLOW_ID], CHALLENGE_AUTHOR_CHAT_GRANT, challengeAuthorChatStartGrant);
     }
     expect((await startChat({ agentScope: CHALLENGE_AUTHOR_AGENT_ID })).status).toBe(201);
   });

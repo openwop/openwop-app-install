@@ -21,6 +21,7 @@ import { describe, expect, it } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { OWNED_REF_PREFIXES, systemOwnedRefOwner } from '../src/byok/refNamespaces.js';
+import { stripComments } from './helpers/stripComments.js';
 
 const SRC = join(__dirname, '..', 'src');
 
@@ -41,6 +42,7 @@ const WRITERS: Record<string, string> = {
   // Writers below `setSecret` (the storage primitives and the subscription store).
   'providers/managedProvider.ts': 'owned: managed',
   'byok/copilotOAuth.ts': 'writes through subscriptionCredential.ts (the subscription owner)',
+  'routes/agents.ts': 'writes through subscriptionCredential.ts (the subscription owner), at the personal tenant only',
   'storage/postgres/index.ts': 'storage adapter',
   'storage/sqlite/index.ts': 'storage adapter',
   'storage/storage.ts': 'storage interface',
@@ -51,7 +53,7 @@ const WRITE_CALL = /\b(?:setSecret|upsertTenantSecret|upsertEncryptedSecret|stor
 
 /** Drop comments so a doc comment that MENTIONS a writer is not counted as one. */
 function code(text: string): string {
-  return text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+  return stripComments(text);
 }
 
 function walk(dir: string, out: string[] = []): string[] {

@@ -6,7 +6,7 @@
  * tenant key IS the authorization boundary (a caller can never read/write another
  * subject's rows)". That claim has two premises. The second — structural isolation
  * by key — is covered (same-tenant/diff-subject at `manual-tests-route.test.ts:59`,
- * cross-tenant at `man-grade-probe.test.ts` MANP-1). The FIRST — "Authed (the
+ * cross-tenant at `manual-tests-cross-tenant.test.ts` MANP-1). The FIRST — "Authed (the
  * global middleware)" — was never measured, and `subjectOf` falls back to a SHARED
  * `user:_anon` when both `userId` and `principalId` are absent (MANC-2).
  *
@@ -25,13 +25,14 @@ import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
-import { saveRun, getRun, listRuns } from '../src/features/manual-tests/manualTestsService.js';
+import { saveRun, getRun, listRuns, type ManualTestRun } from '../src/features/manual-tests/manualTestsService.js';
 
 let server: http.Server;
 let BASE = '';
 const RUNS = '/host/openwop-app/manual-tests/runs';
 
-interface Res { status: number; body: any }
+interface Body { runs?: ManualTestRun[]; run?: ManualTestRun | null }
+interface Res { status: number; body: Body }
 /** A caller with its OWN cookie jar — i.e. its own browser. */
 function visitor() {
   let cookie = '';
@@ -41,8 +42,9 @@ function visitor() {
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
-    for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    for (const c of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(c); if (m?.[1]) cookie = m[1]; }
+    const parsed: Body = res.status === 204 ? {} : ((await res.json().catch(() => ({}))) as Body);
+    return { status: res.status, body: parsed };
   };
   return {
     get: (p: string) => call('GET', p),

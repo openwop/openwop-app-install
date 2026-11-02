@@ -14,6 +14,11 @@
  *   6. ADR 0890 — the checkout-option knobs: valid bare and keyed values are GREEN;
  *      a value the host ignores or a key naming nothing real is an ERROR; `managed` on
  *      a pre-dahlia API version and a no-trial `if_required` WARN.
+ *
+ * Tracker TST-CED-1. Red when (w67g3, witnessed): a standalone feature in a plan
+ * is not reported; a locked, unpriced bundle is not reported; an unknown
+ * `bundle:` reference is not reported; a pack with no display price does not
+ * WARN; a no-trial `if_required` does not WARN.
  */
 import { describe, it, expect } from 'vitest';
 import { spawnSync } from 'node:child_process';

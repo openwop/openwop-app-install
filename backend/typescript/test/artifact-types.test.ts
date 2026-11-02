@@ -2,15 +2,20 @@
  * Host artifact-type registry (ADR 0055 / RFC 0071/0075) — unit. The seeded
  * host-native types, ajv validation (registered must validate; unregistered is the
  * escape hatch), and listing.
+ *
+ * TST-BZD-26 (grade-tests w66). Red when: a host doc type stops being seeded; a registered
+ * payload stops being validated (or an invalid one passes); the unregistered escape hatch
+ * stops answering valid. The registry is reset AND reseeded per case — case 3 registers a
+ * pack type, which made case 1's "every type is host" order-dependent under shuffle.
  */
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import {
   seedHostArtifactTypes, validateArtifact, isRegisteredArtifactType, listArtifactTypes,
   registerArtifactType, __resetArtifactTypes,
 } from '../src/host/artifactTypes.js';
 
 describe('host artifact-type registry', () => {
-  beforeAll(() => { __resetArtifactTypes(); seedHostArtifactTypes(); });
+  beforeEach(() => { __resetArtifactTypes(); seedHostArtifactTypes(); });
 
   it('seeds host-native doc.* types', () => {
     expect(isRegisteredArtifactType('doc.sow')).toBe(true);
@@ -30,7 +35,10 @@ describe('host artifact-type registry', () => {
   });
 
   it('registers a pack-sourced type through the same seam', () => {
-    registerArtifactType({ artifactTypeId: 'vendor.x', title: 'X', schema: { type: 'object' }, export: [], registrationSource: 'pack' });
-    expect(validateArtifact('vendor.x', {})).toMatchObject({ registered: true, registrationSource: 'pack', valid: true });
+    registerArtifactType({ artifactTypeId: 'vendor.x', title: 'X', schema: { type: 'object', required: ['a'] }, export: [], registrationSource: 'pack' });
+    expect(validateArtifact('vendor.x', { a: 1 })).toMatchObject({ registered: true, registrationSource: 'pack', valid: true });
+    const bad = validateArtifact('vendor.x', {});
+    expect(bad).toMatchObject({ registered: true, registrationSource: 'pack', valid: false });
+    expect((bad.errors ?? []).length, 'the pack schema really validates').toBeGreaterThan(0);
   });
 });

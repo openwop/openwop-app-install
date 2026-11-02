@@ -22,6 +22,11 @@
  * into that write, so an applied action with no audit record is unreachable. The
  * crash-window legs below drive the reverse case and assert it renders as
  * `recorded, not applied` rather than as an applied action.
+ *
+ * Tracker: TST-CGF-1. Red when: `verifyRecoverySlice` stops checking prev
+ * pointers; the first entry stops anchoring at null; `recoveryHistory` joins
+ * "applied" by `seq <=` instead of set membership (compensationRecoveryAudit.ts);
+ * or `verifyChain` stops recomputing entry hashes (auditChainService.ts).
  */
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';

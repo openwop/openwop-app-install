@@ -41,27 +41,38 @@ export interface RunStartStamp {
 
 export type RunStartGrant = (req: Request, start: RunStartRequest) => Promise<RunStartStamp | null>;
 
-const grants = new Map<string, RunStartGrant>();
+/**
+ * ADR 0975 D11 — grants are NAMED, several per workflow id. The conversation
+ * workflow is the host's one chat, so more than one feature may need to admit a
+ * conversation scoped to ITS OWN agent (the Challenge Author for an operator,
+ * KickBot for a participant). Each grant stamps its own name and its follow-up
+ * predicate accepts only its own stamp, so two grants never admit each other's
+ * runs. A second, DIFFERENT predicate under the same name is still a boot bug.
+ */
+const grants = new Map<string, Map<string, RunStartGrant>>();
 
-/** Register the start predicate for runs of `workflowIds`. One owner per workflow id. */
-export function registerRunStartGrant(workflowIds: readonly string[], grant: RunStartGrant): void {
+/** Register the start predicate `name` for runs of `workflowIds`. */
+export function registerRunStartGrant(workflowIds: readonly string[], name: string, grant: RunStartGrant): void {
   for (const id of workflowIds) {
-    if (grants.has(id) && grants.get(id) !== grant) throw new Error(`run start grant for ${id} is already registered`);
-    grants.set(id, grant);
+    const named = grants.get(id) ?? new Map<string, RunStartGrant>();
+    if (named.has(name) && named.get(name) !== grant) throw new Error(`run start grant ${name} for ${id} is already registered`);
+    named.set(name, grant);
+    grants.set(id, named);
   }
 }
 
-/** The stamp when a registered grant admits this start, else null. */
+/** The first stamp a registered grant admits this start with (registration
+ *  order), else null. A grant that throws refuses; the next is still asked. */
 export async function runStartGrantFor(req: Request, start: RunStartRequest): Promise<RunStartStamp | null> {
-  const grant = grants.get(start.workflowId);
-  if (!grant) return null;
-  try {
-    const stamp = await grant(req, start);
-    return stamp && typeof stamp.grant === 'string' && stamp.grant.length > 0 ? stamp : null;
-  } catch (err) {
-    log.warn('run_start_grant_failed', { workflowId: start.workflowId, error: err instanceof Error ? err.message : String(err) });
-    return null;
+  for (const [name, grant] of grants.get(start.workflowId) ?? []) {
+    try {
+      const stamp = await grant(req, start);
+      if (stamp && typeof stamp.grant === 'string' && stamp.grant.length > 0) return stamp;
+    } catch (err) {
+      log.warn('run_start_grant_failed', { workflowId: start.workflowId, grant: name, error: err instanceof Error ? err.message : String(err) });
+    }
   }
+  return null;
 }
 
 /** Test seam: forget every registration. */

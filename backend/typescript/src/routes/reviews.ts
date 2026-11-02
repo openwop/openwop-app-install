@@ -21,7 +21,8 @@ import type { Express, Request } from 'express';
 import { OpenwopError } from '../types.js';
 import type { HostAdapterSuite } from '../host/index.js';
 import type { Storage } from '../storage/storage.js';
-import { requireProtocolScope } from '../host/protocolAuthorization.js';
+import { requireKeyDeclaredScope, requireProtocolScope } from '../host/protocolAuthorization.js';
+import { approvalKindOwnsDecideAuthority, getApproval } from '../host/approvalService.js';
 import { isSuperadmin } from '../host/superadmin.js';
 import { isOwnPersonalWorkspace } from '../host/requestSubject.js';
 import { listReviews, getReview, type ReviewStatus, type ReviewAuthCtx } from '../host/reviewProjection.js';
@@ -117,10 +118,18 @@ export function registerReviewRoutes(app: Express, deps: Deps): void {
         // no eligibility check of its own (MEASURED in review: a viewer-issued
         // `runs:read` key approved a `campaign-spend`). Same scope the interrupt
         // arm below and the node route require.
-        await requireProtocolScope(req, 'approvals:respond');
         // The mapper always sets approvalId for an approval-source review; guard
         // explicitly rather than assert, so a future mapper change fails loud.
         if (!review.approvalId) throw new OpenwopError('internal_error', 'review missing approvalId', 500, {});
+        // ADR 0910 D11 correction — a kind whose owner states who decides
+        // (`decidesAuthority`) keeps only the key-lane half; `claimApproval` /
+        // `rejectApproval` run that owner check before any effect.
+        const stored = await getApproval(review.approvalId);
+        if (stored?.tenantId === ctx.tenantId && approvalKindOwnsDecideAuthority(stored.kind)) {
+          requireKeyDeclaredScope(req, 'approvals:respond');
+        } else {
+          await requireProtocolScope(req, 'approvals:respond');
+        }
         // ADR 0473 — `expectedDefinitionHash` is the approve-what-you-see pin a
         // composed-workflow card sends; other kinds ignore it.
         const bodyHash = (req.body as { expectedDefinitionHash?: unknown } | undefined)?.expectedDefinitionHash;

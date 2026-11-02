@@ -18,6 +18,10 @@
  * as PASSED — the exact failure the artifact-type seam was built to end. So leg 1
  * asserts the run reached `completed` AND the event is present AND its payload is
  * right; a 404 from the seam fails the test rather than skipping it.
+ *
+ * TST-BZD-20 (grade-tests w66). Red when: the documents pack stops emitting (leg 1); the
+ * registered-type check is dropped (leg 2); the missing-id check is dropped (leg 3 asserts
+ * that refusal's own message — the registered-type check behind it also answers 400).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -96,7 +100,8 @@ describe('RFC 0142 leg B — runproduce starts a real run that emits artifact.cr
   });
 
   it('leg 3: a missing artifactTypeId is refused', async () => {
-    const { status } = await post('/host/sample/artifacttypes/runproduce', {});
+    const { status, body } = await post('/host/sample/artifacttypes/runproduce', {});
     expect(status).toBe(400);
+    expect(String(body['message'] ?? ''), 'the missing-id refusal, not the not-registered one').toBe('artifactTypeId is required');
   });
 });

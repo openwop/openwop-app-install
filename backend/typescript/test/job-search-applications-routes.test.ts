@@ -5,6 +5,13 @@
  * a real request: a service-level test calls the function with a tenantId it
  * chose itself, which is precisely the thing an attacker cannot do. So this
  * boots `createApp` and drives real routes.
+ *
+ * TST-DGF-1. Red when a grant takes `grantedBy` from the body, when a dealId
+ * without the `deal:` prefix is accepted, when the list stops resolving stage
+ * names, and when a second revoke answers 204 instead of 404
+ * (sabotage-witnessed, wave 71). Every refusal is pinned to its exact status
+ * and code, so a different, earlier refusal cannot stand in for it. The dealId
+ * refusal has a downstream double (CRM `createDeal`), told apart by message.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -19,7 +26,7 @@ let BASE: string;
 
 /** Two separate tenants, established through the test-login seam so each gets a
  *  real principal + cookie rather than a forged header. */
-async function login(email: string, tenantId?: string): Promise<{ cookie: string; orgId: string; tenantId: string }> {
+async function login(email: string, tenantId?: string): Promise<{ cookie: string; orgId: string; tenantId: string; userId: string }> {
   const res = await fetch(`${BASE}/host/openwop-app/test/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -27,9 +34,9 @@ async function login(email: string, tenantId?: string): Promise<{ cookie: string
   });
   if (res.status !== 201 && res.status !== 200) throw new Error(`login ${res.status}: ${await res.text()}`);
   const cookie = (res.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
-  const body = (await res.json()) as { tenantId?: string; user?: { tenantId?: string } };
+  const body = (await res.json()) as { tenantId?: string; user?: { tenantId?: string; userId?: string } };
   const orgs = await (await fetch(`${BASE}/host/openwop-app/orgs`, { headers: { cookie } })).json() as { orgs?: Array<{ orgId: string }> };
-  return { cookie, orgId: orgs.orgs?.[0]?.orgId ?? '', tenantId: tenantId ?? body.tenantId ?? body.user?.tenantId ?? '' };
+  return { cookie, orgId: orgs.orgs?.[0]?.orgId ?? '', tenantId: tenantId ?? body.tenantId ?? body.user?.tenantId ?? '', userId: body.user?.userId ?? '' };
 }
 
 const call = (path: string, cookie: string, init: RequestInit = {}) =>
@@ -52,13 +59,15 @@ describe('ADR 0540 P2 — application routes', () => {
     const res = await call(`${BASE_PATH}/status`, cookie);
     // Default OFF (ADR 0539). A 200 here would mean the priced bundle does not
     // actually gate, which is the dishonesty the ADR calls out explicitly.
-    expect([403, 404]).toContain(res.status);
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as { error?: string }).error).toBe('not_found');
   });
 
   it('an UNAUTHENTICATED caller cannot reach applications', async () => {
     const res = await fetch(`${BASE}${BASE_PATH}/orgs/any-org/applications`);
-    expect(res.status).toBeGreaterThanOrEqual(400);
-    expect(res.status).toBeLessThan(500);
+    // Anonymous ⇒ an anon tenant with the feature OFF: the toggle gate answers.
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as { error?: string }).error).toBe('not_found');
   });
 
   it('a caller cannot read ANOTHER tenant’s org — the IDOR case', async () => {
@@ -85,8 +94,10 @@ describe('ADR 0540 P2 — application routes', () => {
     // Now the real assertion: B presents A's real orgId. Tenant comes from the
     // PRINCIPAL, so this must not resolve, and must not disclose A's existence.
     const res = await call(`${BASE_PATH}/orgs/${a.orgId}/applications`, b.cookie);
-    expect(res.status, 'cross-tenant org id must not be readable').toBeGreaterThanOrEqual(400);
-    expect(await res.text()).not.toContain('"applications"');
+    expect(res.status, 'cross-tenant org id must not be readable').toBe(404);
+    const text = await res.text();
+    expect((JSON.parse(text) as { error?: string }).error).toBe('not_found');
+    expect(text).not.toContain('"applications"');
   });
 
   it('a grant records the ACTING USER as grantedBy — consent cannot be forged', async () => {
@@ -104,7 +115,8 @@ describe('ADR 0540 P2 — application routes', () => {
     });
     expect(res.status).toBe(201);
     const body = (await res.json()) as { grant: { grantedBy: string; tiers: string[] } };
-    expect(body.grant.grantedBy, 'grantedBy must come from the session, never the body').not.toBe('somebody-else');
+    expect(a.userId, 'login must name the session user').not.toBe('');
+    expect(body.grant.grantedBy, 'grantedBy must come from the session, never the body').toBe(a.userId);
     // Conservative default: tier A only.
     expect(body.grant.tiers).toEqual(['A']);
   });
@@ -114,10 +126,12 @@ describe('ADR 0540 P2 — application routes', () => {
     await enableTenantOverride('job-search', a.tenantId, 'test');
     const res = await call(`${BASE_PATH}/orgs/${a.orgId}/grants`, a.cookie, {
       method: 'POST',
-      body: JSON.stringify({ campaignId: 'c', maxSubmits: 0, maxPrepared: 1, ratePerHour: 1, origins: ['x.example.com'], expiresAt: new Date(Date.now() + 1000).toISOString() }),
+      body: JSON.stringify({ campaignId: 'c', maxSubmits: 0, maxPrepared: 1, ratePerHour: 1, origins: ['x.example.com'], expiresAt: new Date(Date.now() + 86_400_000).toISOString() }),
     });
-    expect(res.status).toBeGreaterThanOrEqual(400);
-    expect(res.status).toBeLessThan(500);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error?: string; message?: string };
+    expect(body.error).toBe('validation_error');
+    expect(body.message).toMatch(/^maxSubmits must be a positive integer/);
   });
 
   it('revoking is immediate, and a second revoke is a 404 rather than a lie', async () => {
@@ -134,13 +148,22 @@ describe('ADR 0540 P2 — application routes', () => {
 
   it('rejects a malformed dealId before doing any work', async () => {
     const a = await login('jobsearch-c@e2e.test');
+    // The toggle ON, so the refusal can only come from the validation gate (with
+    // it off, the 404 from the gate used to satisfy this case on its own).
+    await enableTenantOverride('job-search', a.tenantId, 'test');
     const res = await call(`${BASE_PATH}/orgs/${a.orgId}/applications`, a.cookie, {
       method: 'POST',
       body: JSON.stringify({ dealId: 'not-prefixed' }),
     });
-    // Either the toggle gate (feature off) or the validation gate — both are
-    // refusals. What must NOT happen is a 2xx.
-    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error?: string; message?: string };
+    expect(body.error).toBe('validation_error');
+    // The ROUTE's own message, exactly. A second guard downstream — CRM
+    // `createDeal` (features/crm/entities/deals.ts) — refuses the same id with
+    // the same code but says 'dealId must be `deal:`-prefixed.', and it runs
+    // only AFTER createApplication has done work (eligibility, pipeline and
+    // field-def seeding). Matching only /deal:/ let that later guard stand in.
+    expect(body.message).toBe('dealId must be a `deal:`-prefixed string.');
   });
 });
 
@@ -215,8 +238,10 @@ describe('JSUX-FUN-2 (R3) — the funnel bundle composes the three reads under o
     const { cookie, orgId } = await login('jobsearch-bundle-gate@e2e.test');
     // toggle OFF for this fresh tenant ⇒ gone, not empty
     const gated = await call(`${BASE_PATH}/orgs/${orgId}/funnel-bundle`, cookie);
-    expect([403, 404]).toContain(gated.status);
+    expect(gated.status).toBe(404);
+    expect(((await gated.json()) as { error?: string }).error).toBe('not_found');
     const anon = await fetch(`${BASE}${BASE_PATH}/orgs/${orgId}/funnel-bundle`);
-    expect(anon.status).toBeGreaterThanOrEqual(400);
+    expect(anon.status).toBe(404);
+    expect(((await anon.json()) as { error?: string }).error).toBe('not_found');
   });
 });

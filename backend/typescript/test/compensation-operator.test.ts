@@ -20,6 +20,12 @@
  *     is already inside the tenant, so the record leaks nothing they could not
  *     see, and a refused override is exactly what an incident review needs.
  *   - the operator is **200 AND audited**, on the same event type.
+ *
+ * Tracker: TST-CGE-3. Red when (compensationOperator.ts): the cross-tenant check is
+ * dropped (an operator in another tenant is allowed and audited into a run it must
+ * not know exists); the operator flag stops being required; a refusal stops being
+ * audited; a disposition touches a non-held row; or `skip` drops the justification
+ * from the row.
  */
 
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -36,6 +42,7 @@ import {
   compensationStatusForRunTree,
   digestOf,
   nextCompensationOrdinal,
+  obligationsForRunTree,
   recordObligation,
   resolveObligation,
 } from '../src/host/compensationLedger.js';
@@ -63,7 +70,7 @@ function run(over: Partial<RunRecord> = {}): RunRecord {
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     ...over,
-  } as RunRecord;
+  };
 }
 
 /** A held obligation — the state an operator is asked to act on. */
@@ -218,10 +225,12 @@ describe('RFC 0151 §E — dispositions move the plan off `manual`', () => {
     // — the same call `compensation.paused` makes for the same reason.
     const row = await held();
     await applyOperatorDisposition({ run: run(), action: 'skip', justification: 'refunded out of band' });
-    const { obligationsForRunTree } = await import('../src/host/compensationLedger.js');
     const after = (await obligationsForRunTree(T, RUN_ID)).find((o) => o.inverseActionId === row.inverseActionId);
     expect(after?.state).toBe('failed');
     expect(String(after?.reason)).toContain('refunded out of band');
+    // …and NOT on the wire: no event in the run's durable log carries the free text.
+    const log = await getEventLog().list(RUN_ID, { fromSeq: -1, limit: 1000 });
+    expect(JSON.stringify(log)).not.toContain('refunded out of band');
   });
 
   it('leaves a COMPLETED entry alone — an operator disposition never re-opens a discharged inverse', async () => {

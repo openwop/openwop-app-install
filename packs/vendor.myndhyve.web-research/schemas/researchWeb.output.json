@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.web-research/1.0.2/researchWeb.output.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.web-research/2.0.0/researchWeb.output.json",
   "title": "ResearchWebOutput",
   "type": "object",
   "required": ["citations", "query"],

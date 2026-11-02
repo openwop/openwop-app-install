@@ -86,10 +86,11 @@ describe('openwop-app.a2ui-clarify (ADR 0051 Phase 3 producer)', () => {
     const data = it0.data;
     if (!isRecord(data)) throw new Error(`interrupt data is not an object: ${JSON.stringify(data)}`);
     // The workflow's config reaches the interrupt (the free-text fallback).
-    expect(data.question).toBe('When should the kickoff be?');
-    expect(data.catalogVersion).toBe('0.9.1');
-    expect(isRecord(data.surface)).toBe(true);
-    const surface = data.surface as Record<string, unknown>;
+    const form = data.form as Record<string, unknown>;
+    expect((data.questions as Array<{ question: string }>)[0]!.question).toBe('When should the kickoff be?');
+    expect(form.catalogVersion).toBe('0.9.1');
+    expect(isRecord(form.surface)).toBe(true);
+    const surface = form.surface as Record<string, unknown>;
     const components = surface.components as Array<Record<string, unknown>>;
     expect(Array.isArray(components)).toBe(true);
     for (const c of components) expect(SUPPORTED.has(c.component as string)).toBe(true);
@@ -98,11 +99,21 @@ describe('openwop-app.a2ui-clarify (ADR 0051 Phase 3 producer)', () => {
     expect((buttons[0]!.action as Record<string, unknown>).target).toBe('resume');
 
     // Resolve with the collected form values; the run resumes and completes.
+    // ADR 1013 D8 — an answer to a question this interrupt never raised is
+    // refused through the real route, and the interrupt stays open for a retry.
+    const unknown = await fetch(`${BASE}/runs/${runId}/interrupts/${it0.nodeId}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ resumeValue: { answers: [{ id: 'not-asked', answer: 'x' }] } }),
+    });
+    expect(unknown.status).toBe(400);
+    expect(((await unknown.json()) as { error?: string }).error).toBe('validation_error');
+
     // Raw fetch (status only) — the resume endpoint may answer 204/empty.
     const resolve = await fetch(`${BASE}/runs/${runId}/interrupts/${it0.nodeId}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
-      body: JSON.stringify({ resumeValue: { action: 'confirm', date: '2026-07-01', duration: '60', reminder: true } }),
+      body: JSON.stringify({ resumeValue: { answers: [{ id: 'date', answer: '2026-07-01' }, { id: 'duration', answer: '60' }, { id: 'reminder', answer: true }] } }),
     });
     expect(resolve.status).toBe(200);
 

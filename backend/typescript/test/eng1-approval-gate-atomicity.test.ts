@@ -14,6 +14,16 @@
  * This complements `rfc0093-approval-gate.test.ts` (which races two lazy calls)
  * by mixing the LAZY and the SWEEP path — the real production interleave — and
  * by racing them concurrently.
+ *
+ * Tracker TST-CXF-1. DOUBLE GUARD (approvalGateTimeout.ts): a `resolvedAt`
+ * precheck on the caller's snapshot, then the storage compare-and-set. Case 2
+ * hands the lazy path the STALE pre-resolution snapshot a second instance would
+ * hold, so it passes the precheck and must LOSE at the compare-and-set: red when
+ * `if (!won) return false` is removed (a second interrupt.resolved is emitted).
+ * Also red when the timeout approves instead of rejecting, the run is not
+ * failed through the router, or the sweep stops counting its win. Case 3's
+ * Promise.all does not force an interleave in-process (the lazy resolve lands
+ * before the sweep's first read); it pins the outcome, not a forced race.
  */
 
 import { describe, expect, it, beforeEach } from 'vitest';
@@ -117,13 +127,18 @@ describe('ENG-1 approval-gate timeout atomicity (lazy + sweep)', () => {
     // The sweep wins first this time...
     const sweptCount = await sweepExpiredApprovalGates(storage);
     expect(sweptCount).toBe(1);
-    // ...the lazy path then sees a resolved gate (re-fetched) and is a no-op.
-    const stale = (await storage.getInterrupt(gate.interruptId))!;
-    const lazyWon = await timeoutApprovalGateIfDue(storage, stale);
+    // ...then a second instance's lazy path fires with the snapshot it read
+    // BEFORE the sweep resolved the gate (resolvedAt still unset). It passes the
+    // precheck and must lose the storage compare-and-set.
+    expect(gate.resolvedAt).toBeUndefined();
+    const lazyWon = await timeoutApprovalGateIfDue(storage, gate);
     expect(lazyWon).toBe(false);
 
     const events = await storage.listEvents(run.runId);
     assertResolvedExactlyOnce([true, lazyWon], events);
+    // The winner's decision stands.
+    const stored = await storage.getInterrupt(gate.interruptId);
+    expect(stored?.resolvedValue).toEqual({ action: 'reject', reason: 'timeout' });
   });
 
   it('CONCURRENT lazy + sweep racing the same overdue gate resolve exactly once', async () => {

@@ -22,6 +22,9 @@
  * RFC 0142 will add per-type `store` to these entries. That lands INSIDE `types`,
  * which is exactly the field whose shape was wrong — so this test is the
  * precondition for leg B's witness, not a parallel concern.
+ *
+ * TST-BZD-24 (grade-tests w66). Red when a type stops advertising `validated: true`, a
+ * derivable `schemaUrl` comes back, or `validation` leaves the declared enum.
  */
 import http from 'node:http';
 import Ajv2020 from 'ajv/dist/2020.js';

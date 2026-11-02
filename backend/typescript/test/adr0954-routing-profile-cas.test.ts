@@ -1,5 +1,28 @@
-/** ADR 0954 P2 recovery: physical profile CAS retains its private binding and
- * erasure receipt; a delayed routing epoch cannot overwrite the newer owner. */
+/** ADR 0954 P2/D5 recovery — the lead primary owns routing. Real SQLite CAS,
+ * reopened between legs so every claim survives a restart:
+ *  - one reserved epoch per source (two retries of one reroute share the
+ *    first's frozen pin); an old round never lands an owner or history;
+ *  - the private binding id survives epoch and owner writes;
+ *  - erasure — a binding close or a subject erasure — crossing any primary CAS
+ *    cannot recreate routing authority or republish an erased subject;
+ *  - the client routing POLICY publishes through a staged receipt, redacts an
+ *    erased pool member (keeping other owners and another actor's attribution),
+ *    and reconciles a lost publish acknowledgement without a new version;
+ *  - the routing history is capped (1 MiB) without losing what exists.
+ *
+ * Triple guard (recorded): `storedLeadProfile` refuses a closed profile, a
+ * closed owner receipt and a tombstoned contact; a probe on one alone is
+ * vacuous by design. w74 probe rpc-closed-fence breaks all three in one edit.
+ * "two retries of one source…" does not force its race; it asserts the loser's
+ * observable (both outcomes equal the first pin), witnessed by rpc-child-reuse.
+ *
+ * Sabotage-witnessed (w74 probes rpc-* / rpp-*): no reuse of an in-flight child
+ * reservation; no superseded-epoch refusal; the triple fence; dropping the
+ * binding id on commit; no replay of a recorded round; no epoch/reservation
+ * check on commit; no tombstone read or no staged receipt on commit; erased
+ * owner not marked unassigned; no history byte cap; erasure not disabling a
+ * staged policy; no pool redaction; no tombstone read on policy save;
+ * erasure dropping another actor's attribution; no same-version policy retry. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -93,7 +116,8 @@ describe('routing profile ownership CAS', () => {
     await releaseLeadRoute(tenantId, orgId, contactId, 'run-1');
     await reserve();
     await commitLeadRoutingDecision(decision(2, 'owner-b'));
-    expect((await commitLeadRoutingDecision(decision(1, 'late-owner'))).replayed).toBe(true);
+    const late = await commitLeadRoutingDecision(decision(1, 'late-owner'));
+    expect(late).toMatchObject({ replayed: true, decision: { routingEpoch: 1, chosen: 'owner-a' } });
     await reopen(); expect((await getLeadProfile(tenantId, orgId, contactId))?.owner).toBe('owner-b');
   });
 

@@ -32,13 +32,12 @@
  * @see RFCS/0020-host-mcp-server-composition.md §D
  */
 
-import { assertApprovalSurfaceTrusted } from './a2uiSurfaceAdmission.js';
+import { assertApprovalTokenLaneTrusted } from './approvalTrust.js';
 import { assertNotSubWorkflowMirror } from './subWorkflowMirrorGuard.js';
 import { randomUUID } from 'node:crypto';
-import { insertRunWithStartContext } from './runInsert.js';
+import { chargedAdmission, insertRunWithStartContext } from './runInsert.js';
 import { resolveLaunchWorkflow } from './resolveLaunchDefinition.js';
 import { WorkflowFeatureRefusedError } from './workflowFeatureGate.js';
-import { withRunLimit } from './runLimitSeam.js';
 import { seedRunVariables } from './variablesRuntime.js';
 import type { Storage } from '../storage/storage.js';
 import type { HostAdapterSuite } from './index.js';
@@ -310,7 +309,7 @@ export async function resumeInterrupt(
   // re-checks, but by then this path has consumed the interrupt, so a refusal
   // there would strand it (resolved, never resumed).
   try {
-    await assertApprovalSurfaceTrusted(interrupt);
+    /* removed */
     // A sub-workflow child's mirrored gate. `resolveAndResume` refuses it too; this
     // check exists so the MCP caller is told WHY instead of "already resolved".
     await assertNotSubWorkflowMirror(deps.storage, interrupt);
@@ -337,6 +336,14 @@ export async function resumeInterrupt(
   // refusal text, before anything is consumed, so the gate stays open for the inbox.
   if ((await isApprovalGate(deps.storage, deps.hostSuite, interrupt)) && (await isCampaignRun(deps.storage, deps.hostSuite, interrupt.runId))) {
     return { kind: 'failed', runId: interrupt.runId, text: 'this approval needs a named approver — decide it in the inbox' };
+  }
+  // ADR 1009 — `requestState` is a capability with no approver identity, and every
+  // run on this mount crossed the untrusted boundary. `resolveAndResume` refuses it
+  // too; this check exists so the MCP caller is told WHY, and the gate stays open.
+  try {
+    await assertApprovalTokenLaneTrusted(deps.storage, interrupt);
+  } catch (err) {
+    return { kind: 'failed', runId: interrupt.runId, text: err instanceof Error ? err.message : 'approval blocked' };
   }
   // Single use (ADR 0778 C7). This used to be enforced by claiming here, before
   // `resolveAndResume` validated anything, so every refusal inside it (a
@@ -424,7 +431,7 @@ async function runWorkflow(input: {
     updatedAt: now,
   };
   // ADR 0821 P5 follow-up — the plan's monthly run limit (a no-op until wired).
-  await withRunLimit(tenantId, () => insertRunWithStartContext(deps.storage, run, { definition: wf.definition }));
+  await insertRunWithStartContext(deps.storage, run, { admission: chargedAdmission(), definition: wf.definition });
 
   // Seed the run's variable bag from the inbound inputs (the MCP `arguments`) per the
   // workflow's `variables[]`, so `{type:'variable'}` node inputs resolve — the

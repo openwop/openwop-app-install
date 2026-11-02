@@ -9,6 +9,10 @@
  * exact signed canonical form), and asserts the host validator accepts `valid`
  * and rejects each of the 6 negatives — including the load-bearing
  * signature-wrapping (XSW) attack — for the right reason.
+ *
+ * Tracker TST-BEC-2 (w66). Red when any §A check in
+ * `samlValidationService.ts` is removed or widened (one case per reason), the
+ * principal is built from the issuer, or unsigned group attributes are surfaced.
  */
 
 import { describe, expect, it } from 'vitest';

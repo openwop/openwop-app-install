@@ -14,6 +14,12 @@
  * classification every real ads publish node carries, `executor/sideEffects.ts`).
  * Sabotage (run 2026-10-20): dropping `sideEffecting: true` from the test node
  * reds "…zero new ad-launch calls" (the replay re-executes it).
+ *
+ * Probes (wave 73, both witnessed): w73g3-ck-side-effect (the classification) and
+ * w73g3-ck-fork-role (the fork's snapshot role). Response bodies are read as `unknown` and
+ * narrowed per field (no `as T`); the settle helper throws on timeout instead of returning a
+ * status the next assertion would have to notice. The 25 ms settle tick is a real wait: the
+ * executor exposes no completion hook to await (honest ceiling).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -44,18 +50,21 @@ let orgId: string;
 const launches = new Map<string, number>();
 const WF = `wf.adr0960.ad-launch.${randomBytes(3).toString('hex')}`;
 
-async function api<T = Record<string, unknown>>(path: string, init: RequestInit = {}): Promise<{ status: number; body: T }> {
+async function api(path: string, init: RequestInit = {}): Promise<{ status: number; body: unknown }> {
   const res = await fetch(`${BASE}${path}`, { ...init, headers: { ...H, ...(init.headers ?? {}) } });
   const text = await res.text();
-  return { status: res.status, body: (text ? JSON.parse(text) : {}) as T };
+  const body: unknown = text ? JSON.parse(text) : {};
+  return { status: res.status, body };
 }
+/** Walk an untyped JSON body without casts. */
+const get = (b: unknown, ...path: string[]): unknown => path.reduce<unknown>((o, k) => (typeof o === 'object' && o !== null ? Reflect.get(o, k) : undefined), b);
 async function untilTerminal(runId: string): Promise<string> {
   for (let i = 0; i < 400; i++) {
     const s = (await storage.getRun(bareRunId(runId)))?.status ?? '';
     if (['completed', 'failed', 'cancelled'].includes(s)) return s;
     await new Promise((r) => setTimeout(r, 25));
   }
-  return 'timeout';
+  throw new Error(`run ${runId} did not settle within 400 polls`);
 }
 
 beforeAll(async () => {
@@ -63,7 +72,7 @@ beforeAll(async () => {
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   storage = app.locals.storage;
-  hostSuite = app.locals.hostSuite as HostAdapterSuite;
+  hostSuite = app.locals.hostSuite;
   getNodeRegistry().register({
     typeId: 'test.adr0960.ad-launch',
     version: '1.0.0',
@@ -86,24 +95,28 @@ beforeAll(async () => {
   if (d) await saveConfig({ ...d, status: 'on' }, 'test');
   orgId = (await createOrg({ tenantId: TENANT, createdBy: 'u-1', name: 'Client A', ownerSubject: 'u-1' })).orgId;
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-});
+}, 120_000);
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 describe('ADR 0960 P2 — replay from the cockpit', () => {
   it('a replay fork of a campaign run with an ad-launch node makes zero new ad-launch calls, keeps the tag, and diffs clean', async () => {
     const brief = await createBrief(TENANT, orgId, 'u-1', { name: 'Ads', channels: [] });
     const { campaign } = await ensureDraftCampaign(TENANT, brief, 'u-1');
-    const source = bareRunId((await startWorkflowRun({ storage, hostSuite }, {
+    const started = await startWorkflowRun({ storage, hostSuite }, {
       tenantId: TENANT, workflowId: WF, inputs: {},
       metadata: { actingUserId: 'u-1', [CAMPAIGN_RUN_TAG_KEY]: stampCampaignRun(campaign, { role: 'spine' }) },
-    })) as string);
+    });
+    if (!started) throw new Error('startWorkflowRun returned no run id');
+    const source = bareRunId(started);
     expect(await untilTerminal(source)).toBe('completed');
     expect(launches.get(source)).toBe(1);
 
     // What the cockpit's "Replay this run" calls: the existing :fork, mode replay.
-    const fork = await api<{ runId: string }>(`/runs/${encodeURIComponent(`${TENANT}/${source}`)}:fork`, { method: 'POST', body: JSON.stringify({ fromSeq: 0, mode: 'replay' }) });
+    const fork = await api(`/runs/${encodeURIComponent(`${TENANT}/${source}`)}:fork`, { method: 'POST', body: JSON.stringify({ fromSeq: 0, mode: 'replay' }) });
     expect(fork.status, JSON.stringify(fork.body)).toBe(201);
-    const forkId = bareRunId(fork.body.runId);
+    const forkRunId = get(fork.body, 'runId');
+    if (typeof forkRunId !== 'string' || !forkRunId) throw new Error(`fork returned no runId: ${JSON.stringify(fork.body)}`);
+    const forkId = bareRunId(forkRunId);
     expect(await untilTerminal(forkId)).toBe('completed');
     expect(launches.get(forkId) ?? 0).toBe(0);
     expect([...launches.values()].reduce((a, b) => a + b, 0)).toBe(1);
@@ -113,12 +126,14 @@ describe('ADR 0960 P2 — replay from the cockpit', () => {
     expect(snap.runs.find((r) => r.runId === forkId)).toMatchObject({ role: 'fork', status: 'completed' });
 
     // The "prove it" read: no divergence.
-    const diff = await api<{ divergedAtSeq: number | null; eventDiffs: Array<{ seq: number; aEvent?: { type: string }; bEvent?: { type: string } }>; stateDiff: Record<string, unknown> }>(`/runs/${encodeURIComponent(`${TENANT}/${source}`)}:diff?against=${forkId}`);
+    const diff = await api(`/runs/${encodeURIComponent(`${TENANT}/${source}`)}:diff?against=${forkId}`);
     expect(diff.status, JSON.stringify(diff.body)).toBe(200);
     // The only difference is WHO started each run (the fork's caller is stamped
     // as its owner on run.started); every step and the final state match. The
     // cockpit reads exactly this as "the replay matched".
-    expect(diff.body.eventDiffs.map((d) => [d.aEvent?.type, d.bEvent?.type])).toEqual([['run.started', 'run.started']]);
-    expect(diff.body.stateDiff).toEqual({});
+    const eventDiffs = get(diff.body, 'eventDiffs');
+    if (!Array.isArray(eventDiffs)) throw new Error(`no eventDiffs: ${JSON.stringify(diff.body)}`);
+    expect(eventDiffs.map((d) => [get(d, 'aEvent', 'type'), get(d, 'bEvent', 'type')])).toEqual([['run.started', 'run.started']]);
+    expect(get(diff.body, 'stateDiff')).toEqual({});
   });
 });

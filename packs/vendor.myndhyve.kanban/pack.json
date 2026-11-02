@@ -1,7 +1,7 @@
 {
   "name": "vendor.myndhyve.kanban",
-  "version": "1.0.2",
-  "description": "MyndHyve kanban-coordination pack. 7 nodes covering board lifecycle, task management (assign + AI-powered decompose), timeline planning, durable automation requests, and resource monitoring. Routes through ctx.kanban.* host adapter.",
+  "version": "2.0.0",
+  "description": "MyndHyve kanban-coordination pack. 6 nodes covering board lifecycle, task management (assign + AI-powered decompose), timeline planning, durable automation requests, and resource monitoring. Routes through ctx.kanban.* host adapter.",
   "author": "MyndHyve",
   "license": "Apache-2.0",
   "homepage": "https://myndhyve.ai/packs/kanban",
@@ -25,7 +25,7 @@
       "typeId": "kanban.board.create",
       "version": "1.0.1",
       "label": "Kanban Board Create",
-      "description": "Creates a new kanban board with columns. Side-effectful + cacheable — replays return the originally-created boardId.",
+      "description": "Creates a new kanban board with columns. Side-effectful + cacheable \u2014 replays return the originally-created boardId.",
       "category": "coordination",
       "role": "side-effect",
       "capabilities": [
@@ -65,21 +65,6 @@
       "configSchemaRef": "schemas/task.assign.config.json",
       "inputSchemaRef": "schemas/task.assign.input.json",
       "outputSchemaRef": "schemas/task.assign.output.json"
-    },
-    {
-      "typeId": "kanban.task.decompose",
-      "version": "1.0.1",
-      "label": "Kanban Task Decompose",
-      "description": "AI-powered task decomposition: takes a high-level task description and returns N subtasks with dependencies. Routes through host's AI envelope adapter (peer dep host.aiEnvelope required).",
-      "category": "coordination",
-      "role": "side-effect",
-      "capabilities": [
-        "cacheable",
-        "side-effectful"
-      ],
-      "configSchemaRef": "schemas/task.decompose.config.json",
-      "inputSchemaRef": "schemas/task.decompose.input.json",
-      "outputSchemaRef": "schemas/task.decompose.output.json"
     },
     {
       "typeId": "kanban.timeline.plan",

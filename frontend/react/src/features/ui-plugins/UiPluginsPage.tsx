@@ -6,8 +6,9 @@
  * advertised isolation mechanism, then MOUNTS the reference artifact-viewer plugin
  * (a downloaded, signed `kind:"frontend-plugin"` pack) in a cross-origin sandboxed
  * iframe via PluginFrame — where the four falsifiable legs are observable:
- * isolated (opaque origin) · egress-denied (CSP) · allowlist-bound
- * (method_not_allowed) · no-BYOK.
+ * isolated (opaque origin) · requests blocked (CSP) · allowlist-bound
+ * (method_not_allowed) · no-BYOK — and, beside them, what the policy does NOT stop
+ * (ADR 1021: self-navigation, meta refresh, WebRTC).
  */
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -15,6 +16,7 @@ import { PageHeader } from '../../ui/PageHeader.js';
 import { StateCard } from '../../ui/StateCard.js';
 import { Skeleton } from '../../ui/Skeleton.js';
 import { ErrorBoundary } from '../../ui/ErrorBoundary.js';
+import { Notice } from '../../ui/Notice.js';
 import { useFeatureAccess } from '../../featureToggles/FeatureAccessContext.js';
 import { LockIcon, PlugIcon, ShieldIcon } from '../../ui/icons/index.js';
 import { PluginFrame } from './PluginFrame.js';
@@ -80,6 +82,11 @@ export function UiPluginsPage(): JSX.Element {
           <li>{t('legAllowlist')}</li>
           <li>{t('legNoByok')}</li>
         </ul>
+        {/* ADR 1021 — the measured gap, stated beside the claims it qualifies, not
+            under them in fine print. */}
+        <Notice variant="warning">
+          <strong>{t('residualLabel')}</strong> {t('residualBody')}
+        </Notice>
       </div>
 
       {/* ADR 0493 — the legs above are CLAIMS; this checks the three that are

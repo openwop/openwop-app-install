@@ -28,6 +28,11 @@
  * unrecognized token, which is how these three sites were FOUND; they are moved
  * to `single-veto` (the wire schema's own default spelling for the behaviour they
  * always meant), so they now also cover that token end-to-end through a real run.
+ *
+ * TST-BZA-1 (grade-tests w66). Red when: the single-approver reject branch in
+ * `routes/interrupts.ts` is skipped (cases 1–2); the record-only `timeout` refusal is
+ * dropped (case 3); the review-F1 `!gateNode` refusal is dropped (F1 block); the quorum
+ * reject stops recording `reason: 'quorum-reject'` (openwop#1692 block).
  */
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -64,14 +69,12 @@ beforeAll(() => {
   // (the edge shape every core.approvalGate consumer in the corpus ships).
   const def: WorkflowDefinition = {
     workflowId: WF_ID,
-    name: 'PROBE-DOC-3',
-    version: '1.0.0',
     nodes: [
       { nodeId: 'gate', typeId: 'core.approvalGate', config: { prompt: 'Approve?', rejectionPolicy: 'single-veto' } },
       { nodeId: 'notify', typeId: 'core.noop', config: {} },
     ],
     edges: [{ edgeId: 'e1', sourceNodeId: 'gate', targetNodeId: 'notify' }],
-  } as unknown as WorkflowDefinition;
+  };
   registerHostWorkflow(def);
 });
 
@@ -160,14 +163,12 @@ describe('review F1 — an unidentifiable gate node fails CLOSED (409, both verb
   const WF2_ID = 'wf.review-f1-unresolvable-gate';
   const v1 = (): WorkflowDefinition => ({
     workflowId: WF2_ID,
-    name: 'review F1',
-    version: '1.0.0',
     nodes: [
       { nodeId: 'gate', typeId: 'core.approvalGate', config: { prompt: 'Approve?', rejectionPolicy: 'single-veto' } },
       { nodeId: 'notify', typeId: 'core.noop', config: {} },
     ],
     edges: [{ edgeId: 'e1', sourceNodeId: 'gate', targetNodeId: 'notify' }],
-  } as unknown as WorkflowDefinition);
+  });
 
   async function suspendedRun(): Promise<{ runId: string; interruptId: string }> {
     registerHostWorkflow(v1());
@@ -187,13 +188,12 @@ describe('review F1 — an unidentifiable gate node fails CLOSED (409, both verb
     // NEW head, in which `gate` no longer exists.
     registerHostWorkflow({
       ...v1(),
-      version: '1.1.0',
       nodes: [
         { nodeId: 'gate-renamed', typeId: 'core.approvalGate', config: { prompt: 'Approve?', rejectionPolicy: 'single-veto' } },
         { nodeId: 'notify', typeId: 'core.noop', config: {} },
       ],
       edges: [{ edgeId: 'e1', sourceNodeId: 'gate-renamed', targetNodeId: 'notify' }],
-    } as unknown as WorkflowDefinition);
+    });
     return { runId: run.runId, interruptId: open[0]!.interruptId };
   }
 
@@ -204,7 +204,7 @@ describe('review F1 — an unidentifiable gate node fails CLOSED (409, both verb
     expect((await storage.getRun(runId))!.status).toBe('waiting-approval');
     const events = await storage.listEvents(runId);
     expect(events.some((e) => e.type === 'node.completed' && e.nodeId === 'notify'), 'downstream ran off a refused resolve').toBe(false);
-    expect(events.some((e) => e.type === 'interrupt.resolved' || e.type === 'interrupt.resolved'), 'a refused resolve must not record a resolution').toBe(false);
+    expect(events.some((e) => e.type === 'interrupt.resolved'), 'a refused resolve must not record a resolution').toBe(false);
   }
 
   it('a REJECT on an unresolvable node is refused (409), not converted into an accept', async () => {
@@ -245,14 +245,12 @@ describe('openwop#1692 — quorum reject records interrupt.resolved → node.fai
   it('a single reject on a 2-of-N gate vetoes it with action reject + reason quorum-reject', async () => {
     registerHostWorkflow({
       workflowId: WF3_ID,
-      name: 'quorum reject',
-      version: '1.0.0',
       nodes: [
         { nodeId: 'gate', typeId: 'core.approvalGate', config: { prompt: 'Approve?', requiredApprovals: 2 } },
         { nodeId: 'notify', typeId: 'core.noop', config: {} },
       ],
       edges: [{ edgeId: 'e1', sourceNodeId: 'gate', targetNodeId: 'notify' }],
-    } as unknown as WorkflowDefinition);
+    });
     const now = new Date().toISOString();
     const run: RunRecord = {
       runId: `run-quorum-${Math.random().toString(36).slice(2)}`, workflowId: WF3_ID, tenantId: 'default',

@@ -16,6 +16,12 @@
  *  - the egress allow-list matcher (`hostMatchesApi`) permits the provider's api host
  *    and its subdomains (eTLD+1 floor) and FAILS CLOSED on look-alikes — no substring
  *    escape (RFC 0120 §A / RFC 0079 audience binding).
+ *
+ * Tracker TST-CJB-6 (grade-tests w68). Red when: the loader stops copying
+ * `provider.apiHosts` onto the registered manifest; or the matcher stops stripping a
+ * trailing dot. The look-alike cases are a deliberate (protected) duplicate of
+ * connection-injection's eTLD+1 case and connection-pack-egress-seam's look-alikes —
+ * a recorded dedupe-needs-human-ask; the trailing-dot leg is unique to this file.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';

@@ -74,7 +74,7 @@ import { createLogger } from '../../observability/logger.js';
 import { isForwardExecutionEvent, RunLogClosedError, TERMINAL_RUN_EVENT_TYPES } from '../runLogClosure.js';
 import { nextChatMessageCreatedAt } from '../chatMessageOrder.js';
 import { startPoolPressureProbe } from '../../observability/saturationProbe.js';
-import { toolBoundaryKeyPatterns } from '../runKvKeys.js';
+import { toolBoundaryKeyPatterns, clarificationCheckpointKeyPattern } from '../runKvKeys.js';
 
 const log = createLogger('storage.postgres');
 
@@ -507,6 +507,31 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
           created_at, updated_at
         ) VALUES ($1,$2,$3,'pending',0,$4,NULL,NULL,NULL,$5,$5)`;
 
+  // ADR 0987 Q3 — the admitted forms of the two inserts above, for the single
+  // statement that follows the admission lock. Same columns, same parameter
+  // order ($1..$21 from `insertRunParams`), plus `admission_key`; the run row is
+  // written only when the CTE `held` counts fewer holding runs than the cap
+  // (`$k+3`), and the outbox row only when that run row was written.
+  const INSERT_ADMITTED_RUN_SQL = (k: number): string => `INSERT INTO runs (
+          run_id, workflow_id, tenant_id, scope_id, status,
+          inputs, metadata, configurable, callback_url,
+          idempotency_key, parent_run_id, parent_seq, fork_mode,
+          created_at, updated_at, completed_at, error_code, error_message,
+          current_node_id, scheduler_snapshot, event_log_schema_version,
+          admission_key
+        ) SELECT ${Array.from({ length: k }, (_, i) => `$${i + 1}`).join(',')}, $${k + 1}
+            FROM held WHERE held.n < $${k + 3}
+        RETURNING run_id, tenant_id, workflow_id`;
+  // The outbox stamps are TEXT where `runs.created_at` is TIMESTAMPTZ, so they take
+  // their own parameter (`$p+1`, the same ISO string the separate insert passes)
+  // rather than the run row's value, which would render in Postgres's format.
+  const INSERT_DISPATCH_OUTBOX_FROM_ADMITTED_SQL = (p: number): string => `INSERT INTO dispatch_outbox (
+          run_id, tenant_id, workflow_id, status, attempts,
+          next_attempt_at, claimed_by, claim_expires_at, last_error,
+          created_at, updated_at
+        ) SELECT run_id, tenant_id, workflow_id, 'pending', 0, $${p}, NULL, NULL, NULL, $${p + 1}, $${p + 1}
+            FROM admitted RETURNING 1`;
+
   // ADR 0549 P1 compare-and-set commit; ONE text so `insertRun`'s in-transaction
   // commit (H56) and `completeIdempotentResponse` cannot drift apart.
   const COMPLETE_IDEMPOTENT_RESPONSE_SQL = `UPDATE idempotent_response
@@ -534,31 +559,12 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
-        // ADR 0987 D2 — admission is counted from run state inside this
-        // transaction. Partition 3 of the advisory-lock space (1: event sequence,
-        // 2: chat sessions) serializes admissions for one scope across every
-        // instance; two creators on one key cannot both read "4 of 5" and both
-        // insert. The lock is released by COMMIT or ROLLBACK.
-        if (opts.admission) {
-          const a = opts.admission;
-          await client.query('SELECT pg_advisory_xact_lock(hashtext($1), 3)', [a.key]);
-          const held = await client.query<{ n: string }>(
-            'SELECT count(*)::text AS n FROM runs WHERE admission_key = $1 AND status = ANY($2::text[])',
-            [a.key, [...ADMISSION_HOLDING_STATUSES]],
-          );
-          const holding = Number(held.rows[0]?.n ?? 0);
-          if (holding >= a.cap) throw new AdmissionRefusedError(a.cap, holding);
-        }
-        await client.query(INSERT_RUN_SQL, insertRunParams(run));
-        if (opts.admission) {
-          await client.query('UPDATE runs SET admission_key = $1 WHERE run_id = $2', [opts.admission.key, run.runId]);
-        }
-        if (opts.dispatchOutbox) {
-          await client.query(INSERT_DISPATCH_OUTBOX_SQL, [
-            run.runId, run.tenantId, run.workflowId,
-            opts.dispatchOutbox.nextAttemptAt, run.createdAt,
-          ]);
-        }
+        // ADR 0549 H56 — the idempotency compare-and-set does not depend on the
+        // admission count, so it runs BEFORE the admission lock below (ADR 0987
+        // Q3): every statement between the lock and COMMIT is time another
+        // creator on the same key spends queued. A rejected commit throws here
+        // and the ROLLBACK takes nothing with it; a later admission refusal rolls
+        // this UPDATE back, exactly as before.
         if (opts.idempotencyCommit) {
           const c = opts.idempotencyCommit;
           const res = await client.query(COMPLETE_IDEMPOTENT_RESPONSE_SQL, [
@@ -566,6 +572,47 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
             run.runId, c.updatedAt, c.claimToken,
           ]);
           if ((res.rowCount ?? 0) === 0) throw new IdempotentCommitRejectedError(c.key);
+        }
+        // ADR 0987 D2 — admission is counted from run state inside this
+        // transaction. Partition 3 of the advisory-lock space (1: event sequence,
+        // 2: chat sessions) serializes admissions for one scope across every
+        // instance; two creators on one key cannot both read "4 of 5" and both
+        // insert. The lock is released by COMMIT or ROLLBACK.
+        //
+        // ADR 0987 Q3 — the lock is held until COMMIT, so the section after it is
+        // ONE statement: the count, the run insert (stamping `admission_key`) and
+        // the outbox row, as data-modifying CTEs. The count MUST stay a separate
+        // statement from the lock: a READ COMMITTED statement takes its snapshot
+        // when it starts, so a count in the lock statement itself would be read
+        // before the previous holder's commit became visible.
+        if (opts.admission) {
+          const a = opts.admission;
+          await client.query('SELECT pg_advisory_xact_lock(hashtext($1), 3)', [a.key]);
+          const params = insertRunParams(run);
+          const k = params.length;
+          params.push(a.key, [...ADMISSION_HOLDING_STATUSES], a.cap);
+          let outboxCte = '';
+          if (opts.dispatchOutbox) {
+            params.push(opts.dispatchOutbox.nextAttemptAt, run.createdAt);
+            outboxCte = `, outbox AS (${INSERT_DISPATCH_OUTBOX_FROM_ADMITTED_SQL(k + 4)})`;
+          }
+          const res = await client.query<{ n: string; inserted: number }>(
+            `WITH held AS (SELECT count(*) AS n FROM runs WHERE admission_key = $${k + 1} AND status = ANY($${k + 2}::text[])),
+                  admitted AS (${INSERT_ADMITTED_RUN_SQL(k)})${outboxCte}
+             SELECT held.n::text AS n, (SELECT count(*) FROM admitted)::int AS inserted FROM held`,
+            params,
+          );
+          const row = res.rows[0];
+          if (!row || row.inserted !== 1) throw new AdmissionRefusedError(a.cap, Number(row?.n ?? 0));
+          await client.query('COMMIT');
+          return;
+        }
+        await client.query(INSERT_RUN_SQL, insertRunParams(run));
+        if (opts.dispatchOutbox) {
+          await client.query(INSERT_DISPATCH_OUTBOX_SQL, [
+            run.runId, run.tenantId, run.workflowId,
+            opts.dispatchOutbox.nextAttemptAt, run.createdAt,
+          ]);
         }
         await client.query('COMMIT');
       } catch (err) {
@@ -958,6 +1005,17 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
          WHERE run_id = $1 AND node_id = $2 AND resolved_at IS NULL
          ORDER BY created_at DESC LIMIT 1`,
         [runId, nodeId],
+      );
+      return rows[0] ? rowToInterrupt(rows[0]) : null;
+    },
+
+    async getResolvedInterruptByKey(runId, nodeId, resumeKey) {
+      const { rows } = await pool.query<Row>(
+        `SELECT * FROM interrupts
+         WHERE run_id = $1 AND node_id = $2 AND resolved_at IS NOT NULL
+           AND data->>'__resumeKey' = $3
+         ORDER BY resolved_at DESC LIMIT 1`,
+        [runId, nodeId, resumeKey],
       );
       return rows[0] ? rowToInterrupt(rows[0]) : null;
     },
@@ -1607,6 +1665,14 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
       return rowCount ?? 0;
     },
 
+    async countAdmissionHolding(limit) {
+      const { rows } = await pool.query<{ n: string | number }>(
+        `SELECT count(*) AS n FROM (SELECT 1 FROM runs WHERE status = ANY($1::text[]) AND admission_key IS NOT NULL LIMIT $2) held`,
+        [[...ADMISSION_HOLDING_STATUSES], limit],
+      );
+      return Number(rows[0]?.n ?? 0);
+    },
+
     async countAuditRows() {
       const { rows } = await pool.query<{ n: string | number }>(`SELECT count(*) AS n FROM audit_log`);
       return Number(rows[0]?.n ?? 0);
@@ -1850,6 +1916,8 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
         await client.query(`DELETE FROM host_ext_kv WHERE k = ANY($1::text[])`, [[`runvars:${runId}`, `runchans:${runId}`, `runagent:${runId}`]]);
         const ridEsc = runId.replace(/[\\%_]/g, (m) => `\\${m}`);
         await client.query(`DELETE FROM host_ext_kv WHERE k LIKE $1`, [`hostext:runartifact:${ridEsc}:%`]);
+        // ADR 1001 D3.1 — paused agent turns' continuation checkpoints.
+        await client.query(`DELETE FROM host_ext_kv WHERE k LIKE $1`, [clarificationCheckpointKeyPattern(runId)]);
         // ADR 0889 EVD-2 — captured tool calls (PII-bearing inputs/results) and the
         // capture index row retire with the run; they outlived it by up to 30 days.
         const tid = owner.rows[0]?.tenant_id;
@@ -2114,6 +2182,9 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
           const ridEsc = rid.replace(/[\\%_]/g, (m) => `\\${m}`);
           const ar = await client.query(`DELETE FROM host_ext_kv WHERE k LIKE $1`, [`hostext:runartifact:${ridEsc}:%`]);
           childRows += ar.rowCount ?? 0;
+          // ADR 1001 D3.1 — clarification continuation checkpoints retire too.
+          const cc = await client.query(`DELETE FROM host_ext_kv WHERE k LIKE $1`, [clarificationCheckpointKeyPattern(rid)]);
+          childRows += cc.rowCount ?? 0;
         }
         // ADR 0889 EVD-2 — the runs' tool-boundary capture retires with them (as deleteRun).
         for (const { run_id: rid, tenant_id: tid } of picked.rows) {
@@ -2585,6 +2656,16 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
             SET title = $3, title_source = $4, updated_at = $5
           WHERE tenant_id = $1 AND session_id = $2 AND COALESCE(title_source, 'default') = $6`,
         [tenantId, sessionId, patch.title, patch.titleSource, patch.updatedAt, expectTitleSource],
+      );
+      return (r.rowCount ?? 0) > 0;
+    },
+
+    async claimChatSessionTitleSource(tenantId, sessionId, from, to) {
+      const r = await pool.query(
+        `UPDATE chat_sessions
+            SET title_source = $3
+          WHERE tenant_id = $1 AND session_id = $2 AND COALESCE(title_source, 'default') = $4`,
+        [tenantId, sessionId, to, from],
       );
       return (r.rowCount ?? 0) > 0;
     },

@@ -173,7 +173,7 @@ describe('§23 — the seam drives the REAL client', () => {
 
   it('an unsupported revision fails through the canonical interop envelope', async () => {
     const r = await invoke({ serverUrl: peer.endpoint(), requestVersion: '1999-01-01' });
-    expect(r.status).toBeGreaterThanOrEqual(400);
+    expect(r.status).toBe(400);
     // A raw JSON-RPC error body would leave the caller parsing a foreign
     // protocol to learn its own request was rejected. H27 / S22 — the OpenWOP
     // envelope is FLAT; the JSON-RPC `{ error: { code } }` nesting one layer out
@@ -213,9 +213,10 @@ describe('§23 — the seam drives the REAL client', () => {
     expect(peer.calls.some((c) => c.method === 'tools/call')).toBe(true);
   });
 
-  it('is absent without a serverUrl rather than silently defaulting to one', async () => {
+  it('refuses a missing serverUrl rather than silently defaulting to one', async () => {
     const r = await invoke({});
     expect(r.status).toBe(400);
     expect(r.body.error).toBe('validation_error');
+    expect(r.body.message).toBe('serverUrl is required');
   });
 });

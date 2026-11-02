@@ -23,6 +23,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join, dirname, relative } from 'node:path';
+import { stripComments } from './helpers/stripComments.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const SRC = join(here, '../src');
@@ -48,9 +49,6 @@ const ALLOWLIST: Record<string, string> = {
  *  stale and green that way, measured 2026-10-14 in the KickTodo workflows grade.
  *  Line comments are stripped only after start-of-line or whitespace, so a `//` inside
  *  a URL string is left alone. */
-function stripComments(src: string): string {
-  return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|\s)\/\/.*$/gm, '$1');
-}
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {

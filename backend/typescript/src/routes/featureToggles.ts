@@ -208,9 +208,19 @@ export function registerFeatureToggleRoutes(app: Express): void {
             levers: [
               { id: 'providerCache', envVar: 'OPENWOP_CONTEXT_ECONOMY_PROVIDER_CACHE', enabled: ce.providerCache },
               { id: 'toolDiet', envVar: 'OPENWOP_CONTEXT_ECONOMY_TOOL_DIET', enabled: ce.toolDiet },
-              { id: 'transcriptBudget', envVar: 'OPENWOP_CONTEXT_ECONOMY_TRANSCRIPT', enabled: ce.transcriptBudget },
+              {
+                id: 'transcriptBudget', envVar: 'OPENWOP_CONTEXT_ECONOMY_TRANSCRIPT', enabled: ce.transcriptBudget,
+                // ADR 1003 D7 — `enabled` is the TEXT chat's window. The voice
+                // seed digest (`chatContext.ts` loadWindowedTurns) is bounded
+                // whatever this says, because a voice instructions block must be.
+                note: 'Text chat only. The voice-session transcript seed is always bounded, whatever this lever says.',
+              },
               { id: 'memoryBudget', envVar: 'OPENWOP_CONTEXT_ECONOMY_MEMORY', enabled: ce.memoryBudget },
               { id: 'transport', envVar: 'OPENWOP_CONTEXT_ECONOMY_TRANSPORT', enabled: ce.transport },
+              {
+                id: 'conversationCache', envVar: 'OPENWOP_CONTEXT_ECONOMY_CONVERSATION_CACHE', enabled: ce.conversationCache,
+                note: 'Anthropic only: caches the conversation between tool-loop rounds of one turn, not across turns.',
+              },
             ],
           },
         ],

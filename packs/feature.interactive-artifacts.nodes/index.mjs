@@ -12,8 +12,9 @@
  * NOT a structured payload, so that is exactly what this node emits.
  *
  * Pure-JS, Node-20 stdlib only. No host capability — content-trust is UNTRUSTED
- * (model-authored), which the renderers already assume (origin-isolated, no
- * egress, no innerHTML).
+ * (model-authored), which the renderers already assume: origin-isolated, never
+ * innerHTML, and HTML is static until the viewer runs its scripts (running scripts
+ * CAN reach the network, which is why the viewer is asked).
  */
 
 const KIND_TO_TYPE = {
@@ -22,6 +23,11 @@ const KIND_TO_TYPE = {
   html: 'interactive.html',
   react: 'interactive.react',
 };
+
+/** The chart types the workbench can draw. Pinned to the host schema's enum and the
+ *  renderer's `SUPPORTED_CHART_TYPES` by the interactive-artifacts parity test (this
+ *  pack cannot import either). */
+const CHART_TYPES = ['bar', 'line'];
 
 function fail(message) {
   return Object.assign(new Error(message), { code: 'validation_error' });
@@ -44,8 +50,17 @@ export async function render(ctx) {
   if (kind === 'chart') {
     // The chart renderer parses the content as JSON {chartType, data, options}.
     payload = i.chart && typeof i.chart === 'object' ? i.chart : safeParse(i.source);
-    if (!payload || typeof payload !== 'object' || typeof payload.chartType !== 'string' || typeof payload.data !== 'object') {
-      throw fail('`chart` must be (or `source` must be JSON for) an object { chartType: string, data: object, options? }');
+    if (!payload || typeof payload !== 'object' || typeof payload.chartType !== 'string' || !payload.data || typeof payload.data !== 'object') {
+      throw fail('`chart` must be (or `source` must be JSON for) an object { chartType, data: { labels?, datasets: [{ label?, data: number[] }] }, options? }');
+    }
+    // A chart the workbench cannot draw is a failure here, not a success that the
+    // host then stores as an untyped blob.
+    if (!CHART_TYPES.includes(payload.chartType)) {
+      throw fail(`unsupported \`chartType\` "${payload.chartType}" — one of: ${CHART_TYPES.join(' | ')}`);
+    }
+    const datasets = payload.data.datasets;
+    if (!Array.isArray(datasets) || datasets.length === 0 || !datasets.every((d) => d && typeof d === 'object' && Array.isArray(d.data))) {
+      throw fail('`chart.data.datasets` must be a non-empty array of { label?, data: number[] }');
     }
   } else {
     // mermaid / html / react — the renderer reads the raw source text verbatim.

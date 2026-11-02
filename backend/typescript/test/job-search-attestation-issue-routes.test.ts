@@ -7,6 +7,11 @@
  * `issuedBy` it chose itself, which is exactly the thing a real caller cannot
  * do. Only a real request establishes that the acting user comes from the
  * session and that a second user cannot mint an attestation about the first.
+ *
+ * TST-DGF-3. Red when issuance attaches a campaign other than the one the
+ * audit row recorded for the deal, and when an application this host never
+ * sent is attested (sabotage-witnessed, wave 71). Cross-tenant and toggle
+ * refusals are pinned to their exact status and code.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -95,9 +100,16 @@ describe('ADR 0544 P4 — issuance at the HTTP boundary', () => {
       method: 'POST', body: JSON.stringify({ dealId: 'deal:route-2', campaignId: 'camp-somebody-elses' }),
     });
     expect(res.status).toBe(201);
-    const { token } = (await res.json()) as { token: string };
-    const view = await (await fetch(`${BASE}/host/openwop-app/public-attestations/${token}`)).text();
-    expect(view).not.toContain('camp-somebody-elses');
+    const { token, claims } = (await res.json()) as { token: string; claims: { campaignId: string } };
+    // The campaign is DERIVED from the audit row of the deal's submission. The
+    // public view never carries a campaign string (by design), so the claim is
+    // asserted on the issuer's own response and on the counted claim.
+    expect(claims.campaignId).toBe('camp-route');
+    const view = (await (await fetch(`${BASE}/host/openwop-app/public-attestations/${token}`)).json()) as {
+      claims?: Array<{ type: string; facts: Record<string, unknown> }>;
+    };
+    expect(view.claims?.find((c) => c.type === 'applications-in-window')?.facts.count).toBe(1);
+    expect(JSON.stringify(view)).not.toContain('camp-somebody-elses');
   });
 
   it('refuses an application this host has no record of sending', async () => {
@@ -106,6 +118,7 @@ describe('ADR 0544 P4 — issuance at the HTTP boundary', () => {
       method: 'POST', body: JSON.stringify({ dealId: 'deal:invented-by-hand' }),
     });
     expect(res.status).toBe(404);
+    expect(((await res.json()) as { error?: string }).error).toBe('not_found');
   });
 
   it('another TENANT cannot reach the application at all', async () => {
@@ -126,8 +139,8 @@ describe('ADR 0544 P4 — issuance at the HTTP boundary', () => {
     const res = await call(`${BASE_PATH}/orgs/${owner.orgId}/attestations`, outsider.cookie, {
       method: 'POST', body: JSON.stringify({ dealId: 'deal:route-4' }),
     });
-    expect(res.status, 'an outsider must never mint one').toBeGreaterThanOrEqual(400);
-    expect(res.status).toBeLessThan(500);
+    expect(res.status, 'an outsider must never mint one').toBe(404);
+    expect(((await res.json()) as { error?: string }).error).toBe('not_found');
     // …and the applicant's ledger is untouched.
     const mine = await (await call(`${BASE_PATH}/orgs/${owner.orgId}/attestations`, owner.cookie)).json() as { attestations: unknown[] };
     expect(mine.attestations).toHaveLength(0);
@@ -138,8 +151,10 @@ describe('ADR 0544 P4 — issuance at the HTTP boundary', () => {
     const outsider = await login('attest-outsider2@e2e.test');
     await enableTenantOverride('job-search', outsider.tenantId, 'test');
     const res = await call(`${BASE_PATH}/orgs/${owner.orgId}/applications/deal:route-5/attestation-preview`, outsider.cookie);
-    expect(res.status).toBeGreaterThanOrEqual(400);
-    expect(await res.text(), 'a refusal must not carry the claims it refused').not.toContain('applications-in-window');
+    expect(res.status).toBe(404);
+    const text = await res.text();
+    expect((JSON.parse(text) as { error?: string }).error).toBe('not_found');
+    expect(text, 'a refusal must not carry the claims it refused').not.toContain('applications-in-window');
   });
 
   it('is TOGGLE-GATED — off means gone', async () => {
@@ -147,6 +162,7 @@ describe('ADR 0544 P4 — issuance at the HTTP boundary', () => {
     const res = await call(`${BASE_PATH}/orgs/${s.orgId}/attestations`, s.cookie, {
       method: 'POST', body: JSON.stringify({ dealId: 'deal:whatever' }),
     });
-    expect([403, 404]).toContain(res.status);
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as { error?: string }).error).toBe('not_found');
   });
 });

@@ -70,7 +70,7 @@ describe('a2ui-surface-no-network-egress', () => {
       fireEvent.change(screen.getByLabelText(/Message/), { target: { value: 'hi' } });
       fireEvent.click(screen.getByRole('button', { name: 'Send' }));
       // The action routed through the host handler…
-      expect(onAction).toHaveBeenCalledWith('resolve', expect.objectContaining({ action: 'send', msg: 'hi' }));
+      expect(onAction).toHaveBeenCalledWith('resolve', { answers: [{ id: 'msg', answer: 'hi' }] });
       // …and the renderer itself made ZERO network calls.
       expect(fetchSpy).not.toHaveBeenCalled();
       expect(xhrOpen).not.toHaveBeenCalled();

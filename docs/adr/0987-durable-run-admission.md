@@ -1,6 +1,6 @@
 # ADR 0987 — Durable run admission across instances (gap-closure B2)
 
-Status: Accepted (2026-10-27, user; all recommendations). Originally: Proposed. Drafted 2026-10-26 as the decision record that Wave B item B2 of [ADR 0970](0970-platform-competitive-gap-closure-program.md) waits on. It proposes answers to planning questions **S03-G1**, **S03-G2** and **S03-G3**. Nothing here is accepted until the user accepts it, and no code has changed.
+Status: implemented (2026-10-31). Accepted 2026-10-27 (user; all recommendations). P0–P4 implemented: P2 #5388, P3a #5391, P3b #5403, P4 #5462. Originally: Proposed. Drafted 2026-10-26 as the decision record that Wave B item B2 of [ADR 0970](0970-platform-competitive-gap-closure-program.md) waits on. It proposes answers to planning questions **S03-G1**, **S03-G2** and **S03-G3**. Nothing here is accepted until the user accepts it, and no code has changed.
 
 Date: 2026-10-26. Plan: [section 03](../plans/platform-gap-closure-2026-10-24/03-distributed-admission-and-resource-budgets.prd.md), requirements **S03-R1 … S03-R5 (SCALE-01)**, witnesses **S03-T1 … S03-T4**, risks **S03-K1** and **S03-K2**. Builds on [ADR 0934](0934-shared-rate-limit-for-public-token-surfaces.md) (shared fixed-window limiter), ADR 0821 D6 / P5 (monthly plan run limit), ADR 0551 P1 (run insert and dispatch outbox in one transaction), ADR 0549 H56 (idempotency commit in the same transaction), ADR 0640 (read/write traffic tiers) and ADR 0771 (operator-key buckets).
 
@@ -125,6 +125,75 @@ Each case gets a sabotage witness: drop the advisory lock, drop a lane's admissi
 
 The connection budget is unchanged: admission runs on the existing Storage pool, so `poolMax × maxScale` (preflight Gate 5) does not move.
 
+### Implementation record
+
+| Phase | PR / commit | Witnesses |
+| --- | --- | --- |
+| P0 | #5325 | `adr0987-admission-census.test.ts` (lane census, the > 60 s loss reproduced) |
+| P1 | #5327 | `adr0987-admission-insert.test.ts`, `adr0987-admission-two-process-postgres-live.test.ts` |
+| P2 | #5388 | `adr0987-p2-admission-lanes.test.ts` (T4 lane ratchet, plan charge at the seam, `:fork` at the cap); census re-pinned |
+| P3a | #5391 | `adr0987-p3-plan-posture.test.ts` (D5 for the monthly plan: strict fails closed, evaluation open); ADR 0821 correction |
+| P3b | #5403 | `adr0987-p3b-run-windows.test.ts` (the minute window survives a lost process, refund on a refused request, batch units, a day refusal returns the minute unit, D5 strict 503 / evaluation fallback) |
+| P4 | #5462 | `adr0987-p4-admission-summary.test.ts` (each refusal family counted where it happens and read back out of the real route; holding count keyed, suspended-excluded and bounded; superadmin-only; no caller identifiers in the body), `adr0987-p4-holding-count-postgres-live.test.ts` (the Postgres statement on local Postgres 15), frontend `admissionPanel.test.tsx` (failed read, 403, "at least", concurrency rows, Refresh). Release notes: CHANGELOG `[Unreleased]` names KickTodo and Book AI. |
+
+> **P2 notes (2026-10-29).**
+> - **Context correction.** The context table said `reservePlanRun` had one caller, so `POST /runs`, fork, debug,
+>   redrive and evals took no monthly check. That was true of `reservePlanRun` itself but not of the lanes: since
+>   ADR 0821's 2026-10-05 note, ten sites wrapped their insert in `host/runLimitSeam.ts` `withRunLimit`, whose
+>   reserver billing registered as `reservePlanRun`. P2 still moves the charge to one place: the seam is deleted,
+>   `startWorkflowRun` no longer calls the counter, and `insertRunWithStartContext` charges it for every lane whose
+>   `admission.plan` is `'charge'`. A refusal or a throwing insert writes nothing and returns the unit.
+> - **The admission argument** is required (`RunAdmissionPolicy`: `plan: 'charge' | 'exempt:<reason>'`, plus the
+>   optional D2 `concurrency` scope). Exempt lanes: eval cases (`exempt:eval-case`), seeded workforce records
+>   (`exempt:historical-record`) and the conformance seams (`exempt:conformance-seam`). Test fixtures pass
+>   `exempt:test-fixture`.
+> - **Q1 applied.** `core.subWorkflow` children and the cross-canvas invoke now charge the monthly plan (both were
+>   excluded before) and take no concurrency slot.
+> - **Every HTTP run lane counts concurrency in the store.** The per-process slot map, its 60 s filter and
+>   `reserveConcurrentSlot` are deleted. `:fork`, debug run, redrive, workflow-author draft and the creative-briefs
+>   reel pass `runAdmissionFor(req)` and answer `AdmissionRefusedError` with the same `429`. Redrive reports a
+>   refused source as `rate_limited` in its per-source results. Creative-briefs now mounts `runQuotaMiddleware`;
+>   before P2 its slot reservation was a no-op.
+> - **One narrowing, on purpose: eval-set runs take no caller slot.** Their cases are minted after the `202`, so a
+>   case refused at the cap would be recorded as a failed verdict, not a `429`. The runner already bounds its own
+>   cases (`CASE_STRIDE`). Before P2 each case was bound into the per-process map, which only delayed the caller's
+>   next request on that instance for up to 60 s. The request still takes the per-minute and per-day windows.
+> - **The per-minute and per-day windows are unchanged** (per-process maps, `res.once('finish')`). P3 moves them to
+>   `takeShared`.
+
+> **P3b notes (2026-10-30).**
+> - **The windows are shared.** `runs.session.minute`, `runs.session.day`, `runs.key.day` and `runs.ip.day` are
+>   `takeShared` fixed windows (ADR 0934), keyed by a digest, so every instance draws on one budget and a deploy no
+>   longer resets it. The per-process maps are deleted. The per-IP request buckets stay per-process (D1).
+> - **Take first, settle after.** A unit is taken before the handler runs, so two instances cannot both admit the
+>   last one. That changes when the unit is spent, not what is charged: after the response a refused request
+>   (status >= 400) gets its unit back, and a batch creator pays its extra minted runs (`adjustShared`). A day
+>   refusal returns the minute unit it already took. One accepted edge: a client that disconnects before the
+>   response has no `finish`, so its unit is kept. That errs toward the limit.
+> - **D5.** The posture follows `deployProfile()`: strict is `closed` (503 when the counter cannot answer, refuse under
+>   sustained contention), evaluation is `open` (a per-process fallback, logged as degraded).
+> - **No further ADR 0821 correction.** These windows are not ADR 0821's limits; its correction for this ADR is
+>   the monthly plan posture, recorded with P3a.
+> - **Cost.** One KV read and one CAS write per window on each run-creating request (two windows at most), plus a
+>   settlement write only for a refused request or a batch. Run creation already writes the run row and the outbox.
+
+> **P4 notes (2026-10-31).**
+> - **Where it lives.** `GET /host/openwop-app/operations/admission/summary` (superadmin, `requireSuperadmin`), shown as
+>   its own panel on `/operations` with its own read and outcome state, so a failure or a 403 there never speaks for the
+>   hub's other panels.
+> - **Refusals are counted where they happen**, in `host/admissionRefusals.ts`: concurrency at the insert seam (every
+>   lane, D3), the run windows in `admitRunWindows` (plus `unavailable` when a strict counter could not answer), and the
+>   monthly plan in `reservePlanRun` by its reason. `runWindowRefusalCounts` now reads the same tally. They are per
+>   process since boot, like the rest of the health summary, and the panel says so.
+> - **One narrowing of D6: the holding count is not per family.** The admission key is a digest of the scope, so a held
+>   run cannot be attributed to the session or the key family from its row. Encoding the family into the key would change
+>   every live key at deploy and, for the runs already holding a slot, briefly double the cap. The summary reports one
+>   bounded total (`countAdmissionHolding`, at most 1,000 rows from the status-led runs index, "at least" at the bound),
+>   and the two concurrency families report their refusals together for the same reason.
+> - **The monthly plan's cap is per tenant**, so the summary shows "set by each plan" rather than a number.
+> - **Release notes.** The `[Unreleased]` block in `CHANGELOG.md` tells `auth` operators, KickTodo and Book AI by name,
+>   that run starts now fail closed (503) when the counter cannot answer, and which panel line to watch.
+
 ## Decisions recorded (2026-10-27)
 
 The user accepted the recommended answer to every question below on 2026-10-27 ("proceed with your recommendations"), including the steps outside the code. The original question text is kept.
@@ -132,5 +201,38 @@ The user accepted the recommended answer to every question below on 2026-10-27 (
 - [x] **Q1: sub-workflow children.** Should a child run take its own concurrency slot? **Recommendation: no, while its parent is running.** The parent already holds a slot and the child runs inside its budget, and a parent with N children would otherwise deadlock against a cap below N + 1. Children **do** count toward per-day and monthly limits, as new runs.
 - [x] **Q2: monthly plan posture (S03-G2).** Is the plan's monthly run limit a contractual hard limit? **Recommendation: yes under the strict profile, so it fails closed per D5, and it stays fail-open under evaluation.** It is displayed on the pricing page as a limit, so it should behave as one where tenants pay.
 - [x] **Q3: count-in-insert vs reservation rows (S03-G3).** **Recommendation: count-in-insert (D2), and accept it only after a measured hot-key load test.** Fall back to reservation rows only if one key's admission p95 under contention exceeds a budget you set (proposed: 50 ms at 20 concurrent creators on one key).
+  > **MEASURED 2026-10-30 (Q3 load test, local Postgres 15). Count-in-insert meets the 50 ms budget, so reservation rows are not needed.**
+  > The earlier local reading (p95 44–81 ms, over budget in 3 of 4 runs) was taken at load 6–8 while a gate ran beside it, and does not stand. After the user chose "optimize, then re-measure", the section between the lock and COMMIT became ONE statement (count + run insert stamping `admission_key` + outbox row, as data-modifying CTEs; the idempotency commit moved before the lock). The paired runs below were taken with no gate in its e2e phase and load1 2.75–4.46. Each round: 20 creators on one key, 50 calls each, cap 5, with a paired no-admission control. All p50/p95 are in ms.
+  >
+  > | Round (UTC) | Shape | Control p95 | Before p50 / p95 | After p50 / p95 |
+  > |---|---|---|---|---|
+  > | 1 (07:44:30) | saturated (hold 0) | 1.66–1.87 | 12.19 / 23.52 | 9.88 / 13.48 |
+  > | 2 (07:44:38) | saturated | 2.19–2.40 | 10.90 / 16.31 | 9.70 / 17.04 |
+  > | 3 (07:44:45) | saturated | 2.44–2.70 | 12.21 / 18.46 | 10.05 / 19.57 |
+  > | 4 (07:44:54) | saturated | 1.93–8.24 | 13.53 / 20.70 | 9.37 / 16.35 |
+  > | 1–4 (07:45:25–32) | saturated + outbox (the production shape) | — | 11.87–13.15 / 17.79–27.61 | 9.85–10.76 / 13.96–20.14 |
+  > | 1–4 (07:44:34–07:45:00) | held 20 ms (≈ 90% refusals) | 2.67–4.42 | 3.62–3.87 / 7.18–7.49 | 4.67–5.65 / 8.53–11.09 |
+  >
+  > - **Result:** every round, before and after, met 50 ms. The trim lowers the admitted path's p50 by about 15–20%, and its p95 in 3 of 4 plain rounds and 4 of 4 with the outbox.
+  > - **Regression:** the refusal-heavy held shape got about 1.5 ms slower at p50. The refusal now plans the larger CTE statement. That is accepted, because the refusal holds no slot and stays far under budget.
+  > - **Hazard witnessed:** folding the lock into the counting statement makes the count read a snapshot taken before the lock was granted. It admitted 13–14 of 20 against cap 5 (`test/adr0987-q3-admitted-insert-postgres-live.test.ts`). The lock stays its own statement.
+  > - **Not measured:** prod. Cloud SQL adds a network round trip per statement, and the trim removes up to four of them from the locked section, so prod gains more than this local test shows. A prod run still needs a release-manager slot (`scripts/adr0987-admission-load.ts --http`).
+  >
+  > **MEASURED on prod (2026-10-31 / 11-01): P3b did not cost the +40 ms p95 an earlier read suggested.** Both rounds used `scripts/adr0987-admission-load.ts --http`, 100 `POST /runs` of `openwop-app.uppercase`, paced at ≤ 100/min. Server times come from the Cloud Run request log.
+  >
+  > | Round (UTC) | Revision | Shape | Result | Server p50 / p95 / max | Client p50 / p95 |
+  > |---|---|---|---|---|---|
+  > | 1 (10-31 14:14:40–14:15:41) | 01105-scf (e6e1e27b2, before P3b) | 5 creators × 20 | 100 × 201; 0 refused; 0 × 429 | 59 / 76 / 111 ms | 125 / 163 ms |
+  > | 2 (11-01 05:09:36–05:10:36) | 01116-rzt (64003d65c, with P3b) | 20 creators × 5 | 100 × 201; 0 refused; 0 × 429 | 63 / 86 / 146 ms (98 log rows) | 128 / 153 ms |
+  >
+  > - **Correction:** a read of prod at 873d5113e put P3b at about +40 ms p95. Round 1, before P3b, was already 76 ms, so most of that gap was other changes between the two builds, not P3b. Both figures are whole `POST /runs` requests, not the admission step the 50 ms budget was set on.
+  > - **Local A/B (a scratch bench, not committed; a throwaway Postgres database).** P3b's two `takeShared` calls (minute + day) on one hot tenant key, unpaced, against the pre-P3b per-process maps (about 0.01 ms). Median of 3 reps:
+  >
+  >   | Callers | p95, no added delay | p95, +2 ms per KV call | KV calls per request |
+  >   |---|---|---|---|
+  >   | 5 | 4.6 ms | 29.6 ms | about 7 (floor 4) |
+  >   | 20 | 44 ms | 149 ms | 14–21 (CAS retries) |
+  >
+  > - **Open question → `ADM-1` (`docs/steward/TODO.md`).** At 20 unpaced callers with 2 ms added per KV call, 2 of 2,000 requests were refused in 2 of 3 reps: `shared_rate_limit_contention` after 64 CAS attempts under the `closed` (strict) posture. That is a false 429 from contention, not from the cap. Prod pacing does not reach it (round 2: 0 refusals). Options to weigh later: an atomic increment in place of get + CAS, or admitting on contention when the window is far below its limit.
 - [x] **Q4: where the real-Postgres witness runs.** This Mac has no Docker and no Postgres, so the two-process and crash witnesses cannot run here today. **Recommendation: install Postgres locally through Homebrew** (free, local only) and point the existing `OPENWOP_PG_TEST_DSN` hook at it. The alternatives are running `ci:full` on the other machine, which has Docker, or adding an embedded-Postgres dev dependency. Installing software needs your go.
 - [x] **Q5: holding states (S03-G1).** Do you accept D4: `pending` and `running` hold a slot, and a run suspended on approval does not? **Recommendation: yes.** An approval can wait days, and holding a slot for it would let five pending approvals block a user's work.

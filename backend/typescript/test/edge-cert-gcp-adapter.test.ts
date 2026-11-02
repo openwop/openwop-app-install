@@ -11,8 +11,30 @@
  *  - D1: `manual` makes zero calls and leaves the row byte-identical (golden);
  *    an unready configuration makes zero calls;
  *  - D3: the CM state maps onto the TLS axis.
+ *
+ * TST-CWF-1. Two crash models: `crashOnCall` throws BEFORE the fake processes
+ * call k (the request never landed); `crashAfterOnCall` processes it and THEN
+ * throws (it landed, its reply was lost — the realistic crash). Only the second
+ * makes a resume re-POST a resource whose create is still running, i.e. reach
+ * the `409 ALREADY_EXISTS ⇒ success` branch of `ensure()`.
+ *
+ * The fake records any call off the Certificate Manager API in `badUrls`
+ * (asserted empty after every case) instead of asserting inside `fetch`: the
+ * engine turns a provider throw into `edge.issue`, so an `expect` there would be
+ * swallowed.
+ *
+ * DOUBLE GUARD (recorded): "a failed TXT check creates nothing" is held by
+ * `verifyDomain` (advances only a `live` row) AND the engine's own
+ * `row.status !== 'live'` check (`edgeCertificates/engine.ts`); the engine copy
+ * is probed by "a pending row is not advanced".
+ *
+ * Red when (sabotage-witnessed, wave 69): the authorization is not
+ * PER_PROJECT_RECORD; a 409 on create is treated as a failure (the lost-reply
+ * loop); release deletes out of order, ignores a failed step, or is not
+ * NOT_FOUND-tolerant; ACTIVE or FAILED map to the wrong TLS state; resource ids
+ * exceed 63 chars; the engine advances a non-live row.
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
 import { __resetCustomDomains, addDomain, listDomains, verifyDomain, advanceDomainEdge, type CustomDomain } from '../src/host/customDomains.js';
@@ -32,6 +54,8 @@ function fakeCertificateManager(opts: { opPolls?: number } = {}) {
   const deletes: string[] = [];
   let calls = 0;
   let crashAt = -1;
+  let crashAfter = -1;
+  let conflicts = 0;
   let failDeleteOf: string | null = null;
   let certState: Record<string, unknown> = { state: 'PROVISIONING', authorizationAttemptInfo: [{ domain: 'x', state: 'AUTHORIZING' }] };
   let opSeq = 0;
@@ -51,8 +75,15 @@ function fakeCertificateManager(opts: { opPolls?: number } = {}) {
 
   const fetch = async (url: string, init: { method: string; body?: string }) => {
     calls += 1;
-    if (calls === crashAt) throw new Error('simulated crash');
-    expect(url.startsWith(API)).toBe(true);
+    const call = calls;
+    if (call === crashAt) throw new Error('simulated crash');
+    const out = handle(url, init);
+    if (call === crashAfter) throw new Error('simulated lost response');
+    return out;
+  };
+
+  const handle = (url: string, init: { method: string; body?: string }) => {
+    if (!url.startsWith(API)) { badUrls.push(url); return respond(400, { error: { message: 'off-API call' } }); }
     const u = new URL(url);
     const path = u.pathname.slice(new URL(API).pathname.length + 1); // the fake Certificate Manager's own API prefix
     if (init.method === 'GET') {
@@ -71,7 +102,7 @@ function fakeCertificateManager(opts: { opPolls?: number } = {}) {
       const [collection, q] = [path, u.searchParams];
       const id = q.get('dnsAuthorizationId') ?? q.get('certificateId') ?? q.get('certificateMapEntryId');
       const name = `${collection}/${id}`;
-      if (resources.has(name) || [...ops.values()].some((o) => o.target === name)) return respond(409, { error: { message: 'ALREADY_EXISTS' } });
+      if (resources.has(name) || [...ops.values()].some((o) => o.target === name)) { conflicts += 1; return respond(409, { error: { message: 'ALREADY_EXISTS' } }); }
       posts.push(name);
       const body = JSON.parse(init.body ?? '{}') as Record<string, unknown>;
       const res: Record<string, unknown> = { name, ...body };
@@ -92,8 +123,10 @@ function fakeCertificateManager(opts: { opPolls?: number } = {}) {
   return {
     fetch, resources, posts, deletes,
     get calls() { return calls; },
+    get conflicts() { return conflicts; },
     crashOnCall(n: number) { crashAt = calls + n; },
-    noCrash() { crashAt = -1; },
+    crashAfterOnCall(n: number) { crashAfter = calls + n; },
+    noCrash() { crashAt = -1; crashAfter = -1; },
     failDelete(suffix: string | null) { failDeleteOf = suffix; },
     setCert(s: Record<string, unknown>) { certState = s; },
     /** Finish every outstanding operation and make new ones finish at once. */
@@ -111,9 +144,14 @@ function provider(cm: ReturnType<typeof fakeCertificateManager>) {
   return createGcpCertificateManagerProvider({ certMap: MAP, fetch: cm.fetch, metadata, sleep: async () => undefined, opWaitMs: 1_000 });
 }
 
+const badUrls: string[] = [];
 beforeEach(async () => {
+  badUrls.length = 0;
   initHostExtPersistence(await openStorage('memory://'));
   await __resetCustomDomains();
+});
+afterEach(() => {
+  expect(badUrls, 'every adapter call targets the Certificate Manager API').toEqual([]);
 });
 
 async function liveDomain(hostname: string, edge: Parameters<typeof verifyDomain>[4]): Promise<CustomDomain> {
@@ -205,6 +243,37 @@ describe('ADR 0906 D4 — resume after a crash at every call', () => {
       expect(row?.edge?.mapEntryName, `crash at call ${k}`).toBeTruthy();
       expect(row?.edge?.issue, `crash at call ${k}`).toBeUndefined();
     }
+  });
+
+  it('a LOST reply at call k (the call landed) converges too, through the 409 ALREADY_EXISTS path', async () => {
+    const clean = fakeCertificateManager({ opPolls: 2 });
+    await liveDomain('clean.example.com', provider(clean));
+    const total = clean.calls;
+    expect(total).toBeGreaterThan(5);
+
+    let conflicts = 0;
+    for (let k = 1; k <= total; k++) {
+      await __resetCustomDomains();
+      const cm = fakeCertificateManager({ opPolls: 2 });
+      const p = provider(cm);
+      cm.crashAfterOnCall(k);
+      expect((await liveDomain('pages.example.com', p)).status).toBe('live');
+      cm.noCrash();
+      // Re-advance while a create whose reply was lost is still running: the
+      // re-POST gets 409, which must read as "it exists", never as a fault.
+      const resumed = await advanceDomainEdge('pages.example.com', p);
+      expect(resumed?.edge?.issue?.detail ?? '', `lost reply at call ${k}`).not.toContain('ALREADY_EXISTS');
+      cm.completeOps();
+      await advanceDomainEdge('pages.example.com', p);
+      const row = await advanceDomainEdge('pages.example.com', p);
+      expect(cm.posts, `lost reply at call ${k}`).toHaveLength(3);
+      expect(new Set(cm.posts).size, `lost reply at call ${k}`).toBe(3);
+      expect(row?.edge?.mapEntryName, `lost reply at call ${k}`).toBeTruthy();
+      expect(row?.edge?.issue, `lost reply at call ${k}`).toBeUndefined();
+      conflicts += cm.conflicts;
+    }
+    // The 409 branch was really exercised (not only clean resumes).
+    expect(conflicts).toBeGreaterThan(0);
   });
 
   it('a crash records the fault on edge.issue without moving tls', async () => {

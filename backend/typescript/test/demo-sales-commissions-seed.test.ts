@@ -1,7 +1,14 @@
 /**
- * `demo-sales-commissions` round-trip (ADR 0280).
+ * `demo-sales-commissions` round-trip (ADR 0280) — TST-CVA-1.
  * One AE plan + a computed statement per rep for the quarter(s) they closed won
  * deals — real (non-zero) numbers, one walked to paid; idempotent; clears clean.
+ *
+ * Red when: the seeder stops skipping an existing rep/period (re-seed creates),
+ * stops walking one statement to paid, re-creates the plan on a re-seed, or
+ * `clearDemoCommissions` stops deleting the STATEMENT rows. The last one is read
+ * straight from the statement store by the old planId: `countDemoCommissions`
+ * counts statements only through the surviving demo plans, so it reads 0 for
+ * orphan statements once the plans are gone and cannot show the leak.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -33,16 +40,20 @@ describe('demo-sales-commissions seeder', () => {
     const orgId = (await listOrgs(tenantId))[0]!.orgId;
 
     const first = await seedDemoCommissions(tenantId);
-    expect(first.created).toBeGreaterThan(1);
 
     const plans = (await listPlans(tenantId, orgId)).filter((p) => p.createdBy === 'demo:commissions');
     expect(plans).toHaveLength(1);
+    const planId = plans[0]!.planId;
 
     // Statements exist with real (non-zero) totals, and one reached 'paid'.
-    const statements = await listStatements(tenantId, orgId, { planId: plans[0]!.planId }, true, undefined);
+    const statements = await listStatements(tenantId, orgId, { planId }, true, undefined);
     expect(statements.length).toBeGreaterThan(0);
+    // `created` is exactly the plan plus one per computed statement.
+    expect(first.created).toBe(1 + statements.length);
     expect(statements.some((s) => s.total > 0)).toBe(true);
-    expect(statements.some((s) => s.status === 'paid')).toBe(true);
+    const paid = statements.filter((s) => s.status === 'paid');
+    expect(paid).toHaveLength(1);
+    expect(paid[0]!.total).toBeGreaterThan(0);
 
     // Idempotent.
     const before = await countDemoCommissions(tenantId);
@@ -54,6 +65,8 @@ describe('demo-sales-commissions seeder', () => {
     await clearDemoCommissions(tenantId);
     expect(await countDemoCommissions(tenantId)).toBe(0);
     expect((await listPlans(tenantId, orgId)).filter((p) => p.createdBy === 'demo:commissions')).toHaveLength(0);
+    // No orphan statements: read the statement store by the deleted plan's id.
+    expect(await listStatements(tenantId, orgId, { planId }, true, undefined)).toEqual([]);
 
     expect((await seedDemoCommissions(tenantId)).created).toBeGreaterThan(1);
   });

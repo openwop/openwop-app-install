@@ -145,7 +145,7 @@ export async function importConversation(
     replayed = true;
   } else {
     try {
-      await storage.createChatSession({ sessionId, tenantId, title, createdAt: now, updatedAt: now, messageCount: 0 });
+      await storage.createChatSession({ sessionId, tenantId, title, createdAt: now, updatedAt: now, messageCount: 0, titleSource: 'given' });
     } catch (err) {
       if (!isPkConflict(err)) throw err;
       replayed = true; // H3 — a racing twin created it first

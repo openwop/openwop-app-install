@@ -14,15 +14,14 @@
  * UNOWNED workflow, so their own gate is the only guard; the unstamped
  * (backfill-on-read) fixtures keep the paid one, so the funnel stays witnessed.
  *
- * The last describe pins the ADR 0821 P5 run-limit seam (`withRunLimit`): a no-op
- * until a reserver is wired, a refusal stops the insert, and a failed insert
- * releases its reservation (the HTTP wiring is `adr0821-p5-run-limit-wired`).
+ * The ADR 0821 P5 run-limit seam this file once pinned is gone: ADR 0987 P2
+ * charges the plan at the run-insert seam (`adr0987-p2-admission-lanes.test.ts`).
  *
  * Sabotage witnesses (w35): the funnel check removed, the chain-copy owner lookup,
  * the relaunch gate, the planExempt bypass, the plan→'plan' mapping, the daemon's
  * and the trigger's own gates and their plan-lapsed labels, the legacy drain, a
  * person's disable clearing planPause, the lapse chip, the tool gate and its
- * core-node exemption, and both run-limit seams each red a leg below.
+ * core-node exemption, each red a leg below.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
@@ -47,7 +46,6 @@ import { setEventLogBackend } from '../src/executor/eventLog.js';
 import { getSubscription, registerSubscription } from '../src/host/triggerBridgeService.js';
 import { processDueSchedules, resumePlanPausedJobs } from '../src/host/scheduleDaemon.js';
 import { builtinAgentTool } from '../src/host/agentToolProvider.js';
-import { registerRunLimitReserver, withRunLimit } from '../src/host/runLimitSeam.js';
 import type { RunRecord } from '../src/types.js';
 import type { WorkflowDefinition } from '../src/executor/types.js';
 
@@ -106,7 +104,6 @@ beforeEach(async () => {
   registerWorkflowFeature(PAID_WF, FEATURE);
   registerWorkflowFeature(PAID_CHAIN, FEATURE);
   installPlan();
-  registerRunLimitReserver(null);
 });
 
 async function runsFor(workflowId: string): Promise<RunRecord[]> {
@@ -366,25 +363,5 @@ describe('G7 — projected compute-node chat tools resolve their owning feature'
   it('a core.* compute node is never feature-gated', async () => {
     const out = await builtinAgentTool('openwop:core.flow.aggregate-text')!.run({}, { tenantId: 'lapsed-tool' });
     expect(out).toEqual({ content: 'node not available: core.flow.aggregate-text', isError: true });
-  });
-});
-
-describe('ADR 0821 P5 follow-up — the run-limit seam', () => {
-  it('a no-op until wired: the insert runs', async () => {
-    expect(await withRunLimit('t', async () => 'inserted')).toBe('inserted');
-  });
-
-  it('a refusing reserver stops the insert; a failed insert releases its reservation', async () => {
-    let reserved = 0; let released = 0;
-    registerRunLimitReserver(async () => {
-      if (reserved >= 1) throw new OpenwopError('rate_limited', 'limit', 429, { reason: 'plan_run_limit_reached' });
-      reserved += 1;
-      return { release: async () => { released += 1; } };
-    });
-    await expect(withRunLimit('t', async () => { throw new Error('insert failed'); })).rejects.toThrow('insert failed');
-    expect(released).toBe(1);
-    let inserted = false;
-    await expect(withRunLimit('t', async () => { inserted = true; })).rejects.toMatchObject({ httpStatus: 429 });
-    expect(inserted).toBe(false);
   });
 });

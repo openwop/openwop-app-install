@@ -14,12 +14,18 @@
  *      never a verdict, a p-value or "significant"; Optimize has no plan.
  *   5. A CMS page Optimize experiment serves sticky through `assignVisitorArm`.
  *
- * Sabotage (run 2026-10-20): an unseeded draw reds 1; dropping the
- * `existing` check reds 2; reading the store after `assignAt` (so a stopped
- * experiment's recorded arm is lost) reds 3's resolver case; dropping the floor
- * reds 1's floor case.
+ * Sabotage (run 2026-10-20): an unseeded draw reds 1; reading the store after
+ * `assignAt` (so a stopped experiment's recorded arm is lost) reds 3's resolver
+ * case; dropping the floor reds 1's floor case.
+ *
+ * CORRECTED (w73 probes): "dropping the `existing` check reds 2" was false. That
+ * check is a DOUBLE GUARD with the same check inside the row CAS
+ * (`optimizeEpoch`: the early `epochs.some(epoch === n)` return and the mutator's
+ * `row.epochs.some(epoch === n)` → null, which also answers `existing`). Either
+ * alone is an equivalent mutant (op-existing and op-mutate-guard were vacuous);
+ * op-existing-both, one edit over both, reds 2 and 2b.
  */
-import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { hostExtStorage } from '../src/host/hostExtPersistence.js';
 import { createApp } from '../src/index.js';
 import { thompsonWeights } from '../src/host/experiments/stats.js';
@@ -34,6 +40,8 @@ import { defaultWorkflowChainPackRoots, expandChain, getChain, loadWorkflowChain
 
 const units: Array<{ arm: string; firstExposureAt: string; converted: boolean }> = [];
 let n = 0;
+// The fixture surface's observations are per case: no case reads another's units.
+beforeEach(() => { units.length = 0; });
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -45,7 +53,7 @@ beforeAll(async () => {
     stop: async (e) => e,
     observe: async () => ({ units, coverage: 'complete', sourceRetainedSince: null }),
   });
-});
+}, 120_000);
 
 const ARMS = [{ key: 'a', ref: null, weight: 34 }, { key: 'b', ref: 'v2', weight: 33 }, { key: 'c', ref: 'v3', weight: 33 }];
 const OPT = { rewardMetric: { kind: 'conversion', name: 'signup' }, floorPct: 10, epochMinutes: 60 };
@@ -81,7 +89,6 @@ describe('ADR 0949 P4a — 1. Thompson weights', () => {
 describe('ADR 0949 P4a — 2. epochs', () => {
   it('too early is too_soon; the next is appended once; the same instant finds it existing', async () => {
     const { tenantId, id } = await launched();
-    units.length = 0;
     for (let i = 0; i < 300; i++) for (const [arm, rate] of [['a', 0.05], ['b', 0.2], ['c', 0.05]] as const) units.push({ arm, firstExposureAt: '2026-10-01T01:00:00.000Z', converted: i < 300 * rate });
     expect((await optimizeEpoch(tenantId, tenantId, id, { asOf: '2026-10-01T00:30:00.000Z', now: '2026-10-01T00:30:00.000Z' })).outcome).toBe('too_soon');
     // run-1 began at 02:00 and appends at 02:00:05.
@@ -140,9 +147,11 @@ describe('ADR 0949 P4a — 3b. subject erasure', () => {
 describe('ADR 0949 P4a — 4/5. results and the CMS page path', () => {
   it('Optimize results are a model estimate, never a verdict; Optimize has no plan', async () => {
     const { tenantId, id } = await launched();
-    const r = await results(tenantId, tenantId, id, '2026-10-01T03:00:00.000Z') as unknown as Record<string, unknown>;
+    const r = await results(tenantId, tenantId, id, '2026-10-01T03:00:00.000Z');
     expect(r).toMatchObject({ mode: 'optimize', epoch: 0, floorPct: 10 });
-    expect((r.arms as Array<Record<string, unknown>>)[0]).toHaveProperty('probabilityBest');
+    if (!('floorPct' in r)) throw new Error('expected an Optimize result');
+    expect(r.arms.map((a) => a.key)).toEqual(['a', 'b', 'c']);
+    for (const a of r.arms) expect(a.probabilityBest).toEqual(expect.any(Number));
     expect(JSON.stringify(r)).not.toMatch(/verdict|pValue|significan|confidenceSequence/);
     await expect(lockPlan(tenantId, tenantId, id, undefined)).rejects.toMatchObject({ details: { reason: 'not_decide' } });
   });
@@ -188,6 +197,10 @@ describe('ADR 0949 P4a — 6. the optimize-loop chain through the REAL loader (g
     const two = expandChain(found!.chain, { params });
     expect(JSON.stringify(two)).toBe(JSON.stringify(one));
     const node = one.nodes.find((x) => x.typeId.startsWith('feature.experiments.nodes.optimize-epoch'));
+    // Pinned: the side-effect node is referenced at an exact pack version (the
+    // loader reduces `typeId@x.y.z` to the bare id and records the pin, ADR 0766 D1).
+    expect(node?.typeId).toBe('feature.experiments.nodes.optimize-epoch');
+    expect(found!.chain.nodePins?.['feature.experiments.nodes.optimize-epoch']).toBe('1.0.0');
     expect(node?.inputs).toEqual({ orgId: 'org-1', experimentId: 'exp:abc' });
   });
 });

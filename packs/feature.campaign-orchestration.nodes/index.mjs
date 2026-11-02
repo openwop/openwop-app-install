@@ -27,31 +27,51 @@ function str(v) { return typeof v === 'string' ? v : ''; }
 
 /**
  * Deterministic cross-asset consistency: each draft should echo the kernel's
- * headline keywords + primary CTA. Score = fraction of drafts that do. When no
- * drafts are supplied (the workflow path before a gather step), returns a neutral
- * report — unless the channel fan-out ran and every channel failed (see below).
+ * headline keywords + primary CTA. Score = fraction of drafts that do.
+ *
+ * ADR 1020 D2 — the drafts come from the channel fan-out. Each channel child
+ * writes ONE run variable (`channelResult`: `{channel, draft}` or
+ * `{channel, skipped, reason}`) that `core.dispatch` maps out per child into the
+ * names `config.resultVariables` lists (child workflow id → parent variable). A
+ * result is read ONLY for a child whose `dispatched` entry is `completed`; a
+ * declared produced variable can also be seeded from run inputs, so the bag value
+ * of any other child is ignored. Before this the node scored `inputs.drafts`,
+ * which nothing wired, and every run "passed" with `note: 'no drafts to compare'`.
+ * There is no neutral pass now: nothing to compare is a typed failure.
  */
 export async function consistencyCheck(ctx) {
   const i = ctx.inputs ?? {};
   const briefId = str(i.briefId);
   // ADR 0903 D8 — when the channel fan-out ran (its `dispatched` list reaches
   // this node by edge) and not one channel completed, there is nothing to score
-  // and no campaign worth finalizing. Fail with the children's outcomes instead
-  // of the neutral "no drafts to compare" report, which let the run complete.
+  // and no campaign worth finalizing.
   const dispatched = Array.isArray(i.dispatched) ? i.dispatched : null;
   if (dispatched && dispatched.length > 0 && !dispatched.some((d) => d && d.childStatus === 'completed')) {
-    const outcomes = dispatched.map((d) => `${str(d && d.childWorkflowId) || 'unknown'}: ${str(d && d.childStatus) || 'unknown'}`).join(', ');
-    return { status: 'failed', error: { code: 'channels_all_failed', message: `Every channel run failed, so there is nothing to check or finalize (${outcomes}).` } };
+    const outcomes = dispatched.map((d) => `${channelLabel(str(d && d.childWorkflowId))}: ${str(d && d.childStatus) || 'unknown'}`).join(', ');
+    return { status: 'failed', error: { code: 'channels_all_failed', message: `Every channel run failed or was not approved, so there is nothing to check or finalize (${outcomes}).` } };
   }
-  const cb = ctx.features && ctx.features['campaign-brief'];
 
+  const gathered = gatherChannelResults(ctx, dispatched, i.drafts);
+  if (gathered.error) return { status: 'failed', error: gathered.error };
+  const { drafts, channels } = gathered;
+  if (drafts.length === 0) {
+    // Grade-ux H1 — "nothing drafted" has two causes. Only when EVERY child was
+    // skipped is the brief's channel list the reason; when an enabled channel
+    // failed or was not approved, say which, never "enable a channel".
+    const unfinished = channels.filter((c) => c.status !== 'skipped');
+    if (unfinished.length > 0) {
+      return { status: 'failed', error: { code: 'channels_all_failed', message: `No enabled channel produced a draft: ${unfinished.map((c) => channelLabel(c.channel)).join(', ')} did not finish (it failed or was not approved), so there is nothing to check or finalize.` } };
+    }
+    return { status: 'failed', error: { code: 'no_channels_enabled', message: 'Every channel was skipped because the brief enables none of them, so there is nothing to check or finalize. Enable a channel on the brief and run again.' } };
+  }
+
+  const cb = ctx.features && ctx.features['campaign-brief'];
   let kernel = null;
   if (cb && typeof cb.getBrief === 'function') {
-    try { const b = await cb.getBrief({ briefId }); kernel = b && b.brief ? b.brief.kernel : null; } catch { /* optional */ }
+    try { const b = await cb.getBrief({ briefId }); kernel = b && b.brief ? b.brief.kernel : null; } catch { /* read below */ }
   }
-  const drafts = Array.isArray(i.drafts) ? i.drafts : [];
-  if (!kernel || drafts.length === 0) {
-    return { status: 'success', outputs: { report: { score: 100, dimensions: [], divergences: [], passesThreshold: true, checkedAt: new Date().toISOString(), note: 'no drafts to compare' } } };
+  if (!kernel || typeof kernel !== 'object') {
+    return { status: 'failed', error: { code: 'kernel_required', message: 'The brief has no messaging kernel to check the drafts against.' } };
   }
 
   const kernelTokens = `${str(kernel.headline)} ${str(kernel.primaryCta)} ${(Array.isArray(kernel.proofPoints) ? kernel.proofPoints.join(' ') : '')}`
@@ -88,8 +108,60 @@ export async function consistencyCheck(ctx) {
   if (judgeScore !== null) dimensions.push({ name: 'semanticJudge', score: judgeScore, description: 'LLM-judged semantic consistency (40% of the blend).' });
   return {
     status: 'success',
-    outputs: { report: { score, dimensions, divergences, passesThreshold: score >= 80, checkedAt: new Date().toISOString() } },
+    outputs: { report: { score, dimensions, divergences, passesThreshold: score >= 80, checkedAt: new Date().toISOString() }, channels },
   };
+}
+
+/** A channel id (`email_sequence`) or channel workflow id
+ *  (`campaign-studio.channel.email-sequence`) as its display name. */
+function channelLabel(idOrWorkflow) {
+  const key = str(idOrWorkflow).replace(/^campaign-studio\.channel\./, '').replace(/-/g, '_');
+  // CHANNEL_LABEL is defined below (shared with the canvas artifact); this runs only after module load.
+  return CHANNEL_LABEL[key] || key || 'A channel';
+}
+
+/** ADR 1020 D2 — collect the scored drafts. Explicit `inputs.drafts` (a direct
+ *  caller) wins; otherwise each completed child's mapped `channelResult`. Returns
+ *  `{drafts, channels}` — channels: one `{channel, status}` per dispatched child
+ *  (`drafted` | `skipped` | `failed` | the child's own non-completed status),
+ *  keyed by channel, never by child run id (ADR 1002 keeps run-scoped ids out of
+ *  model text) — or `{error}`. */
+function gatherChannelResults(ctx, dispatched, explicitDrafts) {
+  if (Array.isArray(explicitDrafts) && explicitDrafts.length > 0) {
+    return { drafts: explicitDrafts, channels: explicitDrafts.map((d) => ({ channel: str(d && d.channel) || 'unknown', status: 'drafted' })) };
+  }
+  const misconfigured = { error: { code: 'drafts_missing', message: 'This campaign workflow is misconfigured, so the channel drafts could not be checked. Re-create it from the Campaign orchestration template.' } };
+  if (!dispatched || dispatched.length === 0) return misconfigured;
+  const cfg = ctx.config && typeof ctx.config === 'object' ? ctx.config : {};
+  const map = cfg.resultVariables && typeof cfg.resultVariables === 'object' && !Array.isArray(cfg.resultVariables) ? cfg.resultVariables : null;
+  if (!map) return misconfigured;
+  if (!ctx.variables || typeof ctx.variables.get !== 'function') {
+    return { error: { code: 'host_capability_missing', message: 'consistency-check needs the run variable bag (ctx.variables) to read the channel drafts.' } };
+  }
+  const drafts = [];
+  const channels = [];
+  const missing = [];
+  for (const d of dispatched) {
+    if (!d) continue;
+    const wf = str(d.childWorkflowId);
+    const channelOf = (r) => str(r && r.channel) || wf.replace(/^campaign-studio\.channel\./, '').replace(/-/g, '_') || 'unknown';
+    if (d.childStatus !== 'completed') {
+      // Grade-ux M1 — a failed channel is reported, never silently dropped.
+      channels.push({ channel: channelOf(null), status: str(d.childStatus) || 'failed' });
+      continue;
+    }
+    const name = typeof map[wf] === 'string' ? map[wf] : '';
+    const result = name ? ctx.variables.get(name) : undefined;
+    if (!result || typeof result !== 'object') { missing.push(channelLabel(wf)); continue; }
+    if (result.skipped === true) { channels.push({ channel: channelOf(result), status: 'skipped', reason: str(result.reason) || 'skipped' }); continue; }
+    if (!result.draft || typeof result.draft !== 'object') { missing.push(channelLabel(wf)); continue; }
+    drafts.push(result.draft);
+    channels.push({ channel: channelOf(result), status: 'drafted' });
+  }
+  if (missing.length > 0) {
+    return { error: { code: 'drafts_missing', message: `${missing.join(', ')} finished without leaving a draft to check.` } };
+  }
+  return { drafts, channels };
 }
 
 /** ADR 0356 P4 — the setup gate check (the CS-008 assetDecisionGate semantic,

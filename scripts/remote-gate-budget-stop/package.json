@@ -1,0 +1,8 @@
+{
+  "name": "openwop-ci-budget-stop",
+  "private": true,
+  "type": "module",
+  "main": "index.mjs",
+  "engines": { "node": "22" },
+  "dependencies": { "@google-cloud/functions-framework": "3.4.5" }
+}

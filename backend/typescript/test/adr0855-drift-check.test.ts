@@ -109,7 +109,7 @@ async function runOn(s: { tenantId: string; ownerId: string; boardId: string } ,
     metadata: onProject ? { kanban: { boardId: s.boardId, cardId: 'c1' }, actingUserId: s.ownerId } : {},
     configurable: {}, createdAt: now, updatedAt: now,
   };
-  await insertRunWithStartContext(storage, run);
+  await insertRunWithStartContext(storage, run, { admission: { plan: 'exempt:test-fixture' } });
   const def = (await hostSuite.workflowCatalog.getWorkflow('wf.drift.echo'))!.definition;
   expect((await executeRun(storage, (await storage.getRun(run.runId))!, def)).status).toBe('completed');
   return run.runId;

@@ -22,6 +22,7 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { stripComments } from './helpers/stripComments.js';
 
 const ROOT = join(__dirname, '..');
 const SRC = join(ROOT, 'src');
@@ -80,8 +81,6 @@ describe('ADR 0734 — every test-only export in src/ has a reader', () => {
   // counted commented-out code as live; a docblock saying "we used to call __resetFoo"
   // must not hold __resetFoo alive. Strings are left intact (a string-keyed registry IS
   // a real reference), and the `:` guard keeps `https://…` from eating the rest of a line.
-  const stripComments = (t: string): string =>
-    t.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
   const texts = new Map(searchFiles.map((f) => [f, stripComments(readFileSync(f, 'utf8'))]));
 
   // Keyed by `file#symbol`, NOT by symbol. A `Map<symbol, file>` silently collapses

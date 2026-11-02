@@ -23,6 +23,7 @@
 import { OpenwopError } from '../types.js';
 import { createLogger } from '../observability/logger.js';
 import { resolveEffectiveAccess } from './accessControlService.js';
+import { isPersonalTenantId } from './requestSubject.js';
 import { isRegisteredArtifactType } from './artifactTypes.js';
 import { diffText, diffJson, type TextDiff, type JsonDiff } from './textDiff.js';
 import {
@@ -38,7 +39,8 @@ import { getAssetByIdForTenant, viewAsset, listAssetsForTenant, type MediaAsset 
 import { listDocumentsForTenant } from '../features/documents/documentsService.js';
 import { getRunArtifact, listRunArtifactsForTenant, type RunArtifactRecord, listRunArtifactsForRun, displayRunArtifactTitle } from './runArtifactStore.js';
 import type { Subject } from './subject.js';
-import { canReadChatArtifact } from './chatArtifactScope.js';
+import { canReadChatArtifact, chatArtifactRunId, type ChatArtifactLane } from './chatArtifactScope.js';
+import { hostExtStorage } from './hostExtPersistence.js';
 
 export type ArtifactSource = 'document' | 'media' | 'run-event';
 
@@ -318,6 +320,75 @@ export async function listArtifactsForRun(
     seen.add(id);
     const artifact = await getArtifact(tenantId, subject, id);
     if (artifact) out.push({ ...artifact, runNodeId: row.nodeId });
+  }
+  return out;
+}
+
+/**
+ * ADR 1017 D4 — may `subject` read this chat-tool row, for the interactive-artifacts
+ * `get` tool (a model reading back what it rendered). Org read
+ * on the row's org is the Library's membership answer, or the implicit owner of the
+ * caller's OWN personal tenant (`personalTenant`, request- or run-stamped; the
+ * `assertOrgScope` ADR 0622 D2 exit, keyed on ownership, never on the tenant's
+ * shape). That owner has no member row, and outside demo mode the membership answer
+ * alone refused them their own artifact (code grade B1). Then the conversation rule
+ * (ADR 0996). It is wider than `resolveRunArtifact` (the Library and
+ * `GET /artifacts/:id`) by exactly that owner exit, and only for chat-tool rows the
+ * owner's own chat wrote: the Library refusing that owner outside demo mode is filed
+ * as `IA67-8`, and when it is fixed both should be this predicate.
+ */
+export async function canReadChatToolArtifact(
+  tenantId: string,
+  subject: string,
+  row: { tenantId: string; runId: string; orgId: string; linkedArtifactId?: string },
+  ctx: { personalTenant?: string | undefined } = {},
+): Promise<boolean> {
+  if (row.tenantId !== tenantId || row.linkedArtifactId) return false;
+  const ownPersonal = ctx.personalTenant === tenantId && isPersonalTenantId(tenantId);
+  if (!ownPersonal) {
+    const access = await resolveEffectiveAccess(tenantId, { subject, orgId: row.orgId });
+    if (!access.scopes.includes('workspace:read')) return false;
+  }
+  return canReadChatArtifact(row, subject);
+}
+
+/** The chat tools that save an artifact under the turn that ran them (ADR 1017 D2). */
+const CHAT_TURN_LANES: readonly ChatArtifactLane[] = ['chat-viz', 'chat-code'];
+
+/**
+ * ADR 1017 D2 — the artifacts the chat tools saved during ONE chat turn, so the chat
+ * can show them under that turn. The caller names the conversation's backing run and
+ * the turn's wire message id; the lanes are derived from the RUN's own stamps
+ * (`chatSessionId`, `actingUserId`) with the ONE builder the tools minted them with,
+ * never from caller input. Every row then goes through `getArtifact`, the gate of
+ * `GET /artifacts/:id` that a card's click opens, so a card is listed only when it
+ * can open. A missing run, a run of another tenant and an unreadable row all answer
+ * the same empty list: no existence oracle.
+ */
+export async function listArtifactsForChatTurn(
+  tenantId: string,
+  subject: string | undefined,
+  conversationRunId: string,
+  turnMessageId: string,
+): Promise<Array<ArtifactProjection & { runNodeId: string }>> {
+  const run = await hostExtStorage().getRun(conversationRunId);
+  if (!run || run.tenantId !== tenantId) return [];
+  const meta = (run.metadata ?? {}) as { chatSessionId?: unknown; actingUserId?: unknown };
+  const scope = {
+    tenantId,
+    ...(typeof meta.chatSessionId === 'string' && meta.chatSessionId ? { conversationId: meta.chatSessionId } : {}),
+    ...(typeof meta.actingUserId === 'string' && meta.actingUserId ? { actingUserId: meta.actingUserId } : {}),
+  };
+  const out: Array<ArtifactProjection & { runNodeId: string }> = [];
+  for (const lane of CHAT_TURN_LANES) {
+    const laneRunId = chatArtifactRunId(lane, scope);
+    const rows = (await listRunArtifactsForRun(laneRunId))
+      .filter((r) => r.tenantId === tenantId && r.runId === laneRunId && r.turnMessageId === turnMessageId)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    for (const row of rows) {
+      const artifact = await getArtifact(tenantId, subject, `run-event:${row.artifactKey}`);
+      if (artifact) out.push({ ...artifact, runNodeId: row.nodeId });
+    }
   }
   return out;
 }

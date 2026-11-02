@@ -66,10 +66,13 @@ function runProbe(p) {
     const packEdit = /^(packs|examples)\//.test(p.src);
     const env = { ...process.env, ...(packEdit ? { OPENWOP_PACK_TRUST_ALLOW_UNSIGNED: 'true' } : {}), ...(p.env ?? {}) };
     const run = spawnSync('node', ['node_modules/vitest/vitest.mjs', 'run', p.test, '--reporter=json', `--outputFile=${report}`],
-      { cwd: join(ROOT, LANES[p.lane]), encoding: 'utf8', env });
+      // A boot-heavy test file can log more than spawnSync's 1 MiB default; at that limit
+      // node kills the child before vitest writes its report (wave 66: six probes on
+      // api-key-tenant-scoping, ~1.05 MB of boot logs, read as "no report").
+      { cwd: join(ROOT, LANES[p.lane]), encoding: 'utf8', env, maxBuffer: 256 * 1024 * 1024 });
     let r;
     try { r = JSON.parse(readFileSync(report, 'utf8')); } catch {
-      return { id: p.id, verdict: 'error', error: `vitest produced no report: ${(run.stderr || run.stdout || '').trim().slice(-300)}` };
+      return { id: p.id, verdict: 'error', error: `vitest produced no report${run.error ? ` (${run.error.code ?? run.error.message})` : ''}: ${(run.stderr || run.stdout || '').trim().slice(-300)}` };
     }
     if (/pack_untrusted/.test(JSON.stringify(r))) {
       return { id: p.id, verdict: 'error', error: 'pack_untrusted in the run — red for the wrong reason (trust, not the sabotage)' };

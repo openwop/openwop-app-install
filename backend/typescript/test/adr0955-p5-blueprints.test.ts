@@ -22,6 +22,16 @@
  *  - post-webinar's second one-day wait removed                            → "two one-day waits"
  *  - `stopOnSuppressed` turning EVERY ineligible reason into a clean stop   → "only an unsubscribe"
  *  - the stopped branch's condition never matching                          → "an unsubscribe … stops it"
+ *
+ * Probes (wave 73): w73g3-p5bp-stop-any, -resumekey, -wait-bare, -stopped-value, -second-wait,
+ * -sms-org — all witnessed. The sign-off resumes assert the route's exact 200 (it answers with
+ * `res.json`), not a set of statuses. Run-settle polls a real 25 ms tick: the executor exposes no
+ * completion hook to await (honest ceiling).
+ *
+ * Order (wave 73, TST-DRK): every case shares the timer store and the capture arrays, so
+ * timers are swept through `sweepRun(runId)`, which continues and counts only the case's own
+ * run, and deliveries are counted from the case's own starting length. (A shuffle seed that ran
+ * the email-only cases first made the welcome case read 5 emails and sweep 5 timers.)
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -77,7 +87,7 @@ beforeAll(async () => {
   for (const id of ['users', 'crm', 'consent', 'campaign-journeys', 'campaign-journeys.sms', 'campaign-ops']) {
     const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test');
   }
-});
+}, 120_000);
 afterAll(async () => {
   delete process.env.OPENWOP_SENDGRID_API_BASE; delete process.env.OPENWOP_TWILIO_API_BASE;
   await new Promise<void>((r) => stub.close(() => r()));
@@ -107,14 +117,19 @@ describe('ADR 0955 P5 — the blueprints load and instantiate per client', () =>
   });
 });
 
-interface Res { status: number; body: Record<string, unknown> }
+interface Res { status: number; body: unknown }
+/** Walk an untyped JSON body without casts. */
+const get = (b: unknown, ...path: string[]): unknown => path.reduce<unknown>((o, k) => (typeof o === 'object' && o !== null ? Reflect.get(o, k) : undefined), b);
+const listOf = (b: unknown, key: string): unknown[] => { const v = get(b, key); return Array.isArray(v) ? v : []; };
+const endsWith = (v: unknown, suffix: string): boolean => typeof v === 'string' && v.endsWith(suffix);
 function client(): { call: (m: string, p: string, b?: unknown) => Promise<Res> } {
   let cookie = '';
   return {
     call: async (method, path, body) => {
       const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-      for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]!; }
-      return { status: res.status, body: (res.status === 204 ? {} : await res.json().catch(() => ({}))) as Record<string, unknown> };
+      for (const c of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]!; }
+      const parsed: unknown = res.status === 204 ? {} : await res.json().catch(() => ({}));
+      return { status: res.status, body: parsed };
     },
   };
 }
@@ -131,9 +146,9 @@ describe('ADR 0955 P5 — welcome-email-sms end to end (J955WF-5)', () => {
       const signIn = () => { owner = client(); return owner.call('POST', '/host/openwop-app/test/login', { email, tenantId }); };
       const login = await signIn();
       expect(login.status).toBe(201);
-      const userId = String((login.body.user as { userId?: string } | undefined)?.userId ?? '');
+      const userId = String(get(login.body, 'user', 'userId') ?? '');
       const org = await owner.call('POST', '/host/openwop-app/orgs', { name: 'Client A (synthetic)' });
-      const orgId = String(org.body.orgId);
+      const orgId = String(get(org.body, 'orgId'));
       await createClient({ tenantId, orgId, name: 'Client A (synthetic)', createdBy: userId });
       await createSecretConnection({ tenantId, provider: 'sendgrid', kind: 'api_key', secret: 'SG.testkey', scope: 'user', userId });
       const twilio = await createSecretConnection({ tenantId, provider: 'twilio', kind: 'basic', secret: 'ACp5:token', scope: 'user', userId });
@@ -141,55 +156,60 @@ describe('ADR 0955 P5 — welcome-email-sms end to end (J955WF-5)', () => {
       await setSendPolicy({ tenantId, orgId, defaultTimezone: 'UTC', updatedBy: userId });
       const contact = await owner.call('POST', '/host/openwop-app/crm/contacts', { name: 'Pat', email: 'pat@acme.test', phone: '+15550709999' });
       expect(contact.status, JSON.stringify(contact.body)).toBe(201);
-      const contactId = String(contact.body.contactId);
+      const contactId = String(get(contact.body, 'contactId'));
       await recordConsent({ tenantId, subjectKey: contactId, categories: { 'marketing.email': true }, source: 'test' });
       await recordClientChannelConsent({ tenantId, orgId, subjectKey: contactId, channel: 'sms', granted: true, source: 'test' });
 
+      // Other cases in this file share the capture arrays and leave runs waiting on timers:
+      // count only this case's deliveries and continue only this run's timers (sweepRun).
+      const emailsBefore = emails.length;
+      const textsBefore = texts.length;
       const chain = getChain('campaign-journeys.welcome-email-sms')!.chain;
       const params = { contactId, orgId, triggerEventName: 'host.crm.contact.created', senderEmail: 'hello@acme.test' };
       const expanded = expandChain(chain, { params });
       registerWorkflow(expanded);
       const create = await owner.call('POST', '/runs', { workflowId: expanded.workflowId, inputs: params });
       expect(create.status, JSON.stringify(create.body)).toBe(201);
-      const runId = String(create.body.runId);
+      const runId = String(get(create.body, 'runId'));
       const status = async (): Promise<string> => {
         for (let i = 0; i < 120; i++) {
           const b = (await owner.call('GET', `/runs/${runId}`)).body;
-          const s = String(b.status);
+          const s = String(get(b, 'status'));
           if (s === 'failed') {
-            const ev = ((await owner.call('GET', `/host/openwop-app/runs/${bareRunId(runId)}/debug-bundle`)).body.events ?? []) as Array<{ type?: string; nodeId?: string; payload?: unknown }>;
-            return `failed:${JSON.stringify(ev.filter((e) => e.type === 'node.failed').map((e) => [e.nodeId, e.payload]))}`;
+            const ev = listOf((await owner.call('GET', `/host/openwop-app/runs/${bareRunId(runId)}/debug-bundle`)).body, 'events');
+            return `failed:${JSON.stringify(ev.filter((e) => get(e, 'type') === 'node.failed').map((e) => [get(e, 'nodeId'), get(e, 'payload')]))}`;
           }
           if (s.startsWith('waiting') || ['completed', 'cancelled'].includes(s)) return s;
           await new Promise((r) => setTimeout(r, 25));
         }
         return `timeout:${JSON.stringify((await owner.call('GET', `/runs/${runId}`)).body).slice(0, 400)}:${JSON.stringify(await open())}`;
       };
-      const open = async () => ((await owner.call('GET', `/host/openwop-app/runs/${bareRunId(runId)}/interrupts`)).body.interrupts ?? []) as Array<{ token: string; nodeId: string; kind: string; data?: Record<string, unknown> }>;
+      const open = async (): Promise<unknown[]> => listOf((await owner.call('GET', `/host/openwop-app/runs/${bareRunId(runId)}/interrupts`)).body, 'interrupts');
 
       expect(await status()).toMatch(/^waiting/);
-      const gate = (await open()).find((i) => i.nodeId.endsWith('_signoff'))!;
-      expect([200, 202, 204]).toContain((await owner.call('POST', `/interrupts/${gate.token}`, { resumeValue: { decision: 'accept' } })).status);
+      const gate = (await open()).find((i) => endsWith(get(i, 'nodeId'), '_signoff'));
+      expect(gate, 'the sign-off gate').toBeTruthy();
+      expect((await owner.call('POST', `/interrupts/${String(get(gate, 'token'))}`, { resumeValue: { decision: 'accept' } })).status).toBe(200); // routes/interrupts.ts answers the resume with res.json
       expect(await status()).toMatch(/^waiting/); // the one-day timer
-      expect(emails.length).toBe(1);
-      expect(emails[0]).toContain('pat@acme.test');
+      expect(emails.length - emailsBefore).toBe(1);
+      expect(emails[emailsBefore]).toContain('pat@acme.test');
 
       vi.setSystemTime(new Date('2026-10-21T09:00:01Z'));
       expect((await signIn()).status).toBe(201);
-      const swept1 = await sweepDueTimers(storage, timerResumeContinuation(storage, hostSuite), Date.now());
+      const swept1 = await sweepRun(runId);
       expect(swept1, 'the one-day timer is due').toBe(1);
       const afterDay = await status(); expect(afterDay, afterDay).toMatch(/^waiting/); // send-time: no history ⇒ 10:00 UTC
-      const st = (await open()).find((i) => i.nodeId.endsWith('_sendtime'))!;
-      expect(st.data).toMatchObject({ kind: 'until', timestamp: '2026-10-21T10:00:00.000Z', resumeKey: 'send-time', explain: { basis: 'default' } });
+      const st = (await open()).find((i) => endsWith(get(i, 'nodeId'), '_sendtime'));
+      expect(get(st, 'data')).toMatchObject({ kind: 'until', timestamp: '2026-10-21T10:00:00.000Z', resumeKey: 'send-time', explain: { basis: 'default' } });
 
       vi.setSystemTime(new Date('2026-10-21T10:00:01Z'));
       expect((await signIn()).status).toBe(201);
-      await sweepDueTimers(storage, timerResumeContinuation(storage, hostSuite), Date.now());
+      expect(await sweepRun(runId), 'the send-time timer is due').toBe(1);
       const end = await status();
       expect(end, `the run completes after the text: ${JSON.stringify(await open())}`).toBe('completed');
-      expect(texts.length).toBe(1);
-      expect(decodeURIComponent(texts[0]!)).toContain('From=+15550700001'); // the client's own number
-      expect(decodeURIComponent(texts[0]!)).toContain('To=+15550709999');
+      expect(texts.length - textsBefore).toBe(1);
+      expect(decodeURIComponent(texts[textsBefore]!)).toContain('From=+15550700001'); // the client's own number
+      expect(decodeURIComponent(texts[textsBefore]!)).toContain('To=+15550709999');
     } finally { vi.useRealTimers(); }
   });
 });
@@ -202,14 +222,14 @@ async function emailOnlyClient(tag: string): Promise<{ owner: ReturnType<typeof 
   const signIn = (): Promise<Res> => { holder.owner = client(); return holder.owner.call('POST', '/host/openwop-app/test/login', { email: login, tenantId }); };
   const first = await signIn();
   expect(first.status).toBe(201);
-  const userId = String((first.body.user as { userId?: string } | undefined)?.userId ?? '');
-  const orgId = String((await holder.owner.call('POST', '/host/openwop-app/orgs', { name: `${tag} client (synthetic)` })).body.orgId);
+  const userId = String(get(first.body, 'user', 'userId') ?? '');
+  const orgId = String(get((await holder.owner.call('POST', '/host/openwop-app/orgs', { name: `${tag} client (synthetic)` })).body, 'orgId'));
   await createClient({ tenantId, orgId, name: `${tag} client (synthetic)`, createdBy: userId });
   await createSecretConnection({ tenantId, provider: 'sendgrid', kind: 'api_key', secret: 'SG.testkey', scope: 'user', userId });
   const email = `${tag}-contact-${randomBytes(2).toString('hex')}@acme.test`;
   const c = await holder.owner.call('POST', '/host/openwop-app/crm/contacts', { name: 'Sam', email });
   expect(c.status, JSON.stringify(c.body)).toBe(201);
-  const contactId = String(c.body.contactId);
+  const contactId = String(get(c.body, 'contactId'));
   await recordConsent({ tenantId, subjectKey: contactId, categories: { 'marketing.email': true }, source: 'test' });
   return { get owner() { return holder.owner; }, tenantId, orgId, contactId, email, signIn };
 }
@@ -221,34 +241,51 @@ async function startAndApprove(chainId: string, ctx: Awaited<ReturnType<typeof e
   registerWorkflow(expanded);
   const create = await ctx.owner.call('POST', '/runs', { workflowId: expanded.workflowId, inputs: params });
   expect(create.status, JSON.stringify(create.body)).toBe(201);
-  const runId = String(create.body.runId);
+  const runId = String(get(create.body, 'runId'));
   const status = async (): Promise<string> => {
     for (let i = 0; i < 120; i++) {
       const b = (await ctx.owner.call('GET', `/runs/${runId}`)).body;
-      const s = String(b.status);
+      const s = String(get(b, 'status'));
       if (s.startsWith('waiting') || ['completed', 'failed', 'cancelled'].includes(s)) return s;
       await new Promise((r) => setTimeout(r, 25));
     }
-    return 'timeout';
+    throw new Error(`run ${runId} did not settle within 120 polls`);
   };
   expect(await status()).toMatch(/^waiting/);
   if (extraSweepAtStartMs !== undefined) {
     vi.setSystemTime(new Date(Date.now() + extraSweepAtStartMs));
     expect((await ctx.signIn()).status).toBe(201);
-    expect(await sweepDueTimers(storage, timerResumeContinuation(storage, hostSuite), Date.now()), 'the grace timer').toBe(1);
+    expect(await sweepRun(runId), 'the grace timer').toBe(1);
     expect(await status()).toMatch(/^waiting/);
   }
-  const ints = ((await ctx.owner.call('GET', `/host/openwop-app/runs/${bareRunId(runId)}/interrupts`)).body.interrupts ?? []) as Array<{ token: string; nodeId: string }>;
-  const gate = ints.find((i) => i.nodeId.endsWith('_signoff'));
+  const ints = listOf((await ctx.owner.call('GET', `/host/openwop-app/runs/${bareRunId(runId)}/interrupts`)).body, 'interrupts');
+  const gate = ints.find((i) => endsWith(get(i, 'nodeId'), '_signoff'));
   expect(gate, JSON.stringify(ints)).toBeTruthy();
-  expect([200, 202, 204]).toContain((await ctx.owner.call('POST', `/interrupts/${gate!.token}`, { resumeValue: { decision: 'accept' } })).status);
+  expect((await ctx.owner.call('POST', `/interrupts/${String(get(gate, 'token'))}`, { resumeValue: { decision: 'accept' } })).status).toBe(200);
   return { runId, status };
 }
 
-async function sweepAfter(ctx: Awaited<ReturnType<typeof emailOnlyClient>>, ms: number): Promise<number> {
+/**
+ * Sweep due timers but CONTINUE only `runId`'s, and return how many of its timers fired.
+ * The store is shared by every case in this file, and a case that ran earlier leaves runs
+ * waiting on timers that a later case's clock jump makes due; a global sweep would count
+ * (and advance) those too, so the count would depend on case order.
+ */
+async function sweepRun(runId: string): Promise<number> {
+  const cont = timerResumeContinuation(storage, hostSuite);
+  let mine = 0;
+  await sweepDueTimers(storage, async (interrupt) => {
+    if (bareRunId(interrupt.runId) !== bareRunId(runId)) return;
+    mine += 1;
+    await cont(interrupt);
+  }, Date.now());
+  return mine;
+}
+
+async function sweepAfter(ctx: Awaited<ReturnType<typeof emailOnlyClient>>, ms: number, runId: string): Promise<number> {
   vi.setSystemTime(new Date(Date.now() + ms));
   expect((await ctx.signIn()).status).toBe(201);
-  return sweepDueTimers(storage, timerResumeContinuation(storage, hostSuite), Date.now());
+  return sweepRun(runId);
 }
 
 describe('ADR 0955 P5 — post-webinar and abandoned-signup end to end (J955WF-10)', () => {
@@ -258,14 +295,14 @@ describe('ADR 0955 P5 — post-webinar and abandoned-signup end to end (J955WF-1
       vi.setSystemTime(new Date('2026-10-20T09:00:00Z'));
       const ctx = await emailOnlyClient('p5c');
       const before = emails.length;
-      const { status } = await startAndApprove('campaign-journeys.post-webinar', ctx);
+      const { status, runId } = await startAndApprove('campaign-journeys.post-webinar', ctx);
       expect(await status()).toMatch(/^waiting/);
       expect(emails.length - before).toBe(1);
       await recordConsent({ tenantId: ctx.tenantId, subjectKey: ctx.contactId, categories: { 'marketing.email': false }, source: 'test' });
-      expect(await sweepAfter(ctx, 86_401_000)).toBe(1);
+      expect(await sweepAfter(ctx, 86_401_000, runId)).toBe(1);
       const mid = await status();
       expect(mid, 'after the first day').toMatch(/^waiting/);
-      expect(await sweepAfter(ctx, 86_401_000)).toBe(1);
+      expect(await sweepAfter(ctx, 86_401_000, runId)).toBe(1);
       expect(await status(), 'consent withdrawn is not a clean stop').toBe('failed');
       expect(emails.length - before).toBe(1);
     } finally { vi.useRealTimers(); }
@@ -277,13 +314,13 @@ describe('ADR 0955 P5 — post-webinar and abandoned-signup end to end (J955WF-1
       vi.setSystemTime(new Date('2026-10-20T09:00:00Z'));
       const ctx = await emailOnlyClient('p5w');
       const before = emails.length;
-      const { status } = await startAndApprove('campaign-journeys.post-webinar', ctx);
+      const { status, runId } = await startAndApprove('campaign-journeys.post-webinar', ctx);
       expect(await status()).toMatch(/^waiting/);
       expect(emails.length - before, 'the thank-you').toBe(1);
-      expect(await sweepAfter(ctx, 86_401_000), 'first day').toBe(1);
+      expect(await sweepAfter(ctx, 86_401_000, runId), 'first day').toBe(1);
       expect(await status()).toMatch(/^waiting/);
       expect(emails.length - before, 'nothing more after one day').toBe(1);
-      expect(await sweepAfter(ctx, 86_401_000), 'second day').toBe(1);
+      expect(await sweepAfter(ctx, 86_401_000, runId), 'second day').toBe(1);
       const end = await status();
       expect(end, end).toBe('completed');
       expect(emails.length - before, 'the follow-up').toBe(2);
@@ -302,15 +339,15 @@ describe('ADR 0955 P5 — post-webinar and abandoned-signup end to end (J955WF-1
       expect(emails.length - before, 'the reminder, after the grace hour and the sign-off').toBe(1);
       // The contact unsubscribes from this client's mail during the day's wait.
       await addSuppression(ctx.tenantId, ctx.email, 'unsubscribed', 'test', undefined, { channel: 'email', senderOrgId: ctx.orgId });
-      expect(await sweepAfter(ctx, 86_401_000)).toBe(1);
+      expect(await sweepAfter(ctx, 86_401_000, runIdOf)).toBe(1);
       const end = await status();
       // J955WF-12 — an unsubscribe is a correct end of the journey: the run COMPLETES through the
       // "stopped" terminal, it does not fail (a failed run here would teach operators to ignore failures).
       expect(end, 'an unsubscribe ends the journey cleanly').toBe('completed');
       expect(emails.length - before, 'no last reminder after an unsubscribe').toBe(1);
-      const ev = ((await ctx.owner.call('GET', `/host/openwop-app/runs/${bareRunId(runIdOf)}/debug-bundle`)).body.events ?? []) as Array<{ type?: string; nodeId?: string; payload?: { outputs?: unknown } }>;
-      expect(ev.some((e) => e.type === 'node.completed' && e.nodeId?.endsWith('_stopped-gate2')), 'the stopped terminal ran').toBe(true);
-      expect(ev.find((e) => e.type === 'node.completed' && e.nodeId?.endsWith('_gate2'))?.payload?.outputs).toMatchObject({ eligible: false, stopped: 'suppressed' });
+      const ev = listOf((await ctx.owner.call('GET', `/host/openwop-app/runs/${bareRunId(runIdOf)}/debug-bundle`)).body, 'events');
+      expect(ev.some((e) => get(e, 'type') === 'node.completed' && endsWith(get(e, 'nodeId'), '_stopped-gate2')), 'the stopped terminal ran').toBe(true);
+      expect(get(ev.find((e) => get(e, 'type') === 'node.completed' && endsWith(get(e, 'nodeId'), '_gate2')), 'payload', 'outputs')).toMatchObject({ eligible: false, stopped: 'suppressed' });
     } finally { vi.useRealTimers(); }
   });
 });

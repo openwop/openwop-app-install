@@ -2,7 +2,12 @@
  * ADR 0906 follow-up (ADR 0904 D12) — with no injected metadata, the
  * Certificate Manager adapter reads its token and project through the ONE
  * shared client, `host/gcpAdc.ts`. A metadata failure surfaces as a typed
- * provider error, not a raw fetch error.
+ * provider error, not a raw fetch error. TST-CWF-2.
+ *
+ * Red when (sabotage-witnessed, wave 69): the project id stops coming from the
+ * shared client (case 1); a `GcpMetadataError` is no longer mapped to the typed
+ * 503 `EdgeProviderError` (cases 2–3); the token read loses its 3 s bound
+ * (the `token` row of case 3).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GCP_METADATA_TOKEN_URL, __resetGcpMetadataForTests } from '../src/host/gcpAdc.js';
@@ -50,8 +55,14 @@ describe('the edge adapter uses host/gcpAdc by default', () => {
 
   it('no metadata server ⇒ a typed EdgeProviderError', async () => {
     stubMetadata(false);
-    const p = createGcpCertificateManagerProvider({ certMap: 'm1', fetch: async () => ({ ok: true, status: 200, text: async () => '{}' }) });
-    await expect(p.prepare('h.example.com')).rejects.toBeInstanceOf(EdgeProviderError);
+    const cmFetch = vi.fn(async () => ({ ok: true, status: 200, text: async () => '{}' }));
+    const p = createGcpCertificateManagerProvider({ certMap: 'm1', fetch: cmFetch });
+    const err = await p.prepare('h.example.com').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(EdgeProviderError);
+    expect((err as EdgeProviderError).status).toBe(503);
+    expect((err as EdgeProviderError).message).toContain('(not running on GCP?)');
+    // No Certificate Manager call is made without a token.
+    expect(cmFetch).not.toHaveBeenCalled();
   });
 
   it.each(['token', 'project'] as const)('bounds a stalled %s metadata read and preserves its typed error', async (which) => {

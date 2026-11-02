@@ -25,7 +25,7 @@ export const messages = {
   cardDirections: "{{count}} dirección(es)",
   open: 'Abrir',
   emptyTitle: 'Aún no hay briefs creativos',
-  emptyBody: 'Crea tu primer brief visual o genéralos desde una campaña.',
+  emptyBody: 'Crea tu primer brief visual o genéralos desde una campaña. Los briefs generados aparecen aquí cuando apruebas el borrador en el chat.',
   status_draft: 'borrador',
   status_review: 'en revisión',
   status_approved: 'aprobado',

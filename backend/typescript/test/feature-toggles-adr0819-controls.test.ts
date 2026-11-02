@@ -7,18 +7,28 @@
  *  - the revision precondition on DELETE;
  *  - the history route is superadmin-only;
  *  - a PUT for an undeclared toggle id is a 404, not an orphan row;
- *  - §1's restriction opt-out: a lapsed plan does NOT turn consent permissive;
+ *  - §1's restriction opt-out: a plan that EXCLUDES territories does NOT turn
+ *    territory scoping permissive (re-aimed in grade-tests w70 from `consent`,
+ *    which sits in no bundle, so no plan could ever exclude it);
  *  - TGWF-4: a USER-listed closed-beta member is served on the node lane.
+ *
+ * Tracker TST-DCA-1. Sabotage witnesses (grade-tests w70):
+ *  - red when `resolveConfig` stops evaluating `killed` first, or the store drops it
+ *  - red when the disable-lock ignores `next.killed`, or DELETE skips the revision
+ *  - red when the history route drops `requireSuperadmin`, or PUT accepts an undeclared id
+ *  - red when territory visibility resolves through the paywalled `resolveOne`
+ *  - red when the public docs lane resolves through the paywalled `resolveOne` (404)
+ *  - red when `ctx.features` drops the acting user from the subject (TGWF-4)
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { getSetCookies } from './headerCookies.js';
 import { createApp } from '../src/index.js';
-import { enableTenantOverride, resolveOne, saveConfig, getEffectiveConfig } from '../src/host/featureToggles/service.js';
+import { enableTenantOverride, resolveOne, saveConfig, getEffectiveConfig, getStoredConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { provisionDemoFeatures } from '../src/host/demoProvision.js';
-import { isAllowed } from '../src/features/consent/consentService.js';
+import { filterVisibleCrmRecords } from '../src/host/crmRecordVisibility.js';
 import { buildFeatureSurfaces } from '../src/host/featureSurfaces.js';
 import { createOrg } from '../src/host/accessControlService.js';
 
@@ -122,6 +132,9 @@ describe('§3 — the kill switch', () => {
     const cur = (await (await op.get(`${ADMIN}/crm`)).json()) as Record<string, unknown>;
     const res = await op.put(`${ADMIN}/crm`, { ...cur, killed: true });
     expect(res.status).toBe(409);
+    const body = (await res.json()) as { error?: string; details?: { dependents?: string[] } };
+    expect(body.error).toBe('conflict');
+    expect(body.details?.dependents).toContain('csm');
     expect((await getEffectiveConfig('crm'))?.killed).toBeFalsy();
   });
 
@@ -142,6 +155,7 @@ describe('§5 — the revision precondition on DELETE', () => {
     await setGlobal('docs', 'beta'); // someone else changes it
     const res = await op.del(`${ADMIN}/docs?revision=${loaded.revision}`);
     expect(res.status).toBe(409);
+    expect(((await res.json()) as { details?: { reason?: string } }).details?.reason).toBe('revision_conflict');
     expect((await getEffectiveConfig('docs'))?.status).toBe('beta');
     const fresh = (await (await op.get(`${ADMIN}/docs`)).json()) as { revision: string };
     expect((await op.del(`${ADMIN}/docs?revision=${fresh.revision}`)).status).toBe(200);
@@ -160,21 +174,37 @@ describe('§4 + hygiene — the admin surface', () => {
 
     const member = client();
     await member.login('oidc:adr0819c-member', 'user:adr0819c-member');
-    expect((await member.get(`${ADMIN}/notebooks/history`)).status).toBe(403);
+    const refused = await member.get(`${ADMIN}/notebooks/history`);
+    expect(refused.status).toBe(403);
+    const rb = (await refused.json()) as { error?: string; message?: string };
+    expect(rb.error).toBe('forbidden');
+    expect(rb.message).toContain('Feature-toggle administration requires a superadmin principal');
   });
 
   it('a PUT for an undeclared toggle id is 404', async () => {
     const res = await op.put(`${ADMIN}/no-such-feature-0819`, { status: 'on' });
     expect(res.status).toBe(404);
+    expect(((await res.json()) as { error?: string }).error).toBe('not_found');
+    expect(await getStoredConfig('no-such-feature-0819'), 'an orphan row was written').toBeNull();
   });
 });
 
 describe('§1 opt-outs — a lapsed plan never loosens a restriction', () => {
-  it('consent stays ENFORCED for a tenant whose plan excludes the consent feature', async () => {
-    await setGlobal('consent', 'on');
-    // No record and no policy: an enforcing consent denies marketing; a
-    // paywall-resolved "off" would have been permissive (returns true).
-    expect(await isAllowed('user:adr0819c-lapsed', 'subject-1', 'marketing')).toBe(false);
+  it('territory scoping stays ENFORCED for a tenant whose plan excludes territories', async () => {
+    await setGlobal('territories', 'on');
+    const tenantId = 'ws:adr0819c-lapsed';
+    // The premise: the plan really removes territories for this tenant.
+    expect((await resolveOne('territories', { tenantId }))?.blockedBy).toBe('plan');
+    const org = await createOrg({ tenantId, createdBy: 'u-lapsed', name: 'Lapsed org' });
+    // A reader with no membership: an ENFORCING scope shows them nothing; a
+    // paywall-resolved "off" would be allow-all (the row comes back).
+    const rows = [{ id: 'deal-1' }, { id: 'deal-2' }];
+    const visible = await filterVisibleCrmRecords({
+      tenantId, orgId: org.orgId, target: 'deal', callerSubject: 'oidc:adr0819c-stranger', rows, idOf: (r) => r.id,
+    });
+    expect(visible).toEqual([]);
+    // Control: a system read (no caller) is unscoped, so the rows exist to hide.
+    expect(await filterVisibleCrmRecords({ tenantId, orgId: org.orgId, target: 'deal', callerSubject: undefined, rows, idOf: (r) => r.id })).toEqual(rows);
   });
 });
 
@@ -186,20 +216,25 @@ describe('§1 opt-outs — a lapsed plan never darkens a PUBLIC lane (ADR 0419 s
     expect((await resolveOne('docs', { tenantId: 'user:adr0819c-docs' }))?.blockedBy).toBe('plan');
     // ...but a visitor reading the public docs is not the operator's customer.
     const res = await fetch(`${BASE}/host/openwop-app/public/${org.orgId}/docs`);
+    // A refused lane answers 404 `not_found` (docsService `listPublishedDocs`);
+    // served, the org has no published docs yet, so the nav is empty.
     expect(res.status).toBe(200);
+    expect(((await res.json()) as { docs: unknown }).docs).toEqual([]);
   });
 });
 
 describe('TGWF-4 — the node lane resolves the acting user', () => {
   it('a user-listed closed-beta member is served through ctx.features', async () => {
     await setGlobal('strategy', 'beta', { betaCohort: ['oidc:beta-person'] });
-    const surfaces = buildFeatureSurfaces({ tenantId: OPERATOR_TENANT, actingUserId: 'oidc:beta-person' } as Parameters<typeof buildFeatureSurfaces>[0]);
-    const methods = Object.values(surfaces.strategy ?? {});
-    expect(methods.length).toBeGreaterThan(0);
-    // Any refusal would be the uniform toggle error; a served call may still
-    // fail on its own arguments, which is not what this probe measures.
-    await methods[0]!({}).catch((err: { code?: string }) => {
-      expect(err.code).not.toBe('host_capability_disabled');
-    });
+    const codeOf = async (actingUserId: string): Promise<string | null> => {
+      const methods = Object.values(buildFeatureSurfaces({ tenantId: OPERATOR_TENANT, actingUserId }).strategy ?? {});
+      expect(methods.length).toBeGreaterThan(0);
+      // A served call may still fail on its own arguments; only the toggle
+      // refusal's code is what this case measures.
+      return methods[0]!({}).then(() => null, (err: { code?: string }) => err.code ?? null);
+    };
+    expect(await codeOf('oidc:beta-person')).not.toBe('host_capability_disabled');
+    // Control: someone outside the cohort IS refused on the same lane.
+    expect(await codeOf('oidc:not-in-cohort')).toBe('host_capability_disabled');
   });
 });

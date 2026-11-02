@@ -9,6 +9,14 @@
  *  - DLR2-B3  deleting a dealer left review cards NO action could ever clear
  *  - DLR2-B4  a decision taken outside the inbox left its card pending (and wedged)
  *  - DLR2-M3  no subject eraser: `decidedBy` survived erasure on every row
+ *
+ * TST-CUD-2. Each fix below was round-1 probe-witnessed: red when the partner routes
+ * skip the toggle or answer it with a different 404 message (token oracle), when
+ * a failed queue write is not flagged, when the public read or a viewer's GET
+ * repairs, when a dealer delete or a direct decision leaves its card pending, when
+ * a direct APPROVE closes as rejected, when the eraser skips `decidedBy` or erases
+ * another decider, when the repair keys on the flag, when a suspended dealer can be
+ * reactivated without its company, or when the card id is not derived from regId.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -19,6 +27,7 @@ import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { eraseSubject } from '../src/host/subjectErasure.js';
 import { listApprovals } from '../src/host/approvalService.js';
+import type { DealRegistration } from '../src/features/dealers/entities/registration.js';
 
 let BASE: string;
 let server: http.Server;
@@ -36,15 +45,20 @@ afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
 });
 
-interface Res<T = any> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> }
+interface Res<T> { status: number; body: T }
+/** The union of the response fields these routes return (each call reads only its own). */
+interface Body {
+  error: string; message: string; status: string;
+  user: { userId: string }; orgId: string; companyId: string; dealerId: string;
+  token: string; url: string; registrations: DealRegistration[];
+}
+interface Client { get: (p: string) => Promise<Res<Body>>; post: (p: string, b?: unknown) => Promise<Res<Body>>; patch: (p: string, b?: unknown) => Promise<Res<Body>>; del: (p: string) => Promise<Res<Body>> }
 function client(withCookie = true): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async (method: string, path: string, body?: unknown): Promise<Res<Body>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(withCookie && cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    if (withCookie) for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    if (withCookie) for (const c of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]!; }
+    return { status: res.status, body: (res.status === 204 ? {} : await res.json().catch(() => ({}))) as Body };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), del: (p) => call('DELETE', p) };
 }
@@ -67,7 +81,7 @@ async function setup(): Promise<{ owner: Client; orgId: string; dealerId: string
 describe('ADR 0669 — an issued partner link survives the v1 cut', () => {
   it('the link a portal-token mint hands out is the unversioned vendor path, and it serves anonymously', async () => {
     const { owner, orgId, dealerId } = await setup();
-    const url = (await owner.post(`${B(orgId)}/dealers/${dealerId}/portal-token`)).body.url as string;
+    const url = (await owner.post(`${B(orgId)}/dealers/${dealerId}/portal-token`)).body.url;
     const path = new URL(url).pathname;
     expect(path.startsWith('/v1'), `issued link ${path}: a /v1 link is a 410 after the cut`).toBe(false);
     expect((await client(false).get(path)).status).toBe(200);
@@ -120,7 +134,7 @@ describe('DLR2-B2 — a review card that never landed is not "awaiting review"',
 
     // Opening the console is what heals it: the admin list re-queues and clears the flag.
     const repaired = (await owner.get(`${B(orgId)}/registrations`)).body.registrations;
-    expect(repaired[0].queueFailed).toBeUndefined();
+    expect(repaired[0]!.queueFailed).toBeUndefined();
     expect((await listApprovals(tenantId, 'pending')).filter((a) => a.kind === 'dealer-registration')).toHaveLength(1);
   });
 
@@ -166,7 +180,7 @@ describe('DLR2-B3/B4 — a review card must never outlive the thing it decides',
     const { owner, orgId, dealerId, tenantId, token } = await setup();
     const anon = client(false);
     await anon.post(`/host/openwop-app/partner/${token}/register`, { dealTitle: 'Sample order', companyName: 'Initech' });
-    const regId = (await owner.get(`${B(orgId)}/registrations`)).body.registrations[0].regId;
+    const regId = (await owner.get(`${B(orgId)}/registrations`)).body.registrations[0]!.regId;
 
     // The workflow surface and the demo seeder both decide this way. Leaving the card
     // pending is worse than untidy: approving an already-REJECTED row 409s, the handler
@@ -175,8 +189,9 @@ describe('DLR2-B3/B4 — a review card must never outlive the thing it decides',
     await decideRegistration(tenantId, orgId, regId, 'rejected', 'user:ops');
 
     expect((await listApprovals(tenantId, 'pending')).filter((a) => a.kind === 'dealer-registration')).toHaveLength(0);
-    expect((await owner.get(`${B(orgId)}/registrations`)).body.registrations[0].status).toBe('rejected');
-    expect(dealerId).toBeTruthy();
+    expect((await owner.get(`${B(orgId)}/registrations`)).body.registrations[0]!.status).toBe('rejected');
+    // the dealer itself is untouched by a registration decision
+    expect((await owner.get(`${B(orgId)}/dealers/${dealerId}`)).body.status).toBe('active');
   });
 });
 
@@ -185,7 +200,7 @@ describe('review fold-in — defects the independent pass found in the fix', () 
     const { owner, orgId, tenantId, token } = await setup();
     const anon = client(false);
     await anon.post(`/host/openwop-app/partner/${token}/register`, { dealTitle: 'Fleet', companyName: 'Globex' });
-    const regId = (await owner.get(`${B(orgId)}/registrations`)).body.registrations[0].regId;
+    const regId = (await owner.get(`${B(orgId)}/registrations`)).body.registrations[0]!.regId;
 
     // The first version hard-coded `rejected` for BOTH directions, so this — the demo
     // seed's own path, and the `approve-registration` node's — wrote "Rejected" onto the
@@ -214,7 +229,7 @@ describe('review fold-in — defects the independent pass found in the fix', () 
     const { owner, orgId, tenantId, token } = await setup();
     const anon = client(false);
     await anon.post(`/host/openwop-app/partner/${token}/register`, { dealTitle: 'Sample', companyName: 'Initech' });
-    const regId = (await owner.get(`${B(orgId)}/registrations`)).body.registrations[0].regId;
+    const regId = (await owner.get(`${B(orgId)}/registrations`)).body.registrations[0]!.regId;
     const { decideRegistration } = await import('../src/features/dealers/entities/registration.js');
     await decideRegistration(tenantId, orgId, regId, 'rejected', 'user:ops');
     const resolved = (await listApprovals(tenantId, 'rejected')).filter((a) => a.kind === 'dealer-registration');
@@ -255,7 +270,7 @@ describe('review fold-in — defects the independent pass found in the fix', () 
     // assertion passed against the un-fixed code, which is how I know). What makes the
     // race impossible is that the id is DERIVED from the registration, so a second create
     // is an idempotent put rather than a second row. That is what this pins.
-    const regId = (await owner.get(`${B(orgId)}/registrations`)).body.registrations[0].regId;
+    const regId = (await owner.get(`${B(orgId)}/registrations`)).body.registrations[0]!.regId;
     expect(cards[0]!.approvalId).toBe(`appr:dealreg:${regId}`);
   });
 
@@ -278,14 +293,18 @@ describe('review fold-in — defects the independent pass found in the fix', () 
   it('B4: a dealer whose CRM company is gone cannot be walked back to active', async () => {
     const { owner, orgId, dealerId } = await setup();
     const companyId = (await owner.get(`${B(orgId)}/dealers/${dealerId}`)).body.companyId;
-    expect((await owner.post(`${B(orgId)}/dealers/${dealerId}`, undefined)).status).toBeGreaterThan(0); // no-op probe
-    await owner.del(`/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}/companies/${encodeURIComponent(companyId)}`);
+    expect((await owner.del(`/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}/companies/${encodeURIComponent(companyId)}`)).status).toBe(204);
+    // precondition: the company delete DID suspend the dealer — the guard below is
+    // only meaningful from `suspended` (a failed suspend would 200 the PATCH instead)
+    expect((await owner.get(`${B(orgId)}/dealers/${dealerId}`)).body.status).toBe('suspended');
     // The company delete auto-suspends (ADR 0283), whose whole point is that a
     // dangling-company dealer must not read as active. Shipping the reversal without
     // this guard is a one-click route straight back into that state.
     const res = await owner.patch(`${B(orgId)}/dealers/${dealerId}`, { status: 'active' });
     expect(res.status).toBe(409);
-    expect(JSON.stringify(res.body)).toMatch(/company/i);
+    expect(res.body.error).toBe('conflict');
+    expect(res.body.message).toMatch(/CRM company no longer exists, so it cannot be reactivated/);
+    expect((await owner.get(`${B(orgId)}/dealers/${dealerId}`)).body.status).toBe('suspended');
   });
 });
 
@@ -294,7 +313,7 @@ describe('DLR2-M3 — subject erasure reaches the dealers rows', () => {
     const { owner, orgId, tenantId, token } = await setup();
     const anon = client(false);
     await anon.post(`/host/openwop-app/partner/${token}/register`, { dealTitle: 'Fleet', companyName: 'Globex' });
-    const regId = (await owner.get(`${B(orgId)}/registrations`)).body.registrations[0].regId;
+    const regId = (await owner.get(`${B(orgId)}/registrations`)).body.registrations[0]!.regId;
     const { decideRegistration } = await import('../src/features/dealers/entities/registration.js');
     await decideRegistration(tenantId, orgId, regId, 'approved', 'user:manager-a');
 
@@ -303,19 +322,19 @@ describe('DLR2-M3 — subject erasure reaches the dealers rows', () => {
     await eraseSubject(tenantId, 'user:manager-a');
 
     const row = (await owner.get(`${B(orgId)}/registrations`)).body.registrations[0];
-    expect(row.decidedBy).toBe('[erased]');
-    expect(row.status).toBe('approved');           // the business decision survives
+    expect(row?.decidedBy).toBe('[erased]');
+    expect(row?.status).toBe('approved');         // the business decision survives
   });
 
   it('leaves another decider alone (the negative control)', async () => {
     const { owner, orgId, tenantId, token } = await setup();
     const anon = client(false);
     await anon.post(`/host/openwop-app/partner/${token}/register`, { dealTitle: 'Fleet', companyName: 'Globex' });
-    const regId = (await owner.get(`${B(orgId)}/registrations`)).body.registrations[0].regId;
+    const regId = (await owner.get(`${B(orgId)}/registrations`)).body.registrations[0]!.regId;
     const { decideRegistration } = await import('../src/features/dealers/entities/registration.js');
     await decideRegistration(tenantId, orgId, regId, 'approved', 'user:manager-b');
     await eraseSubject(tenantId, 'user:someone-else');
-    expect((await owner.get(`${B(orgId)}/registrations`)).body.registrations[0].decidedBy).toBe('user:manager-b');
+    expect((await owner.get(`${B(orgId)}/registrations`)).body.registrations[0]!.decidedBy).toBe('user:manager-b');
   });
 });
 
@@ -336,12 +355,12 @@ describe('R3 — the repair never writes for a viewer (the R2 deferral)', () => 
     const { listApprovals } = await import('../src/host/approvalService.js');
     // The viewer's GET returns the rows but performs NO repair.
     const seen = (await viewer.get(`${B(orgId)}/registrations`)).body.registrations;
-    expect(seen.some((r: { queueFailed?: boolean }) => r.queueFailed === true)).toBe(true); // shown, un-repaired
+    expect(seen.some((r) => r.queueFailed === true)).toBe(true); // shown, un-repaired
     expect((await listApprovals(tenantId, 'pending')).filter((a) => a.kind === 'dealer-registration')).toHaveLength(0);
 
     // The owner's visit heals it — same route, write-capable caller.
     const healed = (await owner.get(`${B(orgId)}/registrations`)).body.registrations;
-    expect(healed.every((r: { queueFailed?: boolean }) => r.queueFailed === undefined)).toBe(true);
+    expect(healed.every((r) => r.queueFailed === undefined)).toBe(true);
     expect((await listApprovals(tenantId, 'pending')).filter((a) => a.kind === 'dealer-registration')).toHaveLength(1);
   });
 });

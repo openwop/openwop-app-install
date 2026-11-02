@@ -27,10 +27,10 @@ import { renderForBrief, renderVariantsForBrief, listRenders, deleteRender, dele
 import { listTemplates } from './render/templates.js';
 import type { CreativeBrief } from './types.js';
 import { buildRunRecord, dispatchRunInBackground } from '../../host/runDispatch.js';
-import { insertRunWithStartContext } from '../../host/runInsert.js';
-import { withRunLimit } from '../../host/runLimitSeam.js';
+import { chargedAdmission, insertRunWithStartContext } from '../../host/runInsert.js';
 import { seedRunVariables } from '../../host/variablesRuntime.js';
-import { reserveConcurrentSlot } from '../../middleware/rateLimit.js';
+import { refuseRunAdmission, runAdmissionFor, runQuotaMiddleware } from '../../middleware/rateLimit.js';
+import { AdmissionRefusedError } from '../../storage/storage.js';
 import { CREATIVE_BRIEFS_REEL_ID } from './reelWorkflow.js';
 import { runLinks } from '../../middleware/protocolVersion.js';
 import { resolveHeadlessAiDescribed, resolveHeadlessAiForSpec } from '../../host/headlessAi.js';
@@ -337,7 +337,9 @@ export function registerCreativeBriefsRoutes(deps: RouteDeps): void {
   // the run's status/events URLs; the FE polls, then the reel render appears in
   // the brief's renders list. A sync route would force a creative-briefs→
   // aiProviders adapter import — the coupling the node avoids (ADR 0411 P3b).
-  app.post(`${ORG}/briefs/:briefId/reel`, async (req, res, next) => {
+  // ADR 0987 D3 — a run-creating route: per-minute and per-day windows and the
+  // caller's concurrency scope, like every other HTTP run lane (it had none).
+  app.post(`${ORG}/briefs/:briefId/reel`, runQuotaMiddleware(), async (req, res, next) => {
     try {
       const { user, orgId, tenantId } = await authz(req, 'workspace:write');
       const briefId = req.params.briefId;
@@ -363,10 +365,18 @@ export function registerCreativeBriefsRoutes(deps: RouteDeps): void {
         owner: ownerStampFromRequest(req),
       });
       // ADR 0551 P1 — `enqueueDispatch`: the 202 below promises a start.
-      // ADR 0821 P5 follow-up — the plan's monthly run limit (a no-op until wired).
-      await withRunLimit(tenantId, () => insertRunWithStartContext(storage, run, { definition: wf.definition, enqueueDispatch: true }));
+      // ADR 0987 D3 — the plan's monthly run limit and the caller's concurrency
+      // slot, counted in the insert (D2); a full scope wrote nothing.
+      try {
+        await insertRunWithStartContext(storage, run, { admission: chargedAdmission(runAdmissionFor(req)), definition: wf.definition, enqueueDispatch: true });
+      } catch (err) {
+        if (err instanceof AdmissionRefusedError) {
+          refuseRunAdmission(req, res);
+          return;
+        }
+        throw err;
+      }
       seedRunVariables(run.runId, wf.definition.variables, inputs);
-      reserveConcurrentSlot(req, run.runId);
       res.status(202).json({
         runId: run.runId,
         status: 'pending',

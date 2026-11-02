@@ -256,7 +256,7 @@ export function ProjectDetailPage(): JSX.Element {
       {actionError ? <Notice variant="error" announce={actionError}>{actionError}</Notice> : null}
 
       {!canWrite ? (
-        <Notice variant="info"><Trans i18nKey="readOnlyNotice" ns="projects" components={{ 0: <code /> }} /></Notice>
+        <Notice variant="info"><Trans i18nKey="readOnlyNotice" ns="projects" components={[<code />]} /></Notice>
       ) : null}
 
       <Tabs
@@ -298,7 +298,7 @@ export function ProjectDetailPage(): JSX.Element {
           client={knowledgeClient}
           readOnly={!canWrite}
           copy={{
-            intro: <Trans i18nKey="knowledgeIntro" ns="projects" components={{ 0: <strong /> }} />,
+            intro: <Trans i18nKey="knowledgeIntro" ns="projects" components={[<strong />]} />,
             emptyBody: t('knowledgeEmptyBody'),
             searchTitle: t('knowledgeSearchTitle'),
             searchPlaceholder: t('knowledgeSearchPlaceholder'),

@@ -32,6 +32,8 @@ import {
 } from '../../../packs/feature.campaign-channels.nodes/platformLimits.mjs';
 import { nodes as channelNodes, CHANNEL_SPEC } from '../../../packs/feature.campaign-channels.nodes/index.mjs';
 
+// ADR 1020 D3 — `enabledChannels` lists every channel: generate now SKIPS a channel
+// the brief does not enable, and these cases exercise each channel's generation.
 // FU-CODE-1 — the fields the REAL assembleContext projection carries (pinned by
 // the projection-contract test in campaign-brief-kb-integration.test.ts). The
 // mock REJECTS anything else, so a test can never go green on a field the real
@@ -42,7 +44,7 @@ function briefFeature(extra: Record<string, unknown> = {}) {
     if (!PROJECTION_FIELDS.has(k)) throw new Error(`briefFeature mock: '${k}' is not a field the real assembleContext projection carries`);
   }
   return {
-    assembleContext: async () => ({ found: true, brief: { id: 'b1', orgId: 'o1', productName: 'FlashPick', ...extra }, contextText: 'CONTEXT', valid: true, enabledChannels: ['ad_variants'], kernel: { headline: 'H', primaryCta: 'C', proofPoints: [] } }),
+    assembleContext: async () => ({ found: true, brief: { id: 'b1', orgId: 'o1', productName: 'FlashPick', ...extra }, contextText: 'CONTEXT', valid: true, enabledChannels: ['landing_page', 'ad_variants', 'email_sequence', 'creative_briefs', 'social_posts'], kernel: { headline: 'H', primaryCta: 'C', proofPoints: [] } }),
     getKernel: async () => ({ found: true, kernel: { headline: 'H', primaryCta: 'C', proofPoints: [] } }),
   };
 }
@@ -242,8 +244,20 @@ describe('generate node enforcement', () => {
     expect(ragArgs[1]!.minScore).toBeUndefined(); // best-effort keeps the service default
   });
 
-  it('CB-CODE-5: creative-brief creation is idempotent on (campaignBriefId, title) and counts failures', async () => {
-    const draft = { briefs: [
+  it('ADR 1020 D14: generate creates NO managed creative briefs (they wait for the approval)', async () => {
+    let creates = 0;
+    const cbSurface = { list: async () => ({ briefs: [] }), create: async () => { creates += 1; return { brief: { briefId: 'x' } }; } };
+    const out = await channelNodes['feature.campaign-channels.nodes.generate']({
+      features: { 'campaign-brief': briefFeature(), 'creative-briefs': cbSurface },
+      callAI: async () => ({ data: { briefs: [{ format: 'hero-image', sceneDescription: 'A warehouse at dawn' }] } }), inputs: { briefId: 'b1', channel: 'creative_briefs' },
+    });
+    expect(out.status).toBe('success');
+    expect(creates).toBe(0);
+    expect(out.outputs).not.toHaveProperty('createdBriefIds');
+  });
+
+  it('CB-CODE-5: create-creative-briefs (after the approval) is idempotent on (campaignBriefId, title) and counts failures', async () => {
+    const draft = { channel: 'creative_briefs', briefId: 'b1', briefs: [
       { format: 'hero-image', sceneDescription: 'A warehouse at dawn' },
       { format: 'social-card', sceneDescription: 'A robot picking' },
     ] };
@@ -256,9 +270,9 @@ describe('generate node enforcement', () => {
         throw new Error('should not re-create an existing brief');
       },
     };
-    const out = await channelNodes['feature.campaign-channels.nodes.generate']({
+    const out = await channelNodes['feature.campaign-channels.nodes.create-creative-briefs']({
       features: { 'campaign-brief': briefFeature(), 'creative-briefs': cbSurface },
-      callAI: async () => ({ data: draft }), inputs: { briefId: 'b1', channel: 'creative_briefs' },
+      inputs: { briefId: 'b1', draft },
     });
     expect(out.status).toBe('success');
     expect(created).toHaveLength(1); // only the missing one was created
@@ -270,12 +284,91 @@ describe('generate node enforcement', () => {
       list: async () => ({ briefs: [] }),
       create: async () => { throw new Error('boom'); },
     };
-    const bad = await channelNodes['feature.campaign-channels.nodes.generate']({
+    const bad = await channelNodes['feature.campaign-channels.nodes.create-creative-briefs']({
       features: { 'campaign-brief': briefFeature(), 'creative-briefs': failing },
-      callAI: async () => ({ data: draft }), inputs: { briefId: 'b1', channel: 'creative_briefs' },
+      inputs: { briefId: 'b1', draft },
     });
-    expect(bad.status).toBe('success'); // entity creation stays additive
-    expect(bad.outputs!.briefCreateErrors).toBe(2);
+    // Grade-ux H1 — creating NOTHING after the approval is a failure, not a quiet "completed".
+    expect(bad).toMatchObject({ status: 'failed', error: { code: 'creative_briefs_not_created' } });
+    // A partial success says what landed, and where.
+    expect(out.outputs!.summary).toBe('2 creative briefs are on the Creative Briefs page.');
+
+    // A draft that is not an approved creative_briefs draft is refused, typed.
+    const wrong = await channelNodes['feature.campaign-channels.nodes.create-creative-briefs']({
+      features: { 'campaign-brief': briefFeature(), 'creative-briefs': cbSurface },
+      inputs: { briefId: 'b1', draft: { channel: 'social_posts', posts: [] } },
+    });
+    expect(wrong).toMatchObject({ status: 'failed', error: { code: 'validation_error' } });
+  });
+
+  it('ADR 1020 D13: a null optional field and a stray citation shape cost no repair; an empty landing page does', async () => {
+    let calls = 0;
+    const ok = await channelNodes['feature.campaign-channels.nodes.generate']({
+      features: { 'campaign-brief': briefFeature() },
+      callAI: async () => { calls += 1; return { data: { emails: [{ position: 1, subjectLines: ['S'], body: 'B', ctaText: null }], citations: [{ marker: '[src_1]', claim: 'x' }, 'stray'] } }; },
+      inputs: { briefId: 'b1', channel: 'email_sequence' },
+    });
+    expect(ok.status).toBe('success');
+    expect(calls).toBe(1);
+    expect((ok.outputs?.draft as { citations?: unknown }).citations).toEqual([{ marker: '[src_1]' }]);
+    const emptyPage = await channelNodes['feature.campaign-channels.nodes.generate']({
+      features: { 'campaign-brief': briefFeature() },
+      callAI: async () => ({ data: { title: 'T', sections: [] } }), inputs: { briefId: 'b1', channel: 'landing_page' },
+    });
+    expect(emptyPage).toMatchObject({ status: 'failed', error: { code: 'generation_invalid' } });
+  });
+
+  it('grade-code H1: the platform-limit regeneration must also pass the closed-world check, or the validated draft is kept and truncated', async () => {
+    let n = 0;
+    const longHeadline = 'H'.repeat(200);
+    const out = await channelNodes['feature.campaign-channels.nodes.generate']({
+      features: { 'campaign-brief': briefFeature() },
+      callAI: async () => {
+        n += 1;
+        return n === 1
+          ? { data: { platformSets: [{ platform: 'google', variants: [{ headline: longHeadline, description: 'D', cta: 'Go' }] }] } }
+          : { data: { platformSets: [] } }; // the limit regeneration comes back empty
+      },
+      inputs: { briefId: 'b1', channel: 'ad_variants' },
+    });
+    expect(out.status).toBe('success');
+    const sets = (out.outputs?.draft as { platformSets: unknown[] }).platformSets;
+    expect(sets).toHaveLength(1); // the empty regeneration did NOT replace the validated draft
+  });
+
+  it('ADR 1020 D13 (CS70WF-23): an empty or off-schema draft is repaired once, then a typed generation_invalid; identity cannot be overwritten', async () => {
+    let calls = 0;
+    const empty = await channelNodes['feature.campaign-channels.nodes.generate']({
+      features: { 'campaign-brief': briefFeature() },
+      callAI: async () => { calls += 1; return { data: { emails: [] } }; }, inputs: { briefId: 'b1', channel: 'email_sequence' },
+    });
+    expect(calls).toBe(2);
+    expect(empty).toMatchObject({ status: 'failed', error: { code: 'generation_invalid' } });
+    // Plain words on the run card: no `draft.` paths, items counted from one.
+    expect(empty.error?.message).toContain('emails is empty');
+    expect(empty.error?.message).not.toContain('draft.');
+
+    const unreadable = await channelNodes['feature.campaign-channels.nodes.generate']({
+      features: { 'campaign-brief': briefFeature() },
+      callAI: async () => ({ data: { emails: [{ position: 1, subjectLines: 'x', body: 'B' }] } }), inputs: { briefId: 'b1', channel: 'email_sequence' },
+    });
+    expect(unreadable.error?.message).toContain('email 1: subject lines must be a list');
+
+    const wrongType = await channelNodes['feature.campaign-channels.nodes.generate']({
+      features: { 'campaign-brief': briefFeature() },
+      callAI: async () => ({ data: { posts: 'x' } }), inputs: { briefId: 'b1', channel: 'social_posts' },
+    });
+    expect(wrongType).toMatchObject({ status: 'failed', error: { code: 'generation_invalid' } });
+
+    // A repaired reply passes; the model can never rename the channel or brief.
+    let n = 0;
+    const repaired = await channelNodes['feature.campaign-channels.nodes.generate']({
+      features: { 'campaign-brief': briefFeature() },
+      callAI: async () => { n += 1; return n === 1 ? { data: { emails: [{ position: 1 }] } } : { data: { emails: [{ position: 1, subjectLines: ['S'], body: 'B' }] } }; },
+      inputs: { briefId: 'b1', channel: 'email_sequence' },
+    });
+    expect(repaired.status).toBe('success');
+    expect(repaired.outputs?.draft).toMatchObject({ channel: 'email_sequence', briefId: 'b1' });
   });
 });
 

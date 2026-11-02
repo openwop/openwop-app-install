@@ -401,6 +401,13 @@ export function defaultConnectionPackRoots(): string[] {
 // ---------------------------------------------------------------------------
 
 const seamInstalledVersions = new Map<string, string>();
+/** Ids no definition held when a seam install first registered them. A seam may
+ *  configure these; a seam install OVER a real provider never joins this set. */
+const seamMintedProviders = new Set<string>();
+
+export function isSeamMintedProvider(id: string): boolean {
+  return seamMintedProviders.has(id);
+}
 
 export interface SeamInstallOutcome {
   installed: boolean;
@@ -439,8 +446,10 @@ export function installConnectionPackManifest(raw: unknown): SeamInstallOutcome 
     const version = manifest.version;
     const prev = seamInstalledVersions.get(id);
     assertProviderIdentity(manifest, prev);
+    const minted = getProvider(id) === null;
     const registered = toProviderManifest(manifest.provider);
     registerProvider(registered, { packName: manifest.name });
+    if (minted) seamMintedProviders.add(id);
     verifyMcpReachOnRegistration(registered); // RFC 0199 §B.4
     seamInstalledVersions.set(id, version);
     log.info('seam-installed connection pack', { pack: packName, provider: id, version });

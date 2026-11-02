@@ -29,7 +29,7 @@ vi.mock('../../client/runsClient.js', async (importActual) => ({
   getRun: (runId: string) => getRun(runId),
 }));
 
-import { seedRunState, turnsToBubbles, openConversationSession, streamDeltaFromEvent, exchangeSettleSignal, exchangeErrorPayload, toolActivityFromEvent, titledFromEvent, recallUsedFromEvent, contextDegradedFromEvent } from '../conversationTransport.js';
+import { seedRunState, turnsToBubbles, openConversationSession, streamDeltaFromEvent, exchangeSettleSignal, exchangeErrorPayload, toolActivityFromEvent, titledFromEvent, recallUsedFromEvent, contextDegradedFromEvent, contextBudgetedFromEvent } from '../conversationTransport.js';
 import type { ConversationTurn } from '../conversationClient.js';
 
 const turn = (p: Partial<ConversationTurn> & Pick<ConversationTurn, 'messageId' | 'role' | 'turnIndex' | 'from'>): ConversationTurn => ({
@@ -208,6 +208,23 @@ describe('contextDegradedFromEvent — RCL-UX-2/RCL-7 degradation consumption', 
     expect(contextDegradedFromEvent({ type: 'openwop-app.conversation.context-degraded', sequence: 9, payload: {} }, 3)).toBeNull();
     expect(contextDegradedFromEvent({ type: 'openwop-app.conversation.context-degraded', sequence: 9, payload: { degraded: [42, ''] } }, 3)).toBeNull();
     expect(contextDegradedFromEvent({ type: 'conversation.exchanged', sequence: 9, payload: { degraded: ['persona'] } }, 3)).toBeNull();
+  });
+});
+
+// ADR 1003 D5 — the window's omitted-turn count reaches the reply. Sabotage:
+// accepting a replayed event (sequence ≤ start) or a non-positive count reds it.
+describe('contextBudgetedFromEvent — ADR 1003 D5', () => {
+  const T = 'openwop-app.conversation.context-budgeted';
+  it('returns the omitted-turn count from a live event', () => {
+    expect(contextBudgetedFromEvent({ type: T, sequence: 9, payload: { conversationId: 'c', omittedTurns: 6 } }, 3)).toBe(6);
+  });
+  it('rejects replayed, malformed and non-positive counts, and other types', () => {
+    expect(contextBudgetedFromEvent({ type: T, sequence: 3, payload: { omittedTurns: 6 } }, 3)).toBeNull();
+    expect(contextBudgetedFromEvent({ type: T, sequence: 9, payload: { omittedTurns: 0 } }, 3)).toBeNull();
+    expect(contextBudgetedFromEvent({ type: T, sequence: 9, payload: { omittedTurns: 2.5 } }, 3)).toBeNull();
+    expect(contextBudgetedFromEvent({ type: T, sequence: 9, payload: { omittedTurns: '6' } }, 3)).toBeNull();
+    expect(contextBudgetedFromEvent({ type: T, sequence: 9, payload: {} }, 3)).toBeNull();
+    expect(contextBudgetedFromEvent({ type: 'openwop-app.conversation.context-degraded', sequence: 9, payload: { omittedTurns: 6 } }, 3)).toBeNull();
   });
 });
 

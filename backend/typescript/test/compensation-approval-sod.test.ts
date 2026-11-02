@@ -13,6 +13,12 @@
  * Registering per-route would leave the other two open, which is exactly the
  * gap the assistant-action check was added to close (`features/assistant/
  * actionApproval.ts`).
+ *
+ * Tracker: TST-CGE-1. Red when (compensationRuntime.ts
+ * `registerCompensationApprovalEligibility`): the requester-equals-decider check is
+ * dropped (or honours `isPersonalOwner`); an unidentified decider is let through; the
+ * wildcard-operator escape is removed; or the card's `compensationAction` grows a
+ * field beyond the closed id/type-name set.
  */
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -52,7 +58,7 @@ describe('RFC 0151 §E — separation of duties on a compensation approval', () 
     const approval = await gated('user:alice');
     await expect(
       assertApprovalEligibility(T, 'user:alice', approval),
-    ).rejects.toThrow(/separation of duties/i);
+    ).rejects.toMatchObject({ code: 'forbidden_scope', httpStatus: 403, message: expect.stringMatching(/separation of duties/i) });
   });
 
   it('allows a different human', async () => {
@@ -64,7 +70,7 @@ describe('RFC 0151 §E — separation of duties on a compensation approval', () 
     const approval = await gated('user:alice');
     await expect(
       assertApprovalEligibility(T, undefined, approval),
-    ).rejects.toThrow(/identified approver/i);
+    ).rejects.toMatchObject({ code: 'forbidden_scope', httpStatus: 403, message: expect.stringMatching(/identified approver/i) });
   });
 
   it('honours the wildcard-OPERATOR escape the routes already grant', async () => {
@@ -85,7 +91,7 @@ describe('RFC 0151 §E — separation of duties on a compensation approval', () 
     const approval = await gated('user:alice');
     await expect(
       assertApprovalEligibility(T, 'user:alice', approval, { isPersonalOwner: true }),
-    ).rejects.toThrow(/separation of duties/i);
+    ).rejects.toMatchObject({ code: 'forbidden_scope', httpStatus: 403, message: expect.stringMatching(/separation of duties/i) });
   });
 });
 
@@ -97,12 +103,17 @@ describe('APPR-5 — the new kind is fully wired', () => {
 
   it('the approval card is content-free — ids and type names only', async () => {
     const approval = await gated('user:alice');
-    const serialized = JSON.stringify(approval).toLowerCase();
     // §D/§G keep provider bodies and credentials off the durable compensation
-    // path, and an approval row an operator reads is on that path.
-    for (const forbidden of ['-----begin', 'bearer ', 'sk-', 'providerresponse']) {
-      expect(serialized.includes(forbidden)).toBe(false);
-    }
-    expect(approval.compensationAction?.compensationId).toBe('cmp_abc');
+    // path, and an approval row an operator reads is on that path. The card's
+    // action block is a CLOSED set of ids and type names — asserted exactly, so a
+    // field that could carry an effect payload cannot be added unnoticed. (A
+    // marker grep over this fixture could not fail: its inputs carry no secret.)
+    expect(approval.compensationAction).toEqual({
+      runId: 'run-1',
+      compensationId: 'cmp_abc',
+      nodeId: 'charge',
+      compensationNodeTypeId: 'test.payment.refund',
+      requestedBy: 'user:alice',
+    });
   });
 });

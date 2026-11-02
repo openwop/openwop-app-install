@@ -1,9 +1,18 @@
 /**
- * PMC-5 — the install boundary rejects a structurally invalid manifest.
+ * PMC-5 — the canonical manifest gate (`assertCanonicalManifest`) rejects a
+ * structurally invalid manifest of an ENFORCED kind.
  *
  * `registryInstaller` verified SRI integrity + Ed25519 signature and nothing else,
  * so a correctly-signed pack with an invalid manifest installed cleanly. A
- * signature proves AUTHORSHIP, not SHAPE.
+ * signature proves AUTHORSHIP, not SHAPE. This file tests the gate function; the
+ * call from `registryInstaller.ts` is not exercised here (grade-code row
+ * TST-CBB-2W).
+ *
+ * Tracker: TST-CBB-2 (/grade-tests wave 67). Red when (probe-witnessed,
+ * 2026-10-29): the enforced-kind check returns early, or a failed schema
+ * validation is treated as a pass (rejects case); the unparseable branch returns
+ * instead of throwing (unparseable case); `artifact-type` is added to
+ * `ENFORCED_KINDS` (unenforced case).
  */
 import { describe, expect, it } from 'vitest';
 import { assertCanonicalManifest, ENFORCED_KINDS } from '../src/packs/canonicalManifestGate.js';

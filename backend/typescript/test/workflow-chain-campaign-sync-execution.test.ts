@@ -11,7 +11,10 @@
  *    `sync` reads the REAL (empty) `ctx.ads.listDispatches()` ledger and returns
  *    the honest `outcome: 'no_dispatches'` (the HTTP-route twin is pinned in
  *    `campaign-sync.test.ts`). `notify` (the in-app notifications node) then
- *    delivers to the tenant: `emitted: true, audience: 'tenant'`. Its `title`
+ *    tells the run's person: `emitted: true, audience: 'self'` — since ADR 1022
+ *    a client org's sync result is not a workspace broadcast — with the sync's
+ *    counts-only `summary` as its message (the `sync.summary → notify.message`
+ *    edge). Its `title`
  *    rides the node's declared `inputs`, which reach `ctx.inputs` through ADR
  *    0237 / CHAINX-5 (an earlier header said declared inputs were stripped and
  *    that `notify` degraded to `sent:false` — both stale, corrected w31).
@@ -143,12 +146,12 @@ describe('campaign-sync.daily-metrics — real executor, honest empty-ledger out
 
     const events = await bundleEvents(owner, runId);
     const syncOutputs = completedOutputs(events, 'sync');
-    expect(syncOutputs).toMatchObject({ outcome: 'no_dispatches' });
+    expect(syncOutputs).toMatchObject({ outcome: 'no_dispatches', summary: 'Nothing to sync: no campaign launched from this workspace on meta.' });
 
     const notifyOutputs = completedOutputs(events, 'notify');
     // Was `{ sent:false, provider:'expo', error:'notification_not_connected' }` —
     // a push that never went anywhere, under a green run. The in-app node delivers.
-    expect(notifyOutputs).toMatchObject({ emitted: true, audience: 'tenant' });
+    expect(notifyOutputs).toMatchObject({ emitted: true, audience: 'self' });
   });
 });
 

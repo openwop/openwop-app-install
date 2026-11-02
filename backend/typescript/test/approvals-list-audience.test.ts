@@ -12,6 +12,11 @@
  * list route with any of the six kinds. A green suite that would be green either way is why
  * the leak survived in the first place; the mechanism is witnessed in
  * `approval-audience-owner.test.ts`, and this witnesses the WIRING.
+ *
+ * TST-BZB-12 (grade-tests w66). Red when the list route stops filtering through
+ * `mayViewApproval` (legs 1–2). Every row is seeded ONCE in `beforeAll`, so no leg depends
+ * on another leg having run first (leg 2 used to read leg 1's seed, and read nothing when
+ * shuffled first); leg 2 carries its own positive control.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -72,6 +77,8 @@ beforeAll(async () => {
   });
   cookie = getSetCookies(login.headers).join('; ');
   expect(tenantId, 'the fixture needs a real tenant — otherwise every leg is vacuous').toBeTruthy();
+  for (const k of SCOPED) await seed(k, `SECRET-${k}`);
+  await seed('run-proposal', 'VISIBLE-run-proposal');
 });
 afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
 
@@ -84,7 +91,6 @@ const listKinds = async (): Promise<string[]> => {
 
 describe('ADR 0672 D1 — the list route filters by the audience owner', () => {
   it('leg 1: a plain tenant member sees NONE of the six kinds the projection scopes', async () => {
-    for (const k of SCOPED) await seed(k, `SECRET-${k}`);
     const kinds = await listKinds();
     for (const k of SCOPED) {
       expect(kinds, `${k} must not reach a member who cannot decide it`).not.toContain(k);
@@ -93,7 +99,10 @@ describe('ADR 0672 D1 — the list route filters by the audience owner', () => {
 
   it('leg 2: the row TEXT never reaches them either — existence and content both withheld', async () => {
     const res = await fetch(`${BASE}/host/openwop-app/approvals?status=pending`, { headers: { cookie } });
+    expect(res.status).toBe(200);
     const raw = JSON.stringify(await res.json());
+    // Positive control: the same response DOES carry a visible row's text.
+    expect(raw, 'the list returned nothing at all — the leak check below would be vacuous').toContain('VISIBLE-run-proposal');
     for (const k of SCOPED) {
       expect(raw, `the proposal text for ${k} leaked`).not.toContain(`SECRET-${k}`);
     }
@@ -101,7 +110,6 @@ describe('ADR 0672 D1 — the list route filters by the audience owner', () => {
 
   it('leg 3 (positive control): a TENANT-SCOPED kind is still listed — the filter is not a blanket deny', async () => {
     // Without this, legs 1-2 would pass against a route that returns nothing at all.
-    await seed('run-proposal', 'VISIBLE-run-proposal');
     const kinds = await listKinds();
     expect(kinds, 'run-proposal has no audience rule and must stay visible').toContain('run-proposal');
   });

@@ -25,7 +25,7 @@ export const messages = {
   cardDirections: "{{count}} direção(ões)",
   open: 'Abrir',
   emptyTitle: 'Ainda não há briefs criativos',
-  emptyBody: 'Crie seu primeiro brief visual ou gere-os a partir de uma campanha.',
+  emptyBody: 'Crie seu primeiro brief visual ou gere-os a partir de uma campanha. Os briefs gerados aparecem aqui depois que você aprova o rascunho no chat.',
   status_draft: 'rascunho',
   status_review: 'em revisão',
   status_approved: 'aprovado',

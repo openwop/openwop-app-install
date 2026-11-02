@@ -140,7 +140,7 @@ describe('ADR 0829 D4 — re-entrant dispatch passes', () => {
       executeRun: async (_s: Storage, child: RunRecord) => { await storage.updateRun(child.runId, { status: 'completed', updatedAt: new Date().toISOString() }); return undefined; },
     });
     const now = new Date().toISOString();
-    await insertRunWithStartContext(storage, { runId: 'run-reentry', workflowId: 'p', tenantId: 't-re', status: 'running', inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now });
+    await insertRunWithStartContext(storage, { runId: 'run-reentry', workflowId: 'p', tenantId: 't-re', status: 'running', inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now }, { admission: { plan: 'exempt:test-fixture' } });
     const m = new Map<string, unknown>();
     const vars = { get: (n: string): unknown => m.get(n), set: (n: string, v: unknown): void => { m.set(n, v); } };
     const supervisor = { agentId: 'orchestrator.reentry', decisions: [{ kind: 'next-worker', nextWorkerIds: ['wf-a'] }], handoffs: { 'wf-a': { toAgentId: 'agent.a', intent: 'do a' } } };

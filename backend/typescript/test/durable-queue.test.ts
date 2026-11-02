@@ -1,3 +1,18 @@
+/**
+ * Durable host.queue + host.messaging (queueBus) adapters
+ * (`src/host/durable/durableQueue.ts`, Phase 2) on the dialect-agnostic sqlite
+ * store. TST-CWD-5. The broader cross-surface tenant sweep is
+ * durable-isolation.test.ts (CTI-1).
+ *
+ * Red when (sabotage-witnessed, wave 69): dequeue claims a row without winning
+ * its delete (duplicates under 80 concurrent consumers — unforced: every
+ * consumer reaches its page read before any delete, which is what the probe
+ * showed); the claim takes the page tail (FIFO) or sequence keys stop being
+ * zero-padded (12 messages, so 10 would sort before 2); the tenant segment is
+ * dropped; nack stops incrementing deliveryCount or ignores `requeue:false`;
+ * the DLQ subject changes; a double ack reports success; a stream snapshot is
+ * returned without `fromBeginning`; an unknown delivery token changes reason.
+ */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
@@ -17,12 +32,12 @@ describe('durable queue surface', () => {
   const q: QueueSurface = createDurableQueue({ tenantId: 'q-t' });
 
   it('enqueue/dequeue is FIFO and survives in the shared store', async () => {
-    await q.enqueue({ queue: 'jobs', payload: { n: 1 } });
-    await q.enqueue({ queue: 'jobs', payload: { n: 2 } });
-    await q.enqueue({ queue: 'jobs', payload: { n: 3 } });
-    expect((await q.dequeue({ queue: 'jobs' })).payload).toEqual({ n: 1 });
-    expect((await q.dequeue({ queue: 'jobs' })).payload).toEqual({ n: 2 });
-    expect((await q.dequeue({ queue: 'jobs' })).payload).toEqual({ n: 3 });
+    // Twelve, not three: past 9 a lexicographic key order would put 10 before 2,
+    // so this also proves the sequence keys are zero-padded.
+    for (let i = 1; i <= 12; i++) await q.enqueue({ queue: 'jobs', payload: { n: i } });
+    const order: unknown[] = [];
+    for (let i = 1; i <= 12; i++) order.push((await createDurableQueue({ tenantId: 'q-t' }).dequeue({ queue: 'jobs' })).payload);
+    expect(order).toEqual(Array.from({ length: 12 }, (_, i) => ({ n: i + 1 })));
     expect(await q.dequeue({ queue: 'jobs' })).toEqual({ found: false });
   });
 
@@ -42,6 +57,8 @@ describe('durable queue surface', () => {
     const other = createDurableQueue({ tenantId: 'q-other' });
     expect(await other.dequeue({ queue: 'a' })).toEqual({ found: false }); // other tenant can't see it
     expect(await q.dequeue({ queue: 'b' })).toEqual({ found: false }); // different queue
+    // Positive control: the owner still gets its own message.
+    expect(await q.dequeue({ queue: 'a' })).toMatchObject({ found: true, payload: 'x' });
   });
 });
 

@@ -176,7 +176,7 @@ describe('ADR 0960 P0 — the command snapshot', () => {
     const other = await campaignIn(orgA);
     const now = new Date().toISOString();
     const run = { runId: `r-cc-${randomBytes(4).toString('hex')}`, workflowId: GATED, tenantId: TENANT, status: 'completed' as const, inputs: {}, metadata: { [CAMPAIGN_RUN_TAG_KEY]: stampCampaignRun(c, { role: 'spine' }) }, configurable: {}, createdAt: now, updatedAt: now };
-    await insertRunWithStartContext(storage, run);
+    await insertRunWithStartContext(storage, run, { admission: { plan: 'exempt:test-fixture' } });
     expect((await commandOf(cookieA, c.id)).body.command.runs.map((r) => r.runId)).toEqual([run.runId]);
     await storage.updateRun(run.runId, { metadata: { [CAMPAIGN_RUN_TAG_KEY]: stampCampaignRun(other, { role: 'spine' }) } });
     expect((await commandOf(cookieA, c.id)).body.command.runs).toEqual([]);

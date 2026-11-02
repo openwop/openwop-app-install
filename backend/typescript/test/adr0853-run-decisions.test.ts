@@ -79,7 +79,7 @@ async function runEcho(s: { tenantId: string; ownerId: string; boardId: string }
     metadata: { kanban: { boardId: s.boardId, cardId: 'c1' }, actingUserId: s.ownerId },
     configurable: {}, createdAt: now, updatedAt: now,
   };
-  await insertRunWithStartContext(storage, run);
+  await insertRunWithStartContext(storage, run, { admission: { plan: 'exempt:test-fixture' } });
   const def = (await hostSuite.workflowCatalog.getWorkflow('wf.d6.echo'))!.definition;
   const r = await executeRun(storage, (await storage.getRun(run.runId))!, def);
   expect(r.status).toBe('completed');

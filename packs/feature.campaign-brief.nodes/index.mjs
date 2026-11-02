@@ -158,7 +158,7 @@ export async function generateKernel(ctx) {
     data = ai && typeof ai === 'object' ? ai.data : undefined;
     // XCH-CB-3 (LLM-EXCHANGE-AUDIT round 2): ONE bounded error-fed repair
     // before failing — name the missing contract instead of re-rolling blind.
-    if (!data || typeof data !== 'object' || typeof data.headline !== 'string') {
+    if (kernelProblem(data)) {
       const retry = await ctx.callAI({
         provider: str(i.provider) || undefined,
         model: str(i.model) || undefined,
@@ -166,7 +166,7 @@ export async function generateKernel(ctx) {
         messages: [
           { role: 'user', content: userParts.join('\n\n') },
           { role: 'assistant', content: JSON.stringify(data ?? null) },
-          { role: 'user', content: 'Your previous reply was INVALID: it must be a JSON object with string `headline`, `supportingStatement`, `primaryCta`, `tone`, and a `proofPoints` string array — grounded ONLY in the provided knowledge. Return the corrected FULL kernel object only.' },
+          { role: 'user', content: `Your previous reply was INVALID: ${kernelProblem(data)}. It must be a JSON object with non-empty string \`headline\`, \`supportingStatement\`, \`primaryCta\`, \`tone\`, and a \`proofPoints\` array of at least one non-empty string — grounded ONLY in the provided knowledge. Return the corrected FULL kernel object only.` },
         ],
         temperature: 0,
         responseSchema: KERNEL_RESPONSE_SCHEMA,
@@ -176,8 +176,9 @@ export async function generateKernel(ctx) {
   } catch (e) {
     return { status: 'failed', error: { code: 'generation_failed', message: e instanceof Error ? e.message : 'kernel generation failed' } };
   }
-  if (!data || typeof data !== 'object' || typeof data.headline !== 'string') {
-    return { status: 'failed', error: { code: 'generation_empty', message: 'The provider returned no kernel (after one repair attempt).' } };
+  const problem = kernelProblem(data);
+  if (problem) {
+    return { status: 'failed', error: { code: 'generation_empty', message: `The model did not produce a usable messaging kernel (${problem}), even after one retry. Try again, or add knowledge to the brief's collection so it has more to draw on.` } };
   }
 
   const kernel = {
@@ -193,9 +194,78 @@ export async function generateKernel(ctx) {
     generatedAt: new Date().toISOString(),
   };
 
-  // 5) Persist on the brief (clears stale, advances status to validated).
-  await cb.setKernel({ briefId, kernel });
-  return { status: 'success', outputs: { kernel, grounding: groundingInfo } };
+  const briefVersion = typeof asm.briefVersion === 'number' ? asm.briefVersion : 1;
+  // The kernel this one would replace (null = none): promotion refuses when another
+  // kernel was approved in between (ADR 1020, grade-code M3).
+  const priorKernelAt = typeof asm.priorKernelAt === 'string' ? asm.priorKernelAt : null;
+  // 5) ADR 1020 D8 — with `config.stageKernel` (set by the chains that end on a
+  // `promote-kernel` after their approval) the kernel is NOT persisted here: it
+  // rides this node's output to the approval, and `promote-kernel` is its only
+  // writer. Writing here made the approval decorative: the kernel was saved, the
+  // brief promoted and channels could use it whatever the reviewer said. Without
+  // the flag (a tenant copy of an older chain, which has no promote node) it is
+  // persisted as before, or that copy would never save a kernel at all.
+  if (!(ctx.config && ctx.config.stageKernel === true)) {
+    await cb.setKernel({ briefId, kernel });
+    return { status: 'success', outputs: { kernel, grounding: groundingInfo, briefVersion } };
+  }
+  // Bookkeeping only (never the kernel): lets the brief page say a kernel waits for
+  // approval and link to this run. Best-effort — the review itself does not need it.
+  if (typeof cb.markKernelReview === 'function' && typeof ctx.runId === 'string' && ctx.runId) {
+    try { await cb.markKernelReview({ briefId, runId: ctx.runId }); } catch { /* the page just won't show the notice */ }
+  }
+  return { status: 'success', outputs: { kernel, grounding: groundingInfo, briefVersion, priorKernelAt, staged: true } };
+}
+
+/** ADR 1020 (CS70WF-19) — why a model kernel is unusable, or '' when it is fine.
+ *  A kernel every channel echoes must actually say something: an empty headline
+ *  or no proof point used to be saved as a valid kernel. */
+const KERNEL_FIELD_WORDS = { headline: 'headline', supportingStatement: 'supporting statement', primaryCta: 'primary call to action', tone: 'tone' };
+function kernelProblem(data) {
+  if (!data || typeof data !== 'object') return 'there was no kernel in the reply';
+  const empty = Object.keys(KERNEL_FIELD_WORDS).filter((k) => typeof data[k] !== 'string' || !data[k].trim());
+  if (empty.length > 0) return `it had no ${empty.map((k) => KERNEL_FIELD_WORDS[k]).join(', ')}`;
+  if (strArr(data.proofPoints).filter((p) => p.trim()).length === 0) return 'it had no proof points';
+  return '';
+}
+
+/** ADR 1020 D8/D9 — promote an APPROVED kernel onto the brief. Runs only after the
+ *  approval (a rejection never reaches it). role:"side-effect": a replay fork
+ *  serves this recorded outcome instead of writing an old kernel over the current
+ *  one. The write is a compare-and-swap that refuses `brief_changed` when the
+ *  brief moved past the revision the kernel was generated from (D11). */
+export async function promoteKernel(ctx) {
+  const cb = ensureBrief(ctx);
+  if (typeof cb.setKernel !== 'function') {
+    throw Object.assign(new Error("ctx.features['campaign-brief'].setKernel is unavailable"), { code: 'host_capability_missing' });
+  }
+  const i = ctx.inputs ?? {};
+  const briefId = str(i.briefId);
+  const kernel = i.kernel && typeof i.kernel === 'object' && !Array.isArray(i.kernel) ? i.kernel : null;
+  const problem = kernelProblem(kernel);
+  if (problem) {
+    return { status: 'failed', error: { code: 'kernel_required', message: `This workflow did not pass an approved kernel to save (${problem}). Generate the kernel again.` } };
+  }
+  // Grade-code M2 — the revision precondition is not optional: a chain that does
+  // not wire `briefVersion` here would save a kernel over a brief edited since.
+  if (!Number.isInteger(i.briefVersion)) {
+    return { status: 'failed', error: { code: 'validation_error', message: 'This workflow did not pass the brief revision the kernel was generated from, so the kernel was not saved. Re-create the workflow from its template.' } };
+  }
+  const expectedVersion = i.briefVersion;
+  if (!(i.priorKernelAt === null || typeof i.priorKernelAt === 'string')) {
+    return { status: 'failed', error: { code: 'validation_error', message: 'This workflow did not pass which kernel the new one replaces, so the kernel was not saved. Re-create the workflow from its template.' } };
+  }
+  try {
+    const out = await cb.setKernel({ briefId, kernel, expectedVersion, expectedPriorKernelAt: i.priorKernelAt });
+    if (!out || !out.brief) return { status: 'failed', error: { code: 'brief_not_found', message: `Brief not found: ${briefId}` } };
+    return { status: 'success', outputs: { kernel, briefStatus: out.brief.status } };
+  } catch (e) {
+    const reason = e && e.details && typeof e.details.reason === 'string' ? e.details.reason : '';
+    if (reason === 'brief_changed') {
+      return { status: 'failed', error: { code: 'brief_changed', message: 'The brief changed after this kernel was generated (it was edited, or another kernel was approved), so this one was not saved. Generate the kernel again.' } };
+    }
+    throw e;
+  }
 }
 
 /** XCH-CB-2 (LLM-EXCHANGE-AUDIT Wave 5): read the brief BODY (incl. the
@@ -215,6 +285,7 @@ export const nodes = {
   'feature.campaign-brief.nodes.validate': validate,
   'feature.campaign-brief.nodes.extract-seeds': extractBriefSeeds,
   'feature.campaign-brief.nodes.generate-kernel': generateKernel,
+  'feature.campaign-brief.nodes.promote-kernel': promoteKernel,
   'feature.campaign-brief.nodes.get-brief': getBriefNode,
   'feature.campaign-brief.nodes.extract-voc': extractVoc,
   'feature.campaign-brief.nodes.generate-angles': generateAngles,
@@ -245,9 +316,11 @@ export async function extractBriefSeeds(ctx) {
   if (!r || r.coverage === 'none') {
     return { status: 'failed', error: { code: 'grounding_insufficient', message: 'The knowledge base returned no coverage to seed a brief from.' } };
   }
-  let data;
-  try {
-    const ai = await ctx.callAI({
+  // ADR 1020 D12 (CS70WF-16) — empty proposals are a typed failure after ONE
+  // error-fed repair (they used to return success with `{}`), and each persona's
+  // `sources` indexes are mapped to the retrieved documents (or dropped when they
+  // name no retrieved block) instead of being passed through unchecked.
+  const SEEDS_REQUEST = {
       provider: str(i.provider) || undefined,
       model: str(i.model) || undefined,
       systemPrompt: 'You extract campaign-brief seeds from company knowledge. From the CONTEXT ONLY, propose personas (name, role, buyer stage, pain points, objections), the product summary, and competitor names. Cite the [n] context indexes you drew each item from. Never invent — omit what the context does not support. Reply with strict JSON only.',
@@ -260,13 +333,56 @@ export async function extractBriefSeeds(ctx) {
           competitors: { type: 'array', items: { type: 'string' } },
         },
       },
-    });
+    };
+  const citations = Array.isArray(r.citations) ? r.citations : [];
+  let data;
+  try {
+    const ai = await ctx.callAI(SEEDS_REQUEST);
     data = ai && typeof ai === 'object' ? ai.data : undefined;
+    if (seedsProblem(data)) {
+      const retry = await ctx.callAI({
+        ...SEEDS_REQUEST,
+        messages: [
+          ...SEEDS_REQUEST.messages,
+          { role: 'assistant', content: JSON.stringify(data ?? null) },
+          { role: 'user', content: `Your previous reply was INVALID: ${seedsProblem(data)}. Propose at least one persona, the product summary, or competitor names from the CONTEXT, citing [n] indexes. Return the corrected full JSON object only.` },
+        ],
+        temperature: 0,
+      });
+      data = retry && typeof retry === 'object' ? retry.data : undefined;
+    }
   } catch (e) {
     return { status: 'failed', error: { code: 'generation_failed', message: e instanceof Error ? e.message : 'extraction failed' } };
   }
-  const citations = Array.isArray(r.citations) ? r.citations : [];
-  return { status: 'success', outputs: { proposals: data ?? {}, citations, coverage: r.coverage ?? 'ok', note: 'PROPOSALS — confirm before applying to a brief.' } };
+  const problem = seedsProblem(data);
+  if (problem) {
+    return { status: 'failed', error: { code: 'generation_empty', message: `The provider proposed nothing usable after one repair attempt: ${problem}.` } };
+  }
+  // The context block numbers sources [1..n] over `r.contexts` (kbService
+  // `buildRagContextBlock`); `citations` is the DEDUPED document list, so it cannot
+  // be indexed by [n].
+  const contexts = Array.isArray(r.contexts) ? r.contexts : [];
+  const docIdAt = (n) => {
+    const c = Number.isInteger(n) && n >= 1 && n <= contexts.length ? contexts[n - 1] : null;
+    return c && typeof c.documentId === 'string' && c.documentId ? c.documentId : null;
+  };
+  const personas = (Array.isArray(data.personas) ? data.personas : [])
+    .filter((p) => p && typeof p === 'object' && str(p.name).trim())
+    .map((p) => {
+      const { sources, ...rest } = p;
+      return { ...rest, sourceDocIds: [...new Set((Array.isArray(sources) ? sources : []).map(docIdAt).filter(Boolean))] };
+    });
+  const proposals = { ...data, personas };
+  return { status: 'success', outputs: { proposals, citations, coverage: r.coverage ?? 'ok', note: 'PROPOSALS — confirm before applying to a brief.' } };
+}
+
+/** ADR 1020 D12 — why seed proposals are unusable, or '' when they are fine. */
+function seedsProblem(data) {
+  if (!data || typeof data !== 'object') return 'no proposals object';
+  const personas = Array.isArray(data.personas) ? data.personas.filter((p) => p && typeof p === 'object' && str(p.name).trim()) : [];
+  const competitors = strArr(data.competitors).filter((c) => c.trim());
+  if (personas.length === 0 && !str(data.productSummary).trim() && competitors.length === 0) return 'no persona, product summary or competitor';
+  return '';
 }
 
 // ── ADR 0403 Phase 1 — VOC evidence extraction ──────────────────────────────
@@ -499,6 +615,9 @@ export async function generateAngles(ctx) {
   const asm = await cb.assembleContext({ briefId });
   if (!asm.found) {
     return { status: 'failed', error: { code: 'brief_not_found', message: `Brief not found: ${briefId}` } };
+  }
+  if (asm.kernelStale === true) {
+    return { status: 'failed', error: { code: 'kernel_stale', message: 'The brief changed after its messaging kernel was approved. Regenerate and approve the kernel before generating angles.' } };
   }
   if (!asm.kernel || typeof asm.kernel !== 'object') {
     return { status: 'failed', error: { code: 'kernel_required', message: 'Generate the messaging kernel before angles — angles argue the kernel\'s positioning.' } };

@@ -11,6 +11,18 @@
  *  - the adsAdapter compliance gate RE-CREATES a pruned approval instead of
  *    falling open (BRAND-CODE-1), and its breaker classifier matches the
  *    adapter's http_5xx vocabulary (INTEL-CODE-2).
+ *
+ * Tracker TST-BEG-2 (w66). Red when: parent bans stop cascading or a write
+ * can close a cycle; a brand-load crash allows; an off/absent policy is scored;
+ * the tenant-default path is skipped or a missing default blocks; a pruned
+ * approval falls open; the breaker misses `http_5xx`; the audit records an
+ * irrelevant edit, the wrong actor, or outlives its brand.
+ * Double guards (recorded): the cascade loop stops on `seen` AND
+ * `PARENT_DEPTH_MAX` (no single non-hanging probe can show either); a tenant
+ * policy with `blockPublish:'off'` is allowed by the gov check AND by
+ * `scoreBrandCompliance` (which only refuses `critical`/`threshold`), so the
+ * opt-out case reds only if both change — the outer gov check is probed by
+ * the tenant-default case.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
@@ -33,7 +45,7 @@ let storage: Storage;
 beforeEach(() => { storage = openSqliteStorage(':memory:'); initHostExtPersistence(storage); });
 
 async function mkBrand(name: string, extra: Record<string, unknown> = {}): Promise<Brand> {
-  return createBrand(T, ORG, 'u1', { name, ...extra } as never);
+  return createBrand(T, ORG, 'u1', { name, ...extra });
 }
 
 describe('parent-brand cascade (P3)', () => {
@@ -44,7 +56,7 @@ describe('parent-brand cascade (P3)', () => {
     expect(eff?.bannedPhrases.sort()).toEqual(['cheap', 'discount']);
 
     // ADR 0891 D3 — a cycle is refused at write time…
-    await expect(updateBrand(T, parent.id, { parentBrandId: child.id } as never)).rejects.toMatchObject({ code: 'validation_error' });
+    await expect(updateBrand(T, parent.id, { parentBrandId: child.id })).rejects.toMatchObject({ code: 'validation_error', message: 'That parent would make a cycle.' });
     // …and a legacy cyclic row (written before the check) still must not loop.
     const { DurableCollection } = await import('../src/host/hostExtPersistence.js');
     const store = new DurableCollection<Brand>('brand:brand', (b) => `${b.tenantId}::${b.id}`);
@@ -101,7 +113,7 @@ describe('compliance checker (P1)', () => {
     expect(clean.verdict).toBe('allow');
   });
 
-  it('fails CLOSED when brand resolution crashes under an active policy path', async () => {
+  it('the resolver leg fails OPEN when brand resolution crashes (no brand bound yet)', async () => {
     const checker = buildAdsComplianceChecker(async () => { throw new Error('db down'); });
     // Resolution crash happens BEFORE a policy is known ⇒ allow (pre-0354
     // behavior — a missing brand binding must not block unbranded dispatch).
@@ -249,19 +261,24 @@ describe('audit trail (P5)', () => {
     const initial = await listBrandAudit(T, b.id);
     expect(initial.length).toBe(1); // creation snapshot
 
-    await updateBrand(T, b.id, { keyPhrases: { bannedPhrases: ['cheap', 'bargain'], approvedTaglines: [], valuePropositions: [] } } as never, 'editor-9');
+    await updateBrand(T, b.id, { keyPhrases: { bannedPhrases: ['cheap', 'bargain'], approvedTaglines: [], valuePropositions: [] } }, 'editor-9');
     const after = await listBrandAudit(T, b.id);
     expect(after.length).toBe(2);
     const edit = after.find((r) => r.actor === 'editor-9');
     expect(edit).toBeTruthy();
     expect(edit!.changes.map((c) => c.field)).toContain('keyPhrases');
+
+    // An edit to a field outside the guardrail set (`status`) writes no row.
+    const archived = await updateBrand(T, b.id, { status: 'archived' }, 'editor-9');
+    expect(archived?.status).toBe('archived'); // the edit landed
+    expect((await listBrandAudit(T, b.id)).length).toBe(2);
   });
 
   it('audits the REAL actor on create and update (BRAND-CODE-3)', async () => {
-    const b = await createBrand(T, ORG, 'user-42', { name: 'ActorBrand', keyPhrases: { bannedPhrases: ['cheap'], approvedTaglines: [], valuePropositions: [] } } as never);
+    const b = await createBrand(T, ORG, 'user-42', { name: 'ActorBrand', keyPhrases: { bannedPhrases: ['cheap'], approvedTaglines: [], valuePropositions: [] } });
     const rows = await listBrandAudit(T, b.id);
     expect(rows[0]!.actor).toBe('user-42'); // creation snapshot carries the creator
-    await updateBrand(T, b.id, { keyPhrases: { bannedPhrases: ['cheap', 'nasty'], approvedTaglines: [], valuePropositions: [] } } as never, 'user-42');
+    await updateBrand(T, b.id, { keyPhrases: { bannedPhrases: ['cheap', 'nasty'], approvedTaglines: [], valuePropositions: [] } }, 'user-42');
     const after = await listBrandAudit(T, b.id);
     // Every row names the acting user — no 'editor' default leaks through.
     expect(after.every((r) => r.actor === 'user-42')).toBe(true);

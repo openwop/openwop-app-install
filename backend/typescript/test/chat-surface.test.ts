@@ -6,6 +6,16 @@
  * SPA reads, encoded as the JSON ChatMessage the UI round-trips via
  * `JSON.parse(content)`. Plus surface-direct: idempotency (same key → one
  * message) and emitCard/updateCard.
+ *
+ * Owners: ADR 0102 P2 (host-written activity), ADR 0192 D6 (bus convergence).
+ * Tracker TST-CEC-12. Red when (w67g3, witnessed): an `agent` turn is stored
+ * under another role; the content stops being the JSON ChatMessage the SPA
+ * parses; the message id stops deriving from the idempotency key; a missing
+ * card reports `found: true`.
+ * Ceiling (CHATSURF-CARD-1): the card store (`chatSurface.ts` `_cards`) has NO
+ * reader anywhere in the product, so what `updateCard` writes into a card's
+ * payload is unobservable; this file asserts what IS observable — emitCard's
+ * activity bubble and `updateCard`'s return value.
  */
 
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
@@ -93,9 +103,17 @@ describe('host.chat: surface-direct', () => {
     const c = chat();
     const emit = await c.emitCard({ cardId: 'card-1', cardType: 'progress', payload: { stage: 1 }, idempotencyKey: 'ck1' });
     expect(emit.cardId).toBe('card-1');
+    // The card's one observable trace: a workflow_run bubble in the activity session.
+    const msgs = await jsonFetch<{ messages: Array<{ role: string; content: string }> }>(`/host/openwop-app/chat/sessions/workflow-${TENANT}/messages`);
+    const bubbles = msgs.body.messages
+      .filter((m) => m.role === 'workflow_run')
+      .map((m) => JSON.parse(m.content) as { role: string; content: string; meta?: { card?: unknown } })
+      .filter((b) => b.content === '[progress] card-1');
+    expect(bubbles).toEqual([{ role: 'workflow_run', content: '[progress] card-1', meta: { card: { cardId: 'card-1', cardType: 'progress', payload: { stage: 1 } } } }]);
+    // CHATSURF-CARD-1 ceiling: the patched payload has no reader; only the return is observable.
     const upd = await c.updateCard({ cardId: 'card-1', patch: { stage: 2 }, patchType: 'merge', idempotencyKey: 'ck2' });
-    expect(upd.found).toBe(true);
+    expect(upd).toMatchObject({ cardId: 'card-1', found: true });
     const missing = await c.updateCard({ cardId: 'nope', patch: {}, idempotencyKey: 'ck3' });
-    expect(missing.found).toBe(false);
+    expect(missing).toMatchObject({ cardId: 'nope', found: false });
   });
 });

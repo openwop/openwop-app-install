@@ -29,6 +29,7 @@ import { useChatSessions } from '../hooks/useChatSessions.js';
 import { useAuth } from '../../auth/useAuth.js';
 import { ensureWireTenant } from '../../client/v2Wire.js';
 import { listMyWorkspaces } from '../../client/workspaceClient.js';
+import { useWorkspaceChatAgent } from '../useWorkspaceChatAgent.js';
 import { forgetLegacyTabDeck, workspaceDeckSubject } from './tabDeckPersistence.js';
 import { toast } from '../../ui/toast.js';
 import { announce } from '../../ui/announce.js';
@@ -258,7 +259,9 @@ function TabChatDeckInner({ config, byokStored, onReconfigureBYOK, persistSubjec
   const workbench = useWorkbench(null);
   // ADR 0768 B4 — lets a turn's receipt open this shell's Sources tab.
   const selectWorkbenchTab = workbench.select; // stable (useCallback in useWorkbench)
-  const workbenchActions = useMemo(() => ({ openSources: () => selectWorkbenchTab('sources') }), [selectWorkbenchTab]);
+  const openWorkbenchArtifact = workbench.openArtifact; // stable (useCallback in useWorkbench)
+  // ADR 1017 D2 — and open an artifact a chat tool saved during a turn.
+  const workbenchActions = useMemo(() => ({ openSources: () => selectWorkbenchTab('sources'), openArtifact: openWorkbenchArtifact }), [selectWorkbenchTab, openWorkbenchArtifact]);
   const openWorkbenchRun = workbench.openRun;
   const closeRail = useCallback(() => setActiveRailTab(null), []);
   useMobilePaneArbitration(isMobile, activeRailTab !== null, workbench.tab !== null, closeRail, workbench.close);
@@ -422,6 +425,9 @@ function TabChatDeckInner({ config, byokStored, onReconfigureBYOK, persistSubjec
   // recovery re-keys it; without the move the agent scope (and a launch
   // context) stayed on the abandoned id and the turn ran unscoped.
   const [agentScopes, setAgentScopes] = useState<Record<string, string>>({});
+  // ADR 0975 D12 — read once for the deck; each TabSession applies it to its own
+  // empty plain chat (useDefaultChatAgent), so a `/clear` re-key gets it too.
+  const workspaceChatAgent = useWorkspaceChatAgent(legacySubject !== null);
   const [launchContexts, setLaunchContexts] = useState<Record<string, string>>({});
   const handleSessionIdChange = useCallback((oldId: string, newId: string) => {
     freshSessionIdsRef.current.add(newId);
@@ -988,6 +994,7 @@ function TabChatDeckInner({ config, byokStored, onReconfigureBYOK, persistSubjec
                     {...(ownerSubject ? { ownerSubject } : {})}
                     {...(client ? { client } : {})}
                     {...(scopeAgentId ? { scopeAgentId } : {})}
+                    {...(workspaceChatAgent ? { defaultAgentId: workspaceChatAgent } : {})}
                     onReconfigureBYOK={onReconfigureBYOK}
                     onWorkflowRuns={handleWorkflowRuns}
                     onSources={handleSources}

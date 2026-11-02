@@ -1,6 +1,21 @@
 /** ADR 0904 P4: late model responses cannot restore erased source, and cache
  * identities cannot mix providers, titles, orgs or document incarnations.
- * Real SQLite CAS pins persistence behavior across independent connections. */
+ * Real SQLite CAS pins persistence behavior across independent connections.
+ *
+ * Guards, as measured by w74 sabotage probes:
+ *  - erasure is held by THREE guards in `publishEnrichmentPrefix`: the fresh primary read
+ *    (missing row / other incarnation ⇒ null), the exact-row CAS (a deleted row makes
+ *    CAS(source) fail), and, for collection erasure, the collection-row read. Removing the
+ *    read alone stays green (the CAS holds); the read fallback PLUS a blind put reds the
+ *    document and subject legs and the read/CAS interleave case;
+ *  - the incarnation check, the lost-ack winner reconciliation, the provider and title
+ *    parts of the cache identity, and the three public projections are each single
+ *    guards, each witnessed;
+ *  - org isolation in `cachedPrefixesForCollection`: the same-collection-id read under
+ *    another org is excluded ONLY by the org check; the other org's own collection is
+ *    also excluded by the collection check.
+ * The legacy `kb:enrichcache` store has no writer at HEAD (deletion-only), so its
+ * empty-list assertion is a tripwire for a writer coming back, not a live guard. */
 import { beforeEach, afterEach, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -120,6 +135,8 @@ it('provider identity and title changes miss cache, while colliding org document
   expect(result).toMatchObject({ calls: 1, prefixes: ['Provider B prefix.'] });
   fresh = await docs.get(key(doc)); if (!fresh) throw new Error('missing source');
   expect((await cachedPrefixesForCollection('tenant', 'o', col, [fresh], enricher('', 'provider-a'))).size).toBe(0);
+  expect((await cachedPrefixesForCollection('tenant', 'o', col, [fresh], enricher('', 'provider-b'))).size, 'positive control: the owner org reads its prefix').toBe(1);
+  expect((await cachedPrefixesForCollection('tenant', 'other-org', col, [fresh], enricher('', 'provider-b'))).size, 'same collection id, other org').toBe(0);
   expect((await cachedPrefixesForCollection('tenant', 'other-org', other.col, [fresh], enricher('', 'provider-b'))).size).toBe(0);
   expect((await docs.get(key(other.doc)))?.enrichmentCache).toBeUndefined();
   await docs.put({ ...fresh, title: 'Renamed meals' });

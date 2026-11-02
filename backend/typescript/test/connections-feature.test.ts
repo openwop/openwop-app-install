@@ -1,6 +1,22 @@
 /**
  * Connections broker (ADR 0024 Phase A) — provider registry + api_key/bearer
  * create path + the most-specific credential resolver (user → org → workspace).
+ *
+ * Tracker TST-CJC-2 (grade-tests w68). Red when: the org `connections:use` check
+ * stops refusing a member without the scope; org-scope create skips
+ * `requireConnectionsManage`; the oauth2 secret-post refusal is removed (asserted by
+ * its own message — the kind allow-list below would also 400); PKCE stops sending
+ * S256 / Google offline access; the Slack replay window widens; the pending-auth TTL
+ * sweep stops reaping; a redelivered event is not reported deduped; a workspace
+ * default outranks the user's own connection; or a still-valid token is refreshed /
+ * an expired one is not.
+ *
+ * Tenant isolation of the resolver is a DOUBLE guard: the tenant row read
+ * (`tenantRows`) AND the caller-tenant-scoped secret resolve in `liveSecretFor`.
+ * The isolation case therefore also asserts the row read directly through
+ * `listConnections` (red when `tenantRows` stops filtering by tenant).
+ *
+ * ONE createApp boot for the file (module-level). Every case seeds its own state.
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -22,6 +38,7 @@ import {
   __resetConnectionsStore,
   createSecretConnection,
   resolveConnectionCredential,
+  listConnections,
   upsertOAuthConnection,
   probeConnection,
 } from '../src/features/connections/connectionsService.js';
@@ -42,24 +59,41 @@ import {
 import { __resetTriggerBridgeStore } from '../src/host/triggerBridgeService.js';
 import { createOrg, createMember, __resetAccessStores } from '../src/host/accessControlService.js';
 import { createHmac } from 'node:crypto';
+import type { Storage } from '../src/storage/storage.js';
+
+// ── ONE boot for the whole file. Every describe below runs against it, so a
+//    shuffled describe order never runs a block without initialised persistence.
+let server: http.Server;
+let BASE: string;
+let appStorage: Storage;
+let appHostSuite: Parameters<typeof handleInboundEvent>[0]['hostSuite'];
+const OAUTH_ENV = ['OPENWOP_OAUTH_GOOGLE_CLIENT_ID', 'OPENWOP_OAUTH_GOOGLE_CLIENT_SECRET'] as const;
+const SAVED_OAUTH_ENV = Object.fromEntries(OAUTH_ENV.map((k) => [k, process.env[k]]));
+
+beforeAll(async () => {
+  process.env.OPENWOP_STORAGE_DSN = 'memory://';
+  process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
+  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  appStorage = app.locals.storage;
+  appHostSuite = app.locals.hostSuite;
+  await new Promise<void>((res) => {
+    server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
+  });
+});
+afterAll(async () => {
+  for (const k of OAUTH_ENV) {
+    if (SAVED_OAUTH_ENV[k] === undefined) delete process.env[k];
+    else process.env[k] = SAVED_OAUTH_ENV[k];
+  }
+  await new Promise<void>((res) => server.close(() => res()));
+});
 
 describe('Connections feature (sqlite memory app)', () => {
-  let server: http.Server;
-  let BASE: string;
   const TOKEN = 'dev-token';
 
   beforeAll(async () => {
-    process.env.OPENWOP_STORAGE_DSN = 'memory://';
-    process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
-    const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
     await __clearToggleStore();
     await __resetConnectionsStore();
-    await new Promise<void>((res) => {
-      server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
-    });
-  });
-  afterAll(async () => {
-    await new Promise<void>((res) => server.close(() => res()));
   });
 
   async function jf<T = unknown>(path: string, init: RequestInit = {}): Promise<{ status: number; body: T }> {
@@ -96,16 +130,21 @@ describe('Connections feature (sqlite memory app)', () => {
   });
 
   it('rejects oauth2 secret-post and org-scope create (fail-closed, D2)', async () => {
-    const oauthPost = await jf('/host/openwop-app/connections', {
+    const oauthPost = await jf<{ error?: string; message?: string }>('/host/openwop-app/connections', {
       method: 'POST',
       body: JSON.stringify({ provider: 'google', kind: 'oauth2', secret: 'x', scope: 'user' }),
     });
     expect(oauthPost.status).toBe(400);
-    const orgPost = await jf('/host/openwop-app/connections', {
+    // The oauth2-specific refusal, not the generic kind allow-list (also a 400).
+    expect(oauthPost.body.error).toBe('validation_error');
+    expect(oauthPost.body.message).toMatch(/acquired via \/connections\/:provider\/authorize/);
+    const orgPost = await jf<{ error?: string; details?: { requiredScope?: string; orgId?: string } }>('/host/openwop-app/connections', {
       method: 'POST',
       body: JSON.stringify({ provider: 'servicenow', kind: 'api_key', secret: 'x', scope: 'org', orgId: 'o1' }),
     });
     expect(orgPost.status).toBe(403);
+    expect(orgPost.body.error).toBe('forbidden_scope');
+    expect(orgPost.body.details?.orgId).toBe('o1');
   });
 
   it('authorize is 409 when OAuth is unconfigured; oauthConfigured reflects host env (Phase B)', async () => {
@@ -198,7 +237,6 @@ describe('Connections feature (sqlite memory app)', () => {
 
 describe('Connection resolver (most-specific: user → org → workspace, D2)', () => {
   beforeAll(async () => {
-    process.env.OPENWOP_STORAGE_DSN = 'memory://';
     await __resetConnectionsStore();
   });
 
@@ -218,14 +256,32 @@ describe('Connection resolver (most-specific: user → org → workspace, D2)', 
   });
 
   it('is tenant-isolated — no connection leaks across tenants', async () => {
-    const forOther = await resolveConnectionCredential({ tenantId: 't2', provider: 'servicenow', actingUserId: 'u1' });
+    // Seeded HERE (not by the case above), so the foreign row exists whatever the order.
+    const isoUser = await createSecretConnection({ tenantId: 't1-iso', provider: 'servicenow', kind: 'api_key', secret: 'ISO-USER', scope: 'user', userId: 'u1' });
+    const isoWs = await createSecretConnection({ tenantId: 't1-iso', provider: 'servicenow', kind: 'api_key', secret: 'ISO-WS', scope: 'workspace' });
+    // Positive control: the owning tenant resolves it.
+    expect((await resolveConnectionCredential({ tenantId: 't1-iso', provider: 'servicenow', actingUserId: 'u1' }))?.secret).toBe('ISO-USER');
+    const forOther = await resolveConnectionCredential({ tenantId: 't2-iso', provider: 'servicenow', actingUserId: 'u1' });
     expect(forOther).toBeNull();
+
+    // The resolve leg above is DOUBLE-GUARDED: even if the tenant row read
+    // (`tenantRows`) leaked t1's rows into t2's selection, `liveSecretFor`
+    // resolves the secret under the CALLER's tenant (`resolveSecret(…, { tenantId })`),
+    // so a leaked row yields no secret and the leg still reads null. Measured: the
+    // w68 cf-iso-r2 sabotage (tenantRows unfiltered) left it green. So the row
+    // read itself is asserted here, on `listConnections`, which goes through
+    // `tenantRows` with no secret step: t2's list is EXACTLY t2's own rows.
+    const t2Own = await createSecretConnection({ tenantId: 't2-iso', provider: 'zoom', kind: 'api_key', secret: 'T2-OWN', scope: 'workspace' });
+    const t2Ids = (await listConnections('t2-iso', 'u1')).map((c) => c.connectionId);
+    expect(t2Ids).toEqual([t2Own.connectionId]);
+    // Positive control for the list path: the owner sees both of its rows.
+    const t1Ids = (await listConnections('t1-iso', 'u1')).map((c) => c.connectionId).sort();
+    expect(t1Ids).toEqual([isoUser.connectionId, isoWs.connectionId].sort());
   });
 });
 
 describe('OAuth2 token material — store, resolve, refresh-on-expiry (ADR 0024 §4)', () => {
   beforeAll(async () => {
-    process.env.OPENWOP_STORAGE_DSN = 'memory://';
     process.env.OPENWOP_OAUTH_GOOGLE_CLIENT_ID = 'cid';
     process.env.OPENWOP_OAUTH_GOOGLE_CLIENT_SECRET = 'csecret';
     await __resetConnectionsStore();
@@ -249,11 +305,12 @@ describe('OAuth2 token material — store, resolve, refresh-on-expiry (ADR 0024 
       tenantId: 'toauth', provider: 'google', userId: 'u1',
       tokens: { accessToken: 'AT-1', refreshToken: 'RT-1', tokenType: 'Bearer', scopes: ['s'], expiresAt: new Date(Date.now() + 3_600_000).toISOString() },
     });
-    const spy = vi.spyOn(globalThis, 'fetch');
+    // The token POST goes through the (mocked) undici egress, not globalThis.fetch.
+    vi.mocked(undici.fetch).mockClear();
     const res = await resolveConnectionCredential({ tenantId: 'toauth', provider: 'google', actingUserId: 'u1' });
     expect(res?.secret).toBe('AT-1');
     expect(res?.provenance.scopeAxis).toBe('user');
-    expect(spy).not.toHaveBeenCalled(); // not expired ⇒ no token-endpoint call
+    expect(vi.mocked(undici.fetch)).not.toHaveBeenCalled(); // not expired ⇒ no token-endpoint call
   });
 
   it('refreshes transparently when the access token is past the skew window', async () => {
@@ -297,7 +354,6 @@ describe('OAuth2 token material — store, resolve, refresh-on-expiry (ADR 0024 
 describe('Org-shared connection: connections:use gate (ADR 0024 Phase C / D2)', () => {
   let orgId: string;
   beforeAll(async () => {
-    process.env.OPENWOP_STORAGE_DSN = 'memory://';
     await __resetConnectionsStore();
     await __resetAccessStores();
     // u1 = owner (gets connections:use via admin scopes); u2 = viewer (no use).
@@ -324,22 +380,24 @@ describe('Org-shared connection: connections:use gate (ADR 0024 Phase C / D2)', 
 
 describe('Inbound provider webhooks (ADR 0024 §6 / Phase C)', () => {
   const SIGNING = 'slack-signing-secret';
-  let deps: { storage: import('../src/storage/storage.js').Storage; hostSuite: Parameters<typeof handleInboundEvent>[0]['hostSuite'] };
-  let connectionId: string;
+  let deps: { storage: Storage; hostSuite: Parameters<typeof handleInboundEvent>[0]['hostSuite'] };
 
   beforeAll(async () => {
-    process.env.OPENWOP_STORAGE_DSN = 'memory://';
-    const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-    deps = { storage: app.locals.storage, hostSuite: app.locals.hostSuite };
-    await __resetConnectionsStore();
+    deps = { storage: appStorage, hostSuite: appHostSuite };
     await __resetInboundStore();
     await __resetTriggerBridgeStore();
-    // A slack connection + its inbound config (workflowId intentionally unresolved
-    // so the fire is a no-op — we're testing verify + dedup, not run execution).
-    const conn = await upsertOAuthConnection({ tenantId: 'tin', provider: 'slack', userId: 'u1', tokens: { accessToken: 'AT', tokenType: 'Bearer', scopes: ['channels:read'] } });
-    connectionId = conn.connectionId;
-    await setInboundConfig({ tenantId: 'tin', connectionId, provider: 'slack', workflowId: 'wf-not-in-catalog', signingSecret: SIGNING });
   });
+
+  /** Each case gets its OWN slack connection + inbound config (a distinct user,
+   *  so a distinct row), so no case depends on another's config or dedup state.
+   *  workflowId is intentionally unresolved so the fire is a no-op — these test
+   *  verify + dedup, not run execution. */
+  let inboundSeq = 0;
+  async function freshInbound(): Promise<string> {
+    const conn = await upsertOAuthConnection({ tenantId: 'tin', provider: 'slack', userId: `u-in-${++inboundSeq}`, tokens: { accessToken: 'AT', tokenType: 'Bearer', scopes: ['channels:read'] } });
+    await setInboundConfig({ tenantId: 'tin', connectionId: conn.connectionId, provider: 'slack', workflowId: 'wf-not-in-catalog', signingSecret: SIGNING });
+    return conn.connectionId;
+  }
 
   function signed(body: string, now: number): { timestamp: string; signature: string } {
     const ts = String(Math.floor(now / 1000));
@@ -360,6 +418,7 @@ describe('Inbound provider webhooks (ADR 0024 §6 / Phase C)', () => {
   });
 
   it('answers the url_verification handshake on a signed challenge', async () => {
+    const connectionId = await freshInbound();
     const now = Date.now();
     const raw = JSON.stringify({ type: 'url_verification', challenge: 'CH-123' });
     const out = await handleInboundEvent(deps, { connectionId, rawBody: raw, body: JSON.parse(raw), headers: signed(raw, now), now });
@@ -367,19 +426,19 @@ describe('Inbound provider webhooks (ADR 0024 §6 / Phase C)', () => {
   });
 
   it('accepts a signed event_callback then dedups a redelivery of the same event_id', async () => {
+    const connectionId = await freshInbound();
     const now = Date.now();
     const raw = JSON.stringify({ type: 'event_callback', event_id: 'Ev100', event: { type: 'message' } });
     const headers = signed(raw, now);
     const first = await handleInboundEvent(deps, { connectionId, rawBody: raw, body: JSON.parse(raw), headers, now });
-    expect(first.status).toBe('accepted');
-    if (first.status === 'accepted') expect(first.deduped).toBe(false);
+    expect(first).toMatchObject({ status: 'accepted', deduped: false });
     // Same event id within the window ⇒ deduped, no second fire.
     const second = await handleInboundEvent(deps, { connectionId, rawBody: raw, body: JSON.parse(raw), headers, now });
-    expect(second.status).toBe('accepted');
-    if (second.status === 'accepted') expect(second.deduped).toBe(true);
+    expect(second).toMatchObject({ status: 'accepted', deduped: true });
   });
 
   it('rejects a bad signature as unauthorized, and an unknown connection as not_found', async () => {
+    const connectionId = await freshInbound();
     const now = Date.now();
     const raw = JSON.stringify({ type: 'event_callback', event_id: 'Ev200' });
     const bad = await handleInboundEvent(deps, { connectionId, rawBody: raw, body: JSON.parse(raw), headers: { timestamp: String(Math.floor(now / 1000)), signature: 'v0=deadbeef' }, now });
@@ -389,6 +448,7 @@ describe('Inbound provider webhooks (ADR 0024 §6 / Phase C)', () => {
   });
 
   it('teardown drops the config + signing secret so inbound stops accepting', async () => {
+    const connectionId = await freshInbound();
     expect(await getInboundConfig('tin', connectionId)).not.toBeNull();
     expect(await removeInboundConfig('tin', connectionId)).toBe(true);
     expect(await getInboundConfig('tin', connectionId)).toBeNull();

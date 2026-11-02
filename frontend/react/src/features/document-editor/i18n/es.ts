@@ -89,7 +89,7 @@ export const messages = {
   embedHint: 'Insertar o editar un HTML aislado (sandbox)',
   embedTitle: 'Contenido insertado',
   embedHtml: 'HTML',
-  embedNote: 'Este HTML se ejecuta aislado: sin acceso a la red ni a cookies.',
+  embedNote: 'Los lectores ven una vista previa estática. Los scripts de este HTML solo se ejecutan para quien elija Ejecutar scripts, y al ejecutarse pueden acceder a la red.',
   embedInserted: 'Contenido insertado',
   focusMode: 'Modo enfoque',
   focusModeHint: 'Modo enfoque: atenúa todo menos el bloque actual',
@@ -123,5 +123,5 @@ export const messages = {
   importWarningsTitle: "No se pudieron convertir {{count}} parte(s) del .docx y faltan:",
   importWarningsMore: "…y {{count}} más.",
   importWarningsDismiss: "Descartar",
-  embedDefaultHtml: "<h2>Hola desde un embed</h2>\n<p>Edita este HTML \u2014 se ejecuta aislado (sin red, sin cookies).</p>",
+  embedDefaultHtml: "<h2>Hola desde un embed</h2>\n<p>Edita este HTML. Se muestra como vista previa estática hasta que un lector ejecuta sus scripts.</p>",
 };

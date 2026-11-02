@@ -10,6 +10,9 @@
  * in another (ADR 0508's home-vs-active family). This test drives the production
  * path, sign in, create a real `ws:` workspace, switch into it, and asserts the
  * echo follows the switch while `/me` does not, which is why `/me` cannot be the key.
+ *
+ * Tracker TST-DCA-5. Red when the `caller` echo reports the HOME (personal)
+ * tenant instead of the resolved subject's (grade-tests w70 probe `ac-echo`).
  */
 
 import http from 'node:http';
@@ -35,10 +38,11 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+interface Res<T> { status: number; body: T }
+interface Assignments { assignments: unknown[]; caller: { tenantId: string; principalId?: string } }
 function client() {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
@@ -48,9 +52,9 @@ function client() {
     const single = res.headers.get('set-cookie');
     const setCookies: string[] = typeof h.getSetCookie === 'function' ? h.getSetCookie() : single ? [single] : [];
     for (const sc of setCookies) { const m = /(__session=[^;]+)/.exec(sc); if (m) cookie = m[1]; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    return { status: res.status, body: (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as T };
   };
-  return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
+  return { get: <T>(p: string) => call<T>('GET', p), post: <T>(p: string, b?: unknown) => call<T>('POST', p, b) };
 }
 
 const ASSIGNMENTS = '/host/openwop-app/feature-toggles/assignments';
@@ -61,26 +65,26 @@ describe('assignments echo the ACTIVE tenant they resolved for (ADR 0873 D12)', 
     const login = await c.post('/host/openwop-app/test/login', { email: `d12-${Date.now()}@acme.test` });
     expect(login.status, JSON.stringify(login.body)).toBe(201);
 
-    const home = await c.get(ASSIGNMENTS);
+    const home = await c.get<Assignments>(ASSIGNMENTS);
     expect(home.status).toBe(200);
     expect(Array.isArray(home.body.assignments)).toBe(true);
     const homeTenant: string = home.body.caller.tenantId;
-    const principal: string = home.body.caller.principalId;
+    const principal = home.body.caller.principalId;
     expect(homeTenant).toMatch(/^user:/);
     expect(typeof principal).toBe('string');
 
-    const ws = await c.post('/host/openwop-app/workspaces', { name: 'D12 shared' });
+    const ws = await c.post<{ workspaceId: string }>('/host/openwop-app/workspaces', { name: 'D12 shared' });
     expect(ws.status, JSON.stringify(ws.body)).toBe(201);
     expect(ws.body.workspaceId).toMatch(/^ws:/);
     const sw = await c.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws.body.workspaceId)}/switch`);
     expect(sw.status, JSON.stringify(sw.body)).toBe(200);
 
-    const active = await c.get(ASSIGNMENTS);
+    const active = await c.get<Assignments>(ASSIGNMENTS);
     expect(active.status).toBe(200);
     expect(active.body.caller).toEqual({ tenantId: ws.body.workspaceId, principalId: principal });
 
     // The reason the key is this echo and not /me: /me stays on the home tenant.
-    const me = await c.get('/host/openwop-app/users/me');
+    const me = await c.get<{ tenantId: string }>('/host/openwop-app/users/me');
     expect(me.status, JSON.stringify(me.body)).toBe(200);
     expect(me.body.tenantId).toBe(homeTenant);
     expect(me.body.tenantId).not.toBe(active.body.caller.tenantId);

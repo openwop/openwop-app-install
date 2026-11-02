@@ -11,6 +11,11 @@
  *      declared headers (the leg's own shape);
  *   2. the generated half equals what the pinned spec declares (drift);
  *   3. the served list is exactly HOST ∪ SPEC — never a reflected request list.
+ *
+ * Tracker TST-CQB-2 (w68). Sabotage-witnessed: red when the served allow-list
+ * reflects the requested headers, when PATCH leaves Allow-Methods, when a header
+ * leaves the generated SPEC half (X-Pack-Signing-Method, If-None-Match), and when
+ * the de-dupe filter drops OpenWOP-Dedup.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -66,8 +71,10 @@ afterAll(async () => {
 
 describe('cors-preflight-admits — the preflight admits what the OpenAPI declares', () => {
   it('fixture guard: the pinned OpenAPI has operations with declared headers', () => {
-    expect(OPS.length).toBeGreaterThan(50);
-    expect(OPS.filter((o) => o.headers.length > 0).length).toBeGreaterThan(20);
+    // Floors near the measured truth (2026-10-29, w68, spec-artifacts 2.46.33):
+    // 127 operations across both majors, 90 of them declaring a header.
+    expect(OPS.length).toBeGreaterThanOrEqual(121);
+    expect(OPS.filter((o) => o.headers.length > 0).length).toBeGreaterThanOrEqual(87);
   });
 
   it('every operation\'s preflight admits its method, its declared headers, Authorization and Content-Type', async () => {

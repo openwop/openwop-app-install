@@ -8,6 +8,14 @@
  * covered by the approval-decision route tests.
  *
  * @see src/host/approverResolution.ts, src/host/accessControlService.ts
+ *
+ * TST-BZC-15 (grade-tests w66). Red when: an unresolvable group/role ref stops being
+ * reported; refs-present is treated as an open gate; RULE 2 canonicalization is skipped;
+ * an unaddressable approver is silently dropped instead of forcing a broadcast (the fixture
+ * mixes an addressable and an unaddressable ref, so a drop is visible); group-derived roles
+ * are ignored; or `getUsersByGroup` loses its tenant/org scope. DOUBLE GUARD (recorded):
+ * that scope is checked on the group row AND on every member row, so dropping either alone
+ * stays green; the probe that drops both is the witness.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -133,7 +141,9 @@ describe('approver resolution (ADR 0075)', () => {
 
     it('a scheme-prefixed approver that cannot be mapped ⇒ null (broadcast, never silently dropped)', async () => {
       registerSubjectToUserIdResolver(async () => null); // resolver maps nothing
-      const r = await resolveNotificationRecipients({ approverRefs: ['oidc:sub-123'] }, { tenantId: T });
+      // 'alice' IS addressable; 'oidc:sub-123' is not. Dropping the unaddressable one
+      // would return ['alice'] — a notice that silently skips an approver.
+      const r = await resolveNotificationRecipients({ approverRefs: ['alice', 'oidc:sub-123'] }, { tenantId: T });
       expect(r).toBeNull();
     });
 
@@ -186,7 +196,8 @@ describe('approver resolution (ADR 0075)', () => {
 
   describe('pre-flight resolvability (§D4)', () => {
     const NODES = [
-      { nodeId: 'start', typeId: 'core.noop' },
+      // A NON-gate node carrying a group ref: the typeId filter, not the refs, must exclude it.
+      { nodeId: 'start', typeId: 'core.noop', config: { approverGroupRefs: ['grp-not-a-gate'] } },
       { nodeId: 'subjGate', typeId: 'core.approvalGate', config: { approverRefs: ['alice'] } },
       { nodeId: 'openGate', typeId: 'core.approvalGate', config: {} },
       { nodeId: 'groupGate', typeId: 'core.approvalGate', config: { approverGroupRefs: ['grp-fin'] } },
@@ -200,7 +211,9 @@ describe('approver resolution (ADR 0075)', () => {
 
     it('rejects (throws) when a group/role gate resolves to nobody — no org context', async () => {
       const gates = approvalGatesWithGroupRole(NODES);
-      await expect(validateApproverResolvability(gates, { tenantId: T })).rejects.toBeInstanceOf(OpenwopError);
+      const err = await validateApproverResolvability(gates, { tenantId: T }).then(() => null, (e: unknown) => e);
+      expect(err).toBeInstanceOf(OpenwopError);
+      expect(err).toMatchObject({ httpStatus: 400, details: { reason: 'unresolvable_approvers', nodeId: 'groupGate', unresolved: ['grp-fin'] } });
     });
 
     it('rejects when the named group/role is empty/missing even WITH org context', async () => {

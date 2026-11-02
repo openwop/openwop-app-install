@@ -152,6 +152,10 @@ export interface LoadAgentsOptions {
    *  dependency is refused (no agents loaded) per RFC 0072 §C. Default false —
    *  the bootstrap eager pass loads regardless, pending the pack peerDep migration. */
   strict?: boolean;
+  /** ADR 1014 D2 — an archived version (`<packDir>/.versions/<name>/<version>/`):
+   *  register under `agentId@version` beside the head, never over it. Refusals are
+   *  not recorded for an archive (the head's verdict is the one operators see). */
+  archived?: boolean;
 }
 
 export function loadAgentsFromManifest(packDir: string, opts: LoadAgentsOptions = {}): ResolvedAgentManifest[] {
@@ -206,7 +210,7 @@ export function loadAgentsFromManifest(packDir: string, opts: LoadAgentsOptions 
       ...(trust.detail ? { detail: trust.detail } : {}),
     });
     const registry = getAgentRegistry();
-    for (const raw of manifest.agents) {
+    for (const raw of opts.archived ? [] : manifest.agents) {
       if (!raw || typeof raw.agentId !== 'string' || raw.agentId.length === 0) continue;
       registry.registerRefused({
         agentId: raw.agentId,
@@ -329,7 +333,8 @@ export function loadAgentsFromManifest(packDir: string, opts: LoadAgentsOptions 
         packVersion,
         degraded: degradedCaps.length > 0 ? [...degradedCaps] : undefined,
       };
-      registry.register(resolved);
+      if (opts.archived) registry.registerVersion(resolved);
+      else registry.register(resolved);
       loaded.push(resolved);
     } catch (err) {
       log.error('skipping agent manifest that failed resolution', {

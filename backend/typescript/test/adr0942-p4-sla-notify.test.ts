@@ -79,7 +79,7 @@ async function campaignRun(workflowId = 'wf.p4'): Promise<RunRecord> {
     runId: `r-p4-${n++}-${Math.random().toString(36).slice(2, 8)}`, workflowId, tenantId: T, status: 'pending', inputs: {},
     metadata: { campaignOrchestration: stampCampaignRun(campaign, { role: 'optimizer' }), actingUserId: 'u1' }, configurable: {}, createdAt: now, updatedAt: now,
   };
-  await insertRunWithStartContext(storage, run);
+  await insertRunWithStartContext(storage, run, { admission: { plan: 'exempt:test-fixture' } });
   return (await storage.getRun(run.runId)) ?? run;
 }
 
@@ -268,7 +268,7 @@ describe('ADR 0942 D7 — the digest chain runs as the scheduler runs it (actorl
     const now = new Date().toISOString();
     // Exactly the scheduler's shape for a host-owned job: no acting user.
     const run: RunRecord = { runId: `r-p4-digest-${n++}`, workflowId: DIGEST_CHAIN_ID, tenantId: T, status: 'pending', inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now };
-    await insertRunWithStartContext(storage, run);
+    await insertRunWithStartContext(storage, run, { admission: { plan: 'exempt:test-fixture' } });
     const before = (await notices(AUTONOMY_DIGEST_TYPE)).length;
     const result = await executeRun(storage, (await storage.getRun(run.runId)) ?? run, def);
     const row = await storage.getRun(run.runId);

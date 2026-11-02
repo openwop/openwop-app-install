@@ -34,7 +34,7 @@ import type { Section } from '../cms/cmsClient.js';
 import { fetchPublicPageResult, type PublicPage } from './siteClient.js';
 import { applySeo } from './siteSeo.js';
 import { getVisitorKey, sendExperimentPageview } from './visitorBeacon.js';
-import { consentTokenFor, loadPosture } from './visitorConsent.js';
+import { consentTokenFor, loadPosture, replayAllowedFor } from './visitorConsent.js';
 import { VisitorConsentBanner } from './VisitorConsentBanner.js';
 import { reportWebVitals } from './webVitalsBeacon.js';
 import { CatalogView, hasLargeCatalog } from './CatalogView.js';
@@ -178,6 +178,7 @@ export function FrontPage({ orgId, slug, surface, embed }: { orgId: string; slug
     let live = true;
     let undoSeo: (() => void) | null = null;
     let stopHeat: (() => void) | null = null;
+    let stopReplay: (() => void) | null = null;
     setState({ kind: 'loading' });
     // ADR 0236 (D1): send the anonymous visitor key so a RUNNING page
     // experiment can assign a variant (consent enforced server-side — no
@@ -225,8 +226,17 @@ export function FrontPage({ orgId, slug, surface, embed }: { orgId: string; slug
             .then((stop) => { if (live) stopHeat = stop; else stop(); })
             .catch(() => undefined);
         };
-        if (vk) { reportWebVitals(orgId, vk); startHeat(vk); }
-        else void loadPosture(orgId).then(() => { const k = live ? getVisitorKey(orgId) : null; if (k) { reportWebVitals(orgId, k); startHeat(k); } });
+        // ADR 0951 P2 — session recording, loaded only on the visitor's explicit,
+        // server-recorded yes to the separate replay choice (geometry only).
+        const startReplay = (k: string): void => {
+          if (!replayAllowedFor(orgId)) return;
+          void import('./replayCapture.js')
+            .then((m) => m.startReplayCapture({ orgId, visitorKey: k }))
+            .then((stop) => { if (live) stopReplay = stop; else stop(); })
+            .catch(() => undefined);
+        };
+        if (vk) { reportWebVitals(orgId, vk); startHeat(vk); startReplay(vk); }
+        else void loadPosture(orgId).then(() => { const k = live ? getVisitorKey(orgId) : null; if (k) { reportWebVitals(orgId, k); startHeat(k); startReplay(k); } });
         return;
       }
       if (surface === 'root') {
@@ -244,7 +254,7 @@ export function FrontPage({ orgId, slug, surface, embed }: { orgId: string; slug
         undoSeo = () => { document.title = prev; };
       }
     });
-    return () => { live = false; if (undoSeo) undoSeo(); if (stopHeat) stopHeat(); };
+    return () => { live = false; if (undoSeo) undoSeo(); if (stopHeat) stopHeat(); if (stopReplay) stopReplay(); };
   }, [orgId, slug, surface, navigate, attempt]);
 
   // The built-in page also sets a sensible title.

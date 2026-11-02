@@ -25,10 +25,13 @@
  *
  * w35 (grade-tests): the router legs each set their own config (they used to lean
  * on the first leg's, so shuffle reddened the control and made toggle-off
- * vacuous), stamp a REAL stored run and read it back, and the route refusals assert
+ * vacuous), and the route refusals assert
  * the PLAN refusal body, not just 403. Re-witnessed: the router/code-exec/widget
  * gates disabled, the service-desk sub-toggle disabled, the visitor lane on
  * `resolveOne`, the scheduled-chat stamp dropped, `evals` taken out of Governance.
+ *
+ * ADR 1016 D3: the router no longer stamps a run; its legs drive the chat
+ * exchange's per-turn entry (`resolveTurnModelRoute`) instead.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -39,16 +42,13 @@ import { saveConfig } from '../src/host/featureToggles/service.js';
 import { isSellableBundleFeature } from '../src/host/featureBundles.js';
 import { __resetBilling, processStripeEvent } from '../src/features/billing/billingService.js';
 import { setRouterConfig, setRouterEnabled } from '../src/features/model-router/configService.js';
-import { resolveModelRoute } from '../src/features/model-router/resolveRoute.js';
-import { maybeStampModelRoute } from '../src/host/exchange/dispatchTurn.js';
+import { resolveModelRoute, resolveTurnModelRoute } from '../src/features/model-router/resolveRoute.js';
 import { createSandboxRunner } from '../src/host/sandboxAdapter.js';
 import { createScheduledChat } from '../src/features/scheduled-agent-chats/scheduledChatService.js';
 import { getJob } from '../src/host/schedulingService.js';
 import { provisionWidget } from '../src/features/chat-widget/widgetService.js';
 import { mintPublicIntakeKey } from '../src/features/service-desk/widgetRoutes.js';
 import { setIntakeConfig } from '../src/features/service-desk/intake.js';
-import type { RunRecord } from '../src/types.js';
-import { openStorage } from '../src/storage/index.js';
 
 let server: http.Server;
 let BASE: string;
@@ -143,8 +143,8 @@ describe('ADR 0820 §8.2 — operator routes refuse a free plan, serve an owner'
   });
 
   it('model-router (Governance): config 403 → served after Governance', async () => {
-    const orgId = await newOrg();
-    const path = `/host/openwop-app/model-router/orgs/${orgId}/config`;
+    // ADR 1016 D1 — one config per workspace (the per-org path is a root-only alias).
+    const path = '/host/openwop-app/model-router/config';
     await expectPlanRefusal(path, 'model-router');
     await own(T, 'governance');
     expect((await authed(path)).status).toBe(200);
@@ -169,55 +169,45 @@ describe('ADR 0820 §8.2 — operator routes refuse a free plan, serve an owner'
 
 describe('ADR 0820 §8.2 — model-router degrades on the chat hot path, never errors', () => {
   const TM = 't-reclass-router';
-  const ORG = 'org-router';
+  const BIG = 'claude-opus-5-5';
   const cfg = {
-    rules: [{ when: { kind: 'tokensOver', threshold: 10 }, target: { provider: 'anthropic', model: 'big' } }],
-    fallback: { provider: 'anthropic', model: 'small' },
+    rules: [{ when: { kind: 'tokensOver', threshold: 10 }, target: { provider: 'anthropic', model: BIG } }],
+    fallback: { provider: 'anthropic', model: 'claude-haiku-4-5' },
   };
-  /** A REAL run in a real store: the stamp is read back from storage, not from a recorder. */
-  async function realRun(): Promise<{ storage: Awaited<ReturnType<typeof openStorage>>; run: RunRecord }> {
-    const storage = await openStorage('memory://');
-    const now = new Date().toISOString();
-    const run: RunRecord = {
-      runId: `run-reclass-${++evt}`, workflowId: 'wf.reclass', tenantId: TM, scopeId: ORG, status: 'running',
-      inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now,
-    };
-    await storage.insertRun(run);
-    return { storage, run };
-  }
-  // A spaced turn text: ~100 tokens, over the rule's 10-token threshold.
-  const TURN = 'please route this turn '.repeat(18);
+  // ADR 1016 D3 — the chat exchange's per-turn entry, for an anthropic-keyed conversation.
+  const turn = () => resolveTurnModelRoute({
+    tenantId: TM,
+    runInputs: { provider: 'anthropic', credentialRef: 'anthropic' },
+    credentialProviders: ['anthropic', 'openai', 'google'],
+    // A spaced turn text: ~100 tokens, over the rule's 10-token threshold.
+    userText: 'please route this turn '.repeat(18),
+  });
   beforeEach(async () => {
     // Every case gets the SAME enabled config, so no case leans on another's setup.
-    await setRouterConfig(TM, ORG, 'u1', cfg);
-    await setRouterEnabled(TM, ORG, 'u1', true);
+    await setRouterConfig(TM, 'u1', cfg);
+    await setRouterEnabled(TM, 'u1', true);
   });
 
-  it('plan-refused: resolveModelRoute returns null and the stamp leaves the run on its own model', async () => {
-    expect(await resolveModelRoute(TM, ORG, { tokenEstimate: 9000 }, 0)).toBeNull();
-    const { storage, run } = await realRun();
-    await expect(maybeStampModelRoute(run, TURN, storage)).resolves.toBeUndefined();
-    expect((await storage.getRun(run.runId))?.metadata['modelRoute']).toBeUndefined();
-    expect(run.metadata['modelRoute']).toBeUndefined();
+  it('plan-refused: resolveModelRoute and the per-turn route both return null (the turn keeps its own model)', async () => {
+    expect(await resolveModelRoute(TM, { tokenEstimate: 9000 }, 0)).toBeNull();
+    await expect(turn()).resolves.toBeNull();
   });
 
-  it('positive control: once Governance is owned, the SAME config routes and stamps', async () => {
+  it('positive control: once Governance is owned, the SAME config routes the turn', async () => {
     await own(TM, 'governance');
-    const decision = await resolveModelRoute(TM, ORG, { tokenEstimate: 9000 }, 0);
-    expect(decision?.target).toEqual({ provider: 'anthropic', model: 'big' });
-    const { storage, run } = await realRun();
-    await maybeStampModelRoute(run, TURN, storage);
-    expect((await storage.getRun(run.runId))?.metadata['modelRoute']).toEqual({ provider: 'anthropic', model: 'big' });
-    expect(run.metadata['modelRoute']).toEqual({ provider: 'anthropic', model: 'big' });
+    const decision = await resolveModelRoute(TM, { tokenEstimate: 9000 }, 0);
+    expect(decision?.target).toEqual({ provider: 'anthropic', model: BIG });
+    await expect(turn()).resolves.toEqual({ provider: 'anthropic', model: BIG });
   });
 
   it('toggle-off (owned plan, tenant switched it off): degrades to null too', async () => {
     await own(TM, 'governance');
     // Control in-case: with the toggle on, this exact state routes.
-    expect((await resolveModelRoute(TM, ORG, { tokenEstimate: 9000 }, 0))?.target).toEqual({ provider: 'anthropic', model: 'big' });
+    expect((await resolveModelRoute(TM, { tokenEstimate: 9000 }, 0))?.target).toEqual({ provider: 'anthropic', model: BIG });
     await setTenantToggle('model-router', TM, 'off');
     try {
-      expect(await resolveModelRoute(TM, ORG, { tokenEstimate: 9000 }, 0)).toBeNull();
+      expect(await resolveModelRoute(TM, { tokenEstimate: 9000 }, 0)).toBeNull();
+      await expect(turn()).resolves.toBeNull();
     } finally {
       await setTenantToggle('model-router', TM, 'on');
     }

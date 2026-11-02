@@ -71,7 +71,7 @@ export function createChatSurface(scope: BundleScope): ChatSurface {
   async function ensureSession(storage: Storage, sessionId: string, now: string): Promise<void> {
     const existing = await storage.getChatSession(tenantId, sessionId);
     if (existing) return;
-    await storage.createChatSession({ sessionId, tenantId, title: 'Workflow activity', createdAt: now, updatedAt: now, messageCount: 0 });
+    await storage.createChatSession({ sessionId, tenantId, title: 'Workflow activity', createdAt: now, updatedAt: now, messageCount: 0, titleSource: 'given' });
   }
 
   /** Append a UI-renderable message. `content` is stored as the JSON-encoded

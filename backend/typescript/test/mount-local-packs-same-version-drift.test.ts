@@ -135,7 +135,7 @@ describe('WF-CMNT-10 — same version, different content', () => {
 
     const r = mount(local, dest);
 
-    expect(r.driftDetected ?? []).not.toContain(NAME);
+    expect(r.driftDetected).not.toContain(NAME);
     expect(r.shadowed).not.toContain(NAME);
     expect(r.skipped).toContain(NAME);
     expect(isSymlink(join(dest, NAME))).toBe(false);
@@ -149,7 +149,7 @@ describe('WF-CMNT-10 — same version, different content', () => {
     const body = 'export const nodes = { same: 1 };\n';
     localPack(local, '2.3.4', body);
     installedPack(dest, '2.3.4', body);
-    expect((mount(local, dest).driftDetected ?? [])).not.toContain(NAME);
+    expect(mount(local, dest).driftDetected).not.toContain(NAME);
   });
 
   it('INCIDENTAL working-tree files are NOT drift — the repo side is a working tree, not a tarball', () => {
@@ -167,7 +167,7 @@ describe('WF-CMNT-10 — same version, different content', () => {
     writeFileSync(join(p, 'index.mjs~'), 'editor backup');
     writeFileSync(join(p, 'build.log'), 'noise');
 
-    expect((mount(local, dest).driftDetected ?? []), 'incidental files must not read as a forgotten version bump').not.toContain(NAME);
+    expect(mount(local, dest).driftDetected, 'incidental files must not read as a forgotten version bump').not.toContain(NAME);
   });
 
   it('a REAL content edit is still caught alongside incidental files (the exclusion is not a blanket)', () => {
@@ -180,7 +180,7 @@ describe('WF-CMNT-10 — same version, different content', () => {
     writeFileSync(join(p, '.DS_Store'), 'finder junk');
     writeFileSync(join(p, 'index.mjs~'), 'editor backup');
 
-    expect((mount(local, dest).driftDetected ?? [])).toContain(NAME);
+    expect(mount(local, dest).driftDetected).toContain(NAME);
   });
 
   it('a LOWER local version never shadows, drift or not', () => {
@@ -192,7 +192,7 @@ describe('WF-CMNT-10 — same version, different content', () => {
     const r = mount(local, dest);
 
     expect(r.shadowed).not.toContain(NAME);
-    expect(r.driftDetected ?? []).not.toContain(NAME);
+    expect(r.driftDetected).not.toContain(NAME);
     expect(isSymlink(join(dest, NAME))).toBe(false);
   });
 
@@ -207,7 +207,7 @@ describe('WF-CMNT-10 — same version, different content', () => {
     const r = mount(local, dest);
 
     expect(r.shadowed).toContain(NAME);
-    expect(r.driftDetected ?? []).not.toContain(NAME);
+    expect(r.driftDetected).not.toContain(NAME);
   });
 
   it('under OPENWOP_STRICT_REGISTRY=true — THE PRODUCTION SETTING — the install still wins AND the drift is still reported', () => {

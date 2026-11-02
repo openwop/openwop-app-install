@@ -1,6 +1,6 @@
 {
   "name": "feature.campaign-studio.nodes",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "kind": "node",
   "description": "Campaign-studio canvas producer node pack. The `render` node emits a typed `canvas.campaign` artifact — { name, objective?, audience?, channels[], funnel?, assets? } — that flows through the run-output producer and renders inline in the chat artifact workbench. Constrained typed JSON, never executable code; pure transform; replay-safe.",
   "author": "OpenWOP App",
@@ -10,9 +10,9 @@
   "nodes": [
     {
       "typeId": "feature.campaign-studio.nodes.render",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "label": "Render campaign",
-      "description": "Emit a `canvas.campaign` artifact. Inputs: { campaign } (or `source` JSON) = { name, objective?, audience?, channels: [{ name, type, tactic?, budget? }], funnel?: [{ stage, description?, kpis? }], assets?: [{ channel?, format?, headline?, body?, cta? }] }. Output: a typed canvas.campaign artifact. Pure transform.",
+      "description": "Emit a `canvas.campaign` artifact. Inputs: { campaign } (or `source` JSON) = { name, objective?, audience?, channels: [{ name, type, tactic?, budget? }], funnel?: [{ stage, description?, kpis? }], assets?: [{ channel?, format?, headline?, body?, cta? }] }. Output: a typed canvas.campaign artifact. Pure transform. ADR 1020 D15: trims strings and refuses an unknown channel type or stage; every other value (over-long text, an over-cap list, an invalid budget, an unknown field) is passed through unchanged so the closed-world validator rejects it, never silently truncated or dropped.",
       "category": "data",
       "role": "action"
     }

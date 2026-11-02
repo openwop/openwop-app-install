@@ -37,6 +37,7 @@ import {
   type BundleOrigin,
   type FetchLike,
 } from '../src/host/certificationEvidence.js';
+import { stripComments } from './helpers/stripComments.js';
 
 const FIXTURE_PATH = join(__dirname, 'fixtures', 'certification-bundle-v3-27315b41c-major2.json');
 const FIXTURE_TEXT = readFileSync(FIXTURE_PATH, 'utf8');
@@ -406,7 +407,7 @@ describe('WHD-18 — every production caller AWAITS the refresh', () => {
   const sites = walk(SRC).flatMap((f) => {
     const raw = readFileSync(f, 'utf8');
     if (!raw.includes('ensureCertificationEvidence(')) return [];
-    const src = raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+    const src = stripComments(raw);
     return [...src.matchAll(/(\S+\s+)?ensureCertificationEvidence\(/g)]
       .filter((m) => !/function\s+$/.test(m[1] ?? '') && !/^(import|\{|,)/.test((m[1] ?? '').trim()))
       .map((m) => ({ file: f.slice(SRC.length + 1), before: (m[1] ?? '').trim() }));

@@ -7,6 +7,12 @@
  *   - formality heuristic flags casual content against a formal brand
  *   - resolveVoice renders the channel rule, approved + banned phrases
  *   - clean content scores 100 and passes
+ *
+ * TST-BBR-2 (w66 g4, sabotage-witnessed). Expected scores are hand-computed from
+ * the rule table, never by the scorer. Red when: the banned-phrase cap is removed;
+ * phrase matching stops anchoring on word boundaries; the length deduction (25)
+ * or the casual-marker deduction (min(20, n×6)) changes; the formality threshold
+ * moves; a channel's formalityOverride stops winning in resolveVoice.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -56,13 +62,15 @@ describe('brand scoring — channel length + formality', () => {
     });
     const r = scoreComplianceDeterministic('This ad copy is definitely far too long for the cap.', b, { channel: 'ad_variants' });
     expect(r.issues.some((i) => i.category === 'length' && i.severity === 'error')).toBe(true);
-    expect(r.deterministicScore).toBeLessThan(100);
+    expect(r.deterministicScore).toBe(75); // 100 − 25 (length is the only rule tripped)
   });
 
   it('flags casual content against a formal brand voice', () => {
     const b = brand({ voiceProfile: { ...EMPTY_VOICE_PROFILE, formalityLevel: 5 } });
     const r = scoreComplianceDeterministic('Hey, this is gonna be totally awesome!', b);
     expect(r.issues.some((i) => i.category === 'formality')).toBe(true);
+    // hey, gonna, totally, awesome = 4 markers × 6 = 24, capped at 20 → 80.
+    expect(r.deterministicScore).toBe(80);
   });
 });
 

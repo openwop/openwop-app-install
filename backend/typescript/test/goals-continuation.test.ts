@@ -11,6 +11,14 @@
  *  - a terminal judge verdict disarms — no orphaned scheduled work under a
  *    retired identity.
  *  - arming a non-`schedule` mode is refused; cross-tenant arm is not found.
+ *
+ * TST-DEE-3 — red when: the job loses its goal metadata or per-fire inputs, a
+ * non-schedule mode arms, pause/resume stop toggling the job, a terminal verdict
+ * or abandon leaves it enabled, or a foreign tenant can arm. Cross-tenant is a
+ * DOUBLE GUARD in `getGoalRow`: the row key is `${tenant}::${id}` (OUTER — a
+ * foreign tenant's lookup misses), then `owner.tenant === tenant` (INNER). The
+ * inner alone is unreachable through the service; the witnessing probe replaces
+ * both (an id-only lookup).
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -105,14 +113,18 @@ describe('arm', () => {
 
   it('refuses to arm a non-schedule continuation mode', async () => {
     const id = await makeScheduleGoal('manual');
-    await expect(armContinuation(TENANT, id, { workflowId: 'wf:x', cronExpr: '0 * * * *' })).rejects.toBeInstanceOf(
-      ContinuationModeError,
-    );
+    const armed = armContinuation(TENANT, id, { workflowId: 'wf:x', cronExpr: '0 * * * *' });
+    await expect(armed).rejects.toBeInstanceOf(ContinuationModeError);
+    await expect(armed).rejects.toThrow('Continuation mode `manual` cannot be armed — only `schedule` continuation uses the scheduler.');
+    expect(await getJob(continuationJobId(TENANT, id))).toBeNull();
   });
 
   it('cross-tenant arm is not found', async () => {
     const id = await makeScheduleGoal();
     expect(await armContinuation('tenant-other', id, { workflowId: 'wf:x', cronExpr: '0 * * * *' })).toBeNull();
+    expect(await getJob(continuationJobId('tenant-other', id))).toBeNull();
+    // Positive control: the owning tenant arms the same goal.
+    expect((await armContinuation(TENANT, id, { workflowId: 'wf:x', cronExpr: '0 * * * *' }))?.continuation.armRef).toBe(continuationJobId(TENANT, id));
   });
 });
 
@@ -122,9 +134,12 @@ describe('daemon integration', () => {
     await armContinuation(TENANT, id, { workflowId: 'wf:checkpoint', cronExpr: '0 * * * *' });
     const jobId = continuationJobId(TENANT, id);
 
-    // Due at a future hourly slot → fires exactly once.
+    // Due at a future hourly slot → fires exactly once, stamped with the goal.
     await processDueSchedules(deps, SLOT_1);
-    expect((await goalRuns(jobId)).length).toBe(1);
+    const fired = await goalRuns(jobId);
+    expect(fired.length).toBe(1);
+    expect(fired[0]!.workflowId).toBe('wf:checkpoint');
+    expect(fired[0]!.metadata).toMatchObject({ goalId: id, purpose: 'goal-continuation' });
 
     // Pause → job disabled → the following slot does NOT fire.
     await transitionGoal(TENANT, id, 'pause');

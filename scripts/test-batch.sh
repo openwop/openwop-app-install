@@ -67,6 +67,18 @@ case "$sub" in
   edit) n="$1"; get "$n"; put "$n" "$head" "$(opt --base "$@")" "$state" ;;
   merge)
     n="$1"; get "$n"
+    # FAKE_RACE_PUSH=<n>: someone pushes to #n's branch just before its merge.
+    if [ "${FAKE_RACE_PUSH:-}" = "$n" ]; then
+      r="$FAKE_DIR/racewt"; rm -rf "$r"
+      git clone -q "$FAKE_ORIGIN" "$r" 2>/dev/null
+      git -C "$r" checkout -q "$head"; echo raced > "$r/RACED"; git -C "$r" add RACED
+      git -C "$r" -c user.email=t@t -c user.name=t commit -qm raced; git -C "$r" push -q origin "$head"
+    fi
+    # Like the real gh: --match-head-commit refuses a head that moved.
+    want="$(opt --match-head-commit "$@")"
+    if [ -n "$want" ] && [ "$want" != "$(git -C "$FAKE_ORIGIN" rev-parse "refs/heads/$head")" ]; then
+      echo "Head branch was modified. Review and try the merge again." >&2; exit 1
+    fi
     w="$FAKE_DIR/mergewt"; rm -rf "$w"
     git clone -q "$FAKE_ORIGIN" "$w" 2>/dev/null
     git -C "$w" checkout -q "$base"
@@ -90,7 +102,10 @@ FAKE
 #!/usr/bin/env bash
 case "$*" in
   ci*) mkdir -p node_modules; touch node_modules/.package-lock.json ;;
-  "run ci") echo "gate $(git rev-parse --short HEAD)" >> "$FAKE_DIR/gates"; [ ! -f BREAK ] || { echo "FAIL test/break.test.ts > BREAK is present"; exit 1; } ;;
+  "run ci") echo "gate $(git rev-parse --short HEAD)" >> "$FAKE_DIR/gates"
+    # FAKE_CHILD_DURING_GATE=<n>:<base>: a PR is opened against <base> while a gate runs.
+    [ -z "${FAKE_CHILD_DURING_GATE:-}" ] || printf 'pr%s\t%s\tOPEN\n' "${FAKE_CHILD_DURING_GATE%%:*}" "${FAKE_CHILD_DURING_GATE#*:}" > "$FAKE_DIR/pr-${FAKE_CHILD_DURING_GATE%%:*}"
+    [ ! -f BREAK ] || { echo "FAIL test/break.test.ts > BREAK is present"; exit 1; } ;;
   "run ci:quick") echo "quick $(git rev-parse --short HEAD)" >> "$FAKE_DIR/quick"; [ ! -f QUICKBREAK ] ;;
 esac
 FAKE
@@ -167,7 +182,7 @@ pk="$TMP/repo/.git/batch/feat/red-3.md"
 [ -f "$pk" ] && grep -q '## Failing lines of the red gate' "$pk" && grep -q '^FAIL test/break.test.ts > BREAK is present' "$pk" && ok "a failure packet for #3 names its change and the red gate's lines" || bad "no usable packet at $pk"
 grep -q 'Failure packet' "$TMP/fake/comments" && ok "the packet is posted on #3" || bad "the packet is not on #3"
 g=$(count gates)
-[ "$g" -le 5 ] && ok "it took $g full gates (close red + ≤ 3 probes + close green)" || bad "it took $g gates"
+[ "$g" -le 6 ] && ok "it took $g full gates (close red + baseline + ≤ 3 probes + close green)" || bad "it took $g gates"
 grep -q 'is NOT the gated tree' "$TMP/out" && bad "main got an ungated tree" || ok "main's tree is the tree the train gated"
 git -C "$TMP/repo" ls-remote --exit-code -q origin batch/feat >/dev/null 2>&1 && bad "batch/feat was not deleted" || ok "batch/feat is deleted after it landed"
 
@@ -192,6 +207,36 @@ rc=$(batch close b2)
 [ "$rc" = 0 ] && [ "$(count gates)" = 1 ] && ok "three features, one gate, landed" || bad "rc $rc, $(count gates) gates: $(tail -4 "$TMP/out")"
 case "$(files main)" in *f1.txt*f2.txt*f7.txt*) ok "all three features are on main";; *) bad "main has: $(files main)";; esac
 grep -q '^next: deploying is a release-queue slot' "$TMP/out" && ok "close ends with the deploy and cleanup steps, and does not deploy" || bad "no next: after close"
+tt="$TMP/repo/.git/batch/b2/timing.tsv"
+[ -f "$tt" ] && awk -F'\t' '$3=="close"&&$4=="start"{c=1} $3=="gate"&&$4=="start"&&$5~/features=3/{f=1} $3=="gate"&&$4=="end"&&$5~/rc=0/{g=f} $3=="close"&&$4=="end"&&$5~/rc=0/{e=1} END{exit !(c&&g&&e)}' "$tt" && ok "close records its start, its gate (rc, features) and its end in timing.tsv" || bad "no usable timing at $tt: $(cat "$tt" 2>/dev/null)"
+[ -f "$tt" ] && awk -F'\t' '$3=="merge"&&$4=="end"&&$5~/pr=7/&&$5~/rc=0/{f=1} END{exit !f}' "$tt" && ok "each merge is timed too" || bad "merges are not timed"
+grep -q '^timing: close took [0-9]*s over 1 full gate' "$TMP/out" && ok "close prints its time and gate count" || bad "no timing line after close"
+
+echo "▶ batch: a merge refuses a PR head that moved after its quick checks"
+setup
+batch open r >/dev/null
+rc=$(FAKE_RACE_PUSH=1 batch merge r 1)
+[ "$rc" = 1 ] && [ "$(state 1)" = OPEN ] && ok "the moved head is not merged, and #1 stays open" || bad "race: rc $rc state $(state 1): $(tail -3 "$TMP/out")"
+case "$(files batch/r)" in *RACED*) bad "the unchecked commit reached the batch";; *) ok "the unchecked commit did not reach the batch";; esac
+[ "$(cut -f2 "$TMP/fake/pr-1")" = main ] && ok "#1 is put back on main" || bad "#1 left on $(cut -f2 "$TMP/fake/pr-1")"
+
+echo "▶ batch: a red main is not blamed on the batch"
+setup
+batch open m >/dev/null; batch merge m 1 >/dev/null; batch merge m 2 >/dev/null
+( cd "$TMP/repo" && echo boom > BREAK && G add BREAK && G commit -qm "red main" && G push -q origin main )
+: > "$TMP/fake/gates"
+rc=$(batch close m)
+[ "$rc" = 1 ] && grep -q 'origin/main itself is red' "$TMP/out" && ok "close probes main first and stops, naming main" || bad "red main: rc $rc: $(tail -4 "$TMP/out")"
+grep -q 'Reverted from' "$TMP/fake/comments" 2>/dev/null && bad "a green feature was reverted for main's red" || ok "no feature is reverted"
+case "$(files batch/m)" in *f1.txt*f2.txt*) ok "#1 and #2 stay on the batch";; *) bad "batch/m has: $(files batch/m)";; esac
+
+echo "▶ batch: close never deletes the branch under a PR opened during the gate"
+setup
+batch open d >/dev/null; batch merge d 1 >/dev/null
+rc=$(FAKE_CHILD_DURING_GATE=8:batch/d batch close d)
+case "$(files main)" in *f1.txt*) ok "the batch landed";; *) bad "close: rc $rc: $(tail -4 "$TMP/out")";; esac
+git -C "$TMP/repo" ls-remote --exit-code -q origin batch/d >/dev/null 2>&1 && ok "batch/d is kept while #8 targets it" || bad "batch/d was deleted under #8"
+grep -q 'NOT deleting batch/d.*#8' "$TMP/out" && grep -q '^next: retarget' "$TMP/out" && ok "...and says to retarget #8 first" || bad "no warning for #8: $(tail -4 "$TMP/out")"
 
 echo "▶ merge-train --gate-ref"
 setup

@@ -86,6 +86,17 @@ const blobFor = (tenantId: string, gcs: ReturnType<typeof fakeGcs>, now = () => 
   createGcsBlob({ tenantId }, { fetch: gcs.fetchFn, config: CFG, signBlob, now });
 
 describe('ADR 0867 — GCS blob: tenant isolation and s3 parity', () => {
+  it('ADR 0951 P2.5: put forwards a caller deadline to the upload request', async () => {
+    const gcs = fakeGcs();
+    const signals: unknown[] = [];
+    const watched: typeof fetch = async (input, init = {}) => { if (init.method === 'POST' && String(input).includes('/upload/')) signals.push(init.signal); return gcs.fetchFn(input, init); };
+    const blob = createGcsBlob({ tenantId: 't' }, { fetch: watched, config: CFG, signBlob, now: () => new Date('2026-10-09T12:00:00Z') });
+    const deadline = new AbortController().signal;
+    await blob.put({ key: 'k', contentBase64: b64('x'), signal: deadline });
+    await blob.put({ key: 'k2', contentBase64: b64('y') });
+    expect(signals).toEqual([deadline, undefined]);
+  });
+
   it('stores under the tenant root, reads back, and is invisible to another tenant', async () => {
     const gcs = fakeGcs();
     const a = blobFor('tenant-a', gcs);

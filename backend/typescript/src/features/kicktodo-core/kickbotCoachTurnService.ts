@@ -105,7 +105,7 @@ export async function kickbotConversationFor(tenantId: string, ownerSubject: str
   }
   const sessionId = randomUUID();
   const ts = new Date().toISOString();
-  await storage.createChatSession({ sessionId, tenantId, title: bot.persona, createdAt: ts, updatedAt: ts, messageCount: 0 });
+  await storage.createChatSession({ sessionId, tenantId, title: bot.persona, createdAt: ts, updatedAt: ts, messageCount: 0, titleSource: 'given' });
   const meta = await ensureConversationMeta(tenantId, sessionId, {
     type: 'agent',
     ownerUserId: ownerSubject,

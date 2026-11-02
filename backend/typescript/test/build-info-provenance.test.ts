@@ -13,6 +13,11 @@
  * temp dirs) SEPARATELY, because the mechanism and its wiring fail
  * independently — the lesson of ADR 0502. A pure-logic test alone would pass
  * with the file read deleted entirely.
+ *
+ * TST-BBI-2 (w66 g4, sabotage-witnessed). Red when: the env claim is preferred
+ * over the image commit; SHA_RE loses its anchors; the file read stops trimming;
+ * an unreadable stamp throws; the OPENWOP_BUILD_META_DIR seam stops reading the
+ * image; `stamped` narrows to image-only.
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';

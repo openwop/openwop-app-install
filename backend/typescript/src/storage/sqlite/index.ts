@@ -51,7 +51,7 @@ import { ADMISSION_HOLDING_STATUSES, AdmissionRefusedError, IdempotentCommitReje
 import { applyMigrations } from './schema.js';
 import { isForwardExecutionEvent, RunLogClosedError, TERMINAL_RUN_EVENT_TYPES } from '../runLogClosure.js';
 import { nextChatMessageCreatedAt } from '../chatMessageOrder.js';
-import { toolBoundaryKeyPatterns } from '../runKvKeys.js';
+import { toolBoundaryKeyPatterns, clarificationCheckpointKeyPattern } from '../runKvKeys.js';
 
 /** Every table with a `tenant_id` column, read from the live schema (memoized
  *  per Database). The single source of truth for tenant-scoped bulk ops
@@ -330,6 +330,12 @@ export function openSqliteStorage(dbPath: string): Storage {
     SELECT * FROM interrupts
     WHERE run_id = ? AND node_id = ? AND resolved_at IS NULL
     ORDER BY created_at DESC LIMIT 1
+  `);
+  const getResolvedInterruptByKeyStmt = db.prepare(`
+    SELECT * FROM interrupts
+    WHERE run_id = ? AND node_id = ? AND resolved_at IS NOT NULL
+      AND json_extract(data, '$.__resumeKey') = ?
+    ORDER BY resolved_at DESC LIMIT 1
   `);
   const resolveInterruptStmt = db.prepare(`
     UPDATE interrupts SET resolved_at = ?, resolved_value = ?
@@ -669,6 +675,12 @@ export function openSqliteStorage(dbPath: string): Storage {
   const casChatSessionTitleStmt = db.prepare(`
     UPDATE chat_sessions
        SET title = ?, title_source = ?, updated_at = ?
+     WHERE tenant_id = ? AND session_id = ? AND COALESCE(title_source, 'default') = ?
+  `);
+  // ADR 1019 D2 — the auto-title claim: title_source only, never title/updated_at.
+  const claimChatSessionTitleSourceStmt = db.prepare(`
+    UPDATE chat_sessions
+       SET title_source = ?
      WHERE tenant_id = ? AND session_id = ? AND COALESCE(title_source, 'default') = ?
   `);
   const deleteChatSessionStmt = db.prepare(`
@@ -1657,6 +1669,11 @@ export function openSqliteStorage(dbPath: string): Storage {
       return row ? rowToInterrupt(row) : null;
     },
 
+    async getResolvedInterruptByKey(runId, nodeId, resumeKey) {
+      const row = getResolvedInterruptByKeyStmt.get(runId, nodeId, resumeKey);
+      return row ? rowToInterrupt(row) : null;
+    },
+
     async resolveInterrupt(interruptId, resolvedValue, resolvedAt) {
       // CONDITIONAL on resolved_at IS NULL — info.changes is 1 iff this call
       // won the resolve, 0 if it was already resolved (ENG-6).
@@ -1918,6 +1935,13 @@ export function openSqliteStorage(dbPath: string): Storage {
       return res.changes > 0;
     },
 
+    async countAdmissionHolding(limit) {
+      const row = db.prepare(
+        `SELECT count(*) AS n FROM (SELECT 1 FROM runs WHERE status IN (${ADMISSION_HOLDING_STATUSES.map(() => '?').join(',')}) AND admission_key IS NOT NULL LIMIT ?)`,
+      ).get(...ADMISSION_HOLDING_STATUSES, limit) as { n: number };
+      return Number(row?.n ?? 0);
+    },
+
     async countAuditRows() {
       const row = db.prepare(`SELECT count(*) AS n FROM audit_log`).get() as { n: number };
       return Number(row?.n ?? 0);
@@ -2112,6 +2136,8 @@ export function openSqliteStorage(dbPath: string): Storage {
         db.prepare(`DELETE FROM host_ext_kv WHERE k IN (?, ?, ?)`).run(`runvars:${rid}`, `runchans:${rid}`, `runagent:${rid}`);
         const ridEsc = rid.replace(/[\\%_]/g, (m) => `\\${m}`);
         db.prepare(`DELETE FROM host_ext_kv WHERE k LIKE ? ESCAPE '\\'`).run(`hostext:runartifact:${ridEsc}:%`);
+        // ADR 1001 D3.1 — paused agent turns' continuation checkpoints.
+        db.prepare(`DELETE FROM host_ext_kv WHERE k LIKE ? ESCAPE '\\'`).run(clarificationCheckpointKeyPattern(rid));
         // ADR 0889 EVD-2 — the run's tool-boundary capture (keyed by its tenant) retires with it.
         const owner = db.prepare(`SELECT tenant_id FROM runs WHERE run_id = ?`).get(rid) as { tenant_id: string } | undefined;
         if (owner?.tenant_id) for (const pattern of toolBoundaryKeyPatterns(owner.tenant_id, rid)) db.prepare(`DELETE FROM host_ext_kv WHERE k LIKE ? ESCAPE '\\'`).run(pattern);
@@ -2164,6 +2190,8 @@ export function openSqliteStorage(dbPath: string): Storage {
           // metacharacters escaped defensively, same as the postgres arm.
           const ridEsc = run_id.replace(/[\\%_]/g, (m) => `\\${m}`);
           childRows += Number(db.prepare(`DELETE FROM host_ext_kv WHERE k LIKE ? ESCAPE '\\'`).run(`hostext:runartifact:${ridEsc}:%`).changes ?? 0);
+          // ADR 1001 D3.1 — clarification continuation checkpoints retire too.
+          childRows += Number(db.prepare(`DELETE FROM host_ext_kv WHERE k LIKE ? ESCAPE '\\'`).run(clarificationCheckpointKeyPattern(run_id)).changes ?? 0);
           // ADR 0889 EVD-2 — the run's tool-boundary capture retires too (as deleteRun).
           const owner = db.prepare(`SELECT tenant_id FROM runs WHERE run_id = ?`).get(run_id) as { tenant_id: string } | undefined;
           if (owner?.tenant_id) {
@@ -2532,6 +2560,10 @@ export function openSqliteStorage(dbPath: string): Storage {
         expectTitleSource,
       );
       return info.changes > 0;
+    },
+
+    async claimChatSessionTitleSource(tenantId, sessionId, from, to) {
+      return claimChatSessionTitleSourceStmt.run(to, tenantId, sessionId, from).changes > 0;
     },
 
     async deleteChatSession(tenantId, sessionId) {

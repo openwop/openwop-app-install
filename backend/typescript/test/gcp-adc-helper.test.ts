@@ -6,11 +6,18 @@
  *  - `invalidate()` drops it (callers do this on a 401/403);
  *  - every failure is a typed `GcpMetadataError` that callers map themselves.
  * The single-fetcher ratchet is `gcp-adc-single-fetcher-ratchet.test.ts`.
+ *
+ * TST-DEC-2 — red when: the refresh-early margin or the fallback TTL changes,
+ * `invalidate()` keeps the token, plain values stop being trimmed, the
+ * `Metadata-Flavor: Google` header is dropped, an HTTP error / missing token /
+ * network failure / non-JSON body stops being a typed `GcpMetadataError` with its
+ * own message, or callers stop sharing ONE process-wide client.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { GCP_METADATA_TOKEN_URL, GcpMetadataError, createGcpMetadataClient, gcpMetadata, __resetGcpMetadataForTests } from '../src/host/gcpAdc.js';
 
-function fakeMetadata(tokens: Array<{ access_token?: string; expires_in?: number } | number>) {
+type TokenReply = { access_token?: string; expires_in?: number } | number;
+function fakeMetadata(tokens: TokenReply[]) {
   const calls: Array<{ url: string; flavor?: string }> = [];
   let i = 0;
   const fetchImpl = async (url: string, init?: { headers?: Record<string, string> }) => {
@@ -60,15 +67,17 @@ describe('gcpAdc — token caching', () => {
   it('reads plain metadata values trimmed', async () => {
     const md = fakeMetadata([]);
     expect(await createGcpMetadataClient({ fetchImpl: md.fetchImpl }).metadataText('project/project-id')).toBe('proj-1');
+    // Same metadata base as the token endpoint, plain-value path.
+    expect(md.calls).toEqual([{ url: GCP_METADATA_TOKEN_URL.replace('instance/service-accounts/default/token', 'project/project-id'), flavor: 'Google' }]);
   });
 });
 
 describe('gcpAdc — typed failures', () => {
-  it.each([
+  it.each<[string, TokenReply[], RegExp]>([
     ['an HTTP error', [500], /HTTP 500/],
     ['a body without access_token', [{ expires_in: 10 }], /no access_token/],
   ])('%s is a GcpMetadataError', async (_l, tokens, msg) => {
-    const md = fakeMetadata(tokens as Array<number | { expires_in: number }>);
+    const md = fakeMetadata(tokens);
     const p = createGcpMetadataClient({ fetchImpl: md.fetchImpl }).accessToken();
     await expect(p).rejects.toBeInstanceOf(GcpMetadataError);
     await expect(createGcpMetadataClient({ fetchImpl: md.fetchImpl }).accessToken()).rejects.toThrow(msg);
@@ -76,12 +85,17 @@ describe('gcpAdc — typed failures', () => {
 
   it('a network failure (off GCP) is a GcpMetadataError', async () => {
     const client = createGcpMetadataClient({ fetchImpl: async () => { throw new Error('getaddrinfo ENOTFOUND'); } });
-    await expect(client.accessToken()).rejects.toBeInstanceOf(GcpMetadataError);
+    const p = client.accessToken();
+    await expect(p).rejects.toBeInstanceOf(GcpMetadataError);
+    // The network cause survives in the message (not re-labelled "not JSON").
+    await expect(p).rejects.toThrow('metadata instance/service-accounts/default/token: getaddrinfo ENOTFOUND');
   });
 
   it('a non-JSON token body is a GcpMetadataError', async () => {
     const client = createGcpMetadataClient({ fetchImpl: async () => ({ ok: true, status: 200, text: async () => '<html>' }) });
-    await expect(client.accessToken()).rejects.toThrow(/not JSON/);
+    const p = client.accessToken();
+    await expect(p).rejects.toBeInstanceOf(GcpMetadataError);
+    await expect(p).rejects.toThrow('metadata token: response was not JSON');
   });
 });
 

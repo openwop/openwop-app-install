@@ -15,6 +15,7 @@
  */
 import { OpenwopError } from '../../types.js';
 import { DurableCollection, hostExtStorage } from '../../host/hostExtPersistence.js';
+import { casRewrite } from './casRewrite.js';
 import { cleanString } from '../../host/boundedStrings.js';
 import { DEFAULT_UTM_POLICY, UTM_PARAMS, lintTrackedUrl, type UtmParam, type UtmPolicy, type UtmViolation } from '../../host/trackedUrl.js';
 import { getCampaign, listCampaigns } from '../campaign-orchestration/campaignService.js';
@@ -154,10 +155,12 @@ export async function deleteAlias(tenantId: string, orgId: string, utmCampaign: 
 export async function eraseUtmGovernanceActors(tenantId: string, forms: ReadonlySet<string>, tombstone: string): Promise<number> {
   let n = 0;
   for (const p of await policies.listForTenantIndexed(tenantId)) {
-    if (p.tenantId === tenantId && forms.has(p.updatedBy)) { await policies.put({ ...p, updatedBy: tombstone }); n += 1; }
+    if (p.tenantId !== tenantId || !forms.has(p.updatedBy)) continue;
+    if (await casRewrite(policies, `${p.tenantId}::${p.orgId}`, (r) => r.tenantId === tenantId && forms.has(r.updatedBy), (r) => ({ ...r, updatedBy: tombstone }), 'UTM policy')) n += 1;
   }
   for (const a of await aliases.listForTenantIndexed(tenantId)) {
-    if (a.tenantId === tenantId && forms.has(a.createdBy)) { await aliases.put({ ...a, createdBy: tombstone }); n += 1; }
+    if (a.tenantId !== tenantId || !forms.has(a.createdBy)) continue;
+    if (await casRewrite(aliases, `${a.tenantId}::${a.orgId}::${a.utmCampaign}`, (r) => r.tenantId === tenantId && forms.has(r.createdBy), (r) => ({ ...r, createdBy: tombstone }), 'UTM alias')) n += 1;
   }
   return n;
 }

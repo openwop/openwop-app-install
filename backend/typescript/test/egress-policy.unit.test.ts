@@ -3,6 +3,11 @@
  * baseline is never relaxed; allowlist is default-deny; denylist is default-allow;
  * host rules match subdomains (suffix). Plus the store round-trip + fail-closed
  * assert.
+ *
+ * Tracker TST-CXD-2. Red when (host/egressPolicy.ts): the SSRF baseline line is
+ * removed; host matching stops requiring a `.` suffix boundary; the allowlist
+ * default or the denylist match allows; put stops de-duping; or an invalid URL
+ * is allowed.
  */
 
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
@@ -26,7 +31,7 @@ describe('evaluateEgress — SSRF baseline (never relaxed)', () => {
     }
   });
   it('denies an invalid URL', () => {
-    expect(evaluateEgress('not a url', rules('off', [])).allowed).toBe(false);
+    expect(evaluateEgress('not a url', rules('off', []))).toEqual({ allowed: false, reason: 'invalid_url' });
   });
 });
 
@@ -39,7 +44,7 @@ describe('evaluateEgress — mode off', () => {
 describe('evaluateEgress — denylist (default allow)', () => {
   it('denies a matching host + its subdomains, allows others', () => {
     const r = rules('denylist', ['evil.com']);
-    expect(evaluateEgress('https://evil.com/x', r).allowed).toBe(false);
+    expect(evaluateEgress('https://evil.com/x', r)).toEqual({ allowed: false, reason: 'denylist_match' });
     expect(evaluateEgress('https://api.evil.com/x', r).allowed).toBe(false); // subdomain suffix
     expect(evaluateEgress('https://notevil.com/x', r).allowed).toBe(true);   // NOT a suffix match
     expect(evaluateEgress('https://good.com/x', r).allowed).toBe(true);
@@ -81,6 +86,8 @@ describe('store round-trip + assertEgressAllowed', () => {
 
   it('assertEgressAllowed throws for the SSRF baseline regardless of tenant policy', async () => {
     await putEgressRules('tenantA', 'off', []);
-    await expect(assertEgressAllowed('tenantA', 'http://169.254.169.254/latest')).rejects.toBeInstanceOf(OpenwopError);
+    const err = await assertEgressAllowed('tenantA', 'http://169.254.169.254/latest').then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(OpenwopError);
+    expect(err).toMatchObject({ code: 'egress_blocked', httpStatus: 403, details: { reason: 'ssrf_private_range', mode: 'off' } });
   });
 });

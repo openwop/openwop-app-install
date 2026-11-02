@@ -12,8 +12,6 @@
 // data against at runtime (so a stale copy would mean the app mis-accepts or
 // mis-rejects live data — a real bug, not cosmetic):
 //
-//   - schemas/ai-envelope.schema.json            (host/envelopeAcceptor.ts)
-//   - schemas/envelopes/*.schema.json            (host/envelopeAcceptor.ts, per-kind)
 //   - schemas/prompt-pack-manifest.schema.json   (host/promptPackLoader.ts)
 //   - schemas/prompt-kind.schema.json            (   "  — manifest $ref)
 //   - schemas/prompt-template.schema.json        (   "  — manifest $ref)

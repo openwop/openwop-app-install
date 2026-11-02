@@ -8,6 +8,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { OpenwopError } from '../../types.js';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { onCampaignDeleted } from '../../host/campaignLifecycle.js';
 import { mapAndValidate, parseCsv, autodetectMapping, mappingWithPreset, type ColumnMapping, type ParsedRow } from './csvImport.js';
@@ -25,13 +26,23 @@ const records = new DurableCollection<CampaignPerformanceRecord>(
 // when a campaignName/adSet CONTAINS a `|` (e.g. "Brand | Q3"), silently
 // overwriting a different (name, adSet) pair's row — data loss. JSON-encoding
 // makes the delimiter unambiguous (the same fix adsAdapter's idemKey uses).
+function requireOrg(orgId: unknown): asserts orgId is string {
+  if (typeof orgId !== 'string' || orgId.length === 0) {
+    throw new OpenwopError('validation_error', '`orgId` is required: performance records belong to one organization.', 400, { field: 'orgId' });
+  }
+}
+
 const naturalKey = (r: { platform: string; campaignName: string; adSet: string; date: string }): string =>
   JSON.stringify([r.platform, r.campaignName, r.adSet, r.date]);
 
-export async function listRecords(tenantId: string, orgId?: string, campaignId?: string): Promise<CampaignPerformanceRecord[]> {
+/** ADR 1022 D3 — one org's records. The org is REQUIRED: an absent or empty
+ *  org used to mean "every org in the tenant", and that reached a run surface
+ *  and a chain whose org was never filled in. */
+export async function listRecords(tenantId: string, orgId: string, campaignId?: string): Promise<CampaignPerformanceRecord[]> {
+  requireOrg(orgId);
   const all = await records.listByPrefix(`${tenantId}::`);
   return all
-    .filter((r) => (!orgId || r.orgId === orgId) && (!campaignId || r.campaignId === campaignId))
+    .filter((r) => r.orgId === orgId && (!campaignId || r.campaignId === campaignId))
     .sort((a, b) => b.date.localeCompare(a.date));
 }
 
@@ -98,6 +109,7 @@ export async function importCsv(
   tenantId: string, orgId: string, csv: string,
   opts: { mapping?: ColumnMapping; defaultPlatform?: AdPlatform; campaignId?: string; preset?: string } = {},
 ): Promise<ImportResult> {
+  requireOrg(orgId);
   const { headers, rows } = parseCsv(csv);
   const mapping = opts.mapping ?? (opts.preset ? mappingWithPreset(headers, opts.preset) : autodetectMapping(headers));
   const today = new Date().toISOString().slice(0, 10);
@@ -131,10 +143,11 @@ onCampaignDeleted('perf-records-by-campaign', async ({ tenantId, orgId, campaign
  *  RECORDS' own captured currencies first (R2 CC-SP-7 — the intake truth),
  *  merged with campaign budget currencies; a campaign filter uses that
  *  campaign's budget currency. */
-async function resolveKpiCurrency(tenantId: string, recordCurrencies: Set<string>, orgId?: string, campaignId?: string): Promise<{ currency: string; mixed: boolean; known: boolean }> {
+async function resolveKpiCurrency(tenantId: string, recordCurrencies: Set<string>, orgId: string, campaignId?: string): Promise<{ currency: string; mixed: boolean; known: boolean }> {
   if (campaignId) {
     const c = await getCampaign(tenantId, campaignId).catch(() => null);
-    const cur = c?.budget?.currency;
+    // ADR 1022 (CP71WF-36) — another org's campaign tells this org nothing.
+    const cur = c && c.orgId === orgId ? c.budget?.currency : undefined;
     return { currency: cur ?? 'USD', mixed: false, known: !!cur };
   }
   const campaigns = await listCampaigns(tenantId, orgId).catch(() => []);
@@ -151,7 +164,7 @@ async function resolveKpiCurrency(tenantId: string, recordCurrencies: Set<string
 }
 
 /** Project a KPI summary over the records (optionally scoped to one campaign). */
-export async function kpiSummary(tenantId: string, orgId?: string, campaignId?: string): Promise<KpiSummary> {
+export async function kpiSummary(tenantId: string, orgId: string, campaignId?: string): Promise<KpiSummary> {
   const all = await listRecords(tenantId, orgId, campaignId);
   const recordCurrencies = new Set(all.map((r) => r.currency).filter((v): v is string => !!v));
   const { currency, mixed: currencyMixed, known: currencyKnown } = await resolveKpiCurrency(tenantId, recordCurrencies, orgId, campaignId);

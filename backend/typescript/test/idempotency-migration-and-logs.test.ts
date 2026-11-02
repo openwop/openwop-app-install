@@ -19,6 +19,12 @@
  * Uses `legacyDbAtVersion` rather than hand-rolling a schema: a hand-rolled
  * table models a database that has never existed, which is the documented cause
  * of three consecutive breaks (#1851, #1868).
+ *
+ * TST-DGA-1. Red when migration 37 drops a column from the primary key, drops
+ * NOT NULL from a key column, empties or backfills from the `idempotency` mutex
+ * table, or recreates the ledger (DROP + CREATE) on replay; when `redactKey`
+ * loses its salt or stops being stable; and when the storage claim path logs
+ * the raw key (sabotage-witnessed, wave 71).
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';

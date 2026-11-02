@@ -44,7 +44,27 @@ export const INTERACTIVE_ARTIFACT_TYPES: ArtifactType[] = [
     // `__tests__/promptCatalogParity.test.ts` — the frontend constant cannot be imported
     // across workspaces, so the repo's existing parity-test convention is what stops the
     // two from drifting (the same test already pins the prompt against the renderer).
-    schema: obj({ chartType: { type: 'string', enum: CHART_TYPES }, data: { type: 'object' }, options: { type: 'object' } }, ['chartType', 'data']) },
+    //
+    // ADR 1017 D5 — and `data` must hold something to draw: at least one dataset, each
+    // with a `data` array. `{ chartType:'bar', data:{} }` used to validate and persist as
+    // a typed chart that the renderer can only show as raw JSON. Item values stay unconstrained
+    // because the renderer coerces a non-number to 0, and BI's `run-metric` can emit a
+    // `null` for a NaN metric value.
+    schema: obj({
+      chartType: { type: 'string', enum: CHART_TYPES },
+      data: {
+        type: 'object',
+        properties: {
+          labels: { type: 'array' },
+          datasets: {
+            type: 'array', minItems: 1,
+            items: { type: 'object', properties: { label: { type: 'string' }, data: { type: 'array' } }, required: ['data'] },
+          },
+        },
+        required: ['datasets'],
+      },
+      options: { type: 'object' },
+    }, ['chartType', 'data']) },
 ];
 
 export function registerInteractiveArtifactTypes(): void {

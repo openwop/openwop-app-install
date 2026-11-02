@@ -8,8 +8,12 @@
  *  - a subscription or binding may name the event in EITHER spelling;
  *  - P3: `host.webhook.response` (a RUN event) reads on major 2 as a registered
  *    vendor type instead of failing `500 event_type_unmapped`.
+ *
+ * Tracker TST-DFC-6. Red when (w71g1, witnessed): bindings match only the emitted
+ * spelling; the bindings route stops refusing a non-host name; the run-event codemap
+ * stops winning on egress; subscriptions match only the legacy spelling.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { Express } from 'express';
@@ -18,7 +22,7 @@ import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import type { Storage } from '../src/storage/storage.js';
-import type { RunRecord } from '../src/types.js';
+import type { RunRecord, WebhookSubscriptionRecord } from '../src/types.js';
 import { deliverHostExtEvent } from '../src/routes/webhooks.js';
 import { emitHostEvent } from '../src/host/hostEventDispatcher.js';
 
@@ -58,10 +62,11 @@ describe('webhook delivery projects the host-event name per protocol major (ADR 
       { subscriptionId: `s3-${tenantId}`, events: [V2], protocolMajor: 2 as const },
     ];
     for (const s of subs) {
-      await storage.insertWebhook({
+      const row: WebhookSubscriptionRecord = {
         subscriptionId: s.subscriptionId, tenantId, url: 'https://example.test/hook', events: s.events, secret: 'x'.repeat(32), createdAt: now,
         protocolMajor: s.protocolMajor,
-      } as Parameters<Storage['insertWebhook']>[0]);
+      };
+      await storage.insertWebhook(row);
     }
     await deliverHostExtEvent({ type: LEGACY, tenantId, payload: { contactId: 'c1' } });
     const rows = await storage.listWebhookDeliveries({ subscriptionIds: subs.map((s) => s.subscriptionId) });
@@ -87,7 +92,8 @@ describe('the ONE egress serializer keeps the codemap precedence (ADR 0792 revie
       { subscriptionId: `w3-${tenantId}`, events: ['openwop-app.webhook.response'] }, // the host-rule spelling must NOT match
     ];
     for (const s of subs) {
-      await storage.insertWebhook({ subscriptionId: s.subscriptionId, tenantId, url: 'https://example.test/hook', events: s.events, secret: 'x'.repeat(32), createdAt: now, protocolMajor: 2 } as Parameters<Storage['insertWebhook']>[0]);
+      const row: WebhookSubscriptionRecord = { subscriptionId: s.subscriptionId, tenantId, url: 'https://example.test/hook', events: s.events, secret: 'x'.repeat(32), createdAt: now, protocolMajor: 2 };
+      await storage.insertWebhook(row);
     }
     // deliverHostExtEvent reaches the same enqueueDelivery every run event uses.
     await deliverHostExtEvent({ type: 'host.webhook.response', tenantId, payload: {} });
@@ -119,13 +125,14 @@ describe('a binding may name the event in its v2 spelling (ADR 0792)', () => {
     const bindingId = ((await bound.json()) as { bindingId: string }).bindingId;
 
     await emitHostEvent({ type: LEGACY, tenantId, payload: { contactId: 'c2' } });
-    let matched: RunRecord | undefined;
-    for (let i = 0; i < 40 && !matched; i++) {
+    // Wait on the condition itself (the run row), never a fixed sleep.
+    const matched = await vi.waitFor(async () => {
       const runs = await storage.listRuns({ tenantId, limit: 50 });
-      matched = runs.find((r) => (r.metadata as { hostEvent?: { bindingId?: string } } | undefined)?.hostEvent?.bindingId === bindingId);
-      if (!matched) await new Promise((r) => setTimeout(r, 25));
-    }
-    expect(matched, 'the v2-spelled binding started its workflow').toBeTruthy();
+      const run: RunRecord | undefined = runs.find((r) => (r.metadata as { hostEvent?: { bindingId?: string } } | undefined)?.hostEvent?.bindingId === bindingId);
+      expect(run, 'the v2-spelled binding started its workflow').toBeTruthy();
+      return run;
+    }, { timeout: 2_000, interval: 25 });
+    expect(matched?.workflowId).toBe(workflowId);
   });
 
   it('the bindings route still refuses a name that is neither host.… nor openwop-app.…', async () => {
@@ -140,6 +147,7 @@ describe('a binding may name the event in its v2 spelling (ADR 0792)', () => {
       body: JSON.stringify({ eventType: 'run.completed', workflowId }),
     });
     expect(bad.status).toBe(400);
+    expect(await bad.json()).toMatchObject({ error: 'validation_error', message: 'eventType must be a host-extension event name (host.… or openwop-app.…).' });
   });
 });
 

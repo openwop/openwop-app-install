@@ -18,6 +18,11 @@
  * Result determines the design:
  *   - fork still resolves + runs the NEW shape  → refusal is wrong; disclose instead
  *   - fork 404s / corrupts / aborts wholesale   → refusal is justified
+ *
+ * Tracker TST-DCD-1. Red when the save stops disclosing a dropped recorded node
+ * (`removedReferencedNodeIds`), or discloses removed ids no run recorded
+ * (grade-tests w70 probes `fan-*`). Each run is awaited to a terminal status
+ * before the edit, so "recorded" never depends on executor timing.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -51,7 +56,20 @@ describe('ADR 0440 P2 — fork after an edit removed a recorded node', () => {
   });
   afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-  it('the edit is ACCEPTED and the fork still resolves the new shape', async () => {
+  /** Poll the run to a terminal status (no settle hook exists over HTTP). */
+  const settled = async (runId: string): Promise<string> => {
+    let status = '';
+    for (let i = 0; i < 300; i++) {
+      status = String((await api(`/runs/${runId}`)).body?.status ?? '');
+      if (['completed', 'failed', 'cancelled'].includes(status)) return status;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    return status;
+  };
+  const runIdOf = (body: Record<string, unknown> | undefined): string =>
+    (body?.runId ?? (body?.run as { runId?: string } | undefined)?.runId) as string;
+
+  it('the edit is ACCEPTED: the definition resolves the new shape, the old run stays readable, the dropped step is disclosed', async () => {
     // 1. A two-node workflow.
     const created = await api('/host/openwop-app/workflows', {
       method: 'POST',
@@ -70,8 +88,9 @@ describe('ADR 0440 P2 — fork after an edit removed a recorded node', () => {
     // 2. Run it, so the definition is REFERENCED and events record both nodes.
     const run = await api('/runs', { method: 'POST', body: JSON.stringify({ workflowId: WF, inputs: {} }) });
     expect(run.status, JSON.stringify(run.body)).toBe(201);
-    const runId = (run.body?.runId ?? (run.body?.run as { runId?: string } | undefined)?.runId) as string;
+    const runId = runIdOf(run.body);
     expect(runId).toBeTruthy();
+    expect(await settled(runId)).toBe('completed');
 
     // 3. Edit it the way the builder would: drop `second`. THIS is the write
     //    P2 proposed to refuse.
@@ -115,6 +134,7 @@ describe('ADR 0440 P2 — fork after an edit removed a recorded node', () => {
     expect((await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify(body) })).status).toBe(201);
     const run = await api('/runs', { method: 'POST', body: JSON.stringify({ workflowId: WF2, inputs: {} }) });
     expect(run.status).toBe(201);
+    expect(await settled(runIdOf(run.body))).toBe('completed');
 
     // A rename — the overwhelmingly common autosave. No node dropped, so no
     // disclosure AND no run probe (the probe is gated on the id set shrinking).
@@ -140,7 +160,9 @@ describe('ADR 0440 P2 — fork after an edit removed a recorded node', () => {
       edges: [],
     };
     expect((await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify(base) })).status).toBe(201);
-    expect((await api('/runs', { method: 'POST', body: JSON.stringify({ workflowId: WF4, inputs: {} }) })).status).toBe(201);
+    const ran = await api('/runs', { method: 'POST', body: JSON.stringify({ workflowId: WF4, inputs: {} }) });
+    expect(ran.status).toBe(201);
+    expect(await settled(runIdOf(ran.body))).toBe('completed');
 
     // Add a node AFTER the run, then remove it. No run ever recorded it.
     const withExtra = {

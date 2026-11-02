@@ -123,7 +123,7 @@ export async function getNavReport(): Promise<NavReport> {
  *  consent regime ON; `storageConfigured:false` is the "not configured" state. */
 export interface BehaviorSettings {
   heatmaps: { enabled: boolean };
-  replay: { enabled: boolean; storageConfigured: boolean; consentEnabled: boolean; available: boolean; retentionDays: number };
+  replay: { enabled: boolean; storageConfigured: boolean; consentEnabled: boolean; available: boolean; orgEligible?: boolean; retentionDays: number };
 }
 export async function getBehaviorSettings(orgId: string): Promise<BehaviorSettings> {
   const res = await fetch(`${base(orgId)}/behavior/settings`, fetchOpts({ headers: authedHeaders() }));
@@ -153,4 +153,46 @@ export async function getHeatmap(orgId: string, q: { page: string; device: HeatD
   const params = new URLSearchParams({ page: q.page, device: q.device, days: String(q.days), ...(q.arm ? { arm: q.arm } : {}) });
   const res = await fetch(`${base(orgId)}/heatmap?${params.toString()}`, fetchOpts({ headers: authedHeaders() }));
   return asJson<HeatmapView>(res, 'getHeatmap');
+}
+
+// ── ADR 0951 P2.4 session replay (owners/admins of the exact org) ────────────
+// Own fetch helper, NOT `asJson`: a 403 here is a missing per-org permission
+// (or one revoked mid-view), never a plan refusal, so it must not trigger the
+// entitlement refresh that would lock the whole Analytics page.
+export interface ReplaySessionRef { sessionId: string; startedAt: string; updatedAt: string; durationMs: number; bytes: number; chunkCount: number }
+export type ReplayNode = { id: number; parent: number | null; kind: 'box' | 'masked'; x: number; y: number; width: number; height: number };
+export type ReplayEvent =
+  | { type: 'frame'; at: number; viewport: { width: number; height: number }; nodes: ReplayNode[] }
+  | { type: 'pointer'; at: number; action: 'move' | 'down' | 'up'; x: number; y: number }
+  | { type: 'scroll'; at: number; x: number; y: number };
+export class ReplayRequestError extends Error {
+  constructor(readonly status: number) { super(`replay request returned ${status}`); this.name = 'ReplayRequestError'; }
+}
+async function replayJson<T>(path: string): Promise<T> {
+  const res = await fetch(path, fetchOpts({ headers: authedHeaders() }));
+  if (!res.ok) throw new ReplayRequestError(res.status);
+  return (await res.json()) as T;
+}
+/** David 2026-10-28 — attest (true) or withdraw (false) that this client is
+ *  not in a health or finance category. Withdrawing fences and then deletes
+ *  the org's recordings. Owners/admins of the exact org only. */
+export async function setReplayEligibility(orgId: string, notHealthOrFinance: boolean): Promise<boolean> {
+  const res = await fetch(`${base(orgId)}/replay/eligibility`, fetchOpts({
+    method: 'PUT', headers: { ...authedHeaders(), 'content-type': 'application/json' }, body: JSON.stringify({ notHealthOrFinance }),
+  }));
+  if (!res.ok) throw new ReplayRequestError(res.status);
+  return ((await res.json()) as { orgEligible: boolean }).orgEligible;
+}
+/** One page of the org's recordings, newest first. Pass the previous page's
+ *  `nextCursor` for the next one; no `nextCursor` means this was the last. */
+export async function listReplaySessions(orgId: string, cursor?: string): Promise<{ sessions: ReplaySessionRef[]; nextCursor?: string }> {
+  const page = await replayJson<{ sessions: ReplaySessionRef[]; nextCursor?: string }>(
+    `${base(orgId)}/replay/sessions${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`,
+  );
+  return { sessions: page.sessions, ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) };
+}
+export async function getReplayChunk(orgId: string, sessionId: string, index: number): Promise<ReplayEvent[]> {
+  return (await replayJson<{ events: ReplayEvent[] }>(
+    `${base(orgId)}/replay/sessions/${encodeURIComponent(sessionId)}/chunks/${index}`,
+  )).events;
 }

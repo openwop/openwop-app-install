@@ -19,6 +19,8 @@
  * proposal reds the submit case; counting every citation of a claim with a
  * support array as judged reds the partial and submit cases; deleting the
  * pre-verification branch reds the "not run" case.
+ *
+ * TST-DJE-6 (grade-tests wave 71). All three sabotages re-witnessed in wave 71.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';

@@ -5,6 +5,14 @@
  * item and the campaign continues, and skips are reported rather than silent.
  * Both are asserted against the real pipeline — a mocked loop would prove the
  * test's arithmetic, not the product's behaviour.
+ *
+ * Tracker TST-DHA-2 (wave 71). Red when: a parked item ends the loop
+ * (`w71g3-ca-continue`); parking keys on raw text instead of the bank's
+ * normalised key (`ca-parkkey`); a refused item lands in no bucket
+ * (`ca-complete`) or in the wrong one; a below-floor or thrown skip loses its
+ * reason (`ca-floordetail`, `ca-errdetail`); the claim CAS stops deduping a
+ * re-run (`ca-rerun`); subject erasure stops filtering by subject
+ * (`ca-erase-r2`, the second subject's chore must survive).
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { runCampaign, listParked, digestIsComplete, eraseSubjectParked, type CampaignItem } from '../src/features/job-search/autopilot/campaign.js';
@@ -107,9 +115,11 @@ describe('ADR 0545 D3 — one unanswerable question parks ONE item', () => {
     expect(await listParked(T, ME), 'the bank normalises; so must the backlog').toHaveLength(1);
   });
 
-  it('never awaits a human — parking is recorded and the loop moves on', async () => {
-    // Structural: `runCampaign` takes no callback through which it could ask,
-    // so an interruption mid-campaign is not expressible.
+  it('a novel question is recorded as ONE parked chore and the pass returns', async () => {
+    // What this asserts is the RECORD, not "never awaits": `runCampaign` takes no
+    // callback through which it could ask, so the no-await property is structural
+    // and has no runtime witness here. Overlaps "the SAME question blocking six
+    // applications is ONE thing to ask" (dedupe row TST-DHA-2b, kept: protected file).
     await seedGrant();
     const started = Date.now();
     await runCampaign([item('a', { questions: [{ text: 'Novel question?', required: true }] })], async () => ({ ok: true }), started);
@@ -134,6 +144,16 @@ describe('ADR 0545 D6 — every listing is accounted for', () => {
 
     expect(digest.considered).toBe(5);
     expect(digestIsComplete(digest), 'a listing that lands in no bucket is a silent skip').toBe(true);
+    // …and each lands in the RIGHT bucket: a count that balances can still be wrong.
+    expect(digest.applied).toEqual(['deal:applied-1']);
+    expect(digest.alreadyApplied).toBe(0);
+    expect(digest.parked.map((p) => p.listingId)).toEqual(['parked-1']);
+    expect(Object.fromEntries(digest.skipped.map((s) => [s.listingId, s.reason]))).toEqual({
+      'exhausted-1': 'refused',
+      'ineligible-1': 'ineligible',
+      'below-floor-1': 'below-floor',
+    });
+    expect(digest.skipped.find((s) => s.listingId === 'exhausted-1')?.detail).toBe('exhausted');
   });
 
   it('a skip carries its REASON, never a bare count', async () => {
@@ -206,9 +226,17 @@ describe('ADR 0545 D6 — every listing is accounted for', () => {
 describe('ADR 0464 — the parked backlog is erasable', () => {
   it('deletes the subject’s parked questions', async () => {
     await seedGrant();
-    await runCampaign([item('a', { questions: [{ text: 'Novel question?', required: true }] })], async () => ({ ok: true }), Date.now());
+    const OTHER = 'user:other';
+    await runCampaign([
+      item('a', { questions: [{ text: 'Novel question?', required: true }] }),
+      // A second subject's chore in the same tenant: it must SURVIVE the erasure
+      // (without it an erase-everything sabotage stays green).
+      item('b', { subjectId: OTHER, questions: [{ text: 'Novel question?', required: true }] }),
+    ], async () => ({ ok: true }), Date.now());
     expect(await listParked(T, ME)).toHaveLength(1);
+    expect(await listParked(T, OTHER)).toHaveLength(1);
     await eraseSubjectParked(T, ME);
     expect(await listParked(T, ME)).toHaveLength(0);
+    expect(await listParked(T, OTHER), 'another subject’s chore is not theirs to erase').toHaveLength(1);
   });
 });

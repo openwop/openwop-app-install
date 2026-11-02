@@ -8,6 +8,12 @@
  *  - `cad.get-design` without `canvasId` reads the bound canvas, still through
  *    THE canvas predicate (a focus the caller can no longer read → not_found);
  *  - CANVAS only: a builder workflow's binding is ADR 0773's pairing context.
+ *
+ * Tracker TST-CXE-2. Red when: the canvas read predicate is skipped
+ * (canvasSurface.ts `getCanvasForCaller`); a created meta loses its owner
+ * (conversationStore.ts); the route stops checking the existing meta's
+ * visibility or the `kind` (chatSessions.ts); or the tool stops defaulting to
+ * the bound canvas (conversationFocus.ts).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -36,25 +42,28 @@ beforeAll(async () => {
 }, 60_000);
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Client { userId: string; put: (p: string, b?: unknown) => Promise<any>; post: (p: string, b?: unknown) => Promise<any>; patch: (p: string, b?: unknown) => Promise<any> }
+/** The fields these cases read from the routes' JSON bodies. */
+interface Body { user?: { userId: string }; orgId?: string; id?: string; focus?: unknown; error?: string; message?: string }
+interface Res { status: number; body: Body }
+interface Client { userId: string; put: (p: string, b?: unknown) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res> }
 async function loginTo(tenantId: string, who: string): Promise<Client> {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<any> => {
+  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]!; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    return { status: res.status, body: res.status === 204 ? {} : ((await res.json().catch(() => ({}))) as Body) };
   };
   const r = await call('POST', '/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return { userId: r.body.user.userId, put: (p, b) => call('PUT', p, b), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b) };
+  return { userId: r.body.user?.userId ?? '', put: (p, b) => call('PUT', p, b), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b) };
 }
 
 /** A private project with a CAD canvas; A is the owner, B an org viewer outside it. */
 async function fixture() {
   const tenantId = `org:efb-${Date.now()}-${n++}`;
   const a = await loginTo(tenantId, 'owner');
-  const orgId = (await a.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId as string;
-  const projectId = (await a.post('/host/openwop-app/projects', { orgId, name: 'Secret' })).body.id as string;
+  const orgId = (await a.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId ?? '';
+  const projectId = (await a.post('/host/openwop-app/projects', { orgId, name: 'Secret' })).body.id ?? '';
   await a.patch(`/host/openwop-app/projects/${projectId}/visibility`, { visibility: 'private' });
   const b = await loginTo(tenantId, 'viewer');
   await createMember({ tenantId, orgId, subject: b.userId, displayName: 'B', roles: ['viewer'] });
@@ -77,6 +86,8 @@ describe('focus route', () => {
     const f = await fixture();
     const r = await f.b.put(FOCUS('embed-b-1'), { kind: 'canvas', id: f.canvasId });
     expect(r.status).toBe(404);
+    // The envelope redacts the high-entropy id (errorEnvelope sanitizer).
+    expect(r.body).toMatchObject({ error: 'not_found', message: 'canvas "<redacted:high-entropy>" not found.' });
     expect(await getConversationMeta(f.tenantId, 'embed-b-1')).toBeNull();
   });
 
@@ -84,13 +95,18 @@ describe('focus route', () => {
     const f = await fixture();
     await f.a.put(FOCUS('embed-a-2'), { kind: 'canvas', id: f.canvasId });
     const open = (await createCanvasForTenant(f.tenantId, { canvasTypeId: 'canvas.cad', name: 'Open', initialState: { solids: [] } })).canvasId;
-    expect((await f.b.put(FOCUS('embed-a-2'), { kind: 'canvas', id: open })).status).toBe(404);
+    const refused = await f.b.put(FOCUS('embed-a-2'), { kind: 'canvas', id: open });
+    expect(refused.status).toBe(404);
+    expect(refused.body.error).toBe('not_found');
     expect((await getConversationMeta(f.tenantId, 'embed-a-2'))?.focus?.id).toBe(f.canvasId);
   });
 
   it('rejects any kind but canvas (a workflow binding is ADR 0773 pairing, not this)', async () => {
     const f = await fixture();
-    expect((await f.a.put(FOCUS('embed-a-3'), { kind: 'workflow', id: 'x' })).status).toBe(400);
+    const r = await f.a.put(FOCUS('embed-a-3'), { kind: 'workflow', id: 'x' });
+    expect(r.status).toBe(400);
+    expect(r.body).toMatchObject({ error: 'validation_error', message: "focus MUST be { kind: 'canvas', id }." });
+    expect(await getConversationMeta(f.tenantId, 'embed-a-3')).toBeNull();
   });
 });
 

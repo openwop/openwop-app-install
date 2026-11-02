@@ -10,6 +10,11 @@
  * These use REAL ephemeral listeners rather than a stub probe. The whole point
  * of the helper is its bind semantics; a fake probe would let those drift while
  * the test stayed green.
+ *
+ * Tracker TST-CJA-7 (grade-tests w68). Red when: a busy PINNED port is silently
+ * used or moved; the probe binds anything but loopback v4; a pinned value above
+ * 65535 is accepted; the unpinned scan stops taking a free start port as 'default'
+ * or returns a busy one; or run.ts goes back to a literal PORT.
  */
 
 import { describe, expect, it } from 'vitest';

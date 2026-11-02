@@ -2,6 +2,10 @@
  * RFC 0170 §B.3 — the SESSION lane of the mint/revoke seams (suite ≥ 2.40.3,
  * openwop#1602 cookie presentation). Cookies ENABLED here, as in production: the
  * lane is advertised only then, and the credential is the session cookie itself.
+ *
+ * Tracker TST-CQE-2 (w68). Sabotage-witnessed: red when the anonymous lane
+ * advertises a revocation rule, and when a revoked session is no longer spelled
+ * `credential_revoked` on major 2.
  */
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
@@ -45,7 +49,7 @@ describe('RFC 0170 — session lane: cookie-presented mint, epoch-bump revoke', 
     expect(m.lane).toBe('session');
     expect(m.presentation?.kind).toBe('cookie');
     const cookie = { cookie: `${m.presentation!.name}=${m.credential}`, 'OpenWOP-Version': '2', accept: 'application/json' };
-    expect((await fetch(`${BASE}/runs`, { headers: cookie })).status).not.toBe(401);
+    expect((await fetch(`${BASE}/runs`, { headers: cookie })).status).toBe(200); // the cookie authenticates before revoke
 
     const rev = await fetch(`${BASE}/conformance/seams/sample/auth/credential/revoke`, { method: 'POST', headers: H, body: JSON.stringify({ lane: 'session', credential: m.credential }) });
     expect(rev.status).toBe(200);

@@ -10,6 +10,11 @@
  * string` parameter) cannot be enumerated, so they are checked as FAMILIES: the
  * only way the mapping can collide is a three-segment `host.a.x-y` against a
  * four-segment `host.a.x.y` (or the family `host.a.x.*`), and that is asserted.
+ *
+ * Tracker TST-DFC-4. Red when (w71g1, witnessed): a three-segment name projects to four
+ * segments; the projection drops the verb (a collision); the legacy `crm.segment.entered`
+ * mapping is lost; the run-event codemap stops winning over the host rule; the v2-name
+ * grammar admits three segments after the org.
  */
 import { describe, expect, it } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
@@ -57,8 +62,11 @@ const names = [...new Set([...literal, ...CRM_EVENT_TYPES, ...KB_EVENT_TYPES, ..
 
 describe('host-event v2 spelling (ADR 0792)', () => {
   it('is non-vacuous — the scan finds the host event population', () => {
-    expect(names.length).toBeGreaterThan(80);
-    expect(families.size + featureFamilies.size, 'template-built emitter families').toBeGreaterThan(5);
+    // Floors at ~95% of the measured population (w71g1, 2026-10-30 on d1421077a:
+    // names 187, families 5 + entity-templated 7 = 12). A scan that silently stops
+    // matching drops far below these; ordinary churn does not.
+    expect(names.length).toBeGreaterThanOrEqual(177);
+    expect(families.size + featureFamilies.size, 'template-built emitter families').toBeGreaterThanOrEqual(11);
   });
 
   it('maps the documented shapes', () => {

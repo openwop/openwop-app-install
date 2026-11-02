@@ -1,14 +1,22 @@
 /**
- * Multi-cloud KMS backend dispatch (kmsBackends.ts).
+ * Multi-cloud KMS backend dispatch (kmsBackends.ts) — ADR 0024.
  *
  * Verifies OPENWOP_BYOK_KMS_KEY routes to the right backend by shape, that the
  * AWS/Azure clients carry the stripped key handle, and that calling crypto
- * without the optional cloud SDK installed surfaces a helpful, actionable
- * error (the SDKs are NOT dev dependencies, so the dynamic import fails here —
- * which is exactly the non-using-host code path we want to exercise).
+ * without the optional cloud SDK surfaces a helpful, actionable error.
+ *
+ * TST-DKB-2 (grade-tests wave 72). The two "SDK absent" cases used to be
+ * `skipIf(installed)` — and every correct tree HAS the SDKs (kms-backend-preflight
+ * asserts it), so they never ran in the gate. They now FORCE absence with
+ * `vi.doMock` on the package the product lazily `import()`s, and assert the
+ * ACTIONABLE text (`Run \`npm install …\``), not the bare package name the raw
+ * ERR_MODULE_NOT_FOUND also carries. Red when: the prefix is not stripped
+ * (w72 probes kb-aws-strip / kb-azure-strip), a GCP key is claimed by a non-GCP
+ * backend (kb-gcp-null), or a load failure stops being mapped to the install
+ * advice (kb-aws-msg).
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   matchNonGcpKmsBackend,
   createAwsKmsClient,
@@ -43,26 +51,21 @@ describe('KMS backend dispatch', () => {
   });
 });
 
-// These two assert the "optional SDK is absent → actionable install error" path,
-// which is ONLY reachable when the SDK genuinely isn't resolvable. In some envs
-// (e.g. a fresh CI `npm ci`) `@aws-sdk/client-kms` / `@azure/keyvault-keys` are
-// present transitively — there the import succeeds and the code proceeds to real
-// auth/network, so the actionable-error path can't occur. Gate on actual absence
-// so the check is deterministic everywhere (run when valid, skip otherwise).
-// Probe via a variable specifier so tsc doesn't statically resolve the optional
-// (often-uninstalled) modules — `import(name)` with a non-literal is dynamic.
-const isInstalled = (name: string): Promise<boolean> => import(name).then(() => true, () => false);
-const awsKmsInstalled = await isInstalled('@aws-sdk/client-kms');
-const azureKvInstalled = await isInstalled('@azure/keyvault-keys');
-
 describe('KMS backend lazy-import errors', () => {
-  it.skipIf(awsKmsInstalled)('AWS encrypt without @aws-sdk/client-kms throws an actionable error', async () => {
-    const client = createAwsKmsClient('arn:aws:kms:us-east-1:123:key/abc');
-    await expect(client.encrypt(Buffer.alloc(32))).rejects.toThrow(/@aws-sdk\/client-kms/);
+  afterEach(() => {
+    vi.doUnmock('@aws-sdk/client-kms');
+    vi.doUnmock('@azure/keyvault-keys');
   });
 
-  it.skipIf(azureKvInstalled)('Azure encrypt without @azure/keyvault-keys throws an actionable error', async () => {
+  it('AWS encrypt without @aws-sdk/client-kms throws an actionable error', async () => {
+    vi.doMock('@aws-sdk/client-kms', () => { throw new Error('w72: forced AWS SDK load failure'); });
+    const client = createAwsKmsClient('arn:aws:kms:us-east-1:123:key/abc');
+    await expect(client.encrypt(Buffer.alloc(32))).rejects.toThrow(/Run `npm install @aws-sdk\/client-kms`/);
+  });
+
+  it('Azure encrypt without @azure/keyvault-keys throws an actionable error', async () => {
+    vi.doMock('@azure/keyvault-keys', () => { throw new Error('w72: forced Azure SDK load failure'); });
     const client = createAzureKeyVaultKmsClient('https://v.vault.azure.net/keys/k');
-    await expect(client.encrypt(Buffer.alloc(32))).rejects.toThrow(/@azure\/keyvault-keys/);
+    await expect(client.encrypt(Buffer.alloc(32))).rejects.toThrow(/Run `npm install @azure\/keyvault-keys @azure\/identity`/);
   });
 });

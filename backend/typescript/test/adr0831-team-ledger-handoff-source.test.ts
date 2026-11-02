@@ -171,7 +171,7 @@ describe('ADR 0831 P3 — handoff notes propose open questions to the ledger', (
         metadata: { kanban: { boardId: s.boardId, cardId: 'c1' }, ...(actingUserId ? { actingUserId } : {}) },
         configurable: {}, createdAt: now, updatedAt: now,
       };
-      await insertRunWithStartContext(storage, run);
+      await insertRunWithStartContext(storage, run, { admission: { plan: 'exempt:test-fixture' } });
       return run.runId;
     };
     const record = normalizeHandoffRecord({ intent: 'Draft the EU page', openQuestions: ['Which legal entity?'] }, 'agent')!;

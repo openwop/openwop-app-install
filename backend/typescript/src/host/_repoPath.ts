@@ -74,8 +74,7 @@ export function locateRepoDir(
  * Convenience wrapper for the common case — locate `<repo>/schemas/`.
  * Equivalent to `locateRepoDir(fromDir, 'schemas', sentinelFile)`.
  *
- * Pre-existing callers (envelopeAcceptor.ts, promptPackLoader.ts) use
- * this form; the generalized `locateRepoDir` is the load-bearing helper.
+ * `promptPackLoader.ts` uses this form; the generalized `locateRepoDir` is the load-bearing helper.
  */
 export function locateRepoSchemasDir(fromDir: string, sentinelFile: string): string {
   return locateRepoDir(fromDir, 'schemas', sentinelFile);

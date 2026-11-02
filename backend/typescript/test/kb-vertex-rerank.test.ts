@@ -10,6 +10,12 @@
  *  - a reached daily cap makes no call at all.
  * The real search/RAG source-run and replay-fork witness lives in
  * `kb-paid-retrieval-replay.test.ts`, including a changed enrichment model.
+ *
+ * Recorded double guards (w74 probes): `typeof score !== 'number'` is equivalent to
+ * `!Number.isFinite(score)` (it never coerces), and `!Number.isFinite` is equivalent to the
+ * 0–1 range check for ±Infinity; the malformed-score rows witness the range and finiteness
+ * guards together, not each copy. The "off" leg runs CAPPED so the enabled check is the
+ * only refusal on that path.
  */
 import { describe, it, expect, beforeAll, afterEach } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -30,6 +36,7 @@ afterEach(() => {
   __setVertexRerankDepsForTest(null);
   delete process.env.OPENWOP_KB_VERTEX_RERANK;
   delete process.env.OPENWOP_KB_VERTEX_RERANK_DAILY_CAP;
+  delete process.env.OPENWOP_VERTEX_PROJECT;
 });
 
 const ON = { OPENWOP_KB_VERTEX_RERANK: '1', OPENWOP_KB_VERTEX_RERANK_DAILY_CAP: '100', OPENWOP_VERTEX_PROJECT: 'proj-x' };
@@ -37,10 +44,13 @@ function md(): GcpMetadataClient & { invalidations: number } {
   const m = { invalidations: 0, accessToken: async () => 'tok', metadataText: async () => 'proj-md', invalidate: () => { m.invalidations += 1; } };
   return m;
 }
+/** `body` is serialised with JSON.stringify; a `{ raw }` body is sent verbatim (JSON cannot
+ *  carry Infinity through stringify, which writes `null`). */
 function fake(status: number, body: unknown, seen: Array<{ url: string; body: Record<string, unknown>; auth: string }> = []): VertexRerankDeps['fetchImpl'] {
   return async (url, init) => {
     seen.push({ url, body: JSON.parse(init.body) as Record<string, unknown>, auth: init.headers.authorization! });
-    return { ok: status === 200, status, text: async () => JSON.stringify(body) };
+    const text = body && typeof body === 'object' && 'raw' in body && typeof body.raw === 'string' ? body.raw : JSON.stringify(body);
+    return { ok: status === 200, status, text: async () => text };
   };
 }
 const DOCS = [{ id: 'a', text: 'alpha text', title: 'A' }, { id: 'b', text: 'beta text' }];
@@ -65,9 +75,10 @@ describe('vertexRerank adapter', () => {
     ['string score', [{ id: 'a', score: '0.7' }]],
     ['negative score', [{ id: 'a', score: -0.1 }]],
     ['oversized score', [{ id: 'a', score: 1.1 }]],
-    ['nonfinite score', [{ id: 'a', score: Infinity }]],
+    ['nonfinite score', { raw: '{"records":[{"id":"a","score":1e999}]}' }],
   ])('rejects a malformed ranking response: %s', async (_name, records) => {
-    expect(await vertexRerank(`invalid-${n++}`, 'q', DOCS, 2, { env: ON, metadata: md(), fetchImpl: fake(200, { records }) })).toBeNull();
+    const body = Array.isArray(records) ? { records } : records; // the raw row parses to score: Infinity
+    expect(await vertexRerank(`invalid-${n++}`, 'q', DOCS, 2, { env: ON, metadata: md(), fetchImpl: fake(200, body) })).toBeNull();
   });
 
   it('every failure is null; a 401 invalidates the token; off is null', async () => {
@@ -76,7 +87,10 @@ describe('vertexRerank adapter', () => {
     expect(m.invalidations).toBe(1);
     expect(await vertexRerank(`t-${n++}`, 'q', DOCS, 2, { env: ON, metadata: md(), fetchImpl: fake(500, {}) })).toBeNull();
     expect(await vertexRerank(`t-${n++}`, 'q', DOCS, 2, { env: ON, metadata: md(), fetchImpl: async () => { throw new Error('timeout'); } })).toBeNull();
-    expect(await vertexRerank(`t-${n++}`, 'q', DOCS, 2, { env: {}, metadata: md(), fetchImpl: fake(200, { records: [{ id: 'a', score: 1 }] }) })).toBeNull();
+    // Off but CAPPED: only the enabled check can refuse here (an uncapped env is also refused by the cap).
+    const offSeen: Array<{ url: string; body: Record<string, unknown>; auth: string }> = [];
+    expect(await vertexRerank(`t-${n++}`, 'q', DOCS, 2, { env: { OPENWOP_KB_VERTEX_RERANK_DAILY_CAP: '100', OPENWOP_VERTEX_PROJECT: 'proj-x' }, metadata: md(), fetchImpl: fake(200, { records: [{ id: 'a', score: 1 }] }, offSeen) })).toBeNull();
+    expect(offSeen, 'off makes no call').toHaveLength(0);
   });
 
   it('a reached daily cap makes no call', async () => {
@@ -93,11 +107,11 @@ describe('vertex rerank — config, boot and search wiring', () => {
   it('is not selectable unless the operator enabled it', async () => {
     const t = `t-${n++}`;
     const c = await createCollection(t, 'o', 'u', { name: 'c' });
-    await expect(setRetrievalConfig(t, 'o', c.collectionId, 'u', { mode: 'hybrid+rerank', rerank: { kind: 'vertex' } })).rejects.toMatchObject({ httpStatus: 422 });
+    await expect(setRetrievalConfig(t, 'o', c.collectionId, 'u', { mode: 'hybrid+rerank', rerank: { kind: 'vertex' } })).rejects.toMatchObject({ httpStatus: 422, details: { reason: 'vertex_rerank_not_configured' } });
     expect((await collectionQuality(t, 'o', KB_MAINTENANCE_CALLER))[0]?.availableRerankers).not.toContain('vertex');
     Object.assign(process.env, ON);
     expect((await collectionQuality(t, 'o', KB_MAINTENANCE_CALLER))[0]?.availableRerankers).toContain('vertex');
-    await expect(setRetrievalConfig(t, 'o', c.collectionId, 'u', { mode: 'hybrid+rerank', rerank: { kind: 'vertex' } })).resolves.toBeTruthy();
+    expect((await setRetrievalConfig(t, 'o', c.collectionId, 'u', { mode: 'hybrid+rerank', rerank: { kind: 'vertex' } })).retrievalConfig?.rerank).toEqual({ kind: 'vertex' });
   });
 
   it('the boot refuses it on with no daily cap', () => {

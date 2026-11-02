@@ -32,6 +32,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { stripComments } from './helpers/stripComments.js';
 
 const FEATURES_ROOT = join(__dirname, '..', 'src', 'features');
 
@@ -815,20 +816,6 @@ const NON_COLLECTION_STORES = new Map<string, { eraser: string; why: string }>([
       + 'ad platform persists there under the platform\'s retention.',
   }],
 ]);
-
-/**
- * KB-3 (found while sabotage-proving the widening) — COMMENTS ARE NOT CODE.
- * `hasEraser` was a bare `/registerSubjectEraser\s*\(/` over the raw file, so
- * COMMENTING OUT a registration left the store reading as covered: the sabotage
- * probe that was supposed to turn this gate red came back green. Same family as
- * the repo's "ratchet gates count comments" lesson, in the gate whose whole job
- * is to notice a missing eraser. Stripped before every source probe below.
- */
-export function stripComments(src: string): string {
-  return src
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')
-    .replace(/(^|[^:'"`\\])\/\/[^\n]*/g, '$1');
-}
 
 function walk(dir: string): string[] {
   const out: string[] = [];
@@ -1679,3 +1666,32 @@ describe('ADR 0464 — feature-owned subject-bearing stores', () => {
     ).toEqual([]);
   });
 });
+
+/**
+ * ADR 1018 (row 68, grade-code CW68C-4) — ANONYMOUS free-text stores.
+ *
+ * The census above binds subject-shaped FIELDS, so a store of anonymous visitor text
+ * (no userId, email or subjectKey: the writer never knows who the visitor is) is
+ * structurally invisible to it — a by-subject DSAR cannot find these rows. They are
+ * listed here instead, each with its erasure story, and the test holds the story to the
+ * code: the namespace must exist, and its file must register a DEFAULT-ON kvAgeOut TTL
+ * for the same prefix (the bound that stands in for a subject eraser). Visitor text can
+ * still contain personal data typed by the visitor; the operator can delete one thread
+ * on request (`DELETE …/conversations/:threadId`), and `deleteWidget` drops them all.
+ */
+const ANONYMOUS_FREE_TEXT_STORES = new Map<string, { file: string; why: string }>([
+  ['chatwidget:thread', { file: 'chat-widget/visitorThreads.ts', why: 'public widget visitor transcripts; 7-day TTL + per-thread operator delete + widget delete' }],
+  ['chatwidget:threadsum', { file: 'chat-widget/visitorThreads.ts', why: 'the 140-char preview of the first visitor message; same TTL and deletes as its thread' }],
+]);
+
+describe('ADR 1018 — anonymous free-text stores carry a default-on TTL instead of a subject eraser', () => {
+  for (const [ns, { file, why }] of ANONYMOUS_FREE_TEXT_STORES) {
+    it(`${ns} — ${why}`, () => {
+      const src = stripComments(readFileSync(join(FEATURES_ROOT, file), 'utf8'));
+      expect([...src.matchAll(STORE_RE)].map((m) => m[2]), `${ns} must still be declared in ${file}`).toContain(ns);
+      expect(src, `${file} must register a kvAgeOut TTL for hostext:${ns}:`).toMatch(new RegExp(`registerKvAgeOut\\(\\{[^}]*prefix:\\s*'hostext:${ns}:'[^}]*ttlDays:\\s*[A-Z_0-9]+`));
+      expect(stores.has(ns), `${ns} gained a subject field — classify it in the census above instead`).toBe(false);
+    });
+  }
+});
+

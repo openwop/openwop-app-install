@@ -25,7 +25,7 @@ import type { Storage } from '../storage/storage.js';
 import type { UserAgentRecord } from '../types.js';
 import { OpenwopError } from '../types.js';
 import { CAS_RETRIES, entityEtag, etagHeader, parseIfMatch, staleWriteError } from '../host/entityVersion.js';
-import { getAgentRegistry } from '../executor/agentRegistry.js';
+import { getAgentRegistry, type ResolvedAgentManifest } from '../executor/agentRegistry.js';
 import { createLogger } from '../observability/logger.js';
 import {
   canonicalRequestDigest,
@@ -36,6 +36,7 @@ import {
 import { idempotencyOutcomeOf, recordIdempotencyClaim } from '../observability/metricSeams.js';
 import { requireTenantWrite } from '../features/featureRoute.js';
 import { deleteCaptureSetting } from '../host/evals/toolBoundary.js';
+import { alignHead, currentRevision, onUserAgentDeleted, revisionForRecord } from '../host/userAgentRevisions.js';
 
 const log = createLogger('routes.userAgents');
 
@@ -188,7 +189,10 @@ export function registerUserAgentRoutes(app: Express, deps: Deps): void {
         createdAt: new Date().toISOString(),
       };
       await storage.insertUserAgent(record);
-      registerUserAgent(record);
+      // ADR 1014 D8 — record who typed this content as revision 0, so a DSAR can
+      // reach it. Numbering never fails the create: a fault leaves revision 0 unnamed.
+      if (req.userId) await alignHead(record, req.userId).catch(() => undefined);
+      registerUserAgent(record, await revisionForRecord(record));
       const responseBody = {
         agentId: record.agentId,
         persona: record.persona,
@@ -266,6 +270,7 @@ export function registerUserAgentRoutes(app: Express, deps: Deps): void {
       // A lost swap re-reads and re-applies the patch (a concurrent edit to another
       // field is kept); with `If-Match`, a version that moved is refused instead.
       let updated: UserAgentRecord | null = null;
+      let replaced: UserAgentRecord | null = null;
       for (let attempt = 0; attempt < CAS_RETRIES && !updated; attempt += 1) {
         const record = await storage.getUserAgent(tenantId, agentId);
         if (!record) {
@@ -275,6 +280,9 @@ export function registerUserAgentRoutes(app: Express, deps: Deps): void {
             404,
           );
         }
+        // ADR 1014 P5 — number the content as stored BEFORE this edit (revision 0 for
+        // a never-edited agent; a catch-up if another edit's numbering is pending).
+        await alignHead(record).catch(() => undefined);
         if (ifMatch !== undefined && userAgentEtag(record) !== ifMatch) {
           throw staleWriteError('agent', userAgentEtag(record));
         }
@@ -290,12 +298,21 @@ export function registerUserAgentRoutes(app: Express, deps: Deps): void {
             ? { confidenceThreshold: patch.confidenceThreshold }
             : {}),
         };
-        if (await storage.updateUserAgent(tenantId, next, record)) updated = next;
+        if (await storage.updateUserAgent(tenantId, next, record)) { updated = next; replaced = record; }
       }
-      if (!updated) throw staleWriteError('agent', undefined);
+      if (!updated || !replaced) throw staleWriteError('agent', undefined);
+      // ADR 1014 P5 — an edit that changes the content is a new revision; the old one
+      // stays. Numbering never fails the edit: a fault leaves the next read to catch up.
+      let revision: string;
+      try {
+        revision = await alignHead(updated, req.userId);
+      } catch (err) {
+        log.warn('user_agent_revision_failed', { agentId: updated.agentId, error: err instanceof Error ? err.message : String(err) });
+        revision = await currentRevision(tenantId, updated.agentId).catch(() => '0');
+      }
       // Re-register so the in-process registry (GET /v1/agents, the chat `@`
       // picker, the chat-responder system prompt) reflects the edit at once.
-      registerUserAgent(updated);
+      registerUserAgent(updated, revision);
       // ADR 0775 P3d — other instances drop their copy and re-read the edit.
       await broadcastAgentEviction(tenantId, updated.agentId);
       res.setHeader('ETag', etagHeader(userAgentEtag(updated)));
@@ -308,7 +325,7 @@ export function registerUserAgentRoutes(app: Express, deps: Deps): void {
         modelClass: updated.modelClass,
         systemPrompt: updated.systemPrompt,
         packName: `user:${tenantId}`,
-        packVersion: '0',
+        packVersion: revision,
         toolAllowlist: updated.toolAllowlist,
         memoryShape: updated.memoryShape,
         confidenceThreshold: updated.confidenceThreshold,
@@ -344,6 +361,10 @@ export function registerUserAgentRoutes(app: Express, deps: Deps): void {
       // registry — possible if the storage row outlived an earlier
       // partial-load), so calling it on a missing entry is safe.
       getAgentRegistry().remove(agentId, tenantId);
+      // ADR 1014 P5 — its revisions (tenant IP) and its deployments go with it.
+      await onUserAgentDeleted(tenantId, agentId).catch((err: unknown) => {
+        log.warn('user_agent_revision_purge_failed', { agentId, error: err instanceof Error ? err.message : String(err) });
+      });
       // ADR 0775 P3d — and on every other instance (architect H2).
       await broadcastAgentEviction(tenantId, agentId);
       // ADR 0889 EVD-5 — the agent's eval-capture opt-in leaves with it, so a
@@ -393,7 +414,8 @@ export async function loadUserAgentsIntoRegistry(storage: Storage): Promise<numb
         });
       }
     }
-    registerUserAgent(effective);
+    // ADR 1014 P5 — a restarted instance registers the same revision for the same content.
+    registerUserAgent(effective, await revisionForRecord(effective).catch(() => '0'));
   }
   if (migrated > 0) {
     log.info('user_agents_anon_tenant_migrated', { migrated });
@@ -425,7 +447,7 @@ export async function ensureUserAgentRegistered(
   if (!existing) {
     await storage.insertUserAgent(record);
   }
-  registerUserAgent(record);
+  registerUserAgent(record, await revisionForRecord(record).catch(() => '0'));
 }
 
 /** Read-through hydration: load ONE user-authored agent from durable storage
@@ -447,7 +469,7 @@ export async function hydrateUserAgentIntoRegistry(storage: Storage, agentId: st
     ? await storage.getUserAgent(tenant, agentId)
     : await storage.getUserAgentAnyTenant(agentId);
   if (!record) return false;
-  registerUserAgent(record);
+  registerUserAgent(record, await revisionForRecord(record));
   return true;
 }
 
@@ -460,8 +482,13 @@ export async function hydrateUserAgentIntoRegistry(storage: Storage, agentId: st
  *  list route filters on it, and the chat-responder dispatch path
  *  rejects an `inputs.agentId` whose `ownerTenant` doesn't match the
  *  run's tenant. Pack-installed agents OMIT the field (tenant-agnostic). */
-function registerUserAgent(record: UserAgentRecord): void {
-  getAgentRegistry().register({
+function registerUserAgent(record: UserAgentRecord, version = '0'): void {
+  getAgentRegistry().register(projectUserAgent(record, version));
+}
+
+/** ADR 1014 P5 — the manifest of one user-agent revision (`packVersion` = the revision). */
+export function projectUserAgent(record: UserAgentRecord, version: string): ResolvedAgentManifest {
+  return {
     agentId: record.agentId,
     persona: record.persona,
     modelClass: record.modelClass,
@@ -474,9 +501,9 @@ function registerUserAgent(record: UserAgentRecord): void {
       ? { confidence: { defaultThreshold: record.confidenceThreshold } }
       : {}),
     packName: `user:${record.tenantId}`,
-    packVersion: '0',
+    packVersion: version,
     ownerTenant: record.tenantId,
-  });
+  };
 }
 
 interface ValidatedCreate {

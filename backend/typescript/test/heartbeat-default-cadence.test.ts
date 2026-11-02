@@ -4,6 +4,9 @@
  * "not configured" → the host default applies (the ADR correction: stored 0s
  * are form noise, not opt-outs); explicit `-1` = deliberately OFF; the host
  * default itself is env-tunable and `0` restores the pre-0313 opt-in world.
+ *
+ * Tracker TST-DFB-5. Red when (w71g1, witnessed): a positive cadence stops winning; -1
+ * stops meaning OFF; an env value of 0 is ignored; the fallback is not 10 minutes.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { effectiveHeartbeatIntervalMs, HEARTBEAT_DEFAULT_MS_ENV, HEARTBEAT_OFF } from '../src/host/heartbeatService.js';

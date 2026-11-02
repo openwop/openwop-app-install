@@ -6,6 +6,19 @@
  * whole risk is that adding a bypass for one caller quietly weakens the gate for
  * everyone, so "unchanged for everything else" is the property under test — not
  * a side effect to be assumed.
+ *
+ * The PURCHASE rule (a grant never authorises spending) is a consult-level rule
+ * and is pinned in `apply-grant.test.ts` ("NEVER grants a purchase"); this file's
+ * class case pins the gate-level companion — a CREDENTIAL action never proceeds,
+ * and is never even offered for approval (ADR 0894 D6).
+ *
+ * TST-BXG-2. Red when: a session with no apply context consults a grant
+ * (w66 cg-noctx), a retry re-claims a listing (cg-claim), the gate proceeds
+ * without consuming (cg-consume), a granted step is recorded as anything but
+ * `grant` (cg-decided), a credential action reaches the commit tier (cg-cred),
+ * the commit origin is not the action's (cg-origin), `startTask` drops the
+ * context (cg-start), or the workflow surface trusts an unknown tier, extra
+ * keys, or a context with no subject/campaign (cg-tier, cg-closed, cg-drop).
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { advance } from '../src/features/computer-use/computerUseService.js';
@@ -13,6 +26,7 @@ import { sessions, type CuSession } from '../src/features/computer-use/sessionSt
 import type { ComputerUseAdapter, CuAction } from '../src/features/computer-use/adapter.js';
 import { createApplyGrant, applyGrants, submissionClaims } from '../src/host/applyGrant.js';
 import { startTask } from '../src/features/computer-use/computerUseService.js';
+import type { BundleScope } from '../src/host/inMemorySurfaces.js';
 import { buildComputerUseSurface } from '../src/features/computer-use/feature.js';
 import { __resetHostExtPersistence, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
@@ -51,13 +65,16 @@ const session = (over: Partial<CuSession> = {}): CuSession => ({
   ...over,
 });
 
-const mintGrant = (over: Record<string, unknown> = {}) =>
+const mintGrant = (over: Partial<Parameters<typeof createApplyGrant>[0]> = {}) =>
   createApplyGrant({
-    tenantId: TENANT, orgId: 'org-1', subjectId: 'subj-1', grantedBy: 'user-1',
+    tenantId: TENANT, orgId: 'org-1', subjectId: 'user-1', grantedBy: 'user-1',
     campaignId: 'camp-1', maxSubmits: 5, maxPrepared: 3, ratePerHour: 4,
     origins: [ORIGIN], resumePolicy: 'default',
     expiresAt: new Date(Date.now() + 86_400_000).toISOString(), ...over,
-  } as never);
+  });
+
+/** The run scope a workflow node hands the computer-use surface. */
+const runScope = (runId: string): BundleScope => ({ tenantId: TENANT, runId, actingUserId: 'user-1' });
 
 const submitAction: CuAction = { actionId: 'act-1', kind: 'submit', description: 'Submit application', url: `https://${ORIGIN}/apply` };
 
@@ -100,7 +117,7 @@ describe('ADR 0541 P2 — the gate is NEVER weakened for anything else', () => {
 
   it('with a valid grant, the same commit proceeds without a human', async () => {
     await mintGrant();
-    const s = session({ applyContext: { subjectId: 'subj-1', campaignId: 'camp-1', tier: 'A' } });
+    const s = session({ applyContext: { subjectId: 'user-1', campaignId: 'camp-1', tier: 'A' } });
     await sessions.put(s);
     const { adapter, approvals } = stubAdapter(submitAction);
     const view = await advance(adapter, s);
@@ -110,7 +127,7 @@ describe('ADR 0541 P2 — the gate is NEVER weakened for anything else', () => {
 
   it('records the decision as `grant`, not `auto` — D5 attributability', async () => {
     await mintGrant();
-    const s = session({ applyContext: { subjectId: 'subj-1', campaignId: 'camp-1', tier: 'A' } });
+    const s = session({ applyContext: { subjectId: 'user-1', campaignId: 'camp-1', tier: 'A' } });
     await sessions.put(s);
     await advance(stubAdapter(submitAction).adapter, s);
     const stored = await sessions.get(`${TENANT}:sess-1`);
@@ -121,15 +138,15 @@ describe('ADR 0541 P2 — the gate is NEVER weakened for anything else', () => {
 
   it('CONSUMES budget before proceeding — consume-then-act, not act-then-consume', async () => {
     const g = await mintGrant();
-    const s = session({ applyContext: { subjectId: 'subj-1', campaignId: 'camp-1', tier: 'A' } });
+    const s = session({ applyContext: { subjectId: 'user-1', campaignId: 'camp-1', tier: 'A' } });
     await sessions.put(s);
     await advance(stubAdapter(submitAction).adapter, s);
     expect((await applyGrants.get(`${TENANT}:${g.grantId}`))?.submitsUsed).toBe(1);
   });
 
-  it('a PURCHASE is never granted — it halts even with a valid grant', async () => {
+  it('a PURCHASE is never granted — a CREDENTIAL action never proceeds, even with a valid grant', async () => {
     await mintGrant();
-    const s = session({ applyContext: { subjectId: 'subj-1', campaignId: 'camp-1', tier: 'A' } });
+    const s = session({ applyContext: { subjectId: 'user-1', campaignId: 'camp-1', tier: 'A' } });
     await sessions.put(s);
     const purchase: CuAction = { actionId: 'act-buy', kind: 'submit', description: 'Pay application fee', url: `https://${ORIGIN}/pay` };
     // NOTE: kind is `submit` here on purpose — the CLASS comes from the closed
@@ -148,26 +165,30 @@ describe('ADR 0541 P2 — the gate is NEVER weakened for anything else', () => {
 
   it('an EXHAUSTED grant halts for a human rather than failing the session', async () => {
     await mintGrant({ maxSubmits: 1 });
-    const first = session({ applyContext: { subjectId: 'subj-1', campaignId: 'camp-1', tier: 'A' } });
+    const first = session({ applyContext: { subjectId: 'user-1', campaignId: 'camp-1', tier: 'A' } });
     await sessions.put(first);
     await advance(stubAdapter(submitAction).adapter, first);
 
     // A DIFFERENT listing (different requestHash) so the claim is not the thing
     // refusing — this must be the budget.
-    const second = session({ sessionId: 'sess-2', requestHash: 'req-hash-2', applyContext: { subjectId: 'subj-1', campaignId: 'camp-1', tier: 'A' } });
+    const second = session({ sessionId: 'sess-2', requestHash: 'req-hash-2', applyContext: { subjectId: 'user-1', campaignId: 'camp-1', tier: 'A' } });
     await sessions.put(second);
-    const view = await advance(stubAdapter(submitAction).adapter, second);
+    const { adapter, approvals } = stubAdapter(submitAction);
+    const view = await advance(adapter, second);
     expect(view.status).toBe('awaiting_approval');
+    expect(approvals, 'an exhausted grant auto-approves nothing').toEqual([]);
+    const g = (await applyGrants.listByPrefix(`${TENANT}:`))[0];
+    expect(g?.submitsUsed, 'the halted session spent nothing').toBe(1);
   });
 
   it('a RETRY of the same listing does not submit twice, and does not spend twice', async () => {
     // D3b — the single most embarrassing failure mode in this product.
     const g = await mintGrant();
-    const s = session({ applyContext: { subjectId: 'subj-1', campaignId: 'camp-1', tier: 'A' } });
+    const s = session({ applyContext: { subjectId: 'user-1', campaignId: 'camp-1', tier: 'A' } });
     await sessions.put(s);
     await advance(stubAdapter(submitAction).adapter, s);
 
-    const retry = session({ sessionId: 'sess-retry', applyContext: { subjectId: 'subj-1', campaignId: 'camp-1', tier: 'A' } });
+    const retry = session({ sessionId: 'sess-retry', applyContext: { subjectId: 'user-1', campaignId: 'camp-1', tier: 'A' } });
     await sessions.put(retry);
     const { adapter, approvals } = stubAdapter(submitAction);
     const view = await advance(adapter, retry);
@@ -175,12 +196,12 @@ describe('ADR 0541 P2 — the gate is NEVER weakened for anything else', () => {
     expect(approvals, 'a retry must not produce a second application').toEqual([]);
     expect(view.status).toBe('awaiting_approval');
     expect((await applyGrants.get(`${TENANT}:${g.grantId}`))?.submitsUsed, 'the retry must not spend a second unit').toBe(1);
-    expect(await submissionClaims.get(`${TENANT}:subj-1:req-hash-1`)).toBeTruthy();
+    expect(await submissionClaims.get(`${TENANT}:user-1:req-hash-1`)).toBeTruthy();
   });
 
   it('an OUT-OF-SCOPE origin halts, even with an otherwise valid grant', async () => {
     await mintGrant({ origins: ['other.example.com'] });
-    const s = session({ applyContext: { subjectId: 'subj-1', campaignId: 'camp-1', tier: 'A' } });
+    const s = session({ applyContext: { subjectId: 'user-1', campaignId: 'camp-1', tier: 'A' } });
     await sessions.put(s);
     const { adapter, approvals } = stubAdapter(submitAction);
     expect((await advance(adapter, s)).status).toBe('awaiting_approval');
@@ -201,11 +222,11 @@ describe('ADR 0541 P2 — the gate is NEVER weakened for anything else', () => {
       startUrl: `https://${ORIGIN}/apply`,
       allowedOrigins: [`https://${ORIGIN}`],
       createdBy: 'user-1',
-      applyContext: { subjectId: 'subj-1', campaignId: 'camp-1', tier: 'A' },
+      applyContext: { subjectId: 'user-1', campaignId: 'camp-1', tier: 'A' },
     });
     const stored = await sessions.get(`${TENANT}:${view.sessionId}`);
     expect(stored?.applyContext, 'a started session must carry the grant context').toEqual({
-      subjectId: 'subj-1', campaignId: 'camp-1', tier: 'A',
+      subjectId: 'user-1', campaignId: 'camp-1', tier: 'A',
     });
   });
 
@@ -213,14 +234,14 @@ describe('ADR 0541 P2 — the gate is NEVER weakened for anything else', () => {
     // A chain supplies this, so an unrecognised tier must fall back to 'C' —
     // which is never grantable — rather than being trusted. The safe direction
     // is the one that requires a human.
-    const surface = buildComputerUseSurface({ tenantId: TENANT, runId: 'run:1', actingUserId: 'user-1' } as never);
+    const surface = buildComputerUseSurface(runScope('run:1'));
     const start = surface.startTask as (a: Record<string, unknown>) => Promise<{ session: { sessionId: string } }>;
     const out = await start({
       orgId: 'org-1',
       task: 'apply',
       startUrl: `https://${ORIGIN}/apply`,
       allowedOrigins: [`https://${ORIGIN}`],
-      applyContext: { subjectId: 'subj-1', campaignId: 'camp-1', tier: 'ZZZ', sneaky: 'x' },
+      applyContext: { subjectId: 'user-1', campaignId: 'camp-1', tier: 'ZZZ', sneaky: 'x' },
     });
     const stored = await sessions.get(`${TENANT}:${out.session.sessionId}`);
     expect(stored?.applyContext?.tier, 'an unknown tier must fall back to the human-required one').toBe('C');
@@ -228,7 +249,7 @@ describe('ADR 0541 P2 — the gate is NEVER weakened for anything else', () => {
   });
 
   it('a context with no subject or campaign is DROPPED, not half-built', async () => {
-    const surface = buildComputerUseSurface({ tenantId: TENANT, runId: 'run:2', actingUserId: 'user-1' } as never);
+    const surface = buildComputerUseSurface(runScope('run:2'));
     const start = surface.startTask as (a: Record<string, unknown>) => Promise<{ session: { sessionId: string } }>;
     const out = await start({
       orgId: 'org-1', task: 'apply2', startUrl: `https://${ORIGIN}/apply2`,

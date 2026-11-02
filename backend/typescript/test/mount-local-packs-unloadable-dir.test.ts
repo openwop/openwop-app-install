@@ -129,6 +129,7 @@ describe('ensureLocalPacksMounted — unloadable registry dir', () => {
 
     const res = mount(localDir, destDir);
     expect(res.mounted).toContain(NAME);
+    expect(lstatSync(join(destDir, NAME)).isSymbolicLink()).toBe(true);
   });
 
   it('does NOT touch a registry dir that has a readable manifest', () => {

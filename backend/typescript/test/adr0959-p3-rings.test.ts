@@ -12,6 +12,19 @@
  *  - the advance writing with `put` instead of compare-and-swap               → "one transition"
  *  - the soak check removed                                                   → "soak"
  *  - the plan accepting a held client by name                                 → "held"
+ *
+ * DOUBLE GUARD / EQUIVALENT MUTANT (recorded): `failedRunsSince` counts a failed run only when
+ * its stamp names the rollout's `toVersion` AND it was created at or after the client's apply.
+ * The old 1.0.0 failure in "only the open ring" is created BEFORE the apply, so dropping only the
+ * version filter changes nothing on this fixture (probe w73g3-pb3-health-version-only: vacuous,
+ * an equivalent mutant). The header's "ignoring the version" sabotage breaks both filters in one
+ * edit (w73g3-pb3-health-version-since: witnessed). A 1.0.0 failure AFTER the apply cannot be
+ * produced once the install runs 2.0.0, so the version filter alone has no reachable witness.
+ *
+ * Every case builds its OWN playbook (`ringFixture`: v1 + v2 published, installed on the four
+ * clients, rings canary/early/general/held) and its own rollout, so the file passes in any
+ * order (wave 73: three cases shared one rollout id and a `good@3.0.0` leaked into another).
+ * Run settle polls a real 25 ms tick: the executor exposes no completion hook (honest ceiling).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -34,12 +47,15 @@ let storage: Storage;
 const orgs: string[] = [];
 const cookies = { admin1: '', admin2: '' };
 
-interface Res { status: number; body: Record<string, unknown> }
+interface Res { status: number; body: unknown }
+/** Walk an untyped JSON body without casts. */
+const get = (b: unknown, ...path: string[]): unknown => path.reduce<unknown>((o, k) => (typeof o === 'object' && o !== null ? Reflect.get(o, k) : undefined), b);
+const str = (v: unknown, what: string): string => { if (typeof v !== 'string' || !v) throw new Error(`${what} is not a string: ${JSON.stringify(v)}`); return v; };
 async function call(who: keyof typeof cookies, method: string, path: string, body?: unknown, root = '/host/openwop-app'): Promise<Res> {
   const res = await fetch(`${BASE}${root}${path}`, { method, headers: { cookie: cookies[who], 'content-type': 'application/json' }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
   const raw = res.status === 204 ? '' : await res.text();
-  let parsed: Record<string, unknown> = {};
-  try { parsed = raw ? JSON.parse(raw) as Record<string, unknown> : {}; } catch { /* not JSON */ }
+  let parsed: unknown = {};
+  try { parsed = raw ? JSON.parse(raw) : {}; } catch { /* not JSON */ }
   return { status: res.status, body: parsed };
 }
 
@@ -64,24 +80,43 @@ async function installAll(id: string): Promise<void> {
   const rings = ['canary', 'early', 'general', 'held'];
   for (const [i, org] of orgs.entries()) expect((await call('admin1', 'PUT', `/campaign-playbooks/clients/${org}/installs/${id}/ring`, { ring: rings[i] })).status).toBe(200);
 }
+let seq = 0;
+/** This case's own playbook: 1.0.0 installed on the four clients (rings canary/early/general/held),
+ *  then 2.0.0 published. `good`: 1.0.0 fails every run, 2.0.0 is healthy. `bad`: the reverse. */
+async function ringFixture(kind: 'good' | 'bad'): Promise<string> {
+  const id = `${kind}-${(++seq).toString(36)}`;
+  await publish(id, '1.0.0', kind === 'good');
+  await installAll(id);
+  await publish(id, '2.0.0', kind === 'bad');
+  return id;
+}
 async function approvedRollout(id: string, soakHours: Record<string, number>): Promise<string> {
   const created = await call('admin1', 'POST', `/campaign-playbooks/playbooks/${id}/rollouts`, { toVersion: '2.0.0', rings: true, soakHours });
   expect(created.status, JSON.stringify(created.body)).toBe(201);
-  expect((await call('admin2', 'POST', `/approvals/${(created.body.approval as { approvalId: string }).approvalId}/claim`, {})).status).toBe(200);
-  return (created.body.rollout as { rolloutId: string }).rolloutId;
+  expect((await call('admin2', 'POST', `/approvals/${str(get(created.body, 'approval', 'approvalId'), 'approval.approvalId')}/claim`, {})).status).toBe(200);
+  return str(get(created.body, 'rollout', 'rolloutId'), 'rollout.rolloutId');
 }
-const workflowOf = async (orgId: string, id: string) => ((await call('admin1', 'GET', `/campaign-playbooks/clients/${orgId}/installs`)).body.installations as Array<{ playbookId: string; workflowId: string }>).find((i) => i.playbookId === id)!.workflowId;
+async function installationOf(orgId: string, id: string): Promise<unknown> {
+  const rows = get((await call('admin1', 'GET', `/campaign-playbooks/clients/${orgId}/installs`)).body, 'installations');
+  if (!Array.isArray(rows)) throw new Error('installations is not an array');
+  const row: unknown = rows.find((i) => get(i, 'playbookId') === id);
+  if (!row) throw new Error(`no installation of ${id} on ${orgId}`);
+  return row;
+}
+const workflowOf = async (orgId: string, id: string): Promise<string> => str(get(await installationOf(orgId, id), 'workflowId'), 'workflowId');
 async function runToEnd(workflowId: string): Promise<string> {
   const r = await call('admin1', 'POST', '/runs', { workflowId, inputs: {} }, '');
   expect(r.status, JSON.stringify(r.body)).toBe(201);
+  const runId = str(get(r.body, 'runId'), 'runId');
   for (let i = 0; i < 120; i++) {
-    const s = String((await call('admin1', 'GET', `/runs/${String(r.body.runId)}`, undefined, '')).body.status);
-    if (['completed', 'failed', 'cancelled'].includes(s)) return s;
+    const s = get((await call('admin1', 'GET', `/runs/${runId}`, undefined, '')).body, 'status');
+    if (typeof s === 'string' && ['completed', 'failed', 'cancelled'].includes(s)) return s;
     await new Promise((res) => setTimeout(res, 25));
   }
-  return 'timeout';
+  throw new Error(`run ${runId} did not settle within 120 polls`);
 }
-const getRollout = async (rid: string) => (await call('admin1', 'GET', `/campaign-playbooks/rollouts/${rid}`)).body.rollout as { status: string; ringIndex: number; rings: Array<{ name: string; orgIds: string[] }> };
+const getRollout = async (rid: string): Promise<unknown> => get((await call('admin1', 'GET', `/campaign-playbooks/rollouts/${rid}`)).body, 'rollout');
+const ringsOf = (rollout: unknown): unknown[] => { const r = get(rollout, 'rings'); if (!Array.isArray(r)) throw new Error('rollout.rings is not an array'); return r; };
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -104,80 +139,78 @@ beforeAll(async () => {
     await createClient({ tenantId: TENANT, orgId, name: `Client ${i} (synthetic)`, createdBy: 'seed' });
     orgs.push(orgId);
   }
-  // `good`: 1.0.0 fails every run, 2.0.0 is healthy. `bad`: the reverse.
-  await publish('good', '1.0.0', true);
-  await publish('bad', '1.0.0', false);
-  await installAll('good');
-  await installAll('bad');
-  await publish('good', '2.0.0', false);
-  await publish('bad', '2.0.0', true);
-});
+}, 120_000);
 afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
 
 describe('ADR 0959 D6.3 — rings', () => {
-  let rid = '';
   it('held clients are skipped, by a ring rollout and by name', async () => {
-    const byName = await call('admin1', 'POST', '/campaign-playbooks/playbooks/good/rollouts', { toVersion: '2.0.0', orgIds: [orgs[3]!] });
+    const good = await ringFixture('good');
+    const byName = await call('admin1', 'POST', `/campaign-playbooks/playbooks/${good}/rollouts`, { toVersion: '2.0.0', orgIds: [orgs[3]!] });
     expect(byName.status).toBe(409);
     expect(JSON.stringify(byName.body)).toContain('install_held');
-    rid = await approvedRollout('good', { canary: 0, early: 1, general: 0 });
-    const r = await getRollout(rid);
-    expect(r.rings.map((x) => [x.name, x.orgIds])).toEqual([['canary', [orgs[0]]], ['early', [orgs[1]]], ['general', [orgs[2]]]]);
+    const rid = await approvedRollout(good, { canary: 0, early: 1, general: 0 });
+    expect(ringsOf(await getRollout(rid)).map((x) => [get(x, 'name'), get(x, 'orgIds')])).toEqual([['canary', [orgs[0]]], ['early', [orgs[1]]], ['general', [orgs[2]]]]);
   });
 
   it('only the open ring applies; an old version\'s failures do not stop the next ring', async () => {
-    expect(await runToEnd(await workflowOf(orgs[0]!, 'good'))).toBe('failed'); // a 1.0.0 failure, before the rollout
+    const good = await ringFixture('good');
+    const rid = await approvedRollout(good, { canary: 0, early: 1, general: 0 });
+    expect(await runToEnd(await workflowOf(orgs[0]!, good))).toBe('failed'); // a 1.0.0 failure, before the apply
     const early = await call('admin1', 'POST', `/campaign-playbooks/rollouts/${rid}/targets/${orgs[1]}/apply`, {});
     expect(early.status).toBe(409);
     expect(JSON.stringify(early.body)).toContain('ring_not_open');
     const ring0 = await call('admin1', 'POST', `/campaign-playbooks/rollouts/${rid}/apply-ring`, {});
     expect(ring0.status, JSON.stringify(ring0.body)).toBe(200);
     expect(ring0.body).toMatchObject({ applied: [orgs[0]] });
-    expect(await runToEnd(await workflowOf(orgs[0]!, 'good'))).toBe('completed'); // 2.0.0 is healthy
+    expect(await runToEnd(await workflowOf(orgs[0]!, good))).toBe('completed'); // 2.0.0 is healthy
     const adv = await call('admin1', 'POST', `/campaign-playbooks/rollouts/${rid}/advance`, {});
     expect(adv.status, JSON.stringify(adv.body)).toBe(200);
-    expect((await getRollout(rid)).ringIndex).toBe(1);
+    expect(get(await getRollout(rid), 'ringIndex')).toBe(1);
   });
 
   it('a ring still soaking does not advance', async () => {
-    expect((await call('admin1', 'POST', `/campaign-playbooks/rollouts/${rid}/apply-ring`, {})).status).toBe(200);
+    const good = await ringFixture('good');
+    const rid = await approvedRollout(good, { canary: 0, early: 1, general: 0 });
+    expect((await call('admin1', 'POST', `/campaign-playbooks/rollouts/${rid}/apply-ring`, {})).status).toBe(200); // canary
+    const first = await call('admin1', 'POST', `/campaign-playbooks/rollouts/${rid}/advance`, {});
+    expect(first.status, JSON.stringify(first.body)).toBe(200); // canary soaks 0 h
+    expect((await call('admin1', 'POST', `/campaign-playbooks/rollouts/${rid}/apply-ring`, {})).status).toBe(200); // early
     const adv = await call('admin1', 'POST', `/campaign-playbooks/rollouts/${rid}/advance`, {});
     expect(adv.status).toBe(409);
     expect(JSON.stringify(adv.body)).toContain('soak_pending');
+    expect(get(await getRollout(rid), 'ringIndex')).toBe(1);
   });
 });
 
 describe('ADR 0959 D6.3 — the exit criteria', () => {
   it('concurrent advances produce one transition', async () => {
-    const rid = await (async () => {
-      // A fresh playbook version so this rollout is independent of the one above.
-      await publish('good', '3.0.0', false);
-      const created = await call('admin1', 'POST', '/campaign-playbooks/playbooks/good/rollouts', { toVersion: '3.0.0', rings: true, soakHours: { canary: 0, early: 0, general: 0 } });
-      expect(created.status, JSON.stringify(created.body)).toBe(201);
-      expect((await call('admin2', 'POST', `/approvals/${(created.body.approval as { approvalId: string }).approvalId}/claim`, {})).status).toBe(200);
-      return (created.body.rollout as { rolloutId: string }).rolloutId;
-    })();
+    const good = await ringFixture('good');
+    const rid = await approvedRollout(good, { canary: 0, early: 0, general: 0 });
     expect((await call('admin1', 'POST', `/campaign-playbooks/rollouts/${rid}/apply-ring`, {})).status).toBe(200);
     // In-process, so the five interleave at every storage await (over HTTP they serialize and
     // the losers merely see `ring_incomplete`, which would not test the compare-and-swap).
     const results = await Promise.allSettled(Array.from({ length: 5 }, () => advanceRollout(storage, TENANT, rid, 'u')));
-    expect(results.filter((r) => r.status === 'fulfilled'), JSON.stringify(results.map((r) => (r.status === 'rejected' ? String((r.reason as { details?: { reason?: string } }).details?.reason) : 'ok')))).toHaveLength(1);
-    expect((await getRollout(rid)).ringIndex).toBe(1);
+    expect(results.filter((r) => r.status === 'fulfilled'), JSON.stringify(results.map((r) => (r.status === 'rejected' ? String(get(r.reason, 'details', 'reason')) : 'ok')))).toHaveLength(1);
+    expect(get(await getRollout(rid), 'ringIndex')).toBe(1);
   });
 
   it('a failing canary stops the rollout; rollback stays open', async () => {
-    const rid = await approvedRollout('bad', { canary: 0, early: 0, general: 0 });
+    const bad = await ringFixture('bad');
+    const rid = await approvedRollout(bad, { canary: 0, early: 0, general: 0 });
     expect((await call('admin1', 'POST', `/campaign-playbooks/rollouts/${rid}/apply-ring`, {})).status).toBe(200);
-    expect(await runToEnd(await workflowOf(orgs[0]!, 'bad'))).toBe('failed'); // 2.0.0 fails
+    expect(await runToEnd(await workflowOf(orgs[0]!, bad))).toBe('failed'); // 2.0.0 fails
     const adv = await call('admin1', 'POST', `/campaign-playbooks/rollouts/${rid}/advance`, {});
     expect(adv.status).toBe(409);
     expect(adv.body).toMatchObject({ details: { reason: 'health_failed', orgIds: [orgs[0]] } });
-    expect((await getRollout(rid)).status).toBe('halted');
+    expect(get(await getRollout(rid), 'status')).toBe('halted');
     expect((await call('admin1', 'POST', `/campaign-playbooks/rollouts/${rid}/advance`, {})).status).toBe(409);
     const blocked = await call('admin1', 'POST', `/campaign-playbooks/rollouts/${rid}/targets/${orgs[1]}/apply`, {});
     expect(blocked.status).toBe(409);
     expect(JSON.stringify(blocked.body)).toContain('rollout_halted');
+    expect(get(await installationOf(orgs[0]!, bad), 'pinnedVersion')).toBe('2.0.0');
     const back = await call('admin1', 'POST', `/campaign-playbooks/rollouts/${rid}/targets/${orgs[0]}/rollback`, {});
     expect(back.status, JSON.stringify(back.body)).toBe(200);
+    // Rolled back, read from the installation (not the response): the client is on 1.0.0 again.
+    expect(get(await installationOf(orgs[0]!, bad), 'pinnedVersion')).toBe('1.0.0');
   });
 });

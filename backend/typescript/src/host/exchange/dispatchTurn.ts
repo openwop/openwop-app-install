@@ -1,23 +1,22 @@
 /**
  * Model-target resolution + provider dispatch for one conversation turn
  * (ADR 0327 P1). Owns the ONE conversation model resolution path (CS-GB-1 —
- * override > stamped route > same-provider class tier > run inputs), the
- * route-stamp write side (ADR 0130 Phase 3c), turn provenance (ADR 0124
- * Phase 2d), usage/rollup/span annotations, prompt assembly, and
+ * override > this turn's route (ADR 1016) > legacy stamp > same-provider class
+ * tier > run inputs), turn provenance (ADR 0124 Phase 2d), usage/rollup/span annotations, prompt assembly, and
  * `dispatchReply` — the mock/managed/subscription/compat/BYOK dispatch braid.
  */
 
 import { fenceUntrustedBlock } from '../untrustedContent.js';
+import { assertEffectAllowed } from '../runEffectContext.js';
 import { notReReadLine, workflowRunRefOf } from './runDigests.js';
 import { createLogger } from '../../observability/logger.js';
 import { dispatchChat, type ChatMessage, type ProviderId } from '../../providers/dispatch.js';
 import { withLlmSpan, annotateActiveLlmSpan, PROVIDER_DISPATCH_SPAN } from '../../observability/llmSpans.js';
-import { resolveConversationModelTarget, type ConversationModelTierInput } from '../../features/model-router/applyRoute.js';
+import { resolveConversationModelTarget, unchosenModelTarget, type ConversationModelTierInput, type ConversationModelTargetInput } from '../../features/model-router/applyRoute.js';
+import type { RoutingTarget } from '../../features/model-router/routeTurn.js';
 // One rate-limit vocabulary across both dispatch seams (grade-pass RESIL-1/2);
 // import direction is safe — conversationToolLoop never imports this module.
 import { isProviderRateLimited, isTransientProviderFailure, providerFailureFields, rateLimitBackoffMs } from '../conversationToolLoop.js';
-import { resolveModelRoute } from '../../features/model-router/resolveRoute.js';
-import type { TurnFeatures } from '../../features/model-router/routeTurn.js';
 import { recordUsage } from '../../features/usage-analytics/usageRollupService.js';
 import { dispatchManagedChat, isManagedCredentialRef, managedProviderIdFromRef } from '../../providers/managedProvider.js';
 import { OpenwopError, type RunRecord } from '../../types.js';
@@ -31,7 +30,6 @@ import { COPILOT_PROVIDER_ID, copilotEndpoint } from '../../aiProviders/copilotS
 import { appendSourcesFooter } from '../agentDispatch.js';
 import { resolveWebSearchPreference } from '../webSearchPreference.js';
 import { checkByokChatBudget, recordByokChatUsage } from '../../aiProviders/byokChatBudget.js';
-import type { Storage } from '../../storage/storage.js';
 import type { ConversationTurn } from '../conversation.js';
 import { asText, isContentParts } from './contentParts.js';
 import type { ServedModel } from '../turnAttribution.js';
@@ -41,66 +39,18 @@ const MAX_TOKENS = 1024;
 // Same component name as the orchestrator — log identity is an ops surface.
 const logger = createLogger('host.conversationExchange');
 
-/** ADR 0130 Phase 3c — the model-router WRITE side (lazy first-turn stamp). On the
- *  first exchange where no route is stamped, ask the router (the decision owner) for
- *  a target and persist it into `run.metadata.modelRoute`. Written ONCE; thereafter
- *  read verbatim by `dispatchReply` (3b) on every turn + on `:fork` — never
- *  re-resolved on replay. BEST-EFFORT: any failure leaves the run's explicit model
- *  (router-inert is the safe default) and never breaks the turn. The org is the
- *  workspace-root (`scopeId ?? tenantId`), matching where the admin stored the config. */
-/** Pure stamp decision: the new run.metadata to persist, or null when nothing should
- *  change. Returns null if ALREADY stamped (the replay/fork guard — never re-resolve)
- *  or if there is no routed target. Exported for unit coverage of the guard + shape. */
-export function computeRouteStamp(
-  metadata: Record<string, unknown>,
-  target: { provider: string; model: string } | null,
-): Record<string, unknown> | null {
-  if (metadata['modelRoute']) return null; // already stamped (or a fork) — never re-resolve
-  if (!target) return null;                // router off/unconfigured → keep the explicit model
-  return { ...metadata, modelRoute: { provider: target.provider, model: target.model } };
-}
-
-export async function maybeStampModelRoute(run: RunRecord, userText: string, storage: Storage, conversationKind?: string, hasAttachment?: boolean): Promise<void> {
-  if (run.metadata?.['modelRoute']) return; // fast-path the common already-stamped case
-  try {
-    const orgId = run.scopeId ?? run.tenantId;
-    // ADR 0130 Phase 6 — the conversation kind is SERVER-derived (ConversationMeta
-    // at this exchange's compose step), so a `conversationKind` rule can't be
-    // gamed by a client-asserted signal. Stamped once like every route (a room
-    // that BECOMES a board after its first turn keeps its stamp — the documented
-    // trade against per-turn re-resolution; canonical board chats are group-typed
-    // from birth via ensureBoardChat, which is the incident's case).
-    // CHAT-FIRST-PORT A8 — `hasAttachment` is the turn's REAL attachment presence
-    // (image/file parts), fed by the caller so the `attachment` rule + the
-    // multimodal difficulty bump genuinely fire (previously never populated).
-    const features: TurnFeatures = {
-      tokenEstimate: Math.ceil(userText.length / 4),
-      ...(conversationKind ? { conversationKind } : {}),
-      ...(hasAttachment ? { hasAttachment: true } : {}),
-    };
-    const decision = await resolveModelRoute(run.tenantId, orgId, features, Date.now());
-    const metadata = computeRouteStamp(run.metadata, decision ? decision.target : null);
-    if (!metadata) return;
-    await storage.updateRun(run.runId, { metadata });
-    run.metadata = metadata; // so THIS turn's dispatchReply reads the fresh stamp too
-  } catch (e) {
-    // CS-GB-3 — warn, not debug: a mis-stamped board chat silently ran on the
-    // wrong tier for its whole life and was invisible in ops.
-    logger.warn('model-route stamp failed', { runId: run.runId, error: e instanceof Error ? e.message : String(e) });
-  }
-}
-
 /** RFC 0109 / ADR 0124 Phase 2d — resolve the `{ provider, model }` to stamp on the
  *  answering agent's turn (`agent.model`). Resolved the SAME way `dispatchReply` resolves
- *  the dispatch target — run inputs → the stamped `modelRoute` (verbatim on :fork) → the
- *  per-exchange override — so the provenance matches what actually dispatched. Non-secret
+ *  the dispatch target — run inputs → a legacy stamp the conversation can call → this
+ *  turn's route (ADR 1016) → the per-exchange override — so the provenance matches what
+ *  was chosen. (The exchange prefers `served` when a degrade answered instead.) Non-secret
  *  (identifiers only); `undefined` when the model is the `'unknown'` sentinel (unresolved),
  *  so a turn never carries a meaningless stamp. */
-export function resolveModelProvenance(run: RunRecord, override?: { provider?: string; model?: string }, tier?: ConversationModelTierInput): { provider: string; model: string } | undefined {
+export function resolveModelProvenance(run: RunRecord, override?: { provider?: string; model?: string }, tier?: ConversationModelTierInput, route?: RoutingTarget | null): { provider: string; model: string } | undefined {
   const inputs = (run.inputs ?? {}) as { provider?: unknown; model?: unknown };
-  // CS-GB-1 — the ONE resolver (override > stamp > same-provider class tier >
+  // CS-GB-1 / ADR 1016 — the ONE resolver (override > route > stamp > same-provider class tier >
   // inputs), so provenance always names what actually dispatched.
-  const target = resolveConversationModelTarget({ runInputs: inputs, metadata: run.metadata, ...(override ? { override } : {}), ...(tier ? { tier } : {}) });
+  const target = resolveConversationModelTarget({ runInputs: inputs, metadata: run.metadata, ...(override ? { override } : {}), ...(tier ? { tier } : {}), route });
   return target.provider && target.model && target.model !== 'unknown'
     ? { provider: target.provider, model: target.model }
     : undefined;
@@ -155,6 +105,9 @@ export function turnsToMessages(
   answeringAgentId: string | undefined,
   personaNameById?: ReadonlyMap<string, string>,
   runDigestById?: ReadonlyMap<string, string>,
+  /** ADR 1001 D7 — user turns that answered a question card: messageId →
+   *  the fenced text the model reads instead of the displayed content. */
+  answerTextById?: ReadonlyMap<string, string>,
 ): ChatMessage[] {
   const msgs: ChatMessage[] = [{ role: 'system', content: scaffold }];
   for (const t of turns) {
@@ -177,7 +130,8 @@ export function turnsToMessages(
       continue;
     }
     if (t.role === 'user') {
-      msgs.push({ role: 'user', content: isContentParts(t.content) ? t.content : asText(t.content) });
+      const answerText = answerTextById?.get(t.messageId);
+      msgs.push({ role: 'user', content: answerText ?? (isContentParts(t.content) ? t.content : asText(t.content)) });
     } else {
       const otherAgent = t.agent?.agentId && t.agent.agentId !== answeringAgentId;
       // ADR 0665 D2 — TAKE THE MEET at the cross-agent boundary.
@@ -256,16 +210,17 @@ export type ExchangeNotice = ByokBudgetNotice | DeepRunBudgetNotice;
  *  ephemeral key; when that key has expired the resolver returns null and we
  *  surface a clean `credential_unavailable` instead of a 500, so the UI can prompt
  *  the user to re-enter it rather than silently failing mid-thread. */
-export async function dispatchReply(run: RunRecord, messages: ChatMessage[], onDelta?: (delta: string) => Promise<void> | void, webSearchOverride?: boolean, modelOverride?: { provider?: string; model?: string }, tier?: ConversationModelTierInput): Promise<{ completion: string; budgetWarning?: ByokBudgetNotice; served?: ServedModel }> {
+export async function dispatchReply(run: RunRecord, messages: ChatMessage[], onDelta?: (delta: string) => Promise<void> | void, webSearchOverride?: boolean, modelOverride?: { provider?: string; model?: string }, tier?: ConversationModelTierInput, route?: RoutingTarget | null): Promise<{ completion: string; budgetWarning?: ByokBudgetNotice; served?: ServedModel }> {
   const inputs = (run.inputs ?? {}) as { provider?: unknown; model?: unknown; credentialRef?: unknown; webSearch?: unknown; compatEndpointId?: unknown };
   const credentialRef = typeof inputs.credentialRef === 'string' ? inputs.credentialRef : 'managed:openwop-free';
-  // ADR 0130 Phase 3b + ADR 0124 Phase 3 + CS-GB-1 — the ONE resolver:
-  // exchange override > stamped route (verbatim on :fork) > SAME-provider
+  // ADR 0130 Phase 3b + ADR 0124 Phase 3 + CS-GB-1 + ADR 1016 — the ONE resolver:
+  // exchange override > this turn's route > legacy stamp > SAME-provider
   // reasoning-class default (group rooms) > run inputs. The managed credential
   // covers any managed model; a BYOK provider switch still resolves against the
   // run's credentialRef (the selector only offers models the caller holds a
   // credential for).
-  const target = resolveConversationModelTarget({ runInputs: inputs, metadata: run.metadata, ...(modelOverride ? { override: modelOverride } : {}), ...(tier ? { tier } : {}) });
+  const targetInput: ConversationModelTargetInput = { runInputs: inputs, metadata: run.metadata, ...(modelOverride ? { override: modelOverride } : {}), ...(tier ? { tier } : {}), route };
+  const target = resolveConversationModelTarget(targetInput);
   const provider = target.provider;
   const model = target.model;
   // Native provider grounding for the single-completion path — BYOK only; the
@@ -423,16 +378,16 @@ export async function dispatchReply(run: RunRecord, messages: ChatMessage[], onD
   if (budget.personal?.exceeded) {
     throw new OpenwopError('rate_limited', 'Your personal daily BYOK spend limit is reached. Raise or clear it under Settings → AI Usage & Budget; resets at 00:00 UTC.', 429, { code: 'byok_personal_budget_exceeded' });
   }
-  // The tenant's UN-bumped selection: when the reasoning-class bump chose the
-  // model above and THAT model can't serve this key (429 quota / 404 access —
-  // free-tier Google keys have ~zero pro quota), degrade once to the selection
-  // instead of failing the turn. Mirrors the tool loop's runLoopWithBumpFallback;
-  // group-room advisor turns take THIS path since the group tool-loop opt-out.
-  const selectedTarget = tier
-    ? resolveConversationModelTarget({ runInputs: inputs, metadata: run.metadata, ...(modelOverride ? { override: modelOverride } : {}) })
-    : null;
-  const bumpFallbackModel = selectedTarget && selectedTarget.model !== model ? selectedTarget.model : null;
+  // The UN-chosen selection: when the reasoning-class bump OR this turn's route
+  // (ADR 1016 D4b) chose the model above and THAT model can't serve this key
+  // (429 quota / 404 access — free-tier Google keys have ~zero pro quota),
+  // degrade once to the selection instead of failing the turn. Mirrors the tool
+  // loop's runLoopWithBumpFallback; group-room advisor turns take THIS path since
+  // the group tool-loop opt-out.
+  const bumpFallbackModel = unchosenModelTarget(targetInput, target)?.model ?? null;
   const attempt = (m: string) => withLlmSpan(PROVIDER_DISPATCH_SPAN, { provider, model: m }, async () => {
+    // ADR 1012 — the provider runs this search; a replay must not reach it.
+    if (webSearch) assertEffectAllowed('network-egress', `native-web-search ${provider}`);
     const out = await dispatchChat({ provider: provider as ProviderId, model: m, apiKey, messages, maxTokens: MAX_TOKENS, ...(webSearch ? { webSearch: true } : {}), ...(onDelta ? { onDelta } : {}) });
     annotateCacheUsage(out.usage); // ADR 0148 A2
     return out;

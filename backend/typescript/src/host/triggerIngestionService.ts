@@ -35,7 +35,7 @@
 
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { seedRunVariables } from './variablesRuntime.js';
-import { insertRunWithStartContext } from './runInsert.js';
+import { chargedAdmission, insertRunWithStartContext } from './runInsert.js';
 import { fetch as undiciFetch } from 'undici';
 import type { RunRecord } from '../types.js';
 import type { HostAdapterSuite } from './index.js';
@@ -47,7 +47,6 @@ import { DurableCollection } from './hostExtPersistence.js';
 import { openWebhookSecret, sealWebhookSecret } from './webhookSecretCodec.js';
 import { resolveLaunchWorkflow } from './resolveLaunchDefinition.js';
 import { WorkflowFeatureRefusedError } from './workflowFeatureGate.js';
-import { withRunLimit } from './runLimitSeam.js';
 import { resolveOne } from './featureToggles/service.js';
 import { isDeniedWebhookHost, webhookEgressDispatcher, webhookPrivateEgressAllowed } from './webhookEgressGuard.js';
 import {
@@ -646,7 +645,7 @@ export async function ingestExternalEvent(deps: IngestDeps, subscriptionId: stri
         updatedAt: now,
       };
       // ADR 0821 P5 follow-up — the plan's monthly run limit (a no-op until wired).
-      await withRunLimit(sub.tenantId, () => insertRunWithStartContext(deps.storage, run, { definition: wf.definition }));
+      await insertRunWithStartContext(deps.storage, run, { admission: chargedAdmission(), definition: wf.definition });
       // ADR 0677 `ISWF-6a` — seed the variable bag. Without this the trigger lane was the
       // ONLY run-start path that never called `seedRunVariables` (the others:
       // `runStarter.ts:139`, `mcpSemantics.ts:360`, `workflowEvalRunner.ts:262`,

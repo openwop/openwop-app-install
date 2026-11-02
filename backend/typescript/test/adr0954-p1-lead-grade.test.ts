@@ -10,10 +10,21 @@
  * client; a run started for client A cannot grade client B's lead; models need
  * `host:members:manage` on the client; the sub-toggle gates everything.
  *
- * Sabotage-witnessed (P1): dropping the `pendingRunId` check in
- * `recordLeadGrade` reds "an older run cannot overwrite"; dropping the 404
- * conversion in `authorizeLeadClient` reds the B-only case; dropping the stamp
- * check in the `gradeLead` surface op reds "a run started for client A".
+ * Sabotage-witnessed (P1, re-measured w74): dropping the 404 conversion in
+ * `authorizeLeadClient` reds the B-only case; dropping the orgId half of the
+ * stamp check in the `gradeLead` surface op reds "a run started for client A";
+ * dropping the sub-toggle gate or weakening `host:members:manage` reds the model
+ * case; ignoring a modelId argument reds the frozen-model fork cases; keeping
+ * `crmLeadIntel` in caller metadata reds the spoof cases. "An older run cannot
+ * overwrite" now records the older run while the NEWER one is pending, so only
+ * the ADR 0837 A7 `pendingRunId` check can refuse it (in w74 round 1 the newer
+ * run was recorded first, which clears the pin, and a different clause refused).
+ * "A contact belongs to one client" is a double guard: the profile scan and the
+ * reverse-owner check in `bindLead` each refuse; only an edit that breaks both
+ * reds it.
+ *
+ * Cases that read or change a client's ACTIVE model use their own client org
+ * (`freshClient`), so no case depends on which model another case activated.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
@@ -33,7 +44,6 @@ import { contentHashOf, V0_CONTENT } from '../src/features/crm/leadIntel/model.j
 import { activateModel, resolveActiveModel, saveModelVersion } from '../src/features/crm/leadIntel/modelStore.js';
 import { GRADE_LEAD_WORKFLOW_ID, ROUTE_LEAD_WORKFLOW_ID, LEAD_INTEL_RUN_STAMP, LEAD_INTEL_TOGGLE } from '../src/features/crm/leadIntel/constants.js';
 import { fromWireRunId, toWireRunId } from '../src/host/v2Ids.js';
-import type { BundleScope } from '../src/host/inMemorySurfaces.js';
 import { sweepDispatchOutbox } from '../src/host/runDispatchSweeper.js';
 import { startWorkflowRun } from '../src/host/runStarter.js';
 import { DISPATCH_OUTBOX_HINT_GRACE_MS } from '../src/host/runInsert.js';
@@ -95,8 +105,17 @@ beforeAll(async () => {
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 afterEach(() => { vi.restoreAllMocks(); });
 
+/** A client org of its own (opA editor, admin admin; opB NOT a member), so the
+ *  case's active model starts at v0 whatever other cases activated on orgA. */
+async function freshClient(name: string): Promise<string> {
+  const orgId = (await createOrg({ tenantId: TENANT, createdBy: 'seed', name })).orgId;
+  await createMember({ tenantId: TENANT, orgId, subject: opA, displayName: 'opA', roles: ['editor'] });
+  await createMember({ tenantId: TENANT, orgId, subject: admin, displayName: 'Admin', roles: ['admin'] });
+  return orgId;
+}
+
 const newContact = async (name: string): Promise<string> =>
-  (await createContact({ tenantId: TENANT, name, email: `${name.toLowerCase()}-${randomBytes(3).toString('hex')}@example.test`, stage: 'lead' } as Parameters<typeof createContact>[0])).contactId;
+  (await createContact({ tenantId: TENANT, name, email: `${name.toLowerCase()}-${randomBytes(3).toString('hex')}@example.test`, stage: 'lead' })).contactId;
 
 async function waitForGrade(orgId: string, contactId: string, runId: string): Promise<void> {
   for (let i = 0; i < 300; i += 1) {
@@ -110,20 +129,21 @@ async function waitForGrade(orgId: string, contactId: string, runId: string): Pr
 
 describe('ADR 0954 P1 — leads per client', () => {
   it('the real chain grades a bound lead; the B-only operator gets 404 on every A route', async () => {
+    const client = await freshClient('Client Avery');
     const contactId = await newContact('Avery');
-    const bound = await call('opA', 'POST', `/${orgA}/leads`, { contactId, source: 'form' });
+    const bound = await call('opA', 'POST', `/${client}/leads`, { contactId, source: 'form' });
     expect(bound.status, bound.raw).toBe(201);
-    const started = await call<{ runId: string; modelId: string; modelVersion: number }>('opA', 'POST', `/${orgA}/leads/${contactId}/grade`);
+    const started = await call<{ runId: string; modelId: string; modelVersion: number }>('opA', 'POST', `/${client}/leads/${contactId}/grade`);
     expect(started.status, started.raw).toBe(202);
     expect(started.body).toMatchObject({ modelId: 'v0', modelVersion: 0 });
-    await waitForGrade(orgA, contactId, started.body.runId);
-    const seen = await call<{ grade: { band: string; score: number } }>('opA', 'GET', `/${orgA}/leads/${contactId}/grade`);
+    await waitForGrade(client, contactId, started.body.runId);
+    const seen = await call<{ grade: { band: string; score: number } }>('opA', 'GET', `/${client}/leads/${contactId}/grade`);
     expect(seen.status).toBe(200);
     expect(seen.body.grade).toMatchObject({ band: 'F', score: 0 });
-    const explained = await call<{ stale: boolean }>('opA', 'GET', `/${orgA}/leads/${contactId}/grade?explain=1`);
+    const explained = await call<{ stale: boolean }>('opA', 'GET', `/${client}/leads/${contactId}/grade?explain=1`);
     expect(explained.body.stale).toBe(false);
 
-    for (const [method, path] of [['GET', `/${orgA}/leads`], ['GET', `/${orgA}/leads/${contactId}/grade`], ['POST', `/${orgA}/leads/${contactId}/grade`], ['POST', `/${orgA}/leads`], ['GET', `/${orgA}/leads/models/active`]] as const) {
+    for (const [method, path] of [['GET', `/${client}/leads`], ['GET', `/${client}/leads/${contactId}/grade`], ['POST', `/${client}/leads/${contactId}/grade`], ['POST', `/${client}/leads`], ['GET', `/${client}/leads/models/active`]] as const) {
       const r = await call('opB', method, path, method === 'POST' && path.endsWith('/leads') ? { contactId } : undefined);
       expect(r.status, `${method} ${path}: ${r.raw}`).toBe(404);
     }
@@ -147,6 +167,11 @@ describe('ADR 0954 P1 — leads per client', () => {
     await stampPendingGrade(TENANT, orgA, contactId, 'run-old', pin);
     await stampPendingGrade(TENANT, orgA, contactId, 'run-new', pin);
     const g = { modelId: 'v0', modelVersion: 0, modelHash: pin.modelHash, score: 1, band: 'E' as const, parts: {}, inputsDigest: 'x', truncated: false };
+    // `run-new` is pending now, so `run-old` (same binding, same model pin) can
+    // be refused ONLY by the pendingRunId rule (ADR 0837 A7).
+    expect(await recordLeadGrade(TENANT, orgA, contactId, 'run-old', { ...g, score: 99 }, bindingId)).toBe('superseded');
+    expect(await getLeadGrade(TENANT, orgA, contactId)).toMatchObject({ pendingRunId: 'run-new' });
+    expect((await getLeadGrade(TENANT, orgA, contactId))?.score).toBeUndefined();
     expect(await recordLeadGrade(TENANT, orgA, contactId, 'run-new', { ...g, score: 7 }, bindingId)).toBe('recorded');
     expect(await recordLeadGrade(TENANT, orgA, contactId, 'run-old', { ...g, score: 99 }, bindingId)).toBe('superseded');
     expect(await recordLeadGrade(TENANT, orgA, contactId, 'run-fork-of-new', { ...g, score: 99 }, bindingId)).toBe('superseded');
@@ -159,26 +184,27 @@ describe('ADR 0954 P1 — leads per client', () => {
     const runId = `run-li-${randomBytes(4).toString('hex')}`;
     await hostExtStorage().insertRun({
       runId, workflowId: 'w', tenantId: TENANT, status: 'running', inputs: null,
-      metadata: { [LEAD_INTEL_RUN_STAMP]: { orgId: orgA, contactId } }, configurable: {}, createdAt: 'x', updatedAt: 'x',
+      metadata: { [LEAD_INTEL_RUN_STAMP]: { orgId: orgA, contactId } }, configurable: {}, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
     });
-    const surface = buildCrmSurface({ tenantId: TENANT, runId } as BundleScope);
+    const surface = buildCrmSurface({ tenantId: TENANT, runId });
     await expect(surface.gradeLead!({ orgId: orgB, contactId })).rejects.toMatchObject({ details: { reason: 'wrong_client' } });
   });
 
   it('models need host:members:manage on the client; the sub-toggle gates the routes', async () => {
+    const client = await freshClient('Client Models');
     const model = { signals: [{ signalId: 'funnel.completion', weight: 10 }], bands: { A: 50, B: 40, C: 30, D: 20, E: 10 } };
-    const byOp = await call('opA', 'POST', `/${orgA}/leads/models/standard`, { expectedVersion: 0, model });
+    const byOp = await call('opA', 'POST', `/${client}/leads/models/standard`, { expectedVersion: 0, model });
     expect(byOp.status).toBe(403);
-    const byAdmin = await call<{ model: { version: number } }>('admin', 'POST', `/${orgA}/leads/models/standard`, { expectedVersion: 0, model });
+    const byAdmin = await call<{ model: { version: number } }>('admin', 'POST', `/${client}/leads/models/standard`, { expectedVersion: 0, model });
     expect(byAdmin.status, byAdmin.raw).toBe(201);
-    expect((await call('admin', 'POST', `/${orgA}/leads/models/standard`, { expectedVersion: 0, model: { ...model, signals: [{ signalId: 'nope', weight: 1 }] } })).status).toBe(422);
-    expect((await call('admin', 'POST', `/${orgA}/leads/models/standard/activate`, { version: 1, expected: null })).status).toBe(200);
-    const active = await call<{ modelId: string; version: number }>('opA', 'GET', `/${orgA}/leads/models/active`);
+    expect((await call('admin', 'POST', `/${client}/leads/models/standard`, { expectedVersion: 0, model: { ...model, signals: [{ signalId: 'nope', weight: 1 }] } })).status).toBe(422);
+    expect((await call('admin', 'POST', `/${client}/leads/models/standard/activate`, { version: 1, expected: null })).status).toBe(200);
+    const active = await call<{ modelId: string; version: number }>('opA', 'GET', `/${client}/leads/models/active`);
     expect(active.body).toMatchObject({ modelId: 'standard', version: 1 });
 
     await setToggle(LEAD_INTEL_TOGGLE, 'off');
     try {
-      expect((await call('opA', 'GET', `/${orgA}/leads`)).status).toBe(404);
+      expect((await call('opA', 'GET', `/${client}/leads`)).status).toBe(404);
     } finally {
       await setToggle(LEAD_INTEL_TOGGLE, 'on');
     }
@@ -255,7 +281,9 @@ describe('ADR 0954 P1 — host-pinned starts, retries and real forks', () => {
       // outbox worker, as a restarted process does after the lost insert ack.
       const accepted = await storage.getRun(retried.body.runId);
       expect(accepted?.status).toBe('pending');
-      const due = Date.parse(accepted!.createdAt) + DISPATCH_OUTBOX_HINT_GRACE_MS + 1;
+      // The outbox row is due at insert-time `Date.now()` + the grace (runInsert.ts),
+      // which can trail `createdAt` by more than 1 ms under load: count from now.
+      const due = Date.now() + DISPATCH_OUTBOX_HINT_GRACE_MS + 1;
       expect(await sweepDispatchOutbox({ storage, hostSuite }, 'lead-recovery', due)).toBe(1);
     }
     await waitForGrade(orgA, contactId, retried.body.runId);
@@ -291,13 +319,13 @@ describe('ADR 0954 P1 — host-pinned starts, retries and real forks', () => {
     const originalDecision = mode === 'route' ? await getLeadRoutingDecision(TENANT, orgA, contactId, 1) : null;
     if (mode === 'route') expect(originalDecision?.chosen).toBe(opA);
     const replacement = await changeActiveModel();
-    const surface = buildCrmSurface({ tenantId: TENANT, runId: started.body.runId } as BundleScope);
-    await expect(surface.gradeLead!({ orgId: orgA, contactId, modelId: replacement, modelVersion: 1 })).rejects.toMatchObject({ details: { reason: 'model_pin_mismatch' } });
+    const surface = buildCrmSurface({ tenantId: TENANT, runId: started.body.runId });
+    await expect(surface.gradeLead!({ orgId: orgA, contactId, modelId: replacement, modelVersion: selected.version })).rejects.toMatchObject({ details: { reason: 'model_pin_mismatch' } });
     expect(await surface.gradeLead!({ orgId: orgA, contactId })).toMatchObject({ outcome: 'superseded', modelId: selected.modelId, modelVersion: selected.version });
     const fork = await publicPost(`/runs/${encodeURIComponent(toWireRunId(started.body.runId, TENANT))}:fork`, { fromSeq: 0, mode: 'branch' });
     expect(fork.status, fork.raw).toBe(201);
     expect(fork.body.runId).toEqual(expect.any(String));
-    const decoded = fromWireRunId(fork.body.runId as string, TENANT);
+    const decoded = fromWireRunId(String(fork.body.runId), TENANT);
     if (!decoded.ok) throw new Error('fork returned a foreign run id');
     let forked = await hostExtStorage().getRun(decoded.runId);
     for (let i = 0; i < 300 && forked && !['completed', 'failed', 'cancelled'].includes(forked.status); i++) {
@@ -322,11 +350,11 @@ describe('ADR 0954 P1 — host-pinned starts, retries and real forks', () => {
       metadata: { [LEAD_INTEL_RUN_STAMP]: { orgId: orgA, contactId, bindingId: await getLeadBindingId(TENANT, orgA, contactId), modelId: 'v0', modelVersion: 0, modelHash: contentHashOf(V0_CONTENT), definitionHash: 'd'.repeat(64) } },
     });
     expect(created.status, created.raw).toBe(201);
-    const decoded = fromWireRunId(created.body.runId as string, TENANT);
+    const decoded = fromWireRunId(String(created.body.runId), TENANT);
     if (!decoded.ok) throw new Error('public create returned a foreign run id');
     const stored = await hostExtStorage().getRun(decoded.runId);
     expect(stored?.metadata).not.toHaveProperty(LEAD_INTEL_RUN_STAMP);
-    const surface = buildCrmSurface({ tenantId: TENANT, runId: decoded.runId } as BundleScope);
+    const surface = buildCrmSurface({ tenantId: TENANT, runId: decoded.runId });
     await expect(mode === 'route' ? surface.routeLead!({ orgId: orgA, contactId, routingEpoch: 1 }) : surface.gradeLead!({ orgId: orgA, contactId })).rejects.toMatchObject({ details: { reason: 'wrong_client' } });
     expect(await getLeadGrade(TENANT, orgA, contactId)).toBeNull();
   });

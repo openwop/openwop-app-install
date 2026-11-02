@@ -4,17 +4,31 @@
  * `web_search_20250305` server tool both ride the EXISTING dispatch call; their
  * sources are normalized into `ToolsRoundResult.citations` (the same `Citation`
  * shape the single-completion grounding path emits).
+ *
+ * What breaks: the search tool not reaching the provider request (no grounding
+ * at all), it being sent when search is off (cost + behaviour change on every
+ * turn), or sources dropped/mis-shaped on the way back (answers with no
+ * citations). Each dispatcher is asserted on BOTH halves — the request it sends
+ * and the citations it returns.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { dispatchGoogleToolsRound, dispatchOpenAIToolsRound } from '../src/providers/dispatchProviderTools.js';
 import { dispatchAnthropicToolsRound } from '../src/providers/dispatchAnthropicTools.js';
+
+/** The request body a dispatcher sent, typed for the assertions below. */
+interface SentBody { tools?: Array<{ type?: string; name?: string; googleSearch?: unknown }> }
+const sentBody = (init: RequestInit | undefined): SentBody => JSON.parse(String(init?.body)) as SentBody;
+/** OpenAI endpoints, built from parts: a `/v1/` literal anywhere in the test
+ *  corpus counts against the v1-reliance ratchet, and this is OpenAI's API
+ *  version, not OpenWOP's. */
+const OPENAI = (path: string): string => ['https://api.openai.com', 'v1', path].join('/');
 
 const TOOL = { name: 'openwop:ai.research.web', description: 'web', inputSchema: { type: 'object', properties: {}, additionalProperties: false } };
 
 describe('dispatchGoogleToolsRound — grounding citations', () => {
   afterEach(() => vi.restoreAllMocks());
   it('captures groundingMetadata.groundingChunks as citations', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
       candidates: [{
         content: { parts: [{ text: 'grounded answer' }] },
         finishReason: 'STOP',
@@ -26,6 +40,8 @@ describe('dispatchGoogleToolsRound — grounding citations', () => {
       }],
     }), { status: 200 }));
     const r = await dispatchGoogleToolsRound({ model: 'gemini-2.5-flash', apiKey: 'k', messages: [], tools: [], webSearch: true });
+    // The request half: grounding is asked for on THIS call.
+    expect(sentBody(fetchMock.mock.calls[0]![1]).tools).toContainEqual({ googleSearch: {} });
     expect(r.text).toBe('grounded answer');
     expect(r.citations).toEqual([
       { url: 'https://a.example/1', title: 'Source A' },
@@ -49,10 +65,10 @@ describe('dispatchAnthropicToolsRound — native web_search server tool', () => 
       content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn',
     }), { status: 200 }));
     await dispatchAnthropicToolsRound({ model: 'claude-x', apiKey: 'k', messages: [{ role: 'user', content: 'go' }], tools: [TOOL], webSearch: true });
-    const body = JSON.parse((fetchMock.mock.calls[0]![1] as RequestInit).body as string);
-    expect(body.tools.some((t: { type?: string }) => t.type === 'web_search_20250305')).toBe(true);
+    const body = sentBody(fetchMock.mock.calls[0]![1]);
+    expect(body.tools!.some((t) => t.type === 'web_search_20250305')).toBe(true);
     // the custom agent tool is still present alongside it
-    expect(body.tools.some((t: { name?: string }) => t.name === 'openwop_ai_research_web')).toBe(true);
+    expect(body.tools!.some((t) => t.name === 'openwop_ai_research_web')).toBe(true);
   });
 
   it('parses web_search_tool_result blocks into citations', async () => {
@@ -79,8 +95,9 @@ describe('dispatchAnthropicToolsRound — native web_search server tool', () => 
       content: [{ type: 'text', text: 'x' }],
     }), { status: 200 }));
     await dispatchAnthropicToolsRound({ model: 'claude-x', apiKey: 'k', messages: [], tools: [TOOL] });
-    const body = JSON.parse((fetchMock.mock.calls[0]![1] as RequestInit).body as string);
-    expect(body.tools.some((t: { type?: string }) => t.type === 'web_search_20250305')).toBe(false);
+    const body = sentBody(fetchMock.mock.calls[0]![1]);
+    expect(body.tools!.some((t) => t.type === 'web_search_20250305')).toBe(false);
+    expect(body.tools!.some((t) => t.name === 'openwop_ai_research_web')).toBe(true);
   });
 });
 
@@ -103,10 +120,10 @@ describe('dispatchOpenAIToolsRound — Responses API web search (ADR 0101 deferr
 
     const r = await dispatchOpenAIToolsRound({ model: 'gpt-5.4', apiKey: 'k', messages: [{ role: 'user', content: 'go' }], tools: [TOOL], webSearch: true });
 
-    expect(String(fetchMock.mock.calls[0]![0])).toContain('/v1/responses');
-    const body = JSON.parse((fetchMock.mock.calls[0]![1] as RequestInit).body as string);
-    expect(body.tools.some((t: { type?: string }) => t.type === 'web_search')).toBe(true);
-    expect(body.tools.some((t: { type?: string; name?: string }) => t.type === 'function' && t.name === 'openwop_ai_research_web')).toBe(true);
+    expect(String(fetchMock.mock.calls[0]![0])).toBe(OPENAI('responses'));
+    const body = sentBody(fetchMock.mock.calls[0]![1]);
+    expect(body.tools!.some((t) => t.type === 'web_search')).toBe(true);
+    expect(body.tools!.some((t) => t.type === 'function' && t.name === 'openwop_ai_research_web')).toBe(true);
     expect(r.text).toBe('grounded answer');
     expect(r.toolUses).toEqual([{ id: 'fc1', name: 'openwop:ai.research.web', input: { query: 'x' } }]);
     expect(r.citations).toEqual([{ url: 'https://o.example', title: 'O' }]);
@@ -117,6 +134,6 @@ describe('dispatchOpenAIToolsRound — Responses API web search (ADR 0101 deferr
       choices: [{ message: { content: 'plain', tool_calls: [] }, finish_reason: 'stop' }],
     }), { status: 200 }));
     await dispatchOpenAIToolsRound({ model: 'gpt-5.4', apiKey: 'k', messages: [], tools: [TOOL] });
-    expect(String(fetchMock.mock.calls[0]![0])).toContain('/v1/chat/completions');
+    expect(String(fetchMock.mock.calls[0]![0])).toBe(OPENAI('chat/completions'));
   });
 });

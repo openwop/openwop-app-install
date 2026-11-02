@@ -895,4 +895,6 @@ export const messages = {
   compactionLoadFailed: "No se pudo cargar el ajuste de compactación.",
   compactionCountHelp: "Déjalo en blanco para usar {{n}}.",
   compactionSaved: "Ajuste de compactación guardado. Se aplica a la próxima ejecución que inicie este agente.",
+  // ADR 1005 P3c — the agent workspace's Deployments tab (its console strings live in `agent-deployments`).
+  wsTabDeployments: "Despliegues",
 } as const;

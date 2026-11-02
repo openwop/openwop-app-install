@@ -33,6 +33,11 @@
  *      pack(s)" and ten files stayed red, because the mount was real and the
  *      resolver ignored it. A reviewer reordering imports for tidiness would
  *      silently undo this.
+ *
+ * Tracker TST-CJA-1 (grade-tests w68). Red when: the `OPENWOP_PACK_DIR`
+ * assignment is removed; a static `import … from '../src/index.js'` is added;
+ * the dynamic `await import('../src/index.js')` is respelled or removed; or the
+ * per-run pack dir's initializer is re-pointed at the shared `~/.openwop-packs`.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -80,9 +85,20 @@ describe('conformance harness determinism', () => {
     // parallel-worktree sessions CLAUDE.md warns about.
     const assignment = RUN_TS.match(/process\.env\.OPENWOP_PACK_DIR\s*=\s*([^;]+);/);
     expect(assignment, 'expected an OPENWOP_PACK_DIR assignment to inspect').not.toBeNull();
+    const rhs = assignment![1]!.trim();
     expect(
-      /openwop-packs|homedir\(\)/.test(assignment![1]),
+      /openwop-packs|homedir\(\)/.test(rhs),
       'the harness must not point OPENWOP_PACK_DIR at the shared ~/.openwop-packs',
+    ).toBe(false);
+    // The RHS is an identifier, so the check above alone cannot see where it
+    // points. Follow it to its initializer: it MUST be a fresh private temp dir.
+    expect(rhs, 'the assignment should name the per-run dir variable').toMatch(/^[A-Za-z_$][\w$]*$/);
+    const init = RUN_TS.match(new RegExp(`const\\s+${rhs}\\s*=\\s*([^;]+);`));
+    expect(init, `expected a const initializer for ${rhs}`).not.toBeNull();
+    expect(init![1], 'the per-run pack dir must be a fresh mkdtemp under tmpdir()').toMatch(/^mkdtempSync\(\s*join\(\s*tmpdir\(\)/);
+    expect(
+      /openwop-packs|homedir\(\)|process\.env\.HOME/.test(init![1]!),
+      'the per-run pack dir must not be the shared ~/.openwop-packs',
     ).toBe(false);
   });
 });

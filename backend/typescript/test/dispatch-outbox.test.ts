@@ -101,8 +101,8 @@ describe('ADR 0551 P1 — dispatch outbox: the intent is written with the run', 
   afterEach(() => vi.restoreAllMocks());
 
   it('enqueues an intent only when the caller declares accepted work', async () => {
-    await insertRunWithStartContext(storage, makeRun({ runId: 'declared' }), { enqueueDispatch: true });
-    await insertRunWithStartContext(storage, makeRun({ runId: 'undeclared' }));
+    await insertRunWithStartContext(storage, makeRun({ runId: 'declared' }), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true });
+    await insertRunWithStartContext(storage, makeRun({ runId: 'undeclared' }), { admission: { plan: 'exempt:test-fixture' } });
 
     const row = await storage.getDispatchOutbox('declared');
     expect(row).not.toBeNull();
@@ -117,7 +117,7 @@ describe('ADR 0551 P1 — dispatch outbox: the intent is written with the run', 
 
   it('leaves the wakeup hint a real window before the worker may claim', async () => {
     const insertedAt = Date.now();
-    await insertRunWithStartContext(storage, makeRun({ runId: 'early' }), { enqueueDispatch: true });
+    await insertRunWithStartContext(storage, makeRun({ runId: 'early' }), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true });
 
     // Probed with a WALL-CLOCK offset, not with the row's own `nextAttemptAt`.
     // Deriving the probe from the value under test makes the assertion true for
@@ -132,7 +132,7 @@ describe('ADR 0551 P1 — dispatch outbox: the intent is written with the run', 
 
   it('becomes claimable once the window has passed', async () => {
     const insertedAt = Date.now();
-    await insertRunWithStartContext(storage, makeRun({ runId: 'early' }), { enqueueDispatch: true });
+    await insertRunWithStartContext(storage, makeRun({ runId: 'early' }), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true });
 
     const claimed = await storage.claimDispatchOutbox('w1', insertedAt + DISPATCH_OUTBOX_HINT_GRACE_MS + 1_000, 60_000, 10);
     expect(claimed.map((r) => r.runId)).toEqual(['early']);
@@ -140,7 +140,7 @@ describe('ADR 0551 P1 — dispatch outbox: the intent is written with the run', 
   });
 
   it('a claimed row is invisible to a second claimer until its lease expires', async () => {
-    await insertRunWithStartContext(storage, makeRun({ runId: 'leased' }), { enqueueDispatch: true });
+    await insertRunWithStartContext(storage, makeRun({ runId: 'leased' }), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true });
     const due = (await storage.getDispatchOutbox('leased'))!.nextAttemptAt;
 
     expect((await storage.claimDispatchOutbox('w1', due, 60_000, 10)).map((r) => r.runId)).toEqual(['leased']);
@@ -157,7 +157,7 @@ describe('ADR 0551 P1 — dispatch outbox: the intent is written with the run', 
     // on this table is not decoration — it is what enrols the queue in erasure.
     // Asserted rather than assumed: a table added without it would leave live
     // dispatch intents behind after a tenant was deleted.
-    await insertRunWithStartContext(storage, makeRun({ runId: 'erased', tenantId: 'doomed' }), { enqueueDispatch: true });
+    await insertRunWithStartContext(storage, makeRun({ runId: 'erased', tenantId: 'doomed' }), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true });
     expect(await storage.getDispatchOutbox('erased')).not.toBeNull();
 
     await storage.deleteAllTenantData('doomed');
@@ -169,13 +169,13 @@ describe('ADR 0551 P1 — dispatch outbox: the intent is written with the run', 
     // row is gone. `deleteRun` removes the run and its event/interrupt rows,
     // deliberately not the outbox row (a run-less intent is self-healing — see
     // the "discharges an intent whose run no longer exists" test below).
-    await insertRunWithStartContext(storage, makeRun({ runId: 'atomic' }), { enqueueDispatch: true });
+    await insertRunWithStartContext(storage, makeRun({ runId: 'atomic' }), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true });
     expect(await storage.deleteRun('atomic')).toBe(true);
     expect(await storage.getDispatchOutbox('atomic')).not.toBeNull();
 
     // Re-inserting the run now collides on the outbox primary key.
     await expect(
-      insertRunWithStartContext(storage, makeRun({ runId: 'atomic' }), { enqueueDispatch: true }),
+      insertRunWithStartContext(storage, makeRun({ runId: 'atomic' }), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true }),
     ).rejects.toThrow();
 
     // THE ASSERTION: the run row must not survive a failed intent write. If
@@ -200,7 +200,7 @@ describe('ADR 0551 P1 — dispatch outbox worker', () => {
     // The kill is modelled by what a kill actually leaves behind: the run and
     // its intent are durable (the 201 was honest), and NOTHING ran. No
     // `dispatchRunInBackground` call is made here on purpose.
-    await insertRunWithStartContext(storage, makeRun({ runId: 'stranded' }), { enqueueDispatch: true });
+    await insertRunWithStartContext(storage, makeRun({ runId: 'stranded' }), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true });
     expect((await storage.getRun('stranded'))!.status).toBe('pending');
 
     const due = (await storage.getDispatchOutbox('stranded'))!.nextAttemptAt;
@@ -234,7 +234,7 @@ describe('ADR 0551 P1 — dispatch outbox worker', () => {
       metadata: { deferredParameterAliases: { bareTarget: 'target' } },
       nodes: [{ nodeId: 'read', typeId, config: { picked: '{{inputs.target}}' } }], edges: [],
     };
-    await insertRunWithStartContext(storage, makeRun({ runId: 'unseeded-variables', inputs: { target: 'input' }, configurable: { bareTarget: 'accepted override' } }), { enqueueDispatch: true });
+    await insertRunWithStartContext(storage, makeRun({ runId: 'unseeded-variables', inputs: { target: 'input' }, configurable: { bareTarget: 'accepted override' } }), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true });
     const due = (await storage.getDispatchOutbox('unseeded-variables'))!.nextAttemptAt;
     expect(await sweepDispatchOutbox({ storage, hostSuite: stubHostSuite(async () => ({ workflowId: 'wf-1', definition })) }, 'survivor', due)).toBe(1);
     await flush();
@@ -244,7 +244,7 @@ describe('ADR 0551 P1 — dispatch outbox worker', () => {
   });
 
   it('duplicate delivery of one intent yields exactly one logical execution', async () => {
-    await insertRunWithStartContext(storage, makeRun({ runId: 'dup' }), { enqueueDispatch: true });
+    await insertRunWithStartContext(storage, makeRun({ runId: 'dup' }), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true });
     const due = (await storage.getDispatchOutbox('dup'))!.nextAttemptAt;
     const deps = { storage, hostSuite: stubHostSuite() };
 
@@ -271,7 +271,7 @@ describe('ADR 0551 P1 — dispatch outbox worker', () => {
     // left it green — two fences guarding one path means neither is proven.
     // Here the lease is explicitly cleared, so the status check is the only
     // thing standing between a re-delivery and a second execution.
-    await insertRunWithStartContext(storage, makeRun({ runId: 'terminal' }), { enqueueDispatch: true });
+    await insertRunWithStartContext(storage, makeRun({ runId: 'terminal' }), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true });
     const due = (await storage.getDispatchOutbox('terminal'))!.nextAttemptAt;
     const deps = { storage, hostSuite: stubHostSuite() };
 
@@ -287,7 +287,7 @@ describe('ADR 0551 P1 — dispatch outbox worker', () => {
   });
 
   it('keeps the intent pending until it can SEE the run start, then retires it', async () => {
-    await insertRunWithStartContext(storage, makeRun({ runId: 'observed' }), { enqueueDispatch: true });
+    await insertRunWithStartContext(storage, makeRun({ runId: 'observed' }), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true });
     const due = (await storage.getDispatchOutbox('observed'))!.nextAttemptAt;
     const deps = { storage, hostSuite: stubHostSuite() };
 
@@ -327,7 +327,7 @@ describe('ADR 0551 P1 — dispatch outbox worker', () => {
         return Reflect.get(target, prop, recv);
       },
     });
-    await insertRunWithStartContext(stuck, makeRun({ runId: 'looping' }), { enqueueDispatch: true });
+    await insertRunWithStartContext(stuck, makeRun({ runId: 'looping' }), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true });
     const deps = { storage: stuck, hostSuite: stubHostSuite() };
     let at = (await storage.getDispatchOutbox('looping'))!.nextAttemptAt;
 
@@ -345,7 +345,7 @@ describe('ADR 0551 P1 — dispatch outbox worker', () => {
   });
 
   it('refuses to dispatch a pending run that an instance already holds a live lease on', async () => {
-    await insertRunWithStartContext(storage, makeRun({ runId: 'held' }), { enqueueDispatch: true });
+    await insertRunWithStartContext(storage, makeRun({ runId: 'held' }), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true });
     const due = (await storage.getDispatchOutbox('held'))!.nextAttemptAt;
     // An instance is between `run.started` and the status write.
     await storage.setRunDispatchLease('held', 'instance-a', due + 600_000);
@@ -359,7 +359,7 @@ describe('ADR 0551 P1 — dispatch outbox worker', () => {
   });
 
   it('discharges an intent whose run no longer exists', async () => {
-    await insertRunWithStartContext(storage, makeRun({ runId: 'gone' }), { enqueueDispatch: true });
+    await insertRunWithStartContext(storage, makeRun({ runId: 'gone' }), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true });
     const due = (await storage.getDispatchOutbox('gone'))!.nextAttemptAt;
     await storage.deleteRun('gone');
 
@@ -368,7 +368,7 @@ describe('ADR 0551 P1 — dispatch outbox worker', () => {
   });
 
   it('retries, then marks dead, an intent whose workflow cannot be resolved', async () => {
-    await insertRunWithStartContext(storage, makeRun({ runId: 'unresolvable' }), { enqueueDispatch: true });
+    await insertRunWithStartContext(storage, makeRun({ runId: 'unresolvable' }), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true });
     const deps = { storage, hostSuite: stubHostSuite(async () => null) };
     let at = (await storage.getDispatchOutbox('unresolvable'))!.nextAttemptAt;
 

@@ -99,6 +99,94 @@ export const CHANNEL_SPEC = {
   },
 };
 
+/** ADR 1020 D13 — what is wrong with a model draft for this channel, as short
+ *  findings ([] = usable). A CLOSED-WORLD check of the spec's JSON schema: types,
+ *  required keys (non-empty when a string), `additionalProperties: false`, enums,
+ *  plus a non-empty item list. Length limits are NOT findings here: the platform
+ *  limit pass below regenerates and truncates with a flag (ADR 0355 P1). */
+function draftFindings(spec, data) {
+  const out = [];
+  schemaFindings(spec.schema, data, 'draft', out);
+  // The deliverable list must not be empty (landing pages have no itemsKey, so
+  // their sections are named explicitly).
+  const listKey = spec.itemsKey ?? (spec.schema && spec.schema.properties && spec.schema.properties.sections ? 'sections' : null);
+  if (listKey && data && typeof data === 'object' && Array.isArray(data[listKey]) && data[listKey].length === 0) {
+    out.push(`draft.${listKey} is empty`);
+  }
+  return out;
+}
+
+/** ADR 1020 (grade-code M1/M2) — what a model commonly gets harmlessly wrong is
+ *  normalized BEFORE the closed-world check, so it costs no repair: a `null`
+ *  optional field is absent, and `citations` (which the quality pass does not read;
+ *  it scores the inline [src_N] markers) keep only well-formed {docId?, marker?}
+ *  entries instead of failing the whole draft. Deliverable fields stay strict. */
+function cleanDraft(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return data;
+  const strip = (v) => {
+    if (Array.isArray(v)) return v.map(strip);
+    if (!v || typeof v !== 'object') return v;
+    const o = {};
+    for (const [k, x] of Object.entries(v)) if (x !== null) o[k] = strip(x);
+    return o;
+  };
+  const out = strip(data);
+  if ('citations' in out) {
+    const kept = Array.isArray(out.citations)
+      ? out.citations
+        .filter((c) => c && typeof c === 'object' && !Array.isArray(c))
+        .map((c) => ({ ...(typeof c.docId === 'string' ? { docId: c.docId } : {}), ...(typeof c.marker === 'string' ? { marker: c.marker } : {}) }))
+        .filter((c) => Object.keys(c).length > 0)
+      : [];
+    if (kept.length > 0) out.citations = kept; else delete out.citations;
+  }
+  return out;
+}
+
+/** The channels in words, for messages a person reads on a run card. */
+const CHANNEL_WORDS = { landing_page: 'landing page', ad_variants: 'ad variants', email_sequence: 'email sequence', creative_briefs: 'creative briefs', social_posts: 'social posts' };
+const ITEM_WORDS = { emails: 'email', posts: 'post', platformSets: 'ad set', variants: 'variant', briefs: 'brief', sections: 'section', subjectLines: 'subject line', directions: 'direction', hashtags: 'hashtag' };
+/** `draft.emails[0].subjectLines must be a list` → `email 1: subject lines must be a list`. */
+function humanFinding(f) {
+  const m = /^(\S+)\s(.*)$/.exec(f);
+  if (!m) return f;
+  const words = (k) => k.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase();
+  const parts = [];
+  for (const seg of m[1].replace(/^draft\.?/, '').split('.').filter(Boolean)) {
+    const a = /^(\w+)\[(\d+)\]$/.exec(seg);
+    parts.push(a ? `${ITEM_WORDS[a[1]] ?? words(a[1])} ${Number(a[2]) + 1}` : words(seg));
+  }
+  const where = parts.length > 1 ? `${parts.slice(0, -1).join(', ')}: ${parts[parts.length - 1]}` : (parts[0] ?? 'the draft');
+  return `${where} ${m[2]}`;
+}
+function schemaFindings(schema, value, path, out) {
+  if (!schema || out.length >= 20) return;
+  if (Array.isArray(schema.enum) && !schema.enum.includes(value)) { out.push(`${path} must be one of ${schema.enum.join(', ')}`); return; }
+  switch (schema.type) {
+    case 'object': {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) { out.push(`${path} must be an object`); return; }
+      const props = schema.properties ?? {};
+      for (const k of schema.required ?? []) {
+        const v = value[k];
+        if (v === undefined || v === null || (typeof v === 'string' && !v.trim())) out.push(`${path}.${k} is missing or empty`);
+      }
+      for (const [k, v] of Object.entries(value)) {
+        if (props[k]) schemaFindings(props[k], v, `${path}.${k}`, out);
+        else if (schema.additionalProperties === false) out.push(`${path}.${k} is not a field of this channel`);
+      }
+      return;
+    }
+    case 'array':
+      if (!Array.isArray(value)) { out.push(`${path} must be a list`); return; }
+      value.forEach((v, n) => schemaFindings(schema.items, v, `${path}[${n}]`, out));
+      return;
+    case 'string': if (typeof value !== 'string') out.push(`${path} must be text`); return;
+    case 'integer': if (!Number.isInteger(value)) out.push(`${path} must be a whole number`); return;
+    case 'number': if (typeof value !== 'number' || !Number.isFinite(value)) out.push(`${path} must be a number`); return;
+    default: return;
+  }
+}
+
 function djb2(str) { let h = 5381; for (let k = 0; k < str.length; k++) h = ((h << 5) + h + str.charCodeAt(k)) | 0; return (h >>> 0).toString(16); }
 
 export async function generate(ctx) {
@@ -113,8 +201,29 @@ export async function generate(ctx) {
 
   const asm = await cb.assembleContext({ briefId });
   if (!asm.found) return { status: 'failed', error: { code: 'brief_not_found', message: `Brief not found: ${briefId}` } };
+  // ADR 1020 D3 — the brief is the configuration: a channel it does not enable is
+  // SKIPPED (no model call, no draft). `skipped` is top-level and set only here,
+  // never spread from model data, because the chain's `generate → approve` edge
+  // is `falsy(skipped)`: a skipped channel asks nobody to approve anything.
+  // OPT-IN by `config.skipDisabledChannel`, which only chains that carry that
+  // edge set: a tenant copy minted from an older chain has an unconditional
+  // `generate → approve` edge and would otherwise ask a person to approve a draft
+  // that does not exist, so it keeps generating as it always did.
+  // `enabledChannels` is the surface's own `validateBrief` result, spread onto the
+  // projection — the same set finalize records.
+  const enabled = Array.isArray(asm.enabledChannels) ? asm.enabledChannels : null;
+  const skipDisabled = Boolean(ctx.config && ctx.config.skipDisabledChannel === true);
+  if (skipDisabled && enabled && !enabled.includes(channel)) {
+    writeChannelResult(ctx, { channel, skipped: true, reason: 'channel_disabled' });
+    return { status: 'success', outputs: { skipped: true, reason: 'channel_disabled', channel } };
+  }
+  // ADR 1020 D8 — a stale kernel reaches readers as null; say WHY, so nobody is
+  // told to "generate" a kernel the brief page still shows.
+  if (asm.kernelStale === true) {
+    return { status: 'failed', error: { code: 'kernel_stale', message: 'The brief changed after its messaging kernel was approved. Regenerate and approve the kernel before generating channel assets.' } };
+  }
   if (!asm.kernel || typeof asm.kernel !== 'object') {
-    return { status: 'failed', error: { code: 'kernel_required', message: 'Generate the messaging kernel before channel assets.' } };
+    return { status: 'failed', error: { code: 'kernel_required', message: 'Generate and approve the messaging kernel before channel assets.' } };
   }
   const brief = asm.brief ?? {};
   const orgId = str(brief.orgId);
@@ -200,22 +309,46 @@ export async function generate(ctx) {
 
   let data;
   try {
-    const ai = await ctx.callAI({
+    const request = {
       provider: str(i.provider) || undefined,
       model: str(i.model) || undefined,
       systemPrompt: spec.system,
       messages: [{ role: 'user', content: userParts.join('\n\n') }],
       responseSchema: spec.schema,
-    });
-    data = ai && typeof ai === 'object' ? ai.data : undefined;
+    };
+    const ai = await ctx.callAI(request);
+    data = cleanDraft(ai && typeof ai === 'object' ? ai.data : undefined);
+    // ADR 1020 D13 (CS70WF-23) — the draft is checked CLOSED-WORLD against its
+    // channel spec (the host only checks top-level required keys, so `{emails: []}`
+    // or `{posts: "x"}` used to succeed and be sent for approval), with ONE
+    // error-fed repair naming exactly what was wrong.
+    const findings = draftFindings(spec, data);
+    if (findings.length > 0) {
+      const retry = await ctx.callAI({
+        ...request,
+        messages: [
+          ...request.messages,
+          { role: 'assistant', content: JSON.stringify(data ?? null) },
+          { role: 'user', content: `Your previous reply was INVALID for this channel: ${findings.slice(0, 8).join('; ')}. Return the corrected FULL JSON object only.` },
+        ],
+        temperature: 0,
+      });
+      data = cleanDraft(retry && typeof retry === 'object' ? retry.data : undefined);
+    }
   } catch (e) {
     return { status: 'failed', error: { code: 'generation_failed', message: e instanceof Error ? e.message : 'channel generation failed' } };
   }
   if (!data || typeof data !== 'object') {
     return { status: 'failed', error: { code: 'generation_empty', message: 'The provider returned no draft.' } };
   }
+  const remaining = draftFindings(spec, data);
+  if (remaining.length > 0) {
+    return { status: 'failed', error: { code: 'generation_invalid', message: `The AI's ${CHANNEL_WORDS[channel] ?? 'channel'} draft came back incomplete twice (${remaining.slice(0, 3).map(humanFinding).join('; ')}). Ask the Channel Generator to generate it again.` } };
+  }
 
-  let draft = { channel, briefId, ...data, generatedAt: new Date().toISOString() };
+  // The draft's identity is set LAST, so model fields can never overwrite which
+  // channel and brief it belongs to.
+  let draft = { ...data, channel, briefId, generatedAt: new Date().toISOString() };
 
   // ADR 0355 P1 — enforced platform limits: deterministic post-validate, ONE
   // field-scoped regeneration, then word-boundary truncation WITH a flag.
@@ -233,9 +366,11 @@ export async function generate(ctx) {
           messages: [{ role: 'user', content: `${userParts.join('\n\n')}\n\nYOUR PREVIOUS DRAFT EXCEEDED HARD LIMITS: ${JSON.stringify(findings)}. Regenerate the SAME JSON with every field within its limit. Reply with strict JSON only.` }],
           responseSchema: spec.schema,
         });
-        const fixed = fixAi && typeof fixAi === 'object' ? fixAi.data : undefined;
-        if (fixed && typeof fixed === 'object') {
-          draft = { channel, briefId, ...fixed, generatedAt: draft.generatedAt };
+        const fixed = cleanDraft(fixAi && typeof fixAi === 'object' ? fixAi.data : undefined);
+        // ADR 1020 (grade-code H1) — the regenerated draft must pass the SAME
+        // closed-world check; otherwise keep the validated draft and truncate it.
+        if (fixed && typeof fixed === 'object' && draftFindings(spec, fixed).length === 0) {
+          draft = { ...fixed, channel, briefId, generatedAt: draft.generatedAt };
           findings = validator(draft);
         }
       } catch { /* regen is best-effort — truncation below is the floor */ }
@@ -281,49 +416,91 @@ export async function generate(ctx) {
     } catch { /* compliance optional */ }
   }
 
-  // ADR 0353 P2 — when the creative-briefs feature is ON, the generated visual
-  // briefs become MANAGED entities (lifecycle/versions/mood-board/sharing)
-  // instead of transient drafts; the draft still returns for the approval flow.
-  // CB-CODE-5: creation is IDEMPOTENT on (campaignBriefId, title) — a retry of
-  // this node must not mint duplicate managed briefs — and failures are COUNTED
-  // into `briefCreateErrors` instead of vanishing in a bare catch.
-  let createdBriefIds = [];
-  let briefCreateErrors = 0;
-  const cbSurface = ctx.features && ctx.features['creative-briefs'];
-  if (channel === 'creative_briefs' && cbSurface && typeof cbSurface.create === 'function' && Array.isArray(draft.briefs)) {
-    let existing = [];
-    if (typeof cbSurface.list === 'function') {
-      try {
-        const l = await cbSurface.list({ orgId });
-        existing = Array.isArray(l && l.briefs) ? l.briefs : [];
-      } catch { briefCreateErrors += 1; /* dedupe read failed — creates below still counted */ }
-    }
-    for (const vb of draft.briefs.slice(0, 6)) {
-      const title = typeof vb.format === 'string' ? `${str(brief.productName) || 'Asset'} — ${vb.format}` : (str(brief.productName) || 'Visual brief');
-      const match = existing.find((eb) => eb && eb.campaignBriefId === briefId && eb.title === title);
-      if (match) {
-        if (typeof match.briefId === 'string') createdBriefIds.push(match.briefId);
-        continue; // already created by a prior run/retry — skip, don't duplicate
-      }
-      try {
-        const r = await cbSurface.create({
-          orgId,
-          title,
-          assetType: typeof vb.format === 'string' ? vb.format : 'image',
-          sceneDescription: typeof vb.sceneDescription === 'string' ? vb.sceneDescription : 'Scene to be defined.',
-          ...(typeof vb.composition === 'string' ? { composition: vb.composition } : {}),
-          ...(typeof vb.messagingContext === 'string' ? { messagingIntent: vb.messagingContext } : {}),
-          directions: Array.isArray(vb.directions) ? vb.directions : [],
-          moodBoard: [],
-          campaignBriefId: briefId,
-          actor: 'campaign-channels',
-        });
-        if (r && r.brief && typeof r.brief.briefId === 'string') createdBriefIds.push(r.brief.briefId);
-      } catch { briefCreateErrors += 1; /* entity creation is additive — the draft flow still works */ }
-    }
-  }
+  // ADR 1020 D14 (CS70WF-24) — managed creative briefs are NOT created here: model
+  // output reaches durable state only after the human approves the draft. The
+  // creative_briefs chain does that in `create-creative-briefs`, after its approval.
 
-  return { status: 'success', outputs: { draft, qualityReport, complianceReport, grounding: groundingInfo, ...(createdBriefIds.length > 0 ? { createdBriefIds } : {}), ...(briefCreateErrors > 0 ? { briefCreateErrors } : {}), itemsKey: spec.itemsKey } };
+  writeChannelResult(ctx, { channel, draft });
+  return { status: 'success', outputs: { draft, qualityReport, complianceReport, grounding: groundingInfo, itemsKey: spec.itemsKey } };
+}
+
+/** ADR 1020 D2 — the ONE bag variable a channel run reports back through, on both
+ *  paths (`{channel, draft}` or `{channel, skipped, reason}`). The orchestration's
+ *  `core.dispatch` maps it out per child (`perWorkerOutputMappings`) so the
+ *  consistency check scores real drafts. Declared in each channel chain's
+ *  `producedVariables`. A host without a bag (a bare unit harness) gets the
+ *  outputs alone; the parent then reports `drafts_missing`, never a fake pass. */
+export const CHANNEL_RESULT_VARIABLE = 'channelResult';
+function writeChannelResult(ctx, value) {
+  if (ctx.variables && typeof ctx.variables.set === 'function') ctx.variables.set(CHANNEL_RESULT_VARIABLE, value);
+}
+
+/** ADR 1020 D14 (CS70WF-24) — create the APPROVED creative_briefs draft's visual
+ *  briefs as MANAGED entities (lifecycle, versions, mood board, sharing) on the
+ *  Creative Briefs page. Runs after the channel's approval, so a rejected draft
+ *  leaves nothing behind (they used to be created before the gate, from unreviewed
+ *  model output). role:"side-effect": a replay fork serves the recorded outcome.
+ *  Idempotent on (campaignBriefId, title) (CB-CODE-5); failures are counted into
+ *  `briefCreateErrors`. When the creative-briefs feature is off it skips honestly.
+ *  Inputs: { briefId, draft }. Output: { createdBriefIds, briefCreateErrors? } or
+ *  { skipped: true }. Creating these charges nothing (the charged step is a later
+ *  render, unchanged). */
+export async function createCreativeBriefs(ctx) {
+  const cb = ensureBrief(ctx);
+  const i = ctx.inputs ?? {};
+  const briefId = str(i.briefId);
+  const draft = i.draft && typeof i.draft === 'object' && !Array.isArray(i.draft) ? i.draft : null;
+  if (!draft || draft.channel !== 'creative_briefs' || !Array.isArray(draft.briefs)) {
+    return { status: 'failed', error: { code: 'validation_error', message: 'This workflow did not pass an approved creative-briefs draft to create.' } };
+  }
+  const cbSurface = ctx.features && ctx.features['creative-briefs'];
+  if (!cbSurface || typeof cbSurface.create !== 'function') {
+    return { status: 'success', outputs: { skipped: true, summary: 'No creative briefs were added: Creative Briefs is turned off for this workspace.' } };
+  }
+  const asm = await cb.assembleContext({ briefId });
+  if (!asm.found) return { status: 'failed', error: { code: 'brief_not_found', message: `Brief not found: ${briefId}` } };
+  const brief = asm.brief ?? {};
+  const orgId = str(brief.orgId);
+  const createdBriefIds = [];
+  let briefCreateErrors = 0;
+  let existing = [];
+  if (typeof cbSurface.list === 'function') {
+    try {
+      const l = await cbSurface.list({ orgId });
+      existing = Array.isArray(l && l.briefs) ? l.briefs : [];
+    } catch { briefCreateErrors += 1; /* dedupe read failed — creates below still counted */ }
+  }
+  for (const vb of draft.briefs.slice(0, 6)) {
+    const title = typeof vb.format === 'string' ? `${str(brief.productName) || 'Asset'} — ${vb.format}` : (str(brief.productName) || 'Visual brief');
+    const match = existing.find((eb) => eb && eb.campaignBriefId === briefId && eb.title === title);
+    if (match) {
+      if (typeof match.briefId === 'string') createdBriefIds.push(match.briefId);
+      continue; // already created by a prior run/retry — skip, don't duplicate
+    }
+    try {
+      const r = await cbSurface.create({
+        orgId,
+        title,
+        assetType: typeof vb.format === 'string' ? vb.format : 'image',
+        sceneDescription: typeof vb.sceneDescription === 'string' ? vb.sceneDescription : 'Scene to be defined.',
+        ...(typeof vb.composition === 'string' ? { composition: vb.composition } : {}),
+        ...(typeof vb.messagingContext === 'string' ? { messagingIntent: vb.messagingContext } : {}),
+        directions: Array.isArray(vb.directions) ? vb.directions : [],
+        moodBoard: [],
+        campaignBriefId: briefId,
+        actor: 'campaign-channels',
+      });
+      if (r && r.brief && typeof r.brief.briefId === 'string') createdBriefIds.push(r.brief.briefId);
+    } catch { briefCreateErrors += 1; /* entity creation is additive — the draft flow still works */ }
+  }
+  // Grade-ux H1 — the run card says what happened and where to find it; a step
+  // that created nothing at all is a failure, not a quiet "completed".
+  if (createdBriefIds.length === 0 && briefCreateErrors > 0) {
+    return { status: 'failed', error: { code: 'creative_briefs_not_created', message: 'The approved creative briefs could not be added to the Creative Briefs page. Try approving the draft again, or add them by hand.' } };
+  }
+  const n = createdBriefIds.length;
+  const summary = `${n === 1 ? '1 creative brief is' : `${n} creative briefs are`} on the Creative Briefs page${briefCreateErrors > 0 ? ` (${briefCreateErrors} could not be added)` : ''}.`;
+  return { status: 'success', outputs: { summary, createdBriefIds, ...(briefCreateErrors > 0 ? { briefCreateErrors } : {}) } };
 }
 
 /** Pure content-quality score (citations, length, completeness). Shared by the
@@ -874,6 +1051,7 @@ export async function publishSocialPosts(ctx) {
 }
 
 export const nodes = {
+  'feature.campaign-channels.nodes.create-creative-briefs': createCreativeBriefs,
   'feature.campaign-channels.nodes.generate': generate,
   'feature.campaign-channels.nodes.content-quality-check': contentQualityCheck,
   'feature.campaign-channels.nodes.publish-landing-page': publishLandingPage,

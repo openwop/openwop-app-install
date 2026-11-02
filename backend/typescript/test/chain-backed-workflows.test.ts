@@ -5,6 +5,11 @@
  * Proves the friction-reducer end-to-end: a chain pack → a stable-id, resolve-by-id
  * `WorkflowDefinition`, WITHOUT a hand-coded def and WITHOUT the deprecated seam. The
  * chainId-only signature is the guardrail against reopening the anti-pattern.
+ *
+ * TST-CCB-4. Red when: the expanded definition keeps the expansion's hash-suffixed
+ * `chainId:expansionId` instead of the stable chainId; the deferred param rename
+ * stops restoring bare names; the `postProcess` hook is not called; registration
+ * rethrows instead of soft-failing; or the lesson-batch child stops being `internal`.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import {
@@ -35,7 +40,10 @@ describe('registerChainBackedWorkflow — resolve-by-id from a chain', () => {
   it('expands a chain to a STABLE-id definition (workflowId === chainId → replay-safe)', () => {
     const def = buildChainBackedDefinition(CHAIN_ID);
     expect(def.workflowId).toBe(CHAIN_ID); // deterministic, not a random uuid
+    expect((def.metadata as { chainId?: string }).chainId).toBe(CHAIN_ID);
+    // Node ids carry the deterministic expansion prefix (`kicktodo_plan-generation_<hash>_…`).
     expect(def.nodes.length).toBeGreaterThan(0);
+    for (const n of def.nodes) expect(n.nodeId.startsWith('kicktodo_plan-generation_')).toBe(true);
   });
 
   it('restores launch-contract param names (un-prefixes deferred materialization)', () => {

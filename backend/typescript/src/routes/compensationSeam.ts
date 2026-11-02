@@ -285,7 +285,7 @@ async function runSeamWorkflow(
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
-  await insertRunWithStartContext(storage, run, { tenantId, definition });
+  await insertRunWithStartContext(storage, run, { tenantId, definition, admission: { plan: 'exempt:conformance-seam' } });
   // Arm the fault BEFORE the executor runs, keyed on this run's id so two
   // concurrent seam calls cannot inject into each other.
   const ledger = ledgerFor(run.runId);
@@ -399,7 +399,7 @@ async function handleReplay(req: Request, res: Response, deps: { storage: Storag
     parentRunId: source.runId,
     forkMode: 'replay',
   };
-  await insertRunWithStartContext(deps.storage, replay, { tenantId, definition });
+  await insertRunWithStartContext(deps.storage, replay, { tenantId, definition, admission: { plan: 'exempt:conformance-seam' } });
   const { executeRun } = await import('../executor/executor.js');
   await executeRun(deps.storage, replay, definition, { replayInvocationsFromRunId: source.runId });
 

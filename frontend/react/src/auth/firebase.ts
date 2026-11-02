@@ -658,6 +658,12 @@ export function hasPendingMfaChallenge(): boolean {
   return pendingMfaResolver !== null;
 }
 
+/** Drop an abandoned MFA challenge (the re-authentication dialog was cancelled
+ *  mid-code), so the next sign-in modal does not boot into code entry for it. */
+export function clearPendingMfaChallenge(): void {
+  pendingMfaResolver = null;
+}
+
 export async function signOut(): Promise<void> {
   // ADR 0873 D8 — every sign-out path (SignInButton, invite switch, hardSignOut)
   // runs through here, so this is the one place the offline caches are purged.

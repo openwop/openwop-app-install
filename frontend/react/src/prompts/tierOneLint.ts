@@ -15,7 +15,7 @@
  * Trigger contract:
  *   - Runs against prompts of `kind: 'schema-hint'` only.
  *   - Triggers SHOULD when the host advertises
- *     `capabilities.envelopes.tierOneSubsetCompliance: 'strict'`.
+ *     `capabilities.aiProviders.tierOneSubsetCompliance: 'strict'`.
  *   - Returns the (possibly-empty) list of finding labels.
  *
  * @see RFCS/0030-envelope-reasoning-and-tier-one-subset.md §B

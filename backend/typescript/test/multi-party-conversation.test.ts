@@ -23,7 +23,7 @@ import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import { getAgentRegistry } from '../src/executor/agentRegistry.js';
-import { markAsBoardGroup, getConversationMeta, ensureConversationMeta } from '../src/host/conversationStore.js';
+import { markAsBoardGroup, getConversationMeta, ensureConversationMeta, agentRef } from '../src/host/conversationStore.js';
 import { programMock, resetMockPrograms } from '../src/providers/dispatchMock.js';
 import { participantRosterOf, isParticipant } from '../src/host/multiPartyConversation.js';
 import type { ConversationMeta } from '../src/host/conversationStore.js';
@@ -94,7 +94,9 @@ describe('RFC 0101 — participant roster + speaker attribution (helper)', () =>
     expect(isParticipant(roster!, 'a1')).toBe(true);
     expect(isParticipant(roster!, 'stranger')).toBe(false);
     // A 1:1 / ungrouped chat declares NO roster — the speaker rule does not apply.
-    expect(participantRosterOf({ ...base, type: 'agent', participants: [] } as ConversationMeta)).toBeNull();
+    // With an AGENT seated, so only the type check can return null here (an
+    // empty participant list returned null whatever the type — w72g4-mpc-type).
+    expect(participantRosterOf({ ...base, type: 'agent', participants: [{ subjectRef: 'agent:a1', role: 'member', addedAt: '' }] } satisfies ConversationMeta)).toBeNull();
     expect(participantRosterOf(null)).toBeNull();
   });
 
@@ -108,14 +110,14 @@ describe('RFC 0101 — participant roster + speaker attribution (helper)', () =>
     const base: Omit<ConversationMeta, 'type' | 'boardId' | 'participants'> = {
       conversationId: 'c', tenantId: TENANT, createdAt: '', updatedAt: '',
     };
-    const projectMeta = {
+    const projectMeta: ConversationMeta = {
       ...base, type: 'group', ownerSubject: { kind: 'project', id: 'project-1' },
       participants: [
         { subjectRef: 'user:u1', role: 'owner', addedAt: '' },
         { subjectRef: 'agent:a1', role: 'member', addedAt: '' },
         { subjectRef: 'agent:a2', role: 'member', addedAt: '' },
       ],
-    } as unknown as ConversationMeta;
+    };
     expect(projectMeta.boardId).toBeUndefined(); // the point of the case
     const roster = participantRosterOf(projectMeta);
     expect(roster).toEqual([{ agentId: 'a1' }, { agentId: 'a2' }]);
@@ -144,10 +146,10 @@ describe('RFC 0101 — participant roster + speaker attribution (helper)', () =>
     const base: Omit<ConversationMeta, 'type' | 'boardId' | 'participants'> = {
       conversationId: 'c', tenantId: TENANT, createdAt: '', updatedAt: '',
     };
-    const notebookMeta = {
+    const notebookMeta: ConversationMeta = {
       ...base, type: 'group', ownerSubject: { kind: 'project', id: 'notebook-1' },
       participants: [{ subjectRef: `agent:${RESEARCHER}`, role: 'member', addedAt: '' }],
-    } as unknown as ConversationMeta;
+    };
     expect(notebookMeta.boardId).toBeUndefined();
     const roster = participantRosterOf(notebookMeta);
     expect(roster).toEqual([{ agentId: RESEARCHER }]);
@@ -164,9 +166,9 @@ describe('RFC 0101 — participant roster + speaker attribution (helper)', () =>
     // e.g. a kicktodo accountability circle (`circleService.ts:106`) seats no
     // agents at create. Returning `[]` here would mean "no agent may speak" and
     // 422 every turn in those rooms.
-    expect(participantRosterOf({ ...base, type: 'group', participants: [{ subjectRef: 'user:u1', role: 'owner', addedAt: '' }] } as unknown as ConversationMeta)).toBeNull();
+    expect(participantRosterOf({ ...base, type: 'group', participants: [{ subjectRef: 'user:u1', role: 'owner', addedAt: '' }] } satisfies ConversationMeta)).toBeNull();
     // A BOARD group keeps the stricter declared-but-empty semantics, unchanged.
-    expect(participantRosterOf({ ...base, type: 'group', boardId: 'b1', participants: [{ subjectRef: 'user:u1', role: 'owner', addedAt: '' }] } as unknown as ConversationMeta)).toEqual([]);
+    expect(participantRosterOf({ ...base, type: 'group', boardId: 'b1', participants: [{ subjectRef: 'user:u1', role: 'owner', addedAt: '' }] } satisfies ConversationMeta)).toEqual([]);
   });
 });
 
@@ -237,10 +239,13 @@ describe('RFC 0101 — multi-party council on the conversation wire (ADR 0040 Ph
 
     // RFC 0101 (3) — a turn from a NON-participant agent is rejected fail-closed.
     programMock('', [{ content: 'I was not invited.' }]);
-    const denied = await api<{ error?: { code?: string } }>(`/runs/${rid}/interrupts/gate`, { method: 'POST', body: JSON.stringify({
+    const denied = await api<{ error?: string; message?: string }>(`/runs/${rid}/interrupts/gate`, { method: 'POST', body: JSON.stringify({
       resumeValue: { operation: 'exchange', turn: { content: 'Let me in.', to: stranger } },
     }) });
     expect(denied.status).toBe(422);
+    // THE membership refusal, not some other 422 on the same route.
+    expect(denied.body.error).toBe('validation_error');
+    expect(denied.body.message).toBe(`Agent ${stranger} is not a participant of this multi-party conversation.`);
     // No agent turn was appended for the stranger.
     const afterDenied = await poll(rid);
     const speakers = ofType(afterDenied.events, 'conversation.exchanged')
@@ -280,8 +285,8 @@ describe('RFC 0101 — multi-party council on the conversation wire (ADR 0040 Ph
     const sessionId = `sess-mp-project-${Date.now()}`;
     const meta = await ensureConversationMeta(TENANT, sessionId, {
       type: 'group',
-      participants: [`agent:${inRoom}`],
-    } as Parameters<typeof ensureConversationMeta>[2]);
+      participants: [agentRef(inRoom)],
+    });
     expect(meta.boardId).toBeUndefined();
     expect(participantRosterOf(meta)).toEqual([{ agentId: inRoom }]);
 
@@ -311,10 +316,12 @@ describe('RFC 0101 — multi-party council on the conversation wire (ADR 0040 Ph
 
     // The enforcement: a NON-member agent is refused fail-closed.
     programMock('', [{ content: 'I am not in this project.' }]);
-    const denied = await api(`/runs/${rid}/interrupts/gate`, { method: 'POST', body: JSON.stringify({
+    const denied = await api<{ error?: string; message?: string }>(`/runs/${rid}/interrupts/gate`, { method: 'POST', body: JSON.stringify({
       resumeValue: { operation: 'exchange', turn: { content: 'Let me in.', to: outsider } },
     }) });
     expect(denied.status).toBe(422);
+    expect(denied.body.error).toBe('validation_error');
+    expect(denied.body.message).toBe(`Agent ${outsider} is not a participant of this multi-party conversation.`);
     const afterDenied = await poll(rid);
     expect(ofType(afterDenied.events, 'conversation.exchanged')
       .map((e) => (e.payload!.turn as { role?: string; speakerId?: string }))

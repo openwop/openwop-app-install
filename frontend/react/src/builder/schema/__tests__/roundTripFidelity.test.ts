@@ -43,7 +43,7 @@ import type { SavedWorkflow } from '../workflow.js';
 interface StoredDefinition {
   workflowId: string;
   metadata: Record<string, unknown>;
-  nodes: Array<{ nodeId: string; typeId: string; config?: Record<string, unknown>; outputRole?: 'primary' | 'secondary'; inputs?: Record<string, unknown>; compensation?: Record<string, unknown>; irreversibleEffect?: boolean }>;
+  nodes: Array<{ nodeId: string; typeId: string; config?: Record<string, unknown>; outputRole?: 'primary' | 'secondary'; inputs?: Record<string, unknown>; compensation?: Record<string, unknown>; irreversibleEffect?: boolean; agent?: Record<string, unknown> }>;
   edges: Array<{ edgeId: string; sourceNodeId: string; targetNodeId: string }>;
 }
 
@@ -187,6 +187,24 @@ describe('ADR 0440 P1 — open→save is a fixed point for what the host stores'
     };
     const outFalse = save(open(saidFalse)).nodes as Array<{ irreversibleEffect?: boolean }>;
     expect(outFalse[0]!.irreversibleEffect).toBe(false);
+  });
+
+  it('preserves the RFC 0082 §B agent binding verbatim (ADR 1005)', () => {
+    // The host keeps `agent` since ADR 1005, and the builder has no editor for it:
+    // a save that dropped it would unbind the agent with nothing on screen.
+    const bound: StoredDefinition = {
+      ...STORED_WALKTHROUGH,
+      nodes: [
+        { nodeId: 'a1', typeId: 'core.noop', agent: { agentId: 'core.conformance.channel-agent', channel: 'stable' } },
+        { nodeId: 'a2', typeId: 'core.noop', agent: { agentId: 'core.conformance.channel-agent', version: '1.0.0' } },
+        { nodeId: 'a3', typeId: 'core.noop' },
+      ],
+      edges: [],
+    };
+    const nodes = save(open(bound)).nodes as Array<{ agent?: unknown }>;
+    expect(nodes[0]!.agent).toEqual({ agentId: 'core.conformance.channel-agent', channel: 'stable' });
+    expect(nodes[1]!.agent).toEqual({ agentId: 'core.conformance.channel-agent', version: '1.0.0' });
+    expect(nodes[2]!.agent).toBeUndefined();
   });
 
   it('does not INVENT either field on a node that declared neither', () => {

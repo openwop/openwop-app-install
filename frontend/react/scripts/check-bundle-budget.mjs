@@ -11,6 +11,7 @@
  * Budgets are gzip bytes (what the network actually transfers). Raise them
  * here, in the same PR that justifies the growth.
  */
+import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { gzipSync } from 'node:zlib';
 import { dirname, join } from 'node:path';
@@ -523,6 +524,49 @@ function gzipBytes(path) {
   return gzipSync(readFileSync(path)).length;
 }
 
+/**
+ * The GATED size: gzip with every chunk hash the file names replaced by a stable
+ * stand-in, so the same code measures the same on every build.
+ *
+ * A chunk references the others by file name (`import("./c-DZQYusNB.js")`), and
+ * those 8-character hashes change whenever the named chunk's content does. They
+ * look random, and random text compresses unevenly. MEASURED 2026-11-01: the
+ * entries of d56470aa6 and 7b3331c6d were the same 433,802 bytes and identical
+ * apart from ~519 chunk hashes, yet gzipped to 131,495 and 131,476 B. So hash luck
+ * alone moved the entry about ±30 B. With 19 B of headroom, upstream read green
+ * while every adopter's build (whose overlay changes chunk contents, so hashes)
+ * read 3–12 B over. A budget guards growth of the code, not hash luck.
+ *
+ * Each distinct hash becomes 8 sha-derived characters, numbered by where it first
+ * appears in the file. The stand-ins are as incompressible as real hashes, so the
+ * gated number stays close to what ships (it is NOT the hash-stripped size), and
+ * the served gzip is printed beside it. Rollup's hashes are not uniform in their
+ * first character (~3/4 of them start with B, C or D, which is why they compress
+ * ~230 B better than uniform random stand-ins), so a stand-in keeps that class:
+ * B/C/D when the real hash starts with one, any character otherwise.
+ */
+const HASHED_ASSET = /^.+-([A-Za-z0-9_-]{8})\.[a-z0-9]+$/;
+const assetHashes = (() => {
+  let names = [];
+  try { names = readdirSync(ASSETS); } catch { /* reported below */ }
+  return [...new Set(names.map((n) => HASHED_ASSET.exec(n)?.[1]).filter(Boolean))];
+})();
+const standIn = (i, real) => {
+  const d = createHash('sha256').update(`openwop-bundle-budget:${i}`).digest();
+  const tail = d.toString('base64url');
+  return /^[BCD]/.test(real) ? 'BCD'[d[31] % 3] + tail.slice(1, 8) : tail.slice(0, 8);
+};
+
+export function normalizedGzipBytes(text, hashes = assetHashes) {
+  const present = hashes
+    .map((h) => ({ h, at: text.indexOf(`-${h}.`) }))
+    .filter((x) => x.at >= 0)
+    .sort((a, b) => a.at - b.at);
+  let out = text;
+  present.forEach(({ h }, i) => { out = out.split(`-${h}.`).join(`-${standIn(i, h)}.`); });
+  return gzipSync(Buffer.from(out, 'latin1')).length;
+}
+
 const kib = (n) => `${(n / 1024).toFixed(1)} kB`;
 let failed = false;
 
@@ -562,7 +606,8 @@ const ENTRY_BUDGET = ENTRY_GZIP_BUDGET + entryShare;
 for (const f of files) {
   const path = join(ASSETS, f);
   const raw = statSync(path).size;
-  const gz = gzipBytes(path);
+  const served = gzipBytes(path);
+  const gz = normalizedGzipBytes(readFileSync(path, 'latin1'));
   const isEntry = f.startsWith('index-');
   // `i18n` names ONE chunk (`i18n-<hash>.js`), not the lazy locale chunks that share
   // its prefix (`i18n-es-<hash>.js` …) — those stay on the global ceiling.
@@ -571,7 +616,7 @@ for (const f of files) {
   if (gz > budget) {
     failed = true;
     console.error(
-      `✗ check-bundle-budget: ${f} is ${kib(gz)} gzip (${kib(raw)} min) — over the ` +
+      `✗ check-bundle-budget: ${f} is ${kib(gz)} gzip (${gz} B gated, ${served} B served; ${kib(raw)} min) — over the ` +
       `${isEntry ? 'ENTRY' : 'chunk'} budget of ${kib(budget)} by ${gz - budget} B. ` +
       `Code-split or raise the budget in scripts/check-bundle-budget.mjs.`,
     );
@@ -603,13 +648,16 @@ if (failed) {
 
 const entry = files.find((f) => f.startsWith('index-'));
 if (entry) {
-  const gz = gzipBytes(join(ASSETS, entry));
+  const gz = normalizedGzipBytes(readFileSync(join(ASSETS, entry), 'latin1'));
+  const served = gzipBytes(join(ASSETS, entry));
   // Print the HEADROOM, not just the size. The burn rate is what a reader needs, and
   // reconstructing it from historical logs is archaeology nobody does.
   // A declared distribution share is reported SEPARATELY, so the host's own number
   // is never hidden inside a bigger one.
   const shareNote = entryShare > 0 ? ` = host ${kib(ENTRY_GZIP_BUDGET)} + '${DISTRIBUTION}' declared entry share ${entryShare} B` : '';
   console.log(`✓ check-bundle-budget: entry chunk ${kib(gz)} gzip (budget ${kib(ENTRY_BUDGET)}${shareNote}, ${ENTRY_BUDGET - gz} B of headroom).`);
+  // The gated number is hash-normalized; say what actually ships beside it.
+  console.log(`  gated ${gz} B (chunk hashes normalized) · served ${served} B (this build's real gzip)`);
 } else {
   console.log('✓ check-bundle-budget: no entry chunk matched index-*.js (skipped).');
 }

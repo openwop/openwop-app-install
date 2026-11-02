@@ -5,7 +5,8 @@
  * Ships the reachable surface that mounts a downloaded, signed
  * `kind:"frontend-plugin"` pack in a cross-origin sandboxed iframe and drives it
  * over the ui-plugin/1 host-RPC boundary — the falsifiable real boundary
- * (isolated + egress-denied + allowlist-bound + no-BYOK).
+ * (isolated + requests blocked + allowlist-bound + no-BYOK; ADR 1021 names what
+ * the policy does not stop).
  *
  * The `uiPlugins` CAPABILITY is advertised independently of this toggle
  * (discovery.ts / `presentationEnabled('uiPlugins')`, always-on under profile
@@ -28,7 +29,7 @@ export const uiPluginsFeature: BackendFeature = {
   toggleDefault: {
     id: 'ui-plugins',
     label: 'UI Plugins',
-    description: 'Load signed, sandboxed front-end plugin packs — cross-origin-iframe isolation, deny-egress, closed host-RPC allowlist.',
+    description: 'Load signed, sandboxed front-end plugin packs — cross-origin-iframe isolation, a policy that blocks their requests, a closed host-RPC allowlist. A plugin can still send what it reads to a server it chooses, so anything it can read could reach its author.',
     category: 'Developer',
     status: 'off',
     bucketUnit: 'tenant',

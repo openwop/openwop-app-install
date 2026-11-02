@@ -102,6 +102,21 @@ export async function releaseIgnition(tenantId: string, key: string): Promise<vo
 }
 
 /**
+ * ADR 1020 (grade-ux H2) — take over a live claim whose recorded run has already
+ * FINISHED (the caller checked its status). The window exists to fold a duplicate
+ * request into a run that is still going; a run that was rejected or failed is no
+ * reason to refuse a new one ("reject it and ask to regenerate" used to hand back
+ * the rejected run for five minutes). CAS against exactly the claim naming that
+ * run, so a concurrent claimer that replaced it wins. Returns whether it took over.
+ */
+export async function reclaimAfterFinishedRun(tenantId: string, key: string, finishedRunId: string, nowMs: number = Date.now()): Promise<boolean> {
+  const id = `${tenantId}:${key}`;
+  const existing = await claims.get(id);
+  if (!existing || existing.runId !== finishedRunId) return false;
+  return claims.compareAndSwap(existing, { tenantId, key, claimedAt: nowMs });
+}
+
+/**
  * Best-effort: record the run this claim ignited so a subsequent duplicate call
  * inside the window can return the real `runId`. A missing/absent claim is a
  * no-op (never resurrects one). CAS so it never clobbers a newer claim.

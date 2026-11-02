@@ -16,6 +16,16 @@
  * ENV2-B1 — the missing subject eraser, with a DIFFERENT semantic from the one
  * `documents` needed. See the audit-ledger case below: it is the whole reason
  * this class is being closed one feature at a time rather than swept.
+ *
+ * TST-DAC-4. Honest ceiling: "PRESERVES the promotion ledger actor" asserts an
+ * ABSENCE (the eraser has no promotions loop to sabotage); it stays as the
+ * recorded decision.
+ *
+ * Red when (sabotage-witnessed, wave 70): a zero count is rendered; an
+ * all-zero diff is not "no config entries change"; the summary stops reading
+ * each domain's own diff(); the gated proposal stops carrying the computed
+ * change; the eraser crosses tenants, stops tombstoning `createdBy`, or is not
+ * registered with the host fan-out.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import http from 'node:http';
@@ -26,6 +36,10 @@ import {
   diffDomainPayloads,
 } from '../src/features/environments/environmentsService.js';
 import { eraseEnvironmentsSubject, ERASED_SUBJECT } from '../src/features/environments/erasure.js';
+import { recordOwnership, setPublishedRevision } from '../src/host/workflowOwnership.js';
+import { recordRevision } from '../src/host/workflowRevisions.js';
+import { revisionHashOf } from '../src/host/definitionHash.js';
+import type { WorkflowDefinition } from '../src/executor/types.js';
 
 let server: http.Server;
 beforeAll(async () => {
@@ -67,14 +81,11 @@ describe('ENV2-M1 — the approval says what changes, not just where it lands', 
     // A REGISTERED domain's payloads (ADR 0819 §2 removed `feature-toggles`;
     // the diff reports registered domains only, so it would now be skipped).
     const diff = diffDomainPayloads(
-      { 'workflow-pins': { a: 'a1b2c3d4e5f6a1b2', b: 'b1b2c3d4e5f6a1b2' } as never },
-      { 'workflow-pins': { a: 'c1b2c3d4e5f6a1b2', c: 'd1b2c3d4e5f6a1b2' } as never },
+      { 'workflow-pins': { a: 'a1b2c3d4e5f6a1b2', b: 'b1b2c3d4e5f6a1b2' } },
+      { 'workflow-pins': { a: 'c1b2c3d4e5f6a1b2', c: 'd1b2c3d4e5f6a1b2' } },
     );
-    const text = describeSnapshotChange(diff);
-    // b removed, c added, a changed — whatever the domain's own diff() reports,
-    // the sentence must be non-empty and mention the domain.
-    expect(text).toContain('workflow-pins');
-    expect(text).not.toBe('no config entries change');
+    // b removed, c added, a changed — the domain's own diff(), rendered exactly.
+    expect(describeSnapshotChange(diff)).toBe('workflow-pins +1 ~1 -1');
   });
 
   it('the QUEUED approval actually carries the summary — the wiring, not the helper', async () => {
@@ -90,6 +101,12 @@ describe('ENV2-M1 — the approval says what changes, not just where it lands', 
 
     await createEnvironment({ tenantId: T, name: 'staging', order: 1 });
     await createEnvironment({ tenantId: T, name: 'prod', order: 2 });
+    // Real config to promote: one published workflow pin, so the snapshot differs
+    // from prod's (empty) baseline by exactly `workflow-pins +1`.
+    const def: WorkflowDefinition = { workflowId: 'wf-gate', nodes: [{ nodeId: 'n1', typeId: 'core.noop', config: {} }], edges: [] };
+    await recordOwnership(T, 'wf-gate', { nodeCount: 1 });
+    await recordRevision(T, def, {});
+    expect(await setPublishedRevision(T, 'wf-gate', revisionHashOf(def))).toBe(true);
     const snap = await snapshotLiveConfig({ tenantId: T, sourceEnv: 'staging', createdBy: 'u-1' });
     await movePointer({ tenantId: T, fromEnvName: null, toEnvName: 'staging', snapshotHash: snap.hash, actor: 'u-1' });
 
@@ -99,10 +116,8 @@ describe('ENV2-M1 — the approval says what changes, not just where it lands', 
     const approval = (outcome as { pendingApproval?: { proposal?: string } }).pendingApproval;
     expect(approval, 'the promote must have been GATED, not applied').toBeTruthy();
     const proposal = String(approval?.proposal ?? '');
-    expect(proposal, 'the reviewer still sees where it lands').toContain('prod');
-    // The property under test: the substance, not just the destination + hash.
-    expect(proposal, 'and what it does — the bare hash was the defect').toMatch(/change|\+\d|~\d|-\d/);
-    expect(proposal.length, 'materially more than "Deploy snapshot abcdef… to \'prod\'"').toBeGreaterThan(50);
+    // Where it lands AND what it does — the bare hash was the defect.
+    expect(proposal).toBe(`Deploy snapshot ${snap.hash.slice(0, 12)}… to "prod" — workflow-pins +1`);
   });
 });
 

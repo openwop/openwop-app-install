@@ -38,6 +38,7 @@ import {
   createDurableQueue, createDurableQueueBus, purgeTenantDurableSurfaces, snapshotDurableDlqSubjects,
 } from '../src/host/durable/durableQueue.js';
 import { buildHostSurfaceBundle, initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
+import { stripComments } from './helpers/stripComments.js';
 
 let base: Storage;
 /** Every key `Storage` returned from a list/page call since the last reset. */
@@ -288,7 +289,7 @@ describe('ADR 0868 — ratchet: no durable adapter reads a whole range with kvLi
   it('only durableStore.ts (the helpers and their fallback) calls kvList', () => {
     const dir = join(__dirname, '../src/host/durable');
     const offenders = readdirSync(dir).filter((f) => f.endsWith('.ts') && f !== 'durableStore.ts')
-      .filter((f) => /\.kvList\(/.test(readFileSync(join(dir, f), 'utf8').replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '')));
+      .filter((f) => /\.kvList\(/.test(stripComments(readFileSync(join(dir, f), 'utf8'))));
     expect(offenders).toEqual([]);
   });
 });

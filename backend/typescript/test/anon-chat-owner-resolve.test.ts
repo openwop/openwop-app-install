@@ -16,6 +16,19 @@
  * tenant-bound id. Without a model provider configured the reply itself fails
  * (502), which is past the gate under test; the assertion is that the gate does
  * not refuse the owner, and still refuses everyone else.
+ *
+ * TWO GUARDS stand between a stranger and this conversation, and only one is
+ * reachable from here. Every anonymous visitor is its OWN tenant (`anon:<sid>`),
+ * so another visitor presenting the owner's tenant-bound id is refused by the
+ * v2 id layer (`403 id_tenant_mismatch`, middleware/v2Identity.ts) before the
+ * visibility gate in `authorizeConversationResolve` runs. A same-tenant
+ * non-owner does not exist for anonymous sessions, so the visibility gate's
+ * DENY branch is an honest ceiling here (w66 acr-deny read vacuous); the
+ * control asserts the guard that actually answers.
+ *
+ * TST-BXD-1 (ADR 0839 D1, CS-BE-1; incident 2026-10-08). Red when: the resolve
+ * gate keys the owner check on the canonical user id instead of the principal
+ * (w66 acr-key), or the id-layer tenant check stops refusing a foreign tenant.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type http from 'node:http';
@@ -84,15 +97,16 @@ describe('anonymous chat: the owner can send a turn on their own conversation', 
     const runId = await openChat(cookie);
     const r = await sendTurn(cookie, runId);
     expect(r.error, `the owner's turn was refused: ${r.status} ${r.error}`).not.toBe('interrupt_not_found');
-    expect(r.status).not.toBe(404);
+    // Past the gate: no refusal status at all (without a provider the reply
+    // itself fails later, which is not a refusal of the owner).
+    expect([401, 403, 404], `the owner's turn was refused: ${r.status} ${r.error}`).not.toContain(r.status);
   });
 
-  it('control: ANOTHER anonymous visitor is still refused, masked as interrupt_not_found', async () => {
+  it('control: ANOTHER anonymous visitor is still refused (at the id layer: 403 id_tenant_mismatch)', async () => {
     const owner = await anonCookie();
     const runId = await openChat(owner);
     const intruder = await anonCookie();
     const r = await sendTurn(intruder, runId);
-    expect([403, 404]).toContain(r.status);
-    expect(r.status === 404 ? r.error : 'id-layer refusal').not.toBe(undefined);
+    expect(r).toEqual({ status: 403, error: 'id_tenant_mismatch' });
   });
 });

@@ -523,6 +523,9 @@ run_selftests() {
   echo "▶ guard: the contention detector actually fires (preflight-suite)"
   bash "$ROOT/scripts/test-preflight-suite.sh"
   echo
+  echo "▶ guard: --check-gate-age reads a gate's age from its claim, and fails closed (R1, ADR 0863)"
+  bash "$ROOT/scripts/test-preflight-gate-age.sh"
+  echo
   echo "▶ machine-wide train markers: another repo's train holds --wait-foreign and the daemon (2026-10-26)"
   bash "$ROOT/scripts/test-ci-claims.sh"
   echo
@@ -535,6 +538,14 @@ run_selftests() {
   echo
   echo "▶ e2e ledger: required and advisory results are reported separately (ADR 0509)"
   node --test "$ROOT/scripts/test-e2e-ledger-report.mjs"
+  echo
+  echo "▶ remote evidence: request, SSH identity and full gate artifacts must agree (ADR 0863 D9)"
+  node --test "$ROOT/scripts/test-remote-gate-result.mjs" "$ROOT/scripts/test-remote-gate-ssh.mjs" "$ROOT/scripts/test-remote-gate-source.mjs" "$ROOT/scripts/test-remote-gate-frame.mjs" "$ROOT/scripts/test-remote-gate-job.mjs" "$ROOT/scripts/test-remote-gate-accept.mjs" "$ROOT/scripts/test-remote-gate-status.mjs" "$ROOT/scripts/test-remote-gate-publish.mjs"
+  node --test --test-concurrency=1 "$ROOT/scripts/test-remote-gate-cancel.mjs"
+  node --test --test-concurrency=1 "$ROOT/scripts/test-remote-gate-control.mjs"
+  node --test --test-concurrency=1 "$ROOT/scripts/test-remote-gate-supervisor.mjs"
+  node --test --test-concurrency=1 "$ROOT/scripts/test-remote-gate-e2e.mjs"
+  node --test "$ROOT/scripts/test-remote-gate-gcp.mjs" "$ROOT/scripts/test-remote-gate-budget-stop.mjs"
   echo
   echo "▶ adaptive width: shadow changes nothing, a broken tool narrows nothing (ADR 0971)"
   node --test --test-concurrency=1 "$ROOT/scripts/test-ci-width.mjs"

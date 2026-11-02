@@ -9,13 +9,17 @@
  *
  * Pins: an identical repeat of the last call that RAN is answered with a note,
  * not re-executed; a different call in between (a read after a write) runs again;
- * a failed call, and a call that reported unfinished work (ADR 0773 B.7), may be
- * repeated; the five-call loop ends `tool_rounds_exhausted`, while a turn that
- * did say something keeps its text.
+ * a failed call may be repeated; the five-call loop ends `tool_rounds_exhausted`,
+ * while a turn that did say something keeps its text. (The `continueTurn`
+ * exemption for a call that reported unfinished work, ADR 0773 B.7, at
+ * `agentDispatch.ts` `lastRanCall = …`, is NOT exercised here — corrected in
+ * grade-tests w74, TST-DUJ2.) The exhaustion branch has a second witness:
+ * `agent-dispatch-tool-loop.test.ts` "bounds the loop at maxToolRounds".
  *
- * Red when (sabotage-witnessed): the repeat check is removed (the tool runs five
- * times); `lastRanCall` is never cleared by another tool; a failure is remembered;
- * the exhaustion branch is removed (the loop returns an empty success).
+ * Red when (sabotage-witnessed, w74 probes tlr-*): the repeat check is removed
+ * (the tool runs five times); `lastRanCall` is never cleared by another tool; a
+ * failure is remembered; the exhaustion branch is removed (the loop returns an
+ * empty success); the exhaustion branch ignores text the turn did say.
  */
 import { describe, expect, it, vi } from 'vitest';
 import { runChatToolLoop, repeatedCallNote, TOOL_ROUNDS_EXHAUSTED, type CompiledTool } from '../src/host/agentDispatch.js';

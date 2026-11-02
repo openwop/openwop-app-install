@@ -707,7 +707,7 @@ export function ProfilePage(): JSX.Element {
                       <Trans
                         t={t}
                         i18nKey="boardIntro"
-                        components={{ 0: <strong />, 1: <strong />, 2: <strong /> }}
+                        components={[<strong />, <strong />, <strong />]}
                       />
                     </p>
                   }

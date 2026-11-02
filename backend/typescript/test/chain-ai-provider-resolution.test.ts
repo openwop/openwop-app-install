@@ -23,6 +23,10 @@
  * cache key hashes the RESOLVED provider+model). What must never reach a call is
  * an unresolved token, an empty string or the literal "undefined"; an ABSENT key
  * is fine, because the host fills it.
+ *
+ * TST-CCC-1. Red when: `withRunAiDefault` stops filling an absent provider from the
+ * run default; a shipped chain's AI node authors a literal "undefined" provider; or
+ * expansion stops letting a supplied `provider` param override the (absent) default.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { join } from 'node:path';
@@ -63,6 +67,9 @@ describe('the reported failure: exec-ops.daily-briefing', () => {
       const cfg = (n.config ?? {}) as Record<string, unknown>;
       expect(badValue(cfg.provider), `${n.nodeId}.provider = ${JSON.stringify(cfg.provider)}`).toBe(false);
       expect(badValue(cfg.model), `${n.nodeId}.model = ${JSON.stringify(cfg.model)}`).toBe(false);
+      // "No vendor pinned": a copy expanded without provider/model params carries none.
+      expect(cfg.provider, `${n.nodeId}.provider must stay absent (ADR 0903 D7)`).toBeUndefined();
+      expect(cfg.model, `${n.nodeId}.model must stay absent (ADR 0903 D7)`).toBeUndefined();
       // The exact assertion that would have caught the production failure, now at
       // the call: what dispatches is a real provider and model, never "undefined".
       expect(dispatched(cfg)).toMatchObject({ provider: 'google', model: 'gemini-test' });
@@ -87,8 +94,9 @@ describe('EVERY shipped chain: no AI node can dispatch with an unresolved provid
     let checked = 0;
     for (const { chain } of listChains()) {
       if (!chain.dag.nodes.some((n) => AI.has(n.typeId))) continue;
-      // Supply every REQUIRED param with a placeholder — expansion now refuses
-      // without them (chain_missing_required_param), which is itself the point.
+      // Supply every REQUIRED param with a placeholder so each node's config is
+      // realistic. (Expansion does NOT refuse a blank required param — see the last
+      // block of this file — so this is fixture fidelity, not a precondition.)
       const required = ((chain.parameters as { required?: string[] })?.required) ?? [];
       const params = Object.fromEntries(required.map((k) => [k, `test-${k}`]));
       let def;
@@ -109,7 +117,7 @@ describe('EVERY shipped chain: no AI node can dispatch with an unresolved provid
         }
       }
     }
-    expect(checked, 'fixture guard: no AI nodes checked — the walker is broken').toBeGreaterThan(50);
+    expect(checked, 'fixture guard: no AI nodes checked — the walker is broken').toBeGreaterThan(93); // measured 97 AI nodes in examples/ (2026-10-29)
     expect(
       offenders,
       'These AI nodes would dispatch with an unresolved provider — the production failure. '

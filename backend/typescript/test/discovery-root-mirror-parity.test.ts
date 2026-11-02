@@ -26,6 +26,12 @@
  * leg 1 (root == wrapper) has nothing to compare and is replaced by a leg that
  * the served root carries no wrapper. Leg 2 (no dotted family key) is a
  * property of the served root and is kept, read from the v2 document.
+ *
+ * TST-CVF-14. Red when the header-less served root gains a `capabilities`
+ * wrapper (leg 1) or a dotted family key such as `host.forms` (leg 2). Leg 1
+ * overlaps `discovery-v2-adapter-parity`'s `load()` check, which fetches with
+ * `OpenWOP-Version: 2`; this one is the header-LESS (default) document. Both are
+ * kept (dedupe-needs-human-ask row TST-CVF-14a).
  */
 import http from 'node:http';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -56,7 +62,8 @@ describe('RFC 0073 — every capability family is at the document ROOT', () => {
     expect(doc['capabilities'], 'a wrapper is a second arm a consumer could be satisfied by').toBeUndefined();
     // Non-vacuity: the root does carry families.
     const families = Object.entries(doc).filter(([, v]) => v !== null && typeof v === 'object' && typeof (v as Record<string, unknown>)['status'] === 'string');
-    expect(families.length).toBeGreaterThan(20);
+    // MEASURED 39 families on the served root on 2026-10-29; floor = that minus one.
+    expect(families.length).toBeGreaterThanOrEqual(38);
   });
 
   it('leg 2: no dotted family key — plain is canonical (ADR 0537)', async () => {

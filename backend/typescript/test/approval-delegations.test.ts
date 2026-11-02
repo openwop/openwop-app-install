@@ -4,6 +4,18 @@
  * revoke; tenant isolation; superadmin-gated ?all) and a real 2-of-N quorum
  * gate where a delegate's vote counts AS the principal (no double-count).
  * The service-layer semantics live in approval-delegations.unit.test.ts.
+ *
+ * Settling: run status is polled (20 ms, bounded) because a resume has no hook to
+ * await from outside the process — an honest ceiling. The "still 1 of 2" check
+ * after the two same-identity votes waits 200 ms and is then paired with its
+ * positive control in the same case (a distinct approver's vote DOES resolve the
+ * gate), so the wait cannot pass merely because nothing ever resolves.
+ *
+ * TST-BXF-3. Red when: a caller may forge `fromSubject` (w66 dh-forge), a
+ * non-owner may revoke (dh-revoke), `?all=1` is not superadmin-gated (dh-all),
+ * a delegation is found across tenants (dh-tenant), a delegate's vote counts as
+ * their own identity (dh-countas), or the delegation join stops admitting the
+ * delegate (dh-eligible-r2).
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -29,14 +41,25 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res { status: number; body: any }
+/** Narrow views of the bodies this file reads. Every field is optional: a refusal
+ *  body has none of them, and the assertions say which one they expect. */
+interface Body {
+  error?: string;
+  message?: string;
+  user?: { userId: string };
+  delegation?: { delegationId: string; fromSubject: string };
+  delegations?: Array<{ delegationId: string }>;
+  runId?: string;
+  status?: string;
+}
+interface Res { status: number; body: Body }
 interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res> }
 function client(): Client {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out: Body = res.status === 204 ? {} : ((await res.json().catch(() => ({}))) as Body);
     return { status: res.status, body: out };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b) };
@@ -46,7 +69,7 @@ let n = 0;
 async function signup(c: Client, tenantId: string): Promise<string> {
   const r = await c.post('/host/openwop-app/test/login', { email: `dlg-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return r.body.user.userId;
+  return r.body.user!.userId;
 }
 
 const DLG = '/host/openwop-app/approval-delegations';
@@ -62,19 +85,22 @@ describe('approval-delegation routes — authz through HTTP', () => {
     // Alice delegates to Bob (fromSubject defaults to the caller).
     const created = await alice.post(DLG, { toSubject: bobId, startsAt: iso(-HOUR), endsAt: iso(HOUR), reason: 'PTO' });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
-    expect(created.body.delegation.fromSubject).toBe(aliceId);
+    expect(created.body.delegation?.fromSubject).toBe(aliceId);
 
     // Bob cannot create a delegation FROM Alice.
     const forged = await bob.post(DLG, { fromSubject: aliceId, toSubject: bobId, startsAt: iso(-HOUR), endsAt: iso(HOUR) });
     expect(forged.status).toBe(403);
+    expect(forged.body).toMatchObject({ error: 'forbidden', message: 'You can only delegate your own approvals.' });
 
     // Both parties see it in their list.
     expect((await alice.get(DLG)).body.delegations).toHaveLength(1);
     expect((await bob.get(DLG)).body.delegations).toHaveLength(1);
 
     // Bob (the delegate, not the owner) cannot revoke; Alice can.
-    const id = created.body.delegation.delegationId;
-    expect((await bob.post(`${DLG}/${id}/revoke`)).status).toBe(403);
+    const id = created.body.delegation!.delegationId;
+    const bobRevoke = await bob.post(`${DLG}/${id}/revoke`);
+    expect(bobRevoke.status).toBe(403);
+    expect(bobRevoke.body.message).toMatch(/Only the delegating approver/);
     expect((await alice.post(`${DLG}/${id}/revoke`)).status).toBe(200);
   });
 
@@ -88,13 +114,17 @@ describe('approval-delegation routes — authz through HTTP', () => {
     const created = await a.post(DLG, { toSubject: 'u:other', startsAt: iso(-HOUR), endsAt: iso(HOUR) });
     expect(created.status).toBe(201);
     expect((await b.get(DLG)).body.delegations).toHaveLength(0);
-    expect((await b.post(`${DLG}/${created.body.delegation.delegationId}/revoke`)).status).toBe(404);
+    const crossRevoke = await b.post(`${DLG}/${created.body.delegation!.delegationId}/revoke`);
+    expect(crossRevoke.status).toBe(404);
+    expect(crossRevoke.body.error).toBe('not_found');
   });
 
   it('?all=1 is superadmin-gated', async () => {
     const c = client();
     await signup(c, `org:dlg-${Date.now()}-${n++}`);
-    expect((await c.get(`${DLG}?all=1`)).status).toBe(403);
+    const all = await c.get(`${DLG}?all=1`);
+    expect(all.status).toBe(403);
+    expect(all.body).toMatchObject({ error: 'forbidden', message: 'Listing all delegations is an operator action.' });
   });
 });
 
@@ -115,17 +145,17 @@ describe('quorum gate + delegation — a delegate votes AS the principal (end-to
     });
     const create = await owner.post('/runs', { workflowId });
     expect(create.status).toBe(201);
-    const runId = create.body.runId;
+    const runId = create.body.runId!;
     for (let i = 0; i < 80; i++) {
       await new Promise((r) => setTimeout(r, 20));
-      const s = (await owner.get(`/runs/${runId}`)).body.status as string;
+      const s = (await owner.get(`/runs/${runId}`)).body.status ?? '';
       if (s.startsWith('waiting')) break;
     }
     return { owner, member, third, ownerId, memberId, thirdId, runId };
   }
   const vote = (c: Client, runId: string, extra: Record<string, unknown> = {}) =>
     c.post(`/runs/${runId}/interrupts/gate`, { resumeValue: { action: 'accept', ...extra } });
-  const status = async (c: Client, runId: string) => (await c.get(`/runs/${runId}`)).body.status as string;
+  const status = async (c: Client, runId: string): Promise<string> => (await c.get(`/runs/${runId}`)).body.status ?? '';
 
   it('principal votes + their delegate votes → still 1 of 2 (no double-count); a distinct approver tips it', async () => {
     const { owner, member, third, memberId, thirdId, runId } = await suspendQuorumGate();
@@ -154,7 +184,9 @@ describe('quorum gate + delegation — a delegate votes AS the principal (end-to
   it('a delegate of an eligible principal can vote where a stranger cannot', async () => {
     const { member, third, thirdId, runId } = await suspendQuorumGate();
     // Before any delegation: the third user is not eligible.
-    expect((await vote(third, runId)).status).toBe(403);
+    const refused = await vote(third, runId);
+    expect(refused.status).toBe(403);
+    expect(refused.body.error).toBe('forbidden');
     // After the member delegates to them: eligible, counted as the member.
     expect((await member.post(DLG, { toSubject: thirdId, startsAt: iso(-HOUR), endsAt: iso(HOUR) })).status).toBe(201);
     expect((await vote(third, runId)).status).toBe(200);

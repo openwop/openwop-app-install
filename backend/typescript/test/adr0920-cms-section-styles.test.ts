@@ -12,7 +12,10 @@
  * Sabotage notes: dropping `pickEnum` (keeping raw values) reds the unknown-enum
  * cases; removing the `Math.min/max` in `unitFraction` reds the clamp case;
  * removing `planFigureHtml` from the hero branch reds the crawler plan case;
- * relaxing FRAGMENT_HREF_RE to `^#` reds the refused-fragment table.
+ * relaxing FRAGMENT_HREF_RE to `^#` reds the refused-fragment table. Also witnessed
+ * (w73): letting unknown keys survive in a plan line, and raising the plan-lines or
+ * chat-messages cap. The `//evil.com` / `/\\evil.com` rows are a DOUBLE GUARD (the
+ * `startsWith('/')` refusal and the explicit-scheme regex), so neither is probed alone.
  */
 import { describe, expect, it } from 'vitest';
 import { sanitizeSectionOverlay, validateSection, type Section } from '../src/features/cms/cmsService.js';
@@ -83,15 +86,18 @@ describe('ADR 0920 — round-trip of every new field', () => {
   });
 });
 
-describe('ADR 0920 — closed enums drop unknown values (never throw)', () => {
-  it.each([
+/** [section type, data with unknown style values, keys that must be dropped]. */
+const ENUM_ROWS: Array<[string, Record<string, unknown>, string[]]> = [
     ['hero', { heading: 'H', visual: 'chat', ctaIcon2: 'rocket' }, ['visual', 'ctaIcon2']],
     ['columns', { layout: 'grid', numbers: 'roman', tone: 'neon', head: 'side', columns: [{ text: 't', art: 'sunset' }] }, ['numbers', 'tone', 'head']],
     ['richText', { text: 'x', visual: 'plan', tone: 'loud', head: 'left' }, ['visual', 'tone', 'head']],
     ['cta', { label: 'Go', url: '/g', align: 'end', tone: 7 }, ['align', 'tone']],
-  ])('%s', (type, d, absent) => {
-    const out = data(type as string, d as Record<string, unknown>);
-    for (const k of absent as string[]) expect(out).not.toHaveProperty(k);
+];
+
+describe('ADR 0920 — closed enums drop unknown values (never throw)', () => {
+  it.each(ENUM_ROWS)('%s drops unknown style values', (type, d, absent) => {
+    const out = data(type, d);
+    for (const k of absent) expect(out).not.toHaveProperty(k);
   });
 
   it('an unknown column layout still falls back to cards; unknown art is dropped from the item', () => {

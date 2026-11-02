@@ -18,6 +18,11 @@
  * only structural problems (bad key, duplicate key) throw. A cap that threw would
  * turn a hardening change into a migration, and would make the next person's
  * "harmless" cap a production incident.
+ *
+ * Tracker TST-DCE-1. Red when any of the label / title (create or update) /
+ * option-count / option-length / submitMessage (create or update) slices goes,
+ * when an empty label stops falling back to the key, or when the key-shape or
+ * duplicate-key check goes (grade-tests w70 probes `fac-*`).
  */
 import { describe, expect, it, beforeAll } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -78,9 +83,13 @@ describe('ADR 0516 Phase 2a — authored strings are bounded', () => {
   it('bounds submitMessage on create AND update — it renders on the public page too', async () => {
     // Missed in the first pass: the post-submit confirmation is authored, public, and
     // was entirely unbounded.
-    const form = await mk([{ key: 'k', label: 'K', type: 'text' }]);
-    const withMsg = await updateForm(TENANT, ORG, form.formId, { submitMessage: 'm'.repeat(10_000) });
-    expect(withMsg!.submitMessage!.length).toBe(2_000);
+    const created = await createForm({
+      tenantId: TENANT, orgId: ORG, title: 'T', fields: [{ key: 'k', label: 'K', type: 'text' }],
+      createdBy: 'user:x', submitMessage: 'c'.repeat(10_000),
+    });
+    expect(created.submitMessage).toBe('c'.repeat(2_000));
+    const withMsg = await updateForm(TENANT, ORG, created.formId, { submitMessage: 'm'.repeat(10_000) });
+    expect(withMsg!.submitMessage).toBe('m'.repeat(2_000));
   });
 
   it('leaves ordinary content untouched — the cap must not be a silent editor', async () => {
@@ -101,10 +110,10 @@ describe('ADR 0516 Phase 2a — authored strings are bounded', () => {
   it('structural problems STILL throw — truncation is only for length', async () => {
     // Bounding must not have softened the checks that protect the submission
     // envelope; these are correctness, not resource, problems.
-    await expect(mk([{ key: 'not a key!', label: 'X', type: 'text' }])).rejects.toThrow();
+    await expect(mk([{ key: 'not a key!', label: 'X', type: 'text' }])).rejects.toThrow(/fields\[0\]\.key MUST match/);
     await expect(mk([
       { key: 'dup', label: 'A', type: 'text' },
       { key: 'dup', label: 'B', type: 'text' },
-    ])).rejects.toThrow();
+    ])).rejects.toThrow('Duplicate field key: dup.');
   });
 });

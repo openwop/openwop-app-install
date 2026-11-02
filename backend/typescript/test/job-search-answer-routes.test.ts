@@ -6,6 +6,11 @@
  * there is no parameter — path, query or body — through which a caller can name
  * someone else. A store that keys correctly behind a route that accepts
  * `?subjectId=` is not subject-scoped.
+ *
+ * TST-DGE-2. Red when the PUT honours a body `subjectId`, when the GET skips
+ * the feature toggle, when a special-category refusal loses its explanation,
+ * when the exceptions card counts rows instead of waiting applications, and
+ * when answering an exception leaves it parked (sabotage-witnessed, wave 71).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -112,12 +117,21 @@ describe('ADR 0545 — answer-bank routes', () => {
 
   it('is TOGGLE-GATED — off means gone', async () => {
     const off = await login('bank-off@e2e.test');
-    expect([403, 404]).toContain((await call(BASE_PATH, off.cookie)).status);
+    const res = await call(BASE_PATH, off.cookie);
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error?: string; answers?: unknown };
+    expect(body.error).toBe('not_found');
+    expect(body.answers, 'gone, not empty').toBeUndefined();
   });
 
   it('is not reachable anonymously', async () => {
+    // An anonymous caller resolves to an anon tenant with the feature OFF, so
+    // the toggle gate answers first (a 404, never the caller's data).
     const res = await fetch(`${BASE}${BASE_PATH}`);
-    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error?: string; answers?: unknown };
+    expect(body.error).toBe('not_found');
+    expect(body.answers).toBeUndefined();
   });
 });
 

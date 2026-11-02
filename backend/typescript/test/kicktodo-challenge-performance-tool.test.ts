@@ -17,6 +17,11 @@
  * return stays green, because the shared predicate itself refuses an undefined
  * subject — the empty-without-user case pins the observable behaviour, not that
  * one line.
+ *
+ * TST-DJE-1 (grade-tests wave 71): the manager's workspace holds TWO candidates and
+ * the SHARED tenant ONE, so a tool that read the wrong tenant's metrics answers
+ * `intake: 1` and the manager case is red (with one candidate each, as before, it
+ * stayed green).
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -55,6 +60,7 @@ beforeAll(async () => {
   await setMetrics('on');
   const intake = { audience: 'beginners', transformation: '', durationDaysTarget: 14, dailyMinutesTarget: 15 };
   await createCandidate({ tenantId: MGR, createdBy: MGR, topic: 'Morning pages', ...intake });
+  await createCandidate({ tenantId: MGR, createdBy: MGR, topic: 'Evening review', ...intake });
   await createCandidate({ tenantId: SHARED, createdBy: 'user:owner', topic: 'Watercolor basics', ...intake });
 });
 
@@ -94,7 +100,7 @@ describe('openwop:kicktodo.challenge-performance — the route predicate, shared
       factory: await factoryMetrics(MGR),
       verifierQuality: await verifierQuality(MGR),
     })));
-    // Not vacuous: the manager's one candidate is counted, the SHARED tenant's is not.
-    expect(body.factory).toMatchObject({ candidatesByState: { intake: 1 } });
+    // Not vacuous: the manager's two candidates are counted, the SHARED tenant's one is not.
+    expect(body.factory).toMatchObject({ candidatesByState: { intake: 2 } });
   });
 });

@@ -64,6 +64,20 @@
 #   scripts/preflight-suite.sh --release    drop the claim our parent holds
 #   scripts/preflight-suite.sh --wait-claim[=N]  block while ANOTHER worktree's
 #                               gate holds the claim (default 3600s); never claims
+#   scripts/preflight-suite.sh --check-gate-age[=SEC]  exit 1 ONLY while a gate in
+#                               ANOTHER worktree is younger than SEC (default 240);
+#                               prints its age (or "unknown"), pid and worktree.
+#                               An unreadable age counts as young. Never waits.
+#
+# --check-gate-age (2026-10-31, ADR 0863) is the ONE detector for the loop rule R1
+# ("no targeted vitest while a merge-train gate is under 4 minutes old"). Agents
+# had been hand-parsing `ps` for it, and broke it twice: macOS ps has no `etimes`,
+# and a grep matched only a literal "[gate]". The age comes from the gate CLAIM's
+# own start time (below). A `scripts/ci.sh` in another worktree with no claim (a
+# gate run with OPENWOP_CI_NO_WAIT=1 takes none) is aged from `ps -o etime`, parsed
+# as macOS and Linux both print it: `[[dd-]hh:]mm:ss`. It FAILS CLOSED: a claim
+# still being written, a start time that will not parse, or an etime that will not
+# parse is "unknown", and unknown is young (exit 1).
 #
 # `npm run ci` WAITS BY DEFAULT (2026-09-28). `scripts/ci.sh` enters `--ci` by
 # exec (`--ci-exec`, before it does anything else — so a waiting gate is not a
@@ -156,6 +170,7 @@ fi
 WAIT_MAX=3600
 WAIT_LOAD=          # empty = the load gate is OFF (the default, deliberately)
 WAIT_FOREIGN=       # empty = other projects' suites are REPORTED, never waited on
+GATE_AGE_MIN=       # --check-gate-age: seconds below which a foreign gate is young
 
 for arg in "$@"; do
   case "$arg" in
@@ -169,6 +184,8 @@ for arg in "$@"; do
     --release) MODE=release ;;
     --wait-claim)   MODE=wait-claim ;;
     --wait-claim=*) MODE=wait-claim; WAIT_MAX="${arg#--wait-claim=}" ;;
+    --check-gate-age)   MODE=gate-age; GATE_AGE_MIN=240 ;;
+    --check-gate-age=*) MODE=gate-age; GATE_AGE_MIN="${arg#--check-gate-age=}" ;;
     -h|--help) sed -n '/^#   scripts\/preflight-suite.sh  /,/^set -uo pipefail/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
     *) echo "preflight-suite: unknown argument '$arg'" >&2; exit 2 ;;
   esac
@@ -548,7 +565,7 @@ report_once() {
   return 1
 }
 
-[ "$MODE" = wait-claim ] || printf '\n\033[1m▶ preflight-suite\033[0m\n'
+case "$MODE" in wait-claim|gate-age) ;; *) printf '\n\033[1m▶ preflight-suite\033[0m\n' ;; esac
 
 if [ "$MODE" = release ]; then release_claim; exit 0; fi
 
@@ -571,6 +588,96 @@ if [ "$MODE" = wait-claim ]; then
     printf '⏳ a gate is running in %s (pid %s); this full suite waits for it (%ss/%ss). OPENWOP_VITEST_NO_WAIT=1 skips.\n' "$wt" "$pid" "$waited" "$WAIT_MAX"
     sleep "$POLL_S"; waited=$((waited + POLL_S))
   done
+fi
+
+# --check-gate-age (see the header). Prints one line per gate in ANOTHER worktree,
+# then exits 1 if any is younger than GATE_AGE_MIN or of unknown age, else 0.
+# `[[dd-]hh:]mm:ss` → seconds; prints nothing for anything else.
+etime_s() {
+  printf '%s' "$1" | tr -d ' ' | awk '
+    /^([0-9]+-)?([0-9]+:)?[0-9]+:[0-9]+$/ {
+      d = 0; t = $0
+      if (index(t, "-")) { d = substr(t, 1, index(t, "-") - 1); t = substr(t, index(t, "-") + 1) }
+      n = split(t, p, ":"); h = (n == 3) ? p[1] : 0
+      print d * 86400 + h * 3600 + p[n - 1] * 60 + p[n] }'
+}
+# A claim's start time (`ps -o lstart`, local time) → epoch seconds; empty on failure.
+# BSD date first (macOS), then GNU.
+lstart_epoch() {
+  local s e; s="$(printf '%s' "$1" | tr -s ' ')"
+  e="$(LC_ALL=C date -j -f '%a %b %d %T %Y' "$s" +%s 2>/dev/null)" || e=""
+  case "$e" in ''|*[!0-9]*) e="$(LC_ALL=C date -d "$s" +%s 2>/dev/null)" || e="" ;; esac
+  case "$e" in ''|*[!0-9]*) ;; *) printf '%s' "$e" ;; esac
+}
+# Age in seconds of a gate: the YOUNGER of the claim's start time and the claim
+# pid's `ps -o etime`, whichever of the two can be read.
+#
+# `ps -o lstart` is LOCAL time with no offset, so a start time in the hour a DST
+# fall-back repeats is ambiguous. `date` resolves it to the earlier offset, and the
+# age reads 3600 s too OLD: a young gate passes as old, which is the R1 hazard this
+# check exists to stop (2026-11-01, 06:00–07:00Z, every gate's self-test went red).
+# A spring-forward makes the age 3600 s too YOUNG, or negative. etime counts
+# elapsed seconds and has no clock in it, so taking the minimum means a
+# mis-resolved local time can only push the verdict toward YOUNG (fail closed).
+gate_age() {
+  local pid="$1" started="$2" e age="" et=""
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  e="$(lstart_epoch "$started")"
+  [ -n "$e" ] && age=$(( $(date +%s) - e ))
+  { [ -n "$age" ] && [ "$age" -ge 0 ]; } || age=""
+  et="$(etime_s "$(ps -o etime= -p "$pid" 2>/dev/null)")"
+  if [ -n "$age" ] && [ -n "$et" ]; then
+    [ "$et" -lt "$age" ] && age="$et"
+  elif [ -z "$age" ]; then
+    age="$et"
+  fi
+  printf '%s' "$age"
+}
+# Gates in another worktree of this repo that hold NO claim: `scripts/ci.sh` only
+# (the gate's parent, alive for every lane), as "pid<TAB>etime<TAB>worktree".
+unclaimed_gates() {
+  local pid et cwd wt_root
+  # shellcheck disable=SC2009
+  ps -ww -Ao pid=,etime=,command= 2>/dev/null \
+    | grep -E 'scripts/ci\.sh( |$)' \
+    | grep -vE '^ *[0-9]+ +[^ ]+ +(/[^ ]*/)?grep( |$)' \
+    | awk '{print $1 "\t" $2}' \
+    | while IFS=$'\t' read -r pid et; do
+        in_scope "$pid" || continue
+        cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | tail -1)
+        [ -n "$cwd" ] || continue
+        wt_root=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null) || continue
+        [ "$(repo_id "$cwd")" = "$MY_REPO" ] || continue
+        wt_root="$(cd "$wt_root" && pwd -P)"
+        [ "$wt_root" = "$MY_ROOT" ] && continue   # our own gate
+        printf '%s\t%s\t%s\n' "$pid" "$et" "$wt_root"
+      done
+}
+if [ "$MODE" = gate-age ]; then
+  case "$GATE_AGE_MIN" in ''|*[!0-9]*) echo "preflight-suite: --check-gate-age needs whole seconds, got '$GATE_AGE_MIN'" >&2; exit 2 ;; esac
+  young=0 seen=0 claim_wt=""
+  verdict() {   # $1 age or "", $2 pid, $3 worktree, $4 source
+    seen=1
+    if [ -z "$1" ]; then
+      young=1; printf 'gate-age: unknown pid %s worktree %s (%s) -> YOUNG (fail closed)\n' "$2" "$3" "$4"
+    elif [ "$1" -lt "$GATE_AGE_MIN" ]; then
+      young=1; printf 'gate-age: %ss pid %s worktree %s (%s) -> YOUNG (< %ss)\n' "$1" "$2" "$3" "$4" "$GATE_AGE_MIN"
+    else
+      printf 'gate-age: %ss pid %s worktree %s (%s) -> old (>= %ss)\n' "$1" "$2" "$3" "$4" "$GATE_AGE_MIN"
+    fi
+  }
+  held="$(foreign_claim)"
+  if [ -n "$held" ]; then
+    IFS=$'\t' read -r pid started claim_wt <<<"$held"
+    verdict "$(gate_age "$pid" "$started")" "$pid" "$claim_wt" claim
+  fi
+  while IFS=$'\t' read -r pid et wt; do
+    [ -n "$pid" ] || continue
+    [ "$wt" = "$claim_wt" ] && continue   # already aged from its claim
+    verdict "$(etime_s "$et")" "$pid" "$wt" "unclaimed ci.sh, ps etime"
+  done <<<"$(unclaimed_gates)"
+  [ "$seen" = 1 ] || printf 'gate-age: none - no gate in another worktree of this clone (min %ss)\n' "$GATE_AGE_MIN"
+  exit "$young"
 fi
 
 # --ci: the gate's own entry (see the header). Everything the operator needs to

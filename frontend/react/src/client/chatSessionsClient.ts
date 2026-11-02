@@ -66,6 +66,11 @@ export interface ChatSessionHeader {
    *  creation. Agents recall that client's shared memory here. `name` is a
    *  display snapshot. */
   client?: { orgId: string; name: string };
+  /** ADR 0151 / 1019 — where the title came from: `default` (a placeholder),
+   *  `claimed` (the auto-title call is in flight or failed), `auto` (the model named
+   *  it), `user` (renamed by a person), `given` (named by its board, project,
+   *  channel, …). Absent on old rows and the local fallback index. */
+  titleSource?: 'default' | 'claimed' | 'auto' | 'user' | 'given';
 }
 
 /** ADR 0195 D3 — the curated reaction vocabulary (mirrors the backend

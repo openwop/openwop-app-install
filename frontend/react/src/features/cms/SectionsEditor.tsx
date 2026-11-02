@@ -1151,7 +1151,7 @@ export function SectionsEditor({ sections, assets, onChange, baseLocale = 'en', 
 
             {localized && !onBase ? (
               <div className="u-flex u-gap-1 u-items-center cms-loc-overlay-note">
-                <span className="u-label-sm"><Trans t={t} i18nKey="overlayNote" values={{ locale: localeLabel(active) }} components={{ 1: <strong /> }} /></span>
+                <span className="u-label-sm"><Trans t={t} i18nKey="overlayNote" values={{ locale: localeLabel(active) }} components={[<></>, <strong />]} /></span>
                 {localeState?.[active] === 'draft' ? (
                   <span className="chip chip--warning">{t('localeWithheldChip')}</span>
                 ) : null}

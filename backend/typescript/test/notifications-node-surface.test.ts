@@ -10,57 +10,84 @@
  * So the assertions that matter here are the REFUSALS: every path that cannot
  * deliver must say so in `emitted:false` + a reason, and must never be reportable
  * as a delivery.
+ *
+ * Scope: this file stops at `emit` (mocked). That `emitter.buildRecord` keeps
+ * `recipientRole` on the stored row is `notifications-emitter-record-fields.test.ts`.
+ *
+ * Sabotage witnessed (grade-tests w74, TST-DVA-3): each refusal `return` in
+ * `features/notifications/surface.ts` replaced by an emit, the `self`/`role:`
+ * targets emptied, `urgent` dropped from PRIORITIES, the pack collapsing
+ * `emitted` to true, the pack's surface guard removed, and the pack's typeId
+ * renamed in pack.json (the reachability case) — each reds its case.
  */
 import { describe, expect, it, beforeEach, vi } from 'vitest';
 import { buildNotificationsSurface } from '../src/features/notifications/surface.js';
 import type { BundleScope } from '../src/host/inMemorySurfaces.js';
+import type { getNotificationEmitter } from '../src/notifications/emitter.js';
+
+/** The emitter's own input type (`RecordInput` is module-private). */
+type EmitInput = Parameters<ReturnType<typeof getNotificationEmitter>['emit']>[0];
+interface NotifyNodeResult { status: string; outputs: { emitted?: unknown; audience?: unknown; reason?: unknown } }
+interface NotificationsPack { notify: (ctx: unknown) => Promise<NotifyNodeResult> }
+/** Loaded the way the runtime does (an untyped .mjs), through a computed URL. */
+async function loadPack(): Promise<NotificationsPack> {
+  return (await import(new URL('../../../packs/feature.notifications.nodes/index.mjs', import.meta.url).href)) as NotificationsPack;
+}
 
 // Mocks `emit` — the DURABLE path (inbox row + SSE + Web Push + Teams). An
 // earlier cut called `signal()`, which is transient and reaches only a live SSE
 // listener; the /grade-data pass caught it. Asserting on `emit` keeps that fix pinned.
-const signal = vi.fn();
+const signal = vi.fn<(rec: EmitInput) => Promise<void>>();
 vi.mock('../src/notifications/emitter.js', () => ({
-  getNotificationEmitter: () => ({ emit: async (...a: unknown[]) => signal(...a) }),
+  getNotificationEmitter: () => ({ emit: async (rec: EmitInput) => { await signal(rec); } }),
 }));
 
-const scopeOf = (over: Partial<BundleScope> = {}): BundleScope =>
-  ({ tenantId: 'user:t1', runId: 'run-1', ...over }) as BundleScope;
+const scopeOf = (over: Partial<BundleScope> = {}): BundleScope => ({ tenantId: 'user:t1', runId: 'run-1', ...over });
+/** The one record handed to `emit` (asserts there was exactly one). */
+function emitted(): EmitInput {
+  expect(signal).toHaveBeenCalledTimes(1);
+  return signal.mock.calls[0]![0];
+}
 
 /** Drive the pack node, not just the surface — the wiring is half the contract. */
 async function viaNode(scope: BundleScope, config: Record<string, unknown>, inputs: Record<string, unknown>) {
-  // @ts-expect-error — untyped .mjs pack module (loaded the way the runtime does)
-  const { notify } = (await import('../../../packs/feature.notifications.nodes/index.mjs')) as {
-    notify: (ctx: unknown) => Promise<{ status: string; outputs: Record<string, unknown> }>;
-  };
+  const { notify } = await loadPack();
   return notify({ features: { notifications: buildNotificationsSurface(scope) }, config, inputs });
 }
 
-beforeEach(() => signal.mockClear());
+// mockReset, not mockClear: a queued mockImplementationOnce must never answer a later case.
+beforeEach(() => signal.mockReset());
 
 describe('audience is explicit — the three ADR 0050 modes', () => {
   it('tenant → a broadcast row (no recipient field at all)', async () => {
     const out = await viaNode(scopeOf(), { audience: 'tenant' }, { title: 'Digest ready' });
     expect(out.outputs.emitted).toBe(true);
-    expect(signal).toHaveBeenCalledTimes(1);
-    const rec = signal.mock.calls[0][0] as Record<string, unknown>;
+    const rec = emitted();
     expect(rec.recipientUserId).toBeUndefined();
     expect(rec.recipientRole).toBeUndefined();
-    expect(rec.tenantId).toBe('user:t1');
+    // The whole record: no recipient key at all, and the deep link derived from the run.
+    expect(rec).toEqual({
+      tenantId: 'user:t1', type: 'workflow.notice', priority: 'normal', title: 'Digest ready', message: '',
+      runId: 'run-1', actionUrl: '/runs/run-1',
+    });
   });
 
   it('self → addressed to the run’s acting user', async () => {
     const out = await viaNode(scopeOf({ actingUserId: 'u-42' }), { audience: 'self' }, { title: 'Yours' });
     expect(out.outputs.emitted).toBe(true);
-    expect((signal.mock.calls[0][0] as Record<string, unknown>).recipientUserId).toBe('u-42');
+    expect(emitted().recipientUserId).toBe('u-42');
   });
 
-  it('role:<name> → addressed to the role, and the field SURVIVES to the record', async () => {
+  it('role:<name> → addressed to the role, and the field reaches the emitter', async () => {
     const out = await viaNode(scopeOf(), { audience: 'role:admin' }, { title: 'Quota' });
     expect(out.outputs.emitted).toBe(true);
     // `emitter.buildRecord` used to DROP `recipientRole`, which would have turned
     // every role-addressed notice into a tenant-wide broadcast — the inverse of
-    // ADR 0050's default-deny guarantee. This asserts the field reaches the record.
-    expect((signal.mock.calls[0][0] as Record<string, unknown>).recipientRole).toBe('admin');
+    // ADR 0050's default-deny guarantee. This file asserts the field reaches `emit`;
+    // that buildRecord keeps it is notifications-emitter-record-fields.test.ts.
+    const rec = emitted();
+    expect(rec.recipientRole).toBe('admin');
+    expect(rec.recipientUserId).toBeUndefined();
   });
 });
 
@@ -98,6 +125,7 @@ describe('every undeliverable path REFUSES rather than reporting success', () =>
     const out = await viaNode(scopeOf(), { audience: 'role:' }, { title: 'x' });
     expect(out.outputs.emitted).toBe(false);
     expect(out.outputs.reason).toBe('role_required');
+    expect(signal).not.toHaveBeenCalled();
   });
 
   it('an emitter throw is reported, never swallowed into a success', async () => {
@@ -105,6 +133,8 @@ describe('every undeliverable path REFUSES rather than reporting success', () =>
     const out = await viaNode(scopeOf(), { audience: 'tenant' }, { title: 'x' });
     expect(out.outputs.emitted).toBe(false);
     expect(out.outputs.reason).toBe('emitter_error');
+    // The throw came from the real emit call, not an earlier refusal.
+    expect(signal).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -112,13 +142,15 @@ describe('priority', () => {
   it('honours `urgent` — the union has four values, not three', async () => {
     // The first cut hand-listed {low, normal, high} and would have silently
     // DOWNGRADED urgent to normal; tsc caught it against NotificationPriority.
-    await viaNode(scopeOf(), { audience: 'tenant', priority: 'urgent' }, { title: 'x' });
-    expect((signal.mock.calls[0][0] as Record<string, unknown>).priority).toBe('urgent');
+    const out = await viaNode(scopeOf(), { audience: 'tenant', priority: 'urgent' }, { title: 'x' });
+    expect(out.outputs.emitted).toBe(true);
+    expect(emitted().priority).toBe('urgent');
   });
 
   it('falls back to normal for an unrecognised value', async () => {
-    await viaNode(scopeOf(), { audience: 'tenant', priority: 'nonsense' }, { title: 'x' });
-    expect((signal.mock.calls[0][0] as Record<string, unknown>).priority).toBe('normal');
+    const out = await viaNode(scopeOf(), { audience: 'tenant', priority: 'nonsense' }, { title: 'x' });
+    expect(out.outputs.emitted).toBe(true);
+    expect(emitted().priority).toBe('normal');
   });
 });
 
@@ -144,10 +176,7 @@ describe('the node is REACHABLE, not merely present on disk', () => {
 
 describe('the node fails loudly when the surface is absent', () => {
   it('throws host_capability_missing rather than pretending it notified', async () => {
-    // @ts-expect-error — untyped .mjs pack module (loaded the way the runtime does)
-    const { notify } = (await import('../../../packs/feature.notifications.nodes/index.mjs')) as {
-      notify: (ctx: unknown) => Promise<unknown>;
-    };
+    const { notify } = await loadPack();
     await expect(notify({ features: {}, config: { audience: 'tenant' }, inputs: { title: 'x' } }))
       .rejects.toThrow(/ctx\.features\.notifications/);
   });

@@ -26,6 +26,11 @@
  * on — and those results are therefore NOT CACHED AT ALL. Caching them under a
  * placeholder would keep the shape of the guarantee and lose its substance.
  *
+ * DOUBLE GUARD, recorded: the tenant and the principal each ride in BOTH the
+ * cache key (`mcpClientCache.ts` keyOf) and the authorization fingerprint
+ * (`mcpClient.ts` authorizationFingerprint), so removing either copy alone stays
+ * green here by design; the re-probe removes both in one edit.
+ *
  * @see spec/v1/mcp-integration.md §D; RFC 0153 UQ5 / gap G4
  */
 import { createServer, type Server } from 'node:http';
@@ -35,6 +40,7 @@ import { makeMcpClient, _resetMcpNegotiation } from '../src/host/mcpClient.js';
 import { _mcpClientCacheSize, _resetMcpClientCache } from '../src/host/mcpClientCache.js';
 import { MCP_CURRENT_VERSION, MCP_LEGACY_VERSION } from '../src/host/mcpProfile.js';
 import type { Storage } from '../src/storage/storage.js';
+import { openStorage } from '../src/storage/index.js';
 
 /** A peer whose self-description is MUTABLE — the whole subject of this file. */
 class MutablePeer {
@@ -99,13 +105,16 @@ class MutablePeer {
   }
 }
 
-const storage = {} as Storage;
+/** A real memory store, not `{} as Storage`: the client only touches it to stamp a
+ *  run's connection use, and an untyped stand-in would hide any new read. */
+let storage: Storage;
 let peer: MutablePeer;
 const SERVER_ID = 'p3-cache-peer';
 
 beforeAll(async () => {
   process.env.OPENWOP_TEST_SEAM_ENABLED = 'true';
   process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true';
+  storage = await openStorage('memory://');
   peer = new MutablePeer();
   await peer.start();
 });
