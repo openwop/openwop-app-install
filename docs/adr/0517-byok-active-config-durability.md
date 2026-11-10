@@ -202,3 +202,28 @@ clear-to-default, failed save, and older servers omitting the new field.
    key), and the expired card is unreachable from that path by construction. The
    open question was never real; it is recorded rather than deleted because the
    reasoning trail is the point.
+
+
+## BYOK-1 correction — Keys-page labels in chat adoption (2026-11-05)
+
+The existing-key adoption policy above was incompletely implemented: both chat
+helpers matched only wizard-owned `byok:<provider>[:<suffix>]` refs. The Keys page
+stores labeled refs as `<provider>:<slug>`, so a valid workspace key appeared in
+Keys while Chat asked for it again. Adoption now also accepts an exact provider
+name and its colon-labeled refs. The canonical `byok:<provider>` preference and
+existing ordering remain unchanged; an existing binding is never overwritten just
+because another candidate is present.
+
+Both namespaces retain exact-or-colon boundaries. Hyphen names remain outside
+automatic chat adoption because they can identify another provider (for example
+`google-vertex`); the broader dispatch naming helper must not be reused here in a
+way that silently captures those names. This correction does not change the
+dispatch ladder, tenant scope, membership/write authority, stored-secret
+existence/resolution checks, managed/subscription handling, wire contracts or
+replay behavior. It extends the existing BYOK owner and host-local adoption seam;
+no new RFC or credential storage path is needed.
+
+Focused regressions exercise the actual Wizard and KeyEntry saved-key action,
+helper candidate selection, member refusal, and real local HTTP binding/readback
+with a same-ref foreign-tenant refusal. Build/full integration gate and deployed
+acceptance remain required through the normal release train.

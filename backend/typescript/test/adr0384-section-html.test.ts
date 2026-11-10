@@ -48,6 +48,12 @@ const OPTS = { assetBase: 'https://app.example.test' };
 function fixture(type: Section['type']): Section {
   const base = { sectionId: `sec-${type}`, type } as const;
   switch (type) {
+    case 'statusTable': return { ...base, data: { heading: 'Orders', columns: ['Tag', 'Item'], rows: [{ cells: ['UP-07', 'Sofa'], status: 'CFA overdue', tone: 'bad' }] } };
+    case 'dateCalc': return { ...base, data: { heading: 'Work back', note: 'Lead times are estimates.', needDate: '2027-03-12', leadWeeks: 10, floatDays: 10, approveDays: 5 } };
+    case 'conversation': return { ...base, data: { heading: 'Ask', exchanges: [{ q: 'Why late?', a: 'The CFA is overdue.' }] } };
+    case 'featureIndex': return { ...base, data: { heading: 'Index', groups: [{ name: 'Leads', items: [{ label: 'Inquiry capture' }] }] } };
+    case 'decisionTree': return { ...base, data: { heading: 'Decide', trees: [{ title: 'Go', nodes: [{ id: 'a', text: 'In scope?', options: [{ label: 'No', outcome: 'Refer out.' }] }] }] } };
+    case 'scheduleSim': return { ...base, data: { heading: 'Timeline', milestones: [{ id: 'm', label: 'Plumbing rough', startWeek: 0, weeks: 2, floatDays: 3, rework: 'Open tile' }], decisions: [{ title: 'Valve', milestone: 'm', kind: 'selection', options: [{ label: 'On time', delayDays: 0 }] }] } };
     case 'hero':
       return { ...base, data: { eyebrow: 'Eyebrow', heading: 'Hero heading', subheading: 'Sub with **bold**', ctaLabel: 'Go', ctaUrl: '/p/next', ctaLabel2: 'Docs', ctaUrl2: 'https://example.com/d' } };
     case 'richText':
@@ -107,54 +113,56 @@ describe('ADR 0384 sectionHtml — coverage', () => {
 
 describe('ADR 0384 sectionHtml — golden fixture', () => {
   it('full-page golden (reconcile deliberately on any semantic change)', () => {
+    // ADR 1030 D1 — each section's root carries its stable `data-owp-*` hooks
+    // (the designed-pages stylesheet keys on them); nested figures do not.
     const body = pageBodyHtml(SECTION_TYPES.map((t) => fixture(t)), OPTS);
     expect(body).toBe(`<main>
-<header>
+<header data-owp-section="hero">
 <p>Eyebrow</p>
 <h1>Hero heading</h1>
 <p>Sub with <strong>bold</strong></p>
 <p><a href="/p/next">Go</a> <a href="https://example.com/d" rel="noopener noreferrer">Docs</a></p>
 </header>
-<section>
+<section data-owp-section="richText">
 <h2 id="rich">Rich</h2>
 <p>Para one with <em>em</em> and <code>code</code>.</p>
 <p>Para two with <a href="https://example.com" rel="noopener noreferrer">link</a>.</p>
 </section>
-<figure>
+<figure data-owp-section="image">
 <img src="https://app.example.test/host/openwop-app/assets/tok-abc" alt="An alt">
 <figcaption>A caption</figcaption>
 </figure>
-<section>
+<section data-owp-section="cta">
 <h2 id="act-now">Act now</h2>
 <p>Because</p>
 <p><a href="https://example.com/start" rel="noopener noreferrer">Start</a></p>
 </section>
-<section>
+<section data-owp-section="columns" data-owp-layout="cards">
 <h2 id="cols">Cols</h2>
 <ul>
 <li><a href="/p/one"><h3>C1</h3><p>T1</p></a></li>
 <li><h3>C2</h3><p>T2</p></li>
 </ul>
 </section>
-<section>
+<section data-owp-section="productGrid">
 <h2 id="shop">Shop</h2>
 <p><a href="/store/org-1">Shop</a></p>
 </section>
-<section>
+<section data-owp-section="form">
 <h2 id="contact">Contact</h2>
 </section>
-<section>
+<section data-owp-section="pricing">
 <h2 id="plans">Plans</h2>
 <p>All the <strong>essentials</strong></p>
 <p><a href="/pricing">See pricing</a></p>
 </section>
-<section>
+<section data-owp-section="entityList">
 <h2 id="team">Team</h2>
 </section>
-<section>
+<section data-owp-section="entityDetail">
 <h2 id="spotlight">Spotlight</h2>
 </section>
-<section>
+<section data-owp-section="comparison">
 <h2 id="compare">Compare</h2>
 <table>
 <thead><tr><td></td><th scope="col">OpenWOP</th><th scope="col">n8n</th></tr></thead>
@@ -165,18 +173,18 @@ describe('ADR 0384 sectionHtml — golden fixture', () => {
 <p>Y ships, N no</p>
 <p>As of mid-2026.</p>
 </section>
-<section>
+<section data-owp-section="faq">
 <h2 id="faq">FAQ</h2>
 <details><summary>How is pricing calculated?</summary><p>Per workspace, flat.</p></details>
 </section>
-<section>
+<section data-owp-section="quotes">
 <h2 id="loved-by-teams">Loved by teams</h2>
 <figure><blockquote><p>It shipped our launch.</p></blockquote><figcaption>Ana, CTO at Acme</figcaption></figure>
 </section>
-<section>
+<section data-owp-section="fields">
 <dl><dt>heading</dt><dd>&lt;b&gt;Plain&lt;/b&gt;</dd><dt>seats</dt><dd>3</dd></dl>
 </section>
-<section>
+<section data-owp-section="video">
 <h2 id="watch">Watch</h2>
 <figure>
 <img src="https://media.example.test/f.jpg" alt="The film" width="1920" height="1080">
@@ -186,6 +194,35 @@ describe('ADR 0384 sectionHtml — golden fixture', () => {
 <p><a href="https://media.example.test/f.mp4" rel="noopener noreferrer">Watch the video (1:57)</a> <a href="https://www.youtube.com/watch?v=abc123XYZ" rel="noopener noreferrer">Watch on YouTube</a> <a href="https://media.example.test/f.vtt" rel="noopener noreferrer">Captions (WebVTT)</a></p>
 </figcaption>
 </figure>
+</section>
+<section data-owp-section="statusTable">
+<h2 id="orders">Orders</h2>
+<table><thead><tr><th>Tag</th><th>Item</th><th>Status</th></tr></thead><tbody>
+<tr><td>UP-07</td><td>Sofa</td><td>CFA overdue</td></tr>
+</tbody></table>
+</section>
+<section data-owp-section="dateCalc">
+<h2 id="work-back">Work back</h2>
+<p>Lead times are estimates.</p>
+</section>
+<section data-owp-section="conversation">
+<h2 id="ask">Ask</h2>
+<h3>Why late?</h3>
+<p>The CFA is overdue.</p>
+</section>
+<section data-owp-section="featureIndex">
+<h2 id="index">Index</h2>
+<h3>Leads</h3>
+<ul><li>Inquiry capture</li></ul>
+</section>
+<section data-owp-section="decisionTree">
+<h2 id="decide">Decide</h2>
+<h3>Go</h3>
+<ol><li>In scope?<ul><li>No: Refer out.</li></ul></li></ol>
+</section>
+<section data-owp-section="scheduleSim">
+<h2 id="timeline">Timeline</h2>
+<ol><li>Plumbing rough (if late: Open tile)</li></ol>
 </section>
 </main>`);
   });

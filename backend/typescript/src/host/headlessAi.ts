@@ -24,7 +24,8 @@
 
 import { DurableCollection } from './hostExtPersistence.js';
 import { OpenwopError } from '../types.js';
-import { resolveSecret, listSecretRefs, type SecretScope } from '../byok/secretResolver.js';
+import { listSecretRefs, type SecretScope } from '../byok/secretResolver.js';
+import { resolveUserNamedSecret } from '../byok/userNamedSecret.js';
 import {
   dispatchManagedChat, managedProviderIdFromRef, managedUnderlyingProvider, MANAGED_FREE_REF, isManagedCredentialRef,
 } from '../providers/managedProvider.js';
@@ -204,7 +205,7 @@ async function validateHeadlessSpec(
   if (!refs.includes(input.credentialRef)) {
     throw new OpenwopError('validation_error', 'credentialRef is not a stored BYOK secret for this workspace.', 400, { field: 'credentialRef' });
   }
-  if (!(await resolveSecret(input.credentialRef, scope))) {
+  if (!(await resolveUserNamedSecret(input.credentialRef, scope))) {
     throw new OpenwopError('validation_error', 'credentialRef does not currently resolve to a usable key.', 400, { field: 'credentialRef' });
   }
   return { provider: input.provider as HeadlessProvider, model: input.model.trim(), credentialRef: input.credentialRef };
@@ -304,7 +305,7 @@ export async function resolveHeadlessAiForSpec(
   if (!providerSupports(provider, modality)) {
     throw new OpenwopError('validation_error', `${provider} does not accept ${modality} input here.`, 422, { field: 'provider' });
   }
-  const apiKey = await resolveSecret(credentialRef, scope);
+  const apiKey = await resolveUserNamedSecret(credentialRef, scope);
   if (!apiKey) throw new OpenwopError('validation_error', 'credentialRef does not currently resolve to a usable key.', 400, { field: 'credentialRef' });
   return {
     provider,
@@ -353,7 +354,7 @@ export async function resolveHeadlessAiDescribed(
   }
   const def = await getHeadlessAiDefault(tenantId);
   if (def && providerSupports(def.provider, modality)) {
-    const apiKey = await resolveSecret(def.credentialRef, { tenantId });
+    const apiKey = await resolveUserNamedSecret(def.credentialRef, { tenantId });
     if (apiKey) {
       const { provider, model } = def;
       return {
@@ -414,7 +415,7 @@ export async function resolveHeadlessAiForConversation(
   if (!model) return null;
   const budget = await checkByokChatBudget(tenantId, provider, actingSubject);
   if (budget.exceeded || budget.personal?.exceeded) return null;
-  const apiKey = await resolveSecret(credentialRef, { tenantId });
+  const apiKey = await resolveUserNamedSecret(credentialRef, { tenantId });
   if (!apiKey) return null;
   return {
     provider,
@@ -437,7 +438,7 @@ export async function resolveByokTextDescribed(tenantId: string): Promise<Descri
   if (byokTextOverride) return byokTextOverride(tenantId);
   const def = await getHeadlessAiDefault(tenantId);
   if (!def) return null;
-  const apiKey = await resolveSecret(def.credentialRef, { tenantId });
+  const apiKey = await resolveUserNamedSecret(def.credentialRef, { tenantId });
   if (!apiKey) return null;
   const provider = def.provider;
   const model = getClassDefault(provider, 'quick') ?? def.model;
@@ -474,7 +475,7 @@ async function resolvePreferredByokText(tenantId: string, modelClass?: 'quick'):
     return null;
   }
   if (!def?.preferForText) return null;
-  const apiKey = await resolveSecret(def.credentialRef, { tenantId });
+  const apiKey = await resolveUserNamedSecret(def.credentialRef, { tenantId });
   if (!apiKey) {
     log.warn('headless_ai_preferred_ref_unresolved', { tenantId }); // fall through to managed
     return null;
@@ -536,7 +537,7 @@ export async function resolveNativeWebSearch(
     });
     return null;
   }
-  const apiKey = await resolveSecret(def.credentialRef, { tenantId });
+  const apiKey = await resolveUserNamedSecret(def.credentialRef, { tenantId });
   if (!apiKey) {
     log.warn('native_web_search_ref_unresolved', { tenantId, provider: def.provider });
     return null;
@@ -624,7 +625,7 @@ export async function resolveHeadlessEmbedder(tenantId: string, dimensions: numb
   if (!def || !EMBEDDINGS_PROVIDERS.includes(def.provider)) return null;
   const model = EMBEDDING_MODELS[def.provider];
   if (!model) return null;
-  const apiKey = await resolveSecret(def.credentialRef, { tenantId });
+  const apiKey = await resolveUserNamedSecret(def.credentialRef, { tenantId });
   if (!apiKey) {
     log.warn('headless_embedder_ref_unresolved', { tenantId });
     return null;
@@ -664,7 +665,7 @@ export async function resolveHeadlessEmbedderForSpec(
   if (!model) return null;
   const def = await getHeadlessAiDefault(tenantId);
   const ref = spec.credentialRef || (def?.provider === spec.provider ? def.credentialRef : spec.provider);
-  const apiKey = await resolveSecret(ref, { tenantId });
+  const apiKey = await resolveUserNamedSecret(ref, { tenantId });
   if (!apiKey) {
     log.warn('headless_embedder_spec_ref_unresolved', { tenantId, provider: spec.provider });
     return null;

@@ -281,3 +281,73 @@ canvas rows the eraser covers; `canvas:idem` is an ephemeral retry cache with
 > side: erasing `agent:X` leaves a person's `user:X` rows alone. Re-adding the
 > bridge reddens the negative, and dropping the `userRef` arms reddens all
 > five `userRef` positives.
+
+## 9. Correction 2026-11-07 — the feature census had no denominator (CHAN-F6)
+
+CHAN-F6 said the coverage ratchet "walks only `src/host`, so feature-dir stores
+are unchecked". **Half true.** `subject-erasure-coverage.test.ts` does walk only
+`src/host`, but `subject-erasure-feature-stores.test.ts` has walked `src/features`
+since the §Correction that created it. The real gap was narrower and worse: that
+census starts from a SIGNAL (a row type with `userId`, `email`, `subjectKey`,
+`createdBy`, …), so a store with no signal field entered no list at all.
+
+MEASURED at `68509a7f2`: 417 first-party feature namespaces. The signal census
+governs 162, ADR 1018 lists 2 anonymous free-text stores, and 1 (`media:asset`)
+is declared in `src/host`. **252 were governed by nothing**, so a new store that
+named its subject `ownerRef`, `actor` or `recipient` passed every gate. (37 more
+namespaces also appear in `src/host`, but only in demo seeders that re-open them.
+They stay feature-governed: a seeder is not an owner.)
+
+**P1 (this change) closes the denominator, not the audit.** A new block in
+`subject-erasure-feature-stores.test.ts` requires every first-party feature
+namespace to be governed by the signal census, the host gate, ADR 1018, a new
+`SIGNAL_FREE_REVIEWED` map (reviewed, no subject data, with a reason), or a pinned
+**shrink-only** baseline of the 252
+(`test/fixtures/subject-erasure-signal-free-baseline.json`, ceiling 252). A new
+store fails the day it lands. A baseline entry leaves by being reviewed or by
+gaining a signal; a stale or now-governed entry reds the test. It is first-party
+only, so the same baseline holds in an adopter's tree (ADR 1031 P3).
+
+Sabotage-witnessed: a new signal-free feature store reds the governed check; an
+appended baseline entry reds the shrink-only and liveness checks; a walk narrowed
+to one feature reds the non-vacuity floor (417).
+
+**P2+ (open):** review the 252 in waves, feature by feature, against each
+feature's `erasure.ts`. Some will be subject-bearing under a field no signal
+names; those need an eraser AND a signal, not a review line.
+
+**Open decision, for a human (not settled by P1):** where a feature store's
+classification lives. Either (a) the central registries in the test, as today,
+or (b) self-classification beside each feature's eraser (a
+`FeatureRatchetDeclarations` field, the ADR 1031 P2 pattern), which an adopter's
+package would carry with it. P1 uses (a) only because the existing census does;
+the baseline moves either way.
+
+**P2 wave 1 (2026-11-09): 31 reviewed, baseline 252 → 221 (ceiling 221).** Each
+was read at its declaration: the row type with its nested types, and the key
+function, since a key built from a user id is subject data even when no field is.
+They are config and schema rows (field definitions, pipelines, taxonomies, consent
+policy), per-tenant counters keyed by tenant and date, retention watermarks, and
+id-only index rows. Each has its reason in `SIGNAL_FREE_REVIEWED`.
+
+**What wave 1 found: "no signal field" does not mean "no subject data".** A
+pre-sort of the 252 row types (247 resolved, one level of nesting, so the count
+is a floor) found **73** that match `PERSON_FIELD`: a field that names a person
+under a name the census signals do not bind. Examples: `updatedBy` (capability-firewall,
+model-router, campaign-intel), `attestedBy` (`brand:font`), `approverId`,
+`voterId`, `viewer`, `subjectRef`, a sender address (`email:settings`).
+`crm:lead-sla-settings` even calls `declarePiiFields(…, ['agencyLead',
+'updatedBy'])`, a classification no erasure gate reads. Those stores stay in the
+baseline; they need an eraser, or a widened actor signal (measure first, the KB-3
+rule), not a review line. A new test refuses a reviewed entry whose resolved row
+type carries such a field (`PERSON_FIELD`). Sabotage-witnessed: reviewing
+`modelrouter:config` and `email:settings` reds it, naming `updatedBy` and
+`senderAddress`.
+
+**Next waves:** the remaining rows the pre-sort did not flag (about 140, each still
+read by hand: a key or a free-text field can carry a person where no field name
+does), then the person-bearing stores, feature by feature against each
+`erasure.ts`. Widening `CREATED_BY_FIELD` to `updatedBy` would move them into the
+actor ledger at once and break `ACTOR_DEBT_CEILING`, so it is a measured change
+of its own. Should `declarePiiFields` feed the census? That question joins the open
+decision above.

@@ -4,6 +4,19 @@ Status: **Accepted — Phase 1 (backend) and Phase 2 (SPA) implemented** 2026-09
 Authors: Claude (session with David), from ADR 0706 OQ5 and a steward `/architect` options pass
 Relates: ADR 0706 (Challenge Factory provider choice; OQ5 is this ADR's origin), ADR 0089 (run-credential registration), ADR 0517 (deterministic `byok:<provider>` refs), ADR 0499 (credentialRef consumers), RFC 0124 (sensitive deferred params), RFC 0171 §D.1 (closed v2 `configurable`)
 
+## Correction — dedicated campaign callers (2026-11-06, source candidate)
+
+The earlier builder Run options reachability does not cover dedicated campaign
+autopilot or the Campaign Strategist run tool. Their candidate integration uses
+existing configurable.ai credential declarations through a feature-owned admission
+helper, with explicit provider/model coherence before ignition. The page consumes
+the exact shared name-only picker/loader from the reviewed KB extraction rather
+than creating another vault UI. Blank retains prior defaults; a selected reference
+is a name, never key material. Dedicated detached stages inherit a narrow stored
+source AI projection, including the managed sentinel, not a fresh binding lookup.
+See ADR 0961's correction for new legacy-stage refusal, reuse and qualification
+limits. No protocol or generic run-creation contract changes. Execution pending.
+
 ## 1. Context — the spec already defines the field, and the host ignored it
 
 A run gets only the BYOK secrets it **declares**. `executor.ts prepareRunSecrets` resolved
@@ -186,3 +199,67 @@ resolve-in-authorized-tenant (4).
   > still dispatch). Sabotage: bypassing the call site reddens 1, dropping the own-provider
   > exemption reddens 2. Credential suites unchanged (ladder 8, dispatch 3, ADR 0712 12,
   > ai-providers 17, challenge-author tools 22, image 8, video 15, flagship e2e 2).
+
+## Correction — explicit builder run option (BYOK-2, 2026-11-05)
+
+The Phase2 picker only existed for workflows declaring a credentialRef variable.
+Builder Run did not use that dialog or declare a key, even when its imported
+Campaign Studio nodes fixed Google as their provider. The run therefore had no
+secret, despite a valid labeled Google key in the workspace vault. Provider/model
+defaulting (ADR0903) does not declare a stored key; the existing credential ladder
+already recognizes provider:label names when registered.
+
+Plan: extend the shared RunInputsDialog with an optional separate AI-key run
+option and use it at builder launch. Bind only the selected name through the
+existing configurable.ai.credentialRef field, not through chain params or node
+inputs. Keep the existing declared-variable picker as the sole control when one
+is present. Preserve default inputs, registration CAS, collaboration, draft
+launch metadata and ordinary non-AI Run behavior. Unknown/indirect graph calls
+must have an explicit Run options affordance without inferring readiness.
+
+No automatic key selection, vault-value enumeration, aliases, credential binding
+writes, pack edits or executor fallback. A blank choice retains existing declared
+keys/managed behavior; copy states that it does not supply a workspace key. Mixed
+provider graphs must explain that one run key applies only to matching-provider
+steps. A key list failure is an honest retry state, not a keyless workspace;
+workspace/auth changes clear the selected option and ignore stale reads. The
+server's existing tenant/provider validator remains authoritative. Selection is
+stamped in the run create request; fork inherits it, never reselecting the latest
+workspace binding. This uses the existing accepted run option and needs no RFC.
+
+Independent architecture review precedes implementation. Original-source RED,
+fixed focused UI and local-library credential/fork checks, source/UX review and
+root-owned canonical composition gate/deployed acceptance remain required.
+
+Implementation record: builder Run now opens the shared dialog when a provider/
+model is explicit, a credential variable is declared, or catalog AI metadata
+indicates usage. Explicit Run options remains available for unknown/indirect
+graphs. The graph fingerprint excludes snapshot-generated timestamps, is checked
+after async preflight and inside the serialized registration turn, and identity
+changes cancel the pending option. Only the explicitly selected key requires a
+verified list; blank No key override remains runnable during list failure, with
+honest retry copy. Optional canonical variables without required normalize false.
+
+Focused evidence: original shared-dialog source fails6newcases; original builder
+source fails3of4launchcases (non-AI control passes). Restored final source passes
+20cases across actual BuilderShell integration, shared key-option and existing
+credential-form tests. Changed frontend ESLint passes. These are diagnostic only;
+no compiler/build/full gate or new backend execution claimed. Existing backend
+ADR0712 tenant/dispatch/fork controls are unchanged and await composed execution.
+Independent architecture/code/UX review is recorded with campaign acceptance
+evidence. Root owns canonical qualification and deployed live acceptance.
+
+
+### Correction — 2026-11-07: pending Builder options retain their launch identity
+
+The Builder's pending run-options record must capture the launch identity when
+it opens. Clearing React state on an auth/workspace change does not synchronously
+unmount the old form: a blank/default choice submitted in that same turn could
+call the parent launcher, which then captured the new identity and registered
+the workflow. The parent now compares the pending record's captured identity
+before calling the launcher, for both blank and selected choices. Existing
+after-await identity checks, server ownership, credential admission and default
+resolution remain unchanged. A real-dialog same-turn regression reproduced one
+unwanted registration before the correction; a separate unchanged-identity blank
+control protects the normal default launch. Focused results and canonical gate
+evidence are recorded separately; this correction is not yet deployed.

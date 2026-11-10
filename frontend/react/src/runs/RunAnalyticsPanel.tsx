@@ -1,7 +1,8 @@
 /**
  * RunAnalyticsPanel — per-run health/quality metrics. The reliability half
- * (duration, nodes completed/failed, interrupts raised vs resolved, resumes)
- * derives entirely from the event log (§A2). The *quality* half (mean rating,
+ * uses current snapshot timing/status when available and event-log counters
+ * (nodes completed/failed, interrupts raised vs resolved, resumes; §A2).
+ * Event-only consumers retain duration/outcome fallback. The *quality* half (mean rating,
  * corrections, flags, most-corrected nodes) derives from RFC 0056 annotations
  * passed in via `annotations` (§C2); it renders only when the host advertises
  * `capabilities.feedback` and at least one annotation exists. Complements
@@ -13,7 +14,7 @@
 
 import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { RunEventDoc } from '@openwop/openwop';
+import type { RunEventDoc, RunSnapshot } from '@openwop/openwop';
 import type { Annotation } from '../client/feedbackClient.js';
 import { formatDuration } from './format.js';
 import { formatNumber } from '../i18n/format.js';
@@ -29,6 +30,8 @@ const OUTCOME_LABEL_KEYS: Record<string, string> = {
 
 interface Props {
   events: readonly RunEventDoc[];
+  /** Authoritative current execution; inherited events keep their original times. */
+  snapshot?: Pick<RunSnapshot, 'status' | 'startedAt' | 'completedAt'> | null;
   annotations?: readonly Annotation[];
   /** RUN-R2-1 — the annotations READ failed (distinct from "none exist"). The
    *  quality section says so instead of silently omitting itself. */
@@ -46,7 +49,7 @@ function count(events: readonly RunEventDoc[], type: string): number {
   return events.reduce((n, e) => (e.type === type ? n + 1 : n), 0);
 }
 
-export function RunAnalyticsPanel({ events, annotations, annotationsUnavailable, eventsUnavailable }: Props) {
+export function RunAnalyticsPanel({ events, snapshot, annotations, annotationsUnavailable, eventsUnavailable }: Props) {
   const { t } = useTranslation('runs');
   const stats = useMemo(() => {
     if (events.length === 0) return null;
@@ -55,18 +58,23 @@ export function RunAnalyticsPanel({ events, annotations, annotationsUnavailable,
     const first = sorted[0];
     const terminal = sorted.find((e) => TERMINAL_TYPES.includes(e.type));
     const last = sorted[sorted.length - 1];
-    const start = first ? Date.parse(first.timestamp) : NaN;
-    const end = terminal ? Date.parse(terminal.timestamp) : last ? Date.parse(last.timestamp) : NaN;
-    const durationMs = Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : null;
-
-    const outcome = terminal ? terminal.type.replace('run.', '') : 'running';
+    const snapshotTerminal = snapshot && ['completed', 'failed', 'cancelled'].includes(snapshot.status);
+    const start = snapshot ? Date.parse(snapshot.startedAt ?? '') : first ? Date.parse(first.timestamp) : NaN;
+    // A terminal snapshot without its own valid completion time has unknown
+    // duration. An inherited terminal is never a fallback for this execution.
+    const end = snapshot
+      ? snapshotTerminal ? Date.parse(snapshot.completedAt ?? '') : last ? Date.parse(last.timestamp) : NaN
+      : terminal ? Date.parse(terminal.timestamp) : last ? Date.parse(last.timestamp) : NaN;
+    const durationMs = Number.isFinite(start) && Number.isFinite(end) && end >= start ? end - start : null;
+    const outcome = snapshot ? snapshotTerminal ? snapshot.status : 'running' : terminal ? terminal.type.replace('run.', '') : 'running';
+    const live = snapshot ? !snapshotTerminal : !terminal;
     const interruptsRaised = count(events, 'node.suspended');
     const interruptsResolved = events.filter((e) => isInterruptResolvedEvent(e.type)).length;
 
     return {
       outcome,
       durationMs,
-      live: !terminal,
+      live,
       nodesCompleted: count(events, 'node.completed'),
       nodesFailed: count(events, 'node.failed'),
       interruptsRaised,
@@ -74,7 +82,7 @@ export function RunAnalyticsPanel({ events, annotations, annotationsUnavailable,
       interruptsPending: Math.max(0, interruptsRaised - interruptsResolved),
       resumes: count(events, 'run.resumed'),
     };
-  }, [events]);
+  }, [events, snapshot]);
 
   // §C2 — quality dimension from RFC 0056 annotations.
   const quality = useMemo(() => {

@@ -39,6 +39,7 @@ import type { MarketingCampaign } from '../src/features/campaign-orchestration/t
 import type { CampaignBrief } from '../src/features/campaign-brief/types.js';
 import { CHANNEL_WORKFLOW_IDS } from '../src/features/campaign-channels/channelWorkflows.js';
 import { setKernel } from '../src/features/campaign-brief/briefService.js';
+import { buildCampaignStudioSurface } from '../src/features/campaign-orchestration/surface.js';
 
 const REPO_ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..');
 let BASE: string;
@@ -234,6 +235,31 @@ describe('campaign-studio — finalize route', () => {
     // And it produced no campaign.
     const list = await owner.get<CampaignsRes>(`/host/openwop-app/campaign-orchestration/campaigns?orgId=${orgId}`);
     expect(list.body.campaigns.length).toBe(0);
+  });
+
+  it.each(['HTTP', 'workflow surface'] as const)('refuses stale messaging at finalization through %s', async (entry) => {
+    const { owner, orgId, tenantId } = await ownerWithOrg();
+    const brief = await owner.post<{ brief: CampaignBrief }>('/host/openwop-app/campaign-brief/briefs', { orgId, name: 'Reviewed messaging', productName: 'FlashPick' });
+    const briefId = brief.body.brief.id;
+    await setKernel(tenantId, briefId, FINALIZE_KERNEL);
+    const edited = await owner.patch<{ brief: CampaignBrief }>(`/host/openwop-app/campaign-brief/briefs/${briefId}`, { productName: 'A different product' });
+    expect(edited.body.brief.kernelStale).toBe(true);
+    if (entry === 'HTTP') {
+      const result = await owner.post<CampaignRes>('/host/openwop-app/campaign-orchestration/finalize', { briefId });
+      expect(result.status).toBe(409);
+      expect(result.body.error).toBe('conflict');
+      expect(result.body.message).toContain('stale');
+    } else {
+      const surface = buildCampaignStudioSurface({ tenantId });
+      await expect(surface.finalizeFromBrief!({ briefId })).rejects.toMatchObject({ httpStatus: 409, details: { reason: 'kernel_stale' } });
+    }
+    // Refusal must precede canonical campaign creation and any project links.
+    expect((await owner.get<CampaignsRes>(`/host/openwop-app/campaign-orchestration/campaigns?orgId=${orgId}`)).body.campaigns).toEqual([]);
+    // Approving a fresh kernel restores the path without deleting/recreating the brief.
+    await setKernel(tenantId, briefId, { ...FINALIZE_KERNEL, headline: 'Fresh product messaging' });
+    const fresh = await owner.post<CampaignRes>('/host/openwop-app/campaign-orchestration/finalize', { briefId });
+    expect(fresh.status).toBe(201);
+    expect(fresh.body.campaign.kernel?.headline).toBe('Fresh product messaging');
   });
 });
 

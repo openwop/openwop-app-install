@@ -47,7 +47,7 @@
  * shape, different module. That also makes this trivially testable without a
  * network seam.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 /** The shape every feature's `Org` shares; extra fields ride along untouched. */
 export interface OrgLike { orgId: string; name?: string }
@@ -68,6 +68,10 @@ export interface OrgSelection<T extends OrgLike> {
   retry: () => void;
 }
 
+/** Optional local lifecycle identity; auth remains with the calling feature.
+ * Omitting this preserves the original three-argument display semantics. */
+export interface OrgSelectionOptions { scopeKey: string | number }
+
 /**
  * @param listOrgs    the feature's own org lister
  * @param enabled     pass a feature-toggle gate to defer the read (default true)
@@ -81,36 +85,64 @@ export function useOrgSelection<T extends OrgLike>(
   listOrgs: () => Promise<T[]>,
   enabled = true,
   initialOrgId = '',
+  options?: OrgSelectionOptions,
 ): OrgSelection<T> {
   const [orgs, setOrgs] = useState<readonly T[] | null>(null);
   const [orgId, setOrgId] = useState(initialOrgId);
   const [orgsFailed, setOrgsFailed] = useState(false);
   const [reload, setReload] = useState(0);
+  const scoped = options !== undefined;
+  const scopeKey = options?.scopeKey;
+  // A committed A→B→A gets a distinct owner even when the scalar key repeats.
+  // No request/subscription/ref mutation during render: abandoned renders cannot
+  // invalidate the still-committed read. Effects and retry own request issuance.
+  const owner = useMemo(() => ({ scopeKey, scoped, enabled }), [scopeKey, scoped, enabled]);
+  const [acceptedOwner, setAcceptedOwner] = useState<typeof owner | null>(null);
+  const requestSequence = useRef(0);
 
   useEffect(() => {
     if (!enabled) return undefined;
     let cancelled = false;
+    const sequence = ++requestSequence.current;
+    const isCurrent = () => !cancelled && requestSequence.current === sequence;
     void listOrgs()
       .then((o) => {
-        if (cancelled) return;
+        if (!isCurrent()) return;
         setOrgs(o);
         setOrgsFailed(false);
+        setAcceptedOwner(owner);
         // Keep an existing selection if it is still present, else take the first.
         setOrgId((cur) => (cur && o.some((x) => x.orgId === cur) ? cur : (o[0]?.orgId ?? '')));
       })
       .catch(() => {
-        if (cancelled) return;
+        if (!isCurrent()) return;
         // NOT `setOrgs([])`. `orgs` stays null (nothing is known) and the failure
         // gets its own flag, so the caller can tell "none" from "couldn't read".
+        if (scoped) setOrgs(null);
         setOrgsFailed(true);
+        setAcceptedOwner(owner);
       });
     return () => { cancelled = true; };
     // `listOrgs` is intentionally not a dep: callers pass a module-level function,
     // and depending on it would re-fetch on every render for any caller that
     // passes an inline arrow.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, reload]);
+  }, [enabled, reload, owner, scoped]);
 
-  const retry = useCallback(() => setReload((n) => n + 1), []);
-  return { orgs, orgId, setOrgId, orgsFailed, retry };
+  const retry = useCallback(() => {
+    // Invalidate before React commits the retry effect, including an earlier
+    // promise settling in the same event batch.
+    ++requestSequence.current;
+    if (scoped) setAcceptedOwner(null);
+    setReload((n) => n + 1);
+  }, [scoped]);
+  if (!scoped) return { orgs, orgId, setOrgId, orgsFailed, retry };
+  const accepted = enabled && acceptedOwner === owner;
+  return {
+    orgs: accepted ? orgs : null,
+    orgId: accepted && !orgsFailed && orgs?.some((o) => o.orgId === orgId) ? orgId : '',
+    setOrgId,
+    orgsFailed: accepted && orgsFailed,
+    retry,
+  };
 }

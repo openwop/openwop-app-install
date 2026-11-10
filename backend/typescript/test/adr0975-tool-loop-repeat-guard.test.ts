@@ -51,7 +51,7 @@ const lastUser = (r: AiToolCallRequest): string => {
 };
 
 describe('ADR 0975 D6 — the repeat guard', () => {
-  it('the kicktodo.com loop: five identical calls run the tool ONCE and end tool_rounds_exhausted, not empty', async () => {
+  it('the adopter-deployment loop: five identical calls run the tool ONCE and end tool_rounds_exhausted, not empty', async () => {
     const m = scripted([{ call: 'candidates' }]);
     const executeTool = vi.fn().mockResolvedValue({ content: '{"candidates":[]}' });
     const res = await runChatToolLoop(opts(5), { callAIWithTools: m.callAIWithTools, executeTool });

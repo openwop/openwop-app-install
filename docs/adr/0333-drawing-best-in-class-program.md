@@ -2,6 +2,22 @@
 
 Status: implemented (2026-07-10 — Phases 1–8 shipped, PRs #1597–#1618 range; see the phase table)
 
+## Correction — descendant chrome targets (2026-11-07)
+
+The shared viewport's interactive-target predicate originally required a direct
+`HTMLElement` control target. A pointer landing on a zoom button's SVG icon (or
+nested text label) was therefore classified as canvas background: GraphSurface
+cleared selection and armed pointer capture instead of leaving activation with
+the button. Keyboard activation reached the button directly and was unaffected.
+
+Keep the existing shared predicate; resolve native controls and ARIA widget roles
+through their ancestors, accepting `Element` targets so SVG descendants work.
+Resolve inherited contenteditable including explicit noneditable islands. Plain
+SVG canvas paths and region/group containers remain background targets. No
+viewport geometry, gesture policy, canvas persistence or wire contract changes.
+Focused regression evidence and deployed pointer retest are separate; a jsdom
+bubbling witness cannot establish browser pointer-capture retargeting behavior.
+
 ## Context
 
 `canvas.drawing` shipped as an ADR 0310 Phase-C elements-trait consumer with ADR 0317

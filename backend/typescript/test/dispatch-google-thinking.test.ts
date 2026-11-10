@@ -26,7 +26,7 @@ async function captureGoogleBody(model: string): Promise<GeminiReqBody> {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     if (url.includes('generativelanguage.googleapis.com')) {
       body = JSON.parse(String(init?.body)) as GeminiReqBody;
-      return new Response('data: {"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}\n\n', { status: 200, headers: { 'content-type': 'text/event-stream' } });
+      return new Response('data: {"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}]}\n\n', { status: 200, headers: { 'content-type': 'text/event-stream' } });
     }
     throw new Error(`unexpected fetch: ${url}`);
   });
@@ -67,7 +67,7 @@ describe('dispatchGoogle reasoning-budget detection', () => {
 // `minimal` comes before "no config" because an unbounded-thinking call can spend
 // a caller-capped budget on thought and return empty (review of #3894).
 describe('dispatchGoogle walks the thinking-shape ladder when Google rejects a shape', () => {
-  const OK_SSE = 'data: {"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}\n\n';
+  const OK_SSE = 'data: {"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}]}\n\n';
   const INVALID = JSON.stringify({ error: { code: 400, message: 'Request contains an invalid argument.', status: 'INVALID_ARGUMENT' } });
 
   function scripted(responses: Array<{ status: number; body: string }>): { bodies: GeminiReqBody[]; calls: () => number } {

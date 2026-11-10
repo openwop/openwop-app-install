@@ -28,7 +28,8 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { EXPECTED_SUBJECT_ERASERS } from '../src/host/subjectEraserManifest.js';
+// ADR 1031 P2 — the manifest is the host set ∪ composed features' declared erasers.
+import { expectedSubjectErasers } from '../src/host/subjectEraserManifest.js';
 import {
   registeredSubjectEraserIds, missingSubjectErasers, registerSubjectEraser, __isSyntheticEraserRegistry,
 } from '../src/host/subjectErasure.js';
@@ -79,7 +80,7 @@ describe('WF-CONS-2 — the subject-eraser expected set', () => {
     expect(derived.size, 'the source scan must find the real population').toBeGreaterThanOrEqual(113);
     expect(derived.has('eraseSubjectApplyGrants'), 'the LIVE instance this finding named').toBe(true);
     expect(derived.has('eraseSalesCommissionsSubject'), 'the eraser that had to be NAMED to be visible').toBe(true);
-    expect([...derived].sort()).toEqual([...EXPECTED_SUBJECT_ERASERS].sort());
+    expect([...derived].sort()).toEqual([...expectedSubjectErasers()].sort());
   });
 
   it('the registry refuses an ANONYMOUS eraser (unreportable + manifest-invisible)', () => {
@@ -101,14 +102,15 @@ describe('WF-CONS-2 — LAYER 2: a real boot registers every expected eraser', (
     // change and the fan-out would still have reported `failed: 0`.
     expect(missingSubjectErasers()).toEqual([]);
     const live = new Set(registeredSubjectEraserIds());
-    for (const id of EXPECTED_SUBJECT_ERASERS) expect(live.has(id), `${id} was never registered at boot`).toBe(true);
+    for (const id of expectedSubjectErasers()) expect(live.has(id), `${id} was never registered at boot`).toBe(true);
   });
 
   it('the live registry declares no eraser the manifest does not know about', () => {
     // The other direction: an eraser added at runtime (or by a module the
     // manifest was never updated for) is an UNTRACKED erasure, which is a
     // different problem from a missing one but is equally invisible.
-    const unexpected = registeredSubjectEraserIds().filter((id) => !EXPECTED_SUBJECT_ERASERS.has(id));
+    const expected = expectedSubjectErasers();
+    const unexpected = registeredSubjectEraserIds().filter((id) => !expected.has(id));
     expect(unexpected).toEqual([]);
   });
 });

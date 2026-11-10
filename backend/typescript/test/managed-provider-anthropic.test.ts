@@ -1,5 +1,5 @@
 /**
- * The managed tier's underlying provider is the operator's choice
+ * ADR 0990 P0 (#5285) and D4 — the managed tier's underlying provider is the operator's choice
  * (`OPENWOP_MANAGED_PROVIDER`, default `minimax`). An operator whose customers
  * need a provider with business no-training API terms selects `anthropic`.
  *
@@ -13,10 +13,16 @@
  *
  * Sabotage-witnessed: with the Anthropic target sharing the MiniMax storage row,
  * case 3 goes red (the MiniMax key reaches api.anthropic.com); with an unknown
- * value mapped to MiniMax, case 4 goes red.
+ * value mapped to MiniMax, case 4 goes red. Re-witnessed in grade-tests wave 78, plus:
+ * an empty value defaulting to Anthropic reds case 1; the result naming the real model
+ * reds case 2; `ANTHROPIC_MODEL` ignored reds case 3 (tools round); every provider
+ * reading the MiniMax key row reds cases 2 and 3.
  */
 
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import { resetCachedMasterKey } from '../src/byok/encryption.js';
 import {
@@ -31,16 +37,23 @@ import type { Storage } from '../src/storage/storage.js';
 
 let storage: Storage;
 const ENV_KEYS = ['OPENWOP_MANAGED_PROVIDER', 'ANTHROPIC_API_KEY', 'ANTHROPIC_MODEL', 'MINIMAX_API_KEY'] as const;
+const FILE_ENV = ['OPENWOP_BYOK_ENCRYPTION_KEY', 'OPENWOP_MANAGED_DAILY_TOKEN_CAP', ...ENV_KEYS] as const;
+const savedEnv = Object.fromEntries(FILE_ENV.map((k) => [k, process.env[k]]));
+const DATA_DIR = mkdtempSync(join(tmpdir(), 'openwop-managed-anthropic-'));
 
 beforeAll(() => {
   process.env.OPENWOP_BYOK_ENCRYPTION_KEY = 'a'.repeat(64);
   process.env.OPENWOP_MANAGED_DAILY_TOKEN_CAP = '100000';
 });
+afterAll(() => {
+  for (const k of FILE_ENV) { const v = savedEnv[k]; if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  rmSync(DATA_DIR, { recursive: true, force: true });
+});
 
 beforeEach(async () => {
   for (const k of ENV_KEYS) delete process.env[k];
   storage = await openStorage('memory://');
-  configureManagedProvider({ storage, dataDir: '/tmp/openwop-managed-anthropic-test' });
+  configureManagedProvider({ storage, dataDir: DATA_DIR });
   _clearManagedCacheForTests();
   resetCachedMasterKey();
 });
@@ -91,10 +104,13 @@ function anthropicSse(text: string): Response {
   return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
 }
 
-function sentTo(spy: ReturnType<typeof vi.spyOn>): { url: string; key: string | undefined; model: unknown } {
-  const [url, init] = spy.mock.calls[0] as [string, RequestInit];
-  const headers = init.headers as Record<string, string>;
-  return { url: String(url), key: headers['x-api-key'], model: (JSON.parse(String(init.body)) as { model?: unknown }).model };
+function sentTo(spy: MockInstance<typeof fetch>): { url: string; key: string | undefined; model: unknown } {
+  const call = spy.mock.calls[0];
+  if (!call) throw new Error('no outbound request was made');
+  const [input, init] = call;
+  const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+  const body = typeof init?.body === 'string' ? (JSON.parse(init.body) as { model?: unknown }) : {};
+  return { url, key: new Headers(init?.headers).get('x-api-key') ?? undefined, model: body.model };
 }
 
 describe('OPENWOP_MANAGED_PROVIDER', () => {

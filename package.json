@@ -23,6 +23,7 @@
     "demo:agency-ops:reset": "node scripts/demo-agency-ops-reset.mjs"
   },
   "devDependencies": {
-    "playwright": "1.59.1"
+    "playwright": "1.59.1",
+    "tracegate-ci": "0.10.1"
   }
 }

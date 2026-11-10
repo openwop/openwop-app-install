@@ -50,7 +50,7 @@ for (const dir of PACK_DIRS) {
 
 describe('the scan reaches a real corpus', () => {
   it('finds chains to inspect', () => {
-    expect(chains.length, 'no chains found — the ratchet is scanning nothing').toBeGreaterThan(268); // measured 272 (2026-10-29)
+    expect(chains.length, 'no chains found — the ratchet is scanning nothing').toBeGreaterThan(258); // measured 272 (2026-10-29); 261 after the KickTodo packs left (ADR 1031 P3)
   });
 });
 

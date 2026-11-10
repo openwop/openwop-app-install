@@ -16,6 +16,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { reconcileRestoredSession } from './finalizeSession.js';
 import { adoptLocalContentForSubject } from './localContentAdoption.js';
+import { recordShellIdentity } from './shellIdentity.js';
 import { isStorageSubjectResolved } from '../platform/storage.js';
 import {
   type AuthUser,
@@ -59,6 +60,8 @@ export function useAuth(): UseAuth {
       return;
     }
     const unsubscribe = onAuthChanged((u) => {
+      // KT-AUTH-1 — first emission only: who this page's shell mounted as.
+      recordShellIdentity(u?.uid ?? null);
       // ADR 0434 Phase 3 — ONE writer for the storage subject. Every `content`
       // key (chat thread, prompts, builder drafts) reads it, so it must be set
       // BEFORE anything re-renders off the new identity, and it must go back to
@@ -88,11 +91,23 @@ export function useAuth(): UseAuth {
     // anonymous — the state the page would have shown anyway. A real resolution
     // arriving later still wins, because `adoptLocalContentForSubject` re-points
     // the subject and fires `authChanged`, which drops the stale caches.
+    //
+    // `loading` is bounded by the same watchdog. It used NOT to be, and that was
+    // the first-visit splash hang (2026-11-05): when the SDK never emits — the
+    // lazy `firebase-*.js` chunk fails to fetch, or the SDK's first IndexedDB
+    // open never completes — `loading` stayed true for the life of the page, and
+    // `/` (App.tsx) and every AppGate showed their "still resolving" state
+    // forever, even after the warning below had fired. A reload fetched the
+    // chunk from the HTTP cache (or reopened the now-created database) and
+    // worked, which is why it presented as "first visit only". A late real
+    // answer still wins: the callback above calls setUser/setLoading again.
     const watchdog = setTimeout(() => {
       if (!isStorageSubjectResolved()) {
         console.warn(`[auth] storage subject unresolved after ${SUBJECT_WATCHDOG_MS}ms — settling anonymous so content surfaces stop waiting`);
+        recordShellIdentity(null);
         adoptLocalContentForSubject(null);
       }
+      setLoading(false); // idempotent if the SDK already answered
     }, SUBJECT_WATCHDOG_MS);
     return () => { clearTimeout(watchdog); unsubscribe(); };
   }, [configured]);

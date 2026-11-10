@@ -1,20 +1,32 @@
 /**
  * ADR 1001 — the findings of the final-head /architect and /code-review pass
- * (2026-10-29), each pinned at the unit it lives in.
+ * (2026-10-29) and the ADR 1006 tool-lane follow-ups, each pinned at the unit it
+ * lives in.
  *
  *  1. A tool the firewall HELD earlier in a turn is not dropped when the same
- *     turn then asks a clarification: the loop returns both, and the caller
- *     escalates the held tool first (ADR 0150, never a silent completion).
+ *     turn then asks a clarification: the loop returns BOTH the held tool and the
+ *     pending ask (ADR 0150). The caller's escalate-first ordering lives in
+ *     `runAgentDispatch` and is not asserted here.
  *  2. A turn that offers NO tools (a no-tool agent that may still ask) sends no
  *     `tools` / `tool_choice` to the OpenAI-compatible or Anthropic APIs, which
  *     refuse `tool_choice` without tools.
  *  3. `ClarificationData.contextType` reaches the wire `interrupt.requested`,
- *     and the host's routing keys (`__causationId`, `__durable`) do not.
+ *     and the host's routing keys (`__causationId`, `__durable`) do not, even on
+ *     the custom fallback that copies `data`.
  *  4. The inbox row of an agent's ask shows its first question.
- * Sabotage-witnessed: dropping `pendingApprovals` from the loop's clarification
- * return reds 1; restoring the unconditional `tools`/`tool_choice` reds 2;
- * dropping `contextType` from the projector, or `__causationId` from
- * `hostData`, reds 3; reading only `data.question` reds 4; restoring the
+ *  5. A mixed round ends on the ask: the earlier call runs, the later one is
+ *     recorded forbidden and never executes, tool output before the ask marks it
+ *     untrusted, and the checkpointed transcript holds the ask text.
+ *  6. Anthropic receives `openwop:ask-user` sanitized and the call comes back
+ *     under the real id.
+ *
+ * Sabotage-witnessed (wave 81): dropping `pendingApprovals` from the loop's
+ * clarification return reds 1; sending `tools`/`tool_choice` unconditionally
+ * (OpenAI) or `tools` (Anthropic) reds 2; dropping `contextType` from the
+ * projector, or `__causationId` / `__durable` from `hostData`, reds 3; reading
+ * only `data.question` reds 4; disarming the ended-turn branch, dropping
+ * `toolOutputSeen` from `untrusted`, or not pushing the ask text reds 5; sending
+ * the raw name or not mapping it back reds 6.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { runChatToolLoop, type CompiledTool } from '../src/host/agentDispatch.js';
@@ -93,7 +105,7 @@ describe('3. the wire projection of an agent ask', () => {
         profile: 'openwop-agent-clarification', questions: [{ id: 'q', question: 'Which?' }], contextType: 'form-field',
         __causationId: 'r:n:clarify:1', __durable: true, __resumeKey: 'clarify:1:abc', askedBy: 'Iris', round: 1,
       },
-    }) as { data?: Record<string, unknown> };
+    });
     expect(p.data).toEqual({ questions: [{ id: 'q', question: 'Which?' }], contextType: 'form-field' });
   });
 
@@ -110,10 +122,11 @@ describe('3. the wire projection of an agent ask', () => {
 
 describe('4. the inbox row of an agent ask', () => {
   it('shows the first question', () => {
-    const form = interruptAnswerForm({
+    const rec: InterruptRecord = {
       interruptId: 'i', runId: 'r', nodeId: 'n', kind: 'clarification', token: 't', createdAt: '2026-10-29T00:00:00Z',
       data: { profile: 'openwop-agent-clarification', questions: [{ id: 'q', question: 'Which region?' }] },
-    } as InterruptRecord);
+    };
+    const form = interruptAnswerForm(rec);
     expect(form?.question).toBe('Which region?');
   });
 });

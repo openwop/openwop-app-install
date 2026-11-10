@@ -4,6 +4,14 @@
  * use i18next `_one`/`_other` suffixes (Intl.PluralRules) with `{{count}}`.
  */
 export const messages = {
+  errCanonicalSourceOutput: "La liaison de sortie source enregistrée est invalide. Rechargez le workflow avant de l’enregistrer.",
+  defaultSourceOutput: "Sortie par défaut",
+  missingSourceOutput: "Sortie introuvable : {{name}}",
+  defaultSourceOutputHelp: "Utilise la propriété output si elle existe ; sinon, transmet la table des sorties de la source.",
+  sourceOutputDescription: "Sortie source : {{name}} ({{type}})",
+
+  runOptions: "Options d’exécution",
+  runOptionsChanged: "Le workflow a changé pendant l’ouverture des options. Vérifiez-le et relancez-le.",
   unpublishedChanges: 'Modifications non publiées',
   unpublishedChangesTitle: 'La version publiée est celle exécutée en production ; ce workflow a des modifications plus récentes. Publiez (Enregistrer) à nouveau ou restaurez depuis l’Historique.',
   historyMenu: 'Historique',
@@ -100,6 +108,7 @@ export const messages = {
   collabAnnFailed: 'La session en direct n\'a pas pu se connecter',
 
   // ── Validate / run results ──────────────────────────────────────────────
+  defaultInputsMetadataConflict: "Le format des métadonnées de l’éditeur du flux de travail est incompatible. Le brouillon local est conservé ; corrigez les métadonnées importées avant d’enregistrer.",
   defaultInputsInvalidJson: 'Les entrées par défaut ne sont pas un JSON valide.',
   validNode_one: '{{count}} nœud',
   validNode_other: '{{count}} nœuds',
@@ -482,7 +491,10 @@ export const messages = {
   preflightFeatureDisabled: 'Non activée',
   preflightFeatureEnableCta: 'Activer',
   preflightFeaturesNotice: 'Ce modèle nécessite que {{features}} soit activée pour votre espace de travail. Activez-la d’abord, sinon les étapes qui l’utilisent échoueront lors de l’exécution du flux.',
-  preflightZeroConfig: 'Fonctionne sans connexions — prêt à l’emploi.',
+  preflightZeroConfig: 'Aucun compte connecté nécessaire',
+  preflightAccountUsage: 'Ce workflow utilise des comptes connectés. Vérifiez leur configuration avant de l’exécuter.',
+  preflightAccountUnknown: 'Une configuration des comptes peut être nécessaire. Vérifiez le workflow avant de l’exécuter.',
+  preflightReviewConnections: 'Vérifier les connexions',
   preflightInputsTitle: 'Entrées',
   preflightInputsBlurb: 'Renseignez-les maintenant : ils sont figés dans le workflow à la copie, et vous pourrez les modifier ensuite dans le builder.',
   preflightConfirm: 'Ajouter à mes workflows',
@@ -493,9 +505,9 @@ export const messages = {
   templateAsksQuestions_other: 'Pose {{count}} questions',
   aliasHint: 'Inclut des étapes génériques compatibles avec {{brand}} via une connexion.',
   startHereTitle: 'Commencez ici',
-  startHereHint: 'Ceux-ci fonctionnent sans connexions — essayez-en un maintenant.',
+  startHereHint: 'Ces modèles ne nécessitent aucun compte connecté. Vérifiez les données et la configuration avant de les exécuter.',
   allTemplatesTitle: 'Tous les modèles',
-  zeroConnectionsChip: 'Zéro connexion',
+  zeroConnectionsChip: 'Aucun compte connecté nécessaire',
   templateCategoryAll: 'Toutes les catégories',
   templateCategoryFilterLabel: 'Filtrer les modèles par catégorie',
   preRunConnsHeading_one: '{{count}} connexion à configurer.',

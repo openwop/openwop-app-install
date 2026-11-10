@@ -70,6 +70,38 @@ renderCreative({ briefSnapshot, template, resolvedLayerAssets, brand, overrides?
 - **Layer resolution:** background/product ← `mediaAssetId` (mood-board item, image-gen output, or attached asset) resolved to bytes host-side + embedded as a `data:` URI in the SVG; headline/body/CTA ← the chosen direction's copy (brief fields) type-set into the text layers; logo ← brand `logo.markSrc/lockupSrc`; colors ← `brief.brandPalette` ⊕ brand `palette` (brief wins); fonts ← brand `typography` family mapped onto the **bundled font set** (§Open Q1).
 - **Determinism (the same-pixels guarantee):** identical `(briefSnapshot content-hash, templateId+version, each layer asset SHA-256, brand snapshot hash, bundled-renderer version, overrides)` ⇒ **identical bytes**. Fonts are **embedded from bundled buffers** (never fetched at render — a network font would break determinism and add SSRF surface); asset bytes are **pinned by content hash** (the SHA-256 media already stores per ADR 0352). No wall-clock, no RNG, no locale-dependent shaping.
 
+#### Correction (2026-11-06) — native font delivery (CB-RENDER-1)
+
+The original implementation passed WASM-only `fontBuffers` to native
+`@resvg/resvg-js` 2.6.2, while widening its types. Native options reject unknown
+fields and silently fall back to defaults, including system-font loading. This
+masked the bug on developer macOS; the exact deployed Linux image rendered no
+text. A bounded native probe confirmed zero glyph pixels and ignored output
+width with the old carrier, versus visible glyphs and honored width with the
+same exact fonts through the documented native `fontFiles` option.
+
+Fonts remain embedded as source bytes, then materialize privately for one
+synchronous render operation: a fresh 0700 temporary directory, numeric 0600
+exclusive files, `loadSystemFonts: false`, and cleanup in `finally` from the
+start of setup. Static PNG rendering copies its bytes before cleanup; a GIF
+keeps the same files through all frames and copies its result before cleanup.
+The same owner carries already-authorized, license-attested custom font bytes;
+existing brand limits and validation stay intact. No persistent cache, network
+fonts, system fonts, global cleanup hooks or new credential/persistence path.
+Concurrent operations own distinct directories. A process crash may leave its
+private disposable directory until container/filesystem teardown; normal setup
+or rendering failures clean it and propagate through existing error handling.
+
+`RENDERER_VERSION` advances to `adrender-1.0.1` so new composite hashes and
+provenance identify corrected pixels. Existing media/recorded action results
+remain unchanged and replay/fork continues reading them verbatim. Old blank
+assets are not silently repaired. The resolved custom-font and GIF decisions
+below use this native file carrier rather than a native buffer API. This is a
+host implementation correction on the existing render seam, with no wire/API,
+capability or RFC change. Tests compare real PNG/GIF output to the supported
+native carrier, distinguish visible glyphs from shapes, cover copy/nudge/custom
+font changes, and exercise private file lifetime and failure cleanup.
+
 ### 3. Variant generation across formats (one brief → many renders)
 
 `renderVariants(brief, [templateId…])` fans the same brief content across a template family — Meta feed + story + TikTok + LinkedIn + Google sizes — each produced by its own template's geometry (re-flowed, not stretched). One approve, N platform-correct creatives. Each is an independent deterministic render (its own composite hash → its own media asset).
@@ -149,6 +181,22 @@ Each phase: `/architect` before (replay determinism + the media/ads seam), `/cod
 4. **Raster product shots** — the image-gen seam (ADR 0115) can generate a background/product layer on demand; v1 consumes existing `mediaAssetId`s (mood board / attached / previously generated), with generate-into-a-layer as a Phase-3+ convenience.
 
    > **Resolved (2026-07-17):** the Renders gallery now has per-layer background/product pickers — **Choose** from the library (`MediaPickerDialog`) or **Generate** with AI (`GenerateImageDialog`, the ADR 0401 seam), unset falls back to the mood board. A nudge re-render preserves the original render's layer assets (threaded via `CreativeRender.layerAssets`). Backend already accepted explicit `layers` overrides for any org asset; this wires the FE. Composes ADR 0399 × ADR 0401.
+
+## Build-memory correction (2026-11-06)
+
+Keep each embedded face in a single base64 string literal. The earlier generated
+format chained 17,012 string additions across four faces; esbuild retained large
+intermediate concatenations while folding those constants. A bounded adopter
+gate stopped at 3,835 MiB during its second backend build. Representing the same
+payloads as four literals reduced the canonical backend build to 438.5 MiB in
+the measured diagnostic, under the same aggregate memory limit.
+
+The compiled backend JavaScript is byte-identical to the prior build. Each
+decoded face's size and SHA-256 is independently pinned in
+`creative-briefs-font-payload.test.ts`; the family names, licenses, cache and
+`BUNDLED_FONTS_VERSION` stay unchanged. Source maps reflect the new source layout.
+No renderer, font bytes, replay version, gate assertion or resource budget is
+changed. Full composition qualification is required before release.
 
 ## RFC verdict
 

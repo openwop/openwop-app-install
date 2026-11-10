@@ -32,7 +32,6 @@ import {
 import { getArtifact, getArtifactRevision, listArtifacts, listArtifactsForRun } from '../src/host/artifactProjection.js';
 import { DurableCollection } from '../src/host/hostExtPersistence.js';
 import type { RunArtifactRecord } from '../src/host/runArtifactStore.js';
-import { registerKicktodoCreatorArtifactTypes } from '../src/features/kicktodo-creator/artifactSchemas.js';
 import { createDocument } from '../src/features/documents/documentsService.js';
 import { __resetMedia } from '../src/features/media/mediaService.js';
 import { createMember, createOrg, createWorkspace } from '../src/host/accessControlService.js';
@@ -209,31 +208,13 @@ describe('ADR 0957 P1b — client-bound outputs retain their organization', () =
   });
 });
 
-// P9 (2026-10-28) — the Challenge Factory outline and final result both listed
-// as `{`: an untyped JSON row took its first line as its title.
+// P9 (2026-10-28) — a feature's outline and final result both listed as `{`: an
+// untyped JSON row took its first line as its title. (The typed-plan cases are
+// KickTodo's: test/kicktodo/kicktodo-run-artifact-plan-titles.test.ts, ADR 1031 P2.)
 describe('JSON artifact titles', () => {
   const day = (n: number, extra: Record<string, unknown> = {}) => ({ day: n, stableActivityId: `d${n}`, title: `Day ${n}`, actionInstruction: 'Do it.', userFacingWhy: 'Because.', estimatedMinutes: 10, achievementIds: ['a1'], evidencePolicy: 'note', claimRefs: [], ...extra });
   const plan = (days: unknown[]) => ({ title: 'Twenty-One Days of Focus', promise: 'Focus daily', audience: 'makers', durationDays: 21, dailyMinutesBudget: 20, outcomes: [{ outcomeId: 'o1', measurableOutcome: 'x', method: 'y' }], achievements: [{ achievementId: 'a1', observableEvidence: 'z', outcomeIds: ['o1'] }], days });
-  const envelope = (p: ReturnType<typeof plan>) => ({ plan: p, artifact: { artifactTypeId: 'kicktodo.challenge-plan', title: p.title, payload: p } });
-  const alt = { stableActivityId: 'd1-alt', title: 'Alt', actionInstruction: 'Alt.', evidencePolicy: 'note' };
-
-  it('a plan with alternatives persists TYPED, titled by the plan', async () => {
-    registerKicktodoCreatorArtifactTypes();
-    await persistRunArtifact({ tenantId: 't1', runId: 'p9', nodeId: 'outline-approve', role: 'gate-preview', output: envelope(plan([day(1, { alternatives: [alt] }), day(2)])), now: '2026-10-28T00:00:00Z' });
-    const row = await getRunArtifact('p9:outline-approve');
-    expect(row?.artifactTypeId).toBe('kicktodo.challenge-plan');
-    expect(row?.title).toBe('Twenty-One Days of Focus');
-  });
-
-  it('a malformed alternative stays UNTYPED (no false typed claim) but is still titled by the plan', async () => {
-    registerKicktodoCreatorArtifactTypes();
-    await persistRunArtifact({ tenantId: 't1', runId: 'p9b', nodeId: 'outline-approve', role: 'gate-preview', output: envelope(plan([day(1, { alternatives: [{ ...alt, evidencePolicy: 'vibes' }] })])), now: '2026-10-28T00:00:00Z' });
-    const row = await getRunArtifact('p9b:outline-approve');
-    expect(row?.artifactTypeId).toBeUndefined();
-    expect(row?.format).toBe('application/json');
-    expect(row?.title).toBe('Twenty-One Days of Focus');
-    expect(row?.content).toContain('"vibes"'); // raw bytes kept as produced
-  });
+  const envelope = (p: ReturnType<typeof plan>) => ({ plan: p, artifact: { artifactTypeId: 'test.plan', title: p.title, payload: p } });
 
   it('a submitted approval result is named by its state, never as published', () => {
     const { title } = deriveArtifact({ approvalId: 'appr:1', state: 'submitted' }, 'submit');

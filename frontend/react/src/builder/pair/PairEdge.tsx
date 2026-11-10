@@ -10,6 +10,7 @@
  * No silent caps: the list says how many more fit.
  */
 
+import { projectSourceOutput, sourceOutputForWire } from '../schema/sourceOutput.js';
 import { useState } from 'react';
 import { BaseEdge, EdgeLabelRenderer, getBezierPath, type EdgeProps } from '@xyflow/react';
 import { useTranslation } from 'react-i18next';
@@ -25,6 +26,7 @@ const SHOWN = 6;
 export interface PairEdgeData extends Record<string, unknown> {
   showPlus?: boolean;
   sourcePort?: string;
+  canonicalSourceOutput?: string | null;
   targetPort?: string;
 }
 
@@ -39,7 +41,9 @@ export function PairEdge(props: EdgeProps): JSX.Element {
   const src = nodes.find((n) => n.id === source);
   const tgt = nodes.find((n) => n.id === target);
 
-  const srcType = src ? catalogEntry(src.kind)?.outputs.find((p) => p.name === data.sourcePort)?.type : undefined;
+  const binding = { sourcePort: data.sourcePort ?? 'out', ...(data.canonicalSourceOutput !== undefined ? { canonicalSourceOutput: data.canonicalSourceOutput } : {}) };
+  const srcType = projectSourceOutput(binding, src ? catalogEntry(src.kind)?.outputs ?? [] : []).type;
+  const sourceOutput = sourceOutputForWire(binding);
   const tgtType = tgt ? catalogEntry(tgt.kind)?.inputs.find((p) => p.name === data.targetPort)?.type : undefined;
   const fits = open
     ? catalog.filter((e) => !e.clientOnly
@@ -57,7 +61,7 @@ export function PairEdge(props: EdgeProps): JSX.Element {
     useBuilderStore.getState().applyEditOps([
       { kind: 'removeEdge', edgeId: id },
       { kind: 'addNode', nodeId: newId, typeId: entry.typeId, name: entry.label, position: { x: (src.position.x + tgt.position.x) / 2, y: (src.position.y + tgt.position.y) / 2 } },
-      { kind: 'addEdge', edgeId: `e_${crypto.randomUUID().slice(0, 8)}`, sourceNodeId: src.id, targetNodeId: newId, ...(data.sourcePort ? { sourceOutput: data.sourcePort } : {}), ...(inPort ? { targetInput: inPort } : {}) },
+      { kind: 'addEdge', edgeId: `e_${crypto.randomUUID().slice(0, 8)}`, sourceNodeId: src.id, targetNodeId: newId, ...(sourceOutput !== undefined ? { sourceOutput } : {}), ...(inPort ? { targetInput: inPort } : {}) },
       { kind: 'addEdge', edgeId: `e_${crypto.randomUUID().slice(0, 8)}`, sourceNodeId: newId, targetNodeId: tgt.id, ...(outPort ? { sourceOutput: outPort } : {}), ...(data.targetPort ? { targetInput: data.targetPort } : {}) },
     ]);
     setOpen(false);

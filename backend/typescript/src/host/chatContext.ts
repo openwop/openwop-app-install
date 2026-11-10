@@ -86,6 +86,10 @@ export interface ComposeChatContextInput {
    *  2..n away and the ledger undercounted on the primary lane. Voice omits it
    *  (it also has no runId). No other leg reads it. */
   dispatchId?: string | undefined;
+  /** ADR 1042 D9 — a narrow channel turn (an outside sender, a group, a relay
+   *  contact): the agent's long-term knowledge/memory and a twin's borrowed recall
+   *  are NOT loaded, so an outsider never reads them through the reply. */
+  suppressRecall?: boolean | undefined;
 }
 
 export interface ComposedChatContext {
@@ -249,7 +253,7 @@ export async function composeChatContext(tenantId: string, input: ComposeChatCon
     // Fail-soft + fail-closed on capability: `resolveAgentKnowledgeRetrieve`
     // returns undefined for agents without the `knowledge` capability.
     (async (): Promise<string> => {
-      if (!(agent && agent.systemPrompt && tenantOk && identity && seed)) return '';
+      if (input.suppressRecall || !(agent && agent.systemPrompt && tenantOk && identity && seed)) return '';
       try {
         // ADR 0442 P3 — pass the ACTING participant so a `per-user` agent (e.g.
         // KickBot) recalls THIS caller's own `user:<id>` memory, never another
@@ -290,7 +294,7 @@ export async function composeChatContext(tenantId: string, input: ComposeChatCon
     // cited-as-data. Live per-turn read (this scaffold is composed fresh per turn,
     // never frozen into the event log), so revocation takes effect immediately.
     (async (): Promise<string> => {
-      if (!(agent && agent.systemPrompt && tenantOk && identity && seed)) return '';
+      if (input.suppressRecall || !(agent && agent.systemPrompt && tenantOk && identity && seed)) return '';
       const resolver = getBorrowedRecallResolver();
       if (!resolver) return '';
       try {

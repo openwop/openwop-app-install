@@ -4,6 +4,14 @@
  * use i18next `_one`/`_other` suffixes (Intl.PluralRules) with `{{count}}`.
  */
 export const messages = {
+  errCanonicalSourceOutput: "La salida de origen guardada no es válida. Vuelve a cargar el flujo antes de guardar.",
+  defaultSourceOutput: "Salida predeterminada",
+  missingSourceOutput: "Salida no disponible: {{name}}",
+  defaultSourceOutputHelp: "Usa la propiedad output si existe; de lo contrario, pasa el mapa de salidas del origen.",
+  sourceOutputDescription: "Salida del origen: {{name}} ({{type}})",
+
+  runOptions: "Opciones de ejecución",
+  runOptionsChanged: "El flujo cambió mientras las opciones estaban abiertas. Revísalo y ejecútalo de nuevo.",
   unpublishedChanges: 'Cambios sin publicar',
   unpublishedChangesTitle: 'La versión publicada es la que se ejecuta en producción; este flujo de trabajo tiene ediciones más recientes. Publica (Guardar) de nuevo o restaura desde el Historial.',
   historyMenu: 'Historial',
@@ -100,6 +108,7 @@ export const messages = {
   collabAnnFailed: 'La sesión en vivo no pudo conectarse',
 
   // ── Validate / run results ──────────────────────────────────────────────
+  defaultInputsMetadataConflict: "Los metadatos del editor del flujo de trabajo tienen un formato incompatible. El borrador local se conserva; corrige los metadatos importados antes de guardar.",
   defaultInputsInvalidJson: 'Las entradas predeterminadas no son JSON válido.',
   validNode_one: '{{count}} nodo',
   validNode_other: '{{count}} nodos',
@@ -482,7 +491,10 @@ export const messages = {
   preflightFeatureDisabled: 'No activada',
   preflightFeatureEnableCta: 'Activar',
   preflightFeaturesNotice: 'Esta plantilla necesita que {{features}} esté activada en tu espacio de trabajo. Actívala primero; de lo contrario, los pasos que la usan fallarán cuando se ejecute el flujo.',
-  preflightZeroConfig: 'Funciona sin conexiones — listo para usar.',
+  preflightZeroConfig: 'No se necesitan cuentas conectadas',
+  preflightAccountUsage: 'Este flujo utiliza cuentas conectadas. Revisa la configuración de tus cuentas antes de ejecutarlo.',
+  preflightAccountUnknown: 'Puede que debas configurar cuentas. Revisa el flujo antes de ejecutarlo.',
+  preflightReviewConnections: 'Revisar conexiones',
   preflightInputsTitle: 'Entradas',
   preflightInputsBlurb: 'Complétalos ahora: se fijan en el flujo al copiarlo y luego puedes editarlos en el builder.',
   preflightConfirm: 'Agregar a mis flujos de trabajo',
@@ -493,9 +505,9 @@ export const messages = {
   templateAsksQuestions_other: 'Hace {{count}} preguntas',
   aliasHint: 'Incluye pasos genéricos que funcionan con {{brand}} a través de una conexión.',
   startHereTitle: 'Empieza aquí',
-  startHereHint: 'Estos funcionan sin conexiones — prueba uno ahora.',
+  startHereHint: 'Estas plantillas no necesitan cuentas conectadas. Revisa sus datos y configuración antes de ejecutarlas.',
   allTemplatesTitle: 'Todas las plantillas',
-  zeroConnectionsChip: 'Sin conexiones',
+  zeroConnectionsChip: 'No se necesitan cuentas conectadas',
   templateCategoryAll: 'Todas las categorías',
   templateCategoryFilterLabel: 'Filtrar plantillas por categoría',
   preRunConnsHeading_one: '{{count}} conexión por configurar.',

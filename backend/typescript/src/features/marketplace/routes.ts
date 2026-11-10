@@ -11,6 +11,7 @@
  *   GET  /pack-enablement                           workspace's disabled packs (toggle + authed)
  *   PUT  /pack-enablement/:packName {enabled}       curate availability (toggle + authed, own workspace)
  *   POST /install  {packName, version}              install (toggle + SUPERADMIN)
+ *   POST /skills/import[/preview], GET /skills/imported   SKILL.md import (ADR 1044 — skillImportRoutes.ts)
  *   GET  /orgs/:orgId/listings/:packName/reviews    reviews list (workspace:read)
  *   POST /orgs/:orgId/listings/:packName/reviews    upsert review (workspace:write)
  *   DEL  /orgs/:orgId/listings/:packName/reviews/:id delete review (author|admin)
@@ -50,6 +51,7 @@ import { listRegisteredWorkflows } from '../../host/workflowsRegistry.js';
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { certifyConnectionPack } from './certService.js';
+import { registerSkillImportRoutes } from './skillImportRoutes.js';
 
 const log = createLogger('features.marketplace');
 
@@ -497,6 +499,10 @@ export function registerMarketplaceRoutes(deps: RouteDeps): void {
       });
     } catch (err) { next(err); }
   });
+
+  // ── ADR 1044: SKILL.md import (sub-toggle + workspace admin; tenant-local) ──
+  // The same authority predicate as bundle activation, passed in, not copied.
+  registerSkillImportRoutes(deps, canManageBundles);
 
   // ── Phase 3: reviews / ratings (org-scoped RBAC; the only new store) ──
 

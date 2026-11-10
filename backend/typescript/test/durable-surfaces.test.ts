@@ -1,4 +1,17 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+/**
+ * The durable host surfaces and the Storage primitives under them (Phase 2, RFC 0016 / 0019
+ * surfaces, ADR 0868 paging): `kvCompareAndSwap` and `kvCompareAndDelete` are what make
+ * `OPENWOP_SURFACE_*=durable` correct across instances, and a table row or cache key is
+ * scoped to its tenant. A lost compare, a shared key range or a cache that shares the kv
+ * keyspace is one tenant reading or overwriting another's data.
+ *
+ * Red when (sabotage-witnessed): the swap skips its compare; the conditional delete skips
+ * its value or reports a removal it did not make; the cache shares the `kv` root, always
+ * hits, loses its default TTL or does not evict; insert skips the schema check; the row key
+ * drops the tenant or the table; update or upsert misreport; the cursor or the filter goes;
+ * count stops counting.
+ */
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import type { CacheSurface, TableSurface } from '../src/host/inMemorySurfaces.js';
@@ -14,6 +27,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  _setDurableStorageForTesting(null);
   await storage.close();
 });
 
@@ -61,11 +75,14 @@ describe('durable cache surface', () => {
     const got = await cache.get({ key: 'm' }) as { hit: boolean; value: unknown; ttlRemainingMs: number | null };
     expect(got.hit).toBe(true);
     expect(got.value).toEqual({ a: 1 });
-    expect(got.ttlRemainingMs).toBeGreaterThan(0); // default 60s ttl
+    // The default 60 s TTL, read back with room for a slow run.
+    expect(got.ttlRemainingMs).toBeGreaterThan(50_000);
+    expect(got.ttlRemainingMs).toBeLessThanOrEqual(60_000);
   });
 
   it('evicts', async () => {
     await cache.put({ key: 'e', value: 1 });
+    expect((await cache.get({ key: 'e' }) as { hit: boolean }).hit).toBe(true);
     await cache.evict({ key: 'e' });
     expect((await cache.get({ key: 'e' }) as { hit: boolean }).hit).toBe(false);
   });
@@ -80,11 +97,17 @@ describe('durable cache surface', () => {
 });
 
 describe('durable table surface', () => {
-  const table: TableSurface = createDurableTable({ tenantId: 'tbl-t' });
-
-  it('insert declares schema; conforming inserts pass, violations throw', async () => {
+  // Each case owns a tenant: u1 + u2, written through `insert`, which declares the schema.
+  let seq = 0;
+  let table: TableSurface;
+  beforeEach(async () => {
+    table = createDurableTable({ tenantId: `tbl-${seq++}` });
     await table.insert({ table: 'users', row: { id: 'u1', name: 'Ada', age: 36 } });
     await table.insert({ table: 'users', row: { id: 'u2', name: 'Linus', age: 54 } });
+  });
+
+  it('insert declares schema; conforming inserts pass, violations throw', async () => {
+    await expect(table.count({ table: 'users' })).resolves.toEqual({ count: 2 });
     await expect(
       table.insert({ table: 'users', row: { id: 'u3', name: 'X', age: 'not-a-number' } }),
     ).rejects.toThrow(/declared as 'number'/);
@@ -116,7 +139,7 @@ describe('durable table surface', () => {
   });
 
   it('isolates tenants and tables', async () => {
-    const other = createDurableTable({ tenantId: 'tbl-other' });
+    const other = createDurableTable({ tenantId: `tbl-other-${seq}` });
     await other.insert({ table: 'users', row: { id: 'x1', name: 'Z', age: 9 } });
     expect(await table.count({ table: 'users' })).toEqual({ count: 2 }); // unchanged by other tenant
     expect(await table.count({ table: 'orders' })).toEqual({ count: 0 }); // different table

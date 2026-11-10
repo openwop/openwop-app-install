@@ -14,10 +14,17 @@
  *     check. (A draft brief of THIS client can still be granted by id through
  *     the route; it reads dark to the collaborator until approved, P2.)
  *
- * Sabotage notes (2026-10-28), each red when applied alone:
+ * Sabotage notes (2026-10-28, re-measured w78), each red when applied alone:
  *   - drop the approved filter on the brief list → the draft is offered (red);
  *   - drop the `systemMintOnly` skip → the change-set kind appears (red);
- *   - list campaigns without the org → the other client's campaign appears (red).
+ *   - the campaign `exists`/brief `exists` answering true → the other client's
+ *     brief is granted (red); the route on `workspace:read` → the viewer gets
+ *     the picker (red); no toggle check → the picker answers with it off (red).
+ * CORRECTED (w78): "list campaigns without the org → red" was false. The
+ * campaign kind's `list` passes `orgId` to `listCampaigns` AND re-filters
+ * `c.orgId === orgId`, so dropping either alone stays green (probed). That is a
+ * double guard; dropping both in one edit reds. The brief list is the same
+ * shape (`listBriefs` prefix + exact filter), also red only when both go.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -65,8 +72,6 @@ function client() {
   };
   return { get: <T>(p: string) => call<T>('GET', p), post: <T>(p: string, b?: unknown) => call<T>('POST', p, b), put: <T>(p: string, b?: unknown) => call<T>('PUT', p, b), patch: <T>(p: string, b?: unknown) => call<T>('PATCH', p, b), del: <T>(p: string) => call<T>('DELETE', p) };
 }
-
-
 
 let n = 0;
 async function setup() {
@@ -126,7 +131,9 @@ describe('ADR 0958 matrix row 10 — what the Collaborators panel may offer', ()
 
   it('never offers a kind only the feature may mint, even one that can list itself', async () => {
     // The portal's change-set kind has no `list`, so it would be left out anyway;
-    // this kind lists, so only the systemMintOnly skip keeps it out.
+    // this kind lists, so only the systemMintOnly skip keeps it out. The kind
+    // registry is module-level, so it stays registered for later cases; being
+    // system-only, it is skipped there too.
     registerGrantResourceKind('test-system-only', {
       featureId: null, actions: ['view'], systemMintOnly: true,
       async exists() { return true; }, async project() { return null; },
@@ -146,10 +153,14 @@ describe('ADR 0958 matrix row 10 — what the Collaborators panel may offer', ()
     await createMember({ orgId: s.orgId, tenantId: s.tenantId, displayName: 'Viewer', subject: vl.body.user.userId, roles: ['viewer'] });
     expect((await viewer.post(`/host/openwop-app/workspaces/${encodeURIComponent(s.tenantId)}/switch`)).status).toBe(200);
     expect((await viewer.get(s.A)).status).toBe(200); // control: the viewer can read the client
-    expect((await viewer.get(`${s.C}/grantable`)).status).toBe(403);
+    const refused = await viewer.get<{ error: string }>(`${s.C}/grantable`);
+    expect(refused.status).toBe(403);
+    expect(refused.body.error).toBe('forbidden_scope');
     await setToggle('campaign-ops.external-collab', false);
     try {
-      expect((await s.admin.get(`${s.C}/grantable`)).status).toBe(404);
+      const dark = await s.admin.get<{ error: string; message: string }>(`${s.C}/grantable`);
+      expect(dark.status).toBe(404);
+      expect(dark.body).toMatchObject({ error: 'not_found', message: 'External collaborators is not enabled for this tenant.' });
     } finally { await setToggle('campaign-ops.external-collab', true); }
   });
 });

@@ -48,7 +48,7 @@ export function registerCampaignAutopilotRoutes(deps: RouteDeps): void {
       const actingUserId = req.userId ?? req.principal?.principalId;
       if (!actingUserId) throw new OpenwopError('unauthenticated', 'Sign in to launch a campaign.', 401, {});
       const campaign = await loadCampaignScoped(req, 'workspace:write');
-      const out = await launchAutopilot({ storage: deps.storage, hostSuite: deps.hostSuite }, { tenantId: tenantOf(req), campaign, actingUserId });
+      const out = await launchAutopilot({ storage: deps.storage, hostSuite: deps.hostSuite }, { tenantId: tenantOf(req), campaign, actingUserId, ...(req.body?.ai !== undefined ? { ai: req.body.ai } : {}) });
       res.status(out.reused ? 200 : 201).json(out);
     } catch (err) { next(err); }
   });

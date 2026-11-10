@@ -11,6 +11,19 @@
  * expiry) is the spec's `ClarificationResume`, an ask from untrusted context
  * is restricted with or without an acting person, and injected text in a
  * choice stays inside the fence.
+ *
+ * Sabotage-witnessed (wave 81): each cap raised by one (questions, choices,
+ * question and choice length), the id pattern widened, the duplicate-id check
+ * dropped, the schema-keyword allowlist emptied, the bidi strip skipped, the
+ * digest reduced to the first id, the round dropped from the key, either secret
+ * scrub skipped, the resume schema's `additionalProperties`, `minItems`, id
+ * `const` or `\S` pattern removed, the no-answer value changed, the parse
+ * choice check dropped, the answer fence removed, the "do not guess" line
+ * dropped, the prompt block's zero-round or plural branch broken, the contract
+ * generated from a literal instead of the caps, and each restriction branch
+ * (untrusted context, approverRefs, profile) disabled.
+ * Ceiling: dropping the `context` bag is structural (`clarificationDataOf`
+ * builds a new object), so no single edit can leak it; the case pins it anyway.
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -55,14 +68,22 @@ describe('liftClarification (ADR 1001 D2)', () => {
   });
 
   it('enforces the caps on questions, choices and lengths', () => {
-    const six = Array.from({ length: 6 }, (_, i) => ({ id: `q${i}`, question: 'x?' }));
-    expect(liftClarification({ questions: six }).ok).toBe(false);
-    const nine = Array.from({ length: 9 }, (_, i) => `c${i}`);
-    expect(liftClarification({ questions: [{ id: 'q', question: 'x?', schema: { type: 'string', enum: nine } }] }).ok).toBe(false);
-    expect(liftClarification({ questions: [{ id: 'q', question: 'x'.repeat(501) }] }).ok).toBe(false);
-    expect(liftClarification({ questions: [{ id: 'q', question: 'x?', schema: { type: 'string', enum: ['a', 'b'.repeat(121)] } }] }).ok).toBe(false);
-    expect(liftClarification({ questions: [{ id: 'bad id', question: 'x?' }] }).ok).toBe(false);
-    expect(liftClarification({ questions: [{ id: 'q', question: 'a?' }, { id: 'q', question: 'b?' }] }).ok).toBe(false);
+    const refused = (payload: unknown, reason: string) =>
+      expect(liftClarification(payload)).toEqual({ ok: false, reason: expect.stringContaining(reason) });
+    const qs = (count: number) => Array.from({ length: count }, (_, i) => ({ id: `q${i}`, question: 'x?' }));
+    const choices = (count: number) => Array.from({ length: count }, (_, i) => `c${i}`);
+    // Spaced text, so the secret scrub never shortens it before the length check.
+    const words = (len: number) => 'ab '.repeat(len).slice(0, len - 1) + 'z';
+    expect(liftClarification({ questions: qs(5) }).ok).toBe(true);
+    refused({ questions: qs(6) }, 'at most 5 questions');
+    expect(liftClarification({ questions: [{ id: 'q', question: 'x?', schema: { type: 'string', enum: choices(8) } }] }).ok).toBe(true);
+    refused({ questions: [{ id: 'q', question: 'x?', schema: { type: 'string', enum: choices(9) } }] }, 'at most 8 choices');
+    expect(liftClarification({ questions: [{ id: 'q', question: words(500) }] }).ok).toBe(true);
+    refused({ questions: [{ id: 'q', question: words(501) }] }, "question 'q' is longer than 500 characters");
+    expect(liftClarification({ questions: [{ id: 'q', question: 'x?', schema: { type: 'string', enum: ['a', words(120)] } }] }).ok).toBe(true);
+    refused({ questions: [{ id: 'q', question: 'x?', schema: { type: 'string', enum: ['a', words(121)] } }] }, 'a choice is longer than 120 characters');
+    refused({ questions: [{ id: 'bad id', question: 'x?' }] }, 'each question id must be 1-64 characters');
+    refused({ questions: [{ id: 'q', question: 'a?' }, { id: 'q', question: 'b?' }] }, "question id 'q' is repeated");
   });
 
   it('drops the open context bag and strips bidi overrides from the text a person reads', () => {
@@ -127,6 +148,17 @@ describe('parseClarificationResume + clarificationAnswerMessage (ADR 1001 D4)', 
     expect(parseClarificationResume(null, qs)).toEqual({ kind: 'unanswered' });
     expect(parseClarificationResume({ answers: [{ id: 'region', answer: 'MARS' }, { id: 'confirm', answer: true }, { id: 'note', answer: 'x' }] }, qs).kind).toBe('unanswered');
     expect(parseClarificationResume({ answers: [] }, qs)).toEqual({ kind: 'unanswered' });
+    // Every other branch: swapped ids, a non-boolean for yes/no, a blank
+    // and an over-length free-text answer (2001 code points).
+    const ok = [{ id: 'region', answer: 'EMEA' }, { id: 'confirm', answer: true }, { id: 'note', answer: 'x' }];
+    expect(parseClarificationResume({ answers: ok }, qs).kind).toBe('answers');
+    // Ids swapped where every value still fits its slot's type, so only the id
+    // check can refuse it ('EMEA' is a valid choice for slot 1, 'x' valid text for slot 3).
+    expect(parseClarificationResume({ answers: [{ id: 'note', answer: 'EMEA' }, ok[1], { id: 'region', answer: 'x' }] }, qs)).toEqual({ kind: 'unanswered' });
+    expect(parseClarificationResume({ answers: [ok[0], { id: 'confirm', answer: 'yes' }, ok[2]] }, qs)).toEqual({ kind: 'unanswered' });
+    expect(parseClarificationResume({ answers: [ok[0], ok[1], { id: 'note', answer: '   ' }] }, qs)).toEqual({ kind: 'unanswered' });
+    expect(parseClarificationResume({ answers: [ok[0], ok[1], { id: 'note', answer: 'é'.repeat(2001) }] }, qs)).toEqual({ kind: 'unanswered' });
+    expect(parseClarificationResume({ answers: [ok[0], ok[1], { id: 'note', answer: 'é'.repeat(2000) }] }, qs).kind).toBe('answers');
   });
 
   it('fences the answers, and a choice carrying a fake fence end cannot close it early', () => {
@@ -160,13 +192,22 @@ describe('clarificationPromptBlock (ADR 1001 D5, ADR 1006)', () => {
 describe('the ask-user tool contract (ADR 1006)', () => {
   it('is generated from the caps the lift enforces, so a call at the limit is accepted and one past it is refused', () => {
     const L = CLARIFICATION_LIMITS;
-    const q = (askUserContract().inputSchema as { properties: { questions: { maxItems: number; items: { properties: { question: { maxLength: number }; schema: { properties: { enum: { maxItems: number } } } } } } } }).properties.questions;
-    expect(q.maxItems).toBe(L.maxQuestions);
-    expect(q.items.properties.question.maxLength).toBe(L.maxQuestionChars);
-    expect(q.items.properties.schema.properties.enum.maxItems).toBe(L.maxChoices);
+    // Read the generated schema by path (no cast): each value is compared with
+    // the cap the lift enforces.
+    const read = (...path: string[]): unknown => path.reduce<unknown>(
+      (o, k) => (o !== null && typeof o === 'object' && k in o ? Reflect.get(o, k) : undefined),
+      askUserContract().inputSchema,
+    );
+    const item = ['properties', 'questions', 'items', 'properties'];
+    expect(read('properties', 'questions', 'maxItems')).toBe(L.maxQuestions);
+    expect(read(...item, 'id', 'pattern')).toBe(L.idPattern.source);
+    expect(read(...item, 'question', 'maxLength')).toBe(L.maxQuestionChars);
+    expect(read(...item, 'schema', 'properties', 'enum', 'maxItems')).toBe(L.maxChoices);
+    expect(read(...item, 'schema', 'properties', 'enum', 'items', 'maxLength')).toBe(L.maxChoiceChars);
+    expect(read(...item, 'schema', 'properties', 'maxLength', 'maximum')).toBe(L.maxTextAnswerChars);
     const at = (count: number) => Array.from({ length: count }, (_, i) => ({ id: `q${i}`, question: `Q${i}?` }));
-    expect(liftClarification({ questions: at(q.maxItems) }).ok).toBe(true);
-    expect(liftClarification({ questions: at(q.maxItems + 1) }).ok).toBe(false);
+    expect(liftClarification({ questions: at(L.maxQuestions) }).ok).toBe(true);
+    expect(liftClarification({ questions: at(L.maxQuestions + 1) }).ok).toBe(false);
   });
 });
 

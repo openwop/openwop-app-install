@@ -46,10 +46,53 @@ describe('ChatPocket', () => {
 
   it('keeps the conversation mounted while closed (closing never discards the thread)', () => {
     panelProps.length = 0;
-    const { container } = render(<ChatPocket agentId="a" title="Helper" defaultOpen />);
+    render(<ChatPocket agentId="a" title="Helper" defaultOpen />);
+    // The pocket now lives in the existing body portal, outside render.container.
+    // Capture the actual nodes so the original hidden-but-mounted intent remains.
+    const pocket = screen.getByRole('dialog', { name: 'Helper' });
+    const composer = screen.getByRole('textbox', { name: 'composer' });
+    if (!(composer instanceof HTMLTextAreaElement)) throw new Error('composer is not a textarea');
+    fireEvent.change(composer, { target: { value: 'retained unsent draft' } });
     fireEvent.click(screen.getByRole('button', { name: /pocketClose:Helper/ }));
-    expect(container.querySelector('.chat-pocket')?.hasAttribute('hidden')).toBe(true);
-    expect(container.querySelector('textarea')).not.toBeNull();
+    expect(pocket.hasAttribute('hidden')).toBe(true);
+    expect(pocket.querySelector('textarea')).not.toBeNull();
+    expect(pocket.querySelector('textarea')).toBe(composer);
+    expect(composer.isConnected).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: /pocketAsk:Helper/ }));
+    expect(screen.getByRole('dialog', { name: 'Helper' })).toBe(pocket);
+    expect(screen.getByRole('textbox', { name: 'composer' })).toBe(composer);
+    expect(composer.value).toBe('retained unsent draft');
+  });
+
+  it('places both launcher and dialog outside the feature section that owns page-arrival motion', () => {
+    render(<main className="page-enter"><section aria-label="Feature content">
+      <ChatPocket agentId="store" title="Store Assistant" contextLabel="current client" />
+    </section></main>);
+    const feature = screen.getByRole('region', { name: 'Feature content' });
+    const launcher = screen.getByRole('button', { name: /pocketAsk:Store Assistant/ });
+    expect(feature.contains(launcher)).toBe(false);
+    expect(launcher.parentElement).toBe(document.body);
+    fireEvent.click(launcher);
+    const pocket = screen.getByRole('dialog', { name: 'Store Assistant' });
+    expect(feature.contains(pocket)).toBe(false);
+    expect(pocket.parentElement).toBe(document.body);
+    expect(pocket.getAttribute('aria-modal')).toBe('false');
+    expect(panelProps.at(-1)).toMatchObject({ agentId: 'store', density: 'pocket', contextLabel: 'current client' });
+    // Structural portal proof only: jsdom cannot establish physical geometry.
+  });
+
+  it('default-open portal close restores the real launcher focus and unmount removes its chrome', () => {
+    const { unmount } = render(<section aria-label="Feature content"><ChatPocket agentId="a" title="Helper" defaultOpen /></section>);
+    const pocket = screen.getByRole('dialog', { name: 'Helper' });
+    const composer = screen.getByRole('textbox', { name: 'composer' });
+    expect(document.activeElement).toBe(composer);
+    fireEvent.click(screen.getByRole('button', { name: /pocketClose:Helper/ }));
+    const launcher = screen.getByRole('button', { name: /pocketAsk:Helper/ });
+    expect(document.activeElement).toBe(launcher);
+    expect(pocket.hasAttribute('hidden')).toBe(true);
+    unmount();
+    expect(pocket.isConnected).toBe(false);
+    expect(launcher.isConnected).toBe(false);
   });
 
   it('toggles with Mod+J', () => {

@@ -22,6 +22,7 @@ import { mergeOpenInterrupts, removeInterruptByNode } from '../lib/interruptReso
 import { isRecord } from '../lib/typeGuards.js';
 import type { ChatMessage, ChatSession, WorkflowRunState } from '../types.js';
 import { isInterruptResolvedEvent } from '../lib/interruptResolvedEvent';
+import { readSkippedTerminals } from '../lib/skippedTerminals.js';
 
 /** Dependencies the workflow-run SSE handler closes over. Threaded through
  *  instead of capturing the whole `session` so the handler can live outside
@@ -102,6 +103,7 @@ export async function reconcileWorkflowRunFromLog(
   const outputs: Record<string, unknown> = {};
   let terminal: 'completed' | 'failed' | 'cancelled' | null = null;
   let runOutputs: Record<string, unknown> | undefined;
+  let skippedTerminals: string[] | undefined;
   let runError: { code: string; message: string } | undefined;
   for (const ev of events) {
     const payload = (ev.payload as Record<string, unknown>) ?? {};
@@ -116,6 +118,7 @@ export async function reconcileWorkflowRunFromLog(
     } else if (ev.type === 'run.completed') {
       terminal = 'completed';
       runOutputs = (payload.outputs as Record<string, unknown>) ?? undefined;
+      skippedTerminals = readSkippedTerminals(payload);
     } else if (ev.type === 'run.failed') {
       terminal = 'failed';
       const err = (payload.error as Record<string, string>) ?? {};
@@ -152,6 +155,7 @@ export async function reconcileWorkflowRunFromLog(
             ...m.workflowRun,
             status: terminalStatus,
             ...(runOutputs ? { outputs: runOutputs } : {}),
+            ...(skippedTerminals ? { skippedTerminals } : {}),
             ...(runError ? { error: runError } : {}),
           },
         };
@@ -399,6 +403,7 @@ export function makeWorkflowRunHandlers(
         void reconcileWorkflowRunFromLog(ctx);
       } else if (ev.type === 'run.completed') {
         const outputs = (payload.outputs as Record<string, unknown>) ?? undefined;
+        const skippedTerminals = readSkippedTerminals(payload);
         // Inline setSession (rather than updateWorkflowRun) so we
         // can capture the finalized message and write it through to
         // the BE in the same step — without this, an @mention chat
@@ -414,6 +419,7 @@ export function makeWorkflowRunHandlers(
                 ...m.workflowRun,
                 status: 'completed',
                 ...(outputs ? { outputs } : {}),
+                ...(skippedTerminals ? { skippedTerminals } : {}),
               },
             };
             finalized = updated;

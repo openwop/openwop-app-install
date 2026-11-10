@@ -44,6 +44,10 @@
  *
  * Tunables via env (defaults shown):
  *   OPENWOP_RATELIMIT_DISABLED=true               disables all checks
+ *   OPENWOP_RATELIMIT_CHANNEL_INBOUND_PER_MIN=600  per hosted channel connection
+ *                                                and per relay device (ADR 1042
+ *                                                D6, `enforceChannelInboundRateLimit`;
+ *                                                0 = off)
  *   OPENWOP_RATELIMIT_IP_REQS_PER_MIN=60         non-read (write-ish) requests
  *   OPENWOP_RATELIMIT_IP_READ_REQS_PER_MIN=600   GET/HEAD/OPTIONS; floored at the
  *                                                write budget so an operator who
@@ -89,11 +93,16 @@ interface Limits {
   /** MCP-1 (ADR 0087 OQ-2) — per-principal budget for inbound MCP `tools/call`,
    *  layered on the per-IP floor. Defaults to the per-IP request budget. */
   mcpPrincipalReqsPerMin: number;
+  /** ADR 1045 D2 — per-principal budget for inbound A2A run-starting methods
+   *  (`message/send`, `SendMessage`, `SendStreamingMessage`), on the per-IP floor. */
+  a2aPrincipalReqsPerMin: number;
   /** ADR 0771 — write budget per OPERATOR-CONFIGURED key, replacing the per-IP
    *  write bucket for that caller only. */
   keyWriteReqsPerMin: number;
   keyRunsPerDay: number;
   keyConcurrent: number;
+  /** ADR 1042 D6 — inbound deliveries per hosted channel connection / relay device. */
+  channelInboundPerMin: number;
 }
 
 /** Which specific limiter fired — carried in `details.reason` and mapped to the
@@ -106,10 +115,12 @@ type RateLimitReason =
   | 'session_concurrent'
   | 'ip_runs_per_day'
   | 'mcp_principal_rate'
+  | 'a2a_principal_rate'
   | 'key_write_rate'
   | 'api_key_rate'
   | 'key_runs_per_day'
-  | 'key_concurrent';
+  | 'key_concurrent'
+  | 'channel_inbound_rate';
 
 /** ADR 0395 — the operator system-health panel reads the EFFECTIVE limits
  *  (config, not counters); read-only, superadmin-gated at the route. */
@@ -144,6 +155,7 @@ function loadLimits(): Limits {
     // affordance; the MCP per-principal budget has its own env and must not shift
     // under it (MCP-1).
     mcpPrincipalReqsPerMin: n('OPENWOP_MCP_PRINCIPAL_REQS_PER_MIN', 60),
+    a2aPrincipalReqsPerMin: n('OPENWOP_A2A_PRINCIPAL_REQS_PER_MIN', 60),
     // ADR 0771. Tied to `forced`, unlike MCP: the harness that induces the
     // canonical 429 IS an operator-key caller, so a keyed bucket that ignored
     // FORCE would make `rate-limit-envelope` unable to ever see its 429.
@@ -153,6 +165,9 @@ function loadLimits(): Limits {
     keyRunsPerDay: n('OPENWOP_RATELIMIT_KEY_RUNS_PER_DAY', 5000),
     // ADR 0771 addendum 2. Not tied to `forced`, same as the day budget.
     keyConcurrent: n('OPENWOP_RATELIMIT_KEY_CONCURRENT', 50),
+    // ADR 1042 D6. Not tied to `forced` (a per-connection budget, not the REST
+    // harness's per-IP one). `0` turns it off.
+    channelInboundPerMin: n('OPENWOP_RATELIMIT_CHANNEL_INBOUND_PER_MIN', 600),
   };
 }
 
@@ -172,6 +187,7 @@ const RATE_LIMIT_SCOPE: Record<RateLimitReason, 'tenant' | 'route' | 'global' | 
   session_concurrent: 'tenant',
   // Per authenticated MCP principal (subject-scoped, like the per-session buckets).
   mcp_principal_rate: 'tenant',
+  a2a_principal_rate: 'tenant',
   // ADR 0771 — per operator-configured key.
   key_write_rate: 'key',
   api_key_rate: 'key',
@@ -179,6 +195,8 @@ const RATE_LIMIT_SCOPE: Record<RateLimitReason, 'tenant' | 'route' | 'global' | 
   key_runs_per_day: 'key',
   // ADR 0771 addendum 2 — in-flight runs of one operator-configured key.
   key_concurrent: 'key',
+  // ADR 1042 D6 — keyed on one hosted connection or one relay device.
+  channel_inbound_rate: 'key',
 };
 
 // ── State (all maps reset per process / cold start) ──
@@ -191,6 +209,11 @@ const ipReadTimes = new Map<string, number[]>();
 const keyWriteTimes = new Map<string, number[]>();
 /** MCP-1 — sliding-window per-principal `tools/call` timestamps (ms). */
 const mcpPrincipalReqTimes = new Map<string, number[]>();
+/** ADR 1045 D2 — keyed on tenant + principal (NUL-joined), so one principal id
+ *  acting in two workspaces does not share one budget. */
+const a2aPrincipalReqTimes = new Map<string, number[]>();
+/** ADR 1042 D6 — sliding-window inbound timestamps per channel bucket. */
+const channelInboundTimes = new Map<string, number[]>();
 
 function pruneWindow(times: number[], windowMs: number, now: number): number[] {
   const cutoff = now - windowMs;
@@ -339,6 +362,75 @@ export function enforceMcpPrincipalRateLimit(res: import('express').Response, pr
 }
 
 
+/**
+ * ADR 1045 D2 (CHAN-P6-2) — the A2A twin of {@link enforceMcpPrincipalRateLimit}:
+ * a per-PRINCIPAL budget on the A2A methods that start work, layered on the
+ * per-IP floor (a peer agent's IP is its gateway's, not its principal's). Same
+ * sliding 60 s window and canonical 429 envelope; its own bucket and reason
+ * (`a2a_principal_rate`) so an operator can tell which server a 429 came from.
+ * Returns `true` (429 already sent) when over budget. Same per-instance residual
+ * as the MCP limiter.
+ */
+export function enforceA2aPrincipalRateLimit(res: import('express').Response, tenantId: string, principalId: string): boolean {
+  if (process.env.OPENWOP_RATELIMIT_DISABLED === 'true') return false;
+  const limit = loadLimits().a2aPrincipalReqsPerMin;
+  if (limit === 0) return false;
+  const key = `${tenantId}\u0000${principalId}`;
+  const now = Date.now();
+  const times = pruneWindow(a2aPrincipalReqTimes.get(key) ?? [], 60_000, now);
+  if (times.length >= limit) {
+    const oldest = times[0]!;
+    log.warn('a2a principal rate limit hit', { recentCalls: times.length, limit });
+    rejectRateLimited(res, 'a2a_principal_rate', (oldest + 60_000 - now) / 1000);
+    return true;
+  }
+  times.push(now);
+  a2aPrincipalReqTimes.set(key, times);
+  return false;
+}
+
+/**
+ * ADR 1042 D6 — per-CONNECTION inbound budget for the messaging lanes (a hosted
+ * connection's public ingest, a relay device's inbound). The per-IP floor cannot
+ * do this: a provider delivers every tenant's webhooks from its own few IPs, and
+ * a relay device is one caller per user. Sliding 60 s window keyed by the caller-
+ * chosen `bucket` (`conn:<id>` / `relay:<id>`) — call it only AFTER the bucket is
+ * known to exist, so unknown ids cannot grow the map. Returns `true` (and sends
+ * the canonical 429 with `Retry-After`, logged as `rate_limited` reason
+ * `channel_inbound_rate`) when over budget; otherwise records the delivery.
+ * Per instance, like every limiter here.
+ */
+export function enforceChannelInboundRateLimit(res: import('express').Response, bucket: string): boolean {
+  const verdict = takeChannelInbound(bucket);
+  if (verdict.ok) return false;
+  sendChannelInboundRateLimited(res, verdict.retryAfterSeconds);
+  return true;
+}
+
+/** The decision half of `enforceChannelInboundRateLimit`, for a caller that maps
+ *  its own outcome (the hosted ingest decides AFTER signature verification, so a
+ *  forged flood cannot spend a real connection's budget). Records on admit. */
+export function takeChannelInbound(bucket: string): { ok: true } | { ok: false; retryAfterSeconds: number } {
+  if (process.env.OPENWOP_RATELIMIT_DISABLED === 'true') return { ok: true };
+  const limit = loadLimits().channelInboundPerMin;
+  if (limit === 0) return { ok: true };
+  const now = Date.now();
+  const times = pruneWindow(channelInboundTimes.get(bucket) ?? [], 60_000, now);
+  if (times.length >= limit) {
+    channelInboundTimes.set(bucket, times);
+    log.warn('channel inbound rate limit hit', { bucket, recent: times.length, limit });
+    return { ok: false, retryAfterSeconds: (times[0]! + 60_000 - now) / 1000 };
+  }
+  times.push(now);
+  channelInboundTimes.set(bucket, times);
+  return { ok: true };
+}
+
+/** The canonical 429 for a refused channel delivery (reason `channel_inbound_rate`). */
+export function sendChannelInboundRateLimited(res: import('express').Response, retryAfterSeconds: number): void {
+  rejectRateLimited(res, 'channel_inbound_rate', retryAfterSeconds);
+}
+
 /** `/.well-known/openwop` read — see the exemption in `ipRateLimitMiddleware`.
  *  GET/HEAD only, exact path only: the method gate is what stops a caller
  *  spending an unbounded budget by POSTing to the same URL. */
@@ -360,6 +452,9 @@ function isDiscoveryRead(req: Request): boolean {
  *    (review HIGH-1).
  * Keyed on a digest of the full token, not on `principalId`, which is the first
  * 8 characters and would merge two keys that share a prefix (review HIGH-2).
+ * CORRECTED 2026-11-05 (ADR 1045, TST-FUD-GC-1): `principalId` is now itself a
+ * digest of the full key, so it no longer merges; this bucket keeps its own
+ * 24-hex digest (a separate id space, unchanged so live buckets carry over).
  * This middleware runs after `authMiddleware` (index.ts), so the principal is
  * verified. Moved before auth, it would read nothing and fall back to the IP.
  */
@@ -636,6 +731,8 @@ export function _resetRateLimitState(): void {
   ipReadTimes.clear();
   keyWriteTimes.clear();
   mcpPrincipalReqTimes.clear();
+  a2aPrincipalReqTimes.clear();
+  channelInboundTimes.clear();
   runWindowEpoch += 1;
   _resetSharedRateLimitLocal();
   _resetAdmissionRefusals();

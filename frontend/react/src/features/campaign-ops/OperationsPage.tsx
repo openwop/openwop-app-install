@@ -16,6 +16,7 @@
  */
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { onAuthChange } from '../../client/config.js';
 import { Button } from '../../ui/Button.js';
 import { CheckboxField, SelectField, TextareaField, TextField } from '../../ui/Field.js';
 import { Notice } from '../../ui/Notice.js';
@@ -33,6 +34,8 @@ import {
   CampaignOpsError,
   type ClientAccount, type CampaignAsset, type ChangeRequest, type ChangeSet, type DiffEntry, type Job, type JobStep, type ExternalAgentsAccess,
 } from './campaignOpsClient.js';
+import { useClientRegistration } from './useClientRegistration.js';
+import { ClientRegistrationDialog } from './ClientRegistrationDialog.js';
 import { ChangeDiff } from './ChangeDiff.js';
 import { ClientApproversPanel, SendToClient } from './ClientApproval.js';
 
@@ -103,6 +106,8 @@ function OperationsInbox(): JSX.Element {
   const [clients, setClients] = useState<ClientAccount[] | null>(null);
   const [agencyAdmin, setAgencyAdmin] = useState(false);
   const [clientsFailed, setClientsFailed] = useState(false);
+  const [registrationOpen, setRegistrationOpen] = useState(false);
+  const [registeredName, setRegisteredName] = useState('');
   const [disabled, setDisabled] = useState(false);
   const [orgId, setOrgId] = useState('');
   const [reloadClients, setReloadClients] = useState(0);
@@ -110,22 +115,58 @@ function OperationsInbox(): JSX.Element {
   const [status, setStatus] = useLiveRegion();
   // `?view=` (the hub already owns `?tab=`): reload and share keep the view.
   const [tab, setTab] = useUrlTab<OpsTab>('view', OPS_TABS, 'requests');
+  const identityGeneration = useRef(0);
+  const renderedGeneration = identityGeneration.current;
+  const clientSelectionEpoch = useRef(0);
+  const renderedSelectionEpoch = clientSelectionEpoch.current;
   const orgRef = useRef(orgId);
   orgRef.current = orgId;
-  const clientStatus = useCallback((text: string) => { if (orgRef.current === orgId) setStatus(text); }, [orgId, setStatus]);
+  const clientStatus = useCallback((text: string) => {
+    if (identityGeneration.current === renderedGeneration && orgRef.current === orgId) setStatus(text);
+  }, [orgId, renderedGeneration, setStatus]);
+
+  const registrationCurrent = useCallback(() => identityGeneration.current === renderedGeneration, [renderedGeneration]);
+  const registrationLifecycle = useClientRegistration({
+    isCurrent: registrationCurrent,
+    onStart: () => setRegistrationOpen(false),
+    onRegistered: (added, created) => {
+      if (!registrationCurrent()) return;
+      setClients(cur => [...(cur ?? []).filter(c => c.orgId !== added.orgId), added]);
+      if (!created || clientSelectionEpoch.current === renderedSelectionEpoch) setOrgId(added.orgId);
+      setRegistrationOpen(false); setRegisteredName(created ? added.displayName : '');
+      setReloadClients(n => n + 1);
+    },
+    onAuthorityLost: () => { setAgencyAdmin(false); setReloadClients(n => n + 1); },
+  });
+  const resetRegistration = registrationLifecycle.reset;
+
+  useEffect(() => {
+    const unsubscribe = onAuthChange(() => {
+      // Invalidate synchronously: old promises/callbacks may settle before render.
+      identityGeneration.current += 1;
+      orgRef.current = '';
+      setClients(null); setAgencyAdmin(false); setClientsFailed(false); setDisabled(false);
+      resetRegistration(); setRegistrationOpen(false); setRegisteredName('');
+      setOrgId(''); setData(EMPTY_DATA); setStatus('');
+      setReloadClients(n => n + 1);
+    });
+    return () => { unsubscribe(); identityGeneration.current += 1; orgRef.current = ''; };
+  }, [setStatus, resetRegistration]);
 
   useEffect(() => {
     let cancelled = false;
+    const generation = identityGeneration.current;
     setClientsFailed(false);
+    setDisabled(false);
     void listClients()
       .then((out) => {
-        if (cancelled) return;
-        setClients(out.clients);
+        if (cancelled || generation !== identityGeneration.current) return;
+        setClients(out.clients); setRegisteredName('');
         setAgencyAdmin(out.agencyAdmin);
         setOrgId((cur) => (cur && out.clients.some((c) => c.orgId === cur) ? cur : (out.clients[0]?.orgId ?? '')));
       })
       .catch((e: unknown) => {
-        if (cancelled) return;
+        if (cancelled || generation !== identityGeneration.current) return;
         if (e instanceof CampaignOpsError && e.status === 404 && /not enabled/i.test(e.message)) { setDisabled(true); return; }
         setClientsFailed(true);
       });
@@ -135,10 +176,11 @@ function OperationsInbox(): JSX.Element {
   const client = useMemo(() => clients?.find((c) => c.orgId === orgId) ?? null, [clients, orgId]);
 
   const load = useCallback(async (forOrg: string): Promise<void> => {
+    const generation = identityGeneration.current;
     const [assets, requests, changeSets, jobs] = await Promise.allSettled([
       listAssets(forOrg), listRequests(forOrg), listChangeSets(forOrg), listJobs(forOrg),
     ]);
-    if (orgRef.current !== forOrg) return; // the operator switched clients meanwhile
+    if (generation !== identityGeneration.current || orgRef.current !== forOrg) return; // the operator switched clients meanwhile
     const listsOk = requests.status === 'fulfilled' && changeSets.status === 'fulfilled' && jobs.status === 'fulfilled';
     setData((prev) => ({
       assets: assets.status === 'fulfilled' ? assets.value : prev.assets,
@@ -151,38 +193,58 @@ function OperationsInbox(): JSX.Element {
     }));
   }, []);
 
-  const refresh = useCallback(() => { if (orgRef.current) void load(orgRef.current); }, [load]);
+  const refresh = useCallback(() => { if (identityGeneration.current === renderedGeneration && orgRef.current === orgId && orgId) void load(orgId); }, [load, orgId, renderedGeneration]);
 
   useEffect(() => {
     setData(EMPTY_DATA);
     if (!orgId) return undefined;
     void load(orgId);
-    const tick = (): void => { if (document.visibilityState === 'visible') void load(orgId); };
+    const generation = identityGeneration.current;
+    const tick = (): void => { if (generation === identityGeneration.current && orgRef.current === orgId && document.visibilityState === 'visible') void load(orgId); };
     const timer = window.setInterval(tick, POLL_MS);
     document.addEventListener('visibilitychange', tick);
     return () => { window.clearInterval(timer); document.removeEventListener('visibilitychange', tick); };
   }, [orgId, load]);
 
-  if (disabled) return <StateCard title={t('notEnabledTitle')} body={t('notEnabledBody')} />;
+  const openRegistration = (): void => { if (registrationCurrent() && !registrationLifecycle.isOwned()) setRegistrationOpen(true); };
+  const registration = registrationOpen && agencyAdmin && clients ? <ClientRegistrationDialog
+    clients={clients} isCurrent={registrationCurrent} onClose={() => setRegistrationOpen(false)}
+    onSubmit={registrationLifecycle.submit} /> : null;
+  const registrationStatus = <>
+    {registrationLifecycle.operation ? registrationLifecycle.operation.phase === 'pending'
+      ? <Notice variant="info" announce={t('registrationPending')}>{t('registrationPending')}</Notice>
+      : <Notice variant="error" announce={registrationLifecycle.operation.error || t('registrationUncertain')}>
+        {registrationLifecycle.operation.error || t('registrationUncertain')}{' '}
+        <Button disabled={registrationLifecycle.operation.checking} onClick={registrationLifecycle.recheck}>{t('registrationCheck')}</Button>
+      </Notice> : null}
+    {registrationLifecycle.error ? <Notice variant="error" announce={registrationLifecycle.error}>{registrationLifecycle.error}</Notice> : null}
+  </>;
+
+  if (disabled) return <StateCard title={t('notEnabledTitle')} body={t('notEnabledBody')} action={<Button onClick={() => setReloadClients(n => n + 1)}>{t('retry')}</Button>} />;
   if (clientsFailed) {
-    return <StateCard announce title={t('loadFailedTitle')} body={t('loadFailedBody')} action={<Button onClick={() => setReloadClients((n) => n + 1)}>{t('retry')}</Button>} />;
+    return <>{registrationStatus}<StateCard announce title={t('loadFailedTitle')} body={registeredName ? t('registrationRefreshFailed', { name: registeredName }) : t('loadFailedBody')} action={<Button onClick={() => setReloadClients((n) => n + 1)}>{t('retry')}</Button>} /></>;
   }
   if (clients === null) return <StateCard loading title={t('loading')} />;
-  if (clients.length === 0) return <StateCard title={t('noClientsTitle')} body={t('noClientsBody')} />;
+  if (clients.length === 0) return <>{registrationStatus}<StateCard title={t('noClientsTitle')} body={t('noClientsBody')}
+    {...(agencyAdmin ? { action: <Button disabled={Boolean(registrationLifecycle.operation)} onClick={openRegistration}>{t('addClient')}</Button> } : {})} />{registration}</>;
 
   return (
     <section className="u-grid u-gap-4" aria-labelledby="campaign-ops-title" data-walkthrough="campaign-ops.page">
       <h2 id="campaign-ops-title" className="sr-only">{t('title')}</h2>
       <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">{status}</p>
 
+      {agencyAdmin ? <div className="action-bar"><Button disabled={Boolean(registrationLifecycle.operation)} onClick={openRegistration}>{t('addClient')}</Button></div> : null}
+      {registrationStatus}
+      {registration}
       <ClientBar
         key={orgId}
         clients={clients}
         client={client}
         orgId={orgId}
-        onSelect={setOrgId}
+        onSelect={(nextOrg) => { clientSelectionEpoch.current += 1; setOrgId(nextOrg); }}
         agencyAdmin={agencyAdmin}
         onModeChanged={(updated) => {
+          if (identityGeneration.current !== renderedGeneration || orgRef.current !== orgId) return;
           setClients((cur) => cur?.map((c) => (c.orgId === updated.orgId ? updated : c)) ?? cur);
           setStatus(t(`modeChanged_${updated.mode}`, { name: updated.displayName }));
         }}
@@ -214,10 +276,10 @@ function OperationsInbox(): JSX.Element {
           <TabPanel idBase="campaign-ops" tabId={tab}>
             {tab === 'requests' ? (
               <div className="u-grid u-gap-4">
-                <Composer key={orgId} orgId={orgId} assets={data.assets} assetsFailed={data.assetsFailed} onStatus={setStatus} onDone={refresh} />
+                <Composer key={orgId} orgId={orgId} assets={data.assets} assetsFailed={data.assetsFailed} onStatus={clientStatus} onDone={refresh} />
                 {data.failed ? <Notice variant="warning" announce={t('listsFailed')}>{t('listsFailed')}</Notice> : null}
                 {!data.loaded && !data.failed ? <StateCard loading title={t('loading')} /> : null}
-                {data.loaded ? <Columns orgId={orgId} clientApproves={client?.approvalPolicy === 'client'} data={data} onStatus={setStatus} onDone={refresh} /> : null}
+                {data.loaded ? <Columns orgId={orgId} clientApproves={client?.approvalPolicy === 'client'} data={data} onStatus={clientStatus} onDone={refresh} /> : null}
               </div>
             ) : (
               <Suspense fallback={<StateCard loading title={t('loading')} />}>

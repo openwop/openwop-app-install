@@ -116,6 +116,9 @@ import type { HostAdapterSuite } from '../src/host/index.js';
 import { createHmac } from 'node:crypto';
 import { beginAuthorization, consumePendingAuth } from '../src/features/connections/oauthFlow.js';
 
+/** ADR 1035 — these cases test selection, not a destination: a host-fixed egress. */
+const FIXED = { fixedEndpoint: 'test: selection only' } as const;
+
 const C = '/host/openwop-app/connections';
 let server: Server;
 let BASE = '';
@@ -198,6 +201,12 @@ beforeAll(async () => {
   await createMember({ orgId: WS, tenantId: WS, displayName: 'Viewer', subject: userIdFor(WS, VIEWER), roles: ['viewer'] });
   await createMember({ orgId: WS, tenantId: WS, displayName: 'Other', subject: userIdFor(WS, OTHER), roles: ['editor'] });
   await createMember({ orgId: WS, tenantId: WS, displayName: 'Connector', subject: userIdFor(WS, CONNECTOR), roles: ['editor'] });
+  // CHAN-F1 — the D3 race legs resolve their own connection in WS, and the broker
+  // now withholds every connection from someone who is not (or is no longer) a
+  // member of a shared workspace. These owners are members, as a real one is.
+  for (const subject of ['user:b780-race-1', 'user:b780-race-1b', 'user:b780-race-2', 'user:b780-race-2b', 'user:b780-gen', 'user:b780-gen-new', 'user:b780-gen-legacy', 'user:b780-newer-expired', 'user:b780-fail-after-reconsent']) {
+    await createMember({ orgId: WS, tenantId: WS, displayName: subject, subject, roles: ['editor'] });
+  }
 });
 
 afterAll(async () => {
@@ -295,10 +304,10 @@ describe('ADR 0780 D2 — the same human by every spelling, and nobody else', ()
     const org = await call(C, admin, 'POST', { provider: 'sendgrid', kind: 'api_key', secret: 'SG.org-key-12345', scope: 'org' });
     expect(org.status, JSON.stringify(org.body)).toBe(201);
     // The member row is keyed `user:<id>`; the run carries the legacy principal.
-    const r = await resolveConnectionCredential({ tenantId: WS, provider: 'sendgrid', actingUserId: ADMIN });
+    const r = await resolveConnectionCredential({ egress: FIXED,  tenantId: WS, provider: 'sendgrid', actingUserId: ADMIN });
     expect(r?.secret).toBe('SG.org-key-12345');
     // Refuse side: a non-holder under the same shape gets nothing.
-    expect(await resolveConnectionCredential({ tenantId: WS, provider: 'sendgrid', actingUserId: VIEWER })).toBeNull();
+    expect(await resolveConnectionCredential({ egress: FIXED,  tenantId: WS, provider: 'sendgrid', actingUserId: VIEWER })).toBeNull();
   });
 
   it('leg 7: a `user:` actor does NOT alias outside its home tenant (principals are not issuer-qualified)', async () => {
@@ -308,10 +317,10 @@ describe('ADR 0780 D2 — the same human by every spelling, and nobody else', ()
     const principal = 'oidc:b780-roaming';
     const { userId } = await createUser({ tenantId: home, principalId: principal });
     await createSecretConnection({ tenantId: WS, provider: 'openai-images', kind: 'api_key', secret: 'el-roaming-key-1', scope: 'user', userId: principal });
-    expect(await resolveConnectionCredential({ tenantId: WS, provider: 'openai-images', actingUserId: userId })).toBeNull();
+    expect(await resolveConnectionCredential({ egress: FIXED,  tenantId: WS, provider: 'openai-images', actingUserId: userId })).toBeNull();
     // In its HOME tenant the alias still holds (#4215).
     await createSecretConnection({ tenantId: home, provider: 'openai-images', kind: 'api_key', secret: 'el-home-key-123', scope: 'user', userId: principal });
-    expect((await resolveConnectionCredential({ tenantId: home, provider: 'openai-images', actingUserId: userId }))?.secret).toBe('el-home-key-123');
+    expect((await resolveConnectionCredential({ egress: FIXED,  tenantId: home, provider: 'openai-images', actingUserId: userId }))?.secret).toBe('el-home-key-123');
   });
 
   it('leg 7b: two IdPs, one `scim:jsmith` string, a shared workspace — X never gets T\'s jsmith', async () => {
@@ -320,7 +329,7 @@ describe('ADR 0780 D2 — the same human by every spelling, and nobody else', ()
     const homeX = 'user:b780-idp-a-home';
     const { userId: x } = await createUser({ tenantId: homeX, principalId: 'scim:jsmith' });
     const theirs = await createSecretConnection({ tenantId: WS, provider: 'heygen', kind: 'api_key', secret: 'hg-t-jsmith-key1', scope: 'user', userId: 'scim:jsmith' });
-    expect(await resolveConnectionCredential({ tenantId: WS, provider: 'heygen', actingUserId: x }), 'a run as X in T must resolve NO credential').toBeNull();
+    expect(await resolveConnectionCredential({ egress: FIXED,  tenantId: WS, provider: 'heygen', actingUserId: x }), 'a run as X in T must resolve NO credential').toBeNull();
     await eraseSubjectConnections(WS, x);
     expect(await getConnection(WS, theirs.connectionId), 'erasing X must leave T\'s jsmith intact').not.toBeNull();
     expect(await resolveSecret(`connection:${theirs.connectionId}`, { tenantId: WS })).not.toBeNull();
@@ -332,7 +341,7 @@ describe('ADR 0780 D3 — revoke means revoked', () => {
     const conn = await upsertOAuthConnection({ tenantId: WS, provider: 'slack', userId: 'user:b780-race-1', tokens: expiredOAuth('at-old') });
     let release!: () => void;
     egress.gate = new Promise<void>((r) => { release = r; });
-    const resolving = resolveConnectionCredential({ tenantId: WS, provider: 'slack', actingUserId: 'user:b780-race-1' });
+    const resolving = resolveConnectionCredential({ egress: FIXED,  tenantId: WS, provider: 'slack', actingUserId: 'user:b780-race-1' });
     await vi.waitFor(() => expect(egress.calls).toBeGreaterThan(0));
     expect(await revokeConnection(WS, conn.connectionId)).toBe(true);
     release();
@@ -348,7 +357,7 @@ describe('ADR 0780 D3 — revoke means revoked', () => {
       if (ref === `connection:${conn.connectionId}`) await revokeConnection(WS, conn.connectionId);
     };
     try {
-      expect(await resolveConnectionCredential({ tenantId: WS, provider: 'slack', actingUserId: 'user:b780-race-1b' })).toBeNull();
+      expect(await resolveConnectionCredential({ egress: FIXED,  tenantId: WS, provider: 'slack', actingUserId: 'user:b780-race-1b' })).toBeNull();
     } finally {
       secretFault.beforeSet = null;
     }
@@ -382,7 +391,7 @@ describe('ADR 0780 D3 — revoke means revoked', () => {
     let release!: () => void;
     egress.gate = new Promise<void>((r) => { release = r; });
     const calls = egress.calls;
-    const resolving = resolveConnectionCredential({ tenantId: WS, provider: 'slack', actingUserId: owner });
+    const resolving = resolveConnectionCredential({ egress: FIXED,  tenantId: WS, provider: 'slack', actingUserId: owner });
     await vi.waitFor(() => expect(egress.calls).toBeGreaterThan(calls));
     const fresh = { ...expiredOAuth('at-reconsented'), expiresAt: new Date(Date.now() + 3_600_000).toISOString() };
     const again = await upsertOAuthConnection({ tenantId: WS, provider: 'slack', userId: owner, tokens: fresh });
@@ -390,7 +399,7 @@ describe('ADR 0780 D3 — revoke means revoked', () => {
     release();
     egress.gate = null;
     await resolving;
-    const now = await resolveConnectionCredential({ tenantId: WS, provider: 'slack', actingUserId: owner });
+    const now = await resolveConnectionCredential({ egress: FIXED,  tenantId: WS, provider: 'slack', actingUserId: owner });
     expect(now?.secret).toBe('at-reconsented');
   });
 
@@ -400,7 +409,7 @@ describe('ADR 0780 D3 — revoke means revoked', () => {
     let release!: () => void;
     egress.gate = new Promise<void>((r) => { release = r; });
     const calls = egress.calls;
-    const resolving = resolveConnectionCredential({ tenantId: WS, provider: 'slack', actingUserId: owner });
+    const resolving = resolveConnectionCredential({ egress: FIXED,  tenantId: WS, provider: 'slack', actingUserId: owner });
     await vi.waitFor(() => expect(egress.calls).toBeGreaterThan(calls));
     await setSecret(`connection:${conn.connectionId}`, JSON.stringify({ accessToken: 'at-mid-swap', tokenType: 'Bearer', scopes: [], generation: 'zzzzzzzzzz.mid-swap' }), { tenantId: WS });
     release();
@@ -415,7 +424,7 @@ describe('ADR 0780 D3 — revoke means revoked', () => {
     const conn = await upsertOAuthConnection({ tenantId: WS, provider: 'slack', userId: owner, tokens: { ...expiredOAuth('at-x'), expiresAt: new Date(Date.now() + 3_600_000).toISOString() } });
     // OLDER than the row: a refresh's write-back that landed over a re-consent.
     await setSecret(`connection:${conn.connectionId}`, JSON.stringify({ accessToken: 'at-stray', tokenType: 'Bearer', scopes: [], generation: '0000000000.stale' }), { tenantId: WS });
-    expect(await resolveConnectionCredential({ tenantId: WS, provider: 'slack', actingUserId: owner })).toBeNull();
+    expect(await resolveConnectionCredential({ egress: FIXED,  tenantId: WS, provider: 'slack', actingUserId: owner })).toBeNull();
     expect((await getConnection(WS, conn.connectionId))?.status).toBe('needs-reconsent');
   });
 
@@ -423,7 +432,7 @@ describe('ADR 0780 D3 — revoke means revoked', () => {
     const owner = 'user:b780-gen-new';
     const conn = await upsertOAuthConnection({ tenantId: WS, provider: 'slack', userId: owner, tokens: { ...expiredOAuth('at-x'), expiresAt: new Date(Date.now() + 3_600_000).toISOString() } });
     await setSecret(`connection:${conn.connectionId}`, JSON.stringify({ accessToken: 'at-newer', tokenType: 'Bearer', scopes: [], generation: 'zzzzzzzzzz.newer' }), { tenantId: WS });
-    expect((await resolveConnectionCredential({ tenantId: WS, provider: 'slack', actingUserId: owner }))?.secret).toBe('at-newer');
+    expect((await resolveConnectionCredential({ egress: FIXED,  tenantId: WS, provider: 'slack', actingUserId: owner }))?.secret).toBe('at-newer');
     expect((await getConnection(WS, conn.connectionId))?.status).toBe('active');
   });
 
@@ -431,7 +440,7 @@ describe('ADR 0780 D3 — revoke means revoked', () => {
     const owner = 'user:b780-gen-legacy';
     const conn = await upsertOAuthConnection({ tenantId: WS, provider: 'slack', userId: owner, tokens: { ...expiredOAuth('at-x'), expiresAt: new Date(Date.now() + 3_600_000).toISOString() } });
     await setSecret(`connection:${conn.connectionId}`, JSON.stringify({ accessToken: 'at-legacy', tokenType: 'Bearer', scopes: [] }), { tenantId: WS });
-    expect((await resolveConnectionCredential({ tenantId: WS, provider: 'slack', actingUserId: owner }))?.secret).toBe('at-legacy');
+    expect((await resolveConnectionCredential({ egress: FIXED,  tenantId: WS, provider: 'slack', actingUserId: owner }))?.secret).toBe('at-legacy');
   });
 
   it('leg 10d: an EXPIRED newer secret on an older row refreshes against the secret\'s generation (CONNCD-11)', async () => {
@@ -439,7 +448,7 @@ describe('ADR 0780 D3 — revoke means revoked', () => {
     const conn = await upsertOAuthConnection({ tenantId: WS, provider: 'slack', userId: owner, tokens: { ...expiredOAuth('at-x'), expiresAt: new Date(Date.now() + 3_600_000).toISOString() } });
     // A re-consent that crashed between its secret write and its row swap.
     await setSecret(`connection:${conn.connectionId}`, JSON.stringify({ ...expiredOAuth('at-orphaned'), refreshToken: 'rt-newer', scopes: ['chat:write', 'files:read'], generation: 'zzzzzzzzzz.crashed' }), { tenantId: WS });
-    const r = await resolveConnectionCredential({ tenantId: WS, provider: 'slack', actingUserId: owner });
+    const r = await resolveConnectionCredential({ egress: FIXED,  tenantId: WS, provider: 'slack', actingUserId: owner });
     expect(r?.secret, 'the refresh must land, not be discarded as "a newer secret exists"').toMatch(/^at-refreshed-/);
     expect((await getConnection(WS, conn.connectionId))?.generation).toBe('zzzzzzzzzz.crashed');
     expect((await getConnection(WS, conn.connectionId))?.scopes, 'the row describes the adopted grant').toEqual(['chat:write', 'files:read']);
@@ -548,7 +557,7 @@ describe('ADR 0780 D3 — revoke means revoked', () => {
     let release!: () => void;
     egress.gate = new Promise<void>((r) => { release = r; });
     const calls = egress.calls;
-    const resolving = resolveConnectionCredential({ tenantId: WS, provider: 'slack', actingUserId: owner });
+    const resolving = resolveConnectionCredential({ egress: FIXED,  tenantId: WS, provider: 'slack', actingUserId: owner });
     await vi.waitFor(() => expect(egress.calls).toBeGreaterThan(calls));
     const fresh = await upsertOAuthConnection({ tenantId: WS, provider: 'slack', userId: owner, tokens: { ...expiredOAuth('at-fresh'), expiresAt: new Date(Date.now() + 3_600_000).toISOString() } });
     egress.fail = true;

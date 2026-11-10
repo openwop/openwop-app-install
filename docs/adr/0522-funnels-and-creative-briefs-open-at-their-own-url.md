@@ -51,6 +51,20 @@ actions, and it now sits beside the name that says which funnel is about to go.
 
 ### Creative Briefs — a lane change, not a rebuild
 
+**Correction (creative client context, 2026-11-06):** a private brief URL also
+needs its organization context. Generated links keep the existing detail path
+and append `?org=<id>`; the client validates that hint against the caller's org
+list before scoped reads. Bare legacy targets remain recoverable through org
+selection/retry instead of being discarded after a wrong-org404. Auth/request
+generations reject stale completions; same-org/brief editor identity preserves
+dirty text across token refresh while child render reads/polling pause. No
+lookup-by-ID endpoint, tenant-wide scan, canonical wire field or RFC is needed.
+Focused diagnostics: original-source final harness 10 failures / 2 controls
+passing; restored implementation 24/24 cases across three files, including
+StrictMode dirty-save refresh, stale completions, retry and legacy recovery.
+Scoped ESLint and i18n checks passed. Canonical qualification and deployed
+reload acceptance remain release-owner work.
+
 - `?brief=` → **`/creative-briefs/:briefId`**, with the **same component serving
   both routes** (the Tutorials precedent) so back-navigation keeps the list's
   filters and view mode.

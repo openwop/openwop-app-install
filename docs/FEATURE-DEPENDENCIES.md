@@ -9,10 +9,10 @@
 
 | Bucket | Count | Meaning |
 |---|---|---|
-| Declared (`dependsOn`) | 28 | real hard deps, disable-lock active |
-| Undeclared → always-on target | 117 | correctly undeclared — an always-on dep can never lock (ADR 0439) |
+| Declared (`dependsOn`) | 16 | real hard deps, disable-lock active |
+| Undeclared → always-on target | 115 | correctly undeclared — an always-on dep can never lock (ADR 0439) |
 | **[1] Primitive** (undeclared → toggleable) | **0** | misfiled cross-cutting infra → **extract to a `host/` seam** |
-| **[2] Soft-read** (undeclared → toggleable) | **111** | domain read, target vacuous-when-off → **leave documented** (no lock) |
+| **[2] Soft-read** (undeclared → toggleable) | **105** | domain read, target vacuous-when-off → **leave documented** (no lock) |
 | **[3] Hard-dep** (undeclared → toggleable) | **0** | target refuses when off → **declare `dependsOn`** |
 
 The goal (ADR 0446) is **not** "drive the total to zero." It is: extract the **[1]**
@@ -39,7 +39,6 @@ _None._
 | `sharing` | `app-builder` | static | shareProjection | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `commerce` | `billing` | static | stripeApi, billingService, subscriptionInvoiceHook | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `commerce-connect` | `billing` | static | stripeApi, connectEventHook, billingService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
-| `kicktodo-commerce` | `billing` | static | stripeApi, billingService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `brand` | `campaign-brief` | dyn | briefService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `campaign-channels` | `campaign-brief` | static | briefService, types | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `campaign-orchestration` | `campaign-brief` | static | briefService, types | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
@@ -59,7 +58,6 @@ _None._
 | `campaign-orchestration` | `campaign-studio` | static | planLinks | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `consent` | `cdp` | static | purposeVocabService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `funnels` | `cdp` | static | collectService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
-| `kicktodo-core` | `cdp` | static | collectService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `service-desk` | `cdp` | static | identityService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `cms` | `comments` | dyn | commentsService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `creative-briefs` | `comments` | static | commentsService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
@@ -74,12 +72,12 @@ _None._
 | `strategy` | `commerce` | static | commerceService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `commerce` | `commerce-connect` | static | storefrontSettlement | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `funnels` | `commerce-connect` | static | storefrontSettlement | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
-| `kicktodo-commerce` | `commerce-connect` | static | connectService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `analytics` | `consent` | static | visitorConsent, consentService | consent.isAllowed returns a policy boolean (permissive/deny), never breaks the consumer; the direct import is a compliance-protective coupling — do NOT extract (see ADR 0446 D.2) |
 | `campaign-connectors` | `consent` | static | consentService | consent.isAllowed returns a policy boolean (permissive/deny), never breaks the consumer; the direct import is a compliance-protective coupling — do NOT extract (see ADR 0446 D.2) |
 | `campaign-journeys` | `consent` | static | consentService | consent.isAllowed returns a policy boolean (permissive/deny), never breaks the consumer; the direct import is a compliance-protective coupling — do NOT extract (see ADR 0446 D.2) |
 | `cdp` | `consent` | static | consentService | consent.isAllowed returns a policy boolean (permissive/deny), never breaks the consumer; the direct import is a compliance-protective coupling — do NOT extract (see ADR 0446 D.2) |
 | `crm` | `consent` | static | consentService, keywordLadder | consent.isAllowed returns a policy boolean (permissive/deny), never breaks the consumer; the direct import is a compliance-protective coupling — do NOT extract (see ADR 0446 D.2) |
+| `destination-sync` | `consent` | static | consentService | consent.isAllowed returns a policy boolean (permissive/deny), never breaks the consumer; the direct import is a compliance-protective coupling — do NOT extract (see ADR 0446 D.2) |
 | `email` | `consent` | static | consentService, topicOptOuts | consent.isAllowed returns a policy boolean (permissive/deny), never breaks the consumer; the direct import is a compliance-protective coupling — do NOT extract (see ADR 0446 D.2) |
 | `funnels` | `consent` | static | consentService, visitorConsent | consent.isAllowed returns a policy boolean (permissive/deny), never breaks the consumer; the direct import is a compliance-protective coupling — do NOT extract (see ADR 0446 D.2) |
 | `publishing` | `consent` | static | visitorConsent | consent.isAllowed returns a policy boolean (permissive/deny), never breaks the consumer; the direct import is a compliance-protective coupling — do NOT extract (see ADR 0446 D.2) |
@@ -90,7 +88,6 @@ _None._
 | `campaign-journeys` | `crm` | static | contactsService, suppressionService, channelEligibility, segmentsService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `cdp` | `crm` | static | contactsService, contactIdentityService, crmMergeEventsService, segmentsService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `funnels` | `crm` | static | entities/activities | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
-| `kicktodo-core` | `crm` | static | contactsService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `production` | `crm` | static | crmEntitiesService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `promotions` | `crm` | static | segmentsService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `recommendations` | `crm` | static | segmentsService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
@@ -117,7 +114,6 @@ _None._
 | `bi` | `entities` | static | entitiesService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `cms` | `entities` | static | entitiesService, kernelAdapter | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `commerce` | `entities` | static | entitiesService, kernelAdapter | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
-| `kicktodo-community` | `entities` | static | publicRead, entitiesService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `service-desk` | `entities` | static | entitiesService, kernelAdapter | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `tutorials` | `entities` | static | entitiesService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `crm` | `forms` | static | submissionSinks, formsService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
@@ -127,8 +123,6 @@ _None._
 | `webinars` | `forms` | static | submissionSinks, formsService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `campaign-intel` | `funnels` | static | funnelsService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `commerce` | `funnels` | static | funnelsService, offerDecisions | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
-| `kicktodo-commerce` | `kicktodo-accountability` | static | cohortService, circleService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
-| `kicktodo-community` | `kicktodo-commerce` | static | entitlementService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `commerce-connect` | `marketplace` | static | listingPricingHook, listingService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `projects` | `notebooks` | static | notebooksService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `comments` | `priority-matrix` | static | priorityMatrixService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |

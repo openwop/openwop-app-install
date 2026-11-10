@@ -186,6 +186,17 @@
   --dur-ui:    150ms;  /* standard control transitions */
   --dur-stamp: 280ms;  /* the openwop-stamp-in press */
   --dur-enter: 380ms;  /* page/section reveals */
+  /* ADR 1029 D1 — section scroll motion. A brand overrides these, never the
+   * selectors; distances of 0 keep the fade and drop the travel. */
+  --ease-reveal: cubic-bezier(0, 0, 0.3, 1);  /* Open Props --ease-out-3 (MIT), vendor-patterns/PROVENANCE.json */
+  --reveal-distance: 16px;  /* `reveal` travel */
+  --rise-distance: 40px;    /* `rise` travel */
+  --stagger-step: 6%;       /* how much later in the view range each next item starts */
+  --slide-distance: 32px;   /* ADR 1038 D6 — `slide-start`/`slide-end` travel */
+  --zoom-from: 0.96;        /* ADR 1038 D6 — the scale a `zoom` section grows from */
+  --hover-lift: 3px;        /* ADR 1038 D7 — how far a public card rises on hover/focus */
+  --tick-step: 360ms;       /* ADR 1038 D1 — the gap between two rows reaching their state in a played card */
+  --attention: var(--color-warning); /* ADR 1038 D5 — the ring a "waiting for a person" mark pulses; a distribution's brand.css may override (not a BrandTheme field) */
 
   /* ── App-functional semantic tokens (kept; not part of the shared palette) ──
    * Status colors stay distinct so success/warning/danger remain legible

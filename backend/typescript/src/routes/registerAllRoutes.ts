@@ -118,8 +118,7 @@ import { resolveNotifyDelivererFromEnv } from '../messaging/notifyDeliverer.js';
 import { initHostExtPersistence } from '../host/hostExtPersistence.js';
 import { installEmailApprovalDelivery } from '../host/emailApprovalDelivery.js';
 import { registerHostSubjectErasers } from '../host/hostSubjectErasers.js';
-import { fetch as undiciFetch } from 'undici';
-import { assertEgressSchemeAllowed, webhookEgressDispatcher } from '../host/webhookEgressGuard.js';
+import { deliverA2aPush } from '../host/a2aPushDelivery.js';
 import { setA2aPushSink } from '../host/a2aTaskStore.js';
 import { registerFeatureToggleRoutes } from './featureToggles.js';
 import { registerAgentAllowlistRoutes } from './agentAllowlists.js';
@@ -338,23 +337,11 @@ const ROUTE_MODULES: RouteModule[] = [
     name: 'a2a:pushSink',
     register: () => {
       if (process.env.OPENWOP_A2A_DURABLE_TASKS !== 'true') return;
-      setA2aPushSink(async (config, event) => {
-        // ADR 0607 — delivery-time scheme re-check, matching the webhook worker.
-        // The comment above says the url "was already SSRF-validated at register
-        // time"; that is the trust-the-other-layer pattern ADR 0606's delivery
-        // arm exists to refuse. A push config stored before the registration arm
-        // existed still reaches here, and this is the layer that decides what
-        // leaves the process. `honorDevFlag: false` matches
-        // `assertPushUrlAllowed` — the two layers MUST agree or the flag becomes
-        // a way to deliver what registration refused.
-        assertEgressSchemeAllowed(config.url, { honorDevFlag: false });
-        await undiciFetch(config.url, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(event),
-          dispatcher: webhookEgressDispatcher(),
-        });
-      });
+      // ADR 1045 push follow-up (RFC 0214 §A–§C): the delivery carries the
+      // registered destination credential, re-runs the SSRF guard on the
+      // original URL, dials the pinned egress dispatcher, and treats a 3xx as a
+      // failed delivery instead of following it. See `host/a2aPushDelivery.ts`.
+      setA2aPushSink((target, event) => deliverA2aPush(target, event));
     },
   },
   // Feature toggles + multivariant testing — host-extension (non-normative).

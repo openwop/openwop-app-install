@@ -29,8 +29,24 @@
  *     two conversations, same script, byte-identical.
  *
  * Red on `origin/main` @ 8da0849a5: the tool, the events and the
- * `clarificationAnswer` field do not exist there. Sabotage-witnessed: listed in
- * the ADR 1001 P2 implementation record.
+ * `clarificationAnswer` field do not exist there.
+ *
+ * Sabotage-witnessed (wave 81): disarming the loop's ended-turn branch (1);
+ * changing the ask text's line join (1); removing the options fence (2, 5);
+ * putting free text inside the fence (2); dropping the `askedBy` routing (the
+ * asker case); host text and the skip flag (9); reading the client's
+ * `turn.content` or not substituting the model text (2, 9); adding the run id to
+ * the model text (10); dropping the answered or stale check (3); dropping the
+ * resumeSchema check (vocabulary 400); the chat-toggle answer refusal and the
+ * offer filter (6); the parent AND (6); keying the exchange claim per request
+ * (8); the duplicate-id lift check (4, second leg) and raising the shared
+ * `maxQuestions` cap (4, first leg); the sink refusal and the voice filter (7);
+ * a contract not generated from the caps.
+ * Double guards, recorded: the six-question leg of 4 is refused by BOTH the
+ * tool's generated argument schema (ADR 1011, `agentDispatch.ts`) and the lift,
+ * both fed by `CLARIFICATION_LIMITS` (one edit to the cap breaks both); and the
+ * claim release in 8 is done by BOTH the dispatch catch and the async `.catch`
+ * in `conversationExchange.ts` (a held pair witnesses it).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -194,7 +210,9 @@ describe('ADR 1001 P2 — the agent asks in a chat', () => {
     const fenceAt = sent.indexOf('BEGIN UNTRUSTED CONTENT (from the options you proposed)');
     expect(fenceAt, 'the chosen option reaches the model inside the fence').toBeGreaterThan(-1);
     expect(sent.indexOf('region (Which region are you travelling in?): \\"EMEA\\"')).toBeGreaterThan(fenceAt);
-    expect(sent.indexOf('Which dates? June 3 to 9'), 'the person\'s own words are theirs, before the fence').toBeLessThan(fenceAt);
+    const ownAt = sent.indexOf('Which dates? June 3 to 9');
+    expect(ownAt, 'the person\'s own words reach the model as theirs').toBeGreaterThan(-1);
+    expect(ownAt, 'the person\'s own words are theirs, before the fence').toBeLessThan(fenceAt);
     expect(sent, 'the readable display is not what the model reads for that turn').not.toContain('Which region are you travelling in? EMEA');
     const answered = r.evs.filter((e) => e.type === CLARIFICATION_ANSWERED_EVENT).map((e) => must(e.payload, 'an event payload'));
     expect(answered).toEqual([expect.objectContaining({ askId, turnMessageId: userTurn.messageId })]);
@@ -273,7 +291,9 @@ describe('ADR 1001 P2 — the agent asks in a chat', () => {
     await vi.waitFor(async () => {
       expect(turnsOf(await events(runId)).filter((t) => t.role === 'agent').length).toBeGreaterThanOrEqual(2);
     }, { timeout: 8000, interval: 25 });
-    await new Promise((r) => setTimeout(r, 300));
+    // The refused answer never reached the model: the ask round plus the ONE
+    // admitted answer round, nothing else.
+    expect(script.seen, 'only the admitted answer had a model round').toHaveLength(2);
     const evs = await events(runId);
     expect(evs.filter((e) => e.type === CLARIFICATION_ANSWERED_EVENT), `statuses ${r1.status}/${r2.status}`).toHaveLength(1);
     expect(turnsOf(evs).filter((t) => t.role === 'user'), 'one answer turn, not two').toHaveLength(2);
@@ -311,6 +331,7 @@ describe('ADR 1001 P2 — the agent asks in a chat', () => {
     const { runId, askId } = await askedChat();
     const bad = await exchange(runId, { turn: { content: 'x' }, clarificationAnswer: { askId, answers: [{ id: 'region', answer: 'MARS' }, { id: 'dates', answer: 'May' }] } });
     expect(bad.status).toBe(400);
+    expect(JSON.stringify(bad.body)).toContain("resumeValue does not match the interrupt's resumeSchema");
     expect((await events(runId)).filter((e) => e.type === CLARIFICATION_ANSWERED_EVENT)).toEqual([]);
   });
 
@@ -323,6 +344,20 @@ describe('ADR 1001 P2 — the agent asks in a chat', () => {
     expect(script.seen, 'the refusal went back to the model, which answered').toHaveLength(2);
     expect(lastTurn(r.turns, 'agent').content).toBe('I will go with sensible defaults.');
     expect(r.evs.filter((e) => e.type === CLARIFICATION_REQUESTED_EVENT)).toEqual([]);
+
+    // Six questions are refused by the tool's generated argument schema
+    // (ADR 1011) before the lift runs, so that leg cannot show the lift's own
+    // refusal. A repeated id is schema-valid and only the lift refuses it: the
+    // lift's reason goes back to the model and no card is recorded.
+    const runId2 = await openChat();
+    script.seen = [];
+    script.rounds = [askCall([{ id: 'q', question: 'First?' }, { id: 'q', question: 'Second?' }]), { text: 'I will assume.', toolUses: [] }];
+    const r2 = await exchange(runId2, { turn: { content: 'Plan my trip.', to: AGENT } });
+    expect(r2.status).toBe(200);
+    expect(script.seen, 'the lift refusal went back to the model').toHaveLength(2);
+    expect(lastSent()).toContain("question id 'q' is repeated");
+    expect(lastTurn(r2.turns, 'agent').content).toBe('I will assume.');
+    expect(r2.evs.filter((e) => e.type === CLARIFICATION_REQUESTED_EVENT)).toEqual([]);
   });
 
   it('injection inside an option stays inside the fence on the way back', async () => {
@@ -361,6 +396,7 @@ describe('ADR 1001 P2 — the chat sub-toggle and the other lanes', () => {
     expect(offered.length, 'control: other tools are still offered').toBeGreaterThan(0);
     const refused = await exchange(runId, { turn: { content: 'x' }, clarificationAnswer: { askId, answers: [] } });
     expect(refused.status).toBe(400);
+    expect(JSON.stringify(refused.body)).toContain('clarificationAnswer is not accepted in this workspace');
   });
 
   it('the parent toggle gates the chat toggle (AND)', async () => {

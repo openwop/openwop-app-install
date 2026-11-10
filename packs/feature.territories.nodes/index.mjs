@@ -84,14 +84,21 @@ export async function activateModel(ctx) {
   if (typeof t.activateModel !== 'function') throw Object.assign(new Error('ctx.features.territories.activateModel not exposed'), { code: 'host_capability_missing', capability: 'host.sample.territories' });
   const i = args(ctx);
   const out = await t.activateModel({ orgId: str(i.orgId), modelId: str(i.modelId) });
-  return { status: 'success', outputs: { success: out.success ?? true, model: out.model ?? null } };
+  // ADR 1034 D1 — the surface SUBMITS the activation for review and returns the card; a
+  // result without one is a typed failure, never `success` with nothing in it.
+  if (!out?.review?.approvalId) {
+    throw Object.assign(new Error('the territories surface did not return a review for this activation'), { code: 'invalid_response' });
+  }
+  return { status: 'success', outputs: { success: out.success ?? true, submittedForReview: true, review: out.review } };
 }
 
 export async function setQuota(ctx) {
   const t = ensure(ctx);
   if (typeof t.setQuota !== 'function') throw Object.assign(new Error('ctx.features.territories.setQuota not exposed'), { code: 'host_capability_missing', capability: 'host.sample.territories' });
   const i = args(ctx);
-  const out = await t.setQuota({ orgId: str(i.orgId), modelId: str(i.modelId), territoryId: str(i.territoryId), period: str(i.period), amount: i.amount, ...(str(i.currency) ? { currency: str(i.currency) } : {}) });
+  // ADR 1034 D2 — `repSplits` is forwarded when the caller supplies it (`[]` clears); when
+  // omitted the surface keeps the stored splits. This used to drop it, erasing them.
+  const out = await t.setQuota({ orgId: str(i.orgId), modelId: str(i.modelId), territoryId: str(i.territoryId), period: str(i.period), amount: i.amount, ...(str(i.currency) ? { currency: str(i.currency) } : {}), ...(i.repSplits !== undefined ? { repSplits: i.repSplits } : {}) });
   return { status: 'success', outputs: { success: out.success ?? true, quota: out.quota ?? null } };
 }
 

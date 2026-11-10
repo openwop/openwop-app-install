@@ -52,7 +52,7 @@ export interface PendingApproval {
   persona: string;
   workflowId: string;
   /** Discriminator; absent ⇒ 'run-proposal' (back-compat). */
-  kind?: 'run-proposal' | 'assistant-action' | 'content-publish' | 'campaign-spend' | 'commerce-spend' | 'strategy-activation' | 'strategy-checkin' | 'pm-scenario-select' | 'claude-code-permission' | 'email-campaign-send' | 'creative-publish-review' | 'funnel-publish';
+  kind?: 'run-proposal' | 'assistant-action' | 'content-publish' | 'campaign-spend' | 'commerce-spend' | 'strategy-activation' | 'strategy-checkin' | 'pm-scenario-select' | 'claude-code-permission' | 'email-campaign-send' | 'creative-publish-review' | 'funnel-publish' | 'warehouse-load';
   /** ADR 0905 D3 — `email-campaign-send` rows: exactly what the approval covers (the
    *  pinned template version's text, the sender, the audience definition). */
   emailSend?: {
@@ -89,6 +89,11 @@ export interface PendingApproval {
    *  structured amount cannot drift from the charge the way a sentence can. */
   amountMinor?: number;
   amountCurrency?: string;
+  /** ADR 1024 — `warehouse-load` rows: the BigQuery target and how many rows the approval
+   *  covers (ids and a count only; never row bodies). */
+  dataset?: string;
+  table?: string;
+  rowCount?: number;
   /** Set for assistant-action approvals — the typed draft this gate decides. */
   actionId?: string;
   /** Set for content-publish approvals (ADR 0066) — the CMS page this gate

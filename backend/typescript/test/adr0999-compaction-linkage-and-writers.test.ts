@@ -47,6 +47,7 @@ import { FUNNELS_DRAFT_TOOL_ID } from '../src/features/funnels/agentTools.js';
 import { COMPACTION_MARKER_IN_INPUT } from '../src/host/toolResultTransform.js';
 import type { Storage } from '../src/storage/storage.js';
 import type { RunRecord } from '../src/types.js';
+import type { BundleScope } from '../src/host/inMemorySurfaces.js';
 
 let server: http.Server;
 let BASE = '';
@@ -77,9 +78,12 @@ beforeEach(async () => {
 
 const raw = (id: string): string => id.slice(id.lastIndexOf('/') + 1);
 
+interface LoginBody { user: { tenantId: string } }
+interface RunCreated { runId: string }
+
 function member() {
   let cookie = '';
-  return async (method: string, path: string, body?: unknown): Promise<{ status: number; body: any }> => {
+  return async (method: string, path: string, body?: unknown): Promise<{ status: number; body: unknown }> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]!; }
     return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
@@ -93,13 +97,14 @@ const asService = (body: Record<string, unknown>) => fetch(`${BASE}/runs`, {
 async function lossyParent(tenantId: string): Promise<string> {
   const at = new Date().toISOString();
   const runId = `adr0999-parent-${n++}`;
-  await storage.insertRun({ runId, tenantId, workflowId: 'conformance-noop', status: 'completed', inputs: {}, configurable: {}, createdAt: at, updatedAt: at, metadata: { compaction: { mode: 'lossy', head: 1, tail: 1 } } } as RunRecord);
+  const row: RunRecord = { runId, tenantId, workflowId: 'conformance-noop', status: 'completed', inputs: {}, configurable: {}, createdAt: at, updatedAt: at, metadata: { compaction: { mode: 'lossy', head: 1, tail: 1 } } };
+  await storage.insertRun(row);
   return runId;
 }
-async function childOf(res: Response): Promise<{ status: number; row: RunRecord | null }> {
+async function childOf(res: Response): Promise<{ status: number; keys: string[]; row: RunRecord | null }> {
   const status = res.status;
-  const body = (await res.json()) as { runId: string };
-  return { status, row: await storage.getRun(raw(body.runId)) };
+  const body = (await res.json()) as RunCreated;
+  return { status, keys: Object.keys(body).sort(), row: await storage.getRun(raw(body.runId)) };
 }
 async function serviceTenant(): Promise<string> {
   const { row } = await childOf(await asService({ workflowId: 'conformance-noop', inputs: {} }));
@@ -120,11 +125,11 @@ describe('ADR 0999 D1.3 — only an admitted parent hands down its decision', ()
     const call = member();
     const login = await call('POST', '/host/openwop-app/test/login', { email: `adr0999-${Date.now()}-${n++}@acme.test` });
     expect(login.status, JSON.stringify(login.body)).toBe(201);
-    const tenantId = login.body.user.tenantId as string;
+    const tenantId = (login.body as LoginBody).user.tenantId;
     const parent = await lossyParent(tenantId);
     const r = await call('POST', '/runs', { workflowId: 'conformance-noop', inputs: {}, metadata: { parentRunId: parent } });
     expect(r.status, JSON.stringify(r.body)).toBe(201);
-    const row = await storage.getRun(raw(r.body.runId));
+    const row = await storage.getRun(raw((r.body as RunCreated).runId));
     expect(row?.tenantId).toBe(tenantId); // same tenant: only the wildcard check stands between them
     expect(row?.metadata?.['parentRunId']).toBeUndefined();
     expect(readCompactionDecision(row?.metadata)).toEqual({ mode: 'lossless' }); // resolved fresh, not inherited
@@ -142,6 +147,9 @@ describe('ADR 0999 D1.3 — only an admitted parent hands down its decision', ()
     }
     // No existence oracle: a foreign parent, a missing one and no parent are indistinguishable.
     expect(new Set([cross.status, ghost.status, none.status])).toEqual(new Set([201]));
+    // ...and the same response SHAPE (the run ids differ; the keys must not).
+    expect(cross.keys).toEqual(none.keys);
+    expect(ghost.keys).toEqual(none.keys);
   });
 });
 
@@ -156,7 +164,8 @@ describe('ADR 0999 D3.3 — the writers refuse a compaction marker instead of fi
     it(`${id} refuses with ${COMPACTION_MARKER_IN_INPUT}, naming the path`, async () => {
       const tool = builtinAgentTool(id);
       expect(tool, `${id} must be registered`).toBeTruthy();
-      const out = await tool!.run(input, { tenantId: 't-none' } as never);
+      const scope: BundleScope = { tenantId: 't-none' };
+      const out = await tool!.run(input, scope);
       expect(out.isError).toBe(true);
       const body = JSON.parse(out.content) as { error: string; message: string; detail?: string };
       expect(body.error).toBe(COMPACTION_MARKER_IN_INPUT);

@@ -49,20 +49,20 @@ describe('icsUtc', () => {
   });
 });
 
-describe('buildIcsCalendar — all-day feed shape (kicktodo)', () => {
+describe('buildIcsCalendar — all-day feed shape (a challenge feed)', () => {
   it('emits a VALUE=DATE VEVENT, no CALSCALE/METHOD, trailing CRLF', () => {
     const ics = buildIcsCalendar({
-      prodId: '-//KickTodo//EN',
-      events: [{ uid: 'c1@kicktodo', start: { kind: 'date', value: '20260720' }, summary: 'KickTodo day 1: Walk' }],
+      prodId: '-//Acme//EN',
+      events: [{ uid: 'c1@acme', start: { kind: 'date', value: '20260720' }, summary: 'Acme day 1: Walk' }],
     });
     expect(ics).toBe(
       'BEGIN:VCALENDAR\r\n' +
         'VERSION:2.0\r\n' +
-        'PRODID:-//KickTodo//EN\r\n' +
+        'PRODID:-//Acme//EN\r\n' +
         'BEGIN:VEVENT\r\n' +
-        'UID:c1@kicktodo\r\n' +
+        'UID:c1@acme\r\n' +
         'DTSTART;VALUE=DATE:20260720\r\n' +
-        'SUMMARY:KickTodo day 1: Walk\r\n' +
+        'SUMMARY:Acme day 1: Walk\r\n' +
         'END:VEVENT\r\n' +
         'END:VCALENDAR\r\n',
     );

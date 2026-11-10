@@ -8,17 +8,18 @@
  * nothing of B, and the model is told part of the memory is gone. A `branch`
  * fork reads live. A receipt holds ids and a hash, never content, and ages out.
  *
- * Sabotage-witnessed (P3): serving the replay from live memory (dropping the
- * `servedFromReceipt` branch in the runner) reds test 5, and dropping the
- * `recallNotice` wiring reds its partial-memory notice. A receipt cannot serve an
- * erased row from a cached copy because it stores no content (asserted).
+ * Sabotage-witnessed (wave 75, 15 probes): dropping the `servedFromReceipt` branch
+ * or the `recallNotice` wiring reds test 5; the fail-closed branch, the per-item
+ * commitments (text, title, trust), the read-side window and the age-out each red
+ * their own case. A receipt cannot serve an erased row from a cached copy because
+ * it stores no content (asserted).
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
 import type http from 'node:http';
 import { createApp } from '../src/index.js';
 import agentRunnerNode from '../src/host/agentRunnerNode.js';
-import { getAgentRegistry, type ResolvedAgentManifest } from '../src/executor/agentRegistry.js';
+import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 import { createMember, createOrg, createWorkspace } from '../src/host/accessControlService.js';
 import { upsertFromPrincipal } from '../src/features/users/usersService.js';
 import { hostExtStorage } from '../src/host/hostExtPersistence.js';
@@ -44,13 +45,13 @@ async function insertRun(over: Partial<RunRecord> & { metadata: Record<string, u
   const runId = `run-p3-${randomBytes(5).toString('hex')}`;
   await hostExtStorage().insertRun({
     runId, workflowId: 'w', tenantId: TENANT, status: 'running', inputs: null, configurable: {}, createdAt: 'x', updatedAt: 'x', ...over,
-  } as RunRecord);
+  });
   return runId;
 }
 
 async function promptOf(runId: string): Promise<string> {
   let prompt = '';
-  const callAI = vi.fn<(req: AiCallRequest) => Promise<AiCallResult>>(async (req) => { prompt = JSON.stringify(req.messages); return { content: 'ok' } as AiCallResult; });
+  const callAI = vi.fn<(req: AiCallRequest) => Promise<AiCallResult>>(async (req) => { prompt = JSON.stringify(req.messages); const result: AiCallResult = { content: 'ok' }; return result; });
   const out = await agentRunnerNode.execute({
     tenantId: TENANT, runId, nodeId: 'copy', configurable: {}, config: { offerTools: [] }, actingUserId: person,
     inputs: { agentId: AGENT, task: 'Write the hero line', credentialRef: 'managed:openwop-free' },
@@ -70,7 +71,7 @@ beforeAll(async () => {
   orgB = (await createOrg({ tenantId: TENANT, createdBy: 'seed', name: 'Client B' })).orgId;
   for (const org of [orgA, orgB]) await createMember({ tenantId: TENANT, orgId: org, subject: person, displayName: 'P', roles: ['editor'] });
   await upsertAgentProfile(TENANT, AGENT, { roleKey: 'copywriter', autonomy: { specLevel: 'recommend' }, memoryScope: 'per-org' });
-});
+}, 120_000);
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 beforeEach(() => {
   const registry = getAgentRegistry();
@@ -78,7 +79,7 @@ beforeEach(() => {
   registry.register({
     agentId: AGENT, persona: AGENT, modelClass: 'chat', systemPrompt: 'You write copy.',
     packName: 'test', packVersion: '0', toolAllowlist: [], memoryShape: { longTerm: true },
-  } as ResolvedAgentManifest);
+  });
 });
 
 describe('ADR 0944 D6 — read receipts', () => {
@@ -122,6 +123,10 @@ describe('ADR 0944 D6 — read receipts', () => {
     const plain = await insertRun({ metadata: { actingUserId: person } });
     await promptOf(plain);
     expect(await listRunReadReceipts(TENANT, plain)).toEqual([]);
+    // The same turn in a client run does record one.
+    const clientRun = await insertRun({ metadata: { [OPS]: { orgId: orgA }, actingUserId: person } });
+    await promptOf(clientRun);
+    expect(await listRunReadReceipts(TENANT, clientRun)).toHaveLength(1);
   });
 
   it('a replay with missing receipt evidence never falls back to current client memory', async () => {

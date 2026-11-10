@@ -19,7 +19,7 @@ import { StateCard } from '../ui/StateCard.js';
 import { toast } from '../ui/toast.js';
 import { ScaleIcon, CheckIcon, XIcon, RotateCwIcon } from '../ui/icons/index.js';
 import { ContentReviewContext, ApprovalDecideBar, StrategyActivationSnapshot } from './ContentReviewContext.js';
-import { EmailSendReviewContext } from './EmailSendReviewContext.js';
+import { EmailSendReviewContext, emailSendApprovable } from './EmailSendReviewContext.js';
 import {
   listApprovals,
   listApprovalsByKind,
@@ -71,6 +71,10 @@ const isClaudeCodePermission = (a: PendingApproval): boolean => a.kind === 'clau
 /** ADR 0945 × 0942 — approve publishing one AI asset at one brand-accuracy check. */
 const isCreativeReview = (a: PendingApproval): boolean => a.kind === 'creative-publish-review';
 const isFunnelPublish = (a: PendingApproval): boolean => a.kind === 'funnel-publish';
+/** ADR 1024 (grade-ux H2) — a warehouse load fell into the run catch-all: an empty Agent
+ *  cell, "Run" with no workflow, "Approve & run", and a "{{persona}} is running it now"
+ *  toast with an empty persona, on a row where nothing runs until the sync is re-run. */
+const isWarehouseLoad = (a: PendingApproval): boolean => a.kind === 'warehouse-load';
 
 /** SECURITY — source URLs come from provider-derived (explicitly untrusted)
  *  content; only http(s) schemes may bind to an href (a `javascript:` URL
@@ -330,6 +334,8 @@ export function ApprovalsInbox({ onResolved }: { onResolved?: () => void }): JSX
               // the human still has to place the purchase. Say what actually happens.
               : isCommerceSpend(a)
                 ? t('toastApprovedSpend')
+              : isWarehouseLoad(a)
+                ? t('toastApprovedWarehouseLoad')
                 : t('toastApprovedRunning', { persona: a.persona }),
       );
       await refresh();
@@ -474,7 +480,8 @@ export function ApprovalsInbox({ onResolved }: { onResolved?: () => void }): JSX
   const claudeCode = items?.filter(isClaudeCodePermission) ?? [];
   const creativeReview = items?.filter(isCreativeReview) ?? [];
   const funnelPublish = items?.filter(isFunnelPublish) ?? [];
-  const runs = items?.filter((a) => !isAssistantAction(a) && !isContentPublish(a) && !isEmailSend(a) && !isCampaignSpend(a) && !isCommerceSpend(a) && !isStrategyActivation(a) && !isScenarioSelect(a) && !isClaudeCodePermission(a) && !isCreativeReview(a) && !isFunnelPublish(a)) ?? [];
+  const warehouseLoad = items?.filter(isWarehouseLoad) ?? [];
+  const runs = items?.filter((a) => !isAssistantAction(a) && !isContentPublish(a) && !isEmailSend(a) && !isCampaignSpend(a) && !isCommerceSpend(a) && !isStrategyActivation(a) && !isScenarioSelect(a) && !isClaudeCodePermission(a) && !isCreativeReview(a) && !isFunnelPublish(a) && !isWarehouseLoad(a)) ?? [];
 
   return (
     <div className="card">
@@ -547,6 +554,8 @@ export function ApprovalsInbox({ onResolved }: { onResolved?: () => void }): JSX
                   <EmailSendReviewContext a={a} />
                   <ApprovalDecideBar
                     busy={busy === a.approvalId}
+                    // ADR 0905 D3 — no digest means nothing here can be approved; a reject still works.
+                    approveDisabled={!emailSendApprovable(a)}
                     onApprove={() => void claim(a)}
                     onReject={(note) => reject(a, note)}
                   />
@@ -710,6 +719,25 @@ export function ApprovalsInbox({ onResolved }: { onResolved?: () => void }): JSX
                       <XIcon size={13} /> {t('rejectLabel')}
                     </Button>
                   </span>
+                </article>
+              ))}
+            </div>
+          )}
+          {warehouseLoad.length > 0 && (
+            <div className="u-grid u-gap-2">
+              <h3 className="u-m-0 u-fs-12 muted">{t('approvalsWarehouseLoadGroup')}</h3>
+              {warehouseLoad.map((a) => (
+                <article key={a.approvalId} className="surface-card u-grid u-gap-2">
+                  <div className="u-flex u-items-center u-gap-2">
+                    <span className="u-flex-1">
+                      {a.dataset && a.table && a.rowCount !== undefined
+                        ? t('approvalsWarehouseLoadAsk', { count: a.rowCount, dataset: a.dataset, table: a.table })
+                        : a.proposal}
+                    </span>
+                    <span className="muted u-fs-12">{relativeTime(a.createdAt)}</span>
+                  </div>
+                  {/* The reasoned bar (SGU-2): a declined export says why to the person who asked. */}
+                  <ApprovalDecideBar busy={busy === a.approvalId} onApprove={() => void claim(a)} onReject={(note) => reject(a, note)} />
                 </article>
               ))}
             </div>

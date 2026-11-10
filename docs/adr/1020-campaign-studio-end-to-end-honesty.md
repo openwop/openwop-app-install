@@ -189,6 +189,33 @@ on ADR 0964.
   proof refs) with put-if-absent, as VOC does.
 - **D11 (`CS70WF-15`).** Staging carries the brief `version` the context was assembled from;
   promotion refuses `brief_changed` when it moved. A row with no `version` is treated as version 0.
+
+  **Correction (2026-11-05, Campaign Studio acceptance testing).** Evidence policy
+  (`groundingPolicy`) and competitor edits are generation-context edits too. They
+  now advance the brief version, mark an existing kernel stale, and require fresh
+  approval just like other protected content. Previously both fields were omitted
+  from the protected-field comparison: a confirmed brief stayed confirmed and an
+  old-context kernel could pass the unchanged revision check. Two regression
+  scenarios in `campaign-brief-kernel.test.ts` cover stored staleness, refusal of
+  old-context promotion, and idempotent re-sends. Legacy unversioned rows are
+  treated as version **1** by the service (the original version-0 statement above
+  does not describe the implemented fallback).
+
+  **Finalization correction (2026-11-05).** Finalization must also reject a
+  stored stale kernel. The generation surface already hid stale kernels, but
+  direct REST finalization checked only presence and the workflow finalization
+  surface copied the brief's stored kernel without checking staleness. The one
+  campaign finalization writer now refuses `kernel_stale` before campaign or
+  project creation; real HTTP and workflow-surface regressions cover refusal
+  and successful recovery after a fresh kernel is saved.
+
+  **Revision-history correction (2026-11-05).** Historical brief snapshots
+  omitted the KB binding, evidence policy and competitors, so they could not
+  explain the evidence context that was reviewed. New snapshots retain all
+  three; the type keeps them optional so older records remain readable. Missing
+  historical fields mean unrecorded context, not an instruction to change a
+  live policy. There is no campaign-brief revision restore operation; this is
+  an audit-completeness correction, not a new restore path.
 - **D12 (`CS70WF-16`).** `extract-seeds` fails `generation_empty` after one repair.
 
 > **CORRECTED during P2 implementation (2026-10-31).** What shipped differs from the text above

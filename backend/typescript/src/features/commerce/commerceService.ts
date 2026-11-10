@@ -20,7 +20,7 @@ import { getGovernancePolicy } from '../../host/governanceService.js';
 import { getApproval, createCommerceSpendApproval } from '../../host/approvalService.js';
 import { recordCommerceAction } from './telemetry.js';
 import { resolvePrice, resolveSellable } from './pricing.js';
-import { computeOrderPromotions, type AppliedPromotion } from './promotionSeam.js';
+import { computeOrderPromotions, commitOrderPromotionHolds, releaseOrderPromotionHolds, type AppliedPromotion } from './promotionSeam.js';
 import { fireProductDeleted } from './productLifecycleSeam.js';
 import { accrueCommission, reverseCommission, __resetAffiliates } from './affiliate.js';
 import { getContact } from '../crm/contactsService.js';
@@ -129,7 +129,7 @@ const commerceApprovals = new DurableCollection<CommerceApprovalMapRow>('commerc
 // no `tenantOf` — this is a point-read claim, a secondary index would be pure overhead.
 interface OrderIdemRow { key: string; tenantId: string; orgId: string; orderId?: string; at: string }
 const orderIdem = new DurableCollection<OrderIdemRow>('commerce:order-idem', (r) => r.key);
-const ORDER_IDEM_STALE_MS = 120_000; // > any createOrder; a pending claim older than this = a dead creator
+export const ORDER_IDEM_STALE_MS = 120_000; // > any createOrder; a pending claim older than this = a dead creator (also the promotion budget-hold TTL, ADR 1025 D1)
 
 // Retention (ADR 0077 P3) — order-idempotency claims are opaque, short-lived checkout
 // dedup tokens (no PII → `internal`) that today accrue forever once their order persists.
@@ -882,7 +882,27 @@ export async function deleteOrder(tenantId: string, orgId: string, orderId: stri
  *  when the tenant sets `commerce.orderApprovalThresholdMinor`, an at/over-threshold
  *  agent order parks a `commerce-spend` approval instead of creating (B3). Operator
  *  data-entry through the REST routes never sets it. */
-async function createOrderInner(input: { tenantId: string; orgId: string; createdBy: string; contactId?: string; /** ADR 0875 D1 — `false` on the PUBLIC lanes: the contact came from a typed email nobody verified, so it is LINKED (CRM, receipt) but never used to price, to unlock an exclusive assortment, or to target a promotion. Default `true` (every authenticated lane). */ buyerVerified?: boolean; /** ADR 0875 D7 — the public storefront sells only ACTIVE products (operator lanes may still order an archived one). */ activeOnly?: boolean; couponCode?: string; affiliateCode?: string; funnelRef?: { funnelId?: unknown; stepId?: unknown }; parentOrderId?: string; pmSaveRequested?: boolean; /** ADR 0877 M5 — ROUTE-derived from `resolveStorefrontSettlement`, never client input. */ settlement?: OrderSettlementStamp; lines: { productId: string; quantity: number; /** INTERNAL (quote conversion, C3): honor a negotiated snapshot price instead of resolving. Route callers never populate this. */ unitPriceOverride?: number; /** ADR 0296 — line provenance; ROUTE-derived (from the separate `bumps` array / the one-click path), never client-marked. */ origin?: 'bump' | 'upsell' }[]; requireApprovalOverThreshold?: boolean; shippingAddress?: { name?: unknown; line1?: unknown; line2?: unknown; city?: unknown; region?: unknown; postalCode?: unknown; country?: unknown } }): Promise<Order> {
+/**
+ * ADR 1025 D1 — the promotion budget holds taken while pricing this order are COMMITTED
+ * (stamped with the orderId) once the order row exists, and RELEASED on every other exit:
+ * the approval gate, a stock shortfall, a failed due-index or order write, any throw.
+ * One wrapper instead of a release at each of those exits, so a new early return or
+ * throw added to the body cannot strand a hold (it would only expire at the TTL).
+ */
+async function createOrderInner(input: Parameters<typeof createOrderCore>[0]): Promise<Order> {
+  const holds: { ids: string[] } = { ids: [] };
+  let order: Order;
+  try {
+    order = await createOrderCore(input, holds);
+  } catch (err) {
+    if (holds.ids.length) await releaseOrderPromotionHolds(input.tenantId, holds.ids);
+    throw err;
+  }
+  if (holds.ids.length) await commitOrderPromotionHolds(input.tenantId, holds.ids, order.orderId);
+  return order;
+}
+
+async function createOrderCore(input: { tenantId: string; orgId: string; createdBy: string; contactId?: string; /** ADR 0875 D1 — `false` on the PUBLIC lanes: the contact came from a typed email nobody verified, so it is LINKED (CRM, receipt) but never used to price, to unlock an exclusive assortment, or to target a promotion. Default `true` (every authenticated lane). */ buyerVerified?: boolean; /** ADR 0875 D7 — the public storefront sells only ACTIVE products (operator lanes may still order an archived one). */ activeOnly?: boolean; couponCode?: string; affiliateCode?: string; funnelRef?: { funnelId?: unknown; stepId?: unknown }; parentOrderId?: string; pmSaveRequested?: boolean; /** ADR 0877 M5 — ROUTE-derived from `resolveStorefrontSettlement`, never client input. */ settlement?: OrderSettlementStamp; lines: { productId: string; quantity: number; /** INTERNAL (quote conversion, C3): honor a negotiated snapshot price instead of resolving. Route callers never populate this. */ unitPriceOverride?: number; /** ADR 0296 — line provenance; ROUTE-derived (from the separate `bumps` array / the one-click path), never client-marked. */ origin?: 'bump' | 'upsell' }[]; requireApprovalOverThreshold?: boolean; shippingAddress?: { name?: unknown; line1?: unknown; line2?: unknown; city?: unknown; region?: unknown; postalCode?: unknown; country?: unknown } }, holds: { ids: string[] } = { ids: [] }): Promise<Order> {
   // ADR 0875 D7 — the cap counts LIVE orders. Counting canceled rows let ~5000
   // abandoned public checkouts disable a store for good.
   assertCap((await listOrders(input.tenantId, input.orgId)).filter((o) => o.status !== 'canceled').length, 'orders');
@@ -986,6 +1006,7 @@ async function createOrderInner(input: { tenantId: string; orgId: string; create
     });
     if (promo.discount > 0) discount = Math.min(subtotal, quantizeMoney(discount + promo.discount, currency));
     if (promo.appliedPromotions.length > 0) appliedPromotions = promo.appliedPromotions;
+    holds.ids = promo.holdIds ?? []; // ADR 1025 D1 — the wrapper commits or releases them
   } catch (e) { log.warn('promotion hook failed — no promo discount', { orderId: 'pending', error: e instanceof Error ? e.message : String(e) }); }
   const total = Math.max(0, quantizeMoney(subtotal - discount, currency));
   let consumeGateKey: string | undefined;

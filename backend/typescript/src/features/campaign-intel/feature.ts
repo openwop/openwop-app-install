@@ -16,7 +16,8 @@ import { buildCampaignIntelSurface, CAMPAIGN_INTEL_SURFACE_POLICY } from './surf
 import { registerCampaignIntelAgentTools } from './agentTools.js';
 import { registerCampaignIntelErasure } from './erasure.js';
 import { capBlocksIncrease, checkLaunchAgainstCaps } from './spendCaps.js';
-import { setAdsCapChecker, setAdsCapIncreaseChecker } from '../../host/adsAdapter.js';
+import { setAdsCapChecker, setAdsCapIncreaseChecker, setAdsCampaignOwnershipChecker } from '../../host/adsAdapter.js';
+import { orgOwnsAdCampaign } from './adOwnership.js';
 import { MULTI_TOUCH_TOGGLE } from './attributionSettings.js';
 
 export const campaignIntelFeature: BackendFeature = {
@@ -36,6 +37,9 @@ export const campaignIntelFeature: BackendFeature = {
     // ADR 1022 D5 — and every budget change meets the same caps (the one-click
     // recommendation apply and the core budget node used to skip them).
     setAdsCapIncreaseChecker((tenantId, target, toDailyMinor) => capBlocksIncrease(tenantId, target, toDailyMinor));
+    // ADR 1022 follow-up (Q-1) — the ONE campaign-ownership predicate (the apply
+    // route's) also guards the core ad-budget-update node, which cannot import it.
+    setAdsCampaignOwnershipChecker((tenantId, orgId, target) => orgOwnsAdCampaign(tenantId, orgId, target));
     registerCampaignIntelErasure();
   },
   surface: { id: 'campaign-intel', build: buildCampaignIntelSurface, orgPolicy: CAMPAIGN_INTEL_SURFACE_POLICY },

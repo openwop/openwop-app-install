@@ -12,13 +12,31 @@
 import { registerJourneyExperimentSurface } from './experimentSurface.js';
 import type { BackendFeature } from '../types.js';
 import { registerCampaignJourneysRoutes } from './routes.js';
+import { registerSubjectEraser } from '../../host/subjectErasure.js';
+import { onCrmRecordMerged, onCrmRecordUnmerged } from '../../host/crmRecordLifecycle.js';
+import { copyEnrollmentsOnMerge, eraseJourneyEnrollmentSubject, removeMergeCopiedEnrollments } from './journeyService.js';
 import { buildCampaignJourneysSurface } from './surface.js';
+import { registerEventTriggerOrgResolver } from '../../host/hostEventDispatcher.js';
+import { journeyEventTriggerOrg } from './eventTriggerOrg.js';
 
 export const campaignJourneysFeature: BackendFeature = {
   id: 'campaign-journeys',
   registerRoutes: (deps) => {
+    // ADR 1024 D5.4/D5.5 — regardless of the toggle: an erasure obligation and a merge's
+    // effect on the ledger are not purchased features. Module-level references (the
+    // eraser registry dedupes by reference; the hooks are keyed).
+    registerSubjectEraser(eraseJourneyEnrollmentSubject);
+    onCrmRecordMerged('campaign-journeys-enrollments', async (e) => {
+      if (e.entity === 'contact') await copyEnrollmentsOnMerge(e.tenantId, e.sourceId, e.survivorId);
+    });
+    onCrmRecordUnmerged('campaign-journeys-enrollments', async (e) => {
+      if (e.entity === 'contact') await removeMergeCopiedEnrollments(e.tenantId, e.sourceId, e.survivorId);
+    });
     registerCampaignJourneysRoutes(deps);
     registerJourneyExperimentSurface(); // ADR 0949 P3b — the `journey.split` experiment adapter
+    // fl2-86 — an event-triggered journey starts only for an event about its own client.
+    // Registered regardless of the toggle: a binding outlives a toggle flip.
+    registerEventTriggerOrgResolver(journeyEventTriggerOrg);
   },
   surface: { id: 'campaign-journeys', build: buildCampaignJourneysSurface },
   requiredPacks: [

@@ -18,6 +18,12 @@
  * `interactive-artifacts.get` agent tool. Also red if hidden stops looking
  * exactly like missing (same 404 body), or if the gate stops being the
  * conversation's own rule (a participant B must see it).
+ *
+ * Sabotage-witnessed (wave 82), one door at a time: the per-artifact gate
+ * (`resolveRunArtifact`), the Library list gate, the `?runId=` filter, the
+ * revisions and revision doors, the agent tool's predicate, a route that tells
+ * "private" from "missing", an owner-only conversation rule, the `user:` bucket,
+ * the turn filter, and the "both halves required" 400.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -51,7 +57,9 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res { status: number; body: any }
+interface Res { status: number; body: Record<string, unknown> | undefined }
+interface ArtifactList { artifacts: Array<{ artifactId: string }> }
+interface ErrorBody { error?: unknown; message?: unknown; details?: Record<string, unknown> }
 interface Member { userId: string; get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res> }
 
 async function signIn(tenantId: string): Promise<Member> {
@@ -59,11 +67,11 @@ async function signIn(tenantId: string): Promise<Member> {
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]!; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    return { status: res.status, body: res.status === 204 ? undefined : ((await res.json().catch(() => undefined)) as Record<string, unknown> | undefined) };
   };
   const r = await call('POST', '/host/openwop-app/test/login', { email: `ce62-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return { userId: r.body.user.userId as string, get: (p) => call('GET', p), post: (p, b) => call('POST', p, b) };
+  return { userId: (r.body!.user as { userId: string }).userId, get: (p) => call('GET', p), post: (p, b) => call('POST', p, b) };
 }
 
 /** A second person in the SAME workspace: a real `viewer` member of the
@@ -76,7 +84,10 @@ async function secondMember(tenantId: string): Promise<Member> {
 
 const LIB = '/host/openwop-app/artifacts';
 const one = (id: string, suffix = ''): string => `${LIB}/${encodeURIComponent(id)}${suffix}`;
-const ids = (r: Res): string[] => (r.body.artifacts as Array<{ artifactId: string }>).map((a) => a.artifactId);
+const ids = (r: Res): string[] => (r.body as ArtifactList | undefined)!.artifacts.map((a) => a.artifactId);
+/** The 404 envelope minus the echoed id (`details` keys only; the envelope redacts the
+ *  high-entropy conversation id inside the echoed value). */
+const shape = (r: Res) => { const b = (r.body ?? {}) as ErrorBody; return { ...b, details: Object.keys(b.details ?? {}).sort() }; };
 
 /** The typed envelope the code tool writes (agentToolProvider EXECUTE_CODE). */
 const codeResult = (stdout: string) => ({
@@ -86,7 +97,9 @@ const codeResult = (stdout: string) => ({
 async function openConversation(owner: Member, participants: string[] = []): Promise<string> {
   const r = await owner.post('/host/openwop-app/chat/sessions', { title: 'private', type: 'agent', participants });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return (r.body.sessionId ?? r.body.conversationId ?? r.body.id) as string;
+  const id = r.body!.sessionId; // `toConversation` answers the created row's `sessionId`
+  expect(typeof id).toBe('string');
+  return id as string;
 }
 
 async function render(tenantId: string, actingUserId: string, conversationId: string | undefined, source: string): Promise<{ artifactId: string; artifactKey: string }> {
@@ -139,14 +152,12 @@ describe('CE62-F1 — chat-tool artifacts follow the conversation', () => {
       const hidden = await b.get(one(code, suffix));
       const absent = await b.get(one(missing, suffix));
       expect(hidden.status, suffix).toBe(404);
-      // Same envelope; `details` only echoes the id that was asked for (and the
-      // envelope redacts the high-entropy conversation id inside it).
-      const shape = (b: { details?: Record<string, unknown> }) => ({ ...b, details: Object.keys(b.details ?? {}).sort() });
-      expect(shape(hidden.body), suffix).toEqual(shape(absent.body));
+      // Same envelope; `details` only echoes the id that was asked for.
+      expect(shape(hidden), suffix).toEqual(shape(absent));
     }
 
     // The agent tool: B's agent cannot read it back by key; A's can.
-    const getAs = async (actingUserId: string) => JSON.parse((await createAgentToolProvider({ tenantId, actingUserId })
+    const getAs = async (actingUserId: string): Promise<{ artifact: { content?: string } | null }> => JSON.parse((await createAgentToolProvider({ tenantId, actingUserId })
       .executeTool({ name: INTERACTIVE_ARTIFACTS_GET_TOOL_ID, input: { artifactKey: viz.artifactKey } })).content);
     expect(await getAs(b.userId)).toEqual({ artifact: null });
     expect((await getAs(a.userId)).artifact?.content).toContain('Secret-->Plan');
@@ -162,7 +173,7 @@ describe('CE62-F1 — chat-tool artifacts follow the conversation', () => {
     const b = await secondMember(tenantId);
     const conv = await openConversation(a);
     const runId = `conv-run-${n++}`;
-    await hostExtStorage().insertRun({ runId, workflowId: 'chat', tenantId, status: 'running', inputs: null, metadata: { chatSessionId: conv, actingUserId: a.userId }, configurable: {}, createdAt: 'x', updatedAt: 'x' });
+    await hostExtStorage().insertRun({ runId, workflowId: 'chat', tenantId, status: 'running', inputs: null, metadata: { chatSessionId: conv, actingUserId: a.userId }, configurable: {}, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
     const turn3 = `${runId}:gate:0:3:agent`;
     const turn5 = `${runId}:gate:0:5:agent`;
     const renderIn = async (turnMessageId: string, source: string): Promise<string> => {
@@ -209,6 +220,10 @@ describe('CE62-F1 — chat-tool artifacts follow the conversation', () => {
     const code = await codeArtifact(tenantId, { actingUserId: a.userId }, 'solo stdout');
     expect(ids(await a.get(LIB))).toContain(code);
     expect(ids(await b.get(LIB))).not.toContain(code);
-    expect((await b.get(one(code))).status).toBe(404);
+    // Hidden reads exactly like missing here too.
+    const hidden = await b.get(one(code));
+    const missing = `run-event:${runArtifactKey(chatArtifactRunId('chat-code', { tenantId, actingUserId: a.userId }), 'run:none')}`;
+    expect(hidden.status).toBe(404);
+    expect(shape(hidden)).toEqual(shape(await b.get(one(missing))));
   });
 });

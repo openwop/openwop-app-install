@@ -59,7 +59,7 @@ afterEach(cleanup);
 describe('EmbeddedChatPanel BYOK gate', () => {
   it('renders the designed gate (not the conversation) when no valid config, and its manage action works', () => {
     const onManage = vi.fn();
-    render(<MemoryRouter><EmbeddedChatPanel agentId="vendor.openwop-app.kicktodo.agents.challenge-author" onManageProvider={onManage} /></MemoryRouter>);
+    render(<MemoryRouter><EmbeddedChatPanel agentId="vendor.example.agents.author" onManageProvider={onManage} /></MemoryRouter>);
     expect(screen.queryByTestId('embedded-conversation')).toBeNull();
     // The gate copy + manage action (shared chat-ns keys).
     expect(screen.getByText('Connect an AI provider to use AI here.')).toBeTruthy();

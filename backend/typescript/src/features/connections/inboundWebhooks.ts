@@ -44,6 +44,7 @@ import {
   type StreamIngressInput,
 } from '../../host/triggerIngestionService.js';
 import { OWNED_REF_PREFIXES } from '../../byok/refNamespaces.js';
+import { takeChannelInbound } from '../../middleware/rateLimit.js';
 
 /** Deps the inbound handler needs — the FULL host suite (resume needs more of it than a
  *  run-start does; a full `HostAdapterSuite` also satisfies `startWorkflowRun`'s Pick). */
@@ -108,9 +109,48 @@ export interface InboundConfig {
   /** ADR 0853 D4 — the project this connection's `decision:` messages are
    *  suggested to (set by someone with edit access to the project). */
   projectId?: string;
+  /** ADR 1042 D7 — `conversation`: a verified chat message becomes a turn in the
+   *  paired owner's main-chat conversation (the channel-ingress feature), and
+   *  the reply goes back to the chat. Absent or `workflow`: the configured
+   *  workflow fires, exactly as before. */
+  mode?: 'workflow' | 'conversation';
   enabled: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+/** ADR 1042 D7 — the chat providers a conversation-mode config may use. */
+export const CONVERSATIONAL_INBOUND_PROVIDERS: ReadonlySet<string> = new Set(['slack', 'discord', 'telegram', 'whatsapp-twilio', 'whatsapp-cloud']);
+
+/** What the conversation-mode handler receives: verified, tenant from the stored config. */
+export interface ConversationalInboundInput {
+  tenantId: string;
+  connectionId: string;
+  provider: string;
+  body: Record<string, unknown>;
+  /** The provider event id the delivery was deduped on, when any. */
+  eventId?: string;
+  deliveryId: string;
+}
+export interface ConversationalIngress {
+  /** Whether conversation mode is on for this tenant (the `channel-ingress` toggle). */
+  enabled(tenantId: string): Promise<boolean>;
+  /** Security review M6 — is this verified message from an approved sender (and
+   *  addressed, in a group)? Asked BEFORE the connection's inbound budget is spent:
+   *  a stranger is acknowledged and dropped without costing anything. */
+  admit(input: ConversationalInboundInput): Promise<{ admitted: boolean }>;
+  /** Handle one admitted message. Never waits for the turn (security review (c)). */
+  ingest(input: ConversationalInboundInput): Promise<{ runId: string | null }>;
+}
+let conversationalIngress: ConversationalIngress | null = null;
+/** Dependency inversion (the observer pattern above): the channel-ingress
+ *  feature registers itself; connections never imports it. */
+export function registerConversationalIngress(handler: ConversationalIngress | null): void {
+  conversationalIngress = handler;
+}
+/** Can a conversation-mode config be saved for this tenant right now? */
+export async function conversationalIngressAvailable(tenantId: string): Promise<boolean> {
+  return conversationalIngress !== null && (await conversationalIngress.enabled(tenantId).catch(() => false));
 }
 
 const store = new DurableCollection<InboundConfig>('connections:inbound', (c) => c.connectionId);
@@ -183,6 +223,8 @@ export async function setInboundConfig(input: {
   streamSource?: 'stream' | 'change';
   /** ADR 0853 D4 — validated by the route (write on the project). */
   projectId?: string;
+  /** ADR 1042 D7 — validated by the route (provider + toggle). */
+  mode?: 'workflow' | 'conversation';
 }): Promise<InboundConfig> {
   const existing = await store.get(input.connectionId);
   const streamProvider = isStreamInbound(input.provider);
@@ -195,6 +237,7 @@ export async function setInboundConfig(input: {
     ...(input.workflowId ? { workflowId: input.workflowId } : {}),
     ...(streamProvider ? { streamSource } : {}),
     ...(input.projectId ? { projectId: input.projectId } : {}),
+    ...(input.mode === 'conversation' ? { mode: 'conversation' as const } : {}),
     enabled: true,
     createdAt: existing?.createdAt ?? new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -473,6 +516,12 @@ export type InboundOutcome =
   | { status: 'ignored' }
   | { status: 'not_found' }
   | { status: 'rejected'; reason?: string }
+  /** ADR 1042 D6 — over this connection's inbound budget (the route answers 429). */
+  | { status: 'rate_limited'; retryAfterSeconds: number }
+  /** ADR 1042 (security review M6) — a verified message from a stranger, a
+   *  non-message, or an un-addressed group message in conversation mode:
+   *  acknowledged 200 and dropped, without spending the connection's budget. */
+  | { status: 'dropped' }
   | { status: 'unauthorized' };
 
 /**
@@ -711,6 +760,28 @@ export async function handleInboundEvent(
     normalizedEvent = input.body.event ?? null;
   }
 
+  // ADR 1042 D6 — the per-connection inbound budget, taken AFTER the signature
+  // check (a forged flood cannot spend a real connection's budget) and before any
+  // dispatch. Observer-only providers (an SMS STOP must never be dropped) and the
+  // streaming/CDC ingress returned above and are not counted.
+  // Security review M6 — in conversation mode only an ADMITTED message (an approved
+  // sender; addressed, in a group) reaches the budget. Discord still needs an
+  // interaction response, so a refused command gets an ephemeral answer.
+  if (config.mode === 'conversation' && conversationalIngress && (await conversationalIngress.enabled(config.tenantId).catch(() => false))) {
+    const admission = await conversationalIngress.admit({ tenantId: config.tenantId, connectionId: input.connectionId, provider: config.provider, body: input.body, ...(eventId ? { eventId } : {}), deliveryId: '' });
+    if (!admission.admitted) {
+      if (config.provider === 'discord' && input.body.type === 2) {
+        return { status: 'respond', json: { type: 4, data: { content: 'This account is not approved to talk to this workspace yet.', flags: 64 } } };
+      }
+      return { status: 'dropped' };
+    }
+  }
+  const admitted = takeChannelInbound(`conn:${input.connectionId}`);
+  if (!admitted.ok) {
+    log.warn('inbound rate limited', { connectionId: input.connectionId, provider: config.provider, reason: 'channel_inbound_rate' });
+    return { status: 'rate_limited', retryAfterSeconds: admitted.retryAfterSeconds };
+  }
+
   // Dedup on the provider event id (stable across its retries); fall back to a body
   // hash so a malformed-but-signed event still can't double-fire within the window.
   const dedupKey = makeDedupKey(input.connectionId, eventId ?? `sha:${createHmac('sha256', signingSecret).update(input.rawBody).digest('hex')}`);
@@ -727,6 +798,22 @@ export async function handleInboundEvent(
         if (text && /^\s*decision:/i.test(text)) {
           await notifyInboundMessage({ tenantId: config.tenantId, connectionId: input.connectionId, provider: config.provider, projectId: config.projectId, text, ref: eventId ?? deliveryId });
         }
+      }
+      // ADR 1042 D7 — conversation mode: the message is a turn in the paired
+      // owner's main-chat conversation. Inside the dedup wrapper, so a redelivery
+      // never makes a second turn. The handler (channel-ingress) owns the sender
+      // allowlist, the conversation and the reply; with it absent or its toggle
+      // off, nothing fires (never the workflow fallback — there is none).
+      if (config.mode === 'conversation') {
+        if (!conversationalIngress || !(await conversationalIngress.enabled(config.tenantId).catch(() => false))) {
+          log.info('inbound conversation mode unavailable — not fired', { connectionId: input.connectionId, reason: 'channel_ingress_off' });
+          return `nofire:${deliveryId}`;
+        }
+        const r = await conversationalIngress.ingest({
+          tenantId: config.tenantId, connectionId: input.connectionId, provider: config.provider,
+          body: input.body, ...(eventId ? { eventId } : {}), deliveryId,
+        });
+        return r.runId ?? `nofire:${deliveryId}`;
       }
       // Phase 3 — conversational resume: if this connection has an active run that is
       // still open AND waiting on an interrupt, feed the message INTO it (resolve +
@@ -790,6 +877,11 @@ export async function handleInboundEvent(
     },
   });
   const runId = result.runId && !result.runId.startsWith('nofire:') ? result.runId : null;
+  // ADR 1042 D7 — a Discord interaction must be answered in the webhook response
+  // within 3 s; the reply itself posts to the channel when the turn settles.
+  if (config.mode === 'conversation' && config.provider === 'discord' && input.body.type === 2) {
+    return { status: 'respond', json: { type: 4, data: { content: 'Got it. The answer will post in this channel.', flags: 64 } } };
+  }
   return { status: 'accepted', runId, deduped: result.outcome === 'deduped' || result.outcome === 'skipped' };
 }
 

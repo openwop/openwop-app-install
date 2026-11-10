@@ -13,6 +13,7 @@
  *   - nodes unreachable from any source node
  */
 
+import { sourceOutputForWire } from './sourceOutput.js';
 import { catalogEntry } from '../palette/catalogRegistry.js';
 import i18n from '../../i18n/index.js';
 import type {
@@ -99,12 +100,15 @@ function topoSort(
   nodes: ReadonlyArray<BuilderNode>,
   edges: ReadonlyArray<BuilderEdge>,
 ): { order: BuilderNode[] } | { cycleNodeId: string } {
-  const indegree = new Map<string, number>(nodes.map((n) => [n.id, 0]));
+  // Match the scheduler: dependency count is DISTINCT upstream nodes, while
+  // every port/condition edge remains in the graph and serialized payload.
+  const upstream = new Map(nodes.map((n) => [n.id, new Set<string>()]));
   const outgoing = new Map<string, BuilderEdge[]>(nodes.map((n) => [n.id, []]));
   for (const e of edges) {
-    indegree.set(e.target, (indegree.get(e.target) ?? 0) + 1);
+    upstream.get(e.target)?.add(e.source);
     outgoing.get(e.source)?.push(e);
   }
+  const indegree = new Map([...upstream].map(([id, sources]) => [id, sources.size]));
   // Stable seed: sort starting nodes by Y then X so layout reflects ordering.
   const ready: BuilderNode[] = nodes
     .filter((n) => (indegree.get(n.id) ?? 0) === 0)
@@ -358,9 +362,8 @@ function serializeExecutable(wf: SavedWorkflow): SerializeResult {
       sourceNodeId,
       targetNodeId,
     };
-    if (e.sourcePort && e.sourcePort !== 'output' && e.sourcePort !== 'out') {
-      out.sourceOutput = e.sourcePort;
-    }
+    const sourceOutput = sourceOutputForWire(e);
+    if (sourceOutput !== undefined) out.sourceOutput = sourceOutput;
     if (e.targetPort && e.targetPort !== 'input' && e.targetPort !== 'in') {
       out.targetInput = e.targetPort;
     }

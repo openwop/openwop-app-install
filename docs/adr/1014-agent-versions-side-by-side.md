@@ -213,6 +213,17 @@ An independent review of P2–P5 found eleven defects. All but one are fixed, wi
 - **H1:** the console tab's probe re-ran on every render, re-fetched in a loop and could not stay open. It now probes once per agent through a stable tab reference (`workspaceDeploymentsTab.test.tsx`).
 - **H2:** after a restart, user agents registered as version `0` with their latest content, so a run could record `0` while revision 2 ran. Every registration path now uses `revisionForRecord`.
 - **M1:** concurrent edits could attach a revision number to the wrong content. Numbering now follows the stored record (`alignHead`, before and after the record's own CAS).
+
+  > **Correction (2026-11-04, TST-FIB-GC1): M1 was not fixed in two places.** (1) The
+  > after-CAS `alignHead(updated, …)` numbered the CALLER's copy, not the stored record. A
+  > forced race (edit A parked after its CAS while edit B saved) made head 3 = `a` while
+  > the agent held `b`. The unforced `Promise.all` M1 test never produced that order. (2)
+  > `alignHead` ignored a failed revision-row write, so a second aligner could point the
+  > head at a row holding the first aligner's content. Now the route re-reads the stored
+  > agent after its CAS and numbers and registers that. `alignHead` treats a taken row as
+  > another aligner's step and finishes it, and re-reads the stored record on every retry
+  > (`reload`). Both halves are pinned by a forced-race test that is red on `96cd0524a`
+  > (`tst-fib-gc1-revision-race.test.ts`). Found by grade-tests w83 (1b).
 - **M2:** a deleted user agent left its revisions, head and deployment rows behind. They are purged on delete, and the registry's cached revisions are evicted on every instance.
 - **M3:** with the flag off, an edit of a deployed user agent could not be promoted. Drafts are now minted whatever the flag says, because minting changes nothing that runs. Only the newest edit is the draft: older edit drafts are superseded.
 - **M4:** the D6 tool guard refused a caller's deliberate narrowing. It now asks whether the host knows the tool (`resolveTool`).

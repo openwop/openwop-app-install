@@ -16,15 +16,21 @@
  *  - drop the redrive inheritance loop in workflowDebug.ts → red (the redrive has no stamp);
  *  - drop the hash check in `parseAutonomyStamp` → red (a tampered stamp is honoured);
  *  - drop `mcpOrigin` from the stamp and the live `source` read → red (the MCP run auto-sends).
+ * Re-measured wave 80 (each red): the fresh-stamp policy, the contributor's toggle check,
+ * `bound`, the dangling arm, both reserved keys, the hash check, the derived block, the
+ * branch posture, the attended floor, the redrive inheritance loop, the `parentRunId`
+ * guard, the inherited-key registration, the MCP constructor's `source`, and the
+ * `mcpOrigin` floor in `resolve.ts`. The stamp's `mcpOrigin` and the live `source` read
+ * share one line of `frozen.ts` (`runAutonomyOf`); breaking that line reds the MCP case.
+ * Each case seeds its OWN campaign, so a loosen in one never reaches another (shuffle-safe).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
+import type { HostAdapterSuite } from '../src/host/index.js';
+import { runWorkflowById } from '../src/host/mcpSemantics.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createOrg } from '../src/host/accessControlService.js';
@@ -39,17 +45,16 @@ import {
   AUTONOMY_STAMP_KEY, AUTONOMY_TOGGLE, FORK_POSTURE_KEY, bindClientPresetIfAbsent, presetPolicy, resolveCampaignAction,
   runAutonomyOf, savePolicy, type FrozenAutonomy,
 } from '../src/host/autonomyPolicy/index.js';
-import type { RunRecord } from '../src/types.js';
+import type { Principal, RunRecord } from '../src/types.js';
 import { bareRunId } from './support/bareRunId.js';
 
 const TENANT = 'default';
 const TOKEN = 'dev-token';
-const SRC_ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..', 'src');
 let server: http.Server;
 let storage: Storage;
+let hostSuite: HostAdapterSuite;
 let BASE: string;
 let orgId: string;
-let campaign: MarketingCampaign;
 let fixtureWorkflowId: string;
 let n = 0;
 
@@ -72,8 +77,15 @@ const runRow = async (runId: string): Promise<RunRecord> => {
 const metaOf = async (runId: string): Promise<Record<string, unknown>> => ((await runRow(runId)).metadata ?? {}) as Record<string, unknown>;
 const stampOf = async (runId: string): Promise<FrozenAutonomy | undefined> => (await metaOf(runId))[AUTONOMY_STAMP_KEY] as FrozenAutonomy | undefined;
 
+/** A campaign of its own per case, on the Guarded client: a case that loosens its
+ *  campaign can never change what another case's runs freeze (order-independent). */
+async function newCampaign(): Promise<MarketingCampaign> {
+  const brief = await createBrief(TENANT, orgId, 'u-1', { name: `Spring launch ${n++}`, channels: [{ type: 'email_sequence', enabled: true, config: {} }] });
+  return (await ensureDraftCampaign(TENANT, brief, 'u-1')).campaign;
+}
+
 /** Insert a campaign run the way a campaign service does (host path, through the seam). */
-async function insertCampaignRun(extraMeta: Record<string, unknown> = {}, extra: Partial<RunRecord> = {}): Promise<RunRecord> {
+async function insertCampaignRun(campaign: MarketingCampaign, extraMeta: Record<string, unknown> = {}, extra: Partial<RunRecord> = {}): Promise<RunRecord> {
   const now = new Date().toISOString();
   const run: RunRecord = {
     runId: `r942-${Date.now()}-${n++}`, workflowId: fixtureWorkflowId, tenantId: TENANT, status: 'completed', inputs: {},
@@ -96,13 +108,12 @@ beforeAll(async () => {
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   storage = app.locals.storage;
+  hostSuite = app.locals.hostSuite;
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   await setToggle('campaign-orchestration', true);
   await setToggle(AUTONOMY_TOGGLE, true);
   orgId = (await createOrg({ tenantId: TENANT, createdBy: 'u-1', name: 'Client A', ownerSubject: 'u-1' })).orgId;
   await bindClientPresetIfAbsent(TENANT, orgId, 'guarded@1', 'u-1');
-  const brief = await createBrief(TENANT, orgId, 'u-1', { name: 'Spring launch', channels: [{ type: 'email_sequence', enabled: true, config: {} }] });
-  campaign = (await ensureDraftCampaign(TENANT, brief, 'u-1')).campaign;
   const disco = await jf<{ fixtures?: string[] }>('/.well-known/openwop');
   fixtureWorkflowId = disco.body.fixtures?.[0] ?? 'openwop-app.uppercase';
 });
@@ -110,7 +121,8 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 
 describe('ADR 0942 D4 — the stamp at run start', () => {
   it('a fresh campaign run is stamped with the client default, rules inline', async () => {
-    const run = await insertCampaignRun();
+    const campaign = await newCampaign();
+    const run = await insertCampaignRun(campaign);
     const stamp = await stampOf(run.runId);
     const guarded = presetPolicy('guarded@1');
     expect(stamp).toMatchObject({ v: 1, policyId: 'preset:guarded', version: 1, hash: guarded.hash, source: 'client', campaignId: campaign.id, orgId });
@@ -121,13 +133,17 @@ describe('ADR 0942 D4 — the stamp at run start', () => {
   });
 
   it('no stamp while the sub-toggle is off; a bound unstamped run resolves to the fail-closed fallback', async () => {
+    const campaign = await newCampaign();
     await setToggle(AUTONOMY_TOGGLE, false);
-    const run = await insertCampaignRun();
-    await setToggle(AUTONOMY_TOGGLE, true);
+    let run: RunRecord;
+    try { run = await insertCampaignRun(campaign); } finally { await setToggle(AUTONOMY_TOGGLE, true); }
     expect(await stampOf(run.runId)).toBeUndefined();
     const ra = runAutonomyOf(await runRow(run.runId));
     expect(ra).toMatchObject({ bound: true, policy: null, reason: 'absent' });
-    expect(resolveCampaignAction({ policy: ra.policy, actionClass: 'ads.publish', facts: {} }).decision.outcome).toBe('approve');
+    // The fallback itself, not just an outcome another preset could also give.
+    const r = resolveCampaignAction({ policy: ra.policy, actionClass: 'ads.publish', facts: {} });
+    expect(r).toMatchObject({ policyId: 'preset:review-everything', decision: { outcome: 'approve' } });
+    expect(r.reasons).toContain('policy_fallback');
   });
 
   it('a non-campaign run is not bound and gets no stamp', async () => {
@@ -139,7 +155,7 @@ describe('ADR 0942 D4 — the stamp at run start', () => {
   });
 
   it('a tag naming a campaign that does not exist gets the fallback stamp, marked dangling', async () => {
-    const ghost = { ...campaign, id: 'cmp_ghostghostghostghostghost' };
+    const ghost = { ...(await newCampaign()), id: 'cmp_ghostghostghostghostghost' };
     const now = new Date().toISOString();
     const run: RunRecord = {
       runId: `r942-ghost-${n++}`, workflowId: fixtureWorkflowId, tenantId: TENANT, status: 'completed', inputs: {},
@@ -150,6 +166,7 @@ describe('ADR 0942 D4 — the stamp at run start', () => {
   });
 
   it('a caller-supplied stamp or posture is stripped from POST /runs', async () => {
+    const campaign = await newCampaign();
     const forged = { v: 1, policyId: 'preset:autopilot', version: 1, hash: presetPolicy('autopilot@1').hash, rules: presetPolicy('autopilot@1').rules, campaignId: campaign.id, orgId };
     const created = await jf<{ runId: string }>('/runs', {
       method: 'POST',
@@ -163,7 +180,7 @@ describe('ADR 0942 D4 — the stamp at run start', () => {
   });
 
   it('a tampered stamp is not honoured', async () => {
-    const run = await insertCampaignRun();
+    const run = await insertCampaignRun(await newCampaign());
     const stamp = await stampOf(run.runId);
     if (!stamp) throw new Error('expected a stamp');
     const tampered = { ...stamp, rules: presetPolicy('autopilot@1').rules };
@@ -174,11 +191,12 @@ describe('ADR 0942 D4 — the stamp at run start', () => {
 
 describe('ADR 0942 D4/D10.4 — fork, redrive and children', () => {
   it('a fork after a loosen keeps the old policy; a branch fork is attended and re-asks before every effect', async () => {
-    const src = await insertCampaignRun();
+    const campaign = await newCampaign();
+    const src = await insertCampaignRun(campaign);
     const before = await stampOf(src.runId);
-    // Loosen the campaign to Autopilot AFTER the source started.
+    // Loosen THIS campaign to Autopilot AFTER the source started.
     await savePolicy({ tenantId: TENANT, orgId, campaignId: campaign.id, input: { kind: 'preset', preset: 'autopilot@1' }, actor: 'u-1', expected: null });
-    const fresh = await insertCampaignRun();
+    const fresh = await insertCampaignRun(campaign);
     expect((await stampOf(fresh.runId))?.policyId).toBe('preset:autopilot'); // non-vacuity: the loosen took effect
     for (const mode of ['replay', 'branch'] as const) {
       const f = await fork(src.runId, mode);
@@ -193,7 +211,7 @@ describe('ADR 0942 D4/D10.4 — fork, redrive and children', () => {
   });
 
   it('a redrive runs under its source\'s policy and is attended', async () => {
-    const src = await insertCampaignRun();
+    const src = await insertCampaignRun(await newCampaign());
     const before = await stampOf(src.runId);
     await storage.updateRun(bareRunId(src.runId), { status: 'failed' });
     const r = await jf<{ results?: Array<{ redriveRunId?: string; error?: string }> }>('/host/openwop-app/runs/redrive', { method: 'POST', body: JSON.stringify({ runIds: [src.runId] }) });
@@ -205,19 +223,22 @@ describe('ADR 0942 D4/D10.4 — fork, redrive and children', () => {
   });
 
   it('a redrive of a run born without a stamp stays without one after the toggle turns on (absence is inherited)', async () => {
+    const campaign = await newCampaign();
     await setToggle(AUTONOMY_TOGGLE, false);
-    const src = await insertCampaignRun();
-    await setToggle(AUTONOMY_TOGGLE, true);
+    let src: RunRecord;
+    try { src = await insertCampaignRun(campaign); } finally { await setToggle(AUTONOMY_TOGGLE, true); }
     expect(await stampOf(src.runId)).toBeUndefined();
     await storage.updateRun(bareRunId(src.runId), { status: 'failed' });
     const r = await jf<{ results?: Array<{ redriveRunId?: string }> }>('/host/openwop-app/runs/redrive', { method: 'POST', body: JSON.stringify({ runIds: [src.runId] }) });
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
     const id = r.body.results?.[0]?.redriveRunId;
     if (!id) throw new Error(`redrive refused: ${JSON.stringify(r.body)}`);
     expect(await stampOf(id)).toBeUndefined();
   });
 
   it('a child inherits its parent\'s stamp verbatim, and an unstamped parent\'s child stays unstamped', async () => {
-    const parent = await insertCampaignRun();
+    const campaign = await newCampaign();
+    const parent = await insertCampaignRun(campaign);
     const child = async (p: RunRecord): Promise<string> => {
       const now = new Date().toISOString();
       const run: RunRecord = {
@@ -230,20 +251,26 @@ describe('ADR 0942 D4/D10.4 — fork, redrive and children', () => {
     };
     expect(await stampOf(await child(await runRow(parent.runId)))).toEqual(await stampOf(parent.runId));
     await setToggle(AUTONOMY_TOGGLE, false);
-    const bare = await insertCampaignRun();
-    await setToggle(AUTONOMY_TOGGLE, true);
+    let bare: RunRecord;
+    try { bare = await insertCampaignRun(campaign); } finally { await setToggle(AUTONOMY_TOGGLE, true); }
     expect(await stampOf(await child(await runRow(bare.runId)))).toBeUndefined();
   });
 });
 
 describe('ADR 0942 D10.3 — MCP-started runs', () => {
-  it('the MCP run constructor writes the origin marker itself, with no caller merge', () => {
-    const src = readFileSync(join(SRC_ROOT, 'host', 'mcpSemantics.ts'), 'utf8');
-    expect(src).toMatch(/metadata: \{ launchResolved: wf\.launchResolved, source: 'mcp-server-mount', trustBoundary: 'untrusted', actingUserId: deps\.principal\.principalId \}/);
+  it('the MCP run constructor writes the origin marker itself, with no caller merge', async () => {
+    // The REAL MCP run constructor (`runWorkflowById`), not its source text.
+    const principal: Principal = { principalId: 'u-mcp', tenants: [TENANT], token: '' };
+    const out = await runWorkflowById({
+      storage, hostSuite, principal,
+      caller: { principal, tenantId: TENANT, workspaceLaunch: false, resolveLaunch: async () => null },
+    }, fixtureWorkflowId, { metadata: { source: 'caller-forged', trustBoundary: 'trusted' } });
+    expect(out.runId, JSON.stringify(out)).not.toBe('');
+    expect(await metaOf(out.runId)).toMatchObject({ source: 'mcp-server-mount', trustBoundary: 'untrusted', actingUserId: 'u-mcp' });
   });
 
   it('an MCP-started campaign run cannot auto-send, even on Autopilot', async () => {
-    const run = await insertCampaignRun({ source: 'mcp-server-mount', trustBoundary: 'untrusted' });
+    const run = await insertCampaignRun(await newCampaign(), { source: 'mcp-server-mount', trustBoundary: 'untrusted' });
     const stamp = await stampOf(run.runId);
     expect(stamp?.mcpOrigin).toBe(true);
     const ra = runAutonomyOf(await runRow(run.runId));

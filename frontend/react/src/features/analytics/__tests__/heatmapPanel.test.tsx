@@ -5,13 +5,20 @@
  *  - scroll reach and attention render as tables;
  *  - a suppressed experiment arm is disclosed;
  *  - the bot count is stated.
+ *
+ * Sabotage (each reds the named case): show a failed page list or a failed heat-map
+ * read as empty; drop the 2% scaling, the `s:` strip or the bot count; compute a share
+ * against the wrong total; invert the scroll value; scale the attention time; disclose
+ * nothing, or disclose any arm; show zeros instead of the empty state; let attention-only
+ * data fall into it.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { render, screen, cleanup, fireEvent } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, within } from '@testing-library/react';
 import type * as Client from '../analyticsClient.js';
 import type { HeatmapView } from '../analyticsClient.js';
-import { messages as en } from '../i18n/en.js';
+import i18n from '../../../i18n/index.js';
 
+const tx = (k: string, o?: Record<string, string | number>): string => i18n.t(`analytics:${k}`, o ?? {});
 const getHeatPages = vi.fn<typeof Client.getHeatPages>();
 const getHeatmap = vi.fn<typeof Client.getHeatmap>();
 vi.mock('../analyticsClient.js', async (importOriginal) => ({
@@ -36,14 +43,24 @@ describe('ADR 0951 P1 — HeatmapPanel', () => {
   it('no measured pages says so', async () => {
     getHeatPages.mockResolvedValue([]);
     render(<HeatmapPanel orgId="org:1" />);
-    expect(await screen.findByText(en.heatNoPages)).toBeTruthy();
+    expect(await screen.findByText(tx('heatNoPages'))).toBeTruthy();
     expect(getHeatmap).not.toHaveBeenCalled();
   });
 
   it('a failed page list says so', async () => {
     getHeatPages.mockRejectedValue(new Error('x'));
     render(<HeatmapPanel orgId="org:1" />);
-    expect(await screen.findByText(en.heatPagesFailed)).toBeTruthy();
+    expect(await screen.findByText(tx('heatPagesFailed'))).toBeTruthy();
+    expect(screen.queryByText(tx('heatNoPages'))).toBeNull();
+  });
+
+  it('a failed heat-map read says so, and is not the empty state', async () => {
+    getHeatPages.mockResolvedValue([{ pageKey: 'pricing', firstSeen: '2026-10-01', lastSeen: '2026-10-20' }]);
+    getHeatmap.mockRejectedValue(new Error('x'));
+    render(<HeatmapPanel orgId="org:1" />);
+    expect(await screen.findByText(tx('heatFailed'))).toBeTruthy();
+    expect(screen.queryByText(tx('heatEmpty'))).toBeNull();
+    expect(screen.queryByRole('img')).toBeNull();
   });
 
   it('clicks: a labelled figure plus the named-element and area tables, and the bot count', async () => {
@@ -52,6 +69,9 @@ describe('ADR 0951 P1 — HeatmapPanel', () => {
     render(<HeatmapPanel orgId="org:1" />);
     expect(await screen.findByRole('img', { name: /12 clicks/ })).toBeTruthy();
     expect(screen.getByText('cta-buy')).toBeTruthy();
+    const named = within(screen.getByRole('row', { name: /cta-buy/ }));
+    expect(named.getByText('7')).toBeTruthy();
+    expect(named.getByText('58%')).toBeTruthy();
     expect(screen.getByText('50% across, 10% down')).toBeTruthy();
     expect(screen.getByText(/3 bot visits left out/)).toBeTruthy();
     expect(getHeatmap).toHaveBeenCalledWith('org:1', { page: 'pricing', device: 'all', days: 30 });
@@ -62,33 +82,43 @@ describe('ADR 0951 P1 — HeatmapPanel', () => {
     getHeatmap.mockResolvedValue(view());
     render(<HeatmapPanel orgId="org:1" />);
     await screen.findByRole('img');
-    fireEvent.click(screen.getByRole('tab', { name: en.heatModeScroll }));
-    expect(screen.getByRole('table', { name: en.heatScrollCaption })).toBeTruthy();
-    fireEvent.click(screen.getByRole('tab', { name: en.heatModeAttention }));
+    fireEvent.click(screen.getByRole('tab', { name: tx('heatModeScroll') }));
+    expect(screen.getByRole('table', { name: tx('heatScrollCaption') })).toBeTruthy();
+    expect(screen.getByText('76%')).toBeTruthy(); // reach at depth 30%: 1 − 6 × 0.04
+    fireEvent.click(screen.getByRole('tab', { name: tx('heatModeAttention') }));
     expect(screen.getByText('hero')).toBeTruthy();
-    expect(screen.getByText('4.2')).toBeTruthy();
+    const section = within(screen.getByRole('row', { name: /hero/ }));
+    expect(section.getByText('4.2')).toBeTruthy();
+    expect(section.getByText('40')).toBeTruthy();
   });
 
   it('discloses a suppressed experiment arm', async () => {
     getHeatPages.mockResolvedValue([{ pageKey: 'pricing', firstSeen: '2026-10-01', lastSeen: '2026-10-20' }]);
     getHeatmap.mockResolvedValue(view({ arms: [{ arm: 'exp/b', views: 12, suppressed: true }] }));
     render(<HeatmapPanel orgId="org:1" />);
-    expect(await screen.findByText(en.heatArmsSuppressed.replace('{{n}}', '30'))).toBeTruthy();
+    expect(await screen.findByText(tx('heatArmsSuppressed', { n: 30 }))).toBeTruthy();
+
+    cleanup();
+    getHeatmap.mockResolvedValue(view({ arms: [{ arm: 'exp/a', views: 40, suppressed: false }] }));
+    render(<HeatmapPanel orgId="org:1" />);
+    await screen.findByRole('img');
+    expect(screen.queryByText(tx('heatArmsSuppressed', { n: 30 }))).toBeNull();
   });
 
   it('no data for the selection is an empty state, not zeros', async () => {
     getHeatPages.mockResolvedValue([{ pageKey: 'pricing', firstSeen: '2026-10-01', lastSeen: '2026-10-20' }]);
     getHeatmap.mockResolvedValue(view({ views: 0, totalClicks: 0, clicks: [], attention: [] }));
     render(<HeatmapPanel orgId="org:1" />);
-    expect(await screen.findByText(en.heatEmpty)).toBeTruthy();
+    expect(await screen.findByText(tx('heatEmpty'))).toBeTruthy();
+    expect(screen.queryByRole('img')).toBeNull();
   });
 
   it('attention-only data remains visible when no click or scroll batch arrived', async () => {
     getHeatPages.mockResolvedValue([{ pageKey: 'pricing', firstSeen: '2026-10-01', lastSeen: '2026-10-20' }]);
     getHeatmap.mockResolvedValue(view({ views: 0, totalClicks: 0, clicks: [] }));
     render(<HeatmapPanel orgId="org:1" />);
-    fireEvent.click(await screen.findByRole('tab', { name: en.heatModeAttention }));
+    fireEvent.click(await screen.findByRole('tab', { name: tx('heatModeAttention') }));
     expect(await screen.findByText('hero')).toBeTruthy();
-    expect(screen.queryByText(en.heatEmpty)).toBeNull();
+    expect(screen.queryByText(tx('heatEmpty'))).toBeNull();
   });
 });

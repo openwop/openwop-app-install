@@ -13,20 +13,20 @@ import { render, screen, cleanup } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import type { PublicPageResult } from '../siteClient.js';
 import type { BrandConfig } from '../../../brand/defaults.js';
-import { messages as en } from '../i18n/en.js';
+import i18n from '../../../i18n/index.js';
 
+const tx = (k: string): string => i18n.t(`site:${k}`);
 const pageResult = vi.fn<() => Promise<PublicPageResult>>();
-let demoMode = false;
 
 vi.mock('../siteClient.js', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   fetchPublicPageResult: () => pageResult(),
 }));
-vi.mock('../visitorConsent.js', () => ({ consentTokenFor: () => undefined, loadPosture: async () => null }));
+vi.mock('../visitorConsent.js', () => ({ consentTokenFor: () => undefined, loadPosture: async () => null, replayAllowedFor: () => false }));
 vi.mock('../VisitorConsentBanner.js', () => ({ VisitorConsentBanner: () => null }));
 vi.mock('../visitorBeacon.js', () => ({ getVisitorKey: () => null, sendExperimentPageview: () => {} }));
 vi.mock('../webVitalsBeacon.js', () => ({ reportWebVitals: () => {} }));
-vi.mock('../../../client/useDemoMode.js', () => ({ useDemoMode: () => demoMode }));
+vi.mock('../../../client/useDemoMode.js', () => ({ useDemoMode: () => false }));
 
 const { brand } = await import('../../../brand/brand.js');
 const { FrontPage } = await import('../FrontPage.js');
@@ -38,15 +38,13 @@ function asWhiteLabel(): void {
 }
 
 afterEach(() => {
-  cleanup(); vi.clearAllMocks(); demoMode = false;
+  cleanup(); vi.clearAllMocks();
   brand.productName = stock.productName; brand.tagline = stock.tagline;
 });
 
 function renderRoot(): void {
   render(<MemoryRouter><FrontPage orgId="org-1" slug="home" surface="root" /></MemoryRouter>);
 }
-
-const storyEyebrow = en.heroEyebrow;
 
 describe('#5226 white-label root fallback', () => {
   it('a white-label build whose home is unpublished shows its own name, not the OpenWOP story', async () => {
@@ -55,16 +53,16 @@ describe('#5226 white-label root fallback', () => {
     renderRoot();
     expect(await screen.findByRole('heading', { level: 1, name: 'Acme Studio' })).toBeTruthy();
     expect(screen.getByText('Campaigns, planned together')).toBeTruthy();
-    expect(screen.getByRole('link', { name: en.neutralCtaLabel })).toBeTruthy();
-    expect(screen.queryByText(storyEyebrow)).toBeNull();
-    expect(screen.queryByText(en.heroCtaLabel)).toBeNull();
-    expect(screen.queryByText(en.heroVignetteOpen)).toBeNull();
+    expect(screen.getByRole('link', { name: tx('neutralCtaLabel') }).getAttribute('href')).toBe('/chat');
+    expect(screen.queryByText(tx('heroEyebrow'))).toBeNull();
+    expect(screen.queryByText(tx('heroCtaLabel'))).toBeNull();
+    expect(screen.queryByText(tx('heroVignetteOpen'))).toBeNull();
   });
 
   it('the stock OpenWOP build keeps its story fallback', async () => {
     pageResult.mockResolvedValue({ status: 'notFound' });
     renderRoot();
-    expect(await screen.findByText(storyEyebrow)).toBeTruthy();
+    expect(await screen.findByText(tx('heroEyebrow'))).toBeTruthy();
   });
 });
 
@@ -83,13 +81,13 @@ describe('#5226 un-authored hero visual', () => {
     pageResult.mockResolvedValue(heroOnly);
     render(<MemoryRouter><FrontPage orgId="org-1" slug="terms" surface="slug" /></MemoryRouter>);
     expect(await screen.findByRole('heading', { level: 1, name: 'Terms of Service' })).toBeTruthy();
-    expect(screen.queryByText(en.heroVignetteOpen)).toBeNull();
+    expect(screen.queryByText(tx('heroVignetteOpen'))).toBeNull();
   });
 
   it('keeps the schematic as the stock default', async () => {
     pageResult.mockResolvedValue(heroOnly);
     render(<MemoryRouter><FrontPage orgId="org-1" slug="terms" surface="slug" /></MemoryRouter>);
     expect(await screen.findByRole('heading', { level: 1, name: 'Terms of Service' })).toBeTruthy();
-    expect(screen.getByText(en.heroVignetteOpen)).toBeTruthy();
+    expect(screen.getByText(tx('heroVignetteOpen'))).toBeTruthy();
   });
 });

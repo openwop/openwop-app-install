@@ -63,11 +63,14 @@ export default defineConfig({
     setupFiles: [
       // ADR 0880 — FIRST, so modules the other setup files load are mapped too.
       ...(process.env.OPENWOP_TRACEGATE_RECORD ? ['src/test/tracegate-recorder.ts'] : []),
+      // ADR 1028 P1b — the tracegate-ci PACKAGE's recorder, for `tracegate-package.sh
+      // record` only. Never beside the fork's: two recorders would share one V8 session.
+      ...(process.env.TRACEGATE_RECORD && !process.env.OPENWOP_TRACEGATE_RECORD ? ['tracegate-ci/vitest-setup'] : []),
       'src/test/i18n-setup.ts',
       'src/test/shared-read-seams.ts',
       'src/test/no-live-fetch.ts',
       // ADR 0880 — after i18n-setup, so only the test's own i18n lookups are recorded.
-      ...(process.env.OPENWOP_TRACEGATE_RECORD ? ['src/test/tracegate-i18n-recorder.ts'] : []),
+      ...(process.env.OPENWOP_TRACEGATE_RECORD || process.env.TRACEGATE_RECORD ? ['src/test/tracegate-i18n-recorder.ts'] : []),
       ...(process.env.OPENWOP_CI_CLOCKSHIFT === '1' ? ['src/test/clock-shift.ts'] : []),
     ],
     // ADR 0880 — the recorder needs each file's verdict; unset, reporters are vitest's default.

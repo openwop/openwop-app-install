@@ -301,6 +301,7 @@ export const messages = {
   emailReviewAudience: 'Para {{audience}}',
   emailReviewEstimate_one: 'Unos {{n}} destinatario (estimación)',
   emailReviewEstimate_other: 'Unos {{n}} destinatarios (estimación)',
+  emailReviewMissing: "Esta revisión está desactualizada y no se puede aprobar. Pide a quien la envió que la envíe de nuevo.",
   approvalEmailStale: 'Esta campaña cambió después de enviarse a revisión. Pide a quien la envió que la vuelva a enviar a revisión.',
   approvalEmailClosed: 'Esta revisión se cerró automáticamente: la campaña ya no está en esta revisión.',
   approvalsCreativeReviewGroup: "Creatividades con IA para revisar antes de publicar",
@@ -311,4 +312,8 @@ export const messages = {
   approvalsFunnelPublishHelp: "Al aprobar, se publica este embudo y sus ofertas quedan disponibles para comprar. Sus páginas de pasos ya deben estar publicadas.",
   approvalsFunnelPublishApprove: "Aprobar y publicar",
   toastApprovedFunnelPublish: "Aprobado: el embudo ya está publicado.",
+  approvalsWarehouseLoadGroup: "Aprobaciones de cargas al almacén de datos",
+  approvalsWarehouseLoadAsk_one: "Cargar {{count}} fila de clientes en {{dataset}}.{{table}}",
+  approvalsWarehouseLoadAsk_other: "Cargar {{count}} filas de clientes en {{dataset}}.{{table}}",
+  toastApprovedWarehouseLoad: "Aprobado. Vuelve a ejecutar la sincronización para cargar estas filas.",
 } as const;

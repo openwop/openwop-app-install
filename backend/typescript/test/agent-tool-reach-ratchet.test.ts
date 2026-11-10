@@ -10,8 +10,9 @@
  * to anyone.
  *
  * Reachable = the ADR 0315 baseline ∪ a shipped pack's `agents[].toolAllowlist`
- * (`packs/**`, `examples/**`) ∪ a host-composed lane allowlist (KickBot, the one
- * such lane, imported, never copied). The denominator is the LIVE
+ * (`packs/**`, `examples/**`) ∪ a host-composed lane allowlist a feature package
+ * declares (`composedLaneToolAllowlist` in its `ratchetDeclarations.ts`, ADR 1031
+ * P2 — KickBot's is the one today, imported there, never copied). The denominator is the LIVE
  * `builtinAgentToolIds()` after a real boot (the safe-mode-baseline-census
  * precedent: registration is a runtime mutation).
  *
@@ -29,7 +30,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { builtinAgentToolIds } from '../src/host/agentToolProvider.js';
 import { DEFAULT_ON_AGENT_TOOL_IDS } from '../src/host/agentToolAllowlistService.js';
-import { KICKBOT_TOOL_ALLOWLIST } from '../src/features/kicktodo-core/kickbotService.js';
+import { collectFeatureRatchetDeclarations } from './helpers/featureRatchetDeclarations.js';
 import {
   AGENT_EVALS_GET_SUMMARY_TOOL_ID,
   AGENT_EVALS_LIST_SUITES_TOOL_ID,
@@ -79,11 +80,12 @@ beforeAll(async () => {
 afterAll(() => { server?.close(); });
 
 describe('every registered chat tool is reachable by an agent, or a named exception', () => {
-  it('the reachable set ∪ the exceptions covers the live tool set exactly', () => {
+  it('the reachable set ∪ the exceptions covers the live tool set exactly', async () => {
     const manifests = shippedManifests();
+    const composedLanes = (await collectFeatureRatchetDeclarations()).flatMap((d) => [...(d.declarations.composedLaneToolAllowlist ?? [])]);
     const reachable = new Set<string>([
       ...DEFAULT_ON_AGENT_TOOL_IDS,
-      ...KICKBOT_TOOL_ALLOWLIST,
+      ...composedLanes,
       ...manifests.flatMap((m) => (m.agents ?? []).flatMap((a) => a.toolAllowlist ?? [])),
     ]);
     const live = [...builtinAgentToolIds()].sort();

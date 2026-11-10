@@ -97,12 +97,14 @@ describe('pack↔surface argument-key parity (ADR 0624 D2)', () => {
   const fixture = JSON.parse(readFileSync(FIXTURE, 'utf8')) as Fixture;
 
   it('anti-vacuity: the scan found a real corpus on BOTH sides, and the profiles pair is inside the asserted population', () => {
-    // Floors = the measured populations at 7321e3612 (2026-10-18). The exact
-    // denominators are pinned by the next case; these name the shrink here.
-    expect(s.surfaces).toBeGreaterThanOrEqual(69);
-    expect(s.methods.length).toBeGreaterThanOrEqual(379);
-    expect(observed.callSites.literalNoSpread).toBeGreaterThanOrEqual(293);
-    expect(observed.assertedPairs).toBeGreaterThanOrEqual(284);
+    // Floors = the measured populations at 7321e3612 (2026-10-18), re-measured
+    // when the KickTodo packages and packs left this repo (ADR 1031 P3; the fixture
+    // lost 54 literal call sites and 54 asserted pairs with them). The
+    // exact denominators are pinned by the next case; these name the shrink here.
+    expect(s.surfaces).toBeGreaterThanOrEqual(61);
+    expect(s.methods.length).toBeGreaterThanOrEqual(373);
+    expect(observed.callSites.literalNoSpread).toBeGreaterThanOrEqual(277);
+    expect(observed.assertedPairs).toBeGreaterThanOrEqual(265);
     const get = s.calls.find((c) => c.pack === 'feature.profiles.nodes' && c.method === 'getProfile');
     expect(get, 'feature.profiles.nodes.get → getProfile call site not found — the scan cannot see the UPWF-1 site').toBeTruthy();
     expect(get!.cls).toBe('literalNoSpread');

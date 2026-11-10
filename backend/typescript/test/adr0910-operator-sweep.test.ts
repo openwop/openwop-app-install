@@ -33,7 +33,7 @@ import { listOperatorActivations, sweepOperatorActivations } from '../src/host/o
 import type { Storage } from '../src/storage/storage.js';
 import { setDefaultWorkspaceTargets } from '../src/host/workspaceJoinLedger.js';
 
-const WS = 'host-kicktodo-sweep';
+const WS = 'host-fixture-sweep';
 const A = 'user:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'; // the actor's personal tenant (listed)
 const B = 'user:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'; // another listed superadmin
 const NOW = new Date('2026-10-18T12:00:00.000Z');
@@ -50,7 +50,7 @@ beforeAll(async () => {
   storage = await openStorage('memory://');
   initHostExtPersistence(storage);
   registerMembershipRootedWorkspaces([WS]);
-  setDefaultWorkspaceTargets([{ featureId: 'kicktodo', orgId: WS, tenantId: WS, name: 'Sweep fixture' }]);
+  setDefaultWorkspaceTargets([{ featureId: 'fixture-feature', orgId: WS, tenantId: WS, name: 'Sweep fixture' }]);
   await createOrg({ tenantId: WS, orgId: WS, createdBy: 'system', name: 'Root' });
   for (const s of ['user:live', 'user:expired', 'user:delisted', 'user:revoked']) {
     await createMember({ tenantId: WS, orgId: WS, displayName: s, subject: s, roles: ['viewer'] });

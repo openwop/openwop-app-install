@@ -11,6 +11,7 @@
  *  - deriving the chip from the DRAFT instead of the saved profile → the save
  *    case reds (TOC2UX-8: the chip claimed "Lossy" before anything was saved).
  *  - setting `state` to 'ready' in the load catch → the failed-load case reds.
+ *  - enabling either row-count input for a viewer → the viewer case reds (wave 79).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
@@ -57,7 +58,10 @@ beforeEach(() => {
   canWrite.value = true;
   featureOn.value = true;
   getAgentProfile.mockResolvedValue(PROFILE);
-  putAgentProfile.mockImplementation(async (_id, input) => ({ ...PROFILE, configParameters: input.configParameters ?? undefined } as AgentProfile));
+  putAgentProfile.mockImplementation(async (_id, input) => {
+    const { configParameters: _old, ...rest } = PROFILE;
+    return input.configParameters ? { ...rest, configParameters: input.configParameters } : rest;
+  });
 });
 
 describe('AgentCompactionPanel (ADR 0999 D7)', () => {
@@ -111,6 +115,8 @@ describe('AgentCompactionPanel (ADR 0999 D7)', () => {
     expect(screen.getByText('Lossy')).toBeTruthy();
     expect((screen.getByRole('checkbox') as HTMLInputElement).disabled).toBe(true);
     expect((screen.getByLabelText('Rows kept at the start') as HTMLInputElement).value).toBe('4');
+    expect((screen.getByLabelText('Rows kept at the start') as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByLabelText('Rows kept at the end') as HTMLInputElement).disabled).toBe(true);
     expect(screen.queryByRole('button', { name: 'Save compaction' })).toBeNull();
   });
 

@@ -20,7 +20,7 @@
  */
 import { lazy } from 'react';
 import { Navigate, matchRoutes, useLocation } from 'react-router-dom';
-import { featureRoutes } from '../features/registry.js';
+import { featureNavGroups, featureRoutes } from '../features/registry.js';
 import type {
   IconCmp,
   FeatureTier,
@@ -451,7 +451,7 @@ export const HEADERLESS_GROUP_IDS: ReadonlySet<string> = new Set(['Pinned']);
  * sequence is declared — features place themselves in a category via
  * `nav.group` and a position within it via `nav.order` (chrome/featureTypes).
  */
-export const GROUP_ORDER: string[] = [
+export const HOST_GROUP_ORDER: string[] = [
   // workspace tier. 'Marketing' (Campaign Studio cluster) is now always present
   // because brand graduated to always-on (ADR 0170) — it used to appear only when
   // a Marketing feature was toggled on.
@@ -466,7 +466,7 @@ export const GROUP_ORDER: string[] = [
   // 'Business' = the cross-functional business cluster (BI metrics · Support) —
   // it was declared by the bi + service-desk features but MISSING here, so it
   // fell back to end-rank and tripped the "known category" invariant test.
-  'Pinned', 'Workspace', 'KickTodo', 'CRM', 'Sales', 'Commerce', 'Business', 'Planning', 'Marketing', 'Customer Data Platform', 'Studio', 'Canvas',
+  'Pinned', 'Workspace', 'CRM', 'Sales', 'Commerce', 'Business', 'Planning', 'Marketing', 'Customer Data Platform', 'Studio', 'Canvas',
   // admin tier ('Content' = CMS / Media / Publishing / Sharing — ADR 0027).
   // 'Developer' = the ui-plugins extensibility surface (was missing from the order —
   // its nav group fell back to end-rank + tripped the "known category" invariant test).
@@ -512,6 +512,25 @@ export const GROUP_LABEL_KEYS: Record<string, string> = {
   'Access & data': 'groupIdentityAccess',
   Actions: 'groupActions',
 };
+
+/**
+ * ADR 1031 P2 — splice the groups features introduce (`FrontendFeature.navGroups`)
+ * in directly after their anchor, so a feature places its own section (KickTodo's
+ * 'KickTodo', after 'Workspace') without editing the host list above.
+ */
+export function withFeatureNavGroups(host: readonly string[], groups: ReadonlyArray<{ label: string; after: string }>): string[] {
+  // Entry-chunk code, so no runtime refusal: an unknown anchor or a label already in
+  // the order is a TEST failure over the shipped features (features.test.ts), the
+  // ADR 0916 D3 posture. Here such a group is simply not spliced.
+  const order = [...host];
+  for (const g of groups) {
+    const at = order.indexOf(g.after);
+    if (at >= 0 && !order.includes(g.label)) order.splice(at + 1, 0, g.label);
+  }
+  return order;
+}
+
+export const GROUP_ORDER: string[] = withFeatureNavGroups(HOST_GROUP_ORDER, featureNavGroups());
 
 export const groupRank = (label: string): number => {
   const i = GROUP_ORDER.indexOf(label);

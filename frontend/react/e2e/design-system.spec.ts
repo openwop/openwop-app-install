@@ -1,6 +1,11 @@
 import { test, expect, devices, type Page } from '@playwright/test';
 import { API } from './support/session.js';
 import { serveFontsLocally } from './support/localFonts.js';
+import { assertVisualRenderer, pinnedConnectOptions } from './support/visualGuard.js';
+
+// The visual specs render in the pinned image's browser when OPENWOP_E2E_PINNED_WS
+// names it (ADR 0863 D9 P5). Worker-scoped, so it sits at file level.
+test.use(pinnedConnectOptions());
 
 /**
  * Visual-contract snapshots (ADR 0510 Phase 2, DSA-031) — the gallery at
@@ -84,6 +89,9 @@ async function setTheme(page: Page, theme: 'light' | 'dark'): Promise<void> {
 test.use({ viewport: { width: 1280, height: 900 } });
 
 test.describe('design-system gallery — visual contract', () => {
+  // Same renderer rule as the route snapshots (ADR 0863 D9 P5): darwin's local
+  // browser or the pinned Playwright image's, never whatever this box renders.
+  test.beforeAll(({ browser }) => assertVisualRenderer(browser, 'design-system gallery'));
   test.describe.configure({ timeout: 120_000 });
   test.beforeEach(async ({ page }) => {
     await page.emulateMedia({ reducedMotion: 'reduce' });

@@ -41,6 +41,10 @@
  *   - skip the autonomy rule in accept → the policy case red;
  *   - drop the projection check on upload → the archived case red;
  *   - skip removing a crashed accept's assets on reject → the crash case red.
+ * The concurrency case forces its window (w78): the first accept parks inside its
+ * re-scan, after its claim is written, and the second is sent only then; it asserts
+ * the loser's own refusal (`intake_busy`) and that the loser never scanned. Every
+ * refusal is asserted by status, code and the field or reason that names its check.
  * Stayed green, and NOT claimed: writing the claim with a plain put instead of
  * a CAS. That only matters when two accepts both read the row before either
  * writes, a window this test cannot time; the busy check above is what it
@@ -121,6 +125,12 @@ function client() {
   return { get: <T>(p: string) => call<T>('GET', p), post: <T>(p: string, b?: unknown) => call<T>('POST', p, b), put: <T>(p: string, b?: unknown) => call<T>('PUT', p, b), patch: <T>(p: string, b?: unknown) => call<T>('PATCH', p, b), del: <T>(p: string) => call<T>('DELETE', p) };
 }
 
+/** The error envelope (`middleware/errorEnvelope.ts`): the code is `error`, the reason is under `details`. */
+interface ErrBody { error?: string; message?: string; details?: { field?: string; reason?: string } }
+const errOf = (r: Res<unknown>): ErrBody => (r.raw ? JSON.parse(r.raw) as ErrBody : {});
+/** Status + code + the one detail that names WHICH check refused (field or reason). */
+const refusal = (r: Res<unknown>, key: 'field' | 'reason'): [number, string | undefined, string | undefined] => [r.status, errOf(r).error, errOf(r).details?.[key]];
+
 // Real file headers, so the magic-byte checks see what a browser upload sends.
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('IHDR-fixture-bytes-0001')]);
 const pngNo = (i: number): Buffer => Buffer.concat([PNG, Buffer.from(`-${i}-${Math.random()}`)]);
@@ -192,20 +202,28 @@ describe('ADR 0958 D8 witness 5 — a pending file is reachable through no door'
     expect(lib.status).toBe(200);
     expect(lib.body.assets).toEqual([]);
     const sel = await s.admin.post<{ assets?: unknown[]; ranked?: unknown[] }>(`/host/openwop-app/media/orgs/${s.orgId}/assets/select`, {});
+    expect(sel.status, sel.raw).toBe(200); // the select really ran, so the absence below is read from its answer
     expect(sel.raw).not.toContain('hero.png');
     // The vendor has no byte route: every plausible path is a refusal.
+    const doors: Array<[string, number, string | undefined]> = [];
     for (const p of [
       `/host/openwop-app/collab/grants/${g.grantId}/intakes/${intakeId}`,
       `/host/openwop-app/collab/grants/${g.grantId}/intakes/${intakeId}/files/${fileId}`,
       `${s.A}/${intakeId}/files/${fileId}`,
     ]) {
       const r = await s.vendor.get(p);
-      expect([401, 403, 404], `${p} answered ${r.status}`).toContain(r.status);
+      doors.push([p.replace(g.grantId, 'G').replace(s.A, 'A').replace(intakeId, 'I').replace(fileId, 'F'), r.status, errOf(r).error]);
       expect(r.raw).not.toContain('IHDR-fixture');
     }
     // Anonymous: no session, no door.
     const anon = await fetch(`${BASE}${s.A}/${intakeId}/files/${fileId}`);
-    expect([401, 403, 404]).toContain(anon.status);
+    doors.push(['anonymous A/I/files/F', anon.status, ((await anon.json().catch(() => ({}))) as ErrBody).error]);
+    expect(doors).toEqual([
+      ['/host/openwop-app/collab/grants/G/intakes/I', 404, 'not_found'],
+      ['/host/openwop-app/collab/grants/G/intakes/I/files/F', 404, 'not_found'],
+      ['A/I/files/F', 404, 'not_found'],
+      ['anonymous A/I/files/F', 404, 'not_found'],
+    ]);
 
     // The agency review download: an attachment, sandboxed, never cached.
     const dl = await s.admin.get(`${s.A}/${intakeId}/files/${fileId}`);
@@ -293,15 +311,16 @@ describe('ADR 0958 P3 — the writer refuses active or mislabelled content', () 
     const s = await setup();
     const g = await s.grant();
     const f = [{ name: 'r.png', contentType: 'image/png', buf: pngNo(5) }];
-    expect((await s.upload(g, f, { ...RIGHTS, license: 'whatever' })).status).toBe(400);
-    expect((await s.upload(g, f, { ...RIGHTS, attest: false })).status).toBe(400);
-    expect((await s.upload(g, f, { license: 'stock', attest: true })).status).toBe(400);
-    expect((await s.upload(g, f, { ...RIGHTS, license: 'licensed-term' })).status).toBe(400);
-    expect((await s.upload(g, f, { ...RIGHTS, license: 'licensed-term', termEndsAt: '2001-01-01' })).status).toBe(400);
+    // Each refusal names its own field: an earlier validator answering instead would show here.
+    expect(refusal(await s.upload(g, f, { ...RIGHTS, license: 'whatever' }), 'field')).toEqual([400, 'validation_error', 'rights.license']);
+    expect(refusal(await s.upload(g, f, { ...RIGHTS, attest: false }), 'field')).toEqual([400, 'validation_error', 'rights.attest']);
+    expect(refusal(await s.upload(g, f, { license: 'stock', attest: true }), 'field')).toEqual([400, 'validation_error', 'rights.modelReleases']);
+    expect(refusal(await s.upload(g, f, { ...RIGHTS, license: 'licensed-term' }), 'field')).toEqual([400, 'validation_error', 'rights.termEndsAt']);
+    expect(refusal(await s.upload(g, f, { ...RIGHTS, license: 'licensed-term', termEndsAt: '2001-01-01' }), 'field')).toEqual([400, 'validation_error', 'rights.termEndsAt']);
     const ok = await s.upload(g, f, { ...RIGHTS, license: 'licensed-term', termEndsAt: '2099-12-31' });
     expect(ok.status, ok.raw).toBe(201);
     // The same bytes again through the same grant are a duplicate.
-    expect((await s.upload(g, f)).status).toBe(409);
+    expect(refusal(await s.upload(g, f), 'reason')).toEqual([409, 'conflict', 'duplicate_file']);
   });
 });
 
@@ -310,9 +329,9 @@ describe('ADR 0958 P3 — the scan port fails closed', () => {
     const s = await setup();
     const g = await s.grant();
     registerUploadScanner({ scan: async () => 'infected' });
-    expect((await s.upload(g, [{ name: 'v.png', contentType: 'image/png', buf: pngNo(6) }])).status).toBe(422);
+    expect(refusal(await s.upload(g, [{ name: 'v.png', contentType: 'image/png', buf: pngNo(6) }]), 'reason')).toEqual([422, 'validation_error', 'scan_infected']);
     registerUploadScanner({ scan: async () => { throw new Error('scanner down'); } });
-    expect((await s.upload(g, [{ name: 'v.png', contentType: 'image/png', buf: pngNo(7) }])).status).toBe(503);
+    expect(refusal(await s.upload(g, [{ name: 'v.png', contentType: 'image/png', buf: pngNo(7) }]), 'reason')).toEqual([503, 'service_unavailable', 'scan_unavailable']);
     expect((await s.vendor.get<{ intakes: unknown[] }>(`/host/openwop-app/collab/grants/${g.grantId}/intakes`)).body.intakes).toEqual([]);
 
     registerUploadScanner(null);
@@ -327,7 +346,7 @@ describe('ADR 0958 P3 — the scan port fails closed', () => {
     expect(refused.status, refused.raw).toBe(409);
     expect(refused.raw).toContain('scan_infected');
     registerUploadScanner({ scan: async () => { throw new Error('down'); } });
-    expect((await s.admin.post(`${s.A}/${id}/accept`)).status).toBe(503);
+    expect(refusal(await s.admin.post(`${s.A}/${id}/accept`), 'reason')).toEqual([503, 'service_unavailable', 'scan_unavailable']);
     // Refused accepts leave it submitted and unclaimed, so a clean scan can accept it.
     registerUploadScanner({ scan: async () => 'clean' });
     expect((await s.admin.post(`${s.A}/${id}/accept`)).status).toBe(200);
@@ -384,16 +403,17 @@ describe('ADR 0958 P3 — tenant and org isolation, with the uniform 404', () =>
     // Another tenant's admin naming this org and intake.
     const outsider = client();
     await outsider.post('/host/openwop-app/test/login', { email: `outsider-${n}@other.test`, tenantId: `ws:t-other-${n}` });
-    for (const p of [`${s.A}/${id}`, `${s.A}/${id}/files/${fileId}`]) expect([403, 404]).toContain((await outsider.get(p)).status);
-    expect([403, 404]).toContain((await outsider.post(`${s.A}/${id}/accept`)).status);
+    const outsiderAnswers = [await outsider.get(`${s.A}/${id}`), await outsider.get(`${s.A}/${id}/files/${fileId}`), await outsider.post(`${s.A}/${id}/accept`)]
+      .map((r) => [r.status, errOf(r).error]);
+    expect(outsiderAnswers).toEqual([[404, 'not_found'], [404, 'not_found'], [404, 'not_found']]);
 
     // A client-org viewer may list but may not download or decide.
     const viewer = client();
     const vv = await viewer.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: `viewer-${n}@agency.test`, tenantId: s.tenantId });
     await createMember({ tenantId: s.tenantId, orgId: s.orgId, subject: vv.body.user.userId, displayName: 'Viewer', roles: ['viewer'] });
     expect((await viewer.get(s.A)).status).toBe(200);
-    expect([403, 404]).toContain((await viewer.get(`${s.A}/${id}/files/${fileId}`)).status);
-    expect([403, 404]).toContain((await viewer.post(`${s.A}/${id}/accept`)).status);
+    const viewerAnswers = [await viewer.get(`${s.A}/${id}/files/${fileId}`), await viewer.post(`${s.A}/${id}/accept`)].map((r) => [r.status, errOf(r).error]);
+    expect(viewerAnswers).toEqual([[403, 'forbidden_scope'], [403, 'forbidden_scope']]);
 
     // A stranger naming the grant cannot upload, list or withdraw.
     const stranger = client();
@@ -432,7 +452,8 @@ describe('ADR 0958 P3 — tenant and org isolation, with the uniform 404', () =>
     await setToggle('campaign-ops.external-collab', false);
     try {
       expect((await s.upload(g, [{ name: 't.png', contentType: 'image/png', buf: pngNo(13) }])).status).toBe(404);
-      expect((await s.admin.get(s.A)).status).not.toBe(200);
+      const off = await s.admin.get(s.A);
+      expect([off.status, errOf(off).error, errOf(off).message]).toEqual([404, 'not_found', 'External collaborators is not enabled for this tenant.']);
     } finally {
       await setToggle('campaign-ops.external-collab', true);
     }
@@ -491,14 +512,25 @@ describe('ADR 0958 P3 — accept is single and human', () => {
     const g = await s.grant();
     const up = await s.upload(g, [{ name: 'c.png', contentType: 'image/png', buf: pngNo(16) }]);
     const id = up.body.intake.intakeId;
-    // A slow scanner holds the first accept inside its claim, so the second
-    // really arrives while the first is in flight.
-    registerUploadScanner({ scan: async () => { await new Promise((r) => setTimeout(r, 150)); return 'clean'; } });
+    // A forced hold, not a timing guess: the file was stored unscanned (the waiver), so
+    // accept re-scans it AFTER writing its claim. The FIRST scan parks until released;
+    // the second accept is sent only once the first is parked, and answers before it
+    // is released. Only the first scan parks, so a broken busy check cannot deadlock.
+    let calls = 0;
+    let arrive!: () => void;
+    const arrived = new Promise<void>((r) => { arrive = r; });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    registerUploadScanner({ scan: async () => { calls += 1; if (calls === 1) { arrive(); await gate; } return 'clean'; } });
     const first = s.admin.post(`${s.A}/${id}/accept`);
-    await new Promise((r) => setTimeout(r, 40));
-    const [a, b] = await Promise.all([first, s.admin.post<{ details?: { reason?: string } }>(`${s.A}/${id}/accept`)]);
-    expect(b.raw).toContain('intake_busy');
-    expect([a.status, b.status].sort()).toEqual([200, 409]);
+    await arrived; // the first accept holds its claim, parked in the scan
+    const b = await s.admin.post(`${s.A}/${id}/accept`);
+    release();
+    const a = await first;
+    // The loser is refused by the claim, and never scanned or wrote anything.
+    expect(refusal(b, 'reason')).toEqual([409, 'conflict', 'intake_busy']);
+    expect(a.status, a.raw).toBe(200);
+    expect(calls).toBe(1);
     expect(await listAssets(s.tenantId, s.orgId)).toHaveLength(1);
   });
 
@@ -538,7 +570,7 @@ describe('ADR 0958 P3 — review fixes (architect pass)', () => {
     expect(await listAssets(s.tenantId, s.orgId)).toEqual([]);
     const still = await s.admin.get<{ intake: { status: string; accepting: boolean } }>(`${s.A}/${id}`);
     expect(still.body.intake).toMatchObject({ status: 'submitted', accepting: false });
-    // Rejecting it now leaves nothing usable either.
+    // A retry with the store healthy accepts both files.
     expect((await s.admin.post(`${s.A}/${id}/accept`)).status).toBe(200);
     expect(await listAssets(s.tenantId, s.orgId)).toHaveLength(2);
   });

@@ -114,6 +114,24 @@ implementation record. This needs real ad accounts (Open decision 1).
 - **Rate limits:** the per-tenant/platform circuit breaker (`adsAdapter.ts:1320-1328`) wraps reads too,
   with `429`/`Retry-After` honoured.
 
+
+> **Correction (2026-11-07, PERF-4 — reporting availability is not numeric zero).**
+> Raw revenue remains number|null, and the existing numeric KPI revenue/ROAS
+> sentinels and reporting-only denominator are unchanged. The summary now emits
+> optional `reportedRevenueRecordCount` on totals and each platform, always an
+> integer including 0 from the new server, counting actual nonnull revenue rows.
+> Measured zero and zero-spend reported rows each count; the count does not establish
+> a mathematically defined ratio when its denominator is 0. Campaign Performance
+> renders localized Not reported only when the count is exactly 0. An absent field
+> from an older server keeps legacy numeric rendering; it cannot establish
+> reporting availability. Partial reporting retains the existing disclosure.
+> This additive host DTO/UI repair changes no imports, stored records, providers,
+> ratio math, optimizer, currencies or public OpenWOP schema (no new RFC).
+> Other consumers are not all repaired: campaign-ops report section projection
+> still drops the optional counts, so generated-report honesty is not qualified.
+> New actual-service and page-fixture regressions are authored **NOT RUN** at
+> the source checkpoint; no fixed, gate, deployed or live acceptance is claimed.
+
 **D4 — Close CSG-CON-1: TikTok + LinkedIn readers.** TikTok `report/integrated/get/`
 (`report_type:BASIC`, `data_level:AUCTION_CAMPAIGN`, `stat_time_day`), LinkedIn `/rest/adAnalytics`
 (`q=analytics`, `pivot=CAMPAIGN`, `timeGranularity=DAILY`), with `costInLocalCurrency` taken as major

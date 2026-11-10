@@ -15,7 +15,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
-import { makeAdsAdapter } from '../src/host/adsAdapter.js';
+import { makeAdsAdapter, setAdsCampaignOwnershipChecker } from '../src/host/adsAdapter.js';
 import { __resetConnectionsStore, createSecretConnection } from '../src/features/connections/connectionsService.js';
 
 interface Hit { path: string; auth?: string; dev?: string; body: Record<string, unknown> }
@@ -30,6 +30,10 @@ describe('ADR 0186 slice 4a/4b — ctx.ads Google Ads HTTP paths', () => {
     process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true';
     process.env.OPENWOP_GOOGLE_ADS_DEVELOPER_TOKEN = 'DEV_TOKEN';
     const app = await createApp({ port: 18991, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+    // This file tests the platform write path. Which org owns a campaign is the
+    // adapter seam's question, with its own witnesses (adr1022-ads-ownership-seam):
+    // here every campaign counts as the acting org's.
+    setAdsCampaignOwnershipChecker(async () => true);
     storage = app.locals.storage;
     await __resetConnectionsStore();
     g = http.createServer((req, res) => {

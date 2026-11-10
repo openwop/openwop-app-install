@@ -24,8 +24,7 @@
  */
 
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
-import { resolveFeatureToggle } from '../../host/agentToolKit.js';
-import { listOrgs, resolveEffectiveAccess } from '../../host/accessControlService.js';
+import { resolveReadOrgScope, toolError, type ToolResult } from '../../host/agentToolKit.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { listModels, listTerritories, getActiveModelId } from './entities/territories.js';
 import { listRules, previewModel } from './entities/assignment.js';
@@ -39,21 +38,7 @@ export const TERRITORIES_LIST_QUOTAS_TOOL_ID = 'openwop:territories.list-quotas'
 export const TERRITORIES_PREVIEW_TOOL_ID = 'openwop:territories.preview';
 export const TERRITORIES_ATTAINMENT_TOOL_ID = 'openwop:territories.attainment';
 
-type ToolResult = { content: string; isError?: boolean; hostMessage?: true };
-
-/** Structured tool error — the agent loop surfaces `content` verbatim, so the
- *  message must say what failed and what to do next. */
-function toolError(error: string, message: string): ToolResult {
-  return { content: JSON.stringify({ error, message }), isError: true, hostMessage: true };
-}
-
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
-
-/** Per-call toggle honesty (the app-builder precedent): per-tenant, dynamic,
- *  fail-closed. */
-async function territoriesEnabled(scope: BundleScope): Promise<boolean> {
-  return resolveFeatureToggle('territories', scope);
-}
 
 type ReadScope =
   | { kind: 'ok'; orgId: string; viewer: string }
@@ -61,25 +46,17 @@ type ReadScope =
   | { kind: 'error'; result: ToolResult }; // feature disabled, or org ambiguous
 
 /**
- * The SAME access decision the read routes make (`authorizeOrgScope` → toggle +
- * `requireOrgScope`'s `resolveEffectiveAccess` `workspace:read` in the org), for a
- * chat-tool scope: fail EMPTY without an acting user; typed `feature_disabled`
- * when off; typed `org_required` when the workspace has several orgs and none was
- * named; fail-closed EMPTY for an unknown org or a caller lacking read scope.
+ * The read routes' access decision for a chat-tool scope. ADR 1034 D11 — through the SHARED
+ * `resolveReadOrgScope` (the dealers tools' helper) rather than the hand-rolled copy this
+ * used to be: CLAUDE.md asks for one predicate shared by a route and its tool. Fails EMPTY
+ * without an acting user; typed `feature_disabled` / `org_required`; EMPTY for an unknown
+ * org or a caller without read scope.
  */
 async function resolveTerritoryRead(scope: BundleScope, orgIdInput?: string): Promise<ReadScope> {
-  const viewer = scope.actingUserId;
-  if (!viewer) return { kind: 'empty' };
-  if (!(await territoriesEnabled(scope))) {
-    return { kind: 'error', result: toolError('feature_disabled', 'The Sales Territories feature is not enabled for this workspace — tell the user you cannot answer territory questions here.') };
-  }
-  const orgs = await listOrgs(scope.tenantId);
-  const orgId = orgIdInput ?? (orgs.length === 1 ? orgs[0]!.orgId : undefined);
-  if (!orgId) return { kind: 'error', result: toolError('org_required', `This workspace has ${orgs.length} organizations — pass \`orgId\` (ask the user which).`) };
-  if (!orgs.some((o) => o.orgId === orgId)) return { kind: 'empty' };
-  const access = await resolveEffectiveAccess(scope.tenantId, { subject: viewer, orgId });
-  if (!access.scopes.includes('workspace:read')) return { kind: 'empty' };
-  return { kind: 'ok', orgId, viewer };
+  const r = await resolveReadOrgScope(scope, { featureId: 'territories', featureLabel: 'Sales Territories' }, orgIdInput);
+  if (r.kind === 'error') return r;
+  if (r.kind === 'empty' || !scope.actingUserId) return { kind: 'empty' };
+  return { kind: 'ok', orgId: r.orgId, viewer: scope.actingUserId };
 }
 
 /** A required-string model id — invalid model input is a TYPED error, never a

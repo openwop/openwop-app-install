@@ -165,6 +165,10 @@ export const HOST_OWN_UNVERSIONED_MOUNTS: readonly string[] = [
   '/pod', '/pricing', '/readiness', '/robots.txt', '/schemas', '/scim', '/sitemap.xml',
   // ADR 0812 P3b final batch 1 — the test seams now register unversioned.
   '/packs-test', '/test',
+  // ADR 1031 P2 — the feature-registered public-route seam (`featurePublicRoutes.ts`)
+  // serves `/public/<seg>/<seg>…` unversioned (KickTodo's feed and wearable webhook;
+  // they were already unversioned on main, through a bypass the scan could not see).
+  '/public',
 ];
 
 function readV2PathManifestOperations(): unknown {

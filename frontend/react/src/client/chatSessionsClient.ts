@@ -138,8 +138,10 @@ async function http<T>(
   return body as T;
 }
 
-export async function listChatSessions(): Promise<ChatSessionHeader[]> {
-  const r = await http<{ sessions: ChatSessionHeader[] }>(PATH);
+/** `agentId` (ADR 1040 D2) narrows the caller's visible conversations to those
+ *  that name this agent as a participant; it never widens what is visible. */
+export async function listChatSessions(opts?: { agentId?: string }): Promise<ChatSessionHeader[]> {
+  const r = await http<{ sessions: ChatSessionHeader[] }>(opts?.agentId ? `${PATH}?agentId=${encodeURIComponent(opts.agentId)}` : PATH);
   return r.sessions;
 }
 
@@ -399,7 +401,7 @@ export async function getSessionFeedback(sessionId: string): Promise<Record<stri
 /** ADR 0777 — ask the server to bind an embedded conversation to the entity
  *  beside it. The server checks the caller may read it; a refusal (404) means
  *  NOT bound. Resolves true only when the server accepted. */
-export async function setConversationFocus(sessionId: string, focus: { kind: 'canvas'; id: string }): Promise<boolean> {
+export async function setConversationFocus(sessionId: string, focus: { kind: string; id: string }): Promise<boolean> {
   try {
     await http<unknown>(
       `/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}/focus`,

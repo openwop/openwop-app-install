@@ -106,12 +106,13 @@ async function asJson<T>(res: Response, ctx: string): Promise<T> {
 /** The caller's resolved assignments (every toggle). */
 /** ADR 0419 — the caller's plan/bundle entitlements (billing-owned). `allowedFeatures`
  *  is `'*'` (unrestricted — billing off or an all-access plan) or the allowlist of
- *  entitled feature ids. 404 when the billing feature is off ⇒ unrestricted. Feeds the
+ *  entitled feature ids. Billing off answers `'*'` (an older backend 404s, read the same:
+ *  unrestricted). Feeds the
  *  feature-access `locked` signal (toggle on, but the plan/bundles don't include it).
  *  Throws `ToggleAdminError` on any other non-OK status, and rejects on a network failure. */
 export async function fetchEntitlements(): Promise<'*' | string[]> {
   const res = await fetch(`${config.baseUrl}/host/openwop-app/billing/entitlements`, fetchOpts({ headers: authedHeaders() }));
-  if (res.status === 404) return '*'; // billing off ⇒ unrestricted (nothing locked)
+  if (res.status === 404) return '*'; // billing off on an older backend ⇒ unrestricted (nothing locked)
   // ADR 0873 D12 — any other failure is NOT an answer: the caller still degrades
   // it to '*' for presentation, but must not record it as a last-known offline
   // grant, and a 401/403 deletes the grants it holds. So it throws with the status.

@@ -49,7 +49,7 @@ describe('ADR 0766 D2 — unpinned chain-pack ratchet', () => {
   const packs = inTreeChainPacks();
 
   it('the scan found the in-tree chain packs (a vacuous scan would pass everything)', () => {
-    expect(packs.length).toBeGreaterThan(75); // measured 79 across the three roots (2026-10-29)
+    expect(packs.length).toBeGreaterThan(68); // measured 79 across the three roots (2026-10-29); 71 after the KickTodo packs left (ADR 1031 P3)
   });
 
   it('every UNPINNED in-tree chain pack is on the ratchet (a new one ships pinned)', () => {

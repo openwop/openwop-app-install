@@ -22,6 +22,7 @@ import type { Storage } from '../storage/storage.js';
 import type { InterruptRecord, RunRecord } from '../types.js';
 import { timeoutApprovalGateIfDue } from '../executor/approvalGateTimeout.js';
 import { mayViewApproval } from './approvalAudience.js';
+import { featureApprovalKind } from './approvalKindRegistry.js';
 import { gateAclOf, gateApproverRefs, isEligibleApprover, policyApproverRefs, type ApproverRefs } from './approverResolution.js';
 import type { EffectiveAccess } from './accessControlService.js';
 import { isTerminalRunStatus } from '@openwop/openwop';
@@ -85,7 +86,15 @@ export interface ReviewAsset {
   url?: string;
 }
 
-export interface ReviewRequest {
+/**
+ * ADR 1031 P3 — review-card fields a FEATURE-owned approval kind adds to its
+ * projection (`FeatureApprovalKindDef.reviewFields`). Empty here: the owning
+ * feature declares its fields by module augmentation of this module, so the host
+ * names none of them (KickTodo's `planProposal` ids moved downstream this way).
+ */
+export interface FeatureReviewFields {}
+
+export interface ReviewRequest extends FeatureReviewFields {
   reviewId: `interrupt:${string}` | `approval:${string}`;
   source: ReviewSource;
   kind: string;
@@ -133,26 +142,6 @@ export interface ReviewRequest {
    *  live from the owned-workflow route (the draft is tenant-owned and
    *  builder-editable); this block lets the card detect edits (live hash ≠
    *  pinned hash) and send the hash it displayed back with the approve. */
-  /**
-   * ADR 0501 step 4 — the two ids the card needs to FETCH the preview of what accepting
-   * this proposal would do. Deliberately ids ONLY.
-   *
-   * The approval row's `planProposal` also carries `note` (the coach's free text —
-   * `declarePiiFields('kicktodo.plan-proposal', ['note'])`) and `coachSubject`. Neither
-   * is copied here: the card already renders the note through the summary under its own
-   * visibility rule, and a second copy on a differently-gated projection is how a PII
-   * field quietly acquires a second exposure path.
-   *
-   * And the preview itself is NOT projected. It must be computed at READ time against
-   * the live plan — a stored diff is a snapshot that goes stale between the coach's
-   * proposal and the participant's decision, which would be a confident answer that is
-   * no longer true. Same reason `composedWorkflow` re-derives `editedSinceProposed`
-   * below instead of trusting the pinned hash.
-   */
-  planProposal?: {
-    enrollmentId: string;
-    proposalId: string;
-  };
   /** ADR 0862 D1/D3 — an assistant action's card as the approver must see it: every
    *  field the executor consumes (the projector's per-kind `CARD_FIELDS`, redacted) and
    *  the `contentHash` the approve MUST echo as `expectedContentHash`. Pending rows only. */
@@ -744,11 +733,9 @@ export function approvalToReview(a: PendingApproval): ReviewRequest {
     // ADR 0478 §3 — the agent's stated reasoning (a claim, labeled as such).
     ...(a.reasoning ? { reasoning: a.reasoning } : {}),
     ...(a.status !== 'pending' && a.note ? { decisionNote: a.note } : {}),
-    // ADR 0501 step 4 — ids only; see the `planProposal` doc on ReviewRequest for why the
-    // note and coachSubject are NOT copied and why the preview is not projected.
-    ...(a.planProposal
-      ? { planProposal: { enrollmentId: a.planProposal.enrollmentId, proposalId: a.planProposal.proposalId } }
-      : {}),
+    // ADR 1031 P3 — fields the owning feature projects for its own kind (ids only,
+    // by the same rule as everything above: no free text on a second exposure path).
+    ...(featureApprovalKind(kind)?.reviewFields?.(a) ?? {}),
     ...(composed
       ? {
           composedWorkflow: {

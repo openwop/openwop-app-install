@@ -16,11 +16,13 @@
  *
  * Red on the old guard: the scanner case (B's `/` is 429) and the share case (one
  * IP's flood blocks B). Sabotage-checked in the PR: charging misses to the page
- * bucket, or dropping the per-IP share, turns those red.
+ * bucket, or dropping the per-IP share, turns those red. Re-checked in w83, plus:
+ * dropping the host ceiling reddens the flood case, and not trusting the
+ * configured load balancer (or caching the trust list across an LB change)
+ * reddens the load-balancer case, which runs through the real guard.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import type { Request } from 'express';
 import { getSetCookies } from './headerCookies.js';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
@@ -28,7 +30,6 @@ import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { addDomain, verifyDomain, invalidateHostCache, __resetCustomDomains } from '../src/host/customDomains.js';
 import { __resetCustomDomainRateLimitsForTests } from '../src/middleware/customDomain.js';
-import { clientIp } from '../src/host/clientIp.js';
 
 let BASE: string; let PORT = 0; let server: http.Server;
 const LIMIT_ENV = [
@@ -144,16 +145,23 @@ describe('custom-domain rate limits are per client', () => {
     expect(await get('/', 'flood.acme.test', '192.0.2.99'), 'the host stays capped for a new IP too').toBe(429);
   });
 
-  it('visitors behind the custom-domain load balancer are told apart', () => {
+  it('visitors behind the custom-domain load balancer are told apart', async () => {
+    await __resetCustomDomains();
+    await boundSite('lb.acme.test');
     const LB = '34.149.148.86';
-    const req = (xff: string): Request => ({ socket: { remoteAddress: '169.254.1.1' }, header: (n: string) => (n.toLowerCase() === 'x-forwarded-for' ? xff : undefined) }) as unknown as Request;
+    process.env.OPENWOP_CUSTOM_DOMAIN_REQS_PER_MIN = '50';
+    process.env.OPENWOP_CUSTOM_DOMAIN_IP_REQS_PER_MIN = '1';
     process.env.OPENWOP_CUSTOM_DOMAIN_LB_IP = LB;
-    expect(clientIp(req(`${A}, ${LB}`))).toBe(A);
-    expect(clientIp(req(`${B}, ${LB}`))).toBe(B);
-    // A forged left-hand entry is still never read.
-    expect(clientIp(req(`6.6.6.6, ${A}, ${LB}`))).toBe(A);
-    // Unconfigured, the LB is the farthest untrusted hop: everyone would share it.
+    // The LB appends `<client>, <lb>`; the socket peer (loopback) is a trusted hop.
+    expect(await get('/', 'lb.acme.test', `${A}, ${LB}`)).toBe(200);
+    expect(await get('/', 'lb.acme.test', `${A}, ${LB}`), 'A spent its own share').toBe(429);
+    expect(await get('/', 'lb.acme.test', `${B}, ${LB}`), 'B behind the same LB has its own share').toBe(200);
+    // A forged left-hand entry is never read: this is still A, and A is spent.
+    expect(await get('/', 'lb.acme.test', `6.6.6.6, ${A}, ${LB}`)).toBe(429);
+    // Unconfigured, the LB is the farthest untrusted hop: everyone shares it.
     delete process.env.OPENWOP_CUSTOM_DOMAIN_LB_IP;
-    expect(clientIp(req(`${A}, ${LB}`))).toBe(LB);
+    __resetCustomDomainRateLimitsForTests();
+    expect(await get('/', 'lb.acme.test', `${A}, ${LB}`)).toBe(200);
+    expect(await get('/', 'lb.acme.test', `${B}, ${LB}`), 'unconfigured, B shares the LB\'s spent share').toBe(429);
   });
 });

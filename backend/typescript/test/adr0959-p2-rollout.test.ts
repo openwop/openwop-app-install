@@ -12,6 +12,13 @@
  *  - rollback using today's layers instead of the recorded ones                      → "exact prior revision"
  *  - the per-target `applied` short-circuit removed (a repeat apply writes again)    → "idempotent"
  *
+ * Sabotage measured (wave 75, recovery and erasure): the rollout-repair decider; the reconcile of
+ * a lost installation acknowledgement; erasure's retry count and its contention refusal. Removing
+ * the per-target `applied` short-circuit ALONE stays green: the history reconcile below it answers
+ * the same `alreadyApplied`, so only one edit that breaks both is witnessed (`rp-idem-both`).
+ *
+ * Every case seeds its own clients (`clients`, `applied`); only the playbook is shared.
+ *
  * NOT witnessed by sabotage: the head compare-and-swap inside `instantiateOwnedChain({into})`.
  * The per-target re-plan refuses a moved head first (the `target_changed` case), so removing the
  * CAS reds nothing here; it guards the race between that re-plan and the write, which this
@@ -41,16 +48,18 @@ let BASE = '';
 let server: http.Server;
 let storage: Storage;
 let TENANT = '';
-const orgs: string[] = [];
 const cookies = { admin1: '', admin2: '' };
 
-interface Res { status: number; body: Record<string, unknown> }
-async function call(who: keyof typeof cookies, method: string, path: string, body?: unknown): Promise<Res> {
+interface Res<T> { status: number; body: T }
+interface Created { rollout: { rolloutId: string }; approval: { approvalId: string } }
+interface PlanRow { orgId: string; class: string; chainDiff: { added: string[]; changed: string[] }; conflicts: Array<{ kind: string; key?: string }>; configDiff: { changes: unknown[] } }
+interface InstallRow { playbookId: string; workflowId: string; pinnedVersion: string; expectedRevision: string; drift: string; history: Array<{ version: string; revision: string }> }
+async function call<T = Record<string, unknown>>(who: keyof typeof cookies, method: string, path: string, body?: unknown): Promise<Res<T>> {
   const res = await fetch(`${BASE}/host/openwop-app${path}`, { method, headers: { cookie: cookies[who], 'content-type': 'application/json' }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
   const raw = res.status === 204 ? '' : await res.text();
-  let parsed: Record<string, unknown> = {};
-  try { parsed = raw ? JSON.parse(raw) as Record<string, unknown> : {}; } catch { /* not JSON */ }
-  return { status: res.status, body: parsed };
+  let parsed: unknown = {};
+  try { parsed = raw ? JSON.parse(raw) : {}; } catch { /* not JSON */ }
+  return { status: res.status, body: parsed as T };
 }
 
 const chain = (version: string, extra: boolean) => ({
@@ -70,7 +79,7 @@ async function publish(version: string, extra: boolean, overridable: string[]): 
   const r = await call('admin1', 'POST', '/campaign-playbooks/playbooks/method/versions', { version });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
 }
-const installOf = async (orgId: string) => ((await call('admin1', 'GET', `/campaign-playbooks/clients/${orgId}/installs`)).body.installations as Array<{ playbookId: string; workflowId: string; pinnedVersion: string; expectedRevision: string; drift: string }>).find((i) => i.playbookId === 'method')!;
+const installOf = async (orgId: string) => (await call<{ installations: InstallRow[] }>('admin1', 'GET', `/campaign-playbooks/clients/${orgId}/installs`)).body.installations.find((i) => i.playbookId === 'method')!;
 const headOf = async (workflowId: string): Promise<string> => revisionHashOf((await getRegisteredWorkflowAsync(workflowId))!);
 
 beforeAll(async () => {
@@ -89,46 +98,62 @@ beforeAll(async () => {
     await createMember({ tenantId: TENANT, orgId: TENANT, subject: u.userId, displayName: k, roles: ['admin'] });
     cookies[k] = `__session=${signSession({ sid: randomBytes(12).toString('hex'), tenantId: TENANT, tier: 'user', userId: u.userId, personalTenant: `ws:home-${u.userId}`, iat: now, exp: now + COOKIE_TTL_SECONDS })}`;
   }
+  await publish('1.0.0', false, ['region', 'tone']);
+  // 2.0.0 adds a node, changes a step, and no longer lets a client set `tone`.
+  await publish('2.0.0', true, ['region']);
+}, 120_000);
+afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
+
+/** Four clients of the case's own, on 1.0.0: [0] and [3] clean, [1] edited in the builder,
+ *  [2] holding a `tone` that 2.0.0 no longer lets a client set. */
+async function clients(): Promise<string[]> {
+  const orgs: string[] = [];
   for (let i = 0; i < 4; i++) {
     const orgId = (await createOrg({ tenantId: TENANT, createdBy: 'seed', name: `Client ${i} (synthetic)` })).orgId;
     await createClient({ tenantId: TENANT, orgId, name: `Client ${i} (synthetic)`, createdBy: 'seed' });
+    const layer = i === 2 ? { params: { region: `R${i}`, tone: 'loud' } } : { params: { region: `R${i}` } };
+    const r = await call('admin1', 'POST', `/campaign-playbooks/clients/${orgId}/installs`, { playbookId: 'method', version: '1.0.0', clientLayer: layer });
+    expect(r.status, JSON.stringify(r.body)).toBe(201);
     orgs.push(orgId);
   }
-  await publish('1.0.0', false, ['region', 'tone']);
-  for (const [i, org] of orgs.entries()) {
-    const layer = i === 2 ? { params: { region: `R${i}`, tone: 'loud' } } : { params: { region: `R${i}` } };
-    const r = await call('admin1', 'POST', `/campaign-playbooks/clients/${org}/installs`, { playbookId: 'method', version: '1.0.0', clientLayer: layer });
-    expect(r.status, JSON.stringify(r.body)).toBe(201);
-  }
-  // 2.0.0 adds a node, changes a step, and no longer lets a client set `tone`.
-  await publish('2.0.0', true, ['region']);
-  // Client 1 edits its copy in the builder.
   const wf = (await installOf(orgs[1]!)).workflowId;
   const def = (await getRegisteredWorkflowAsync(wf))!;
   await registerWorkflowDurable({ ...def, nodes: def.nodes.map((n, i) => (i === 0 ? { ...n, name: 'Edited by the client' } : n)) });
-});
-afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
+  return orgs;
+}
+/** Clients 0 and 2 applied through one approved rollout. */
+async function applied(): Promise<{ orgs: string[]; rolloutId: string }> {
+  const orgs = await clients();
+  const created = await call<Created>('admin1', 'POST', '/campaign-playbooks/playbooks/method/rollouts', { toVersion: '2.0.0', orgIds: [orgs[0]!, orgs[2]!] });
+  expect(created.status, JSON.stringify(created.body)).toBe(201);
+  const rolloutId = created.body.rollout.rolloutId;
+  expect((await call('admin2', 'POST', `/approvals/${created.body.approval.approvalId}/claim`, {})).status).toBe(200);
+  expect((await call('admin1', 'POST', `/campaign-playbooks/rollouts/${rolloutId}/targets/${orgs[0]}/apply`, {})).status).toBe(200);
+  expect((await call('admin1', 'POST', `/campaign-playbooks/rollouts/${rolloutId}/targets/${orgs[2]}/apply`, { clientLayer: { params: { region: 'R2' } } })).status).toBe(200);
+  return { orgs, rolloutId };
+}
 
 describe('ADR 0959 D6.1 — the plan', () => {
   it('classifies each client and diffs by original node id; it makes zero writes', async () => {
+    const orgs = await clients();
     const countWrites = async <T>(fn: () => Promise<T>): Promise<{ out: T; writes: string[] }> => {
       const writes: string[] = [];
-      const originals = { kvSet: storage.kvSet.bind(storage), kvDelete: storage.kvDelete.bind(storage), kvCompareAndSwap: storage.kvCompareAndSwap.bind(storage) };
-      const wrapped = (['kvSet', 'kvDelete', 'kvCompareAndSwap'] as const).map((m) => vi.spyOn(storage, m).mockImplementation(((...args: unknown[]) => {
-        const key = String(args[0]);
-        if (/campaign-playbooks|wfreg|workflow|approval/.test(key)) writes.push(`${m}:${key}`);
-        return (originals[m] as (...a: unknown[]) => unknown)(...args);
-      }) as never));
+      const seen = (m: string, key: string): void => { if (/campaign-playbooks|wfreg|workflow|approval/.test(key)) writes.push(`${m}:${key}`); };
+      const set = storage.kvSet.bind(storage); const del = storage.kvDelete.bind(storage); const swap = storage.kvCompareAndSwap.bind(storage);
+      const wrapped = [
+        vi.spyOn(storage, 'kvSet').mockImplementation((...a) => { seen('kvSet', a[0]); return set(...a); }),
+        vi.spyOn(storage, 'kvDelete').mockImplementation((...a) => { seen('kvDelete', a[0]); return del(...a); }),
+        vi.spyOn(storage, 'kvCompareAndSwap').mockImplementation((...a) => { seen('kvCompareAndSwap', a[0]); return swap(...a); }),
+      ];
       try { return { out: await fn(), writes }; } finally { for (const w of wrapped) w.mockRestore(); }
     };
     // Non-vacuity: the same probe sees a draft save write.
     const control = await countWrites(() => call('admin1', 'PUT', '/campaign-playbooks/playbooks/probe/draft', { title: 'Probe', chains: [chain('1.0.0', false)], entryChainId: 'acme.method', overridable: { params: [], slots: [] } }));
     expect(control.writes.length, 'the write probe sees nothing — it is not wired to this storage').toBeGreaterThan(0);
-    const { out: r, writes } = await countWrites(() => call('admin1', 'POST', '/campaign-playbooks/playbooks/method/rollouts/plan', { toVersion: '2.0.0', orgIds: orgs.slice(0, 3) }));
+    const { out: r, writes } = await countWrites(() => call<{ plan: PlanRow[] }>('admin1', 'POST', '/campaign-playbooks/playbooks/method/rollouts/plan', { toVersion: '2.0.0', orgIds: orgs.slice(0, 3) }));
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     expect(writes, 'the plan wrote').toEqual([]);
-    const plan = r.body.plan as Array<{ orgId: string; class: string; chainDiff: { added: string[]; changed: string[] }; conflicts: Array<{ kind: string; key?: string }>; configDiff: { changes: unknown[] } }>;
-    const by = (o: string) => plan.find((p) => p.orgId === o)!;
+    const by = (o: string) => r.body.plan.find((p) => p.orgId === o)!;
     expect(by(orgs[0]!).class).toBe('clean');
     expect(by(orgs[0]!).chainDiff).toMatchObject({ added: ['extra'], changed: ['start'] });
     expect(by(orgs[1]!).class).toBe('detached');
@@ -139,11 +164,13 @@ describe('ADR 0959 D6.1 — the plan', () => {
 
 describe('ADR 0959 D6.2/D7 — the gate', () => {
   it('the requester cannot approve; a plan that changed closes the review', async () => {
-    const created = await call('admin1', 'POST', '/campaign-playbooks/playbooks/method/rollouts', { toVersion: '2.0.0', orgIds: [orgs[3]!] });
+    const orgs = await clients();
+    const created = await call<Created>('admin1', 'POST', '/campaign-playbooks/playbooks/method/rollouts', { toVersion: '2.0.0', orgIds: [orgs[3]!] });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
-    const approvalId = (created.body.approval as { approvalId: string }).approvalId;
+    const approvalId = created.body.approval.approvalId;
     const self = await call('admin1', 'POST', `/approvals/${approvalId}/claim`, {});
     expect(self.status).toBe(403);
+    expect(JSON.stringify(self.body)).toContain('separation-of-duties');
     // The client is edited after the plan was made: the plan no longer hashes the same.
     const wf = (await installOf(orgs[3]!)).workflowId;
     const def = (await getRegisteredWorkflowAsync(wf))!;
@@ -151,18 +178,18 @@ describe('ADR 0959 D6.2/D7 — the gate', () => {
     const stale = await call('admin2', 'POST', `/approvals/${approvalId}/claim`, {});
     expect(stale.status).toBe(409);
     expect(JSON.stringify(stale.body)).toContain('plan_changed');
-    const rolloutId = (created.body.rollout as { rolloutId: string }).rolloutId;
-    expect(((await call('admin1', 'GET', `/campaign-playbooks/rollouts/${rolloutId}`)).body.rollout as { status: string }).status).toBe('closed');
+    const rolloutId = created.body.rollout.rolloutId;
+    expect((await call<{ rollout: { status: string } }>('admin1', 'GET', `/campaign-playbooks/rollouts/${rolloutId}`)).body.rollout.status).toBe('closed');
   });
 });
 
 describe('ADR 0959 D6.4/D6.5 — apply and rollback', () => {
-  let rolloutId = '';
   it('an approved rollout applies per client: clean at once, conflicts with new values, detached only with overwrite', async () => {
-    const created = await call('admin1', 'POST', '/campaign-playbooks/playbooks/method/rollouts', { toVersion: '2.0.0', orgIds: orgs.slice(0, 3) });
+    const orgs = await clients();
+    const created = await call<Created>('admin1', 'POST', '/campaign-playbooks/playbooks/method/rollouts', { toVersion: '2.0.0', orgIds: orgs.slice(0, 3) });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
-    rolloutId = (created.body.rollout as { rolloutId: string }).rolloutId;
-    const approvalId = (created.body.approval as { approvalId: string }).approvalId;
+    const rolloutId = created.body.rollout.rolloutId;
+    const approvalId = created.body.approval.approvalId;
     const notYet = await call('admin1', 'POST', `/campaign-playbooks/rollouts/${rolloutId}/targets/${orgs[0]}/apply`, {});
     expect(notYet.status).toBe(409);
     const ok = await call('admin2', 'POST', `/approvals/${approvalId}/claim`, {});
@@ -190,6 +217,7 @@ describe('ADR 0959 D6.4/D6.5 — apply and rollback', () => {
   });
 
   it('a repeat apply is idempotent (no second revision)', async () => {
+    const { orgs, rolloutId } = await applied();
     const inst = await installOf(orgs[0]!);
     const n = (await listRevisions(inst.workflowId)).length;
     const again = await call('admin1', 'POST', `/campaign-playbooks/rollouts/${rolloutId}/targets/${orgs[0]}/apply`, {});
@@ -199,11 +227,9 @@ describe('ADR 0959 D6.4/D6.5 — apply and rollback', () => {
   });
 
   it('rollback re-installs the exact prior revision hash, with the layers it ran with', async () => {
+    const { orgs, rolloutId } = await applied();
     // Client 2's 1.0.0 install carried tone=loud; its upgrade dropped it.
-    const priorRevision = (await (async () => {
-      const rows = (await call('admin1', 'GET', `/campaign-playbooks/clients/${orgs[2]}/installs`)).body.installations as Array<{ playbookId: string; history: Array<{ version: string; revision: string }> }>;
-      return rows.find((r) => r.playbookId === 'method')!.history.find((h) => h.version === '1.0.0')!.revision;
-    })());
+    const priorRevision = (await installOf(orgs[2]!)).history.find((h) => h.version === '1.0.0')!.revision;
     const rb = await call('admin1', 'POST', `/campaign-playbooks/rollouts/${rolloutId}/targets/${orgs[2]}/rollback`, {});
     expect(rb.status, JSON.stringify(rb.body)).toBe(200);
     const inst = await installOf(orgs[2]!);
@@ -213,10 +239,11 @@ describe('ADR 0959 D6.4/D6.5 — apply and rollback', () => {
   });
 
   it('a client edited after approval is refused (target_changed), never clobbered', async () => {
-    const created = await call('admin1', 'POST', '/campaign-playbooks/playbooks/method/rollouts', { toVersion: '2.0.0', orgIds: [orgs[2]!] });
+    const orgs = await clients();
+    const created = await call<Created>('admin1', 'POST', '/campaign-playbooks/playbooks/method/rollouts', { toVersion: '2.0.0', orgIds: [orgs[2]!] });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
-    const rid = (created.body.rollout as { rolloutId: string }).rolloutId;
-    expect((await call('admin2', 'POST', `/approvals/${(created.body.approval as { approvalId: string }).approvalId}/claim`, {})).status).toBe(200);
+    const rid = created.body.rollout.rolloutId;
+    expect((await call('admin2', 'POST', `/approvals/${created.body.approval.approvalId}/claim`, {})).status).toBe(200);
     const wf = (await installOf(orgs[2]!)).workflowId;
     const def = (await getRegisteredWorkflowAsync(wf))!;
     const edited = { ...def, nodes: def.nodes.map((n, i) => (i === 0 ? { ...n, name: 'Edited after approval' } : n)) };
@@ -233,10 +260,10 @@ describe('ADR 0959 recovery — durable operation acknowledgements', () => {
     const orgId = (await createOrg({ tenantId: TENANT, createdBy: 'seed', name: 'Recovery client' })).orgId;
     await createClient({ tenantId: TENANT, orgId, name: 'Recovery client', createdBy: 'seed' });
     expect((await call('admin1', 'POST', `/campaign-playbooks/clients/${orgId}/installs`, { playbookId: 'method', version: '1.0.0', clientLayer: { params: { region: 'Recovery' } } })).status).toBe(201);
-    const created = await call('admin1', 'POST', '/campaign-playbooks/playbooks/method/rollouts', { toVersion: '2.0.0', orgIds: [orgId] });
+    const created = await call<Created>('admin1', 'POST', '/campaign-playbooks/playbooks/method/rollouts', { toVersion: '2.0.0', orgIds: [orgId] });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
-    const rolloutId = (created.body.rollout as { rolloutId: string }).rolloutId;
-    const approvalId = (created.body.approval as { approvalId: string }).approvalId;
+    const rolloutId = created.body.rollout.rolloutId;
+    const approvalId = created.body.approval.approvalId;
     if (approve) expect((await call('admin2', 'POST', `/approvals/${approvalId}/claim`, {})).status).toBe(200);
     const install = (await getInstallation(TENANT, orgId, 'method'))!;
     return { orgId, rolloutId, approvalId, install, path: `/campaign-playbooks/rollouts/${rolloutId}/targets/${orgId}/apply` };

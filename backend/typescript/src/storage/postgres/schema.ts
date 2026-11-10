@@ -1059,6 +1059,13 @@ export const MIGRATIONS: Record<number, (client: Queryable) => Promise<void>> = 
     await client.query(`ALTER TABLE runs ADD COLUMN IF NOT EXISTS admission_key TEXT;`);
     await client.query(`CREATE INDEX IF NOT EXISTS runs_admission_key_status_idx ON runs (admission_key, status);`);
   },
+  50: async (client) => {
+    // ADR 1043 RELAY-LOG-RETENTION-1 — the delivery log's age-out (`pruneDeliveryLog`)
+    // deletes by `at` across tenants; the (tenant_id, at) index cannot serve that.
+    // The table is bounded by the same retention, so a plain build is short.
+    // Mirrors sqlite mig 52.
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_messaging_delivery_log_at ON messaging_delivery_log (at);`);
+  },
 };
 
 /** Highest defined migration — DERIVED from MIGRATIONS, never a hand-bumped cap.

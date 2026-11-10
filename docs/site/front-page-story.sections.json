@@ -316,6 +316,7 @@
         "heading": "This app is checked against the protocol it runs on.",
         "lede": "Figures from the app’s own signed conformance bundle (suite 2.42.2), self-measured by the project’s steward on the production image. No independent organization has measured a host yet.",
         "layout": "stats",
+        "count": true,
         "columns": [
           {
             "title": "296",

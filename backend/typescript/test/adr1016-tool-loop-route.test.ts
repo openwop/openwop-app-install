@@ -10,6 +10,10 @@
  * (the loop would call the conversation's own model), or if the loop's degrade
  * target is computed with the route still in it (a routed 404 would fail the turn
  * instead of answering on the conversation's own model).
+ *
+ * Sabotage-witnessed (wave 82): `route: null` in the loop's target input reds
+ * cases 1 and 3; computing `loopFallbackModel` with the route still in it, or
+ * reporting `served` as the routed model instead of `modelUsed`, reds case 3.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
@@ -45,11 +49,16 @@ const run: RunRecord = {
   inputs: { provider: 'anthropic', model: OWN, credentialRef: 'byok:anthropic' }, metadata: {}, configurable: {},
   createdAt: '2026-10-31T00:00:00.000Z', updatedAt: '2026-10-31T00:00:00.000Z',
 };
+// `toolAllowlist: []` still compiles tools: the ADR 0315 default-on baseline is added.
+const agent: ResolvedAgentManifest = {
+  agentId: 'a', persona: 'P', modelClass: 'chat', systemPrompt: 'sp', toolAllowlist: [],
+  packName: 'core.openwop.test', packVersion: '0',
+};
+const policyResolver: ProviderPolicyResolver = { resolveForRun: async () => [] };
 const turn = (route: { provider: string; model: string } | null) => runConversationAgentToolTurn({
-  run,
-  agent: { agentId: 'a', persona: 'P', toolAllowlist: [] } as unknown as ResolvedAgentManifest,
+  run, agent,
   systemPrompt: 'sp', history: [], runId: run.runId, nodeId: 'n', conversationId: 'c',
-  policyResolver: (() => undefined) as unknown as ProviderPolicyResolver,
+  policyResolver,
   route,
 });
 
@@ -66,6 +75,7 @@ describe('ADR 1016 — the BYOK tool loop honours this turn\'s route', () => {
   it('dispatches the ROUTED model and reports it as what answered', async () => {
     models.length = 0; failModel = null;
     const out = await turn({ provider: 'anthropic', model: BIG });
+    expect(out, 'the loop ran (tools compiled)').not.toBeNull();
     expect(models).toEqual([BIG]);
     expect(out?.served).toEqual({ provider: 'anthropic', model: BIG });
   });
@@ -73,6 +83,7 @@ describe('ADR 1016 — the BYOK tool loop honours this turn\'s route', () => {
   it('CONTROL: with no route it dispatches the conversation\'s own model', async () => {
     models.length = 0; failModel = null;
     const out = await turn(null);
+    expect(out, 'the loop ran (tools compiled)').not.toBeNull();
     expect(models).toEqual([OWN]);
     expect(out?.served).toEqual({ provider: 'anthropic', model: OWN });
   });
@@ -80,6 +91,7 @@ describe('ADR 1016 — the BYOK tool loop honours this turn\'s route', () => {
   it('a routed model the key cannot serve degrades ONCE to the conversation\'s own model', async () => {
     models.length = 0; failModel = BIG;
     const out = await turn({ provider: 'anthropic', model: BIG });
+    expect(out, 'the loop ran (tools compiled)').not.toBeNull();
     expect(models).toEqual([BIG, OWN]);
     expect(out?.served).toEqual({ provider: 'anthropic', model: OWN });
     expect(out?.error).toBeUndefined();

@@ -179,3 +179,10 @@ Registered in `FRONTEND_FEATURES`; the `npm run build` gate must pass.
   a real storage backend.
 - [ ] **Richer sections / schema registry.** Promote the inline per-type schemas
   to a registry when the set grows past the core five.
+
+> **CORRECTED 2026-11-03 (ADR 1046).** The no-stored-markup rule still holds for
+> section bodies on the platform origin. Two things are not stored markup: typed
+> props of a `component` section (ADR 1046 D2/D3, escaped by a logic-less template),
+> and admin code injection, which lives only in the custom-domain store and is
+> emitted only on bound custom domains (ADR 1046 D7). Neither runs script on
+> app.openwop.dev (ADR 1046 D5).

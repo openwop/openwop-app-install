@@ -12,7 +12,7 @@
  *
  * Sabotage that turns it red: render the panel un-hidden; ignore Escape; drop `compare`
  * from the curated slugs (duplicate); always curate White label; promote Compare to the
- * primary nav; render PublicHeaderActions / PublicMenuActions inline instead of portalling.
+ * primary nav; never curate Features; render PublicHeaderActions / PublicMenuActions inline instead of portalling.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, within } from '@testing-library/react';
@@ -29,11 +29,12 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 function stubFetch(): void {
   vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
     const u = String(input);
-    // The ADR 0486 nav list: two published pages — one curated (compare),
-    // one purely dynamic (about).
+    // The ADR 0486 nav list: three published pages — two curated (features,
+    // compare), one purely dynamic (about).
     if (u.endsWith('/public/host-site/pages')) {
       return Promise.resolve(json(200, { pages: [
         { slug: 'about', title: 'About Us' },
+        { slug: 'features', title: 'Features' },
         { slug: 'compare', title: 'Compare' },
       ] }));
     }
@@ -72,9 +73,10 @@ describe('PublicShell hamburger menu (ADR 0486)', () => {
     expect(panel.hidden).toBe(false);
     // Curated "main functionality" group.
     expect(within(panel).getByText('Product')).toBeTruthy();
-    expect(within(panel).getByText('Features')).toBeTruthy();
     // Dynamic "child pages" group (resolves after the nav-list fetch).
     expect(await within(panel).findByText('Pages')).toBeTruthy();
+    // Curated pages are listed once the nav read says they are published.
+    expect(within(panel).getByRole('link', { name: 'Features' }).getAttribute('href')).toBe('/p/features');
     expect(within(panel).getByText('About Us')).toBeTruthy();
     // A curated page (Compare) appears ONCE — never duplicated into the dynamic group.
     expect(within(panel).getAllByText('Compare')).toHaveLength(1);
@@ -86,11 +88,11 @@ describe('PublicShell hamburger menu (ADR 0486)', () => {
     expect(within(panel).getByRole('combobox', { name: 'Language' })).toBeTruthy();
   });
 
-  it('keeps the two first-visit decision links visible outside the disclosure', () => {
+  it('keeps the two first-visit decision links visible outside the disclosure', async () => {
     stubFetch();
     renderShell();
     const primary = screen.getByRole('navigation', { name: 'Primary' });
-    expect(within(primary).getByRole('link', { name: 'Features' })).toBeTruthy();
+    expect(await within(primary).findByRole('link', { name: 'Features' })).toBeTruthy();
     expect(within(primary).getByRole('link', { name: 'Pricing' })).toBeTruthy();
     expect(within(primary).queryByRole('link', { name: 'Compare' })).toBeNull();
   });

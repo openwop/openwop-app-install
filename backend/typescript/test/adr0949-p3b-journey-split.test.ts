@@ -19,7 +19,8 @@
  *      `contactArmAt` reads the band layout, as `runFreeze.assignAt` does.
  *   4. The journey `split` node passes `orgId` through.
  *
- * Sabotage (re-run 2026-10-26 on main, each red, then restored): reading the
+ * Sabotage (wave 75: reading `now` for the frozen instant reds 2, a guardrail
+ * row from before exposure reds 3; re-run 2026-10-26 on main, each red, then restored): reading the
  * CURRENT epoch instead of the frozen one in `contactArmAt` reds 1; dropping the
  * `exp:` toggle check (engine on with Experiments OFF) reds 2's string case;
  * dropping `bindJourneyOrg` from the engine split reds 2's client case;
@@ -29,7 +30,7 @@
  * (The 2026-10-20 build's cases 3 and 4 were red on their own base: launch needs
  * a locked plan, and the node's host check needs `enroll`/`checkEligibility`.)
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
@@ -72,7 +73,7 @@ beforeAll(async () => {
   const disco = await api<{ fixtures?: string[] }>('/.well-known/openwop');
   workflowId = disco.body.fixtures?.[0] ?? 'openwop-app.uppercase';
   await setToggle('on');
-});
+}, 120_000);
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 async function api<T = unknown>(path: string, init: RequestInit = {}): Promise<{ status: number; body: T }> {
@@ -165,14 +166,20 @@ describe('ADR 0949 P3b — 2. bucketHoldout on the engine', () => {
   it('an engine experiment assigns at the run\'s frozen instant, needs orgId, and must be a journey split', async () => {
     const run = await stampedRun();
     expect(run.asOf).toBeTruthy();
-    const e = experiment(run.tenantId);
+    // An all-treatment epoch that starts just after the run's stamp: an arm read
+    // at any later instant than the frozen one lands on it.
+    const launched = experiment(run.tenantId);
+    const e: Experiment = { ...launched, epochs: [...launched.epochs, { epoch: 1, weights: { treatment: 100 }, at: new Date(Date.parse(run.asOf!) + 1).toISOString(), reason: 'optimize' }] };
     await putExperimentRow(e);
     const s = buildCampaignJourneysSurface({ tenantId: run.tenantId, runId: run.runId });
+    const arms = new Set<string>();
     for (const c of contacts(100)) {
       const out = await s.bucketHoldout!({ contactId: c, experimentId: e.experimentId, orgId: e.orgId });
       const expected = assignAt(e, c, run.asOf!)!.arm.key;
+      arms.add(String(out.arm));
       expect(out).toMatchObject({ arm: expected, control: expected === 'control', treatment: expected !== 'control', assigned: true, epoch: 0, experimentId: e.experimentId });
     }
+    expect(arms).toEqual(new Set(['control', 'treatment']));
     await expect(s.bucketHoldout!({ contactId: 'c', experimentId: e.experimentId })).rejects.toMatchObject({ details: { reason: 'org_required' } });
     const cms = experiment(run.tenantId, { surface: { kind: 'cms.page', ref: 'p' } });
     await putExperimentRow(cms);
@@ -199,8 +206,8 @@ describe('ADR 0949 P3b — 3. the journey.split adapter', () => {
     const arms = [{ key: 'control', ref: null, weight: 50 }, { key: 'treatment', ref: null, weight: 50 }];
     const d = await createDraft(tenantId, 'org-a', 'u', { name: 'Welcome split', surface: { kind: JOURNEY_SPLIT_SURFACE, ref: 'welcome' }, arms });
     expect(d.unit).toBe('contact');
-    await expect(createDraft(tenantId, 'org-a', 'u', { name: 'x', surface: { kind: JOURNEY_SPLIT_SURFACE, ref: 'welcome' }, arms: [...arms, { key: 'c', ref: null, weight: 0 }] })).rejects.toMatchObject({ details: { field: 'arms' } });
-    await expect(createDraft(tenantId, 'org-a', 'u', { name: 'x', surface: { kind: JOURNEY_SPLIT_SURFACE, ref: 'welcome' }, arms: [arms[0], { key: 'treatment', ref: 'page-1', weight: 50 }] })).rejects.toMatchObject({ details: { field: 'arms' } });
+    await expect(createDraft(tenantId, 'org-a', 'u', { name: 'x', surface: { kind: JOURNEY_SPLIT_SURFACE, ref: 'welcome' }, arms: [{ key: 'control', ref: null, weight: 34 }, { key: 'treatment', ref: null, weight: 33 }, { key: 'c', ref: null, weight: 33 }] })).rejects.toThrow(/exactly two arms/);
+    await expect(createDraft(tenantId, 'org-a', 'u', { name: 'x', surface: { kind: JOURNEY_SPLIT_SURFACE, ref: 'welcome' }, arms: [arms[0], { key: 'treatment', ref: 'page-1', weight: 50 }] })).rejects.toThrow(/reference no content/);
     await lockPlan(tenantId, 'org-a', d.experimentId, PLAN);
     await launch(tenantId, 'org-a', d.experimentId, 'u');
     const d2 = await createDraft(tenantId, 'org-a', 'u', { name: 'Second', surface: { kind: JOURNEY_SPLIT_SURFACE, ref: 'welcome' }, arms });
@@ -216,8 +223,13 @@ describe('ADR 0949 P3b — 3. the journey.split adapter', () => {
     const s = buildCampaignJourneysSurface({ tenantId, runId: run.runId });
     const routed = new Map<string, string>();
     const ids: string[] = [];
+    // Contact 3's complaint predates its exposure: stamped a minute back, so it
+    // cannot tie with the enrollment on the same millisecond.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(Date.now() - 60_000);
+    try { await addSuppression(tenantId, `p3b-${n}-3@acme.test`, 'complaint', 'test'); } finally { vi.useRealTimers(); }
     for (let i = 0; i < 4; i++) {
-      const c = await createContact({ tenantId, name: `C${i}`, email: `p3b-${n}-${i}@acme.test` } as never);
+      const c = await createContact({ tenantId, name: `C${i}`, email: `p3b-${n}-${i}@acme.test` });
       ids.push(c.contactId);
       await enroll(tenantId, e.surface.ref, c.contactId, run.runId);
       routed.set(c.contactId, String((await s.bucketHoldout!({ contactId: c.contactId, experimentId: e.experimentId, orgId: e.orgId })).arm));
@@ -240,8 +252,12 @@ describe('ADR 0949 P3b — 3. the journey.split adapter', () => {
   });
 
   it('observe counts only its own client: another client\'s enrollments in a journey with the same id are not units', async () => {
-    const run = await stampedRun();
-    const tenantId = run.tenantId;
+    // Its own tenant: once a workspace has a client, every other journey case in that
+    // workspace would have to name one.
+    const stamped = await stampedRun();
+    const tenantId = `t-p3b-clients-${n++}`;
+    const run = { ...(await storage.getRun(stamped.runId))!, runId: `run-p3b-clients-${n++}`, tenantId };
+    await storage.insertRun(run);
     const orgA = (await createOrg({ tenantId, createdBy: 'seed', name: 'Client A (synthetic)' })).orgId;
     const orgB = (await createOrg({ tenantId, createdBy: 'seed', name: 'Client B (synthetic)' })).orgId;
     await createClient({ tenantId, orgId: orgA, name: 'Client A (synthetic)', createdBy: 'seed' });
@@ -249,8 +265,8 @@ describe('ADR 0949 P3b — 3. the journey.split adapter', () => {
     const journeyId = `welcome-shared-${n++}`;
     const e = experiment(tenantId, { orgId: orgA, surface: { kind: JOURNEY_SPLIT_SURFACE, ref: journeyId } });
     await putExperimentRow(e);
-    const a = await createContact({ tenantId, name: 'In A', email: `p3b-a-${n}@acme.test` } as never);
-    const b = await createContact({ tenantId, name: 'In B', email: `p3b-b-${n}@acme.test` } as never);
+    const a = await createContact({ tenantId, name: 'In A', email: `p3b-a-${n}@acme.test` });
+    const b = await createContact({ tenantId, name: 'In B', email: `p3b-b-${n}@acme.test` });
     await enroll(tenantId, journeyId, a.contactId, run.runId, { orgId: orgA });
     await enroll(tenantId, journeyId, b.contactId, run.runId, { orgId: orgB });
     expect((await experimentSurface(JOURNEY_SPLIT_SURFACE)!.observe(e)).units).toHaveLength(1);

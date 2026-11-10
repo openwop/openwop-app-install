@@ -24,12 +24,17 @@ let server: http.Server;
 let BASE = '';
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 let n = 0;
+interface Source { assetId: string; sha256: string; present?: boolean; serveUrl?: string; role?: string }
+interface Body {
+  orgId?: string; error?: string; message?: string; verdict?: unknown; sources?: Source[];
+  details?: { feature?: string };
+}
 function client() {
   let cookie = '';
-  return async (method: string, path: string, body?: unknown): Promise<{ status: number; body: Record<string, unknown> }> => {
+  return async (method: string, path: string, body?: unknown): Promise<{ status: number; body: Body }> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    return { status: res.status, body: (await res.json().catch(() => ({}))) as Record<string, unknown> };
+    for (const c of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
+    return { status: res.status, body: (await res.json().catch(() => ({}))) as Body };
   };
 }
 const TENANT = `org:g945p5-${Date.now()}`;
@@ -55,7 +60,7 @@ beforeAll(async () => {
   expect((await call('POST', '/host/openwop-app/test/login', { email: 'g945p5@acme.test', tenantId: TENANT })).status).toBe(201);
   orgId = String((await call('POST', '/host/openwop-app/orgs', { name: 'Client A' })).body.orgId);
   otherOrg = String((await call('POST', '/host/openwop-app/orgs', { name: 'Client B' })).body.orgId);
-}, 60_000);
+}, 120_000);
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 const M = (org: string, id: string): string => `/host/openwop-app/media/orgs/${encodeURIComponent(org)}/assets/${encodeURIComponent(id)}/provenance`;
@@ -66,21 +71,27 @@ describe('GET …/assets/:assetId/provenance', () => {
     const gone = await asset(orgId);
     const verdictId = `fvd:p5-${++n}`;
     const shot = await asset(orgId, { grounding: { mode: 'composite', productId: 'prod:mug', sources: [{ assetId: src.a.assetId, sha256: src.sha }, { assetId: gone.a.assetId, sha256: gone.sha }], provider: 'openwop', model: 'renderer@1', op: 'render', fidelity: { verdictId, outcome: 'needs_review', rulesetVersion: FIDELITY_RULESET_VERSION } } });
-    await recordVerdict({ verdictId, tenantId: TENANT, orgId, assetId: shot.a.assetId, assetSha256: shot.sha, mode: 'composite', sources: [], checks: [{ id: 'dhash', status: 'pass', value: 0, threshold: 10, detail: 'd' }], outcome: 'needs_review', rulesetVersion: FIDELITY_RULESET_VERSION, checkedAt: 'x' });
+    await recordVerdict({ verdictId, tenantId: TENANT, orgId, assetId: shot.a.assetId, assetSha256: shot.sha, mode: 'composite', sources: [], checks: [{ id: 'dhash', status: 'pass', value: 0, threshold: 10, detail: 'd' }], outcome: 'needs_review', rulesetVersion: FIDELITY_RULESET_VERSION, checkedAt: '2026-10-20T00:00:00Z' });
     await deleteAsset(TENANT, orgId, gone.a.assetId);
     const r = await call('GET', M(orgId, shot.a.assetId));
     expect(r.status).toBe(200);
     expect(r.body.verdict).toMatchObject({ verdictId, outcome: 'needs_review', checks: [{ id: 'dhash', value: 0, threshold: 10 }] });
-    const sources = r.body.sources as Array<Record<string, unknown>>;
+    const sources = r.body.sources ?? [];
     expect(sources[0]).toMatchObject({ assetId: src.a.assetId, present: true });
-    expect(typeof sources[0].serveUrl).toBe('string');
+    expect(sources[0]?.serveUrl).toEqual(expect.any(String));
     expect(sources[1]).toEqual({ assetId: gone.a.assetId, sha256: gone.sha, present: false });
     expect(JSON.stringify(r.body)).not.toContain('SECRET PROMPT TEXT');
   });
 
   it('another org\'s asset is a uniform 404', async () => {
     const foreign = await asset(otherOrg, { grounding: { mode: 'none', sources: [], provider: 'p', model: 'm', op: 'generate' } });
-    expect((await call('GET', M(orgId, foreign.a.assetId))).status).toBe(404);
+    const own = await asset(orgId, { grounding: { mode: 'none', sources: [], provider: 'p', model: 'm', op: 'generate' } });
+    expect((await call('GET', M(orgId, own.a.assetId))).status).toBe(200);
+    const refused = await call('GET', M(orgId, foreign.a.assetId));
+    expect(refused).toMatchObject({ status: 404, body: { error: 'not_found', message: 'Asset not found.' } });
+    // Uniform: the foreign id reads like an id that does not exist.
+    const shape = (b: Body) => ({ error: b.error, message: b.message, keys: Object.keys(b).sort() });
+    expect(shape((await call('GET', M(orgId, 'masset:absent'))).body)).toEqual(shape(refused.body));
   });
 });
 
@@ -96,13 +107,22 @@ describe('GET …/products/:productId/media', () => {
     const r = await call('GET', P(bad.productId));
     expect(r.status).toBe(422);
     expect(r.body.error).toBe('product_media_unresolved');
+    // A real token whose asset was deleted: the branch the message is written for.
+    const gone = await asset(orgId);
+    const stale = await createProduct({ tenantId: TENANT, orgId, createdBy: 'u', type: 'physical', name: 'Stale', price: 1, imageAssetTokens: [gone.a.serveToken] });
+    expect(await deleteAsset(TENANT, orgId, gone.a.assetId)).toBe(true);
+    expect(await call('GET', P(stale.productId))).toMatchObject({ status: 422, body: { error: 'product_media_unresolved' } });
   });
 
   it('is refused when commerce is off', async () => {
-    const d = getToggleDefault('commerce')!;
+    const hero = await asset(orgId);
+    const p = await createProduct({ tenantId: TENANT, orgId, createdBy: 'u', type: 'physical', name: 'Toggled', price: 1, imageAssetTokens: [hero.a.serveToken] });
+    expect((await call('GET', P(p.productId))).status).toBe(200);
+    const d = getToggleDefault('commerce');
+    if (!d) throw new Error('the commerce toggle is not registered');
     await saveConfig({ ...d, status: 'off' }, 'test');
     try {
-      expect((await call('GET', P('prod:any'))).status).not.toBe(200);
+      expect(await call('GET', P(p.productId))).toMatchObject({ status: 404, body: { error: 'not_found', details: { feature: 'commerce' } } });
     } finally {
       await saveConfig({ ...d, status: 'on' }, 'test');
     }

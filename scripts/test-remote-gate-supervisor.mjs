@@ -241,11 +241,11 @@ function job(t) {
   const input = { root, trust, requestBytes: Buffer.from(JSON.stringify(request)), now: Date.parse('2026-10-28T01:00:00.000Z') };
   const { job: admitted } = admitRemoteGateJob(input);
   const artifactsDirectory = join(root, 'output'); mkdirSync(artifactsDirectory, { mode: 0o700 });
-  const contents = { 'evidence.json': '{"synthetic":true}\n', 'gate.log': 'synthetic log\n', 'browser.tsv': 'synthetic ledger\n' };
+  const contents = { 'evidence.json': '{"synthetic":true}\n', 'gate.log.gz': 'synthetic log\n', 'browser.tsv': 'synthetic ledger\n' };
   const result = { version: 1, id: admitted.id, requestSha256: admitted.requestSha256,
     ...Object.fromEntries(['runnerId', 'policySha256', 'commit', 'main', 'refsSha256', 'bundleSha256'].map(k => [k, request[k]])),
     treeBefore: request.tree, treeAfter: request.tree, exitCode: 0,
-    artifacts: { evidence: sha256(Buffer.from(contents['evidence.json'])), gateLog: sha256(Buffer.from(contents['gate.log'])),
+    artifacts: { evidence: sha256(Buffer.from(contents['evidence.json'])), gateLog: sha256(Buffer.from(contents['gate.log.gz'])),
       browserLedger: sha256(Buffer.from(contents['browser.tsv'])) } };
   contents['result.json'] = JSON.stringify(result);
   for (const [name, text] of Object.entries(contents)) writeFileSync(join(artifactsDirectory, name), text, { mode: 0o600 });
@@ -303,7 +303,7 @@ test('a cancellation recorded after the job started is honoured, not rejected as
 });
 
 test('publication refused after a passing gate is failed, never completed', supported, async t => {
-  const j = job(t); writeFileSync(join(j.artifactsDirectory, 'gate.log'), 'changed after result was written');
+  const j = job(t); writeFileSync(join(j.artifactsDirectory, 'gate.log.gz'), 'changed after result was written');
   const outcome = await j.run({ command: '/bin/sh', args: ['-c', 'exit 0'] });
   assert.deepEqual([outcome.job.state, outcome.job.details.exitCode], ['failed', PUBLICATION_REFUSED_EXIT]);
 });

@@ -47,7 +47,7 @@ describe('features page — seeded host-global + publicly delivered', () => {
     const steps = (await status.json() as { steps: { id: string; count: number }[] }).steps;
     expect(steps.find((s) => s.id === 'features-page')?.count).toBe(1); // boot already seeded it
 
-    const run = await admin('POST', '/host/openwop-app/example-data/run', { steps: ['features-page'] });
+    const run = await admin('POST', '/host/openwop-app/example-data/run', { steps: ['features-page'], expectedTenantId: 'default' });
     expect(run.status).toBe(200);
     const row = (await run.json() as { results: StepRow[] }).results.find((r) => r.step === 'features-page');
     expect(row?.action).not.toBe('error');
@@ -64,7 +64,7 @@ describe('features page — seeded host-global + publicly delivered', () => {
     expect(page.sections[0].type).toBe('hero');
     expect(page.sections[0].data.heading).toBe(featurePages.hero.heading); // the seed source's copy
     expect(page.sections.every((s) => ['hero', 'richText', 'image', 'cta', 'columns'].includes(s.type))).toBe(true);
-    // One feature CARD grid (layout:'cards' — not the 'steps'/'stats' columns
+    // One feature CARD grid (layout:'cards' — not the 'flow'/'stats' columns
     // sections, which carry no per-card href) per group in the seed source, and
     // each card is a whole-card link (href = appPath), not an inline link in the text.
     const grids = page.sections.filter(
@@ -75,11 +75,17 @@ describe('features page — seeded host-global + publicly delivered', () => {
     expect(cols.length).toBeGreaterThan(0);
     expect(cols[0].href).toMatch(/^\//);              // internal app path
     expect(cols[0].text).not.toMatch(/\]\(/);          // no inline markdown link in card text
+    // ADR 1038 D8 — "How it works" is a process, so it is seeded as a flow, and
+    // its steps carry no state (they describe the product, not live progress).
+    const how = page.sections.find((s) => s.type === 'columns' && (s.data as { layout?: string }).layout === 'flow');
+    const steps = (how?.data as { columns?: Array<{ title?: string; state?: string }> } | undefined)?.columns ?? [];
+    expect(steps.map((c) => c.title)).toEqual(featurePages.howItWorks.steps.map((st) => st.title));
+    expect(steps.every((c) => c.state === undefined)).toBe(true);
   });
 
   it('re-seeding is idempotent (no duplicate features page)', async () => {
-    await admin('POST', '/host/openwop-app/example-data/run', { steps: ['features-page'] });
-    await admin('POST', '/host/openwop-app/example-data/run', { steps: ['features-page'] });
+    await admin('POST', '/host/openwop-app/example-data/run', { steps: ['features-page'], expectedTenantId: 'default' });
+    await admin('POST', '/host/openwop-app/example-data/run', { steps: ['features-page'], expectedTenantId: 'default' });
     // Counted in STORAGE by slug — the seeder's own `count()` is 0/1 by
     // construction, so it could never show a duplicate.
     const pages = (await listPages(SYSTEM_SITE_TENANT, SYSTEM_SITE_ORG)).filter((p) => p.slug === featurePages.slug);

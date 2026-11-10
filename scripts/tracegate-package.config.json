@@ -1,0 +1,8 @@
+{
+  "$comment": "ADR 1028 P0: the tracegate-ci package's view of this repo's lanes. Reached ONLY through TRACEGATE_CONFIG (scripts/tracegate-package.sh), never as a root tracegate.config.json, which the vendored broker and Red Reader would also read. No ledger key yet: P1 adds one when the package starts recording. The frontend keyedExtract (ADR 1028 P1) reads i18n tables by key.",
+  "lanes": {
+    "backend": { "dir": "backend/typescript", "src": "src", "globals": ["test/setup/"], "entryBar": { "days": 1, "earlyAudit": 0.2 } },
+    "frontend": { "dir": "frontend/react", "src": "src", "globals": ["src/test/"], "entryBar": { "days": 1, "earlyAudit": 0.2 }, "keyedExtract": "node scripts/tracegate-package-i18n-extract.mjs" }
+  },
+  "fullRunMaxHours": 24
+}

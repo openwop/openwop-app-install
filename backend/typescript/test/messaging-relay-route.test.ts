@@ -12,6 +12,9 @@
  * Revoke is a DOUBLE GUARD: it drops `deviceTokenHash` AND sets
  * `status:'revoked'`, and `requireDevice` refuses on either; only a probe that
  * breaks both can red the lifecycle case.
+ * ADR 1043 D9: a `pairing` policy records the request and sends the stranger
+ * NOTHING (sabotage-witnessed 2026-11-04: re-queuing the prompt turned the
+ * pairing case red).
  */
 
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
@@ -513,7 +516,8 @@ describe('messaging relay-gateway — policy enforcement (Phase C)', () => {
     const { deviceToken } = await activeRelay('signal');
     const dev = { 'x-openwop-device-token': deviceToken, 'content-type': 'application/json' };
 
-    // 1) Unknown peer → no run, pairing payload returned, outbound code-reply queued.
+    // 1) Unknown peer → no run, pairing payload returned to the device, and (ADR 1043
+    //    D9) NOTHING queued to the stranger: the request waits for an admin.
     const first = await post('/device/inbound', dev, {
       platformMessageId: 'p1', conversationId: 'dm-1', peerId: 'peer-unknown', text: 'hello',
     });
@@ -522,6 +526,7 @@ describe('messaging relay-gateway — policy enforcement (Phase C)', () => {
     expect(first.body.pairing).toBeTruthy();
     expect(first.body.pairing?.code).toMatch(/^[A-Z2-9]{6}$/);
     expect(first.body.runId).toBeUndefined();
+    expect((await get('/device/outbound', dev)).body.messages).toEqual([]);
 
     // 2) Operator approves → allowlist row written, pairing removed.
     const approve = await post('/pairing/approve', OP, { connectorId, code: first.body.pairing?.code });

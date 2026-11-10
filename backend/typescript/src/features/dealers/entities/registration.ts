@@ -14,7 +14,7 @@
  * @see docs/adr/0281-dealer-network-prm.md §3/§7
  */
 
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { DurableCollection } from '../../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../../types.js';
 import { cleanString } from '../../../host/boundedStrings.js';
@@ -52,11 +52,35 @@ export interface DealRegistration {
 /** The partner-portal capability token — bound to ONE dealer. `token` is the id
  *  so resolve is an O(1) point lookup. */
 export interface PartnerToken {
+  /** ADR 1034 D9 — `ptokh:<sha256hex(raw)>`. The raw token is returned once at mint and
+   *  never stored, so a database or backup read yields no working link. A legacy row
+   *  (`ptoken:<uuid>`, plaintext) is re-keyed by the `rekey-partner-tokens-hashed` app
+   *  migration. */
   token: string;
   tenantId: string;
   orgId: string;
   dealerId: string;
   createdAt: string;
+  /** ADR 1034 D9 — the link stops working after this instant (uniform 404). */
+  expiresAt?: string;
+}
+
+/** ADR 1034 D9 — a link is valid for 180 days from mint. */
+export const PARTNER_TOKEN_TTL_MS = 180 * 24 * 60 * 60 * 1000;
+const LEGACY_TOKEN_PREFIX = 'ptoken:';
+const HASHED_TOKEN_PREFIX = 'ptokh:';
+
+/** The at-rest form of a raw partner token. */
+export function hashPartnerToken(raw: string): string {
+  return `${HASHED_TOKEN_PREFIX}${createHash('sha256').update(raw).digest('hex')}`;
+}
+
+/** When a row expires: its own `expiresAt`, else `createdAt + TTL` (a legacy row), else
+ *  `fallbackFrom + TTL` (a legacy row with no parseable `createdAt`). */
+function expiryOf(t: PartnerToken, fallbackFrom: number): string {
+  if (t.expiresAt !== undefined) return t.expiresAt;
+  const created = Date.parse(t.createdAt);
+  return new Date((Number.isFinite(created) ? created : fallbackFrom) + PARTNER_TOKEN_TTL_MS).toISOString();
 }
 
 const MAX = { title: 200, company: 200, perDealerRegistrations: 2000 } as const;
@@ -70,22 +94,59 @@ const scoped = <T extends { tenantId: string; orgId: string }>(rows: T[], tenant
   rows.filter((r) => r.tenantId === tenantId && r.orgId === orgId);
 
 // ── Partner token (mint / rotate / resolve) ──────────────────────────────────
-/** Mint (rotating any existing) the dealer's partner-portal token. */
-export async function mintPartnerToken(tenantId: string, orgId: string, dealerId: string): Promise<PartnerToken> {
+/** Mint (rotating any existing) the dealer's partner-portal token. Returns the RAW token
+ *  once, for the link; only its hash is stored (ADR 1034 D9). */
+export async function mintPartnerToken(tenantId: string, orgId: string, dealerId: string): Promise<{ raw: string; row: PartnerToken }> {
   await getDealer(tenantId, orgId, dealerId); // dealer must exist + be visible
-  for (const old of scoped(await tokens.listForTenantIndexed(tenantId), tenantId, orgId).filter((t) => t.dealerId === dealerId)) {
-    await tokens.delete(old.token); // one active token per dealer — rotate replaces
-  }
-  const token: PartnerToken = { token: `ptoken:${randomUUID()}`, tenantId, orgId, dealerId, createdAt: nowIso() };
-  await tokens.put(token);
-  return token;
+  await revokePartnerTokens(tenantId, orgId, dealerId); // one active token per dealer — rotate replaces
+  const raw = `${LEGACY_TOKEN_PREFIX}${randomUUID()}`; // the link keeps its familiar shape
+  const now = Date.now();
+  const row: PartnerToken = { token: hashPartnerToken(raw), tenantId, orgId, dealerId, createdAt: new Date(now).toISOString(), expiresAt: new Date(now + PARTNER_TOKEN_TTL_MS).toISOString() };
+  await tokens.put(row);
+  return { raw, row };
 }
 
-/** Resolve a partner token → its binding. Throws uniform 404 on a bad/absent token. */
-export async function resolvePartnerToken(token: string): Promise<PartnerToken> {
-  const t = token ? await tokens.get(token) : null;
-  if (!t) throw new OpenwopError('not_found', 'Invalid partner link.', 404, {});
+/** ADR 1034 D9 — revoke the dealer's partner link(s). Returns how many were removed. */
+export async function revokePartnerTokens(tenantId: string, orgId: string, dealerId: string): Promise<number> {
+  let removed = 0;
+  for (const old of scoped(await tokens.listForTenantIndexed(tenantId), tenantId, orgId).filter((t) => t.dealerId === dealerId)) {
+    if (await tokens.delete(old.token)) removed += 1;
+  }
+  return removed;
+}
+
+/** Resolve a RAW partner token → its binding. Throws the uniform 404 on a bad, absent or
+ *  expired token. */
+export async function resolvePartnerToken(raw: string): Promise<PartnerToken> {
+  const invalid = (): OpenwopError => new OpenwopError('not_found', 'Invalid partner link.', 404, {});
+  if (!raw) throw invalid();
+  // The hashed row first. A legacy plaintext row answers only until the boot migration
+  // re-keys it (the migration runs before this host serves; the fallback covers a row
+  // written by an older instance during a rolling deploy).
+  const t = (await tokens.get(hashPartnerToken(raw))) ?? (raw.startsWith(LEGACY_TOKEN_PREFIX) ? await tokens.get(raw) : null);
+  if (!t) throw invalid();
+  if (Date.now() >= Date.parse(expiryOf(t, Date.now()))) {
+    await tokens.compareAndDelete(t); // an expired link is dead weight at rest; clear it
+    throw invalid();
+  }
   return t;
+}
+
+/**
+ * ADR 1034 D9 — the `rekey-partner-tokens-hashed` app migration. Every legacy plaintext row
+ * becomes its hashed twin with an expiry; idempotent and safe to run on two instances at
+ * once: the loser's `putIfAbsent` returns false, and its `compareAndDelete` of the exact
+ * legacy row finds it already gone. Returns how many rows this run re-keyed.
+ */
+export async function rekeyLegacyPartnerTokens(now: number = Date.now()): Promise<number> {
+  let rekeyed = 0;
+  for (const legacy of await tokens.list()) {
+    if (!legacy.token.startsWith(LEGACY_TOKEN_PREFIX)) continue;
+    const hashed: PartnerToken = { ...legacy, token: hashPartnerToken(legacy.token), expiresAt: expiryOf(legacy, now) };
+    if (await tokens.putIfAbsent(hashed)) rekeyed += 1;
+    await tokens.compareAndDelete(legacy);
+  }
+  return rekeyed;
 }
 
 // ── Deal registrations ───────────────────────────────────────────────────────
@@ -119,13 +180,25 @@ export async function createRegistration(tenantId: string, orgId: string, dealer
   return reg;
 }
 
+/** The review card's proposal text — one spelling for every lane that mints the card. */
+export function registrationProposalText(reg: Pick<DealRegistration, 'dealTitle' | 'companyName'>): string {
+  return `Approve deal registration “${reg.dealTitle}” from ${reg.companyName}`;
+}
+
+/** One registration, tenant + org scoped (uniform 404 across tenants/orgs). */
+export async function getRegistration(tenantId: string, orgId: string, regId: string): Promise<DealRegistration> {
+  const r = await registrations.get(regId);
+  if (!r || r.tenantId !== tenantId || r.orgId !== orgId) throw new OpenwopError('not_found', 'Registration not found.', 404, { regId });
+  return r;
+}
+
 /** Queue the review card, deduped. Returns false when the queue write did not land. */
 async function queueRegistrationApproval(reg: DealRegistration): Promise<boolean> {
   try {
     if (await findPendingDealerRegistrationApproval(reg.tenantId, reg.regId)) return true;
     const created = await createDealerRegistrationApproval({
       tenantId: reg.tenantId, orgId: reg.orgId, regId: reg.regId, dealerId: reg.dealerId,
-      proposal: `Approve deal registration “${reg.dealTitle}” from ${reg.companyName}`,
+      proposal: registrationProposalText(reg),
     });
     // REVIEW B5+I2, the seam between the two fixes. The approval id is deterministic in
     // `regId` (so a race cannot mint a second card), which means a RESOLVED card occupies
@@ -207,7 +280,12 @@ export async function decideRegistration(
   if (r.status === decision) return r; // idempotent
   if (r.status !== 'pending') throw new OpenwopError('conflict', `This registration is already ${r.status}.`, 409, { regId, status: r.status });
   const next: DealRegistration = { ...r, status: decision, decidedBy: actor, decidedAt: nowIso() };
-  await registrations.put(next);
+  // ADR 1034 — a CAS, not a plain `put`: the card lane and a direct lane (the seeder)
+  // could otherwise both read `pending` and the later write would silently win with the
+  // opposite decision.
+  if (!(await registrations.compareAndSwap(r, next))) {
+    throw new OpenwopError('conflict', 'This registration changed while it was being decided. Reload and try again.', 409, { regId });
+  }
   if (via === 'direct') {
     // REVIEW I3 — best-effort, like the queue write one function up: the ROW is the
     // truth and the card is recoverable, so a failing close must not make a decision

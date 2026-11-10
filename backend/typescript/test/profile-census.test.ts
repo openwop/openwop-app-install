@@ -16,11 +16,16 @@
  * `OPENWOP_DEPLOY_POSTURE` and `OPENWOP_AUTHORIZATION_ENFORCEMENT` are read per
  * request, so one booted app is driven through both profiles.
  *
- * Sabotage-witnessed (2026-10-26), each reds at least one case: removing the census
- * call from the membership gate; recording under an evaluation profile; dropping the
- * sampling window; removing the second-factor census from `isSuperadmin`; serving
- * the report route without `requireSuperadmin`. NOT witnessed: the census's
- * personal-workspace skip. Removing it stays green because every caller that
+ * Sabotage-witnessed (w77), each reds at least one case: removing the census call
+ * from the membership gate, or making it before the enforcement check; recording
+ * under an evaluation profile; dropping the sampling window, never letting it
+ * expire, or leaving the scope out of its key; recording an allowed decision;
+ * removing the second-factor census from `isSuperadmin`, or any of its three
+ * exemptions; serving the report route without `requireSuperadmin`.
+ *
+ * NOT witnessed: `isSuperadmin`'s `!superadminMfaRequired()` term, an equivalent
+ * mutant, because with the requirement on a caller lacking the factor has already
+ * been refused above it. And the census's personal-workspace skip. Removing it stays green because every caller that
  * reaches the gate in its own personal workspace already has an owner member row
  * (signed-in users are provisioned; an anonymous caller is refused 401 before the
  * gate), so the decision allows them anyway. The skip mirrors enforcement's own
@@ -39,6 +44,7 @@ import {
   _settleProfileCensusForTesting,
   profileCensusReport,
   profileHatchesInEffect,
+  shouldSampleMembership,
   type ProfileCensusReport,
 } from '../src/host/profileCensus.js';
 
@@ -52,12 +58,14 @@ beforeAll(async () => {
   vi.stubEnv('OPENWOP_AUTH_DISABLE_COOKIES', '');
   vi.stubEnv('OPENWOP_AUTHORIZATION_ENFORCEMENT', '');
   vi.stubEnv('OPENWOP_DEPLOY_POSTURE', '');
+  vi.stubEnv('OPENWOP_ALLOW_INMEMORY_SURFACES', ''); // a shell value would join the exact `hatches` list
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => {
     server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
   const def = getToggleDefault('users');
-  if (def) await saveConfig({ ...def, status: 'on' }, 'test');
+  expect(def).toBeDefined();
+  await saveConfig({ ...def!, status: 'on' }, 'test');
 });
 afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
@@ -74,10 +82,17 @@ afterEach(() => {
   vi.stubEnv('OPENWOP_ALLOW_EPHEMERAL_STORAGE', '');
 });
 
-interface Res { status: number; body: any }
-function client(): { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res> } {
+interface Res<T> { status: number; body: T }
+/** The error envelope (`middleware/errorEnvelope.ts`). */
+interface Refusal { error: string; message: string }
+interface Client {
+  get: <T = unknown>(p: string) => Promise<Res<T>>;
+  post: <T = unknown>(p: string, b?: unknown) => Promise<Res<T>>;
+  patch: <T = unknown>(p: string, b?: unknown) => Promise<Res<T>>;
+}
+function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
@@ -89,25 +104,26 @@ function client(): { get: (p: string) => Promise<Res>; post: (p: string, b?: unk
       const m = /(__session=[^;]+)/.exec(sc);
       if (m) cookie = m[1];
     }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    const out: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    return { status: res.status, body: out as T };
   };
-  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b) };
+  return { get: <T>(p: string) => call<T>('GET', p), post: <T>(p: string, b?: unknown) => call<T>('POST', p, b), patch: <T>(p: string, b?: unknown) => call<T>('PATCH', p, b) };
 }
 
 let n = 0;
-async function signup(c: ReturnType<typeof client>): Promise<{ userId: string }> {
-  const r = await c.post('/host/openwop-app/test/login', { email: `census-${Date.now()}-${n++}@acme.test` });
+async function signup(c: Client): Promise<{ userId: string }> {
+  const r = await c.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: `census-${Date.now()}-${n++}@acme.test` });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
 
 /** An owner and a ZERO-scope member, both switched into one shared workspace. */
 async function sharedWorkspaceWithZeroScopeMember(): Promise<{
-  owner: ReturnType<typeof client>; member: ReturnType<typeof client>; memberId: string; workspaceId: string;
+  owner: Client; member: Client; memberId: string; workspaceId: string;
 }> {
   const owner = client();
   await signup(owner);
-  const ws = (await owner.post('/host/openwop-app/workspaces', { name: `CensusCo-${n++}` })).body;
+  const ws = (await owner.post<{ workspaceId: string }>('/host/openwop-app/workspaces', { name: `CensusCo-${n++}` })).body;
   expect((await owner.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws.workspaceId)}/switch`)).status).toBe(200);
   const member = client();
   const m = await signup(member);
@@ -155,6 +171,22 @@ describe('ADR 0981 P2 — membership census (strict profile, enforcement off)', 
     await member.get('/runs');
     const entry = (await census()).membership.wouldDeny.entries.find((e) => e.subject === memberId);
     expect(entry?.count).toBe(1);
+
+    // The window itself, on the clock: it reopens at exactly 10 minutes, and each
+    // part of the key is its own question.
+    const start = Date.UTC(2026, 9, 26, 12);
+    vi.useFakeTimers({ toFake: ['Date'], now: start });
+    try {
+      expect(shouldSampleMembership('t1', 'user:s', 'runs:read')).toBe(true);
+      expect(shouldSampleMembership('t1', 'user:s', 'runs:write')).toBe(true);
+      expect(shouldSampleMembership('t1', 'user:s', 'runs:read')).toBe(false);
+      vi.setSystemTime(start + 599_999);
+      expect(shouldSampleMembership('t1', 'user:s', 'runs:read')).toBe(false);
+      vi.setSystemTime(start + 600_000);
+      expect(shouldSampleMembership('t1', 'user:s', 'runs:read')).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('records nothing under an evaluation profile', async () => {
@@ -171,12 +203,14 @@ describe('ADR 0981 P2 — membership census (strict profile, enforcement off)', 
     await member.get('/runs');
     expect((await census()).membership.wouldDeny.entries.map((e) => e.subject)).toContain(memberId);
     vi.stubEnv('OPENWOP_AUTHORIZATION_ENFORCEMENT', 'true');
-    expect((await member.get('/runs')).status).toBe(403);
+    const refused = await member.get<Refusal>('/runs');
+    expect(refused.status).toBe(403);
+    expect(refused.body).toMatchObject({ error: 'forbidden', message: 'Missing required scope: runs:read' });
     // The fix the census points at: give the member a role that carries the scope.
-    const members = await owner.get(`/host/openwop-app/orgs/${encodeURIComponent(workspaceId)}/members`);
-    const row = (members.body.members ?? members.body).find((m: { subject: string }) => m.subject === memberId);
+    const members = await owner.get<{ members: Array<{ memberId: string; subject: string }> }>(`/host/openwop-app/orgs/${encodeURIComponent(workspaceId)}/members`);
+    const row = members.body.members.find((m) => m.subject === memberId);
     expect(row, JSON.stringify(members.body)).toBeDefined();
-    const patch = await owner.patch(`/host/openwop-app/orgs/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(row.memberId)}`, { roles: ['viewer'] });
+    const patch = await owner.patch(`/host/openwop-app/orgs/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(row!.memberId)}`, { roles: ['viewer'] });
     expect(patch.status, JSON.stringify(patch.body)).toBe(200);
     expect((await member.get('/runs')).status).toBe(200);
   });
@@ -185,7 +219,9 @@ describe('ADR 0981 P2 — membership census (strict profile, enforcement off)', 
     const { member } = await sharedWorkspaceWithZeroScopeMember();
     vi.stubEnv('OPENWOP_DEPLOY_POSTURE', 'auth');
     vi.stubEnv('OPENWOP_AUTHORIZATION_ENFORCEMENT', 'true');
-    expect((await member.get('/runs')).status).toBe(403);
+    const refused = await member.get<Refusal>('/runs');
+    expect(refused.status).toBe(403);
+    expect(refused.body).toMatchObject({ error: 'forbidden', message: 'Missing required scope: runs:read' });
     expect((await census()).membership.wouldDeny.entries).toEqual([]);
   });
 });
@@ -195,14 +231,17 @@ describe('ADR 0981 P2 — the census route is superadmin-only and names hatches 
     const outsider = client();
     await signup(outsider);
     vi.stubEnv('OPENWOP_DEPLOY_POSTURE', 'auth');
-    expect((await outsider.get('/host/openwop-app/operations/profile-census')).status).toBe(403);
+    const refused = await outsider.get<Refusal>('/host/openwop-app/operations/profile-census');
+    expect(refused.status).toBe(403);
+    expect(refused.body.error).toBe('forbidden');
+    expect(refused.body.message).toMatch(/requires a superadmin principal/);
 
     const admin = client();
-    await signup(admin);
-    const personal = (await admin.get('/host/openwop-app/me/workspaces')).body.personal as string;
+    const adminUser = await signup(admin);
+    const personal = (await admin.get<{ personal: string }>('/host/openwop-app/me/workspaces')).body.personal;
     vi.stubEnv('OPENWOP_SUPERADMIN_TENANTS', personal);
     vi.stubEnv('OPENWOP_ALLOW_EPHEMERAL_STORAGE', 'true');
-    const r = await admin.get('/host/openwop-app/operations/profile-census');
+    const r = await admin.get<ProfileCensusReport>('/host/openwop-app/operations/profile-census');
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     expect(r.body.profile).toBe('strict');
     expect(r.body.hatches).toEqual(['OPENWOP_ALLOW_EPHEMERAL_STORAGE']);
@@ -211,6 +250,7 @@ describe('ADR 0981 P2 — the census route is superadmin-only and names hatches 
     expect(r.body.superadminMfa.required).toBe(false);
     // The outsider was never a superadmin, so the admin is the only entry.
     expect(r.body.superadminMfa.withoutFactor.principals).toBe(1);
+    expect(r.body.superadminMfa.withoutFactor.entries.map((e) => e.subject)).toEqual([adminUser.userId]);
   });
 });
 
@@ -247,11 +287,12 @@ describe('ADR 0981 P2 — superadmin second-factor census (predicate level)', ()
   it('does not record a verified second factor, break-glass, a key, or an evaluation profile', () => {
     vi.stubEnv('OPENWOP_SUPERADMIN_TENANTS', OPERATOR);
     vi.stubEnv('OPENWOP_DEPLOY_POSTURE', 'auth');
-    isSuperadmin(req({ kind: 'subject', mfa: true }));
-    isSuperadmin(req({ kind: 'subject', principalId: 'breakglass:abc' }));
-    isSuperadmin(req({ kind: 'api-key', principalId: 'apikey:k1' }));
+    // Each is granted, so none of them passes by being refused before the census.
+    expect(isSuperadmin(req({ kind: 'subject', mfa: true }))).toBe(true);
+    expect(isSuperadmin(req({ kind: 'subject', principalId: 'breakglass:abc' }))).toBe(true);
+    expect(isSuperadmin(req({ kind: 'api-key', principalId: 'apikey:k1' }))).toBe(true);
     vi.stubEnv('OPENWOP_DEPLOY_POSTURE', 'cookie-per-visitor');
-    isSuperadmin(req({ kind: 'subject' }));
+    expect(isSuperadmin(req({ kind: 'subject' }))).toBe(true);
     expect(recorded()).toEqual([]);
   });
 

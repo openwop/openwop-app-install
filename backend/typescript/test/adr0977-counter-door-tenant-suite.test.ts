@@ -8,7 +8,12 @@
  * `onMiss: "live"` must still fail closed: the miss never reaches the counter,
  * and the trial fails.
  *
- * Red when (sabotage-witnessed): the door predicate ignores `suiteSource`.
+ * ADR 0989 D3 — the reserved memory tool shares the same door: a tenant suite
+ * naming it never reaches the trial's memory and gets no `outcome`.
+ *
+ * Red when (sabotage-witnessed, w78): the door predicate ignores `suiteSource`
+ * (both cases); `allowLive` ignores the door (the counter case); the memory
+ * branch ignores the door (the memory case).
  */
 import { vi } from 'vitest';
 
@@ -49,13 +54,13 @@ async function send(method: string, path: string, body?: unknown): Promise<Reply
   try { json = JSON.parse(text) as Record<string, unknown>; } catch { /* asserted below */ }
   return { status: res.status, json, text };
 }
+/** Polls the run until it is terminal: `vi.waitFor` on the real condition, no fixed sleep. */
 async function waitTerminal(runId: string): Promise<string> {
-  for (let i = 0; i < 400; i += 1) {
+  return vi.waitFor(async () => {
     const status = String(((await send('GET', `/runs/${runId}`)).json as { status?: string }).status ?? '');
-    if (['completed', 'failed', 'cancelled'].includes(status)) return status;
-    await new Promise((res) => setTimeout(res, 25));
-  }
-  throw new Error(`run ${runId} never settled`);
+    if (!['completed', 'failed', 'cancelled'].includes(status)) throw new Error(`run ${runId} not settled (${status || 'no status'})`);
+    return status;
+  }, { timeout: 10_000, interval: 25 });
 }
 
 describe('ADR 0977 D2 — a tenant suite cannot open the live counter door', () => {

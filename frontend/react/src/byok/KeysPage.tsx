@@ -45,6 +45,7 @@ import { byokErrorMessage, deleteConflictOf, useByokWriteAccess, type DeleteConf
 import { confirm } from '../ui/confirm.js';
 import { SubscriptionCredentialCard } from './SubscriptionCredentialCard.js';
 import { isCardOwnedRef, parseCredentialRef, WEB_SEARCH_REF } from './lib/credentialRef.js';
+import { featureCardOwnedCredentialRefPrefixes } from '../features/featureExtensions.js';
 import { detectProviderByKeyPrefix } from './keyPrefix.js';
 
 /** KEYS-REF-1 — refs are grouped by the provider they NAME, by the backend's own
@@ -143,7 +144,7 @@ export function KeysPage(): JSX.Element {
 
   // Exclude card-owned refs from the "unscoped/legacy" warning list: the web-search
   // key (ADR 0101 P3, its own card below) and subscription / managed refs.
-  const legacy = (refs !== null ? grouped.get(LEGACY) ?? [] : []).filter((e) => !isCardOwnedRef(e.ref));
+  const legacy = (refs !== null ? grouped.get(LEGACY) ?? [] : []).filter((e) => !isCardOwnedRef(e.ref, featureCardOwnedCredentialRefPrefixes()));
   const webSearchConfigured = (refs ?? []).includes(WEB_SEARCH_REF);
   const totalKeys = entries.length;
   const loading = refs === null;

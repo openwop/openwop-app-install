@@ -657,6 +657,18 @@ process.exit(0);
     && /\{ tg_recheck_misses backend [^}]*tg_red_packet backend;/.test(ci) && /\{ tg_recheck_misses frontend [^}]*tg_red_packet frontend;/.test(ci));
 }
 
+// ── ADR 1028 P1: the package's keyedExtract for i18n tables ─────────────────
+{
+  const ex = path.join(path.dirname(fileURLToPathSafe()), 'tracegate-package-i18n-extract.mjs');
+  const run1 = (src) => { try { return { out: JSON.parse(execFileSync(process.execPath, [ex], { input: src, encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] })) }; } catch (e) { return { code: e.status }; } };
+  const ok = run1("export const messages = { title: 'Hi', nested: { label: 'L', n: 2 }, list: ['a', 'b'] } as const;\n");
+  check('package keyedExtract: a table prints NESTED, as i18next reads it', JSON.stringify(ok.out) === JSON.stringify({ title: 's:Hi', nested: { label: 's:L', n: 'l:2' }, list: 'a:["a","b"]' }), JSON.stringify(ok));
+  const spread = run1("const base = { a: 'x' };\nexport const messages = { ...base, b: 'y' };\n");
+  check('package keyedExtract: a table it cannot fully read exits non-zero (a change, never a skip)', spread.code === 1, JSON.stringify(spread));
+  const cfg = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPathSafe()), 'tracegate-package.config.json'), 'utf8'));
+  check('package keyedExtract: the frontend lane of the package config names it', cfg.lanes.frontend.keyedExtract === 'node scripts/tracegate-package-i18n-extract.mjs');
+}
+
 fs.rmSync(repo, { recursive: true, force: true });
 fs.rmSync(run, { recursive: true, force: true });
 fs.rmSync(ledger, { recursive: true, force: true });

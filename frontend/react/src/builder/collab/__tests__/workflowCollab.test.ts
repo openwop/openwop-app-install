@@ -14,6 +14,8 @@
  */
 import { describe, it, expect } from 'vitest';
 import * as Y from 'yjs';
+import { serializeWorkflow } from '../../schema/serialize.js';
+import type { SavedWorkflow } from '../../schema/workflow.js';
 import { createCollabDocBinding } from '../../../canvas/collabDocBinding.js';
 import { WORKFLOW_COLLAB_SHAPE, workflowCollabSlice } from '../workflowCollabShape.js';
 
@@ -149,4 +151,41 @@ describe('workflow collab shape (ADR 0364)', () => {
       'configurableSchema', 'defaultInputs', 'edges', 'inputSchema', 'name', 'nodes', 'variables',
     ]);
   });
+});
+
+// BUILDER-PORT-1: field transport, not merely a Yjs shape snapshot.
+it('concurrent edge label/condition changes keep null/exact output bindings through real Yjs and serialization', () => {
+  const { a, b, flush } = pair();
+  const A = createCollabDocBinding<WfDoc>(a, WORKFLOW_COLLAB_SHAPE);
+  const B = createCollabDocBinding<WfDoc>(b, WORKFLOW_COLLAB_SHAPE);
+  const nodes = [node('a'), node('b')];
+  const edges = [{ ...edge('default', 'a', 'b'), canonicalSourceOutput: null }, { ...edge('named', 'a', 'b'), canonicalSourceOutput: 'output' }];
+  try {
+    A.seed({ name: 'Bindings', nodes, edges }); flush(); B.current();
+    A.set({ name: 'Bindings', nodes, edges: edges.map(e => ({ ...e, label: 'peer A' })) });
+    B.set({ name: 'Bindings', nodes, edges: edges.map(e => ({ ...e, condition: { path: 'ready', op: 'truthy' } })) });
+    flush();
+    expect(A.current()).toEqual(B.current());
+    const doc = A.current();
+    expect(doc.edges).toEqual(edges.map(e => ({ ...e, label: 'peer A', condition: { path: 'ready', op: 'truthy' } })));
+    // Runtime-validate the materialized minimal graph before giving it to the typed serializer.
+    const name = doc.name;
+    const rawEdges = doc.edges;
+    if (typeof name !== 'string' || !Array.isArray(rawEdges)) throw new Error('Invalid materialized graph');
+    const materializedEdges: unknown[] = rawEdges;
+    const saved: SavedWorkflow = { id: 'wf.collab-ports', name, version: '1.0.0', createdAt: 'now', updatedAt: 'now',
+      nodes: [{ id: 'a', kind: 'noop', name: 'a', position: { x: 0, y: 0 }, config: {} }, { id: 'b', kind: 'noop', name: 'b', position: { x: 0, y: 0 }, config: {} }],
+      edges: materializedEdges.map((e: unknown) => {
+        if (typeof e !== 'object' || e === null || Array.isArray(e)
+          || !('id' in e) || typeof e.id !== 'string'
+          || !('source' in e) || typeof e.source !== 'string'
+          || !('target' in e) || typeof e.target !== 'string'
+          || !('sourcePort' in e) || typeof e.sourcePort !== 'string'
+          || !('targetPort' in e) || typeof e.targetPort !== 'string'
+          || !('canonicalSourceOutput' in e) || !(e.canonicalSourceOutput === null || typeof e.canonicalSourceOutput === 'string')) throw new Error('Invalid materialized binding');
+        return { id: e.id, source: e.source, target: e.target, sourcePort: e.sourcePort, targetPort: e.targetPort, canonicalSourceOutput: e.canonicalSourceOutput };
+      }),
+    };
+    expect(serializeWorkflow(saved).edges.map(e => e.sourceOutput)).toEqual([undefined, 'output']);
+  } finally { a.destroy(); b.destroy(); }
 });

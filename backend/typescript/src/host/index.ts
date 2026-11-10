@@ -35,6 +35,7 @@ import { CALLAI_ECHO_ATTEMPTS_TYPE_ID } from '../bootstrap/conformanceCallAiFixt
 import { CONFORMANCE_TABLE_SCHEMA_PROBE_FIXTURE, CONFORMANCE_TABLE_SCHEMA_PROBE_TYPE_ID } from '../bootstrap/conformanceTableSchemaProbe.js';
 import { v2AdvertisedStorageFamilies } from './storageFamilyAdvert.js';
 import { listFixtureSuiteIds, loadConformanceEvalSuites, registerScriptedEvalAgent } from './evals/fixtureSuites.js';
+import { normalizeEdgeCondition } from './edgeConditionMapping.js';
 
 /**
  * Load conformance fixtures from the in-tree `conformance/fixtures/`
@@ -99,10 +100,24 @@ const conformanceFixtures = new Map<string, WorkflowDefinition>();
               nodeId: n.nodeId ?? n.id ?? '',
             }))
           : [];
+        // RFC 0257 (ADR 1027 P2) — a fixture edge's `condition` is in the WIRE
+        // shape (`{type,left,right}`), which the scheduler does not read. Map it
+        // through the one ingest authority every other seam uses
+        // (`normalizeEdgeCondition`). Unmapped, `conformance-all-terminals-skipped`
+        // reached the executor with `path`/`op` undefined and its edge never fired,
+        // so the positive control (`ok: true`) wrongly ended with no terminal. A
+        // condition that cannot be mapped throws, and the fixture is skipped as
+        // malformed, rather than registered with a dead edge.
+        const normalizedEdges = Array.isArray(parsed.edges)
+          ? parsed.edges.map((e, i) => (e.condition
+            ? { ...e, condition: normalizeEdgeCondition(e.condition, `${id}#${e.edgeId ?? (e as { id?: string }).id ?? i}`) }
+            : e))
+          : parsed.edges;
         conformanceFixtures.set(id, {
           ...parsed,
           workflowId: id,
           nodes: normalizedNodes,
+          ...(normalizedEdges ? { edges: normalizedEdges } : {}),
         });
       } catch {
         /* skip malformed fixture */

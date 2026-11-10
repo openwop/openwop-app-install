@@ -62,7 +62,7 @@ import {
   stripSecretsKeepingData,
   nonEnumerableSecretsView,
 } from '../byok/ephemeralRunSecrets.js';
-import { resolveSecret } from '../byok/secretResolver.js';
+import { resolveUserNamedSecret } from '../byok/userNamedSecret.js';
 import { persistRunArtifact } from '../host/runArtifactStore.js';
 import { buildInterruptRequestedPayload, GATE_PREVIEW_ARTIFACT_TYPE } from './interruptRequestedPayload.js';
 import { unwrapDerived, deriveRecordedResolutions, isRecordedRejection, parentResolutionForKey, derivedResolvedValue } from './forkReplayResolutions.js';
@@ -3137,6 +3137,23 @@ async function pauseRun(input: {
   return { status: 'paused' };
 }
 
+/**
+ * RFC 0257 §A.2 (ADR 1027) — the `run.completed` marker for a run that reached no
+ * terminal: the skipped terminals in the definition's `nodes[]` order, each once.
+ * Empty (spread to nothing) when a terminal completed, so §A.3 holds by default.
+ */
+export function skippedTerminalsInOrder(
+  definition: Pick<WorkflowDefinition, 'nodes'>,
+  skipped: readonly string[] | undefined,
+): { skippedTerminals?: string[] } {
+  if (!skipped || skipped.length === 0) return {};
+  const set = new Set(skipped);
+  const ordered = definition.nodes.map((n) => n.nodeId).filter((id) => set.has(id));
+  // A terminal outside `nodes[]` (none today) keeps its scheduler order after them.
+  for (const id of skipped) if (!ordered.includes(id)) ordered.push(id);
+  return { skippedTerminals: [...new Set(ordered)] };
+}
+
 async function finalizeRun(input: {
   storage: Storage;
   run: RunRecord;
@@ -3324,6 +3341,12 @@ async function finalizeRun(input: {
         outputs: output !== null && typeof output === 'object' && !Array.isArray(output)
           ? (output as Record<string, unknown>)
           : { output },
+        // RFC 0257 §A.2/§A.3 (ADR 1027) — only when no terminal completed: every
+        // terminal, once, in the definition's `nodes[]` order. A pure function of
+        // the definition and the recorded outcomes, so a replay re-derives it.
+        // Until the vendored v2 schema seats it, the major-2 read carries it under
+        // `vendor.openwop-app` (ADR 0725 D3), never dropped and never claimed.
+        ...(skippedTerminalsInOrder(definition, disposition.skippedTerminals)),
       }),
     });
     await storage.updateRun(run.runId, { status: 'completed', completedAt: new Date().toISOString() });
@@ -3342,22 +3365,12 @@ async function finalizeRun(input: {
   }
   if (disposition.status === 'failed') {
     const failedNodeId = disposition.failedNodeId;
-    const skippedTerminals = disposition.skippedTerminals;
-    const err = (failedNodeId ? snapshot.nodeErrors.get(failedNodeId) : undefined) ?? (skippedTerminals && skippedTerminals.length > 0
-      // CS70WF-38 — every final step was skipped by its conditions, so nothing
-      // ran to completion. A host code (open on the v1 wire; on major 2 the
-      // emitter namespaces it to the registered vendor org,
-      // `openwop-app.all_terminals_skipped`, `middleware/protocolVersion.ts`
-      // `v2EventErrorCode`). It used to be internal_error "unknown node failure".
-      ? {
-        code: 'all_terminals_skipped',
-        message: `Every final step of this workflow was skipped by its conditions, so none of them ran (${skippedTerminals.join(', ')}).`,
-        details: { skippedTerminals },
-      }
-      : {
-        code: 'internal_error',
-        message: 'unknown node failure',
-      });
+    // RFC 0257 (ADR 1027): "every terminal skipped, no node failed" COMPLETES now,
+    // so the CS70WF-38 `all_terminals_skipped` failure is gone from this branch.
+    const err = (failedNodeId ? snapshot.nodeErrors.get(failedNodeId) : undefined) ?? {
+      code: 'internal_error',
+      message: 'unknown node failure',
+    };
     // ADR 0554 P2 — the run failed AFTER committing effects, so unwind what it
     // owes BEFORE the terminal event. `observability.md` §"Terminal events"
     // requires `run.failed` to be the LAST event in the stream, and it is also
@@ -3535,7 +3548,7 @@ async function prepareRunSecrets(
   for (const node of definition.nodes) {
     const cfgRefs = (node.config?.credentialRefs as string[] | undefined) ?? [];
     for (const ref of cfgRefs) {
-      const value = await resolveSecret(ref, scope);
+      const value = await resolveUserNamedSecret(ref, scope);
       if (value) required.set(ref, value);
     }
   }
@@ -3555,7 +3568,7 @@ async function prepareRunSecrets(
     // `managed_unavailable` / `sign_in_required` / `daily_limit_reached`
     // at call time.
     if (ref.startsWith('managed:')) continue;
-    const value = await resolveSecret(ref, scope);
+    const value = await resolveUserNamedSecret(ref, scope);
     if (value) required.set(ref, value);
     else if (opts.tolerant) {
       // ADR 0779 D5 — a resume: skip it; the node that needs it fails typed.

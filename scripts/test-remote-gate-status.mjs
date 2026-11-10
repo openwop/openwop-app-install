@@ -31,7 +31,7 @@ function ready(f, resultExtra = {}) {
   transition(f, 'running', { owner: { pid: 12345, startedAt: 'synthetic-owner', executable: '/usr/local/bin/node' } });
   const directory = join(job.directory, 'artifacts'); mkdirSync(directory, { mode: 0o700 });
   const contents = { 'result.json': JSON.stringify({ id: job.id, requestSha256: job.requestSha256, ...resultExtra }),
-    'evidence.json': '{}', 'gate.log': 'synthetic gate log\n', 'browser.tsv': 'synthetic browser ledger\n' };
+    'evidence.json': '{}', 'gate.log.gz': 'synthetic gate log\n', 'browser.tsv': 'synthetic browser ledger\n' };
   const paths = {};
   for (const [name, text] of Object.entries(contents)) {
     paths[name] = join(directory, name); writeFileSync(paths[name], text, { mode: 0o600 });
@@ -98,13 +98,13 @@ test('a completed record cannot bind artifacts from another request', t => {
 test('symlink artifact reads are refused and the peer target is untouched', t => {
   const f = fixture(t); const { paths } = ready(f);
   const peer = join(f.root, 'peer'); writeFileSync(peer, 'preserve', { mode: 0o600 });
-  rmSync(paths['gate.log']); symlinkSync(peer, paths['gate.log']);
+  rmSync(paths['gate.log.gz']); symlinkSync(peer, paths['gate.log.gz']);
   assert.throws(() => remoteGateJobResultFrame(f).next(), /private regular/);
   assert.equal(readFileSync(peer, 'utf8'), 'preserve');
 });
 
 test('a public artifact is not exposed through fetch', t => {
-  const f = fixture(t); const { paths } = ready(f); chmodSync(paths['gate.log'], 0o644);
+  const f = fixture(t); const { paths } = ready(f); chmodSync(paths['gate.log.gz'], 0o644);
   assert.throws(() => remoteGateJobResultFrame(f).next(), /private regular/);
 });
 

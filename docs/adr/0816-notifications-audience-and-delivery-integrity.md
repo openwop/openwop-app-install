@@ -328,6 +328,39 @@ Everything else stays `tenant`, because the notice is team-wide by intent.
    uses direct root-row roles only. D1 matches the read path, and the gap is filed rather than
    widened here.
 
+### Correction — content-watch report bodies need an explicit message port (2026-11-07)
+
+The audience/delivery decisions above do not bind a chain's report body. The
+`content.page-watch` and `content.feed-watch` descriptions promise a change report
+or digest, but their unported `diff -> notify` edges deliver `{content, usage,
+finishReason}` while `feature.notifications.nodes.notify` reads `inputs.message`.
+Separate bounded local witnesses executed the actual scheduler/input helpers and
+notification node with a captured fake emitter: `message` was undefined even when
+`emitted` was true. Changing only the fixture edge to `diff.content ->
+notify.message` delivered the exact synthetic report. These are local wiring
+witnesses, not deployed delivery or real AI/provider qualification.
+
+Bind that explicit port in both content chains and patch-bump the content pack
+and affected chain versions from 1.1.0 to 1.1.1 (ADR 0190's existing catalog seam).
+Keep the audience, nodes, KV bindings, fan-in, scheduling and unconditional
+baseline/no-change notification behavior unchanged. Existing copied workflows are
+not rewritten. This does not implement the separate D8 audience-retarget program
+or add a notification-node fallback for incorrectly authored inputs.
+
+The existing real content execution tests now read the run-scoped durable inbox
+rows and require each message to equal its actual upstream report, on first and
+second runs. Their input resolution uses the executor's shared helper rather
+than another merge implementation. Focused verification on 2026-11-07 used real
+locked root/backend dependencies: reverting only the two message edges made both
+execution cases fail with empty durable messages; restoring the reviewed edges
+passed all 10 ordinary cases across the execution and expansion files. No AI
+provider or external notification was called. Compiler/build, the canonical gate,
+deployment and real-user delivery qualification remain pending.
+Deployment must verify the catalog actually loads the patched pack and chain
+versions, including installed/operator precedence and the newer-SemVer fallback.
+Registry publication, if needed, is separate coordinated release work; none is
+authorized or performed here. No wire change or new RFC is introduced.
+
 ## Implementation record (2026-10-05)
 
 | Phase | Commit | Witness |

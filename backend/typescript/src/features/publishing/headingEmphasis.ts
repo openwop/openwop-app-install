@@ -34,7 +34,9 @@ export function stripHeadingEmphasis(text: string): string {
   return parseHeadingEmphasis(text).map((p) => p.text).join('');
 }
 
-/** The heading as escaped HTML, emphasized runs as `<em>`. */
-export function headingEmphasisHtml(text: string): string {
-  return parseHeadingEmphasis(text).map((p) => (p.em ? `<em>${escapeHtml(p.text)}</em>` : escapeHtml(p.text))).join('');
+/** The heading as escaped HTML, emphasized runs as `<em>`; with `struck` (a hero
+ *  whose emphasis style is `strike`, ADR 1038 D2) as `<em><s>…</s></em>`, so a
+ *  crawler reads the words as struck, as the visitor sees them. */
+export function headingEmphasisHtml(text: string, struck = false): string {
+  return parseHeadingEmphasis(text).map((p) => (p.em ? `<em>${struck ? `<s>${escapeHtml(p.text)}</s>` : escapeHtml(p.text)}</em>` : escapeHtml(p.text))).join('');
 }

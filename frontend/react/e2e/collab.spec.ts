@@ -40,6 +40,13 @@ import { login, enableToggle, API } from './support/session';
  * editors without a browser/network. See docs/steward/COLLAB-UNDO-INVESTIGATION.md.
  * #2746 fixed a separate deep-link defect; it did not establish undo correctness.
  *
+ * Correction 2026-11-08 (COLLAB-UNDO-1): that defect is fixed by
+ * `patches/y-prosemirror+1.3.7.patch`, and the caret precondition below now reads
+ * ProseMirror's selection. Measured alone at 1 worker, 3 repeats: green patched,
+ * and also green UNPATCHED, because B now really appends, which the defect never
+ * touched. So this spec does not witness the defect;
+ * `src/features/document-editor/__tests__/collabUndo.test.ts` does.
+ *
  * `@serial` moves it out of `npm run test:e2e` (which is `--grep-invert @serial`)
  * and into `npm run test:e2e:serial` (`--workers=1`). It therefore STILL RUNS on
  * every full lane pass — as an advisory result (above).
@@ -148,17 +155,30 @@ test.describe('realtime canvas collaboration (ADR 0359)', { tag: '@serial' }, ()
     // attribution bug: complete text syncs, then another author's undo mangles it.
     // Preserve the assertions below; moving the caret alone would not repair that
     // product defect. See docs/steward/COLLAB-UNDO-INVESTIGATION.md.
+    //
+    // Correction 2026-11-08 (COLLAB-UNDO-1): the product defect is fixed by the
+    // cursor-aware diff patch (frontend/react/patches/y-prosemirror+1.3.7.patch,
+    // unit-pinned in document-editor/__tests__/collabUndo.test.ts), and this
+    // precondition now reads ProseMirror's OWN selection rather than the DOM's.
+    // `.doc-editor__content` is the editor's `view.dom`, and TipTap stores the
+    // editor on it. The caret must be empty, in the LAST top-level block, at the
+    // end of that block's text, so B's Enter really opens a paragraph after A's.
     await edB.click();
     await pageB.keyboard.press('ControlOrMeta+End');
     await expect
-      .poll(async () => pageB.evaluate(() => {
-        const sel = window.getSelection();
-        const node = sel?.anchorNode;
-        return node?.textContent != null && sel != null
-          ? sel.anchorOffset === node.textContent.length
-          : false;
+      .poll(async () => edB.evaluate((el) => {
+        type ResolvedPos = { parentOffset: number; parent: { content: { size: number } }; index: (depth: number) => number };
+        const editor = (el as HTMLElement & {
+          editor?: { state: { selection: { empty: boolean; $head: ResolvedPos }; doc: { childCount: number } } };
+        }).editor;
+        if (!editor) return false;
+        const { selection, doc } = editor.state;
+        const $head = selection.$head;
+        return selection.empty
+          && $head.index(0) === doc.childCount - 1
+          && $head.parentOffset === $head.parent.content.size;
       }), {
-        message: 'B\'s caret never reached the end of its line — ControlOrMeta+End '
+        message: 'B\'s caret never reached the end of the document — ControlOrMeta+End '
           + 'landed before the click\'s selection was applied (see the note above)',
         timeout: 5_000,
       })

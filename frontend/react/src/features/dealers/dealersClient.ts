@@ -92,8 +92,15 @@ export async function createOutlet(orgId: string, dealerId: string, input: { nam
 export async function deleteOutlet(orgId: string, outletId: string): Promise<void> {
   await asJson(await fetch(`${base(orgId)}/outlets/${encodeURIComponent(outletId)}`, fetchOpts({ method: 'DELETE', headers: authedHeaders() })), 'deleteOutlet');
 }
-export async function mintPortalToken(orgId: string, dealerId: string): Promise<{ token: string; url: string }> {
+/** Mint (rotating any existing) the dealer's partner link. ADR 1034 D9 — a manager act; the
+ *  raw link is returned ONCE (only its hash is stored) and expires at `expiresAt`. */
+export async function mintPortalToken(orgId: string, dealerId: string): Promise<{ token: string; url: string; expiresAt?: string }> {
   return asJson(await fetch(`${base(orgId)}/dealers/${encodeURIComponent(dealerId)}/portal-token`, fetchOpts({ method: 'POST', headers: jsonHeaders() })), 'mintPortalToken');
+}
+/** ADR 1034 D9 — revoke the dealer's partner link (204, idempotent). */
+export async function revokePortalToken(orgId: string, dealerId: string): Promise<void> {
+  const res = await fetch(`${base(orgId)}/dealers/${encodeURIComponent(dealerId)}/portal-token`, fetchOpts({ method: 'DELETE', headers: authedHeaders() }));
+  if (!res.ok) await asJson(res, 'revokePortalToken');
 }
 export async function listRegistrations(orgId: string, dealerId?: string): Promise<DealRegistration[]> {
   const qs = dealerId ? `?dealerId=${encodeURIComponent(dealerId)}` : '';

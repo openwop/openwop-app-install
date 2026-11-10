@@ -8,7 +8,9 @@
  *     edited outcome, the edited threshold and the chosen approver roles;
  *   - a refused loosen names the steps the server said it would loosen;
  *   - the campaign page renders nothing while the feature is off; the client modal says so;
- *   - "Use the client's default" sends DELETE with the etag.
+ *   - "Use the client's default" sends DELETE with the etag;
+ *   - switching clients drops the previous draft and etag, and a late load from the
+ *     closed client cannot paint the new one (the editor is keyed by scope).
  *
  * What turns it red: re-deriving the grid from a local table (the server-only
  * `x.custom` row vanishes), dropping the etag, sending only changed rows, losing

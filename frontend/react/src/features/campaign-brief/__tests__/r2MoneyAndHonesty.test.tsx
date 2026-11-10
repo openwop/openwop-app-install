@@ -17,7 +17,7 @@
  *
  * Wave 30 (grade-tests): CB-SP-5's "validate never ran" read now follows its
  * positive control (the save error is on screen) instead of a single flush; the
- * fixture is a full typed row (no casts). CB-MONEY-2 is pinned `it.fails` below.
+ * fixture is a full typed row (no casts). CB-MONEY-2 guards readable allocation amounts.
  * Sabotage-witnessed: the exponent conversions both ways, the JPY render, the
  * perChannel-preserving save, the Save&Validate abort, the orgs/personas failure
  * cards, the delete disclosure (both polarities) and the rename shape/blank/Escape.
@@ -35,6 +35,9 @@ const listPersonas = vi.fn();
 const listOrgs = vi.fn();
 const findCampaignForBrief = vi.fn();
 const getPendingKernelRun = vi.fn();
+
+// The collection selector reads the current client's KB through its own client.
+vi.mock('../../kb/kbClient.js', () => ({ listCollections: vi.fn(async () => []) }));
 
 vi.mock('../campaignBriefClient.js', async (orig) => {
   const actual = await orig<Record<string, unknown>>();
@@ -102,14 +105,10 @@ describe('CB-SP-3 — the budget exponent belongs to the currency', () => {
   });
 });
 
-// CB-MONEY-2 (BLOCKED-ON-PRODUCT, wave 30) — the editor shows the per-channel
-// allocations as RAW MINOR units (CampaignBriefPage `budgetPerChannel` line:
-// `${m}`), so a stored USD 150000 (= $1,500) reads "150000" — the 100× misread
-// CB-SP-3 fixed for the total. Correct: the same currency-exponent conversion as
-// the total. Fix direction: render `minorToMajorString(m, brief.budget?.currency)`
-// (or a locale currency format) in that line; then drop `.fails`.
+// CB-MONEY-2 — allocations use the same stored ISO minor-unit exponent as
+// the total, with localized currency display when the brief names a currency.
 describe('CB-MONEY-2 — per-channel allocations render in major units', () => {
-  it.fails('a USD 150000-minor allocation reads 1500, not 150000', async () => {
+  it('a USD 150000-minor allocation reads 1500, not 150000', async () => {
     listBriefs.mockResolvedValue([{ ...BRIEF, budget: { currency: 'USD', perChannel: { ad_variants: 150000 } } }]);
     await openDetail();
     // The allocation line rendered (setup reached the subject)…
@@ -117,6 +116,23 @@ describe('CB-MONEY-2 — per-channel allocations render in major units', () => {
     // …and it carries the major amount, never the minor integer.
     expect(line.textContent).not.toMatch(/150000/);
     expect(line.textContent).toMatch(/1,?500/);
+    expect(line.textContent).not.toMatch(/minor units/);
+    const persistedAllocation = line.textContent;
+    fireEvent.change(screen.getByLabelText(/^Currency/i), { target: { value: 'JPY' } });
+    expect(line.textContent).toBe(persistedAllocation); // a pending edit cannot relabel stored money
+  });
+
+  it.each([
+    { currency: 'JPY', amount: /150,?000/ },
+    { currency: 'KWD', amount: /150\.000/ },
+    { currency: undefined, amount: /1500/ },
+  ])('uses the stored $currency exponent without inventing a currency', async ({ currency, amount }) => {
+    listBriefs.mockResolvedValue([{ ...BRIEF, budget: { ...(currency ? { currency } : {}), perChannel: { ad_variants: 150000 } } }]);
+    await openDetail();
+    const line = screen.getByText((_c, el) => el?.tagName === 'P' && /Per-channel plan/.test(el.textContent ?? ''));
+    expect(line.textContent).toMatch(amount);
+    expect(line.textContent).not.toMatch(/minor units/);
+    if (!currency) expect(line.textContent).not.toMatch(/\$|USD/);
   });
 });
 

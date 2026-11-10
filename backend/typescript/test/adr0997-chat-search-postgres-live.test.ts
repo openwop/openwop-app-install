@@ -7,7 +7,12 @@
  * Runs against `OPENWOP_PG_TEST_DSN` when set (any Postgres; this ADR's evidence
  * used a PGlite socket server), else a `postgres:15-alpine` testcontainer when
  * Docker is reachable, else skips with a notice. Live-infra: skipped in
- * `npm run ci` (OPENWOP_SKIP_TESTCONTAINERS=1).
+ * `npm run ci` (OPENWOP_SKIP_TESTCONTAINERS=1) — a skip there is not a pass.
+ *
+ * Red when (wave 79 probes, run with OPENWOP_PG_TEST_DSN): `ILIKE` → `LIKE`
+ * (non-ASCII case), `ALL` → `ANY` (needles OR'd), the session filter dropped,
+ * tombstones returned, `_` or `%` left unescaped, newest-first flipped, the
+ * limit ignored, empty needles not short-circuited.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { execSync } from 'node:child_process';
@@ -67,6 +72,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (storage) for (const sid of [S1, S2, S3]) await storage.deleteChatSession(T, sid).catch(() => undefined);
+  await storage?.close();
   await stopContainer?.();
 });
 
@@ -82,12 +88,13 @@ describe.skipIf(!available)('ADR 0997 — searchChatMessages on Postgres', () =>
   it('treats LIKE metacharacters literally and never returns a tombstone', async () => {
     expect(ids(await storage!.searchChatMessages([S1], ['100%'], { limit: 10 }))).toEqual(['adr0997-m2']);
     expect(ids(await storage!.searchChatMessages([S1], ['1_0'], { limit: 10 }))).toEqual([]); // unescaped, `_` would match "100"
+    expect(ids(await storage!.searchChatMessages([S1], ['h%r'], { limit: 10 }))).toEqual([]); // unescaped, `%` would match "the … ready"
     expect(ids(await storage!.searchChatMessages([S1], ['plan_b'], { limit: 10 }))).toEqual(['adr0997-m2']);
     expect(ids(await storage!.searchChatMessages([S1], ['deleted'], { limit: 10 }))).toEqual([]);
   });
 
   it('honours the limit and empty inputs', async () => {
-    expect(await storage!.searchChatMessages([S1, S2, S3], ['café'], { limit: 1 })).toHaveLength(1);
+    expect(ids(await storage!.searchChatMessages([S1, S2, S3], ['café'], { limit: 1 }))).toEqual(['adr0997-m5']);
     expect(await storage!.searchChatMessages([], ['café'], { limit: 10 })).toEqual([]);
     expect(await storage!.searchChatMessages([S1], [], { limit: 10 })).toEqual([]);
   });

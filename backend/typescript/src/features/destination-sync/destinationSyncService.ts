@@ -9,6 +9,9 @@ import { createHash, randomUUID } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
 import { normalizeLabel, isNoOnwardUse, reEmitLabel } from '../cdp/purposeLabels.js';
+import { COLLECTED_IDENTITY_KEYS, collectedIdentityForms } from '../cdp/collectedEventIdentity.js';
+import { isErasureTombstoned } from '../consent/consentService.js';
+import { looksLikePiiName } from '../../host/dataClassification.js';
 
 export type SyncMode = 'batch' | 'event' | 'cdc';
 export const SYNC_MODES: readonly SyncMode[] = ['batch', 'event', 'cdc'];
@@ -134,27 +137,79 @@ export function purposePropagationEnabled(): boolean {
   return process.env.OPENWOP_CDP_PURPOSE_PROPAGATION_ENABLED === 'true';
 }
 
+/** ADR 1024 D2.2 — a label that is present but is not an array asserted a constraint
+ *  nobody can read. `normalizeLabel` reads it as unlabelled (fail-open on the read side,
+ *  `purposeLabels.ts:21-22`); egress must not, so it is checked on the raw value here. An
+ *  ABSENT label stays "no constraint" (RFC 0128 §1). */
+function isMalformedLabel(raw: unknown): boolean {
+  return raw !== undefined && raw !== null && !Array.isArray(raw);
+}
+
+/** ADR 1024 D2.4 — the subject values on an egress record: the CDP identity keys, plus a
+ *  field whose NAME reads as PII and whose VALUE is email- or phone-shaped. Egress records
+ *  are CRM-shaped and carry no ingest `piiFields`, so the name scan is what reaches an
+ *  email-keyed erasure; the value test keeps it to identity-class fields (a `name` or a
+ *  street `address` is not a subject key, and checking one costs a store read per form). */
+const EMAIL_SHAPED = /^[^\s@]+@[^\s@]+$/;
+const PHONE_SHAPED = /^\+?[\d\s().-]{6,}$/;
+function egressSubjectValues(record: Record<string, unknown>): string[] {
+  const out = new Set<string>();
+  for (const [k, v] of Object.entries(record)) {
+    if (typeof v !== 'string' || v.trim() === '') continue;
+    if ((COLLECTED_IDENTITY_KEYS as readonly string[]).includes(k)) out.add(v);
+    else if (looksLikePiiName(k) && (EMAIL_SHAPED.test(v.trim()) || PHONE_SHAPED.test(v.trim()))) out.add(v);
+  }
+  return [...out];
+}
+
+/** The identity forms on one record (every spelling the erasure barrier is keyed under). */
+function recordForms(record: Record<string, unknown>): string[] {
+  return [...new Set(egressSubjectValues(record).flatMap((v) => collectedIdentityForms(v)))];
+}
+
+/** One batch's erasure reads: every distinct form once, in bounded parallel (grade-code
+ *  M5: one serial read per record per form made a 10k-row batch ~40k sequential reads). */
+const ERASURE_READ_CONCURRENCY = 16;
+async function erasedForms(tenantId: string, forms: readonly string[]): Promise<Set<string>> {
+  const erased = new Set<string>();
+  for (let i = 0; i < forms.length; i += ERASURE_READ_CONCURRENCY) {
+    const chunk = forms.slice(i, i + ERASURE_READ_CONCURRENCY);
+    const hits = await Promise.all(chunk.map((f) => isErasureTombstoned(tenantId, f)));
+    chunk.forEach((f, j) => { if (hits[j]) erased.add(f); });
+  }
+  return erased;
+}
+
 /**
- * The CDC-select + `[]`-fail-closed drop shared by `prepareSyncBatch` (non-OpenWOP field-map
- * egress) and `buildOnwardEnvelopes` (ADR 0289 OpenWOP-host egress) — one owner for the
- * eligibility rule so the two egress shapes cannot drift on which records ship.
+ * The CDC-select + label + erasure drop shared by every egress shape (`prepareSyncBatch`,
+ * `buildOnwardEnvelopes`, `buildWarehouseRows`) — one owner for the eligibility rule so the
+ * shapes cannot drift on which records ship.
+ *
+ * ADR 1024 D2 — the drop is no longer opt-in. Before it, only the onward path dropped
+ * `permittedPurposes:[]` ("no onward use"); the warehouse load, `/prepare` and the surface
+ * `prepare` shipped those records (`CDP2WF-4`). Every path now drops: a `[]` label, a
+ * present-but-malformed label (D2.2), and a record whose subject is erasure-tombstoned
+ * (D2.4, `CDP2WF-16`). `dropped` counts them; their bodies never leave this function.
  */
-function selectEligible(
-  sync: Pick<DestinationSync, 'syncMode' | 'cursor' | 'cursorField'>,
+async function selectEligible(
+  sync: Pick<DestinationSync, 'tenantId' | 'syncMode' | 'cursor' | 'cursorField'>,
   records: readonly Record<string, unknown>[],
-  opts?: { dropNoOnwardUse?: boolean },
-): { eligible: Record<string, unknown>[]; nextCursor: string | undefined; dropped: number } {
+): Promise<{ eligible: Record<string, unknown>[]; nextCursor: string | undefined; dropped: number }> {
   const { changed, nextCursor } = sync.syncMode === 'cdc'
     ? selectChangedRecords(records, sync.cursor, sync.cursorField)
     : { changed: [...records], nextCursor: sync.cursor };
   let dropped = 0;
-  const eligible = opts?.dropNoOnwardUse
-    ? changed.filter((r) => {
-        const suppressed = isNoOnwardUse(normalizeLabel((r as { permittedPurposes?: unknown }).permittedPurposes));
-        if (suppressed) dropped++;
-        return !suppressed;
-      })
-    : changed;
+  const eligible: Record<string, unknown>[] = [];
+  const formsOf = changed.map(recordForms);
+  const erased = await erasedForms(sync.tenantId, [...new Set(formsOf.flat())]);
+  for (const [i, r] of changed.entries()) {
+    const raw = (r as { permittedPurposes?: unknown }).permittedPurposes;
+    if (isMalformedLabel(raw) || isNoOnwardUse(normalizeLabel(raw)) || formsOf[i]!.some((f) => erased.has(f))) {
+      dropped++;
+      continue;
+    }
+    eligible.push(r);
+  }
   return { eligible, nextCursor, dropped };
 }
 
@@ -164,19 +219,18 @@ function selectEligible(
  * field-map each into destination payloads. Pure — the actual send (rides existing
  * http/connector nodes) then persists the cursor via `advanceCursor`.
  *
- * RFC 0128 §3 `[]`-fail-closed (CDP-1d, opt-in via `opts.dropNoOnwardUse`): a record whose
+ * RFC 0128 §3 `[]`-fail-closed (ADR 1024 D2: always on, every path): a record whose
  * `permittedPurposes` is `[]` asserts "no onward use" and is dropped before field-mapping.
  * Carrying a surviving label into the destination schema is the operator's field-map (the ESP
  * SHOULD leg — a non-OpenWOP sink is untestable, so not forced here). `dropped` counts the
  * suppressed. For the OpenWOP-envelope hop that DOES re-emit the label, see
  * `buildOnwardEnvelopes`.
  */
-export function prepareSyncBatch(
-  sync: Pick<DestinationSync, 'syncMode' | 'cursor' | 'cursorField' | 'fieldMap'>,
+export async function prepareSyncBatch(
+  sync: Pick<DestinationSync, 'tenantId' | 'syncMode' | 'cursor' | 'cursorField' | 'fieldMap'>,
   records: readonly Record<string, unknown>[],
-  opts?: { dropNoOnwardUse?: boolean },
-): { payloads: Record<string, unknown>[]; nextCursor: string | undefined; count: number; dropped: number } {
-  const { eligible, nextCursor, dropped } = selectEligible(sync, records, opts);
+): Promise<{ payloads: Record<string, unknown>[]; nextCursor: string | undefined; count: number; dropped: number }> {
+  const { eligible, nextCursor, dropped } = await selectEligible(sync, records);
   const payloads = eligible.map((r) => applyFieldMap(r, sync.fieldMap));
   return { payloads, nextCursor, count: payloads.length, dropped };
 }
@@ -193,18 +247,21 @@ export function prepareSyncBatch(
  * `dedupField`, when set, seeds a stable per-record `dedupKey` from that record field so a
  * re-sync is effectively-once at the peer (RFC 0083 §C dedup).
  */
-export function buildOnwardEnvelopes(
-  sync: Pick<DestinationSync, 'syncMode' | 'cursor' | 'cursorField' | 'fieldMap' | 'narrowTo'>,
+export async function buildOnwardEnvelopes(
+  sync: Pick<DestinationSync, 'tenantId' | 'syncMode' | 'cursor' | 'cursorField' | 'fieldMap' | 'narrowTo'>,
   records: readonly Record<string, unknown>[],
   opts?: { dedupField?: string },
-): { envelopes: OnwardTriggerEnvelope[]; nextCursor: string | undefined; count: number; dropped: number } {
-  // OpenWOP-host egress ALWAYS fail-closes on `[]` (the onward hop is a real OpenWOP
-  // envelope — the RFC 0128 §3 MUST, not the untestable ESP SHOULD), so dropNoOnwardUse is
-  // forced on regardless of caller opts.
-  const { eligible, nextCursor, dropped } = selectEligible(sync, records, { dropNoOnwardUse: true });
-  const envelopes = eligible.map((r) => {
+): Promise<{ envelopes: OnwardTriggerEnvelope[]; nextCursor: string | undefined; count: number; dropped: number }> {
+  const selected = await selectEligible(sync, records);
+  const { nextCursor } = selected;
+  let { dropped } = selected;
+  const envelopes: OnwardTriggerEnvelope[] = [];
+  for (const r of selected.eligible) {
     const received = normalizeLabel((r as { permittedPurposes?: unknown }).permittedPurposes);
     const onward = reEmitLabel(received, sync.narrowTo);
+    // ADR 1024 D2.3 — a `narrowTo` that leaves nothing in common with the received grant
+    // (or is itself `[]`) re-emits `[]`: no onward use, so the envelope is not built.
+    if (isNoOnwardUse(onward)) { dropped++; continue; }
     const dedupSeed = opts?.dedupField ? (r as Record<string, unknown>)[opts.dedupField] : undefined;
     const env: OnwardTriggerEnvelope = {
       source: 'webhook',
@@ -212,8 +269,8 @@ export function buildOnwardEnvelopes(
     };
     if (onward !== undefined) env.permittedPurposes = onward;
     if (typeof dedupSeed === 'string' && dedupSeed !== '') env.dedupKey = dedupSeed;
-    return env;
-  });
+    envelopes.push(env);
+  }
   return { envelopes, nextCursor, count: envelopes.length, dropped };
 }
 
@@ -225,18 +282,18 @@ export function buildOnwardEnvelopes(
  * replay/`:fork` re-issues identical insertIds (BigQuery dedups) while a later batch (advanced
  * cursor) re-inserts the updated row. Pure — the governed insert lives in `warehouseLoadService.ts`.
  */
-export function buildWarehouseRows(
-  sync: Pick<DestinationSync, 'syncId' | 'syncMode' | 'cursor' | 'cursorField' | 'fieldMap' | 'warehouseKeyField'>,
+export async function buildWarehouseRows(
+  sync: Pick<DestinationSync, 'tenantId' | 'syncId' | 'syncMode' | 'cursor' | 'cursorField' | 'fieldMap' | 'warehouseKeyField'>,
   records: readonly Record<string, unknown>[],
-): { rows: WarehouseRow[]; nextCursor: string | undefined; count: number } {
-  const { eligible, nextCursor } = selectEligible(sync, records);
+): Promise<{ rows: WarehouseRow[]; nextCursor: string | undefined; count: number; dropped: number }> {
+  const { eligible, nextCursor, dropped } = await selectEligible(sync, records);
   const keyField = sync.warehouseKeyField || 'id';
   const marker = sync.cursor ?? '';
   const rows = eligible.map((r) => ({
     insertId: warehouseInsertId(sync.syncId, r[keyField], marker),
     json: applyFieldMap(r, sync.fieldMap),
   }));
-  return { rows, nextCursor, count: rows.length };
+  return { rows, nextCursor, count: rows.length, dropped };
 }
 
 /** Validate + normalize a field map: bounded size, non-empty from/to, no dup `to`. */
@@ -253,6 +310,18 @@ export function validateFieldMap(raw: unknown): FieldMapping[] {
     seen.add(o.to);
     return { from: o.from, to: o.to };
   });
+}
+
+/** ADR 1024 D2.5 — the comparable form of a peer ingest URL: lower-case scheme and host,
+ *  default port dropped, one trailing `/` trimmed. `null` when it does not parse. */
+export function normalizePeerIngestUrl(raw: string): string | null {
+  try {
+    const u = new URL(raw);
+    const path = u.pathname.length > 1 && u.pathname.endsWith('/') ? u.pathname.slice(0, -1) : u.pathname;
+    return `${u.protocol}//${u.host}${path === '/' ? '' : path}${u.search}`;
+  } catch {
+    return null;
+  }
 }
 
 // ── config CRUD ──────────────────────────────────────────────────────────────
@@ -291,6 +360,15 @@ export async function createDestinationSync(input: {
     if (!input.connectionId) throw new OpenwopError('validation_error', 'an `openwop-host` sync requires a `connectionId` (the peer host credential).', 400, {});
     if (!input.peerIngestUrl || !/^https?:\/\//.test(input.peerIngestUrl)) {
       throw new OpenwopError('validation_error', 'an `openwop-host` sync requires an http(s) `peerIngestUrl` (the peer trigger-bridge ingest).', 400, {});
+    }
+    // ADR 1024 D2.6 — a credential belongs in the Connection, never in the URL: the GET
+    // routes return the URL to every reader of the workspace.
+    let u: URL;
+    try { u = new URL(input.peerIngestUrl); } catch {
+      throw new OpenwopError('validation_error', 'an `openwop-host` sync requires an http(s) `peerIngestUrl` (the peer trigger-bridge ingest).', 400, {});
+    }
+    if (u.username || u.password || u.search) {
+      throw new OpenwopError('validation_error', '`peerIngestUrl` must not carry credentials or a query string; put the credential in the Connection.', 400, {});
     }
   }
   // ADR 0292 / CDP-D §6 — a `warehouse` (reverse-ETL BigQuery) sync needs the write-scoped

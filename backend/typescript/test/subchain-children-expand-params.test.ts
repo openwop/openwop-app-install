@@ -14,15 +14,27 @@
  *     Replay: the child's expansion id and its node ids are the ones Path A
  *     produced, so a run recorded before the fix re-resolves the same id and the
  *     same node ids.
- *  2. A NON-funnel witness, red on main: the kicktodo challenge factory's
- *     `lesson-batch` child (candidate, days, the BYOK `credentialRef`s, …).
+ *  2. A NON-funnel witness, red on main, lives with its owner:
+ *     test/kicktodo/kicktodo-subchain-children-expand-params.test.ts (ADR 1031 P2).
  *  3. No child reads a param through node CONFIG (grade-code FN72CD-1): deferred
  *     mode binds only whole-value INPUT tokens, so a config token freezes to nothing
  *     however the parent maps it. The funnel step chains' `provider`/`model` were
  *     exactly that and are removed in this change.
  *
- * Sabotage-witnessed: `asChild: false` in `coRegisterSubChains` turns 1 and 2 red;
- * a `{{params.provider}}` put back into a funnel step's copy-node config turns 3 red.
+ * Sabotage-witnessed (wave 92 probes): `asChild: false` in `coRegisterSubChains` turns
+ * case 1 red here (and the KickTodo witness, item 2, red downstream); so do a
+ * `restoreBareParamNames` input rewrite left on the materialized name and an expansion
+ * id that hashes deferred mode differently from Path A (the replay half). A
+ * `{{params.provider}}` put into a child node's config turns case 2 red.
+ *
+ * DOUBLE GUARD on "X is declared": `restoreBareParamNames` renames the materialized
+ * variable to the bare name AND `coRegisterSubChains` appends `childInputVars` (every
+ * child parameter, bare). Breaking either alone stays green by design; one edit that
+ * drops both at the child `variables:` line turns case 1 red.
+ *
+ * Census floors (measured 5161aec5e): 5 parents, 12 co-registered children, 42 bound
+ * inputs (floor >20), 11 distinct children (floor >=10). Tightening the slack floors is
+ * a human decision (TST-GUA-H1).
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { listChains, coRegisterSubChains, expandChain, reloadWorkflowChainPacks, type WorkflowChain } from '../src/host/workflowChainPackLoader.js';
@@ -56,7 +68,9 @@ beforeAll(() => { reloadWorkflowChainPacks(); });
 describe('ADR 1023 D2 — sub-chain children bind what their parent maps', () => {
   it('every loaded child binds each param input to its bare bag variable; ids and node ids are unchanged', async () => {
     const ps = parents();
-    expect(ps.length, 'the census: parents with sub-chains').toBeGreaterThanOrEqual(6);
+    // 5 first-party parents since KickTodo's challenge factory left (ADR 1031 P3); its
+    // lesson-batch leg runs downstream in test/kicktodo/kicktodo-subchain-children-expand-params.
+    expect(ps.length, 'the census: parents with sub-chains').toBeGreaterThanOrEqual(5);
     let children = 0;
     let bound = 0;
     for (const parent of ps) {
@@ -69,7 +83,10 @@ describe('ADR 1023 D2 — sub-chain children bind what their parent maps', () =>
         expect(childDef.metadata?.expansionId, childChainId).toBe(pathA.metadata?.expansionId);
         expect(childDef.nodes.map((x) => x.nodeId).sort(), childChainId).toEqual(pathA.nodes.map((x) => x.nodeId).sort());
         for (const { node, port, param } of wholeParamInputs(child!)) {
-          const expanded = childDef.nodes.find((x) => x.nodeId.endsWith(`_${node}`));
+          // Exact id, not a suffix match: `copy` must never match `repair_copy`. The
+          // documented shape is `<chainSlug>_<expansionId>_<node>`, read from Path A.
+          const prefix = `${child!.chainId.replace(/\./g, '_')}_${String(pathA.metadata?.expansionId)}_`;
+          const expanded = childDef.nodes.find((x) => x.nodeId === `${prefix}${node}`);
           expect(expanded, `${childChainId}.${node}`).toBeTruthy();
           expect((expanded!.inputs as Record<string, unknown>)[port], `${childChainId}.${node}.${port}`).toEqual({ type: 'variable', variableName: param });
           expect((childDef.variables ?? []).map((v) => v.name), `${childChainId} declares ${param}`).toContain(param);
@@ -79,18 +96,6 @@ describe('ADR 1023 D2 — sub-chain children bind what their parent maps', () =>
     }
     expect(children, 'the census: co-registered children').toBeGreaterThanOrEqual(12);
     expect(bound, 'children read params').toBeGreaterThan(20);
-  });
-
-  it('a NON-funnel child: the kicktodo lesson-batch receives its candidate, days and credential refs', async () => {
-    const factory = chainById('openwop-app.kicktodo.challenge-factory');
-    expect(factory, 'the kicktodo challenge factory is loaded').toBeTruthy();
-    const lessonBatch = (await registeredChildren(factory!)).find((d) => d.metadata?.chainId === 'openwop-app.kicktodo.lesson-batch');
-    expect(lessonBatch, 'lesson-batch is co-registered').toBeTruthy();
-    const build = lessonBatch!.nodes.find((n) => n.nodeId.endsWith('_lesson-batch-build'));
-    expect(build).toBeTruthy();
-    for (const p of ['candidateId', 'days', 'generateMedia', 'credentialRef', 'imageCredentialRef']) {
-      expect((build!.inputs as Record<string, unknown>)[p], p).toEqual({ type: 'variable', variableName: p });
-    }
   });
 
   it('no sub-chain child reads a parameter through node config (it could never arrive)', () => {

@@ -26,8 +26,9 @@ describe('DG-SEED-5 — demo-seed coverage', () => {
     const rows = buildSeedCoverage();
     // Floor = the MEASURED toggled-feature count, 91 on 2404797bf (2026-10-22:
     // 30 seeded + 61 acknowledged). A floor far below the truth would let the
-    // projection silently lose most of its rows.
-    expect(rows.length).toBeGreaterThanOrEqual(91);
+    // projection silently lose most of its rows. 87 after the KickTodo packages left
+    // (ADR 1031 P3: 4 toggled features).
+    expect(rows.length).toBeGreaterThanOrEqual(87);
     for (const r of rows) {
       // seeded and acknowledged are mutually exclusive intents; never both.
       expect(r.seeded && r.acknowledged).toBe(false);

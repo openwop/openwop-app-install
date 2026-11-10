@@ -18,7 +18,9 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
-const CSS_FILES = ['src/styles/foundations/tokens.css', 'src/styles/global.css', 'src/styles/chrome/admin.css', 'src/styles/primitives/adr0510.css', 'src/brand/brand.css'];
+import { featureStylesheets } from './gen-feature-styles.mjs';
+// ADR 1031 P2 — plus every feature-owned `<feature>/styles.css` (both feature roots).
+const CSS_FILES = ['src/styles/foundations/tokens.css', 'src/styles/global.css', 'src/styles/chrome/admin.css', 'src/styles/primitives/adr0510.css', 'src/brand/brand.css', ...featureStylesheets().map((f) => `src/${f}`)];
 const TOKEN_RE = /^(u-[a-z0-9-]+|sr-only|visually-hidden)$/;
 // String/template literal contents (good enough for class tokens — we only
 // need the whitespace-separated words inside them).

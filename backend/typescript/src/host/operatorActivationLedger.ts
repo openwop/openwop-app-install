@@ -12,22 +12,13 @@
 import { DurableCollection } from './hostExtPersistence.js';
 import { isListedSuperadminTenant } from './superadmin.js';
 import { createLogger } from '../observability/logger.js';
-import type { Scope } from './accessControlService.js';
 
 const log = createLogger('host.operatorActivationLedger');
 
-/** ADR 0910 D1 — the activation-only role. NOT a `BuiltInRoleId`: it is never
- *  admitted to a member or group row (the role validators only know built-in and
- *  custom ids), and `scopesForRoles` ignores it, so a standing, non-expiring grant
- *  cannot be minted through the roster at all. Scopes are EXACTLY these two. */
-export const KICKTODO_OPERATOR_ROLE = {
-  id: 'kicktodo-operator',
-  name: 'KickTodo operator',
-  description: 'Just-in-time, time-boxed KickTodo authoring, publication and AI-key administration for an eligible superadmin. Granted only by activation.',
-  scopes: ['host:kicktodo:manage', 'host:byok:manage'] as Scope[],
-  builtIn: true as const,
-  activationOnly: true as const,
-};
+/** ADR 0910 D1 — the activation-only ROLE is declared by the feature that owns the
+ *  default workspace (`BackendFeature.security.activationRoles`, ADR 1031 P2) and
+ *  read from `host/featureScopes.ts`; KickTodo's `kicktodo-operator` is declared by
+ *  kicktodo-core. This module stays the ledger and the use-time test. */
 
 export interface OperatorActivation {
   activationId: string;

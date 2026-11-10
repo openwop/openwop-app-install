@@ -31,12 +31,13 @@ import { createTemplate, createCampaign, setSenderAddress, getCampaign } from '.
 import { withdrawReview } from '../src/features/email/sendApproval.js';
 import type { Storage } from '../src/storage/storage.js';
 import type { RunRecord } from '../src/types.js';
+import { envKeyPrincipalId } from '../src/middleware/envKeyPrincipal.js';
 
 const TOKEN = 'dev-token';
 const TENANT = 'default';
 /** The acting subject a `dev-token` run carries (`run.metadata.actingUserId`); it must be a
  *  writer in the org, because `submitForReview` is held to `workspace:write` (ADR 0832). */
-const DEV_SUBJECT = 'bearer:dev-toke';
+const DEV_SUBJECT = envKeyPrincipalId('dev-token');
 let BASE: string;
 let server: http.Server;
 let storage: Storage;

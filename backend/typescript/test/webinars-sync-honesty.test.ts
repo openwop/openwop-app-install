@@ -15,8 +15,14 @@ import type { WebinarAdapter } from '../src/features/webinars/host/webinarAdapte
 
 // Typed against the REAL adapter method, so every page fixture below is checked by tsc.
 const listAttendance = vi.hoisted(() => vi.fn<WebinarAdapter['listAttendance']>());
-vi.mock('../src/features/webinars/host/webinarAdapter.js', () => ({
-  makeWebinarAdapter: () => ({ listAttendance: (webinarId: string, cursor?: string) => listAttendance(webinarId, cursor) }),
+// ADR 1054 D5 — the sync walks registrants first; default: a complete, empty list.
+const listRegistrants = vi.hoisted(() => vi.fn<WebinarAdapter['listRegistrants']>());
+vi.mock('../src/features/webinars/host/webinarAdapter.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/features/webinars/host/webinarAdapter.js')>()),
+  makeWebinarAdapter: () => ({
+    listAttendance: (webinarId: string, cursor?: string) => listAttendance(webinarId, cursor),
+    listRegistrants: (webinarId: string, cursor?: string) => listRegistrants(webinarId, cursor),
+  }),
 }));
 
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -47,6 +53,8 @@ beforeEach(async () => {
   await __resetCrmStore();
   await __resetCrmEntities();
   listAttendance.mockReset();
+  listRegistrants.mockReset();
+  listRegistrants.mockResolvedValue({ ok: true, value: { rows: [] } });
 });
 
 describe('R2 WB-SP-1/5/8 — sync truth', () => {
@@ -87,6 +95,46 @@ describe('R2 WB-SP-1/5/8 — sync truth', () => {
     const out = await syncEvent(deps(), T, ORG, EVENT);
     expect(out.outcome).toBe('synced');
     if (out.outcome === 'synced') expect(out.attendees).toBe(1);
+  });
+});
+
+describe('ADR 1054 D5 — the backfill reads the registrant list', () => {
+  it('a person who registered on Zoom before the webinar was tracked is recorded, and becomes a no-show', async () => {
+    listRegistrants.mockResolvedValueOnce({ ok: true, value: { rows: [{ email: 'dana@x.test', name: 'Dana' }, { email: 'alice@x.test' }] } });
+    listAttendance.mockResolvedValueOnce({ ok: true, value: { rows: [{ email: 'alice@x.test' }] } });
+    const out = await syncEvent(deps(), T, ORG, EVENT);
+    expect(out).toMatchObject({ outcome: 'synced', attendees: 1, noShows: 1 });
+    expect(await computeEventCounts(T, ORG, '900')).toEqual({ registrantCount: 2, attendeeCount: 1, noShowCount: 1 });
+  });
+
+  it('a registrant walk that breaks after page 1 is PARTIAL: no no-show is computed', async () => {
+    await ingestWebinarEvent(T, ORG, undefined, { provider: 'zoom', providerEventId: '900', phase: 'registered', participantEmail: 'bob@x.test' });
+    listRegistrants
+      .mockResolvedValueOnce({ ok: true, value: { rows: [{ email: 'erin@x.test' }], nextCursor: 'r2' } })
+      .mockResolvedValueOnce({ ok: false, error: 'zoom_500' });
+    listAttendance.mockResolvedValueOnce({ ok: true, value: { rows: [{ email: 'alice@x.test' }] } });
+    const out = await syncEvent(deps(), T, ORG, EVENT);
+    expect(out).toMatchObject({ outcome: 'synced', partial: true, noShows: 0 });
+    expect((await computeEventCounts(T, ORG, '900')).noShowCount).toBe(0);
+  });
+
+  it('a first-page registrant error is an ERROR sync (cooldown released); a 400/404 (no registration list) syncs attendance but PARTIAL', async () => {
+    listRegistrants.mockResolvedValueOnce({ ok: false, error: 'zoom_401' });
+    expect(await syncEvent(deps(), T, ORG, EVENT)).toEqual({ outcome: 'error', reason: 'zoom_401' });
+    expect(listAttendance).not.toHaveBeenCalled();
+    await ingestWebinarEvent(T, ORG, undefined, { provider: 'zoom', providerEventId: '900', phase: 'registered', participantEmail: 'bob@x.test' });
+    listRegistrants.mockResolvedValueOnce({ ok: false, error: 'zoom_400:Registration has not been enabled' });
+    listAttendance.mockResolvedValueOnce({ ok: true, value: { rows: [{ email: 'alice@x.test' }] } });
+    expect(await syncEvent(deps(), T, ORG, EVENT)).toMatchObject({ outcome: 'synced', attendees: 1, noShows: 0, partial: true });
+    expect((await computeEventCounts(T, ORG, '900')).noShowCount).toBe(0);
+  });
+
+  it('a registrant still in the push queue (never got a join link) is NOT marked a no-show', async () => {
+    await ingestWebinarEvent(T, ORG, undefined, { provider: 'zoom', providerEventId: '900', phase: 'registered', participantEmail: 'queued@x.test' });
+    await enqueuePendingPush({ tenantId: T, orgId: ORG, eventId: EVENT.eventId, providerEventId: '900', email: 'queued@x.test' });
+    listRegistrants.mockResolvedValueOnce({ ok: true, value: { rows: [{ email: 'carol@x.test' }] } });
+    listAttendance.mockResolvedValueOnce({ ok: true, value: { rows: [{ email: 'alice@x.test' }] } });
+    expect(await syncEvent(deps(), T, ORG, EVENT)).toMatchObject({ outcome: 'synced', noShows: 1, registrants: 1 }); // carol only
   });
 });
 

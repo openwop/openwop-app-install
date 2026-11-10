@@ -5,10 +5,12 @@
  * lookup never re-spends a provider call. Three resolution paths:
  *   1. explicit lat/lng in the request → cache + return (manual geocode / seed),
  *   2. a cache hit → return the cached point,
- *   3. a miss → the BYOK geocoding Connection (ADR 0024, SSRF-guarded server-side
- *      egress). Until a geocoding Connection is configured, (3) is a clear
- *      `provider_unconfigured` error — never a fabricated coordinate. Paths (1)+(2)
- *      work with no provider (manual entry + cache), which is what the tests cover.
+ *   3. a miss → a `capability_not_provided` 503, never a fabricated coordinate.
+ *
+ * CORRECTED (ADR 1034 D11): this said (3) called "the BYOK geocoding Connection (ADR 0024,
+ * SSRF-guarded server-side egress)". No such call exists, here or anywhere: no geocoding
+ * provider ships, so no code path spends a paid geocoder call (ADR 0282's F4 correction).
+ * The designed provider lane stays tracked there.
  *
  * @see docs/adr/0282-dynamic-sales-maps.md §3
  */
@@ -40,7 +42,12 @@ const isStale = (g: GeocodeResult): boolean => g.source === 'provider' && Date.n
 const normalize = (address: string): string => address.trim().toLowerCase().replace(/\s+/g, ' ');
 // tenantId folded into the key (DEAL-DATA — defense-in-depth) so a cross-tenant
 // orgId collision can never clobber another tenant's cached point.
-const cacheKey = (tenantId: string, orgId: string, address: string): string => `${tenantId}:${orgId}:${normalize(address)}`;
+// ADR 1034 D11 — LENGTH-PREFIXED. The old `${tenantId}:${orgId}:${address}` was ambiguous,
+// because tenant ids contain `:` (`org:acme`): tenant `a:b` + org `c` and tenant `a` + org
+// `b:c` wrote the same key. Legacy rows are re-keyed by the `rekey-geocode-cache` app
+// migration.
+export const cacheKey = (tenantId: string, orgId: string, address: string): string =>
+  `g1|${tenantId.length}|${tenantId}|${orgId.length}|${orgId}|${normalize(address)}`;
 
 function assertLatLng(lat: unknown, lng: unknown): { lat: number; lng: number } {
   if (typeof lat !== 'number' || !Number.isFinite(lat) || Math.abs(lat) > 90) throw new OpenwopError('validation_error', '`lat` must be a number within ±90.', 400, { field: 'lat' });
@@ -68,7 +75,13 @@ export async function geocode(tenantId: string, orgId: string, input: { address?
   // (1) explicit coordinates — manual geocode / seed
   if (input.lat !== undefined || input.lng !== undefined) {
     const { lat, lng } = assertLatLng(input.lat, input.lng);
-    if (!(await geocodes.get(key))) await evictIfAtCap(tenantId, orgId); // a NEW key grows the cache
+    const prior = await geocodes.get(key);
+    // ADR 1034 D11 — never overwrite a row that belongs to another tenant or org (the key
+    // makes that unreachable now; this keeps it true if the key ever regresses).
+    if (prior && (prior.tenantId !== tenantId || prior.orgId !== orgId)) {
+      throw new OpenwopError('conflict', 'This address cannot be cached for this organization.', 409, { field: 'address' });
+    }
+    if (!prior) await evictIfAtCap(tenantId, orgId); // a NEW key grows the cache
     const result: GeocodeResult = { cacheKey: key, tenantId, orgId, address, lat, lng, source: 'manual', at: nowIso() };
     await geocodes.put(result);
     return result;
@@ -84,6 +97,22 @@ export async function geocode(tenantId: string, orgId: string, input: { address?
   // (3) miss → BYOK geocoding Connection (ADR 0024). Not fabricated: absent a
   // configured provider this fails LOUD, honoring the capability-honesty rule.
   throw new OpenwopError('capability_not_provided', 'No geocoding provider is configured. Add a geocoding Connection, or supply explicit lat/lng.', 503, { address });
+}
+
+/**
+ * ADR 1034 D11 — the `rekey-geocode-cache` app migration: move every row whose key is not
+ * the length-prefixed form to it. Idempotent and safe on two instances at once
+ * (insert-if-absent, then a compare-and-delete of the exact legacy row).
+ */
+export async function rekeyLegacyGeocodes(): Promise<number> {
+  let rekeyed = 0;
+  for (const g of await geocodes.list()) {
+    const key = cacheKey(g.tenantId, g.orgId, g.address);
+    if (g.cacheKey === key) continue;
+    if (await geocodes.putIfAbsent({ ...g, cacheKey: key })) rekeyed += 1;
+    await geocodes.compareAndDelete(g);
+  }
+  return rekeyed;
 }
 
 export async function getCachedGeocode(tenantId: string, orgId: string, address: string): Promise<GeocodeResult | null> {

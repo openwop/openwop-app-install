@@ -154,7 +154,7 @@ export function planBudget(records: CampaignPerformanceRecord[], goal: BudgetGoa
 export function scenarioShift(plan: BudgetPlan, from: string, to: string, pct: number): { expectedConversions: number; delta: number } | null {
   const src = plan.platforms.find((p) => p.platform.toLowerCase() === from.toLowerCase());
   const dst = plan.platforms.find((p) => p.platform.toLowerCase() === to.toLowerCase());
-  if (!src || !dst || pct <= 0 || pct > 1) return null;
+  if (!src || !dst || src === dst || !Number.isFinite(pct) || pct <= 0 || pct > 1) return null;
   const moved = Math.round(src.allocationMinor * pct);
   const expected = plan.platforms.reduce((s, p) => {
     const alloc = p === src ? p.allocationMinor - moved : p === dst ? p.allocationMinor + moved : p.allocationMinor;
@@ -210,7 +210,9 @@ export function detectAnomalies(records: CampaignPerformanceRecord[]): Anomaly[]
       { name: 'ctr', of: (r) => (r.impressions > 0 ? r.clicks / r.impressions : 0) },
       { name: 'cpa', of: (r) => (r.conversions !== null && r.conversions > 0 ? r.spend / r.conversions : 0) },
     ];
-    const [platform, campaignName] = key.split('::') as [string, string];
+    const separator = key.indexOf('::');
+    const platform = key.slice(0, separator);
+    const campaignName = key.slice(separator + 2);
     for (const m of metrics) {
       // CPA is UNDEFINED on a zero-conversion day — folding those days in as 0
       // poisons the baseline (a mostly-0 series makes every real CPA day read
@@ -262,7 +264,7 @@ export function topBottomPerformers(records: CampaignPerformanceRecord[], opts: 
   }
   const rows = [...by.entries()]
     .filter(([, v]) => v.spend >= minSpend)
-    .map(([key, v]) => ({ campaignName: key.split('::')[1]!, platform: v.platform, spend: round2(v.spend), roas: v.spend > 0 ? round2(v.revenue / v.spend) : 0 }))
+    .map(([key, v]) => ({ campaignName: key.slice(key.indexOf('::') + 2), platform: v.platform, spend: round2(v.spend), roas: v.spend > 0 ? round2(v.revenue / v.spend) : 0 }))
     .sort((a, b) => b.roas - a.roas);
   // Disjoint slices: with fewer than 2×limit rows, bottom takes only what top
   // didn't (a campaign must never appear as both a top AND bottom performer).

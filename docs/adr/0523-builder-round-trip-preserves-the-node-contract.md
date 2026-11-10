@@ -13,6 +13,18 @@ for `metadata` and `outputRole`) to the fields it did not reach.
 > land while you are in review. Verify with
 > `git log --diff-filter=A -- docs/adr/NNNN-*.md` before assuming a number is yours.
 
+
+## Correction (2026-11-06) — launch-defaults validation type ownership
+
+The launch-defaults regression preserves its actual backend-validator check,
+but calls the typed `builderContractProcess.ts` support helper introduced by
+ADR 0440's parallel-edge follow-up over a bounded JSON/IPC boundary. The
+frontend test still sends its actual captured POST definition and asserts the
+validator retains its metadata. Backend validation remains checked in the
+backend TypeScript project, without importing its full type graph into the
+frontend test compiler. This follow-up depends on the shared helper, with no
+copy, compiler exemption, changed assertion or runtime-default behavior.
+
 ## Why this exists
 
 **The builder silently deleted node `inputs` on every save.** Opening a workflow
@@ -311,3 +323,42 @@ it warns about. Now sans, `--ink-2`, `--weight-emphasis`.
 - Widening the validator past five fields stays deferred (ADR 0440). Zero of 551
   shipped nodes carry one of the ten dropped fields — now actually verified, by a
   tripwire that reads the right corpus.
+
+
+## WF-BLD-2 correction — durable builder launch defaults (2026-11-05)
+
+**Status: implemented in isolated candidate; full gate/deployment pending.** The inspector's raw
+`defaultInputs` string reaches the local cache, but the canonical save omits it;
+a successful server reload restores `{}` while the name survives. A small
+actual-library save/head-read diagnostic reproduced this independently of
+autosave timing.
+
+Preserve this host editor state at
+`metadata.customProperties["openwop-app.builder"].defaultInputs` as a raw string,
+including temporarily invalid JSON and explicit empty edits. This uses the
+canonical metadata customProperties extension slot, not a new top-level
+WorkflowDefinition field. Run still explicitly validates/sends inputs; the
+executor does not acquire runtime-default semantics. No RFC required.
+
+All existing definitionMetadataFor writers and the collaboration definition
+scalar must carry the same value; canonical read/import restores it before the
+legacy top-level defaultInputs fallback. Preserve unknown metadata/siblings,
+explicit clears, variables/inputSchema, revisions/forks and room authority.
+Existing body/room limits apply; no new arbitrary cap or unsaved-state UI. No
+credential value is resolved/copied into metadata; explicit refs remain names.
+Raw text is editor content, never a substitute for the Secrets Vault or a
+claim of comprehensive secret-pattern detection.
+
+Malformed customProperties/reserved containers or nonstring owned leaves stay
+opaque on passive reads; a write refuses through the existing failed-sync path,
+retaining the local draft. This also refuses unrelated saves of that malformed
+import until its metadata is corrected; no silent overwrite or new dirty flag.
+Unknown valid siblings survive. Blank metadata strings override legacy defaults.
+
+Focused original-source red and fixed diagnostics, all-writer source inventory,
+and the implementation record live in the acting task's
+builder-launch-defaults-plan.md / default-inputs-fix.md. The existing main Run
+rejects invalid JSON; debugger behavior remains unchanged (it currently omits
+invalid input). Full merge gate and deployed save/reload acceptance remain due.
+
+Candidate diagnostics: original source with final harness12FAIL/17PASS across3files; fixed88PASS across7files, scoped ESLint and i18n checks exit0. Canonical compiler/build/full gate and deployed acceptance remain pending root coordination.

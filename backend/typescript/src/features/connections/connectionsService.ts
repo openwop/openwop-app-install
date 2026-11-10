@@ -21,7 +21,8 @@ import { setSecret, resolveSecret, removeSecret } from '../../byok/secretResolve
 import { registerCredentialRefConsumer } from '../../host/credentialRefRegistry.js';
 import { fireConnectionRevoked, fireConnectionStatusChanged } from '../../host/connectionLifecycle.js';
 import { createLogger } from '../../observability/logger.js';
-import { resolveEffectiveAccess } from '../../host/accessControlService.js';
+import { resolveEffectiveAccess, isMembershipRootedWorkspace, isSharedWorkspaceTenant, isWorkspaceMember, delegationIssuerIsLive } from '../../host/accessControlService.js';
+import { delegationOf, isDelegatedSubject } from '../../host/delegatedSubject.js';
 import { isProviderAllowed } from '../../host/governanceService.js';
 import { getProvider, type CredentialKind } from './providerRegistry.js';
 import { invalidateMcpCacheForPrincipal, invalidateMcpCacheForTenant } from '../../host/mcpClientCache.js';
@@ -29,6 +30,7 @@ import { refreshAccessToken, deletePendingAuthFor, type OAuthTokenMaterial } fro
 import { mintServiceAccountToken, evictServiceAccountToken } from './serviceAccountJwt.js';
 import { getUser, getUserByPrincipal } from '../users/usersService.js';
 import { OWNED_REF_PREFIXES } from '../../byok/refNamespaces.js';
+import { isInstanceScopedProvider, pickInstanceBound, type InstancePinRefusal } from '../../host/connectorInstancePin.js';
 
 const log = createLogger('connections.service');
 
@@ -496,6 +498,10 @@ interface ConnectionSelectInput {
   provider: string;
   actingUserId?: string;
   orgId?: string;
+  /** ADR 1035 D2 — select ONLY `orgId`'s connection (still behind
+   *  `connections:use`): no user or workspace fall-through. Set for a
+   *  client-stamped run's connector writes; it can only narrow a selection. */
+  orgOnly?: boolean;
   /** Internal: a presence PRE-CHECK (`connectionExists`) must not log a pin
    *  refusal as if a dispatch had been withheld — only a real resolve warns. */
   quiet?: boolean;
@@ -569,40 +575,78 @@ function ownConnection(candidates: readonly Connection[], exact: string | undefi
  * without any egress or secret decrypt.
  */
 async function selectAuthorizedConnection(input: ConnectionSelectInput): Promise<Connection | null> {
+  return (await authorizedCandidates(input, 1))[0] ?? null;
+}
+
+/**
+ * The connections the caller may use, most specific first (user → org →
+ * workspace), at most `limit` of them. `selectAuthorizedConnection` takes the
+ * first; the ADR 1035 instance pin looks further, for the one bound to the
+ * request's instance. Evaluated lazily, so `limit: 1` makes exactly the checks
+ * (and logs exactly the denials) the single pick always made.
+ */
+async function authorizedCandidates(input: ConnectionSelectInput, limit: number): Promise<Connection[]> {
   // ADR 0028 — the provider allowlist is enforced HERE, the choke point every
   // consumer flows through (the http egress seam, the Slack adapter, future
   // adapters), with the same predicate the connect routes use. A policy added
   // after a connection was created still wins: fail closed.
-  if (!(await isProviderAllowed(input.tenantId, input.provider))) return null;
-  if (input.connectionId !== undefined) return selectPinnedConnection(input, input.connectionId);
+  if (!(await isProviderAllowed(input.tenantId, input.provider))) return [];
+  // CHAN-F1 (ADR 1042 open items) — a run stamped with a member who has since
+  // LEFT this shared workspace gets nothing: not their personal connection, not
+  // the workspace's, not an org's. Before this, only the org lane re-checked
+  // (via connections:use); a scheduled run, a heartbeat or a resumed run acting
+  // as a departed member still drew the other two. Checked here, the one choke
+  // point every consumer and both selection shapes pass through.
+  if (!(await actingUserPresent(input.tenantId, input.actingUserId))) {
+    log.warn('acting user not present — connections withheld', { tenantId: input.tenantId, provider: input.provider, actingUserId: input.actingUserId });
+    return [];
+  }
+  if (input.connectionId !== undefined) {
+    const pinned = await selectPinnedConnection(input, input.connectionId);
+    if (pinned && input.orgOnly && pinned.orgId !== input.orgId) return [];
+    return pinned ? [pinned] : [];
+  }
 
   const all = (await tenantRows(input.tenantId)).filter((c) => c.provider === input.provider && c.status === 'active');
+  if (input.orgOnly) {
+    // ADR 1035 D2 — the client org's own connection, or nothing.
+    const orgRow = input.orgId ? all.find((c) => c.orgId === input.orgId) : undefined;
+    if (!orgRow) return [];
+    if (!(await actingUserHasOrgUse(input.tenantId, orgRow.orgId!, input.actingUserId))) {
+      log.warn('connections:use denied — org connection withheld', { connectionId: orgRow.connectionId, orgId: orgRow.orgId, actingUserId: input.actingUserId });
+      return [];
+    }
+    return [orgRow];
+  }
+  const out: Connection[] = [];
   // Most-specific ordering: user (acting) → org → workspace.
   const userConn = ownConnection(all, input.actingUserId, await actingUserIds(input.tenantId, input.actingUserId));
+  if (userConn) out.push(userConn);
+  if (out.length >= limit) return out;
   // A host-attributed send has no human whose org credentials it may use.
   // Do not let an unrelated org row shadow its workspace connection. Explicit
   // org requests still fail closed below rather than fall through on denial.
   const orgConn = input.orgId ? all.find((c) => c.orgId === input.orgId)
     : input.actingUserId ? all.find((c) => c.orgId) : undefined;
-  const wsConn = all.find((c) => !c.userId && !c.orgId);
-  const chosen = userConn ?? orgConn ?? wsConn;
-  if (!chosen) return null;
-
-  // D2 confused-deputy guard (ADR 0024): using an ORG-shared connection requires
-  // the acting human to hold `connections:use` on that org. Enforced HERE — the
-  // broker's resolve boundary — so it holds for every consumer (node-exec, agent
-  // tools, …) regardless of which one calls in, and fails CLOSED. A user- or
-  // workspace-scoped connection is self-authorized (the user owns it).
-  if (scopeAxisOf(chosen) === 'org') {
-    const allowed = await actingUserHasOrgUse(input.tenantId, chosen.orgId!, input.actingUserId);
+  if (orgConn) {
+    // D2 confused-deputy guard (ADR 0024): using an ORG-shared connection requires
+    // the acting human to hold `connections:use` on that org. Enforced HERE — the
+    // broker's resolve boundary — so it holds for every consumer (node-exec, agent
+    // tools, …) regardless of which one calls in, and fails CLOSED: a denied org
+    // connection ends the list, it never falls through to the workspace's.
+    const allowed = await actingUserHasOrgUse(input.tenantId, orgConn.orgId!, input.actingUserId);
     if (!allowed) {
       log.warn('connections:use denied — org connection withheld', {
-        connectionId: chosen.connectionId, orgId: chosen.orgId, actingUserId: input.actingUserId,
+        connectionId: orgConn.connectionId, orgId: orgConn.orgId, actingUserId: input.actingUserId,
       });
-      return null;
+      return out;
     }
+    out.push(orgConn);
+    if (out.length >= limit) return out;
   }
-  return chosen;
+  const wsConn = all.find((c) => !c.userId && !c.orgId);
+  if (wsConn) out.push(wsConn);
+  return out;
 }
 
 /**
@@ -701,12 +745,14 @@ export async function resolveProvidersForCapability(input: {
   capability: string;
   actingUserId?: string;
   orgId?: string;
+  /** ADR 1035 D2 — only `orgId`'s connections count. */
+  orgOnly?: boolean;
 }): Promise<string[]> {
   const active = (await tenantRows(input.tenantId)).filter(
     (c) => c.status === 'active' && getProvider(c.provider)?.category === input.capability,
   );
   const ids = await actingUserIds(input.tenantId, input.actingUserId);
-  const ordered = [
+  const ordered = input.orgOnly ? active.filter((c) => input.orgId !== undefined && c.orgId === input.orgId) : [
     ...(input.actingUserId ? active.filter((c) => c.userId !== undefined && ids.has(c.userId)) : []),
     ...(input.orgId ? active.filter((c) => c.orgId === input.orgId) : active.filter((c) => c.orgId)),
     ...active.filter((c) => !c.userId && !c.orgId),
@@ -718,25 +764,61 @@ export async function resolveProvidersForCapability(input: {
     seen.add(c.provider);
     const authorized = await selectAuthorizedConnection({
       tenantId: input.tenantId, provider: c.provider, actingUserId: input.actingUserId, orgId: input.orgId,
+      ...(input.orgOnly ? { orgOnly: true } : {}),
     });
     if (authorized) out.push(authorized.provider);
   }
   return out;
 }
 
-export async function resolveConnectionCredential(input: {
+/** ADR 1035 D1 — where the resolved credential will be sent. `fixedEndpoint`
+ *  names a host-fixed destination (the reason is the caller's classification);
+ *  `url` is a destination a caller can influence, and for an instance-scoped
+ *  provider it picks — and pins — the connection bound to that instance. A
+ *  required argument, so every call site states which it is. */
+export type CredentialEgress = { fixedEndpoint: string } | { url: string };
+
+export interface ResolvedConnectionCredential {
+  connection: Connection;
+  secret: string;
+  provenance: { connectionId: string; provider: string; scopeAxis: ConnectionScope; actingUserId?: string; scopeChecked: boolean };
+}
+
+interface ResolveCredentialInput {
   tenantId: string;
   provider: string;
   actingUserId?: string;
   orgId?: string;
+  /** ADR 1035 D2 — see `ConnectionSelectInput.orgOnly`. */
+  orgOnly?: boolean;
   /** ADR 0627 D5 — exact pin; see `ConnectionSelectInput.connectionId`. */
   connectionId?: string;
-}): Promise<{
-  connection: Connection;
-  secret: string;
-  provenance: { connectionId: string; provider: string; scopeAxis: ConnectionScope; actingUserId?: string; scopeChecked: boolean };
-} | null> {
-  const chosen = await selectAuthorizedConnection(input);
+}
+
+export function resolveConnectionCredential(input: ResolveCredentialInput & { egress: { fixedEndpoint: string } }): Promise<ResolvedConnectionCredential | null>;
+export function resolveConnectionCredential(input: ResolveCredentialInput & { egress: { url: string } }): Promise<ResolvedConnectionCredential | { refused: InstancePinRefusal } | null>;
+export async function resolveConnectionCredential(input: ResolveCredentialInput & { egress: CredentialEgress }): Promise<ResolvedConnectionCredential | { refused: InstancePinRefusal } | null> {
+  const select: ConnectionSelectInput = {
+    tenantId: input.tenantId, provider: input.provider,
+    ...(input.actingUserId !== undefined ? { actingUserId: input.actingUserId } : {}),
+    ...(input.orgId !== undefined ? { orgId: input.orgId } : {}),
+    ...(input.connectionId !== undefined ? { connectionId: input.connectionId } : {}),
+    ...(input.orgOnly ? { orgOnly: true } : {}),
+  };
+  let chosen: Connection | null;
+  if ('url' in input.egress && isInstanceScopedProvider(input.provider)) {
+    // BEFORE the secret is read: a mismatched URL never decrypts or refreshes it.
+    const candidates = await authorizedCandidates(select, Number.POSITIVE_INFINITY);
+    if (candidates.length === 0) return null;
+    const pick = pickInstanceBound(candidates, input.egress.url);
+    if ('refused' in pick) {
+      log.warn('connector instance pin refused', { provider: input.provider, refused: pick.refused, candidates: candidates.length });
+      return { refused: pick.refused };
+    }
+    chosen = pick.ok;
+  } else {
+    chosen = await selectAuthorizedConnection(select);
+  }
   if (!chosen) return null;
 
   const secret = await liveSecretFor(chosen, input.tenantId);
@@ -750,7 +832,7 @@ export async function resolveConnectionCredential(input: {
       provider: chosen.provider,
       scopeAxis: scopeAxisOf(chosen),
       // An org connection only reaches here once the connections:use gate in
-      // selectAuthorizedConnection passed; user/workspace are self-authorized.
+      // authorizedCandidates passed; user/workspace are self-authorized.
       scopeChecked: true,
       ...(input.actingUserId !== undefined ? { actingUserId: input.actingUserId } : {}),
     },
@@ -783,6 +865,7 @@ export async function credentialStatusFor(input: {
   scopes: readonly string[];
 }): Promise<CredentialStatus> {
   const resolved = await resolveConnectionCredential({
+    egress: { fixedEndpoint: 'status probe: no request is sent' },
     tenantId: input.tenantId,
     provider: input.provider,
     ...(input.actingUserId !== undefined ? { actingUserId: input.actingUserId } : {}),
@@ -803,6 +886,67 @@ export async function credentialStatusFor(input: {
   }
   return { status: 'missing' };
 }
+
+/**
+ * CHAN-F1 — is the run's acting human still present in `tenantId`? The auth
+ * middleware's defence-in-depth rule (ADR 0015), which holds even with
+ * authorization enforcement off: in a membership-rooted workspace (a shared
+ * `ws:` one, or an ADR 0910 declared default one) a subject is present only
+ * while it holds a root membership there. Everywhere else
+ * membership is not how one is present (a personal tenant has no member rows), so
+ * the answer is yes. No acting human (a host-attributed send) has nobody to have
+ * left. Matches the same spellings as the org check below (`actingUserIds`), so a
+ * re-keyed member row is still found. Fails CLOSED: an unreadable membership
+ * withholds the credential for this call.
+ *
+ * CORRECTED 2026-11-07 (CHAN-F1 widening, David's decision): this used to be
+ * `ws:`-only, on the belief that an ADR 0910 operator acts in a default
+ * workspace without being a member. That was false: `activateOperatorAccess`
+ * creates the operator's root (viewer) membership before the activation goes
+ * live, and a live activation without one is no authority (ADR 0910 D4/D5)
+ * and is revoked by the sweep. So membership alone is the rule here too, and a
+ * removed operator whose activation is still live is NOT present.
+ */
+async function actingUserPresent(tenantId: string, actingUserId?: string): Promise<boolean> {
+  if (!actingUserId || !isMembershipRootedWorkspace(tenantId)) return true;
+  try {
+    // An API key acts for its issuer: present while the issuer is (ADR 0795 D6,
+    // the reading auth applies to the same key).
+    if (isDelegatedSubject(actingUserId)) {
+      if (!(await delegationIssuerIsLive(tenantId, actingUserId))) return false;
+      if (isSharedWorkspaceTenant(tenantId)) return true;
+      // A declared default workspace: auth's reading of a key does not ask for
+      // membership there (`membershipDefinesPresence` is `ws:`-only, and widening
+      // it would change authentication), so ask here: a PERSON issuer must still
+      // hold the root membership. A non-person issuer was never a member.
+      // Fails CLOSED: a delegation gone since the check above (a revocation race)
+      // or one without an issuer is not present.
+      const issuer = (await delegationOf(actingUserId))?.issuer;
+      if (!issuer) return false;
+      return PERSON_SUBJECT.test(issuer) ? await isPresentPerson(tenantId, issuer) : true;
+    }
+    // Only a PERSON can leave a workspace. Any other actor shape (an operator
+    // bearer, a service principal) was never a member, and auth already governs
+    // it; refusing it here would close nothing and break its runs.
+    if (!PERSON_SUBJECT.test(actingUserId)) return true;
+    return await isPresentPerson(tenantId, actingUserId);
+  } catch (err) {
+    log.warn('membership unreadable — connections withheld', { tenantId, error: err instanceof Error ? err.message : String(err) });
+    return false;
+  }
+}
+
+/** A person is present while any spelling of them (`actingUserIds`) holds the
+ *  workspace's root membership. */
+async function isPresentPerson(tenantId: string, person: string): Promise<boolean> {
+  for (const subject of await actingUserIds(tenantId, person)) {
+    if (await isWorkspaceMember(subject, tenantId)) return true;
+  }
+  return false;
+}
+
+/** The subject shapes that name a person (a durable user or an IdP principal). */
+const PERSON_SUBJECT = /^(user|oidc|saml|scim):/;
 
 /** D2: does the acting human hold `connections:use` on this org? Fail-closed —
  *  no acting user, or a non-member, resolves to no scopes ⇒ false.

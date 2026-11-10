@@ -28,7 +28,8 @@ def event(kind):
     with path.open('a') as out:
         fcntl.flock(out, fcntl.LOCK_EX)
         out.write(json.dumps(dict(kind=kind, name=name, args=sys.argv[1:],
-            envDir=os.environ.get('OPENWOP_VITE_ENV_DIR'))) + '\\n')
+            envDir=os.environ.get('OPENWOP_VITE_ENV_DIR'),
+            hostOnly=os.environ.get('OPENWOP_BUDGET_HOST_ONLY'))) + '\\n')
 event('start')
 if os.environ['MODE'] == 'parallel':
     deadline = time.monotonic() + 5
@@ -43,7 +44,9 @@ event('end')
 sys.exit(17 if name == os.environ['FAIL_LANE'] else 0)
 ''')
     npm.chmod(0o755)
-    for serial in (True, False):
+    # ADR 1031 x ADR 0874 D4 — the default distribution's budgeted build is
+    # host-code-only ('1'); a named distribution is a shipped build and is not ('').
+    for serial, distribution in ((True, ''), (False, ''), (False, 'kicktodo')):
         for failure in ('', 'lint', 'build', 'check:test-types'):
             events = root / 'events.jsonl'
             events.write_text('')
@@ -55,12 +58,14 @@ sys.exit(17 if name == os.environ['FAIL_LANE'] else 0)
             script = ('set -euo pipefail\n'
                       'budget_env_dir() { echo "$TEST_ENV_DIR"; }\n' + scheduler +
                       '\nrun_frontend_static\n')
-            result = subprocess.run(['bash', '-c', script], env={**os.environ,
+            base_env = {k: v for k, v in os.environ.items() if k not in ('OPENWOP_DISTRIBUTION', 'OPENWOP_BUDGET_HOST_ONLY')}
+            result = subprocess.run(['bash', '-c', script], env={**base_env,
                 'ROOT': str(root), 'PATH': str(root / 'bin') + ':' + os.environ['PATH'],
                 'TMPDIR': str(scratch), 'TEST_ENV_DIR': str(envdir),
                 'STEWARD_LANE_MODE': 'adopter', 'EVENTS': str(events),
                 'MODE': 'serial' if serial else 'parallel', 'FAIL_LANE': failure,
-                'OPENWOP_CI_SERIAL_LANES': '1' if serial else '0'},
+                'OPENWOP_CI_SERIAL_LANES': '1' if serial else '0',
+                **({'OPENWOP_DISTRIBUTION': distribution} if distribution else {})},
                 text=True, capture_output=True, timeout=15)
             assert result.returncode == (17 if failure else 0), result.stdout + result.stderr
             records = [json.loads(line) for line in events.read_text().splitlines()]
@@ -85,6 +90,7 @@ sys.exit(17 if name == os.environ['FAIL_LANE'] else 0)
                     expected_args += ['--', '--max-warnings=0']
                 assert event['args'] == expected_args, event
                 assert event['envDir'] == (str(envdir) if event['name'] == 'build' else None), event
+                assert event['hostOnly'] == (('' if distribution else '1') if event['name'] == 'build' else None), event
                 assert 'OUTPUT_' + event['name'] in result.stdout
             assert not envdir.exists() and not list(scratch.iterdir())
-            print(f'frontend static: serial={serial} failure={failure or "none"} peak={peak} exit={result.returncode}')
+            print(f'frontend static: serial={serial} distribution={distribution or "default"} failure={failure or "none"} peak={peak} exit={result.returncode}')

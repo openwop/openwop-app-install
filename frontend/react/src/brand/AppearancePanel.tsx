@@ -389,6 +389,15 @@ export function AppearancePanel(): JSX.Element {
                   </select>
                 )}
               </Field>
+              <Field label={t('motionLabel')}>
+                {(p) => (
+                  <select {...p} value={theme.motion ?? ''} onChange={(e) => setId((prev) => { const th = { ...prev.theme }; const v = e.target.value; if (v) th.motion = v as 'calm' | 'lively' | 'subtle'; else delete th.motion; return { ...prev, theme: th }; })}>
+                    <option value="">{t('motionCalm')}</option>
+                    <option value="lively">{t('motionLively')}</option>
+                    <option value="subtle">{t('motionSubtle')}</option>
+                  </select>
+                )}
+              </Field>
               <Field label={t('defaultThemeLabel')}>
                 {(p) => (
                   <select {...p} value={theme.defaultMode ?? 'system'} onChange={(e) => patchTheme({ defaultMode: e.target.value as 'system' | 'light' | 'dark' })}>

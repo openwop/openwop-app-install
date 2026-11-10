@@ -21,6 +21,10 @@ import { hostMatchesApi, type ConnectionUseProvenance } from './connectionInject
 import { isDeniedWebhookHost, webhookEgressDispatcher, webhookPrivateEgressAllowed } from './webhookEgressGuard.js';
 import { assertEgressAllowed, evaluateEgress, getEgressRules } from './egressPolicy.js';
 import { assertEffectAllowed } from './runEffectContext.js';
+import { isInstanceScopedProvider, type InstancePinRefusal } from './connectorInstancePin.js';
+import { createLogger } from '../observability/logger.js';
+
+const log = createLogger('connections.egress');
 
 const TIMEOUT_MS = 10_000;
 
@@ -51,12 +55,14 @@ export type BrokeredPostOutcome =
  *  - `bearer` → `Bearer <secret>` (Slack oauth2 token, SendGrid / Expo api_key).
  *  - `basic`  → `Basic <base64(secret)>` (the secret IS the `user:pass` pair,
  *    e.g. Twilio's `AccountSid:AuthToken`).
- *  - `raw`    → `<secret>` verbatim, no prefix (e.g. TikTok's `Access-Token` header). */
-export type AuthScheme = 'bearer' | 'basic' | 'raw';
+ *  - `raw`    → `<secret>` verbatim, no prefix (e.g. TikTok's `Access-Token` header).
+ *  - `bot`    → `Bot <secret>` (a Discord bot token, ADR 1042 D4). */
+export type AuthScheme = 'bearer' | 'basic' | 'raw' | 'bot';
 
 function authHeader(scheme: AuthScheme, secret: string): string {
   if (scheme === 'basic') return `Basic ${Buffer.from(secret).toString('base64')}`;
   if (scheme === 'raw') return secret;
+  if (scheme === 'bot') return `Bot ${secret}`;
   return `Bearer ${secret}`;
 }
 
@@ -88,16 +94,29 @@ export async function brokeredPost(
      *  auth-header-name / `content-type` here is stripped before merge, so a caller
      *  can never override the broker's token or smuggle a second auth header. */
     extraHeaders?: Record<string, string>;
+    /** ADR 1042 D4 — pin the credential to ONE connection row, exactly as
+     *  `brokeredFetch`'s option (a failed pin is `no_connection`). */
+    connectionId?: string;
   },
 ): Promise<BrokeredPostOutcome> {
   // ADR 0531 — fail closed BEFORE the credential is resolved: a replay must not
   // even touch the secret, let alone dial.
   assertEffectAllowed('network-egress', `brokeredPost ${opts.provider}`);
+  // ADR 1035 D1 — brokeredPost has no instance-scoped consumer, and its URL may be
+  // built from the secret, so the instance pin cannot run before the secret is
+  // read. Refuse such a provider outright rather than attach its credential
+  // unpinned; a future consumer goes through brokeredFetch.
+  if (isInstanceScopedProvider(opts.provider)) {
+    log.warn('brokeredPost refused an instance-scoped provider', { provider: opts.provider });
+    return { outcome: 'no_connection' };
+  }
   const resolved = await resolveConnectionCredential({
+    egress: { fixedEndpoint: 'an adapter strategy URL (no instance-scoped provider reaches here)' },
     tenantId: deps.tenantId,
     provider: opts.provider,
     ...(deps.actingUserId ? { actingUserId: deps.actingUserId } : {}),
     ...(deps.orgId ? { orgId: deps.orgId } : {}),
+    ...(opts.connectionId !== undefined ? { connectionId: opts.connectionId } : {}),
   });
   if (!resolved) return { outcome: 'no_connection' };
   const url = typeof opts.url === 'function' ? opts.url(resolved.secret) : opts.url;
@@ -147,6 +166,9 @@ export type BrokeredFetchOutcome =
   | { outcome: 'no_connection' }
   | { outcome: 'host_not_allowed'; host: string }
   | { outcome: 'insecure_base' }
+  /** ADR 1035 D1 — an instance-scoped provider whose authorized connections are
+   *  not bound to the request's instance (or to any). Nothing was sent. */
+  | { outcome: 'instance_refused'; error: InstancePinRefusal }
   | { outcome: 'request_failed'; timedOut: boolean }
   | { outcome: 'sent'; res: Awaited<ReturnType<typeof undiciFetch>>; provenance: ConnectionUseProvenance };
 
@@ -181,8 +203,17 @@ export async function brokeredFetch(
      *  owned by the acting user / org-shared with `connections:use`. A pin that
      *  fails is `no_connection` — never the user→org→workspace fall-through. */
     connectionId?: string;
+    /** ADR 1035 D2 — only `deps.orgId`'s connection may serve this request (no
+     *  user or workspace fall-through). It can only narrow the selection. */
+    orgOnly?: boolean;
     /** A host-local deadline, combined with the broker's own upper bound. */
     signal?: AbortSignal;
+    /** ADR 1042 D4 — the provider takes its credential in the URL PATH (Telegram:
+     *  `/bot<token>/sendMessage`). `url` then carries exactly one `{credential}`
+     *  placeholder in its path; the host pin runs on the placeholder URL, and the
+     *  broker substitutes the secret only after it, only into the path, and only
+     *  when the secret is path-safe (`[A-Za-z0-9:_-]`). No auth header is sent. */
+    credentialInPath?: boolean;
   },
 ): Promise<BrokeredFetchOutcome> {
   // ADR 0531 — a replay never dials. Deliberately THROWS rather than returning a
@@ -225,14 +256,31 @@ export async function brokeredFetch(
     return { outcome: 'insecure_base' };
   }
 
+  // ADR 1035 D1 — the request URL picks, and pins, the connection for an
+  // instance-scoped provider, before any secret is read. The parsed `href` is
+  // both what the pin checks and what is dispatched, so they cannot disagree.
   const resolved = await resolveConnectionCredential({
+    egress: { url: parsed.href },
     tenantId: deps.tenantId,
     provider: opts.provider,
     ...(deps.actingUserId ? { actingUserId: deps.actingUserId } : {}),
     ...(deps.orgId ? { orgId: deps.orgId } : {}),
     ...(opts.connectionId !== undefined ? { connectionId: opts.connectionId } : {}), // '' is a (refused) pin, not an un-pin
+    ...(opts.orgOnly ? { orgOnly: true } : {}),
   });
   if (!resolved) return { outcome: 'no_connection' };
+  if ('refused' in resolved) return { outcome: 'instance_refused', error: resolved.refused };
+
+  // ADR 1035 D1 — the parsed `href` the pin checked is what is dispatched.
+  let dialUrl = parsed.href;
+  if (opts.credentialInPath) {
+    // Exactly one placeholder, and it is in the PATH (never the host, query or
+    // fragment), and the secret cannot change the URL's shape.
+    if (parsed.href.split('%7Bcredential%7D').length !== 2 || !parsed.pathname.includes('%7Bcredential%7D') || !/^[A-Za-z0-9:_-]+$/.test(resolved.secret)) {
+      return { outcome: 'no_connection' };
+    }
+    dialUrl = parsed.href.replace('%7Bcredential%7D', resolved.secret);
+  }
 
   // The broker owns `authorization` + `content-type`. Strip every case-variant of
   // those from caller extras before merge (undici lowercases at send, so an
@@ -249,12 +297,12 @@ export async function brokeredFetch(
   );
 
   try {
-    const res = await undiciFetch(opts.url, {
+    const res = await undiciFetch(dialUrl, {
       method: opts.method ?? 'GET',
       headers: {
         ...(opts.body !== undefined ? { 'content-type': opts.contentType ?? 'application/json; charset=utf-8' } : {}),
         ...safeExtra,
-        [authName]: authHeader(opts.authScheme ?? 'bearer', resolved.secret),
+        ...(opts.credentialInPath ? {} : { [authName]: authHeader(opts.authScheme ?? 'bearer', resolved.secret) }),
       },
       ...(opts.body !== undefined ? { body: opts.body } : {}),
       dispatcher: webhookEgressDispatcher(),

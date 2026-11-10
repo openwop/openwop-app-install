@@ -8,7 +8,12 @@
  * real HTTP transport (brokered egress to the platform API, token host-side). The pairing
  * + routing logic — the net-new host code — is fully implemented + testable here.
  */
+import { createHash } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
+import { egressLedgerKey, priorSend, recordSend, releaseSend, reserveSend } from '../../host/egressSentLedger.js';
+import { createLogger } from '../../observability/logger.js';
+
+const log = createLogger('connections.messagingOutbound');
 
 /** The WhatsApp members (ADR 0394): the pairing binds a connection to the
  *  tenant's WhatsApp SENDER — `channelId` = the E.164 number (Twilio BSP) or
@@ -54,6 +59,77 @@ export async function sendOutbound(connectionId: string, text: string): Promise<
   } catch {
     return { delivered: false, reason: 'no_transport' };
   }
+}
+
+// ── ADR 1042 D4 (CHAN-P0-4) — the channel REPLY transport ──────────────────
+//
+// One entry point for "answer the message that just arrived": per-provider
+// transports registered by whoever owns the provider (the channel-ingress
+// feature for telegram/discord/slack/relay, the whatsapp feature for its two
+// BSP lanes — connections never imports a feature). Every send is keyed in the
+// ADR 0619 send ledger on (lane, inbound message id), so a retried or
+// re-settled turn sends once, and it goes ONLY to the chat it came from.
+
+/** Where a channel message came from — the reply goes back exactly there. */
+export type ChannelLane =
+  | { kind: 'connection'; connectionId: string; provider: string }
+  | { kind: 'relay'; relayId: string; channel: string };
+
+export interface ChannelReply {
+  tenantId: string;
+  lane: ChannelLane;
+  /** The platform chat the inbound message arrived in. */
+  chatId: string;
+  /** A thread inside that chat (Slack `thread_ts`, Telegram topic), when any. */
+  threadId?: string;
+  /** The inbound platform message id (dedup key; quoted when the platform can). */
+  inboundMessageId: string;
+  text: string;
+  /** The paired owner the reply is sent as (the broker resolves THEIR access). */
+  actingUserId: string;
+}
+
+export type ReplyTransportResult = { sent: true; providerRef: string } | { sent: false; error: string };
+export type ReplyTransport = (reply: ChannelReply) => Promise<ReplyTransportResult>;
+
+const replyTransports = new Map<string, ReplyTransport>();
+const laneProvider = (lane: ChannelLane): string => (lane.kind === 'relay' ? 'relay' : lane.provider);
+const laneKeyOf = (lane: ChannelLane): string => (lane.kind === 'relay' ? `relay:${lane.relayId}` : `conn:${lane.connectionId}`);
+
+/** Register the transport for one provider (`relay` for the device lane). Idempotent per boot. */
+export function registerReplyTransport(provider: string, fn: ReplyTransport): void {
+  replyTransports.set(provider, fn);
+}
+
+export interface ChannelReplyOutcome { delivered: boolean; deduped?: boolean; providerRef?: string; reason?: string }
+
+/** Send one reply. Never throws: every failure is a typed `reason`, logged with ids only. */
+export async function sendChannelReply(reply: ChannelReply): Promise<ChannelReplyOutcome> {
+  const provider = laneProvider(reply.lane);
+  const fn = replyTransports.get(provider);
+  if (!fn) return { delivered: false, reason: 'no_transport' };
+  if (!reply.text.trim()) return { delivered: false, reason: 'empty' };
+  // Security review H1 — a platform message id can be unique only within ONE chat
+  // (Telegram `message_id`, a relay id), so the chat and thread are part of the key.
+  const idem = createHash('sha256').update(`reply\u0000${laneKeyOf(reply.lane)}\u0000${reply.chatId}\u0000${reply.threadId ?? ''}\u0000${reply.inboundMessageId}`).digest('hex');
+  const key = egressLedgerKey(reply.tenantId, 'chat', idem);
+  const prior = await priorSend(key);
+  if (prior) return { delivered: true, deduped: true, providerRef: prior.providerRef };
+  const rec = { key, tenantId: reply.tenantId, channel: 'chat' as const, provider: `channel:${provider}`, providerRef: '', createdAt: new Date().toISOString() };
+  if ((await reserveSend(rec)) === 'duplicate') return { delivered: true, deduped: true, providerRef: (await priorSend(key))?.providerRef ?? '' };
+  let result: ReplyTransportResult;
+  try {
+    result = await fn(reply);
+  } catch (err) {
+    result = { sent: false, error: err instanceof Error && 'code' in err ? String((err as { code: unknown }).code) : 'transport_threw' };
+  }
+  if (!result.sent) {
+    await releaseSend(key); // put-on-accept: a failed send can be retried
+    log.warn('channel reply not sent', { tenantId: reply.tenantId, lane: laneKeyOf(reply.lane), provider, reason: result.error });
+    return { delivered: false, reason: result.error };
+  }
+  await recordSend({ ...rec, providerRef: result.providerRef });
+  return { delivered: true, providerRef: result.providerRef };
 }
 
 export async function __resetMessagingOutbound(): Promise<void> {

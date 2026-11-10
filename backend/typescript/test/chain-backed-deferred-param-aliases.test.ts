@@ -144,15 +144,18 @@ describe('PODWF-1 — the cure MERGES; it never replaces the metadata', () => {
     // renamed by the restore loop, so nothing about them may be rewritten either.
     // RETITLED (w73 g4): this used to claim "an alias whose variable was NOT
     // renamed is left exactly as it was", but MEASURED, every alias of this chain
-    // (8 entries, candidateId…credentialRef) IS renamed bare→bare, so no
+    // IS renamed bare→bare, so no
     // un-renamed alias exists here to show untouched. The title now says what the
-    // assertions check.
-    const def = buildChainBackedDefinition('kicktodo.plan-generation');
+    // assertions check. (The sample was KickTodo's plan-generation; it is now a
+    // first-party chain with a produced variable — ADR 1031 P2.)
+    const def = buildChainBackedDefinition('campaign-studio.channel.landing-page');
     const declared = new Set((def.variables ?? []).map((v) => v.name));
-    for (const [bare, varName] of Object.entries(aliasesOf(def))) {
+    const aliases = Object.entries(aliasesOf(def));
+    expect(aliases.length, 'fixture guard: the sample chain carries aliases').toBeGreaterThan(0);
+    for (const [bare, varName] of aliases) {
       expect(declared.has(varName), `${bare}->${varName} must resolve`).toBe(true);
     }
-    expect(declared.has('plan'), 'the produced variable survives the rewrite').toBe(true);
+    expect(declared.has('channelResult'), 'the produced variable survives the rewrite').toBe(true);
   });
 
   // The whole feature graph, imported once OUTSIDE the 15 s test budget. Inside the

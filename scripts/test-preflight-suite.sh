@@ -90,6 +90,12 @@ trap 'printf "\n  \033[31m✗ HUNG: test-preflight-suite exceeded %ss — failin
 
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
 bad()  { printf '  \033[31m✗\033[0m %s\n' "$*"; fails=$((fails + 1)); }
+# await <secs> <cmd…>: poll until <cmd> succeeds, up to <secs>. A fixed `sleep 3`
+# before a grep raced the gate's own output: each poll scans ps, which on a loaded
+# box (load 24, 13 users, 2026-11-04) takes seconds, so "not printed YET" read as
+# "never printed" and reddened clean main. Wait for the evidence, bounded.
+await() { local end=$(( $(date +%s) + $1 )); shift; until "$@"; do [ "$(date +%s)" -ge "$end" ] && return 1; sleep 0.25; done; }
+in_file() { grep -qF -- "$2" "$1" 2>/dev/null; }
 # A scan may take time without taking a contention-poll wait. Assert the
 # emitted policy outcome, keeping elapsed wall time only as a diagnostic.
 no_poll_wait() { ! grep -qE '→ waiting |running CONTENDED \(DEBT-3\)' <<<"$1"; }
@@ -451,7 +457,7 @@ else
 fi
 # The claimant finishes (its suite ends) -> the other proceeds.
 kill_tree "$WIN"; wait "$WIN" 2>/dev/null
-for _ in $(seq 1 40); do [ -e "$TMP/$LOSER.cleared" ] && break; sleep 0.25; done
+await 60 test -e "$TMP/$LOSER.cleared"
 [ -e "$TMP/$LOSER.cleared" ] && ok "when the claimant exits, the waiting one proceeds" \
                             || { bad "the waiting one never proceeded after the claimant exited"; sed 's/^/      /' "$TMP/$LOSER.out"; }
 for p in "$PID_A" "$PID_B"; do kill_tree "$p"; wait "$p" 2>/dev/null; done
@@ -521,6 +527,11 @@ fi
   sleep 600 >/dev/null 2>&1 & echo $! > "$TMP/caller-sleep.pid"; wait $! ) & CALLER="$!"
 for _ in $(seq 1 20); do [ -s "$TMP/orphan.pid" ] && [ -s "$TMP/caller-sleep.pid" ] && break; sleep 0.25; done
 ORPHAN="$(cat "$TMP/orphan.pid")"
+# Kill the caller only once the waiter's shell is RUNNING (it has printed its
+# banner). Killing it earlier let the waiter read $PPID after it was reparented
+# to PID 1 and wait on init for good: a test race that failed on a loaded box
+# (the remote-gate shadow gate, and 1 run in 3 under CPU stress), not a slow loop.
+for _ in $(seq 1 120); do grep -q 'preflight-suite' "$TMP/orphan.out" 2>/dev/null && break; sleep 0.25; done
 kill "$CALLER" 2>/dev/null; wait "$CALLER" 2>/dev/null
 kill "$(cat "$TMP/caller-sleep.pid")" 2>/dev/null   # the caller's sleep, NOT the waiter
 for _ in $(seq 1 20); do kill -0 "$ORPHAN" 2>/dev/null || break; sleep 0.5; done
@@ -530,6 +541,12 @@ else
   grep -q 'has exited; stopping the wait' "$TMP/orphan.out" && ok "a waiter whose caller died stops waiting" \
     || { bad "the orphaned waiter exited without saying why"; sed 's/^/      /' "$TMP/orphan.out"; }
 fi
+# 10c. a waiter whose recorded caller is PID 1 (it was reparented before its shell
+#      read $PPID) stops at once instead of waiting on init for good.
+out="$("${CIENV[@]}" OPENWOP_PREFLIGHT_CLAIMANT_PID=1 "$PF" --wait=600 2>&1)"; rc=$?
+[ "$rc" -eq 1 ] && grep -q 'pid 1) has exited' <<<"$out" \
+  && ok "a waiter whose caller is PID 1 (reparented at startup) stops at once" \
+  || { bad "a waiter recorded PID 1 as its caller and did not stop (rc=$rc)"; printf '%s\n' "$out" | tail -3 | sed 's/^/      /'; }
 kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null; rm -rf "$CLAIM_TMP"
 
 # --- --wait-claim (ADR 0863 D8): a full vitest run outside a gate waits for a
@@ -619,7 +636,7 @@ else
 fi
 rm -f "$MARKS"/R.*
 "${CIENV[@]}" bash "$TMP/gateR/scripts/ci.sh" hang >/dev/null 2>&1 & MINI="$!"
-for _ in $(seq 1 40); do [ -e "$MARKS/R.cleared" ] && break; sleep 0.25; done
+await 60 test -e "$MARKS/R.cleared"
 kill -TERM "$MINI" 2>/dev/null; wait "$MINI" 2>/dev/null
 kill "$(cat "$MARKS/R.sleep" 2>/dev/null)" 2>/dev/null   # its "suite", or it holds our stdout
 sleep 0.5
@@ -654,7 +671,8 @@ sleep 600 & HOLDER="$!"; PIDS+=("$HOLDER"); hold_claim
 rm -f "$MARKS"/G1.* "$MARKS"/G2.*
 ( cd "$CLAIM_WT" && "${GENV[@]}" bash "$CLAIM_WT/scripts/ci.sh" hang > "$TMP/G1.out" 2>&1 ) & G1="$!"; PIDS+=("$G1")
 ( cd "$WT2" && "${GENV[@]}" bash "$WT2/scripts/ci.sh" hang > "$TMP/G2.out" 2>&1 ) & G2="$!"; PIDS+=("$G2")
-sleep 3   # both are now WAITING, behind the held claim
+# both are now WAITING, behind the held claim (each has printed its wait)
+await 60 in_file "$TMP/G1.out" claimed; await 60 in_file "$TMP/G2.out" claimed
 if [ ! -e "$MARKS/G1.cleared" ] && [ ! -e "$MARKS/G2.cleared" ]; then
   new_out="$(cd "$WT3" && "${GENV[@]}" bash "$WT3/scripts/preflight-suite.sh" --check 2>&1)"; new_rc=$?
   if [ "$new_rc" -eq 1 ] && grep -q 'claimed' <<<"$new_out" && ! grep -qF "$CLAIM_WT" <<<"$new_out" && ! grep -qF "$WT2" <<<"$new_out"; then
@@ -673,7 +691,7 @@ else
   bad "a gate proceeded past a live foreign claim"
 fi
 kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null   # the claim holder finishes
-for _ in $(seq 1 40); do [ -e "$MARKS/G1.cleared" ] || [ -e "$MARKS/G2.cleared" ] && break; sleep 0.25; done
+await 60 bash -c '[ -e "$1" ] || [ -e "$2" ]' _ "$MARKS/G1.cleared" "$MARKS/G2.cleared"
 sleep 4   # a deadlock would show as NEITHER proceeding; a race as BOTH
 n=0; [ -e "$MARKS/G1.cleared" ] && n=$((n + 1)); [ -e "$MARKS/G2.cleared" ] && n=$((n + 1))
 if [ "$n" -eq 1 ]; then
@@ -684,7 +702,7 @@ fi
 if [ -e "$MARKS/G1.cleared" ]; then W=G1; L=G2; WP=$G1; else W=G2; L=G1; WP=$G2; fi
 # The winner's suite ends -> the loser proceeds.
 kill "$(cat "$MARKS/$W.sleep" 2>/dev/null)" 2>/dev/null; wait "$WP" 2>/dev/null
-for _ in $(seq 1 40); do [ -e "$MARKS/$L.cleared" ] && break; sleep 0.25; done
+await 60 test -e "$MARKS/$L.cleared"
 [ -e "$MARKS/$L.cleared" ] && ok "when the first gate finishes, the second proceeds" \
                           || { bad "the second gate never proceeded"; sed 's/^/      /' "$TMP/$L.out" | tail -15; }
 for g in "$G1" "$G2"; do kill_tree "$g"; wait "$g" 2>/dev/null; done
@@ -726,12 +744,13 @@ fi
 #      neither, and proceeds only when both are gone — claim first, then foreign.
 sleep 600 & HOLDER="$!"; PIDS+=("$HOLDER"); hold_claim
 ( cd "$WT4" && "${FENV[@]}" bash "$WT4/scripts/ci.sh" hang > "$TMP/G4.out" 2>&1 ) & G4="$!"; PIDS+=("$G4")
-sleep 3
+await 60 in_file "$TMP/G4.out" foreign-project; await 60 in_file "$TMP/G4.out" claimed
 [ ! -e "$MARKS/G4.cleared" ] && grep -q 'foreign-project' "$TMP/G4.out" && grep -q 'claimed' "$TMP/G4.out" \
   && ok "a gate waits behind a foreign suite AND a held claim, naming both" \
   || { bad "the gate did not wait on both (or did not name them)"; sed 's/^/      /' "$TMP/G4.out" | tail -15; }
 kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null
-sleep 3
+# The poll AFTER the release says the repo is clear and the wait is now foreign.
+await 60 in_file "$TMP/G4.out" 'another project is running (--wait-foreign)'
 if [ ! -e "$MARKS/G4.cleared" ] && [ ! -d "$CLAIM_TMP" ]; then
   ok "claim released, foreign suite still running: still waits, and takes NO claim meanwhile"
 else
@@ -740,7 +759,7 @@ fi
 grep -q 'another project is running (--wait-foreign)' "$TMP/G4.out" && ok "says it is waiting on ANOTHER project, not this repo" \
                                                               || bad "the foreign wait was not named in the poll"
 kill "$FV" 2>/dev/null; wait "$FV" 2>/dev/null
-for _ in $(seq 1 40); do [ -e "$MARKS/G4.cleared" ] && break; sleep 0.25; done
+await 60 test -e "$MARKS/G4.cleared"
 [ -e "$MARKS/G4.cleared" ] && ok "the foreign suite ends -> the gate proceeds (no deadlock)" \
                            || { bad "the gate never proceeded after the foreign suite ended"; sed 's/^/      /' "$TMP/G4.out" | tail -10; }
 
@@ -749,12 +768,12 @@ for _ in $(seq 1 40); do [ -e "$MARKS/G4.cleared" ] && break; sleep 0.25; done
 make_fake_vitest "$FOREIGN" >/dev/null || bad "second fake foreign vitest never visible"; FV="$LAST_PID"
 [ -d "$CLAIM_TMP" ] || bad "G4 is running without its claim"
 ( cd "$WT5" && "${FENV[@]}" bash "$WT5/scripts/ci.sh" hang > "$TMP/G5.out" 2>&1 ) & G5="$!"; PIDS+=("$G5")
-sleep 3
+await 60 in_file "$TMP/G5.out" claimed
 [ ! -e "$MARKS/G5.cleared" ] && ok "a second gate waits behind the claim holder + a foreign suite" \
                              || bad "a second gate proceeded past a held claim"
 kill "$(cat "$MARKS/G4.sleep" 2>/dev/null)" 2>/dev/null; wait "$G4" 2>/dev/null
 kill "$FV" 2>/dev/null; wait "$FV" 2>/dev/null
-for _ in $(seq 1 40); do [ -e "$MARKS/G5.cleared" ] && break; sleep 0.25; done
+await 60 test -e "$MARKS/G5.cleared"
 [ -e "$MARKS/G5.cleared" ] && ok "claim holder and foreign suite both end -> the second gate proceeds" \
                            || { bad "the second gate never proceeded"; sed 's/^/      /' "$TMP/G5.out" | tail -10; }
 kill "$(cat "$MARKS/G5.sleep" 2>/dev/null)" 2>/dev/null; wait "$G5" 2>/dev/null
@@ -781,7 +800,7 @@ grep -q 'claimed' <<<"$out" && ! grep -q 'is not below' <<<"$out" \
   || { bad "a queued peer waited on load instead of the claim"; printf '%s\n' "$out" | sed 's/^/      /' | tail -8; }
 kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null; rm -rf "$CLAIM_TMP"
 ( cd "$WT4" && "${LENV[@]}" bash "$WT4/scripts/ci.sh" hang > "$TMP/G4.out" 2>&1 ) & G4="$!"; PIDS+=("$G4")
-sleep 3
+await 60 in_file "$TMP/G4.out" 'is not below'
 if [ ! -e "$MARKS/G4.cleared" ] && [ ! -d "$CLAIM_TMP" ] && grep -q 'is not below' "$TMP/G4.out"; then
   ok "load1 $((CORES * 3)) on $CORES cores: the gate waits, and holds NO claim while it does"
 else
@@ -792,7 +811,7 @@ fi
 [ "$rc" -eq 0 ] && ok "a load-blocked waiter is invisible to a peer (it cannot deadlock one)" \
                 || bad "a peer saw a load-blocked waiter as a competitor (rc=$rc)"
 echo 0.5 > "$LOADF"
-for _ in $(seq 1 40); do [ -e "$MARKS/G4.cleared" ] && break; sleep 0.25; done
+await 60 test -e "$MARKS/G4.cleared"
 [ -e "$MARKS/G4.cleared" ] && ok "load drops -> the gate proceeds and claims" \
                            || { bad "the gate never proceeded after the load dropped"; sed 's/^/      /' "$TMP/G4.out" | tail -10; }
 kill "$(cat "$MARKS/G4.sleep" 2>/dev/null)" 2>/dev/null; wait "$G4" 2>/dev/null

@@ -117,6 +117,10 @@ const send = async <T>(method: 'POST' | 'PATCH', url: string, body: unknown): Pr
 export async function listClients(): Promise<{ clients: ClientAccount[]; agencyAdmin: boolean }> {
   return get('/clients');
 }
+/** Register an existing organization; orgId is required to avoid creating another org. */
+export async function createClient(input: { name: string; orgId: string }): Promise<ClientAccount> {
+  return (await send<{ client: ClientAccount }>('POST', `${base}/clients`, input)).client;
+}
 export async function updateClient(orgId: string, patch: { mode?: ClientMode; status?: ClientStatus; name?: string; approvalPolicy?: ApprovalPolicyMode; externalAgents?: ExternalAgentsAccess }): Promise<ClientAccount> {
   return (await send<{ client: ClientAccount }>('PATCH', `${base}/clients/${enc(orgId)}`, patch)).client;
 }

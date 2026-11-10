@@ -77,6 +77,23 @@ describe('serializeWithIdMap', () => {
     expect(res.edges.map((e) => [e.sourceNodeId, e.targetNodeId])).toEqual([[a.id, b.id], [a.id, c.id]]);
   });
 
+  it('preserves multiple port edges between the same nodes without inventing a cycle', () => {
+    const a = node('noop', 'Source');
+    const b = node('uppercase', 'Consumer');
+    const edges: BuilderEdge[] = [
+      { ...edge(a.id, b.id), id: 'artifact-edge', sourcePort: 'artifact', targetPort: 'artifact' },
+      { ...edge(a.id, b.id), id: 'warning-edge', sourcePort: 'warning', targetPort: 'warning', condition: { path: 'warning', op: 'truthy' }, triggerRule: 'all_complete' },
+    ];
+    const result = serializeWorkflow(wf([a, b], edges));
+    expect(result.nodes.map(n => n.nodeId)).toEqual([a.id, b.id]);
+    expect(result.edges.map(e => [e.sourceNodeId, e.sourceOutput, e.targetNodeId, e.targetInput])).toEqual([
+      [a.id, 'artifact', b.id, 'artifact'], [a.id, 'warning', b.id, 'warning'],
+    ]);
+    expect(result.edges[1]).toMatchObject({ condition: { path: 'warning', op: 'truthy' }, triggerRule: 'all_complete' });
+    expect(() => serializeWorkflow(wf([a, b], [...edges, edge(b.id, a.id)]))).toThrow(/cycle/i);
+    expect(() => serializeWorkflow(wf([a], [edge(a.id, a.id)]))).toThrow(/cycle/i);
+  });
+
   // DOUBLE GUARD (recorded, grade-tests w47): `serializeWithIdMap` and
   // `serializeExecutable` both refuse an empty graph with the same message, so
   // removing either one alone stays green here. The probe aims at the first

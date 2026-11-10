@@ -57,88 +57,35 @@
  *   node scripts/gen-side-effect-floor.mjs            # write the snapshot
  *   node scripts/gen-side-effect-floor.mjs --check    # CI: fail on drift
  */
-import { readFileSync, readdirSync, existsSync, writeFileSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildImplIndex, classifyNodeReach, DEFERRED_SEMANTICS_ROLES } from './lib/packNodeReach.mjs';
+import { ROLES, deriveServedSet as deriveServed, floorOf, scanPackManifests } from './lib/side-effect-floor.mjs';
+import { adopterClaimedDirs } from './lib/adopter-pack-manifest.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const PACKS = join(ROOT, 'packs');
 const OUT = join(ROOT, 'backend/typescript/src/executor/sideEffectFloor.generated.ts');
 
-/** The closed role taxonomy (ADR 0473 P2). Anything outside it is a failure,
- *  not an unknown to be tolerated — see the header. */
-const ROLES = new Set(['pure', 'read', 'gate', 'action', 'side-effect', 'streaming-output']);
-const SIDE_EFFECT_CAPABILITY = 'side-effectful';
-
-function scan() {
-  if (!existsSync(PACKS)) throw new Error(`no packs dir at ${PACKS}`);
-  const nodes = new Map(); // typeId -> { pack, role, caps }
-  const conflicts = [];
-  const unclassified = [];
-  for (const dir of readdirSync(PACKS).sort()) {
-    const manifest = join(PACKS, dir, 'pack.json');
-    if (!existsSync(manifest)) continue;
-    let json;
-    try {
-      json = JSON.parse(readFileSync(manifest, 'utf8'));
-    } catch (err) {
-      // An unreadable manifest is NOT "a pack with no nodes" — that reading is
-      // how a parse error becomes a silently smaller floor.
-      throw new Error(`${dir}/pack.json is unparseable: ${err.message}`);
-    }
-    if (!Array.isArray(json.nodes)) continue;
-    for (const n of json.nodes) {
-      const typeId = n.typeId ?? n.id;
-      if (typeof typeId !== 'string' || typeId.length === 0) {
-        throw new Error(`${dir}/pack.json has a node with no typeId`);
-      }
-      const role = typeof n.role === 'string' ? n.role : null;
-      const caps = Array.isArray(n.capabilities) ? n.capabilities.filter((c) => typeof c === 'string') : [];
-      if (role === null || !ROLES.has(role)) unclassified.push({ typeId, pack: dir, role: role ?? '(absent)' });
-      const prior = nodes.get(typeId);
-      if (prior && (prior.role !== role || prior.caps.includes(SIDE_EFFECT_CAPABILITY) !== caps.includes(SIDE_EFFECT_CAPABILITY))) {
-        // Two packs declaring one typeId differently: whichever the loader reads
-        // last would decide whether a replay re-fires. Never let that be luck.
-        conflicts.push(`${typeId}: ${prior.role}@${prior.pack} vs ${role}@${dir}`);
-      }
-      if (!prior) nodes.set(typeId, { pack: dir, role, caps });
-    }
-  }
-  return { nodes, conflicts, unclassified };
-}
-
 /**
- * ADR 0572 P3 — the subset of the floor the ADR 0341 fast path SERVES.
+ * ADR 1048 D4 — this snapshot is UPSTREAM's. Directories an adopter claims in
+ * `packs/.adopter-manifest.json` carry their own floor half there, so they are
+ * left out of it — which is what keeps this file (and `--check`) byte-identical
+ * in an adopter tree. Upstream has no adopter manifest, so nothing is excluded.
  *
- * Returns `{ served, held: { … } }`. Everything not in `served` is held back
- * WITH ITS REASON, so the caller can report why rather than emitting a number.
+ * Role CONFLICTS and missing roles are still checked over EVERY pack: an adopter
+ * typeId that collides with an upstream one fails here, not at a replay.
  */
-function deriveServedSet(nodes, floor) {
-  const impl = buildImplIndex(ROOT);
-  const served = [];
-  const held = { 'ai-invocation-log': [], 'ai-opaque-not-logged': [], 'deferred-role-semantics': [], unresolved: [] };
-  for (const typeId of floor) {
-    const role = nodes.get(typeId)?.role;
-    if (DEFERRED_SEMANTICS_ROLES.includes(role)) { held['deferred-role-semantics'].push(typeId); continue; }
-    const reach = classifyNodeReach(typeId, impl);
-    if (reach.kind === 'unresolved') held.unresolved.push(typeId);
-    else if (reach.kind === 'invocation-log') held['ai-invocation-log'].push(typeId);
-    else if (reach.kind === 'ai-opaque') held['ai-opaque-not-logged'].push(typeId);
-    else served.push(typeId);
-  }
-  // An empty served set is indistinguishable from "the reach analysis broke",
-  // and it would emit a classifier union that classifies nothing while every
-  // check stayed green — the could-not-fail shape this program keeps finding.
-  if (served.length === 0) throw new Error('derived an EMPTY fast-path served set from a non-empty floor — refusing to write a classifier union that classifies nothing');
-  return { served: served.sort(), held };
+function scan() {
+  const all = scanPackManifests(ROOT);
+  const claimed = adopterClaimedDirs(ROOT);
+  const nodes = new Map([...all.nodes].filter(([, v]) => !claimed.has(v.pack)));
+  return { nodes, conflicts: all.conflicts, unclassified: all.unclassified };
 }
+
+const deriveServedSet = (nodes, floor) => deriveServed(ROOT, nodes, floor);
 
 function render(nodes) {
-  const floor = [...nodes]
-    .filter(([, v]) => v.role === 'side-effect' || v.caps.includes(SIDE_EFFECT_CAPABILITY))
-    .map(([typeId]) => typeId)
-    .sort();
+  const floor = floorOf(nodes);
   const { served, held } = deriveServedSet(nodes, floor);
   const all = [...nodes.keys()].sort();
   const byRole = new Map();

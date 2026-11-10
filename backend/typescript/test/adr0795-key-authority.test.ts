@@ -140,10 +140,14 @@ describe('ADR 0795 D1 / D6 — a shared workspace: the key follows its issuer', 
 
   it('an operator-issued key resolves as the tenant’s own principal, narrowed — while that env key is still configured', async () => {
     const k = await mint('ws:adr0795-op', 'bearer:abcd1234', ['workspace:read']);
-    process.env.OPENWOP_API_KEYS = 'abcd1234-rest-of-the-operator-key:ws:adr0795-op';
+    // `<key>:ws:<id>` splits on the LAST colon (key `…:ws`, tenant `adr0795-op`),
+    // so an env key cannot be configured for a `ws:` tenant at all; only the
+    // wildcard reaches one. ADR 1045 (TST-FUD-GC-1 follow-up) binds this reader
+    // to the delegation's tenant, which the mis-parsed config no longer passed.
+    process.env.OPENWOP_API_KEYS = 'abcd1234-rest-of-the-operator-key:*';
     expect((await resolveEffectiveAccess('ws:adr0795-op', { subject: k.subject })).scopes).toEqual(['workspace:read']);
     // Rotated out: what it minted must not stay the tenant's own principal.
-    process.env.OPENWOP_API_KEYS = 'some-other-key:ws:adr0795-op';
+    process.env.OPENWOP_API_KEYS = 'some-other-key:*';
     expect((await resolveEffectiveAccess('ws:adr0795-op', { subject: k.subject })).scopes).toEqual([]);
   });
 

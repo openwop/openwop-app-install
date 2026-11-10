@@ -26,7 +26,7 @@ import { recordOwnership } from '../src/host/workflowOwnership.js';
 import { workflowCollabEligible } from '../src/host/collab/workflowCollabResource.js';
 
 const TENANT = 'org:probe';
-const RESERVED = ['wf.seed.onboarding', 'tmpl.campaign-brief', 'openwop-app.kicktodo.replan', 'walkthrough.chat.first-message'];
+const RESERVED = ['wf.seed.onboarding', 'tmpl.campaign-brief', 'openwop-app.channel.turn', 'walkthrough.chat.first-message'];
 const OWNED_DRAFT = 'wf.user.probe-draft';
 
 beforeAll(async () => {

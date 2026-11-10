@@ -20,17 +20,25 @@ import { buildDestinationSyncSurface } from '../src/features/destination-sync/su
 /** Narrow the open surface-verb result's `envelopes` field (an `unknown`) for assertions. */
 type OnwardEnvelope = { permittedPurposes?: string[]; webhook: { body: Record<string, unknown> } };
 
-type SyncCore = Pick<DestinationSync, 'syncMode' | 'cursor' | 'cursorField' | 'fieldMap' | 'narrowTo' | 'destinationKind'>;
+type SyncCore = Pick<DestinationSync, 'tenantId' | 'syncMode' | 'cursor' | 'cursorField' | 'fieldMap' | 'narrowTo' | 'destinationKind'>;
 const baseSync: SyncCore = {
+  tenantId: 'tenant-owp-algebra',
   destinationKind: 'openwop-host',
   syncMode: 'batch',
   cursorField: 'updatedAt',
   fieldMap: [{ from: 'email', to: 'email_address' }, { from: 'name', to: 'full_name' }],
 };
 
+// ADR 1024 D2.4 — the builders read the erasure barrier now, so even the pure-algebra
+// cases need host-ext persistence booted.
+beforeAll(async () => {
+  process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
+  await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+});
+
 describe('buildOnwardEnvelopes — the algebra on the OpenWOP-envelope hop', () => {
-  it('re-emits the received label verbatim when no narrowTo, and field-maps the body', () => {
-    const { envelopes, dropped } = buildOnwardEnvelopes(baseSync, [
+  it('re-emits the received label verbatim when no narrowTo, and field-maps the body', async () => {
+    const { envelopes, dropped } = await buildOnwardEnvelopes(baseSync, [
       { email: 'a@x.com', name: 'A', permittedPurposes: ['marketing', 'analytics'] },
     ]);
     expect(dropped).toBe(0);
@@ -40,30 +48,30 @@ describe('buildOnwardEnvelopes — the algebra on the OpenWOP-envelope hop', () 
     expect(envelopes[0]!.webhook.body).toEqual({ email_address: 'a@x.com', full_name: 'A' });
   });
 
-  it('narrowTo intersects (narrows) the received grant', () => {
-    const { envelopes } = buildOnwardEnvelopes(
+  it('narrowTo intersects (narrows) the received grant', async () => {
+    const { envelopes } = await buildOnwardEnvelopes(
       { ...baseSync, narrowTo: ['analytics'] },
       [{ email: 'a@x.com', permittedPurposes: ['marketing', 'analytics'] }],
     );
     expect(envelopes[0]!.permittedPurposes).toEqual(['analytics']);
   });
 
-  it('never widens: a narrowTo broader than the received label stays ⊆ received', () => {
-    const { envelopes } = buildOnwardEnvelopes(
+  it('never widens: a narrowTo broader than the received label stays ⊆ received', async () => {
+    const { envelopes } = await buildOnwardEnvelopes(
       { ...baseSync, narrowTo: ['analytics', 'marketing', 'advertising'] },
       [{ email: 'a@x.com', permittedPurposes: ['analytics'] }],
     );
     expect(envelopes[0]!.permittedPurposes).toEqual(['analytics']); // NOT widened to marketing/advertising
   });
 
-  it('an unlabelled record carries no permittedPurposes (asserts no constraint)', () => {
-    const { envelopes } = buildOnwardEnvelopes(baseSync, [{ email: 'a@x.com' }]);
+  it('an unlabelled record carries no permittedPurposes (asserts no constraint)', async () => {
+    const { envelopes } = await buildOnwardEnvelopes(baseSync, [{ email: 'a@x.com' }]);
     expect(envelopes).toHaveLength(1);
     expect('permittedPurposes' in envelopes[0]!).toBe(false);
   });
 
-  it('`[]` is fail-closed: dropped before egress, never an envelope', () => {
-    const { envelopes, dropped } = buildOnwardEnvelopes(baseSync, [
+  it('`[]` is fail-closed: dropped before egress, never an envelope', async () => {
+    const { envelopes, dropped } = await buildOnwardEnvelopes(baseSync, [
       { email: 'keep@x.com', permittedPurposes: ['marketing'] },
       { email: 'drop@x.com', permittedPurposes: [] },
     ]);
@@ -72,14 +80,14 @@ describe('buildOnwardEnvelopes — the algebra on the OpenWOP-envelope hop', () 
     expect(envelopes[0]!.webhook.body.email_address).toBe('keep@x.com');
   });
 
-  it('seeds a stable dedupKey from dedupField', () => {
-    const { envelopes } = buildOnwardEnvelopes(baseSync, [{ email: 'a@x.com', id: 'contact-7' }], { dedupField: 'id' });
+  it('seeds a stable dedupKey from dedupField', async () => {
+    const { envelopes } = await buildOnwardEnvelopes(baseSync, [{ email: 'a@x.com', id: 'contact-7' }], { dedupField: 'id' });
     expect(envelopes[0]!.dedupKey).toBe('contact-7');
   });
 
-  it('CDC mode ships only records past the watermark + advances the cursor', () => {
+  it('CDC mode ships only records past the watermark + advances the cursor', async () => {
     const cdc: SyncCore = { ...baseSync, syncMode: 'cdc', cursor: '2026-07-01' };
-    const { envelopes, nextCursor } = buildOnwardEnvelopes(cdc, [
+    const { envelopes, nextCursor } = await buildOnwardEnvelopes(cdc, [
       { email: 'old@x.com', updatedAt: '2026-06-01', permittedPurposes: ['marketing'] },
       { email: 'new@x.com', updatedAt: '2026-07-05', permittedPurposes: ['marketing'] },
     ]);
@@ -91,11 +99,6 @@ describe('buildOnwardEnvelopes — the algebra on the OpenWOP-envelope hop', () 
 
 describe('prepareOnward surface verb — flag-gated envelope prep for the http-node egress', () => {
   const TENANT = 'tenant-owp-egress';
-  beforeAll(async () => {
-    process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
-    // Boot the app once to initialize host-ext persistence (DurableCollection storage).
-    await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  });
   // RFC 0128 flag: every case sets what it needs; nothing leaks past a case.
   beforeEach(() => { delete process.env.OPENWOP_CDP_PURPOSE_PROPAGATION_ENABLED; });
   afterEach(() => { delete process.env.OPENWOP_CDP_PURPOSE_PROPAGATION_ENABLED; });
@@ -124,6 +127,7 @@ describe('prepareOnward surface verb — flag-gated envelope prep for the http-n
     const surface = buildDestinationSyncSurface({ tenantId: TENANT });
     const out = await surface.prepareOnward!({
       syncId,
+      peerIngestUrl: 'https://peer.example/host/openwop-app/trigger-bridge/ingest', // ADR 1024 D2.5
       records: [
         { email: 'keep@x.com', permittedPurposes: ['marketing', 'analytics'] },
         { email: 'drop@x.com', permittedPurposes: [] },

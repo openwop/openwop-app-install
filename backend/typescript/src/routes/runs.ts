@@ -70,7 +70,7 @@ import { runEtag, ifNoneMatchSatisfied, sendNegotiatedRunJson } from '../host/re
 import { detectAndRecordReplayDivergence } from '../executor/replayDivergence.js';
 import { validateRunInputs } from '../host/runInputValidation.js';
 import { stripSecretsFromPersisted } from '../byok/ephemeralRunSecrets.js';
-import { resolveSecret } from '../byok/secretResolver.js';
+import { resolveUserNamedSecret } from '../byok/userNamedSecret.js';
 import { runAiCredentialRefViolation } from '../host/runCredentials.js';
 import { advertisedByokProviders } from '../aiProviders/aiProvidersHost.js';
 import { createLogger } from '../observability/logger.js';
@@ -92,7 +92,7 @@ import { loadReadableRun, loadOwnedRun } from '../host/runAccess.js';
 import { storedRunId } from '../host/evals/runIds.js';
 import { resolveRunArtifact } from '../host/runArtifactRead.js';
 import { artifact10 } from '../host/a2aCodec10.js';
-import { personalTenantOf } from '../host/requestSubject.js';
+import { callerSubject as actingSubjectOf, personalTenantOf } from '../host/requestSubject.js';
 import {
   canonicalRequestDigest,
   idempotencyLeaseMs,
@@ -696,7 +696,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
             if (!Object.prototype.hasOwnProperty.call(cfg, bare)) continue;
             const ref = cfg[bare];
             const resolved =
-              typeof ref === 'string' && ref.length > 0 ? await resolveSecret(ref, { tenantId }) : null;
+              typeof ref === 'string' && ref.length > 0 ? await resolveUserNamedSecret(ref, { tenantId }) : null;
             if (resolved === null) {
               throw new OpenwopError(
                 'validation_error',
@@ -749,7 +749,9 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       // execution can resolve per-user credentials + `connections:use` as the
       // run owner. Host-authoritative: derived from the principal, overriding any
       // client-supplied metadata.actingUserId (a caller MUST NOT name another user).
-      const actingUserId = req.userId ?? principal.principalId;
+      // ADR 1040 D4 — THE spelling, shared with the chat-session routes (focus bind),
+      // so a binding checked at bind and a tool call checked per turn see one id.
+      const actingUserId = actingSubjectOf(req) ?? principal.principalId;
       // ADR 0627 D3 (review S2) — and the caller's OWN personal tenant, the same
       // `req.personalTenant` the HTTP lane's `isOwnPersonalWorkspace` reads, so a
       // req-less tenant gate in the tool lane can grant the implicit owner of an

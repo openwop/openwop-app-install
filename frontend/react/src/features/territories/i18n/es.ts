@@ -33,11 +33,11 @@ export const messages = {
 
   submitActivate: 'Enviar para activar',
   submitArchive: 'Enviar para archivar',
-  liveNotice: 'Este modelo está activo — determina la visibilidad de los registros del CRM y la previsión. Clone un modelo de planificación para hacer cambios.',
+  liveNotice: 'Este modelo está activo — determina la visibilidad de los registros del CRM y la previsión. Para hacer cambios, cree un nuevo modelo de planificación.',
   confirmActivateTitle: '¿Enviar este modelo para ponerlo en vivo?',
   submitActivateBody: 'Es un cambio para todo el espacio de trabajo, así que primero pasa a la bandeja de Revisiones. Cuando un responsable lo apruebe allí, este modelo se pondrá en vivo: determinará la visibilidad de los registros del CRM y la previsión, reemplazando el modelo activo actual.',
   confirmArchiveTitle: '¿Enviar este modelo para archivarlo?',
-  submitArchiveBody: 'Es un cambio para todo el espacio de trabajo, así que primero pasa a la bandeja de Revisiones. Cuando un responsable lo apruebe allí, el modelo pasa a ser historial de solo lectura y no puede reactivarse (clónelo en un nuevo modelo de planificación).',
+  submitArchiveBody: 'Es un cambio para todo el espacio de trabajo, así que primero pasa a la bandeja de Revisiones. Cuando un responsable lo apruebe allí, el modelo pasa a ser historial de solo lectura y no puede reactivarse (cree un nuevo modelo de planificación).',
   confirmDeleteTitle: '¿Eliminar este modelo archivado?',
   confirmDeleteBody: 'Esto elimina permanentemente el modelo y TODOS sus territorios, reglas de asignación y cuotas. No se puede deshacer. (Solo se pueden eliminar modelos archivados.)',
 
@@ -176,4 +176,5 @@ export const messages = {
   field_stage: "Etapa del ciclo de vida",
   field_company: "Nombre de la empresa",
   field_score: "Puntuación del lead",
+  managerOnlyLifecycle: 'Solo un responsable de territorios puede activar o archivar modelos.',
 } as const;

@@ -23,7 +23,14 @@ import { getActiveModelId } from '../../territories/entities/territories.js';
 import { computeAttainment } from '../../territories/entities/quota.js';
 import { getPlan, type CommissionPlan, type CommissionRule } from './plan.js';
 import { validateCommissionStatement } from './rowGuards.js';
-import { quantizeMajor } from '../../../host/currencyUnits.js';
+import { toMinor, minorToMajorNumber, lineCommissionMinor, allocateCap } from './money.js';
+import { claimDeals, listPlanClaims, repointClaims, releaseStatementClaims, eraseClaimSubjects } from './dealClaims.js';
+import { repointCommissionStatementApprovals } from '../../../host/approvalService.js';
+import { sameSubject } from './subject.js';
+import { randomUUID } from 'node:crypto';
+import { createLogger } from '../../../observability/logger.js';
+
+const log = createLogger('sales-commissions.statement');
 import { subjectKeyForms, ERASED, ERASED_USER_REF } from '../../../host/subjectErasureRedaction.js';
 
 export type StatementStatus = 'draft' | 'approved' | 'paid';
@@ -34,6 +41,18 @@ export interface StatementLine {
   /** The effective rate applied (base or accelerated), in the rule's `type` units. */
   rate: number;
   commission: number;
+  /** ADR 1034 D7 — the exact integer minor units `dealAmount`/`commission` are derived from.
+   *  Absent on rows computed before D7. */
+  dealAmountMinor?: number;
+  commissionMinor?: number;
+}
+
+/** ADR 1034 D4 — a won deal left off this draft because another statement of the SAME plan
+ *  already committed it (approved or paid). Named by deal and that statement's period only:
+ *  the other statement's id embeds its rep. */
+export interface ExcludedDeal {
+  dealId: string;
+  period: string;
 }
 
 export interface CommissionStatement {
@@ -46,6 +65,10 @@ export interface CommissionStatement {
   currency: string;
   lines: StatementLine[];
   total: number;
+  /** ADR 1034 D7 — the exact total in integer minor units (`total` is derived from it). */
+  totalMinor?: number;
+  /** ADR 1034 D4 — won deals in the period that another statement of this plan already paid. */
+  excludedDeals?: ExcludedDeal[];
   /** The rep's quota attainment % used for accelerators (undefined = no context). */
   attainmentPct?: number;
   status: StatementStatus;
@@ -104,8 +127,42 @@ export function effectiveRate(rule: CommissionRule, attainmentPct: number | unde
   return qualifying.length > 0 ? qualifying[0].rate : rule.rate;
 }
 
-const commissionFor = (rule: CommissionRule, dealAmount: number, rate: number): number =>
-  rule.type === 'percentage' ? (dealAmount * rate) / 100 : rate; // fixed = flat per won deal
+export { sameSubject } from './subject.js';
+export { releaseStatementClaims } from './dealClaims.js';
+
+/** ADR 1034 D4 — deals another statement of this plan has already committed: claimed, or
+ *  (for rows approved before claims existed) present on an approved/paid statement. */
+export async function committedDealsForPlan(tenantId: string, orgId: string, planId: string, exceptStatementId: string): Promise<Map<string, string>> {
+  const all = scoped(await statements.listForTenantIndexed(tenantId), tenantId, orgId).filter((s) => s.planId === planId);
+  const periodOf = new Map(all.map((s) => [s.statementId, s.period]));
+  const out = new Map<string, string>();
+  for (const s of all) {
+    if (s.statementId === exceptStatementId || s.status === 'draft') continue;
+    for (const l of s.lines) out.set(l.dealId, s.period);
+  }
+  for (const c of await listPlanClaims(tenantId, orgId, planId)) {
+    if (c.statementId !== exceptStatementId) out.set(c.dealId, periodOf.get(c.statementId) ?? 'another period');
+  }
+  return out;
+}
+
+/** The deals on `s` that another statement of its plan already committed (the approval pre-check). */
+export async function findDealConflicts(s: CommissionStatement): Promise<ExcludedDeal[]> {
+  const committed = await committedDealsForPlan(s.tenantId, s.orgId, s.planId, s.statementId);
+  const seen = new Set<string>();
+  const out: ExcludedDeal[] = [];
+  for (const l of s.lines) {
+    const period = committed.get(l.dealId);
+    if (period !== undefined && !seen.has(l.dealId)) { seen.add(l.dealId); out.push({ dealId: l.dealId, period }); }
+  }
+  return out;
+}
+
+const safeMinor = (v: bigint, field: string): number => {
+  const n = Number(v);
+  if (!Number.isSafeInteger(n)) throw new OpenwopError('validation_error', `\`${field}\` is too large to compute exactly.`, 400, { field });
+  return n;
+};
 
 /** The rep's attainment % from the active territory model (undefined ⇒ no context). */
 async function repAttainmentPct(tenantId: string, orgId: string, subjectId: string, period: string): Promise<number | undefined> {
@@ -192,7 +249,10 @@ export async function computeStatement(tenantId: string, orgId: string, planId: 
 
   const attainmentPct = await repAttainmentPct(tenantId, orgId, subjectId, period);
 
-  const deals = (await listDeals(tenantId, orgId, {}, undefined)).filter((d) =>
+  const id = statementId(planId, subjectId, period);
+  const committed = await committedDealsForPlan(tenantId, orgId, planId, id);
+  const excludedDeals: ExcludedDeal[] = [];
+  const periodDeals = (await listDeals(tenantId, orgId, {}, undefined)).filter((d) =>
     d.owner === subjectId
     && d.status === 'won'
     && periodContains(d.closeDate, period)
@@ -201,6 +261,14 @@ export async function computeStatement(tenantId: string, orgId: string, planId: 
     // paid full commission on deals closed in Q1, and an expired plan kept paying
     // forever. The window is what makes a plan a plan.
     && withinPlanWindow(d.closeDate, plan));
+  // ADR 1034 D4 — a deal another statement of this plan already committed is not paid
+  // again. It is listed, not silently dropped, so the reviewer sees why it is missing.
+  const deals = periodDeals.filter((d) => {
+    const paidIn = committed.get(d.dealId);
+    if (paidIn === undefined) return true;
+    excludedDeals.push({ dealId: d.dealId, period: paidIn });
+    return false;
+  });
 
   // R2 COM2-B1 — the sums add raw `d.amount` and never consult `d.currency`, then stamp
   // `plan.currency` on the result. A rep closing ¥100,000 and $20,000 under a 5% USD plan
@@ -225,34 +293,48 @@ export async function computeStatement(tenantId: string, orgId: string, planId: 
     });
   }
 
-  const lines: StatementLine[] = [];
-  for (const rule of plan.rules) {
-    let ruleTotal = 0;
-    const ruleLines: StatementLine[] = [];
-    const rate = effectiveRate(rule, attainmentPct);
-    for (const d of deals) {
-      const dealAmount = d.amount ?? 0;
-      const commission = commissionFor(rule, dealAmount, rate);
-      ruleTotal += commission;
-      ruleLines.push({ dealId: d.dealId, dealAmount, rate, commission });
-    }
-    // Cap is per-rule on the rule's total; scale lines proportionally so the sum honors the cap.
-    if (rule.cap !== undefined && ruleTotal > rule.cap && ruleTotal > 0) {
-      const factor = rule.cap / ruleTotal;
-      for (const l of ruleLines) l.commission = l.commission * factor;
-    }
-    lines.push(...ruleLines);
+  // ADR 1034 D7 — a credit is a clawback, and clawback is deferred (ADR 0280 §8). A won deal
+  // with a negative amount would be an unreviewed partial clawback, so it is refused by name.
+  const negatives = deals.filter((d) => (d.amount ?? 0) < 0);
+  if (negatives.length > 0) {
+    throw new OpenwopError('validation_error', `${negatives.length} won deal(s) in this period have a negative amount. A commission cannot be computed from them; correct the deal amounts first.`, 400, {
+      field: 'amount', deals: negatives.slice(0, 20).map((d) => ({ dealId: d.dealId })),
+    });
   }
-  // R2 COM2-M1 — every figure here was raw float arithmetic (a rate division, then a
-  // proportional cap rescale), so a statement stored `7500.000000000001` and a JPY plan
-  // stored `6172.835` yen — not a representable amount in a currency with no minor unit.
-  // The console then rendered it at `maximumFractionDigits: 0` and interpolated THAT into
-  // the confirm on an action its own body calls unreversible.
-  for (const l of lines) l.commission = quantizeMajor(l.commission, plan.currency);
-  const total = quantizeMajor(lines.reduce((sum, l) => sum + l.commission, 0), plan.currency);
 
-  const id = statementId(planId, subjectId, period);
-  const existing = await statements.get(id);
+  // ADR 1034 D7 — integer minor units end to end (`money.ts`). R2 COM2-M1 rounded the float
+  // results with `quantizeMajor`, which still misrounds at the half because the float
+  // product it rounds is already wrong (`1.005 * 100 === 100.49999999999999`).
+  const cur = plan.currency;
+  const lines: StatementLine[] = [];
+  let totalMinor = 0n;
+  for (const rule of plan.rules) {
+    const rate = effectiveRate(rule, attainmentPct);
+    const dealMinors = deals.map((d) => toMinor(d.amount ?? 0, cur, 'amount'));
+    let commissions = dealMinors.map((m) => lineCommissionMinor(rule.type, m, rate, cur));
+    // Cap is per-rule on the rule's total, allocated by largest remainder so the lines sum
+    // to the cap exactly (the float rescale could land one minor unit past it).
+    const ruleTotal = commissions.reduce((a, v) => a + v, 0n);
+    if (rule.cap !== undefined) {
+      const capMinor = toMinor(rule.cap, cur, 'cap');
+      if (ruleTotal > capMinor && ruleTotal > 0n) commissions = allocateCap(commissions, capMinor);
+    }
+    deals.forEach((d, i) => {
+      lines.push({
+        dealId: d.dealId,
+        dealAmount: minorToMajorNumber(dealMinors[i], cur),
+        rate,
+        commission: minorToMajorNumber(commissions[i], cur),
+        dealAmountMinor: safeMinor(dealMinors[i], 'amount'),
+        commissionMinor: safeMinor(commissions[i], 'commission'),
+      });
+      totalMinor += commissions[i];
+    });
+  }
+  const total = minorToMajorNumber(totalMinor, cur);
+  const raw = await statements.get(id);
+  if (raw && (raw.tenantId !== tenantId || raw.orgId !== orgId)) throw new OpenwopError('not_found', 'Commission plan not found.', 404, { planId });
+  const existing = raw;
   const now = nowIso();
   const statement: CommissionStatement = {
     statementId: id,
@@ -264,10 +346,14 @@ export async function computeStatement(tenantId: string, orgId: string, planId: 
     currency: plan.currency,
     lines,
     total,
+    totalMinor: safeMinor(totalMinor, 'total'),
     status: 'draft', // recompute always returns a draft (an approved statement must be re-approved)
     computedAt: now,
     updatedAt: now,
     ...(attainmentPct !== undefined ? { attainmentPct } : {}),
+    ...(excludedDeals.length > 0 ? { excludedDeals } : {}),
+    // ADR 1034 D6 — the submitter stamp survives a recompute (it is the audit trail).
+    ...(existing?.submittedBy !== undefined ? { submittedBy: existing.submittedBy } : {}),
   };
   // Guard: refuse to silently overwrite an already-PAID statement via recompute.
   if (existing && existing.status === 'paid') throw new OpenwopError('conflict', 'This statement is already paid and cannot be recomputed.', 409, { statementId: id });
@@ -278,9 +364,19 @@ export async function computeStatement(tenantId: string, orgId: string, planId: 
   // history still showed a manager approving the old figure. The two disagreed, and only
   // the inbox remembered.
   if (existing && existing.status === 'approved') {
-    throw new OpenwopError('conflict', 'This statement is already approved. Revoke the approval before recomputing it.', 409, { statementId: id, approvedBy: existing.approvedBy });
+    // (Closing grade-code I6: this used to say "Revoke the approval first", and there is no
+    // revoke. An approved statement is final; its claims are too — ADR 1034 D4.)
+    throw new OpenwopError('conflict', 'This statement is already approved, and an approved statement cannot be recomputed.', 409, { statementId: id, approvedBy: existing.approvedBy });
   }
-  await statements.put(statement);
+  // ADR 1034 D6 — a CAS against the exact row the approved/paid refusals above read. A plain
+  // `put` here let an approval landing between the read and the write be overwritten by a
+  // draft at a new total: the card said approved, the row said draft.
+  if (!(await statements.compareAndSwap(existing, statement))) {
+    throw new OpenwopError('conflict', 'This statement changed while it was being recomputed. Reload and try again.', 409, { statementId: id });
+  }
+  // ADR 1034 D4 — a recomputed DRAFT no longer wants a deal it dropped (its close date moved,
+  // it was lost): free that claim so another statement of the plan can pay it.
+  await releaseStatementClaims(tenantId, id, new Set(lines.map((l) => l.dealId)));
   return statement;
 }
 
@@ -299,7 +395,8 @@ export async function listStatements(
   viewerSubject: string | undefined,
 ): Promise<CommissionStatement[]> {
   let rows = scoped(await statements.listForTenantIndexed(tenantId), tenantId, orgId);
-  if (!canSeeAll) rows = rows.filter((s) => s.subjectId === viewerSubject); // fail-closed: no viewer ⇒ nothing
+  // fail-closed: no viewer ⇒ nothing. ADR 1034 D8 — matched across subject spellings.
+  if (!canSeeAll) rows = rows.filter((s) => viewerSubject !== undefined && sameSubject(s.subjectId, viewerSubject));
   if (filter.subjectId) rows = rows.filter((s) => s.subjectId === filter.subjectId);
   if (filter.period) rows = rows.filter((s) => s.period === filter.period);
   if (filter.planId) rows = rows.filter((s) => s.planId === filter.planId);
@@ -310,14 +407,30 @@ export async function persistStatement(s: CommissionStatement): Promise<void> {
   await statements.put(s);
 }
 
-/** Approve a DRAFT statement (ADR 0280 P3), stamping the approver. Idempotent on
- *  an already-approved statement; refuses a paid one. */
-export async function approveStatement(tenantId: string, orgId: string, statementId: string, actor: string): Promise<CommissionStatement> {
-  const s = await getStatementRaw(tenantId, orgId, statementId);
-  if (!s) throw new OpenwopError('not_found', 'Statement not found.', 404, { statementId });
+/**
+ * Approve a DRAFT statement (ADR 0280 P3), stamping the approver. Idempotent on an
+ * already-approved statement; refuses a paid one.
+ *
+ * ADR 1034 D4 — the ONE choke point to `approved`: the decide handler and the demo seeder
+ * both reach it, so the deal claims are taken here, never by a caller. `expected` is the row
+ * the caller checked (the decide handler's pin-checked `live`); the flip CASes against
+ * exactly that row, so a recompute between the check and the approval loses rather than
+ * being approved unseen (architect B3).
+ */
+export async function approveStatement(tenantId: string, orgId: string, statementId: string, actor: string, expected?: CommissionStatement): Promise<CommissionStatement> {
+  const s = expected ?? await getStatementRaw(tenantId, orgId, statementId);
+  if (!s || s.tenantId !== tenantId || s.orgId !== orgId || s.statementId !== statementId) throw new OpenwopError('not_found', 'Statement not found.', 404, { statementId });
   if (s.status === 'approved') return s; // idempotent
   if (s.status !== 'draft') throw new OpenwopError('conflict', `Only a draft statement can be approved (this one is ${s.status}).`, 409, { statementId, status: s.status });
+  const conflicts = await findDealConflicts(s);
+  if (conflicts.length > 0) throw dealAlreadyCommitted(statementId, conflicts);
   const now = nowIso();
+  const { heldElsewhere } = await claimDeals(tenantId, orgId, s.planId, statementId, s.lines.map((l) => l.dealId), now);
+  // On either failure below, the claims this attempt inserted STAY bound to this statement
+  // (see `releaseStatementClaims` for why there is no release here).
+  if (heldElsewhere.length > 0) {
+    throw dealAlreadyCommitted(statementId, heldElsewhere.map((dealId) => ({ dealId, period: 'another period' })));
+  }
   const next: CommissionStatement = { ...s, status: 'approved', approvedBy: actor, approvedAt: now, updatedAt: now };
   // R2 COM2-M8 — a plain `put` is last-writer-wins on the two transitions that move
   // money. `compareAndSwap` is the documented `If-Match` equivalent on this collection
@@ -325,7 +438,26 @@ export async function approveStatement(tenantId: string, orgId: string, statemen
   if (!(await statements.compareAndSwap(s, next))) {
     throw new OpenwopError('conflict', 'This statement changed while you were approving it. Reload and try again.', 409, { statementId });
   }
+  // Closing grade-code I1 — free any claim this statement holds for a deal NOT on the lines
+  // it was approved with (an earlier attempt over older lines can leave one). Safe here: the
+  // row is now approved with exactly these lines, and only this statement's claims are touched.
+  // Best-effort, and it must NOT fail the approval: the statement IS approved now, so a
+  // throw here would make the decide handler reopen a card for an approved row. A failure
+  // only leaves a stale claim for a deal this statement no longer has — logged, recoverable.
+  try {
+    await releaseStatementClaims(tenantId, statementId, new Set(next.lines.map((l) => l.dealId)));
+  } catch (err) {
+    log.error('commission_claim_release_after_approve_failed', { tenantId, statementId, err: err instanceof Error ? err.message : String(err) });
+  }
   return next;
+}
+
+/** The typed refusal for a deal another statement of the plan already committed. Names
+ *  deals and periods only — never the other statement's id, which embeds its rep. */
+export function dealAlreadyCommitted(statementId: string, deals: readonly ExcludedDeal[]): OpenwopError {
+  return new OpenwopError('conflict', `${deals.length} deal(s) on this statement were already paid on another statement of the same plan. Recompute it so they are left off.`, 409, {
+    reason: 'deal_already_committed', statementId, deals: deals.slice(0, 20),
+  });
 }
 
 /** Mark an APPROVED statement paid (payout itself is external/demo — ADR 0280 §8).
@@ -338,9 +470,15 @@ export async function markStatementPaid(tenantId: string, orgId: string, stateme
   // R2 COM2-M4 — the person who is PAID must not be the person who releases the payment.
   // Nothing checked it, and the same rule is enforced verbatim two files over for
   // challenge publication ("the resolver MUST differ from submittedBy").
-  if (actor === s.subjectId) {
+  if (sameSubject(actor, s.subjectId)) {
     throw new OpenwopError('forbidden_scope', 'You cannot mark your own commission statement paid.', 403, { statementId });
   }
+  // ADR 1034 D4 (grade-code H1) — the PAY gate holds the claims, not only the approval.
+  // Re-claiming is idempotent for this statement; a deal another statement holds is a
+  // refusal. So whatever happened to the claims between approval and payout, two statements
+  // can never both be PAID for one deal of one plan.
+  const { heldElsewhere } = await claimDeals(tenantId, orgId, s.planId, statementId, s.lines.map((l) => l.dealId), nowIso());
+  if (heldElsewhere.length > 0) throw dealAlreadyCommitted(statementId, heldElsewhere.map((dealId) => ({ dealId, period: 'another period' })));
   const now = nowIso();
   // R2 COM2-M7 — the terminal money transition recorded NEITHER who settled it NOR when:
   // `void actor;` threw the payer away, and the only trace was a best-effort audit append
@@ -371,30 +509,57 @@ export async function markStatementPaid(tenantId: string, orgId: string, stateme
  */
 export async function eraseSubjectCommissions(tenantId: string, subjectKey: string): Promise<void> {
   const forms = subjectKeyForms(subjectKey).forms;
-  for (const st of await statements.listForTenantIndexed(tenantId)) {
-    if (st.tenantId !== tenantId) continue;
-    const next = { ...st };
-    let touched = false;
-    const subjectErased = forms.has(st.subjectId);
-    if (subjectErased) { next.subjectId = ERASED_USER_REF; touched = true; }
-    if (st.approvedBy !== undefined && forms.has(st.approvedBy)) { next.approvedBy = ERASED; touched = true; }
-    if (st.paidBy !== undefined && forms.has(st.paidBy)) { next.paidBy = ERASED; touched = true; }
-    if (st.submittedBy !== undefined && forms.has(st.submittedBy)) { next.submittedBy = ERASED; touched = true; }
-    if (!touched) continue;
-    // R2 review — the first version rewrote four FIELDS and left the row KEY, which
-    // literally embeds the erased person's user id (`planId:subjectId:period`). That key
-    // is returned verbatim by the statements route, rendered by the console, serialised
-    // to the analyst agent with the whole row, and sits in `approval.commissionStatement`
-    // — where the approvals redactor covers `subjectId` and `proposal` but NOT
-    // `statementId`. Erasure has to rekey, or it did not erase.
-    if (subjectErased) {
-      const rekeyed = { ...next, statementId: statementId(st.planId, ERASED_USER_REF, st.period) };
-      await statements.delete(st.statementId);
-      await statements.put(rekeyed);
-      continue;
+  for (const listed of await statements.listForTenantIndexed(tenantId)) {
+    if (listed.tenantId !== tenantId) continue;
+    // ADR 1034 D8 (grade-code H2) — every write below is a CAS on the row just read, so a
+    // concurrent approve or pay can make one lose. A lost write is RETRIED on a fresh read
+    // (bounded), never ignored: ignoring it left the old row, with the erased rep's id in
+    // its key and fields, beside a re-keyed copy — two payout records, one un-erased.
+    let st: CommissionStatement | null = listed;
+    let done = false;
+    for (let attempt = 0; st && attempt < 5; attempt += 1) {
+      if (await eraseOneStatement(st, forms, tenantId)) { done = true; break; }
+      st = await statements.get(st.statementId);
     }
-    await statements.put(next);
+    // Closing grade-code I3 — never give up silently: an unfinished erasure throws, so the
+    // DSAR job retries instead of reporting success with the id still on a payout record.
+    if (!done && st) throw new OpenwopError('conflict', 'A commission statement kept changing during erasure; retry the erasure.', 409, {});
   }
+  await eraseClaimSubjects(tenantId, forms, `${ERASED_USER_REF}~orphan`);
+}
+
+/** One statement's erasure. Returns false when a CAS lost (re-read and retry). */
+async function eraseOneStatement(st: CommissionStatement, forms: ReadonlySet<string>, tenantId: string): Promise<boolean> {
+  const next = { ...st };
+  let touched = false;
+  const subjectErased = forms.has(st.subjectId);
+  if (subjectErased) { next.subjectId = ERASED_USER_REF; touched = true; }
+  if (st.approvedBy !== undefined && forms.has(st.approvedBy)) { next.approvedBy = ERASED; touched = true; }
+  if (st.paidBy !== undefined && forms.has(st.paidBy)) { next.paidBy = ERASED; touched = true; }
+  if (st.submittedBy !== undefined && forms.has(st.submittedBy)) { next.submittedBy = ERASED; touched = true; }
+  if (!touched) return true;
+  // R2 review — the first version rewrote four FIELDS and left the row KEY, which
+  // literally embeds the erased person's user id (`planId:subjectId:period`). That key
+  // is returned verbatim by the statements route, rendered by the console, serialised
+  // to the analyst agent with the whole row, and sits in `approval.commissionStatement`
+  // — where the approvals redactor covers `subjectId` and `proposal` but NOT
+  // `statementId`. Erasure has to rekey, or it did not erase.
+  if (!subjectErased) return statements.compareAndSwap(st, next);
+  // ADR 1034 D8 — a UNIQUE id. `planId:<erased>:period` collided when two erased reps
+  // shared a plan and period (a role or territory plan), and the second erasure's `put`
+  // overwrote the first rep's approved or paid statement. Nothing re-derives a statement
+  // id after erasure (`closePendingCommissionStatementApprovals` matches the `planId:`
+  // prefix), so a random suffix is safe. Insert the new row, then CAS-delete the exact old
+  // one; if that delete loses, take the new row back out and report the loss.
+  const rekeyed = { ...next, statementId: statementId(st.planId, `${ERASED_USER_REF}~${randomUUID()}`, st.period) };
+  if (!(await statements.compareAndSwap(null, rekeyed))) return false;
+  if (!(await statements.compareAndDelete(st))) {
+    await statements.compareAndDelete(rekeyed);
+    return false;
+  }
+  await repointClaims(tenantId, st.statementId, rekeyed.statementId);
+  await repointCommissionStatementApprovals(tenantId, st.statementId, rekeyed.statementId);
+  return true;
 }
 
 /** R2 COM2-M4 — stamp the submitter on the row at submit time (the approval card is
@@ -402,9 +567,13 @@ export async function eraseSubjectCommissions(tenantId: string, subjectKey: stri
  *  re-stamped, and a missing submitter degrades to "no self-approval check", never to a
  *  block on a legitimate approval. */
 export async function recordStatementSubmitter(tenantId: string, orgId: string, statementId: string, actor: string): Promise<void> {
-  const s = await getStatementRaw(tenantId, orgId, statementId);
-  if (!s || s.status !== 'draft') return;
-  await statements.put({ ...s, submittedBy: actor, updatedAt: nowIso() });
+  // ADR 1034 D6 — a CAS that retries once. The plain `put` here could write a stale draft
+  // over an approval that landed between this read and this write.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const s = await getStatementRaw(tenantId, orgId, statementId);
+    if (!s || s.status !== 'draft') return;
+    if (await statements.compareAndSwap(s, { ...s, submittedBy: actor, updatedAt: nowIso() })) return;
+  }
 }
 
 /** Count a plan's APPROVED/PAID statements — financial records that must survive a
@@ -418,6 +587,7 @@ export async function deleteDraftStatementsForPlan(tenantId: string, orgId: stri
   let removed = 0;
   for (const s of scoped(await statements.listForTenantIndexed(tenantId), tenantId, orgId).filter((s) => s.planId === planId && s.status === 'draft')) {
     await statements.delete(s.statementId);
+    await releaseStatementClaims(tenantId, s.statementId); // a deleted draft wants nothing
     removed += 1;
   }
   return removed;

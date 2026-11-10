@@ -19,7 +19,7 @@
  * ADR 0734 records why: the first sweep's own proposal would have deleted the repo's only
  * timer-teardown seam while six test files left its 20-second interval running.
  */
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { stripComments } from './helpers/stripComments.js';
@@ -67,7 +67,23 @@ const TEST_SEAM_DECL =
 // the floor in the same commit, to its own measured value − 1.
 const MIN_SRC_FILES = 2073;
 const MIN_TEST_SEAM_EXPORTS = 372;
-const MIN_TEST_DECLARING_FILES = 13; // the exact `__test` count; a 14th raises it
+const MIN_TEST_DECLARING_FILES = 2; // the exact `__test` count (13 until the KickTodo packages left, ADR 1031 P3); a 3rd raises it
+
+/**
+ * ADR 1031 P3 — host test seams whose ONLY readers are an adopter's tests. KickTodo's
+ * `test/kicktodo/` moved downstream with its packages; it still drives these host
+ * seams, and the adopter's tree (this host + its `src/adopter/`) keeps this ratchet
+ * green with real readers. Deleting one here would break that suite on the next sync.
+ * Each row is reviewed; a row whose symbol is gone, or that gains a reader here, reds.
+ */
+const ADOPTER_TEST_SEAMS: ReadonlyMap<string, string> = new Map([
+  ['src/features/commerce/affiliate.ts#__resetAccrualGuards', 'KickTodo commerce referral-accrual tests'],
+  ['src/host/agentMemoryAdapter.ts#__resetPerUserNoActorWarnDedupe', 'KickTodo KickBot memory tests'],
+  ['src/host/runApprovalGrant.ts#resetRunApprovalGrantsForTests', 'KickTodo Factory run-approval grant tests (ADR 0975)'],
+  ['src/host/runStartGrant.ts#resetRunStartGrantsForTests', 'KickTodo Factory run-start grant tests (ADR 0975)'],
+  ['src/host/scheduleDaemon.ts#__noteScheduleDaemonTickForTest', 'KickTodo readiness tests (ADR 0787)'],
+  ['src/host/scheduleDaemon.ts#__resetScheduleDaemonLivenessForTest', 'KickTodo readiness tests (ADR 0787)'],
+]);
 
 describe('ADR 0734 — every test-only export in src/ has a reader', () => {
   const srcFiles = walk(SRC);
@@ -145,7 +161,7 @@ describe('ADR 0734 — every test-only export in src/ has a reader', () => {
   });
 
   it('a DUPLICATED declaration name cannot be held alive by its own siblings', () => {
-    // `__test` is declared in 13 src files (11 at ADR 0734). Every one must be inspected on its own, and
+    // `__test` is declared in 2 src files (11 at ADR 0734, 13 before ADR 1031 P3). Every one must be inspected on its own, and
     // a sibling declaration must not count as a reader. This is the review sabotage:
     // appending a dead `export const __test` used to leave the ratchet 4/4 green.
     const testEntries = [...decls.keys()].filter((k) => k.endsWith('#__test'));
@@ -162,8 +178,21 @@ describe('ADR 0734 — every test-only export in src/ has a reader', () => {
     expect(referenced(absent, '')).toBe(false);
   });
 
+  it('every adopter-test exemption is still declared here, and (upstream) still has no reader here', () => {
+    // In an adopter's tree (it has `src/adopter/features/`) these rows HAVE readers:
+    // that is the adopter's suite the row exists for. The no-reader half applies
+    // only where no adopter is composed, i.e. in openwop-app itself.
+    const adopterTree = existsSync(join(SRC, 'adopter', 'features'));
+    for (const key of ADOPTER_TEST_SEAMS.keys()) {
+      const d = decls.get(key);
+      expect(d, `${key} is exempted but no longer declared — drop the row`).toBeDefined();
+      if (!adopterTree) expect(referenced(d!.sym, d!.file), `${key} has a reader in this repo now — drop the row`).toBe(false);
+    }
+  });
+
   it('no test-only export in src/ is unreferenced', () => {
     const orphans = [...decls]
+      .filter(([key]) => !ADOPTER_TEST_SEAMS.has(key))
       .filter(([, d]) => !referenced(d.sym, d.file))
       .map(([key]) => key)
       .sort();

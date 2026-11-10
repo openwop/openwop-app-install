@@ -9,14 +9,29 @@
  * instead of looping, no dialog host = the original error, and account delete
  * retries only its Firebase step.
  *
- * Sabotage-witnessed (2026-10-29): dropping the retry in `withRecentLogin`
- * reds the password, MFA and delete cases; passing a constant instead of the
- * typed password reds the password case.
+ * Origin: #5392 (re-authenticate in place, then retry).
+ *
+ * Sabotage-witnessed (2026-10-29, re-measured in /grade-tests wave 80):
+ *   - dropping the retry in `withRecentLogin` reds the password, wrong-password,
+ *     MFA, second-refusal and delete cases; retrying twice reds the
+ *     second-refusal case;
+ *   - passing a constant instead of the typed password, or dropping `readOnly`
+ *     on the email, reds the password case;
+ *   - silencing a wrong-password error reds that case; not trimming the code
+ *     reds the MFA case;
+ *   - mapping a cancel to the original error, or not clearing the stashed MFA
+ *     challenge on cancel, reds the cancel case;
+ *   - mapping "no host" to a cancel reds the no-host case;
+ *   - opening the dialog for an unrelated error reds the pass-through case;
+ *   - deleteAccount without `withRecentLogin`, re-sending the backend DELETE in
+ *     the retry, or not mapping a cancel to `RequiresRecentLoginError` reds the
+ *     matching delete case.
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, cleanup, fireEvent } from '@testing-library/react';
 import { ReauthRoot } from '../ReauthRoot.js';
 import { ReauthCancelledError, registerReauthPresenter, withRecentLogin } from '../reauth.js';
+import { config } from '../../client/config.js';
 
 const fb = vi.hoisted(() => {
   const user = { email: 'ada@example.com', providerData: [{ providerId: 'password' }] };
@@ -137,7 +152,9 @@ describe('withRecentLogin — re-authentication dialog', () => {
   });
 
   it('other errors pass straight through without opening the dialog', async () => {
-    const presented = vi.fn();
+    // Settles at once, so a misrouted error retries and fails fast instead of
+    // parking `withRecentLogin` on a dialog that never answers.
+    const presented = vi.fn((settle: (ok: boolean) => void) => settle(true));
     const off = registerReauthPresenter(presented);
     try {
       const boom = Object.assign(new Error('x'), { code: 'auth/network-request-failed' });
@@ -159,6 +176,8 @@ describe('deleteAccount — retries only the Firebase step after reauth', () => 
       await expect(deleteAccount()).resolves.toMatchObject({ deleted: true });
       expect(fb.deleteCurrentFirebaseUser).toHaveBeenCalledTimes(2);
       expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock.mock.calls[0]![0]).toBe(`${config.baseUrl}/host/openwop-app/account`);
+      expect(fetchMock.mock.calls[0]![1]?.method).toBe('DELETE');
     } finally { off(); fetchMock.mockRestore(); }
   });
 

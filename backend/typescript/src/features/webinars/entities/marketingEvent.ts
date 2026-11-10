@@ -66,9 +66,20 @@ export async function listMarketingEvents(tenantId: string, orgId: string): Prom
     .sort((a, b) => (b.startsAt ?? b.createdAt).localeCompare(a.startsAt ?? a.createdAt));
 }
 
-/** Upsert a marketing event (idempotent on the provider event id). First writer
- *  sets orgId/connectionId; later writers patch metadata (title/startsAt) without
- *  clobbering the binding. */
+/** ADR 1054 D1 — the provider id is tracked by another client of this workspace. Names no
+ *  field of the other row. */
+function otherOrg(): OpenwopError {
+  return new OpenwopError('conflict', 'This webinar is already tracked by another client in this workspace.', 409, { reason: 'event_in_other_org' });
+}
+
+/** Upsert a marketing event (idempotent on the provider event id).
+ *
+ *  ADR 1054 D1 — the FIRST client to track a provider id owns it: create is `putIfAbsent`, a
+ *  patch is a `compareAndSwap` against the row read (re-read and retried), and a row owned by another
+ *  client is a 409 `event_in_other_org`, never patched or returned. A patch that keeps losing
+ *  (3 tries) is a 409 `event_write_contended`. `connectionId` is kept once
+ *  set unless `replaceConnection` (the operator route) asks: ingest used to overwrite it with
+ *  whichever connection delivered the webhook. */
 export async function upsertMarketingEvent(input: {
   tenantId: string;
   orgId: string;
@@ -79,47 +90,63 @@ export async function upsertMarketingEvent(input: {
   connectionId?: string;
   formId?: string;
   journeyId?: string;
+  replaceConnection?: boolean;
 }): Promise<MarketingEvent> {
   if (!input.providerEventId) throw new OpenwopError('validation_error', 'providerEventId is required.', 400, {});
   const eventId = marketingEventId(input.tenantId, input.provider, input.providerEventId);
-  const now = new Date().toISOString();
-  const existing = await events.get(eventId);
-  if (existing) {
-    if (existing.tenantId !== input.tenantId) throw new OpenwopError('not_found', 'Event not found.', 404, {});
-    const next: MarketingEvent = {
-      ...existing,
-      ...(input.title ? { title: input.title } : {}),
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const now = new Date().toISOString();
+    const existing = await events.get(eventId);
+    if (existing) {
+      if (existing.tenantId !== input.tenantId) throw new OpenwopError('not_found', 'Event not found.', 404, {});
+      if (existing.orgId !== input.orgId) throw otherOrg();
+      const next: MarketingEvent = {
+        ...existing,
+        ...(input.title ? { title: input.title } : {}),
+        ...(input.startsAt ? { startsAt: input.startsAt } : {}),
+        ...(input.connectionId && (input.replaceConnection || !existing.connectionId) ? { connectionId: input.connectionId } : {}),
+        ...(input.formId !== undefined ? { formId: input.formId } : {}),
+        ...(input.journeyId !== undefined ? { journeyId: input.journeyId } : {}),
+        updatedAt: now,
+      };
+      if (await events.compareAndSwap(existing, next)) return next;
+      continue; // a concurrent writer moved the row — re-read, re-check the org
+    }
+    const created: MarketingEvent = {
+      eventId,
+      tenantId: input.tenantId,
+      orgId: input.orgId,
+      provider: input.provider,
+      providerEventId: input.providerEventId,
+      title: input.title ?? `Webinar ${input.providerEventId}`,
       ...(input.startsAt ? { startsAt: input.startsAt } : {}),
       ...(input.connectionId ? { connectionId: input.connectionId } : {}),
-      ...(input.formId !== undefined ? { formId: input.formId } : {}),
-      ...(input.journeyId !== undefined ? { journeyId: input.journeyId } : {}),
+      ...(input.formId ? { formId: input.formId } : {}),
+      ...(input.journeyId ? { journeyId: input.journeyId } : {}),
+      createdAt: now,
       updatedAt: now,
     };
-    await events.put(next);
-    return next;
+    if (await events.putIfAbsent(created)) return created;
+    // lost the first-writer race — loop: the re-read decides same client (patch) or 409
   }
-  const created: MarketingEvent = {
-    eventId,
-    tenantId: input.tenantId,
-    orgId: input.orgId,
-    provider: input.provider,
-    providerEventId: input.providerEventId,
-    title: input.title ?? `Webinar ${input.providerEventId}`,
-    ...(input.startsAt ? { startsAt: input.startsAt } : {}),
-    ...(input.connectionId ? { connectionId: input.connectionId } : {}),
-    ...(input.formId ? { formId: input.formId } : {}),
-    ...(input.journeyId ? { journeyId: input.journeyId } : {}),
-    createdAt: now,
-    updatedAt: now,
-  };
-  await events.put(created);
-  return created;
+  throw new OpenwopError('conflict', 'The webinar changed while it was being saved. Try again.', 409, { reason: 'event_write_contended' });
 }
 
 export async function deleteMarketingEvent(tenantId: string, orgId: string, eventId: string): Promise<boolean> {
   const e = await getMarketingEvent(tenantId, orgId, eventId);
   if (!e) return false;
   return events.delete(eventId);
+}
+
+/** Remove `formId` from an event row with a compare-and-swap (re-read and retried), so a
+ *  concurrent ingest's patch is never overwritten by a stale read (grade-code WEB-11). */
+async function clearEventForm(tenantId: string, orgId: string, eventId: string, formId: string): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const e = await getMarketingEvent(tenantId, orgId, eventId);
+    if (!e || e.formId !== formId) return;
+    const { formId: _drop, ...rest } = e;
+    if (await events.compareAndSwap(e, { ...rest, updatedAt: new Date().toISOString() })) return;
+  }
 }
 
 // ── form → event binding (forms feature stays unmodified) ────────────────────
@@ -132,13 +159,7 @@ export async function bindFormToEvent(tenantId: string, orgId: string, formId: s
   // 1. This form previously bound to a DIFFERENT event → that event's `formId`
   //    pointer must not dangle (the chip kept rendering a dead link).
   const prior = await getFormBinding(tenantId, formId);
-  if (prior && prior.eventId !== eventId) {
-    const prevEvent = await getMarketingEvent(tenantId, prior.orgId, prior.eventId);
-    if (prevEvent && prevEvent.formId === formId) {
-      const { formId: _drop, ...rest } = prevEvent;
-      await events.put({ ...rest, updatedAt: new Date().toISOString() });
-    }
-  }
+  if (prior && prior.eventId !== eventId) await clearEventForm(tenantId, prior.orgId, prior.eventId, formId);
   // 2. This EVENT previously bound to a different form → that form's binding
   //    row must die, or the "unlinked" form keeps registering people into the
   //    webinar forever. Tenant-INDEXED scan (review M1): listByPrefix('') pulled
@@ -164,11 +185,7 @@ export async function unbindForm(tenantId: string, formId: string): Promise<bool
   await formBindings.delete(formId);
   // Also clear the pointer on the event, so a deleted/unbound form leaves NO
   // dangling `formId` behind (grade-data WEB-2). The binding carries the event.
-  const e = await getMarketingEvent(tenantId, b.orgId, b.eventId);
-  if (e && e.formId === formId) {
-    const { formId: _drop, ...rest } = e;
-    await events.put({ ...rest, updatedAt: new Date().toISOString() });
-  }
+  await clearEventForm(tenantId, b.orgId, b.eventId, formId);
   return true;
 }
 

@@ -13,8 +13,11 @@
  *    "inherits" cases red (the child re-resolves against the flipped toggle).
  *  - remove the `parentRunId` return in `decision.ts` → the "absence is
  *    inherited" cases red (a child of a born-OFF parent gets `lossless`).
- *  - drop the `inheritedRunMetadata` merge in `routes/runs.ts` → the route-lane
- *    "inherits" case reds.
+ *  - drop the `parentDecision` compaction copy in `routes/runs.ts` (since the
+ *    ADR 0999 M3 correction that lane copies ONLY the compaction key, not the
+ *    whole `inheritedRunMetadata`) → the route-lane "inherits" case reds.
+ *  - drop `ctx.parentRunId` / the `metadata.parentRunId` half from `decision.ts`
+ *    → the executor / route-lane "absence is inherited" case reds, respectively.
  *  - return `compacted` unfenced in `nodes.ts` `onToolUse` → the fence case reds
  *    (this IS the pre-fix code path, so it is also the red-on-old-code witness).
  *  - stub `findCompactionMarkerPath` to `undefined` in `nodes.ts` → the D3.2 case
@@ -34,6 +37,7 @@ import { chatResponderNode } from '../src/bootstrap/nodes.js';
 import { registerToolResultTransform, __resetToolResultTransform } from '../src/host/toolResultTransform.js';
 import { compactToolOutput } from '../src/features/tool-output-compaction/compact.js';
 import { bareRunId } from './support/bareRunId.js';
+import type { NodeContext } from '../src/executor/types.js';
 
 describe('ADR 0999 D1 — a child run inherits the frozen decision (both lanes)', () => {
   let server: http.Server;
@@ -56,9 +60,12 @@ describe('ADR 0999 D1 — a child run inherits the frozen decision (both lanes)'
       });
     });
     const disco = await api<{ fixtures?: string[] }>('/.well-known/openwop');
-    workflowId = disco.body.fixtures?.[0] ?? 'openwop-app.uppercase';
-    // A DIFFERENT workflow for the executor child: the dispatcher refuses a cycle.
-    childWorkflowId = disco.body.fixtures?.find((f) => f !== workflowId) ?? 'openwop-app.uppercase';
+    // A DIFFERENT workflow for the executor child: the dispatcher refuses a cycle. No silent
+    // fallback: with fewer than two fixtures the child would fail on the cycle guard instead.
+    const fixtures = [...new Set(disco.body.fixtures ?? [])];
+    if (fixtures.length < 2) throw new Error(`discovery lists ${fixtures.length} fixture workflow(s); two distinct ones are needed`);
+    workflowId = fixtures[0]!;
+    childWorkflowId = fixtures[1]!;
   });
   afterAll(async () => {
     await __clearToggleStore();
@@ -168,17 +175,22 @@ describe('ADR 0999 D2 — the workflow-as-tool lane fences the child run output'
     __resetToolResultTransform();
   });
 
-  it('the tool_result the model receives is fenced, with the child output inside the fence', async () => {
-    const ctx = {
-      runId: 'parent-run', tenantId: 't1', nodeId: 'chat',
+  /** A production-shaped chat-node context: the tool binding, the frozen decision, a recording emit. */
+  function chatCtx(prompt: string, compaction: NonNullable<NodeContext['compaction']>, emitted: Array<{ type: string; payload: unknown }> = []): NodeContext {
+    let seq = 0;
+    return {
+      runId: 'parent-run', tenantId: 't1', nodeId: 'chat', attempt: 1, configurable: {},
       config: { provider: 'anthropic', model: 'claude-x', credentialRef: 'k' },
-      inputs: { prompt: 'look it up', tools: [{ workflowId: 'wf.lookup', name: 'lookup', description: 'Look a thing up' }] },
+      inputs: { prompt, tools: [{ workflowId: 'wf.lookup', name: 'lookup', description: 'Look a thing up' }] },
       secrets: { k: 'sk-test' },
-      compaction: { mode: 'lossless' },
-      emit: async () => {},
+      compaction,
+      emit: async (type, payload) => { emitted.push({ type, payload }); seq += 1; return { eventId: `e${seq}`, sequence: seq }; },
     };
-    await chatResponderNode.execute(ctx as never);
-    expect(sentToModel.length).toBeGreaterThanOrEqual(2); // round 1 → tool → round 2
+  }
+
+  it('the tool_result the model receives is fenced, with the child output inside the fence', async () => {
+    await chatResponderNode.execute(chatCtx('look it up', { mode: 'lossless' }));
+    expect(sentToModel).toHaveLength(2); // round 1 → tool → round 2
     const toolResult = (sentToModel[1]!.messages as Array<{ content: unknown }>)
       .flatMap((m) => (Array.isArray(m.content) ? (m.content as Array<{ type: string; content?: string }>) : []))
       .find((b) => b.type === 'tool_result');
@@ -194,16 +206,8 @@ describe('ADR 0999 D2 — the workflow-as-tool lane fences the child run output'
 
   it('D3.2 — under lossy, a compaction marker in the tool input is refused and the child never starts', async () => {
     toolInput = { steps: [{ id: 's0' }, { _elided: 4 }, { id: 's5' }] };
-    const emitted: Array<{ type: string; payload: Record<string, unknown> }> = [];
-    const ctx = {
-      runId: 'parent-run', tenantId: 't1', nodeId: 'chat',
-      config: { provider: 'anthropic', model: 'claude-x', credentialRef: 'k' },
-      inputs: { prompt: 'revise', tools: [{ workflowId: 'wf.lookup', name: 'lookup', description: 'Look a thing up' }] },
-      secrets: { k: 'sk-test' },
-      compaction: { mode: 'lossy' },
-      emit: async (type: string, payload: Record<string, unknown>) => { emitted.push({ type, payload }); },
-    };
-    await chatResponderNode.execute(ctx as never);
+    const emitted: Array<{ type: string; payload: unknown }> = [];
+    await chatResponderNode.execute(chatCtx('revise', { mode: 'lossy' }, emitted));
     expect(childCreates).toBe(0);
     expect(toolResultBlock()?.content).toContain('compaction_marker_in_input');
     // Recorded on the timeline like any other call (review M4), not silently swallowed.
@@ -213,15 +217,7 @@ describe('ADR 0999 D2 — the workflow-as-tool lane fences the child run output'
 
   it('D4 — a FAILED child under lossy reaches the model with every issue (and fenced)', async () => {
     childFails = true;
-    const ctx = {
-      runId: 'parent-run', tenantId: 't1', nodeId: 'chat',
-      config: { provider: 'anthropic', model: 'claude-x', credentialRef: 'k' },
-      inputs: { prompt: 'look it up', tools: [{ workflowId: 'wf.lookup', name: 'lookup', description: 'Look a thing up' }] },
-      secrets: { k: 'sk-test' },
-      compaction: { mode: 'lossy', head: 1, tail: 1 },
-      emit: async () => {},
-    };
-    await chatResponderNode.execute(ctx as never);
+    await chatResponderNode.execute(chatCtx('look it up', { mode: 'lossy', head: 1, tail: 1 }));
     const content = toolResultBlock()?.content ?? '';
     expect(content).toContain('issue number 6'); // a MIDDLE issue — what elision would drop
     expect(content).not.toContain('_elided');

@@ -21,6 +21,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
+import { declaredRows } from '../../../scripts/featureGateDeclarations.mjs';
 
 const SRC = join(process.cwd(), 'src');
 const read = (rel: string): string => readFileSync(join(SRC, rel), 'utf8');
@@ -372,7 +373,7 @@ function handRolledOrgReads(dir: string = SRC): string[] {
  * `chat/hooks/useCommentsContext` documents a deliberate no-affordance fallback.
  * Calling all 44 defects would be the same overclaim in the other direction.
  */
-const HAND_ROLLED: readonly string[] = [
+const HOST_HAND_ROLLED: readonly string[] = [
   'canvas/CanvasEditorPage.tsx',
   'canvas/CanvasPresentPage.tsx',
   'canvas/CanvasPreviewPage.tsx',
@@ -400,7 +401,6 @@ const HAND_ROLLED: readonly string[] = [
   'features/email/EmailTemplateDetailPage.tsx',
   'features/evals/ArenaPage.tsx',
   'features/forms/FormDetailPage.tsx',
-  'features/kicktodo-org-programs/OrgProgramsPage.tsx',
   'features/media/MediaLibraryPage.tsx',
   'features/operations/OperationsWebhooksPage.tsx',
   'features/priority-matrix/PriorityMatrixPage.tsx',
@@ -409,6 +409,9 @@ const HAND_ROLLED: readonly string[] = [
   'features/strategy/StrategyPage.tsx',
   'orgs/useOrgsController.ts',
 ];
+/** ADR 1031 P2 — plus each feature package's `orgSelectionEdge.handRolled` rows
+ *  (`<feature>/gateDeclarations.json`, both feature roots). */
+const HAND_ROLLED: readonly string[] = [...HOST_HAND_ROLLED, ...declaredRows(SRC, 'orgSelectionEdge', 'handRolled').map(([f]) => f as string)];
 
 /**
  * The subset whose org catch WRITES THE SENTINEL — `setOrgs([])` on failure —
@@ -844,6 +847,9 @@ describe('the org-selection dependency edge', () => {
     // no longer reads orgs at all — the router config became the WORKSPACE's,
     // so the org picker (and its hand-rolled `listOrgs` read) was deleted rather
     // than migrated to the hook.
+    // 31 -> 30 (2026-11-05, ADR 1031 P3): `features/kicktodo-org-programs/OrgProgramsPage`
+    // left this repo with the KickTodo packages (it now ships downstream). The
+    // before/after scan differs by exactly that file; nothing migrated or entered.
     // 33 -> 32 (2026-08-18): `features/kb/KnowledgeBasePage` migrated to
     // `useOrgSelection` in #3348 (`a78c543e6`) — the same KB round that closed
     // the chain-promise gap. The migration is the POINT of this ratchet, so the
@@ -864,7 +870,12 @@ describe('the org-selection dependency edge', () => {
     // — a 19th copy of the extracted idiom — and reproduced the ordering bug the
     // component exists to encode, rendering the disclosure BELOW a workspace
     // picker and a dead Create button rather than instead of them.
-    expect(handRolledOrgReads().length).toBe(31);
+    // ADR 1031 P3 — FIRST-PARTY only. An adopter tree (`src/adopter/features/`)
+    // brings its own hand-rolled readers, each NAMED through its package's
+    // `gateDeclarations.json` and so still held by the named arms above; this
+    // floor counts the files THIS repo owns, so a downstream adopter cannot
+    // move it (KickTodo's `kicktodo-org-programs/OrgProgramsPage` did: 31 vs 30).
+    expect(handRolledOrgReads().filter((f) => !f.startsWith('adopter/')).length).toBe(30);
   });
 
   it('the hand-rolled detector rejects the three measured false positives', () => {

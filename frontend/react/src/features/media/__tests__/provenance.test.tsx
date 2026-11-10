@@ -3,15 +3,17 @@
  *
  * - The chip appears ONLY for assets with a generation stamp, and its LABEL
  *   carries the outcome (color-never-alone); a product image with no verdict
- *   reads "Not checked".
+ *   reads "Not checked", and a stamp with neither a verdict nor a product draws
+ *   no chip.
  * - The drawer shows the product photo beside the result, each check with its
  *   measured value and limit, and the judge's evidence as plain text (a model's
  *   markup is never rendered as markup).
- * Breaks if the chip shows for plain uploads, a stage-A row loses its value,
- * or judge evidence is injected as HTML.
+ * Breaks if the chip shows for plain uploads, an outcome loses its word, either
+ * image goes, a stage-A row loses its value, or judge evidence is injected as HTML.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
+import { t } from 'i18next';
 import type * as Client from '../mediaClient.js';
 import type { AssetProvenance, MediaAsset } from '../mediaClient.js';
 
@@ -24,22 +26,33 @@ import { useTranslation } from 'react-i18next';
 
 afterEach(cleanup);
 
-const base: MediaAsset = { assetId: 'masset:1', orgId: 'o', name: 'shot.png', contentType: 'image/png', sizeBytes: 10, tags: [], usageCount: 0, serveUrl: '/assets/x', createdAt: 'x', updatedAt: 'x' };
-const grounding = { mode: 'composite' as const, productId: 'prod:mug', sources: [{ assetId: 'masset:src', sha256: 'a'.repeat(64) }], provider: 'openwop', model: 'renderer@1', op: 'render' };
+const AT = '2026-10-20T00:00:00.000Z';
+const base: MediaAsset = { assetId: 'masset:1', orgId: 'o', name: 'shot.png', contentType: 'image/png', sizeBytes: 10, tags: [], usageCount: 0, serveUrl: '/assets/x', createdAt: AT, updatedAt: AT };
+const noProduct = { mode: 'composite' as const, sources: [], provider: 'openwop', model: 'renderer@1', op: 'render' };
+const grounding = { ...noProduct, productId: 'prod:mug', sources: [{ assetId: 'masset:src', sha256: 'a'.repeat(64) }] };
 
-function Chip({ a }: { a: MediaAsset }): JSX.Element { const { t } = useTranslation('media'); return <div>{FidelityChip({ a, t })}</div>; }
+function Chip({ a }: { a: MediaAsset }): JSX.Element { const { t: tm } = useTranslation('media'); return <div>{FidelityChip({ a, t: tm })}</div>; }
 
 describe('FidelityChip', () => {
   it('is absent for a plain upload', () => {
     render(<Chip a={base} />);
     expect(document.querySelector('.chip')).toBeNull();
   });
-  it('names the outcome in words', () => {
-    render(<Chip a={{ ...base, lineage: { generatedBy: 'ai', grounding: { ...grounding, fidelity: { verdictId: 'v', outcome: 'needs_review', rulesetVersion: 'r' } } } }} />);
-    expect(screen.getByText('Needs review')).toBeTruthy();
-    cleanup();
+  it.each([
+    ['pass', 'media:fidelityPass'],
+    ['needs_review', 'media:fidelityReview'],
+    ['fail', 'media:fidelityFail'],
+  ] as const)('names the outcome in words: %s', (outcome, key) => {
+    render(<Chip a={{ ...base, lineage: { generatedBy: 'ai', grounding: { ...grounding, fidelity: { verdictId: 'v', outcome, rulesetVersion: 'r' } } } }} />);
+    expect(screen.getByText(t(key))).toBeTruthy();
+  });
+  it('reads "Not checked" for a product image with no verdict', () => {
     render(<Chip a={{ ...base, lineage: { generatedBy: 'ai', grounding } }} />);
-    expect(screen.getByText('Not checked')).toBeTruthy();
+    expect(screen.getByText(t('media:fidelityUnchecked'))).toBeTruthy();
+  });
+  it('draws no chip for a stamp with no verdict and no product', () => {
+    render(<Chip a={{ ...base, lineage: { generatedBy: 'ai', grounding: noProduct } }} />);
+    expect(document.querySelector('.chip')).toBeNull();
   });
 });
 
@@ -56,9 +69,11 @@ describe('ProvenanceDialog', () => {
     };
     getAssetProvenance.mockResolvedValue(prov);
     render(<ProvenanceDialog orgId="o" asset={base} onClose={() => undefined} />);
-    expect(await screen.findByText('Source: mug.png')).toBeTruthy();
-    expect(screen.getByText('Result')).toBeTruthy();
-    expect(screen.getByText('Colour matches')).toBeTruthy();
+    expect(await screen.findByText(t('media:provenanceSource', { name: 'mug.png' }))).toBeTruthy();
+    expect(screen.getByText(t('media:provenanceResult'))).toBeTruthy();
+    expect(document.querySelector('img[src="/assets/src"]')).not.toBeNull();
+    expect(document.querySelector('img[src="/assets/x"]')).not.toBeNull();
+    expect(screen.getByText(t('media:provenanceCheck_colour_delta_e'))).toBeTruthy();
     expect(screen.getByText(/44\.8.*limit 8/)).toBeTruthy();
     expect(screen.getByText('<b>swapped</b> mark')).toBeTruthy();
     expect(document.querySelector('b')).toBeNull();

@@ -37,7 +37,7 @@
 import { Pool, type PoolConfig } from 'pg';
 import { aggregateHostExtTenantActivity, HOSTEXT_ACTIVITY_ROW_CAP } from '../hostExtActivity.js';
 import { withRemovalStamp } from '../runRetentionStamp.js';
-import { planHostExtRekey, rekeyTenantSegment, runBudgetBucketBelongsTo } from '../tenantMigration.js';
+import { planHostExtRekey, rekeyTenantSegment, runBudgetBucketBelongsTo, tenantFoldNeedles } from '../tenantMigration.js';
 import { TERMINAL_RUN_STATUSES } from '@openwop/openwop';
 import { randomUUID } from 'node:crypto';
 import type { UsageLikeMatcher } from '../storage.js';
@@ -2342,8 +2342,12 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
         // GEN-1c: run_budget has no tenant_id column (introspection skips it) — move
         // the tenant's buckets by rewriting the encoded-tenant segment; keep the
         // TARGET on a same-window collision (its own budget wins). Counts into `counts`.
+        // Bounded to buckets that contain `from` (tenantFoldNeedles): the rewrite below
+        // needs that substring, so no bucket it would move is dropped.
+        const [fromNeedle, fromJsonNeedle] = tenantFoldNeedles(fromTenant);
         const budgetRows = await client.query<{ bucket: string; window_start: number; count: number }>(
-          `SELECT bucket, window_start, count FROM run_budget`,
+          `SELECT bucket, window_start, count FROM run_budget WHERE strpos(bucket, $1) > 0`,
+          [fromNeedle],
         );
         let runBudgetMoved = 0;
         for (const r of budgetRows.rows) {
@@ -2363,10 +2367,15 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
         // the destination via ensurePersonalWorkspace, never moved). `planHostExtRekey`
         // decides each row's action purely; see tenantMigration.ts for the semantics.
         const now = new Date().toISOString();
+        // Only rows whose key or value text contains `from` (tenantFoldNeedles
+        // proves this is a superset of what planHostExtRekey rewrites). This used to read
+        // the WHOLE table and parse every value on each adoption (KT-AUTH-2 follow-up).
         const kv = await client.query<{ k: string; v: string }>(
           `SELECT k, v FROM host_ext_kv
            WHERE k NOT LIKE 'hostext:access-orgs:%'    AND k NOT LIKE 'hostext:access-members:%'
-             AND k NOT LIKE 'hostextidx:access-orgs:%' AND k NOT LIKE 'hostextidx:access-members:%'`,
+             AND k NOT LIKE 'hostextidx:access-orgs:%' AND k NOT LIKE 'hostextidx:access-members:%'
+             AND (strpos(k, $1) > 0 OR strpos(v, $2) > 0)`,
+          [fromNeedle, fromJsonNeedle],
         );
         let hostExt = 0;
         let hostExtKeysRekeyed = 0;
@@ -3204,6 +3213,40 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
         ],
       );
     },
+    async activateRelayDevice(relayId, activationCode, tokenHash, tokenExpiresAt) {
+      const res = await pool.query(
+        `UPDATE relay_devices SET status = 'active', device_token_hash = $1, token_expires_at = $2,
+           activation_code = NULL, activation_expires_at = NULL
+         WHERE relay_id = $3 AND status = 'registered' AND activation_code = $4`,
+        [tokenHash, tokenExpiresAt, relayId, activationCode],
+      );
+      return (res.rowCount ?? 0) > 0;
+    },
+    async touchRelayDeviceHeartbeat(relayId, tokenHash, at, reportedStatus) {
+      const res = await pool.query(
+        `UPDATE relay_devices SET last_heartbeat_at = $1, last_reported_status = COALESCE($2, last_reported_status)
+         WHERE relay_id = $3 AND status = 'active' AND device_token_hash = $4`,
+        [at, reportedStatus ?? null, relayId, tokenHash],
+      );
+      return (res.rowCount ?? 0) > 0;
+    },
+    async rotateRelayDeviceToken(relayId, expectedHash, nextHash, tokenExpiresAt) {
+      const res = await pool.query(
+        `UPDATE relay_devices SET device_token_hash = $1, token_expires_at = $2
+         WHERE relay_id = $3 AND status = 'active' AND device_token_hash = $4`,
+        [nextHash, tokenExpiresAt, relayId, expectedHash],
+      );
+      return (res.rowCount ?? 0) > 0;
+    },
+    async revokeRelayDevice(relayId) {
+      const res = await pool.query(
+        `UPDATE relay_devices SET status = 'revoked', device_token_hash = NULL, token_expires_at = NULL,
+           activation_code = NULL, activation_expires_at = NULL
+         WHERE relay_id = $1`,
+        [relayId],
+      );
+      return (res.rowCount ?? 0) > 0;
+    },
     async getRelayDevice(relayId) {
       const { rows } = await pool.query<Row>(`SELECT * FROM relay_devices WHERE relay_id = $1`, [relayId]);
       return rows[0] ? rowToRelayDevicePg(rows[0]) : null;
@@ -3417,6 +3460,20 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
         params,
       );
       return rows.map(rowToDeliveryLogPg);
+    },
+    async pruneDeliveryLog(cutoffIso, exceptTenants) {
+      // ADR 1043 RELAY-LOG-RETENTION-1. Served by `idx_messaging_delivery_log_at` (mig 50).
+      const held = exceptTenants.length ? ` AND tenant_id NOT IN (${exceptTenants.map((_, i) => `$${i + 2}`).join(',')})` : '';
+      const r = await pool.query(`DELETE FROM messaging_delivery_log WHERE at < $1${held}`, [cutoffIso, ...exceptTenants]);
+      return r.rowCount ?? 0;
+    },
+    async deleteDeliveryLogForConversation(tenantId, conversationId) {
+      const r = await pool.query(`DELETE FROM messaging_delivery_log WHERE tenant_id = $1 AND conversation_id = $2`, [tenantId, conversationId]);
+      return r.rowCount ?? 0;
+    },
+    async deleteDeliveryLogForRelay(tenantId, relayId) {
+      const r = await pool.query(`DELETE FROM messaging_delivery_log WHERE tenant_id = $1 AND relay_id = $2`, [tenantId, relayId]);
+      return r.rowCount ?? 0;
     },
 
     async appendMessagingTurn(record) {

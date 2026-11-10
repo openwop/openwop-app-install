@@ -32,8 +32,10 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync, existsSync, globSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+// ADR 1031 P2 — feature-declared side-effecting types are recorded at composition.
+import '../src/features/index.js';
 import { isSideEffectingNode } from '../src/executor/sideEffects.js';
-import { MANIFEST_FAST_PATH_SERVED } from '../src/executor/sideEffectFloor.generated.js';
+import { featureSideEffectingNodeTypes } from '../src/host/featureContributions.js';
 
 const REPO = join(import.meta.dirname, '..', '..', '..');
 
@@ -42,21 +44,12 @@ describe('the classifier covers the families it claims', () => {
     expect(isSideEffectingNode('feature.notifications.nodes.notify')).toBe(true);
   });
 
-  it('classifies the node that reaches the emitter through a HOST SURFACE', () => {
-    // `feature.kicktodo.nodes.session-reminder` delivers a cohort session reminder
-    // via `features/kicktodo-accountability/sessionService.ts`, which imports
-    // `getNotificationEmitter`. Its own pack `.mjs` is clean, so the seam scan
-    // below is structurally blind to it.
-    //
-    // CORRECTED (wave 61): this used to say the explicit regex was "the only
-    // thing holding that entry in place". It is not: the pack's manifest now
-    // declares the node side-effecting, so it is ALSO in the derived served set,
-    // and deleting the regex stayed green. Both sources are asserted here.
-    expect(isSideEffectingNode('feature.kicktodo.nodes.session-reminder')).toBe(true);
-    expect(MANIFEST_FAST_PATH_SERVED.has('feature.kicktodo.nodes.session-reminder'), 'the manifest declaration no longer reaches the served set').toBe(true);
-    // The explicit regex stays as the second source (it holds the entry if the
-    // generated floor ever lags the pack). It is unexported, so with the node
-    // served its deletion cannot show here: an honest double-guard ceiling.
+  it('classifies every node a FEATURE declares side-effecting through its host surface (ADR 1031 P2)', () => {
+    // A node that reaches the emitter through its feature's host surface (not its
+    // pack `.mjs`) is declared by that feature (`hostContributions.sideEffectingNodeTypes`).
+    // KickTodo's session reminder is the live case: test/kicktodo/kicktodo-side-effect-classification.test.ts.
+    for (const t of featureSideEffectingNodeTypes()) expect(isSideEffectingNode(t), t).toBe(true);
+    expect(isSideEffectingNode('feature.not-a-pack.nodes.not-declared')).toBe(false);
   });
 
   // Of these six, only `feature.whatsapp.nodes.send` is absent from the served

@@ -9,6 +9,13 @@
  * (policy write below `host:org:manage`); an accepted approval applies against
  * stale state instead of re-checking; a rejection changes the record; a second
  * request queues behind an open one; or the management run can be forked.
+ *
+ * Double guards, recorded: a cancelled approval's version is released by the
+ * `onCancelled` hook AND by `claimPending`, which drops a held row whose run is
+ * terminal (witnessed as a held pair, /grade-tests w81). Self-approval compares
+ * every spelling of the requester (session user, key principal, key issuer, and
+ * each one's canonical decider and user), so the key-lane case is red only when
+ * the issuer and the canonicalisation are both dropped.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -24,21 +31,30 @@ let server: http.Server;
 let BASE = '';
 let seq = 0;
 
-interface Res { status: number; body: any }
-interface Client { userId: string; call(method: string, path: string, body?: unknown): Promise<Res> }
+interface ErrBody { error?: string | { details?: Record<string, unknown> }; details?: Record<string, unknown> }
+interface Body extends ErrBody {
+  [k: string]: unknown;
+  user?: { userId: string };
+  orgId?: string;
+  agentId?: string;
+  transitionRunId?: string;
+  state?: string;
+}
+interface Res<T = Body> { status: number; body: T }
+interface Client { userId: string; call<T = Body>(method: string, path: string, body?: unknown): Promise<Res<T>> }
 
 function client(): Omit<Client, 'userId'> {
   let cookie = '';
   return {
-    async call(method, path, body) {
+    async call<T = Body>(method: string, path: string, body?: unknown): Promise<Res<T>> {
       const res = await fetch(`${BASE}${path}`, {
         method,
         headers: { 'content-type': 'application/json', 'openwop-version': '2', ...(cookie ? { cookie } : {}) },
         ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
       });
-      for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
+      for (const ck of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(ck); if (m?.[1]) cookie = m[1]; }
       const text = await res.text();
-      return { status: res.status, body: text ? JSON.parse(text) : undefined };
+      return { status: res.status, body: (text ? JSON.parse(text) : {}) as T };
     },
   };
 }
@@ -47,7 +63,7 @@ async function signIn(tenantId: string): Promise<Client> {
   const c = client();
   const r = await c.call('POST', '/host/openwop-app/test/login', { email: `p3a-${Date.now()}-${seq++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return { ...c, userId: r.body.user.userId as string };
+  return { ...c, userId: r.body.user?.userId ?? '' };
 }
 
 /** An org tenant: owner (policy), admins A and B (deploy + decide), an editor (decide only). */
@@ -56,7 +72,7 @@ async function team() {
   const owner = await signIn(tenantId);
   const org = await owner.call('POST', '/host/openwop-app/orgs', { name: 'Deployers' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  const orgId = org.body.orgId as string;
+  const orgId = org.body.orgId ?? '';
   const member = async (roles: string[]): Promise<Client> => {
     const c = await signIn(tenantId);
     const r = await owner.call('POST', `/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: c.userId, roles });
@@ -68,26 +84,29 @@ async function team() {
   const editor = await member(['editor']);
   const agent = await owner.call('POST', '/host/openwop-app/agents', { persona: 'Deployable', modelClass: 'chat', systemPrompt: 'v1' });
   expect(agent.status, JSON.stringify(agent.body)).toBe(201);
-  const agentId = agent.body.agentId as string;
+  const agentId = agent.body.agentId ?? '';
   return { tenantId, owner, adminA, adminB, editor, agentId, dep: `/agents/${encodeURIComponent(agentId)}/deployments`, policy: `/host/openwop-app/agent-deployments/${encodeURIComponent(agentId)}/policy` };
 }
 
 type Team = Awaited<ReturnType<typeof team>>;
-const versionOf = async (t: Team): Promise<{ version: string; state: string }> => {
-  const r = await t.adminA.call('GET', t.dep);
+interface Rec { version: string; state: string; transitionRunId?: string; canaryPercent?: number }
+const versionOf = async (t: Team): Promise<Rec> => {
+  const r = await t.adminA.call<Rec[]>('GET', t.dep);
   expect(r.status, JSON.stringify(r.body)).toBe(200);
-  return r.body[0];
+  expect(r.body).toHaveLength(1);
+  return r.body[0]!;
 };
 /** The flat host envelope and the v2 envelope carry `details` at different depths; the claim is the reason, not the envelope. */
-const detailsOf = (b: any): Record<string, unknown> | undefined => b?.details ?? b?.error?.details;
+const detailsOf = (b: ErrBody | undefined): Record<string, unknown> | undefined =>
+  b?.details ?? (typeof b?.error === 'object' ? b.error.details : undefined);
 const runIdOf = (wireRunId: string): string => encodeURIComponent(wireRunId);
 const eventsOf = async (c: Client, wireRunId: string): Promise<Array<{ type: string; payload: Record<string, unknown> }>> => {
-  const r = await c.call('GET', `/runs/${runIdOf(wireRunId)}/events/poll?fromSeq=-1&limit=200`);
+  const r = await c.call<{ events: Array<{ type: string; payload: Record<string, unknown> }> }>('GET', `/runs/${runIdOf(wireRunId)}/events/poll?fromSeq=-1&limit=200`);
   expect(r.status, JSON.stringify(r.body)).toBe(200);
   return r.body.events;
 };
 const runStatus = async (c: Client, wireRunId: string): Promise<{ status: string; error?: { code: string } }> =>
-  (await c.call('GET', `/runs/${runIdOf(wireRunId)}`)).body;
+  (await c.call<{ status: string; error?: { code: string } }>('GET', `/runs/${runIdOf(wireRunId)}`)).body;
 const decide = (c: Client, wireRunId: string, action: 'accept' | 'reject'): Promise<Res> =>
   c.call('POST', `/runs/${runIdOf(wireRunId)}/interrupts/deployment-approval`, { resumeValue: { action } });
 
@@ -98,7 +117,7 @@ async function gatedResume(t: Team): Promise<{ version: string; runId: string }>
   expect(paused.status, JSON.stringify(paused.body)).toBe(200);
   const asked = await t.adminA.call('POST', t.dep, { version, transition: 'promote' });
   expect(asked.status, JSON.stringify(asked.body)).toBe(202);
-  return { version, runId: asked.body.transitionRunId as string };
+  return { version, runId: asked.body.transitionRunId ?? '' };
 }
 
 beforeAll(async () => {
@@ -131,14 +150,19 @@ describe('D12 — who may set the promotion policy', () => {
     expect(byOwner.status, JSON.stringify(byOwner.body)).toBe(200);
     expect(byOwner.body).toMatchObject({ revision: 1, policy: { approval: { onActivate: true }, requiredEval: { requiredPassScore: 0.8 } } });
 
-    expect((await t.owner.call('PUT', t.policy, { approval: { onActivate: false } })).status).toBe(400);
-    expect((await t.owner.call('PUT', t.policy, { gate: true })).status).toBe(400);
+    const falseGate = await t.owner.call('PUT', t.policy, { approval: { onActivate: false } });
+    expect(falseGate.status).toBe(400);
+    expect(detailsOf(falseGate.body)).toMatchObject({ field: 'approval' });
+    const unknownKey = await t.owner.call('PUT', t.policy, { gate: true });
+    expect(unknownKey.status).toBe(400);
+    expect(detailsOf(unknownKey.body)).toMatchObject({ field: 'gate' });
 
     const reserved = await t.owner.call('PUT', '/host/openwop-app/agent-deployments/core.conformance.agents.scripted/policy', {});
     expect(reserved.status).toBe(403);
     expect(detailsOf(reserved.body)).toMatchObject({ reason: 'policy_fixed' });
     const reservedRead = await t.adminA.call('GET', '/host/openwop-app/agent-deployments/core.conformance.agents.scripted/policy');
-    expect(reservedRead.body).toMatchObject({ fixed: true, policy: { requiredEval: {} } });
+    // The refused PUT wrote nothing: no stored revision, the fixed floor unchanged.
+    expect(reservedRead.body).toEqual({ agentId: 'core.conformance.agents.scripted', fixed: true, revision: 0, policy: { requiredEval: {} } });
   });
 });
 
@@ -179,7 +203,7 @@ describe('D13 — a gated promote answers 202 and writes nothing until a second 
     expect(ok.status, JSON.stringify(ok.body)).toBe(200);
     const after = await versionOf(t);
     expect(after.state).toBe('active');
-    expect((after as { transitionRunId?: string }).transitionRunId).toBe(runId);
+    expect(after.transitionRunId).toBe(runId);
     expect((await runStatus(t.adminA, runId)).status).toBe('completed');
     const types = (await eventsOf(t.adminA, runId)).map((e) => e.type);
     expect(types.indexOf('interrupt.resolved')).toBeGreaterThan(-1);
@@ -191,7 +215,9 @@ describe('D13 — a gated promote answers 202 and writes nothing until a second 
     const t = await team();
     expect((await t.owner.call('PUT', t.policy, { approval: { onActivate: true } })).status).toBe(200);
     const { version } = await versionOf(t);
-    expect((await t.editor.call('POST', t.dep, { version, transition: 'pause' })).status, 'an editor cannot deploy').toBe(403);
+    const byEditorAsk = await t.editor.call('POST', t.dep, { version, transition: 'pause' });
+    expect(byEditorAsk.status, 'an editor cannot deploy').toBe(403);
+    expect(detailsOf(byEditorAsk.body)).toMatchObject({ requiredScope: 'packs:publish' });
 
     const { runId } = await gatedResume(t);
     const withdrawn = await decide(t.adminA, runId, 'reject');
@@ -203,7 +229,7 @@ describe('D13 — a gated promote answers 202 and writes nothing until a second 
 
     const second = await t.adminA.call('POST', t.dep, { version, transition: 'promote' });
     expect(second.status, 'the rejected approval no longer holds the version').toBe(202);
-    const byEditor = await decide(t.editor, second.body.transitionRunId as string, 'accept');
+    const byEditor = await decide(t.editor, second.body.transitionRunId ?? '', 'accept');
     expect(byEditor.status, JSON.stringify(byEditor.body)).toBe(200);
     expect((await versionOf(t)).state).toBe('active');
   });
@@ -237,7 +263,7 @@ describe('D13 — a gated promote answers 202 and writes nothing until a second 
     expect((await t.owner.call('PUT', t.policy, { approval: { onActivate: true } })).status).toBe(200);
     const { version, runId } = await gatedResume(t);
     const cancelled = await t.adminA.call('POST', `/runs/${runIdOf(runId)}/cancel`, {});
-    expect(cancelled.status, JSON.stringify(cancelled.body)).toBeLessThan(300);
+    expect(cancelled.status, JSON.stringify(cancelled.body)).toBe(200);
     expect((await runStatus(t.adminA, runId)).status).toBe('cancelled');
     expect((await versionOf(t)).state).toBe('paused');
     const again = await t.adminA.call('POST', t.dep, { version, transition: 'promote' });
@@ -272,9 +298,9 @@ describe('D13 — a gated promote answers 202 and writes nothing until a second 
     expect(down.status, JSON.stringify(down.body)).toBe(200);
     const up = await t.adminA.call('POST', t.dep, { version, transition: 'adjust-canary', canaryPercent: 90 });
     expect(up.status, JSON.stringify(up.body)).toBe(202);
-    expect((await versionOf(t) as { canaryPercent?: number }).canaryPercent).toBe(10);
-    expect((await decide(t.adminB, up.body.transitionRunId as string, 'accept')).status).toBe(200);
-    expect((await versionOf(t) as { canaryPercent?: number }).canaryPercent).toBe(90);
+    expect((await versionOf(t)).canaryPercent).toBe(10);
+    expect((await decide(t.adminB, up.body.transitionRunId ?? '', 'accept')).status).toBe(200);
+    expect((await versionOf(t)).canaryPercent).toBe(90);
   });
 
   it('an undecided approval expires as rejected after a week and frees the version (RFC 0093)', async () => {

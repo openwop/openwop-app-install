@@ -33,6 +33,9 @@ import { __resetAssistantStore, getPendingAction } from '../src/features/assista
 import { enqueueActionWithApproval, decideActionViaApproval, contentHashOf } from '../src/features/assistant/actionApproval.js';
 import { __hostExtStorage } from '../src/host/hostExtPersistence.js';
 
+/** ADR 1035 — these cases test selection, not a destination: a host-fixed egress. */
+const FIXED = { fixedEndpoint: 'test: selection only' } as const;
+
 let BASE: string;
 const TOKEN = 'dev-token';
 const TENANT = 'default';
@@ -405,9 +408,9 @@ describe('provider allowlist — one predicate, both seams', () => {
     // Seam 2 — the broker's resolve choke point (which the http egress seam
     // and the Slack adapter both flow through) withholds the EXISTING
     // servicenow connection: a policy added later still wins; fail closed.
-    expect(await resolveConnectionCredential({ tenantId: TENANT, provider: 'servicenow' })).toBeNull();
+    expect(await resolveConnectionCredential({ egress: FIXED,  tenantId: TENANT, provider: 'servicenow' })).toBeNull();
     await setGovernancePolicy(TENANT, { providerAllowlist: ['google', 'servicenow'] }, 'test-admin');
-    expect(await resolveConnectionCredential({ tenantId: TENANT, provider: 'servicenow' })).not.toBeNull();
+    expect(await resolveConnectionCredential({ egress: FIXED,  tenantId: TENANT, provider: 'servicenow' })).not.toBeNull();
 
     await __resetGovernanceStore();
   });

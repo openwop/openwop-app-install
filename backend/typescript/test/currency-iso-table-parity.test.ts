@@ -15,8 +15,10 @@
  *      same table, entry for entry.
  *
  * Sabotage: adding HUF to the zero list of the frontend copy reds case 2 (it is then
- * listed twice, which a Map would hide); restoring the `Intl` lookup in
- * `currencyExponent` reds case 1.
+ * listed twice, which a Map would hide); dropping a code from it reds case 2; a code
+ * listed twice in the backend table reds case 2; restoring the `Intl` lookup in
+ * `currencyExponent`, its upper-casing, or a literal 100 in `minorToMajor` or
+ * `quantizeMajor` reds case 1.
  */
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -53,6 +55,7 @@ describe('money exponents: one ISO 4217 table', () => {
     vi.spyOn(Intl.NumberFormat.prototype, 'resolvedOptions').mockReturnValue({ maximumFractionDigits: 0 } as Intl.ResolvedNumberFormatOptions);
     expect(currencyExponent('HUF')).toBe(2);
     expect(currencyExponent('huf')).toBe(2);
+    expect(currencyExponent('jpy')).toBe(0); // lower case too: 2 would also be the default
     expect(currencyExponent('IQD')).toBe(3);
     expect(currencyExponent('JPY')).toBe(0);
     expect(currencyExponent(undefined)).toBe(2);
@@ -72,7 +75,7 @@ describe('money exponents: one ISO 4217 table', () => {
     const fe = tableEntries(FRONTEND_TABLE);
     expect(fe.map(([c, e]) => `${c}=${e}`).sort()).toEqual([...ISO_4217_MINOR_UNITS.entries()].map(([c, e]) => `${c}=${e}`).sort());
     expect(new Set(fe.map(([c]) => c)).size, 'a code listed twice').toBe(fe.length);
-    expect(fe.length).toBeGreaterThan(150);
+    expect(fe.length).toBeGreaterThanOrEqual(161);
     // The backend Map hides a duplicate the same way; check its source lists too.
     const be = tableEntries(BACKEND_TABLE);
     expect(new Set(be.map(([c]) => c)).size, 'a backend code listed twice').toBe(be.length);

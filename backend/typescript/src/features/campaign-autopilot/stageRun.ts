@@ -20,7 +20,8 @@ import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { assertRunScopeOrg } from '../../host/accessControlService.js';
 import { hostExtStorage } from '../../host/hostExtPersistence.js';
 import { startWorkflowRun, type StartRunDeps } from '../../host/runStarter.js';
-import { OpenwopError } from '../../types.js';
+import { OpenwopError, type RunRecord } from '../../types.js';
+import { projectCampaignStageAi } from '../campaign-orchestration/launchAi.js';
 import { CAMPAIGN_RUN_TAG_KEY, readCampaignRunTag, stampCampaignRun } from '../campaign-orchestration/campaignRunTag.js';
 import { getCampaign } from '../campaign-orchestration/campaignService.js';
 import type { MarketingCampaign } from '../campaign-orchestration/types.js';
@@ -48,7 +49,7 @@ export function stageRunId(tenantId: string, autopilotRunId: string, stage: Auto
  * only from the run's stored tag; the person (acting user, else the member who
  * caused the run) must hold `need` on the campaign's client org.
  */
-export async function taggedCampaignOf(scope: BundleScope, need: 'workspace:read' | 'workspace:write'): Promise<{ campaign: MarketingCampaign; person: string; metadata: Record<string, unknown> }> {
+export async function taggedCampaignOf(scope: BundleScope, need: 'workspace:read' | 'workspace:write'): Promise<{ campaign: MarketingCampaign; person: string; metadata: Record<string, unknown>; sourceRun: RunRecord }> {
   const person = scope.actingUserId ?? scope.orgScopeSubject;
   if (!person) {
     throw new OpenwopError('forbidden_scope', 'The autopilot needs a person behind the run.', 403, { reason: 'no_acting_user' });
@@ -56,7 +57,7 @@ export async function taggedCampaignOf(scope: BundleScope, need: 'workspace:read
   const run = scope.runId ? await hostExtStorage().getRun(scope.runId) : null;
   const metadata = (run && run.tenantId === scope.tenantId ? run.metadata : undefined) as Record<string, unknown> | undefined;
   const tag = readCampaignRunTag(metadata);
-  if (!tag || !metadata) {
+  if (!run || run.tenantId !== scope.tenantId || !tag || !metadata) {
     throw new OpenwopError('forbidden_scope', 'This run is not a campaign run.', 403, { reason: 'not_campaign_run' });
   }
   const campaign = await getCampaign(scope.tenantId, tag.campaignId);
@@ -64,23 +65,34 @@ export async function taggedCampaignOf(scope: BundleScope, need: 'workspace:read
     throw new OpenwopError('not_found', 'Campaign not found.', 404, { campaignId: tag.campaignId });
   }
   await assertRunScopeOrg(scope, campaign.orgId, need);
-  return { campaign, person, metadata };
+  return { campaign, person, metadata, sourceRun: run };
 }
 
 /** Start (or resolve) the stage run for the calling autopilot run. */
 export async function startStageRun(scope: BundleScope, args: { stage: AutopilotStage; provider?: string; model?: string }): Promise<{ stage: AutopilotStage; runId: string; workflowId: string }> {
   if (!starterDeps) throw new OpenwopError('internal_error', 'The autopilot stage starter is not wired.', 500, {});
   if (!scope.runId) throw new OpenwopError('forbidden_scope', 'A stage can only be started from an autopilot run.', 403, { reason: 'not_campaign_run' });
-  const { campaign, metadata } = await taggedCampaignOf(scope, 'workspace:write');
+  const { campaign, metadata, sourceRun } = await taggedCampaignOf(scope, 'workspace:write');
   if (!campaign.briefId) throw new OpenwopError('validation_error', 'This campaign has no brief.', 422, { reason: 'brief_missing' });
   const workflowId = AUTOPILOT_STAGES[args.stage];
+  const id = stageRunId(scope.tenantId, scope.runId, args.stage);
+  const existing = await starterDeps.storage.getRun(id);
+  if (existing) {
+    if (existing.tenantId !== scope.tenantId || existing.workflowId !== workflowId) {
+      throw new OpenwopError('conflict', 'A deterministic workflow run id is already bound to different work.', 409, { runId: id });
+    }
+    return { stage: args.stage, runId: existing.runId, workflowId };
+  }
+  const ai = projectCampaignStageAi(sourceRun, args);
   const runId = await startWorkflowRun(starterDeps, {
     tenantId: scope.tenantId,
     workflowId,
     inheritFromRunId: scope.runId,
-    runId: stageRunId(scope.tenantId, scope.runId, args.stage),
-    inputs: { briefId: campaign.briefId, ...(args.provider ? { provider: args.provider } : {}), ...(args.model ? { model: args.model } : {}) },
+    runId: id,
+    configurable: ai.configurable,
+    inputs: { briefId: campaign.briefId, ...ai.inputs },
     metadata: {
+      ...ai.metadata,
       ...(scope.actingUserId ? { actingUserId: scope.actingUserId } : {}),
       // The campaign's ONE tag writer, role `stage`, at the goal version the
       // autopilot run was tagged with (the contributor freezes that goal or none).

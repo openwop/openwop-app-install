@@ -147,6 +147,10 @@ export function memoryExtractionBudgetMs(): number {
  *  conversation record, the canonical person and the grant) before `skipped:'no-consent'`, so the
  *  LLM wait is paid only by people who asked for the feature. */
 export async function maybeExtractMemoryOnClose(run: RunRecord, turns: readonly ConversationTurn[]): Promise<void> {
+  // ADR 1042 (review N2) — a channel-ingress conversation's "user" turns are other
+  // people's words (fenced channel messages), never the owner's own: no memory is
+  // extracted from them, whatever the owner's consent.
+  if (run.metadata?.['channelIngress'] !== undefined) return;
   // ADR 0982 D3 — only the person's OWN turns are extraction input. Agent turns echo tool results,
   // MCP content, fetched pages and mock output; before this they were sent too, unfenced.
   const userTurns = turns.filter((t) => t.role === 'user').map((t) => asText(t.content));

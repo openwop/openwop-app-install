@@ -7,8 +7,8 @@
  *   - a failed read is said, with a retry, never shown as an empty memory;
  *   - only an agency admin is offered the erase, which needs the client's name.
  *
- * Break it by rendering the failed state as the empty lists (third case), or by
- * showing the erase button without `agencyAdmin` (fourth case).
+ * Break it by rendering the failed state as the empty lists (the failed-read
+ * case), or by showing the erase button without `agencyAdmin` (the admin case).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
@@ -22,6 +22,12 @@ const h = vi.hoisted(() => ({
 vi.mock('../campaignOpsClient.js', async (orig) => ({ ...(await orig<Record<string, unknown>>()), ...h }));
 
 import { ClientMemoryPanel } from '../ClientMemoryPanel.js';
+import type { ClientMemorySources, ClientNote, ClientNoteProposal, ClientRecallEntry } from '../campaignOpsClient.js';
+
+const NOTE: ClientNote = { id: 'n1', content: 'Never mention Rival', contentTrust: 'trusted', createdAt: '' };
+const PROPOSAL: ClientNoteProposal = { proposalId: 'p1', content: 'Launches on Tuesdays', rationale: 'Seen in three briefs', status: 'pending', createdAt: '' };
+const RECALL: ClientRecallEntry = { id: 'm1', content: 'Drafted the hero line', contentTrust: 'untrusted', createdAt: '', expiresAt: '2027-04-18T00:00:00.000Z' };
+const SOURCES: ClientMemorySources = { collectionIds: [], available: [{ collectionId: 'k1', name: 'Brand book' }] };
 
 const renderPanel = (agencyAdmin = false) => render(
   <MemoryRouter><ClientMemoryPanel orgId="o1" clientName="Acme" agencyAdmin={agencyAdmin} onStatus={() => {}} /></MemoryRouter>,
@@ -29,10 +35,10 @@ const renderPanel = (agencyAdmin = false) => render(
 
 beforeEach(() => {
   for (const f of Object.values(h)) f.mockReset();
-  h.listClientNotes.mockResolvedValue([{ id: 'n1', content: 'Never mention Rival', contentTrust: 'trusted', createdAt: '' }]);
-  h.listClientNoteProposals.mockResolvedValue([{ proposalId: 'p1', content: 'Launches on Tuesdays', rationale: 'Seen in three briefs', status: 'pending', createdAt: '' }]);
-  h.listClientRecall.mockResolvedValue([{ id: 'm1', content: 'Drafted the hero line', contentTrust: 'untrusted', createdAt: '', expiresAt: '2027-04-18T00:00:00.000Z' }]);
-  h.getClientMemorySources.mockResolvedValue({ collectionIds: [], available: [{ collectionId: 'k1', name: 'Brand book' }] });
+  h.listClientNotes.mockResolvedValue([NOTE]);
+  h.listClientNoteProposals.mockResolvedValue([PROPOSAL]);
+  h.listClientRecall.mockResolvedValue([RECALL]);
+  h.getClientMemorySources.mockResolvedValue(SOURCES);
   h.decideClientNoteProposal.mockResolvedValue(undefined);
 });
 afterEach(cleanup);
@@ -64,6 +70,10 @@ describe('ClientMemoryPanel', () => {
     await screen.findByText('Purged note');
     fireEvent.click(screen.getByRole('button', { name: t('campaign-ops:memoryErase') }));
     const dialog = screen.getByRole('dialog');
+    // The erase needs the client's exact name.
+    fireEvent.change(within(dialog).getByRole('textbox'), { target: { value: 'Acm' } });
+    expect((within(dialog).getByRole('button', { name: t('campaign-ops:memoryErase') }) as HTMLButtonElement).disabled).toBe(true);
+    expect(h.purgeClientMemory).not.toHaveBeenCalled();
     fireEvent.change(within(dialog).getByRole('textbox'), { target: { value: 'Acme' } });
     fireEvent.click(within(dialog).getByRole('button', { name: t('campaign-ops:memoryErase') }));
     await screen.findAllByText(t('campaign-ops:memoryErasePartial'));
@@ -92,7 +102,9 @@ describe('ClientMemoryPanel', () => {
     renderPanel();
     expect(await screen.findByText('Couldn’t load the client memory')).toBeTruthy();
     expect(screen.queryByText(/No notes yet/)).toBeNull();
-    expect(screen.getByRole('button', { name: 'Try again' })).toBeTruthy();
+    h.listClientNotes.mockResolvedValue([NOTE]);
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText('Never mention Rival')).toBeTruthy();
   });
 
   it('only an agency admin is offered the erase', async () => {

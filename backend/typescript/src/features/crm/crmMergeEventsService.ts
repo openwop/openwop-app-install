@@ -8,6 +8,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
+import { createLogger } from '../../observability/logger.js';
 import type { ContactIdentifier } from './contactIdentityService.js';
 import type { ContactRefIds } from './entities/activities.js';
 
@@ -29,26 +30,42 @@ export interface MergeEvent {
   unmergedAt?: string;
 }
 
+const log = createLogger('features.crm.merge-events');
+
 const store = new DurableCollection<MergeEvent>('crm:merge-event', (e) => e.mergeEventId, undefined, (e) => e.tenantId);
 
 export async function recordMergeEvent(input: {
   tenantId: string; survivorId: string; sourceId: string;
   filledFields: Record<string, string>; absorbedIdentifiers: ContactIdentifier[]; refIds: ContactRefIds; actor: string;
 }): Promise<void> {
-  try {
-    await store.put({
-      mergeEventId: `merge:${randomUUID()}`,
-      tenantId: input.tenantId,
-      survivorId: input.survivorId,
-      sourceId: input.sourceId,
-      filledFields: input.filledFields,
-      absorbedIdentifiers: input.absorbedIdentifiers,
-      refIds: input.refIds,
-      actor: input.actor,
-      mergedAt: new Date().toISOString(),
-    });
-  } catch {
-    /* best-effort — the merge already committed; a lost audit row must not fail it */
+  const row: MergeEvent = {
+    mergeEventId: `merge:${randomUUID()}`,
+    tenantId: input.tenantId,
+    survivorId: input.survivorId,
+    sourceId: input.sourceId,
+    filledFields: input.filledFields,
+    absorbedIdentifiers: input.absorbedIdentifiers,
+    refIds: input.refIds,
+    actor: input.actor,
+    mergedAt: new Date().toISOString(),
+  };
+  // Still best-effort — the merge already committed, and a lost audit row must not
+  // fail it. But no longer SILENT (ADR 1024 D5.6, `CDP2WF-14`): this row is what an
+  // unmerge replays and what the erasure walk follows from a survivor to its merged-
+  // away contacts, so losing it made a merge irreversible AND partly unerasable with
+  // nothing in any log. One retry, then an error a person can find.
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      await store.put(row);
+      return;
+    } catch (err) {
+      if (attempt === 2) {
+        log.error('crm_merge_event_lost', {
+          tenantId: input.tenantId, survivorId: input.survivorId, sourceId: input.sourceId, mergeEventId: row.mergeEventId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
   }
 }
 

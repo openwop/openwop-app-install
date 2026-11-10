@@ -25,7 +25,7 @@
  *     the worker text is unchanged.
  */
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
@@ -205,6 +205,16 @@ export function findOfflineDeclarationFiles(registrySource, registryPath) {
     if (dir === registryDir) continue; // a file-based feature has no directory of its own
     const file = join(dir, 'offline.ts');
     if (existsSync(file)) out.push({ id: kebab(m[1]), dir, file });
+  }
+  // ADR 1031 — an adopter's features (`src/adopter/features/<id>/routes.tsx`, composed
+  // by glob, never excludable) declare offline the same way; the directory is the id.
+  const adopterRoot = resolve(registryDir, '..', 'adopter', 'features');
+  if (existsSync(adopterRoot)) {
+    for (const e of readdirSync(adopterRoot, { withFileTypes: true }).filter((x) => x.isDirectory()).sort((a, b) => a.name.localeCompare(b.name))) {
+      const dir = join(adopterRoot, e.name);
+      const file = join(dir, 'offline.ts');
+      if (existsSync(join(dir, 'routes.tsx')) && existsSync(file)) out.push({ id: e.name, dir, file });
+    }
   }
   return out;
 }

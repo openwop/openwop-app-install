@@ -131,7 +131,7 @@ describe('chain nodes author no key their node type does not declare', () => {
     // 253), so a slack threshold is a guard that has already stopped guarding.
     // Re-measured 2026-10-29 (w67): 914 nodes / 557 closed-world checks — the old
     // 500 / 300 floors had drifted to roughly half of reality.
-    expect(nodesChecked, 'no chain nodes scanned').toBeGreaterThan(911);   // real: 914
+    expect(nodesChecked, 'no chain nodes scanned').toBeGreaterThan(860);   // real: 914; 873 after the KickTodo packs left (ADR 1031 P3)
     expect(closedWorldChecks, 'no node type closes its world — nothing was actually checked').toBeGreaterThan(553); // real: 557
   });
 

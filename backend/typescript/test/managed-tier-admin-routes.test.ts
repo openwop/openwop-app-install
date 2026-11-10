@@ -9,12 +9,20 @@
  * to the env default; no response carries a key.
  *
  * Sabotage-witnessed: with the key check removed from `saveConfig`, the 409 case
- * goes red (the save lands and the free tier reports not ready).
+ * goes red (the save lands and the free tier reports not ready). Re-witnessed in
+ * grade-tests wave 78, plus: `requireSuperadmin` dropped from each verb reds the
+ * non-superadmin case; the provider, model and cap checks each red the 422 case (each
+ * body is refused by its OWN field); the test-message cooldown dropped reds the last case.
+ *
+ * The non-superadmin case uses a SIGNED-IN, non-superadmin user (a test/login cookie),
+ * as well as an anonymous caller: an authz claim needs an authenticated caller who
+ * lacks the right, and the refusal is read by its message, not only its status.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
+import { getSetCookies } from './headerCookies.js';
 
 interface View {
   config: { provider: string; model: string; dailyTokenCap: number | null } | null;
@@ -31,7 +39,9 @@ describe('managed-tier settings routes (ADR 0990)', () => {
   const saved: Record<string, string | undefined> = {};
 
   beforeAll(async () => {
-    for (const k of ['MINIMAX_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GOOGLE_API_KEY', 'OPENWOP_MANAGED_PROVIDER']) saved[k] = process.env[k];
+    for (const k of ['MINIMAX_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GOOGLE_API_KEY', 'OPENWOP_MANAGED_PROVIDER', 'OPENWOP_TEST_AUTH_ENABLED', 'OPENWOP_SESSION_SECRET']) saved[k] = process.env[k];
+    process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
+    process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
     process.env.MINIMAX_API_KEY = 'sk-minimax-route-test';
     process.env.OPENAI_API_KEY = 'sk-openai-route-test';
@@ -52,12 +62,26 @@ describe('managed-tier settings routes (ADR 0990)', () => {
   });
 
   it('refuses a non-superadmin on every verb', async () => {
-    const json = { 'content-type': 'application/json' };
+    const login = await fetch(`${BASE}/host/openwop-app/test/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: `mtr-member-${Date.now()}@acme.test` }),
+    });
+    expect(login.status, await login.clone().text()).toBe(201);
+    const cookie = getSetCookies(login.headers).map((c) => /(__session=[^;]+)/.exec(c)?.[1]).find(Boolean);
+    expect(cookie, 'a session cookie').toBeTruthy();
     const body = JSON.stringify({ provider: 'openai', model: 'gpt-5.6-terra' });
-    expect((await fetch(`${BASE}${PATH}`)).status).toBe(403);
-    expect((await fetch(`${BASE}${PATH}`, { method: 'PUT', headers: json, body })).status).toBe(403);
-    expect((await fetch(`${BASE}${PATH}`, { method: 'DELETE' })).status).toBe(403);
-    expect((await fetch(`${BASE}${PATH}/test`, { method: 'POST', headers: json, body })).status).toBe(403);
+    for (const auth of [null, cookie!]) {
+      const json: Record<string, string> = { 'content-type': 'application/json', ...(auth ? { cookie: auth } : {}) };
+      for (const [method, path] of [['GET', PATH], ['PUT', PATH], ['DELETE', PATH], ['POST', `${PATH}/test`]] as const) {
+        const res = await fetch(`${BASE}${path}`, { method, headers: json, ...(method === 'PUT' || method === 'POST' ? { body } : {}) });
+        const label = `${method} ${auth ? 'signed-in member' : 'anonymous'}`;
+        expect(res.status, label).toBe(403);
+        expect(((await res.json()) as { message?: string }).message, label).toContain('requires a superadmin principal');
+      }
+    }
+    // Nothing the refused calls sent took effect.
+    const view = (await (await fetch(`${BASE}${PATH}`, { headers: admin })).json()) as View;
+    expect(view.config).toBeNull();
   });
 
   it('GET reports the env default and which providers have a key, never a key', async () => {
@@ -82,9 +106,14 @@ describe('managed-tier settings routes (ADR 0990)', () => {
   });
 
   it('refuses an unsupported provider or a malformed model (422)', async () => {
-    for (const body of [{ provider: 'mistral', model: 'm' }, { provider: 'openai', model: 'has spaces' }, { provider: 'openai', model: 'gpt-5.6-terra', dailyTokenCap: -1 }]) {
+    for (const [body, field] of [
+      [{ provider: 'mistral', model: 'm' }, 'provider'],
+      [{ provider: 'openai', model: 'has spaces' }, 'model'],
+      [{ provider: 'openai', model: 'gpt-5.6-terra', dailyTokenCap: -1 }, 'dailyTokenCap'],
+    ] as const) {
       const res = await fetch(`${BASE}${PATH}`, { method: 'PUT', headers: admin, body: JSON.stringify(body) });
       expect(res.status, JSON.stringify(body)).toBe(422);
+      expect(await res.json(), JSON.stringify(body)).toMatchObject({ error: 'validation_error', details: { field } });
     }
   });
 

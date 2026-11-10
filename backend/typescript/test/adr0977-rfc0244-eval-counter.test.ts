@@ -15,7 +15,16 @@
  *       tools carry no `outcome`.
  *   E2E the suite's live → miss → live sequence: the three G2 legs, host side.
  *
- * Red when (each sabotage-witnessed): see the ADR 0977 P1 record.
+ * Red when (each sabotage-witnessed): the key drops the owner or the tenant; a bad
+ * key or a `::` tenant is accepted; a lost CAS reports success; the `allowLive`
+ * predicate or the `onMiss` check is ignored; the run's door admits a tool other
+ * than the counter; a fail-closed miss stops failing the trial, or a live miss starts
+ * to; a served entry loses its `outcome`; a live call is not counted.
+ *
+ * NOT covered here: the `counterDoor` half of the door (`suiteSource === 'fixture'`).
+ * This boot cannot reach it: a tenant suite naming the scripted agent gets no agent
+ * under the opt-in (`scriptedEvalAgentFor`). It matters under the conformance posture,
+ * which this file does not boot. Tracker row TST-EBB-GAP.
  */
 import { vi } from 'vitest';
 
@@ -28,7 +37,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/index.js';
-import { CONFORMANCE_SUITE_PREFIX, SCRIPTED_AGENT_ID, listFixtureSuiteIds } from '../src/host/evals/fixtureSuites.js';
+import { CONFORMANCE_SUITE_PREFIX, SCRIPTED_AGENT_ID, listFixtureSuiteIds, registerFixtureSuite, resolveFixtureSuite } from '../src/host/evals/fixtureSuites.js';
 import { fixtureInterceptor } from '../src/host/evals/agentEvalRun.js';
 import { COUNTER_TOOL, counterOwnerHash, runCounter } from '../src/host/evals/evalCounter.js';
 import { DurableCollection } from '../src/host/hostExtPersistence.js';
@@ -46,7 +55,7 @@ beforeAll(async () => {
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   server = await new Promise<Server>((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-}, 60_000);
+}, 120_000);
 afterAll(async () => {
   delete process.env.OPENWOP_ENABLE_CONFORMANCE_NODES;
   delete process.env.OPENWOP_CONFORMANCE_EVAL_FIXTURES;
@@ -178,6 +187,21 @@ describe('ADR 0977 E2E — the G2 sequence live → miss → live, host side', (
     // miss-no-live-call: the counter persisted across runs, and neither miss moved F or S.
     expect(cl1).toBe(l2 + 1);
     expect([cF, cS]).toEqual([fA, sA]);
+  });
+
+  it('D2 through a run: under onMiss "live" a tool that is not the counter still fails closed', async () => {
+    // The unit cases above hand the interceptor their own `allowLive`; this one reaches
+    // the predicate `runScriptedTrial` passes. No vendored fixture mixes the two.
+    const live = resolveFixtureSuite(`${CONFORMANCE_SUITE_PREFIX}conformance-eval-counter-live`);
+    const liveTask = live?.tasks[0];
+    if (!live || !liveTask) throw new Error('the vendored counter fixture is not loaded');
+    registerFixtureSuite('adr0977-door-other-tool', {
+      ...live,
+      tasks: [{ ...liveTask, input: { script: [{ tool: 'conformance.eval:lookup', arguments: {} }], output: (liveTask.input as { output?: unknown }).output } }],
+    });
+    const { task: t } = await runFixture('adr0977-door-other-tool');
+    expect(t['fixtureMissCount']).toBe(1);
+    expect(t['passed'], JSON.stringify(t)).toBe(false);
   });
 
   it('D3 regression: conformance-eval-fixture-miss is unchanged (fail-closed miss fails the task)', async () => {

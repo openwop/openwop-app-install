@@ -33,11 +33,11 @@ export const messages = {
 
   submitActivate: 'Enviar para ativar',
   submitArchive: 'Enviar para arquivar',
-  liveNotice: 'Este modelo está ativo — ele determina a visibilidade dos registros do CRM e a previsão. Clone um modelo de planejamento para fazer mudanças.',
+  liveNotice: 'Este modelo está ativo — ele determina a visibilidade dos registros do CRM e a previsão. Para fazer mudanças, crie um novo modelo de planejamento.',
   confirmActivateTitle: 'Enviar este modelo para entrar em produção?',
   submitActivateBody: 'É uma mudança para todo o espaço de trabalho, então primeiro vai para a caixa de Revisões. Quando um responsável aprovar lá, este modelo entra em produção — determinando a visibilidade dos registros do CRM e a previsão, substituindo o modelo ativo atual.',
   confirmArchiveTitle: 'Enviar este modelo para arquivar?',
-  submitArchiveBody: 'É uma mudança para todo o espaço de trabalho, então primeiro vai para a caixa de Revisões. Quando um responsável aprovar lá, o modelo vira histórico somente leitura e não pode ser reativado (clone-o em um novo modelo de planejamento).',
+  submitArchiveBody: 'É uma mudança para todo o espaço de trabalho, então primeiro vai para a caixa de Revisões. Quando um responsável aprovar lá, o modelo vira histórico somente leitura e não pode ser reativado (crie um novo modelo de planejamento).',
   confirmDeleteTitle: 'Excluir este modelo arquivado?',
   confirmDeleteBody: 'Isto remove permanentemente o modelo e TODOS os seus territórios, regras de atribuição e cotas. Não pode ser desfeito. (Apenas modelos arquivados podem ser excluídos.)',
 
@@ -176,4 +176,5 @@ export const messages = {
   field_stage: "Etapa do ciclo de vida",
   field_company: "Nome da empresa",
   field_score: "Pontuação do lead",
+  managerOnlyLifecycle: 'Só um gestor de territórios pode ativar ou arquivar modelos.',
 } as const;

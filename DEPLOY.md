@@ -1015,6 +1015,53 @@ gcloud run services update openwop-app-backend \
 `stream_base_ignored` warning and nothing is advertised. Merge-style
 (`--update-env-vars`), never `--set-*`.
 
+### Optional: MCP and A2A servers — ADR 1045
+
+Both servers are **off by default** in code. On `app.openwop.dev` both are ON
+(measured 2026-11-03: `OPENWOP_A2A_SERVER_ENABLED`, `OPENWOP_A2A_DURABLE_TASKS` and
+`OPENWOP_MCP_SERVER_ENABLED` are set on the service, not in `deploy.env`, so read
+the live service, not this file). Changing either flag is the operator's decision
+(ADR 1041), not part of any deploy. The auth review (every
+method's auth, tenant source, authorization predicate, rate limit and audit) is
+the D6 table in `docs/adr/1045-mcp-a2a-server-hardening.md`. Both servers
+refuse unauthenticated and anonymous callers unless `anonymousActor` is
+advertised (`OPENWOP_ANON_ACTOR_ENABLED`), and bind the tenant from the
+authenticated principal.
+
+| Server | Flag | What it turns on |
+|---|---|---|
+| MCP | `OPENWOP_MCP_SERVER_ENABLED=true` | `POST /host/openwop-app/mcp` and the `host.mcp` advertisement |
+| MCP | `OPENWOP_MCP_PUBLIC_URL=<https direct service URL>` (optional) | the endpoint the "AI clients" page tells users to paste; without it the URL is derived from the request |
+| MCP | `OPENWOP_MCP_PRINCIPAL_REQS_PER_MIN` (default 60, `0` off) | per-principal budget on run-starting MCP methods |
+| A2A | `OPENWOP_A2A_SERVER_ENABLED=true` | `POST /host/openwop-app/a2a` and `/.well-known/agent-card.json` (the client and the `host.a2a` advertisement are always on) |
+| A2A | `OPENWOP_A2A_DURABLE_TASKS=true` (optional) | durable tasks (RFC 0100) **and** the `pushNotifications` card claim |
+| A2A | `OPENWOP_A2A_STREAMING=true` (optional) | the `streaming` card claim and the streaming methods |
+| A2A | `OPENWOP_A2A_WORKFLOW_ID` (optional, default `openwop-app.approval-gate`) | the one workflow an A2A 1.0 `SendMessage` starts |
+| A2A | `OPENWOP_A2A_PRINCIPAL_REQS_PER_MIN` (default 60, `0` off) | per-principal budget on `message/send` / `SendMessage` / `SendStreamingMessage` |
+
+`OPENWOP_A2A_DURABLE_TASKS` is on in production while push does not yet meet
+RFC 0214 (the delivered push carries no destination credential and does not
+refuse a redirect). That is an open item in ADR 1045. Do not turn it on for a new
+deployment until it closes.
+
+Set flags with `scripts/update-env.sh KEY=VALUE` (it verifies the new revision
+and shifts traffic to it by name), never a bare `gcloud run services update`.
+After the new revision serves:
+
+```
+scripts/verify-deploy.sh                                  # the commit stamp, both halves
+node scripts/check-wire-claims.mjs https://app.openwop.dev   # A2A advertised ⇒ the card is served, 1.0 shape, header-less = 0.3
+curl -sS -o /dev/null -w '%{http_code}\n' -X POST https://app.openwop.dev/api/host/openwop-app/mcp \
+  -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"ping"}'   # MUST be 401 (no credential)
+curl -sS -o /dev/null -w '%{http_code}\n' -X POST https://app.openwop.dev/api/host/openwop-app/a2a \
+  -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"agent/getCard"}'  # MUST be 401
+```
+
+`check-wire-claims.mjs` takes a base URL and fetches the live document; it has
+no offline mode. Then run a certify cut against the target so the
+`mcp-current-auth-boundary` and A2A tenant legs are measured on the deployed
+service, not on a checkout.
+
 ### Optional: media → text for RAG (OCR + transcription) — ADR 0108/0110/0111
 
 KB ingest can turn **images** (OCR) and **audio** (transcription) into searchable RAG text —
@@ -1404,7 +1451,7 @@ rules covering the same path will lose one):
 
 ```json
 {
-  "source": "**/!(*.@(js|css|svg|png|jpg|jpeg|webp|avif|ico|woff|woff2|map))",
+  "source": "**/!(*.@(js|css|svg|png|jpg|jpeg|webp|avif|ico|woff|woff2|map|mp4|webm|vtt|m4a|mp3))",
   "headers": [
     { "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" },
     { "key": "Cross-Origin-Opener-Policy", "value": "same-origin-allow-popups" }
@@ -1414,6 +1461,13 @@ rules covering the same path will lose one):
 
 Without the no-cache directive, Firebase Hosting caches `index.html` for ~1
 hour, so newly-deployed bundles aren't picked up until the cache expires.
+
+Keep media (`mp4|webm|vtt|m4a|mp3`) OUT of that rule. Files served `no-store`
+ignore `Range` (200, no `Content-Range`), so a video can't seek: the scrubber
+snaps back (measured on myndhyve.ai, 2026-11-03). Media gets its own rule,
+`**/*.@(mp4|webm|vtt|m4a|mp3)` with `Cache-Control: public, max-age=3600` and
+`nosniff`; no `immutable`, since media is replaced in place under the same name.
+`frontend/react/src/__tests__/hosting-media-range.test.ts` holds this.
 
 ### 16. Smoke the Phase 3 surface
 
@@ -1925,6 +1979,12 @@ call time (no rebuild), all merge-updatable via `--update-env-vars`:
   `notCounted` and not run. The cache and ledger hygiene (idempotency TTL,
   kv age-out, webhook secret retirement) keeps running, as it does with the
   sweep off. Read the counts, then unset it and set the real knobs.
+- `OPENWOP_RELAY_DELIVERY_LOG_RETENTION_DAYS` (default `7`; unset, `0` or
+  invalid reads as `7`) — ADR 1043 RELAY-LOG-RETENTION-1. Rows of
+  `messaging_delivery_log` (each names the contact a relay or connector talked
+  to) older than this are deleted on the retention daemon's default-on half,
+  hourly, skipping tenants under legal hold. Not affected by
+  `OPENWOP_RETENTION_SWEEP_ENABLED`; held back by the dry run.
 - `OPENWOP_WEBHOOK_SECRET_ROTATION_OVERLAP_S` (default `86400`, valid
   `60`–`604800`; anything else falls back to the default) and
   `OPENWOP_WEBHOOK_VERIFY_PER_TENANT_PER_MIN` (default `10`, per instance) —

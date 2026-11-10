@@ -29,16 +29,23 @@
  *  After the security review (same day), also each red:
  *  - drop separation of duties from `agencyStandInRefusal` → the proposer sends;
  *  - drop the sender re-check at the decision → a demoted sender's link approves;
- *  - drop `SYSTEM_MINT_ONLY` → a member mints an approval link on the sharing route;
+ *  - drop `SYSTEM_MINT_ONLY` → a member mints an approval link on the sharing route
+ *    (corrected in wave 76: since ADR 0958 P1 a link is `<changeSet>:<grantId>`, so
+ *    the case must present a real grant id; an approver id is refused by `validate`
+ *    with the same 404 whether or not this guard exists);
  *  - make `writerOf` return `decidedBy` → the client-approved job has no writer.
  *  The approver-active sabotage stayed GREEN until the per-use case was added:
  *  revoking also deletes the links, so only a revoked record with a surviving
  *  link witnesses the per-use check.
+ *
+ * Each case owns its client org (`freshClient`), so "revoke Bob" and "Ann is the
+ * last approver" hold in any order. Portal-off is a double guard: `liveContext`'s
+ * `portalEnabled` and `resolveActiveLink`'s owning-feature gate both refuse.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { randomBytes } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
@@ -50,6 +57,8 @@ import { createClient, updateClient } from '../src/features/campaign-ops/clientS
 import { addAsset } from '../src/features/campaign-ops/assetService.js';
 import { createRequest, recordInterpretation } from '../src/features/campaign-ops/requestService.js';
 import { proposeChangeSet } from '../src/features/campaign-ops/changeSetService.js';
+import { approvalResourceIdOf, approvalShareValidate, CHANGE_SET_GRANT_KIND } from '../src/features/campaign-ops/portal.js';
+import { listGrants } from '../src/host/externalCollaborators.js';
 import { getApproval } from '../src/host/approvalService.js';
 import { hostExtStorage } from '../src/host/hostExtPersistence.js';
 import type { Job } from '../src/features/campaign-ops/execution.js';
@@ -129,51 +138,71 @@ async function settledJob(approvalId: string): Promise<Job> {
 let ann: ClientApprover;
 let bob: ClientApprover;
 
+/** One client org per case: its own members, approvers and policy. `approvers:false`
+ *  is the fresh client case 1 sets up by hand. */
+async function freshClient(opts: { approvers?: boolean } = {}): Promise<void> {
+  orgA = (await createOrg({ tenantId: TENANT, createdBy: 'seed', name: 'Client A (synthetic)' })).orgId;
+  for (const [subject, clientRole] of [[editorId, 'editor'], [adminId, 'admin'], [admin2Id, 'admin']] as const) {
+    await createMember({ tenantId: TENANT, orgId: orgA, subject, displayName: subject, roles: [clientRole] });
+  }
+  await createClient({ tenantId: TENANT, orgId: orgA, name: 'Client A (synthetic)', createdBy: 'seed' });
+  await updateClient(TENANT, orgA, { mode: 'live' });
+  if (opts.approvers === false) return;
+  const add = async (email: string, displayName: string): Promise<ClientApprover> => {
+    const a = await call<{ approver: ClientApprover }>(adminCookie, 'POST', ops('/approvers'), { email, displayName });
+    expect(a.status, a.raw).toBe(201);
+    return a.body.approver;
+  };
+  ann = await add('ann@client.test', 'Ann');
+  bob = await add('bob@client.test', 'Bob');
+  const p = await call(adminCookie, 'PATCH', ops(''), { approvalPolicy: 'client' });
+  expect(p.status, p.raw).toBe(200);
+}
+
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-  for (const id of ['cms', 'campaign-ops']) await toggle(id, 'on');
+  for (const id of ['cms', 'campaign-ops', 'campaign-ops-client-portal']) await toggle(id, 'on');
   TENANT = (await createWorkspace({ name: 'Northwind Agency', ownerSubject: 'oidc:portal-owner' })).tenantId;
   editorId = (await upsertFromPrincipal({ tenantId: TENANT, principalId: 'oidc:portal-editor', source: 'oidc' })).userId;
   adminId = (await upsertFromPrincipal({ tenantId: TENANT, principalId: 'oidc:portal-admin', source: 'oidc' })).userId;
   admin2Id = (await upsertFromPrincipal({ tenantId: TENANT, principalId: 'oidc:portal-admin2', source: 'oidc' })).userId;
-  orgA = (await createOrg({ tenantId: TENANT, createdBy: 'seed', name: 'Client A (synthetic)' })).orgId;
-  for (const [subject, clientRole] of [[editorId, 'editor'], [adminId, 'admin'], [admin2Id, 'admin']] as const) {
+  for (const subject of [editorId, adminId, admin2Id]) {
     await createMember({ tenantId: TENANT, orgId: TENANT, subject, displayName: subject, roles: ['viewer'] });
-    await createMember({ tenantId: TENANT, orgId: orgA, subject, displayName: subject, roles: [clientRole] });
   }
-  await createClient({ tenantId: TENANT, orgId: orgA, name: 'Client A (synthetic)', createdBy: 'seed' });
-  await updateClient(TENANT, orgA, { mode: 'live' });
   editorCookie = cookieFor(editorId, 'ws:home-portal-ed');
   adminCookie = cookieFor(adminId, 'ws:home-portal-ad');
   admin2Cookie = cookieFor(admin2Id, 'ws:home-portal-ad2');
-});
+}, 120_000);
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 describe('ADR 0924 D4/D5 — setting up client approval', () => {
   it('needs the portal on, then an active approver, before the client policy is allowed', async () => {
+    await freshClient({ approvers: false });
     await toggle('campaign-ops-client-portal', 'off');
-    expect((await call(adminCookie, 'POST', ops('/approvers'), { email: 'ann@client.test', displayName: 'Ann' })).body).toMatchObject({ details: { reason: 'portal_off' } });
-    expect((await call(adminCookie, 'PATCH', ops(''), { approvalPolicy: 'client' })).body).toMatchObject({ details: { reason: 'portal_off' } });
-    await toggle('campaign-ops-client-portal', 'on');
+    try {
+      expect((await call(adminCookie, 'POST', ops('/approvers'), { email: 'ann@client.test', displayName: 'Ann' })).body).toMatchObject({ details: { reason: 'portal_off' } });
+      expect((await call(adminCookie, 'PATCH', ops(''), { approvalPolicy: 'client' })).body).toMatchObject({ details: { reason: 'portal_off' } });
+    } finally {
+      await toggle('campaign-ops-client-portal', 'on');
+    }
     expect((await call(adminCookie, 'PATCH', ops(''), { approvalPolicy: 'client' })).body).toMatchObject({ details: { reason: 'no_client_approver' } });
     // Adding an approver is an admin act on the client.
     expect((await call(editorCookie, 'POST', ops('/approvers'), { email: 'ann@client.test', displayName: 'Ann' })).status).toBe(403);
     const a = await call<{ approver: ClientApprover }>(adminCookie, 'POST', ops('/approvers'), { email: 'Ann@Client.test', displayName: 'Ann' });
     expect(a.status, a.raw).toBe(201);
-    ann = a.body.approver;
-    expect(ann).toMatchObject({ kind: 'client-stakeholder', email: 'ann@client.test', status: 'active', mode: 'link-only' });
+    expect(a.body.approver).toMatchObject({ kind: 'client-stakeholder', email: 'ann@client.test', status: 'active', mode: 'link-only' });
     expect((await call(adminCookie, 'POST', ops('/approvers'), { email: 'ann@client.test', displayName: 'Ann again' })).status).toBe(409);
-    bob = (await call<{ approver: ClientApprover }>(adminCookie, 'POST', ops('/approvers'), { email: 'bob@client.test', displayName: 'Bob' })).body.approver;
     const p = await call<{ client: { approvalPolicy: string } }>(adminCookie, 'PATCH', ops(''), { approvalPolicy: 'client' });
     expect(p.status, p.raw).toBe(200);
     expect(p.body.client.approvalPolicy).toBe('client');
   });
 
   it('under the client policy an agency member cannot approve, but can reject', async () => {
+    await freshClient();
     const { cs, approvalId } = await inReview('Member approve');
     const r = await call<{ details?: { reason?: string } }>(adminCookie, 'POST', `/approvals/${approvalId}/claim`, { expectedChangeSetHash: cs.hash });
     expect(r.status, r.raw).toBe(403);
@@ -186,6 +215,8 @@ describe('ADR 0924 D4/D5 — setting up client approval', () => {
 });
 
 describe('ADR 0924 D5 — the link and the decision', () => {
+  beforeEach(() => freshClient());
+
   it('a client approval is written under the member who sent the link, and confirmed', async () => {
     const { cs, approvalId, pageId } = await inReview('Happy path');
     const links = await sendLinks(adminCookie, cs.changeSetId);
@@ -250,10 +281,16 @@ describe('ADR 0924 D5 — the link and the decision', () => {
   it('a member cannot mint an approval link through the sharing route (security review)', async () => {
     const { cs } = await inReview('Member mint');
     await sendLinks(adminCookie, cs.changeSetId);
-    const r = await call(editorCookie, 'POST', `/sharing/orgs/${orgA}/links`, { resourceType: 'campaign_approval', resourceId: `${cs.changeSetId}:${ann.approverId}` });
-    expect(r.status, r.raw).toBe(404);
-    const a = await call(adminCookie, 'POST', `/sharing/orgs/${orgA}/links`, { resourceType: 'campaign_approval', resourceId: `${cs.changeSetId}:${ann.approverId}` });
-    expect(a.status, a.raw).toBe(404);
+    const grant = (await listGrants(TENANT, orgA, ann.approverId)).find((g) => g.resource.kind === CHANGE_SET_GRANT_KIND && g.resource.id === cs.changeSetId && g.status === 'active')!;
+    const resourceId = approvalResourceIdOf(cs.changeSetId, grant.grantId);
+    // Positive control: this id passes the resolver's own check, so a 404 below can
+    // only come from the mint lane.
+    await expect(approvalShareValidate(TENANT, orgA, resourceId)).resolves.toBeUndefined();
+    for (const cookie of [editorCookie, adminCookie]) {
+      const r = await call(cookie, 'POST', `/sharing/orgs/${orgA}/links`, { resourceType: 'campaign_approval', resourceId });
+      expect(r.status, r.raw).toBe(404);
+      expect(r.body).toMatchObject({ error: 'not_found' });
+    }
   });
 
   it('unknown token, wrong hash and a revoked approver are the same 404, and nothing is decided', async () => {

@@ -51,6 +51,8 @@ import { projectPolicyForModel } from '../../host/autonomyPolicy/index.js';
 import { untrustedToolError, launchRefusalResult } from '../../host/agentToolKit.js';
 import { assertWorkflowFeatureLaunchable, WorkflowFeatureRefusedError } from '../../host/workflowFeatureGate.js';
 import { CHANNEL_WORKFLOW_IDS } from '../campaign-channels/channelWorkflows.js';
+import { OpenwopError } from '../../types.js';
+import { campaignLaunchConfigurable, resolveCampaignLaunchAi, type CampaignLaunchAi } from './launchAi.js';
 
 const log = createLogger('campaign-orchestration.strategist-tools');
 
@@ -211,6 +213,13 @@ export async function runOrchestrationRunTool(deps: StartRunDeps, input: Record<
     return toolError('forbidden', 'You need write access to this brief\'s workspace to run its campaign.');
   }
 
+  let ai: CampaignLaunchAi | undefined;
+  try { ai = await resolveCampaignLaunchAi(scope.tenantId, input.ai); }
+  catch (err) {
+    if (err instanceof OpenwopError) return toolError(err.code, 'The selected AI key, provider or model could not be used. No campaign run was started.', { reason: err.details?.reason ?? 'campaign_ai_option_invalid' });
+    throw err;
+  }
+
   // Guard before BOTH the ignition reservation and campaign creation.
   assertEffectAllowed('dispatch', 'campaign-orchestration ignition');
 
@@ -237,7 +246,7 @@ export async function runOrchestrationRunTool(deps: StartRunDeps, input: Record<
   const key = ignitionKey('campaign-orchestration.run', briefId);
   const claim = await claimIgnition(scope.tenantId, key);
   if (!claim.claimed) {
-    return { content: JSON.stringify({ runId: claim.existingRunId ?? null, ignited: false, note: 'an identical run was started moments ago — reusing it' }) };
+    return { content: JSON.stringify({ runId: claim.existingRunId ?? null, ignited: false, reused: true, note: 'An existing run continues with its recorded AI configuration. Newly supplied options were not applied.' }) };
   }
 
   // ADR 0941 D2 — the campaign exists BEFORE its first run, so the run can be
@@ -258,6 +267,7 @@ export async function runOrchestrationRunTool(deps: StartRunDeps, input: Record<
     tenantId: scope.tenantId,
     workflowId: ORCHESTRATION_ID,
     inputs: { briefId, createdBy: scope.actingUserId },
+    ...(ai ? { configurable: campaignLaunchConfigurable(ai) } : {}),
     metadata: {
       actingUserId: scope.actingUserId,
       ...(scope.conversationId ? { chatSessionId: scope.conversationId } : {}),
@@ -376,11 +386,19 @@ export function registerCampaignOrchestrationAgentTools(deps: StartRunDeps): voi
         'Run the full multi-channel campaign for a confirmed brief. Starts the orchestration workflow: validate → generate '
         + 'the messaging kernel → the human APPROVES the kernel on an inline card → generate every enabled channel (each with '
         + 'its own inline approval) → cross-asset consistency check → finalize the marketing campaign. Nothing publishes or '
-        + 'spends: the run pauses at each approval gate for the human. Pass the confirmed `briefId`. Returns the started `runId` and the `campaignId` the run belongs to.',
+        + 'spends: the run pauses at each approval gate for the human. Pass the confirmed `briefId`. Optional `ai` declares only an existing key reference explicitly supplied by the person; never guess a key name or request its value. Omit it to retain existing defaults, not automatically reuse the chat key. Reuse retains the recorded configuration. Returns the started `runId` and the `campaignId` the run belongs to.',
       inputSchema: {
         type: 'object',
         properties: {
           briefId: { type: 'string', description: 'The confirmed brief to orchestrate a campaign from.' },
+          ai: {
+            type: 'object', additionalProperties: false, required: ['credentialRef'],
+            properties: {
+              credentialRef: { type: 'string', description: 'Existing provider-qualified saved key NAME explicitly chosen by the person, never a secret value.' },
+              provider: { type: 'string', description: 'Optional matching provider; otherwise derived from the chosen reference.' },
+              model: { type: 'string', description: 'Optional catalog model for that provider; otherwise its catalog default.' },
+            },
+          },
         },
         required: ['briefId'],
         additionalProperties: false,

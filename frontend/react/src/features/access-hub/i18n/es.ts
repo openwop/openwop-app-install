@@ -26,6 +26,7 @@ export const messages = {
   tab_roles: 'Roles',
   'tab_capability-firewall': 'Cortafuegos de capacidades',
   'tab_example-data': 'Datos de ejemplo',
+  tab_channels: 'Canales de chat',
 
   emptyTitle: 'Aún no hay nada que gestionar aquí',
   emptyBody: 'Las herramientas de credenciales y acceso aparecerán aquí a medida que se habiliten para tu espacio de trabajo.',

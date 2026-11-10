@@ -16,9 +16,11 @@
  * The provider is a `vi.mock` of the Anthropic tools-round dispatcher and
  * `fetch` throws, so a live call is counted, never sent.
  *
- * Sabotage-witnessed: removing the source-record read in `viaReplayLane` reds
- * both cases; dropping the `seedNodeActivity` call in
- * `agentClarificationTurn.ts` reds the between-rounds case.
+ * Sabotage-witnessed (wave 81): removing the source-record read in
+ * `viaReplayLane` reds both replay cases; dropping the `seedNodeActivity` call
+ * in `agentClarificationTurn.ts` reds the between-rounds case; not adding the
+ * ask tool for a stamped run reds the ADR 1006 offer case; stamping a run
+ * regardless of the toggle reds the toggle-off case.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -87,22 +89,25 @@ beforeEach(() => {
   return () => fetchSpy.mockRestore();
 });
 
-interface Ev { type: string; nodeId?: string; sequence: number }
+interface Ev { type: string; nodeId?: string; sequence: number; payload?: unknown }
 async function api<T>(path: string, body?: unknown): Promise<{ status: number; body: T }> {
   const res = await fetch(`${BASE}${path}`, { method: body === undefined ? 'GET' : 'POST', headers: H, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
   return { status: res.status, body: await res.json().catch(() => undefined) as T };
 }
+/** Bounded below the case timeout (15 s), so a stuck run fails here, named. */
 async function waitStatus(runId: string, pred: (s: string) => boolean): Promise<string> {
-  const t0 = Date.now();
-  for (;;) {
-    const s = (await api<{ status?: string }>(`/runs/${encodeURIComponent(runId)}`)).body?.status ?? '';
-    if (pred(s)) return s;
-    if (Date.now() - t0 > 20_000) throw new Error(`run ${runId} stuck at ${s}`);
-    await new Promise((r) => setTimeout(r, 50));
-  }
+  let s = '';
+  await vi.waitFor(async () => {
+    s = (await api<{ status?: string }>(`/runs/${encodeURIComponent(runId)}`)).body?.status ?? '';
+    if (!pred(s)) throw new Error(`run ${runId} stuck at ${s}`);
+  }, { timeout: 6_000, interval: 25 });
+  return s;
 }
 const terminal = (s: string): boolean => ['completed', 'failed', 'cancelled'].includes(s);
 const events = async (runId: string): Promise<Ev[]> => (await api<{ events: Ev[] }>(`/runs/${encodeURIComponent(runId)}/events/poll?fromSeq=0&limit=1000`)).body.events ?? [];
+/** The agent node's final output on a run: the served answer, not just "completed". */
+const finalOutput = async (runId: string): Promise<string> =>
+  JSON.stringify((await events(runId)).filter((e) => e.type === 'node.completed' && e.nodeId === 'run').at(-1)?.payload);
 
 /** A completed BYOK source run that asked twice (dates → May, budget → $900). */
 async function source(): Promise<string> {
@@ -132,10 +137,13 @@ describe('ADR 1001 B1 — a BYOK replay fork of a two-round agent node makes zer
     expect(f.status, JSON.stringify(f.body)).toBe(201);
     expect(await waitStatus(f.body.runId, terminal)).toBe('completed');
     expect(liveRounds, 'a replay fork must not call the model').toHaveBeenCalledTimes(0);
+    // The node re-executed and was SERVED the recorded answer.
+    expect(await finalOutput(f.body.runId)).toContain('TRIP-PLAN');
   });
 
   it('a replay cut between the rounds (round 1 served inline, one invocation) is served too', async () => {
     const runId = await source();
+    expect(liveRounds).toHaveBeenCalledTimes(3); // the source: ask, ask, answer
     liveRounds.mockClear();
     const resolved1 = (await events(runId)).filter((e) => e.type === 'interrupt.resolved' && e.nodeId === 'run')[0];
     if (!resolved1) throw new Error('the source recorded no resolution');
@@ -143,6 +151,7 @@ describe('ADR 1001 B1 — a BYOK replay fork of a two-round agent node makes zer
     expect(f.status, JSON.stringify(f.body)).toBe(201);
     expect(await waitStatus(f.body.runId, terminal)).toBe('completed');
     expect(liveRounds, 'the continuation must reach the source\'s records at the same ordinals').toHaveBeenCalledTimes(0);
+    expect(await finalOutput(f.body.runId)).toContain('TRIP-PLAN');
   });
 });
 

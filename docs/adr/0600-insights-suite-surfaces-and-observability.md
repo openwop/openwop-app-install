@@ -21,6 +21,23 @@ Status: implemented
 > surface's rendering widened. The honest summary is in §Correction 2, and it
 > is not "strengthens".
 
+## Correction (2026-11-06) — rejection confirmation does not predict the run outcome
+
+The generic approval confirmation said that rejection fails/ends the run. A real
+Deal Hygiene reject completed through its explicit rejection branch without
+creating a task. `core.chat.approvalGate` returns `approved:false`; the workflow
+routes that decision. Even native `core.approvalGate` rejection fails its node,
+then RFC 0223 lets the scheduler handle failure edges before determining the run
+outcome (ADR 0778). Node rejection and terminal run failure are not equivalent.
+
+Keep the confirmation and unchanged decision payload/authority; its generic copy
+now says the workflow determines what follows and rejection can end the run.
+Work already done is not undone. Browser-action gates retain their specific
+session-ending wording; non-interrupt proposals keep request-closing wording.
+This corrects the older universal-failure rationale below without changing its
+confirmation safeguard, runtime routing, packs, wire fields or capability.
+Focused component assertions are authored; execution and gate remain pending.
+
 ## 1. `ISU-24` — a positive claim on a failed read
 
 `RunTimeline.tsx` branched on `events.length === 0` and rendered **"No events
@@ -66,6 +83,37 @@ cannot drift on what "no events" means.
 > section deletes, in the component this section introduced. Guard and prop
 > removed; the witnesses now name the callers' branch as what holds it. `RunComparePage` is unaffected: it mounts
 `RunTimeline` only when `events.length > 0`, and the prop defaults to `'ready'`.
+
+### Correction — independent post-event refresh ownership (2026-11-07)
+
+The initial-read distinction above does not make a later REST backfill fresh.
+`RUN-REFRESH-CLEAR-1` (TST-RUN-9 / UX_UPGRADE-runs P2) was confirmed in ordinary
+assertion mode: a terminal SSE event starts both a snapshot read and a full log
+read; the log fails first, then a successful snapshot clears their shared warning.
+The badge can correctly say completed while the details are still incomplete.
+The original initial-read rationale remains; this is a separate refresh gap.
+
+Keep failure ownership at the existing RunDetailView: snapshot and log each clear
+only their own failure after a successful read. Their OR drives the existing
+warning and Retry. Retry retains previous failures while either affected read is
+pending; starting another request does not certify freshness. Within each refresh
+channel, only its latest issued request may update data or failure state, so an
+older success cannot erase a newer failure and an older failure cannot undo a
+newer recovery. The view's lifecycle invalidates pending refresh completions;
+closed stream callbacks cannot start reads after resubscription.
+
+SSE sequence deduplication uses the owner's synchronous current-event ref, updated
+alongside every event-array replacement. Network work is outside React state
+updaters, which may be replayed. Initial-load cancellation and its eventsRead
+semantics remain separate. This does not claim complete ordering across initial
+loads, mutation-specific reads, every stream family or every downstream panel.
+Deferred component controls cover independent failures, pending/partial Retry,
+per-channel completion ordering, closed callbacks and StrictMode duplicates.
+The existing expected-failure regression becomes an ordinary assertion after the
+actual warning-null witness; its correct expectation is preserved.
+
+No endpoint, tenant authority, wire event, replay/fork behavior or new capability
+is changed. This is host UI state at an existing owner; no new RFC is required.
 
 ### A FIFTH vacuous assertion of mine, exactly as PR-A predicted
 
@@ -1158,3 +1206,26 @@ fleet; a second one starves both — CLAUDE.md's measured worker-starvation note
 the FULL backend vitest suite (started once, **deliberately stopped** for the same
 reason — targeted selections were used instead), backend lint, Playwright e2e, the
 live testcontainer adapters, and any live browser check.
+
+
+### Correction — 2026-11-08: exhausted run-event subscription recovery copy
+
+`RUN-SSE-RECOVERY-COPY-1`: the Run Details `eventStreamConnError` notice
+promised “will reconnect” after the stream client had already exhausted its
+bounded reconnect budget. `subscribeViaGenerator` clears its timers, calls
+`onError`, and returns; the page callback only sets the notice, which does not
+restart the subscription effect. The four existing locale values now say live
+event updates stopped and instruct the operator to reload the page. Browser
+Reload is the recovery action; the existing REST-read Retry controls do not
+restart SSE. This corrects the recovery instruction without changing ADR 0897's
+stream lifetime policy, transport, authentication, protocol, run state or UI
+controls. Clean terminal EOF remains an intentional non-error close.
+
+Implementation trail: four runs locale catalogs and this correction only. The
+existing `eventReadHonesty.test.tsx` assertions contain no dependency on this
+wording and remain unchanged. No wording-pinning test is added for this
+reversible copy change. At source preparation, dependencies, focused checks,
+lint, frontend test types, canonical build, full gate, merge, deployment and
+live retest have **not run** for this candidate. Source analysis establishes the
+unsupported promise; it does not establish the underlying transport failure,
+SSE health or recovery of the original subscription.

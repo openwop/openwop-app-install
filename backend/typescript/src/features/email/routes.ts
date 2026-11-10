@@ -258,6 +258,7 @@ export function registerEmailRoutes(deps: RouteDeps): void {
       const providers = await Promise.all(candidates.map(async (provider) => ({
         provider,
         connected: !!(await resolveConnectionCredential({
+          egress: { fixedEndpoint: 'presence check: no request is sent' },
           tenantId, provider, actingUserId: user.userId, orgId,
         }).catch(() => null)),
       })));

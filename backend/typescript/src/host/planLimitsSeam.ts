@@ -8,8 +8,8 @@
  *
  *   - `workflowRuns`     → `host/runStarter.ts` (`host/planRunLimit.ts`), monthly per tenant;
  *   - `aiCreditsMonthly` → `providers/managedProvider.ts` (`host/managedCredits.ts`);
- *   - `kicktodo.maxActiveEnrollments` → `features/kicktodo-commerce/tierGuard.ts`
- *     (pre-existing; it reads billing directly because it is itself a feature).
+ *   - feature-declared keys (`BackendFeature.hostContributions.enforcedPlanLimitKeys`)
+ *     (KickTodo's enrollment cap; it reads billing directly because it is itself a feature).
  *
  * `ENFORCED_PLAN_LIMIT_KEYS` is the list of keys that HAVE an enforcement site.
  * The public pricing page and the entitlements route filter limits through
@@ -23,16 +23,22 @@
  * become a free-everything backdoor.
  */
 
+import { featureEnforcedPlanLimitKeys } from './featureContributions.js';
+
 /** The plan-limit keys that have an enforcement site somewhere in the host. */
 export const PLAN_LIMIT_WORKFLOW_RUNS = 'workflowRuns';
 export const PLAN_LIMIT_AI_CREDITS_MONTHLY = 'aiCreditsMonthly';
-export const PLAN_LIMIT_KICKTODO_ENROLLMENTS = 'kicktodo.maxActiveEnrollments';
 
 export const ENFORCED_PLAN_LIMIT_KEYS: readonly string[] = [
   PLAN_LIMIT_WORKFLOW_RUNS,
   PLAN_LIMIT_AI_CREDITS_MONTHLY,
-  PLAN_LIMIT_KICKTODO_ENROLLMENTS,
 ];
+
+/** ADR 1031 P2 — the host keys, then every composed feature's
+ *  `hostContributions.enforcedPlanLimitKeys` (KickTodo: its enrollment cap). */
+export function enforcedPlanLimitKeys(): string[] {
+  return [...ENFORCED_PLAN_LIMIT_KEYS, ...featureEnforcedPlanLimitKeys()];
+}
 
 /** Returns the tenant's plan limits (`{}` = none configured / billing off). */
 export type PlanLimitsResolver = (tenantId: string) => Promise<Record<string, number>>;
@@ -95,6 +101,6 @@ export function isBillingExemptTenant(tenantId: string): boolean {
 /** Only the limit keys that have an enforcement site (ADR 0821 D6 display rule). */
 export function displayablePlanLimits(limits: Record<string, number>): Record<string, number> {
   const out: Record<string, number> = {};
-  for (const [k, v] of Object.entries(limits)) if (ENFORCED_PLAN_LIMIT_KEYS.includes(k)) out[k] = v;
+  for (const [k, v] of Object.entries(limits)) if (enforcedPlanLimitKeys().includes(k)) out[k] = v;
   return out;
 }

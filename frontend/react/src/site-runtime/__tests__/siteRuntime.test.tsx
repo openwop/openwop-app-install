@@ -14,6 +14,25 @@
  *
  * Red on the old code: none of `site-runtime/` existed, and the visitor modules
  * read `client/config` (so the graph check failed through every one of them).
+ *
+ * Sabotage-checked (w83 probes): an eager `react` or `client/config` import; the
+ * runtime not setting base `''`; dropping the measure-once latch; an opt-in
+ * regime read as allowed; a stored refusal not honoured; no consent subscription;
+ * the banner never offered; a `//host` privacy path admitted; the slug left
+ * encoded; the page language ignored; the stylesheet installed without the
+ * `:root` → `:host` rewrite, or with a bare `:host.x` compound; no live region; focus
+ * not returned; a privacy link with no workspace page; a button token renamed.
+ *
+ * The measure-once latch is held by the opt-out case alone (it re-runs consent
+ * after the pageview and asserts it is not sent again); the opt-in case sends its
+ * one pageview on the single decision change and cannot see the latch.
+ *
+ * Copy is pinned as literals (not imported from the catalogs), and the
+ * stylesheet `mountBanner` installs is the real `runtime.css` with its
+ * `@import`s inlined as the build inlines them (vitest does not process CSS, so
+ * the bare `?inline` import is empty here). Every runtime and banner a case
+ * starts is stopped in `finally`: the consent listeners are module state that
+ * `__resetVisitorConsentForTests` does not clear (SITE-LISTENER-RESET-1).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, waitFor } from '@testing-library/react';
@@ -24,8 +43,25 @@ import { __resetVisitorConsentForTests, recordChoice } from '../../features/site
 import { setVisitorApiBase } from '../../features/site/visitorApi.js';
 import { pageSlugOf, readTarget, startSiteRuntime } from '../main.js';
 import { catalogLocale, mountBanner, shadowCss } from '../mountBanner.js';
-import { messages as en } from '../../features/site/i18n/en.js';
-import { messages as es } from '../../features/site/i18n/es.js';
+
+// The build inlines runtime.css's `@import`s; vitest returns '' for a CSS
+// `?inline` import, so hand mountBanner the same inlined text.
+vi.mock('../runtime.css?inline', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const url = await import('node:url');
+  const dir = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '..');
+  const css = fs.readFileSync(path.resolve(dir, 'runtime.css'), 'utf8')
+    .replace(/@import '([^']+)';/g, (_m: string, file: string) => fs.readFileSync(path.resolve(dir, file), 'utf8'));
+  return { default: css };
+});
+
+const ES_TITLE = 'Analítica en este sitio';
+const ES_PRIVACY = 'Política de privacidad';
+const EN_TITLE = 'Analytics on this site';
+const EN_ACCEPT = 'Accept analytics';
+const EN_SAVED_ON = 'Analytics turned on.';
+const drain = async (): Promise<void> => { for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r)); };
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SRC = resolve(HERE, '../..');
@@ -103,28 +139,39 @@ describe('ADR 1015 — measuring', () => {
   it('opt-out: one same-origin pageview on load; the banner is offered', async () => {
     stubFetch(site('opt-out'));
     const mount = vi.fn(noBanner);
-    await startSiteRuntime({ orgId: ORG, privacyHref: null }, { mountBanner: mount });
-    const pv = analyticsCalls().filter((c) => c.url.endsWith('/collect'));
-    expect(pv).toHaveLength(1);
-    expect(pv[0]!.url).toBe(`/host/openwop-app/public-analytics/${ORG}/collect`);
-    expect(JSON.parse(String(pv[0]!.init!.body))).toMatchObject({ type: 'pageview', path: '/', sessionKey: expect.stringMatching(/^vk-/) });
-    expect(mount).toHaveBeenCalledTimes(1);
+    const stop = await startSiteRuntime({ orgId: ORG, privacyHref: null }, { mountBanner: mount });
+    try {
+      const pv = analyticsCalls().filter((c) => c.url.endsWith('/collect'));
+      expect(pv).toHaveLength(1);
+      expect(pv[0]!.url).toBe(`/host/openwop-app/public-analytics/${ORG}/collect`);
+      expect(JSON.parse(String(pv[0]!.init!.body))).toMatchObject({ type: 'pageview', path: '/', sessionKey: expect.stringMatching(/^vk-/) });
+      expect(mount).toHaveBeenCalledTimes(1);
+      // A later consent change re-runs the decision; the pageview is not sent again.
+      await act(async () => { await recordChoice(ORG, true); });
+      await drain();
+      expect(analyticsCalls().filter((c) => c.url.endsWith('/collect'))).toHaveLength(1);
+    } finally { stop(); }
   });
 
   it('opt-in with no choice: nothing is measured until Accept, then it starts at once', async () => {
     stubFetch(site('opt-in'));
-    await startSiteRuntime({ orgId: ORG, privacyHref: null }, { mountBanner: noBanner });
-    expect(analyticsCalls()).toEqual([]);
-    expect(localStorage.getItem(`owp:vk:${ORG}`)).toBeNull();
-    await act(async () => { await recordChoice(ORG, true); });
-    await waitFor(() => expect(analyticsCalls().filter((c) => c.url.endsWith('/collect'))).toHaveLength(1));
+    const stop = await startSiteRuntime({ orgId: ORG, privacyHref: null }, { mountBanner: noBanner });
+    try {
+      expect(analyticsCalls()).toEqual([]);
+      expect(localStorage.getItem(`owp:vk:${ORG}`)).toBeNull();
+      await act(async () => { await recordChoice(ORG, true); });
+      await waitFor(() => expect(analyticsCalls().filter((c) => c.url.endsWith('/collect'))).toHaveLength(1));
+      expect(localStorage.getItem(`owp:vk:${ORG}`)).toMatch(/^vk-/);
+    } finally { stop(); }
   });
 
   it('a stored refusal sends no analytics call at all', async () => {
     stubFetch(site('opt-out'));
     localStorage.setItem('owp:consent', JSON.stringify({ [ORG]: { analytics: false, at: '2026-10-31T00:00:00.000Z' } }));
-    await startSiteRuntime({ orgId: ORG, privacyHref: null }, { mountBanner: noBanner });
-    expect(analyticsCalls()).toEqual([]);
+    const stop = await startSiteRuntime({ orgId: ORG, privacyHref: null }, { mountBanner: noBanner });
+    try {
+      expect(analyticsCalls()).toEqual([]);
+    } finally { stop(); }
   });
 
   it('maps custom-domain paths to page slugs and reads its own tag', () => {
@@ -146,15 +193,22 @@ describe('ADR 1015 — the banner on a customer page', () => {
     setVisitorApiBase('');
     document.documentElement.setAttribute('lang', 'es');
     const stop = await mountBanner({ orgId: ORG, privacyHref: '/p/privacy' });
-    const host = document.querySelector('[data-owp-consent]');
-    const shadow = host?.shadowRoot;
-    expect(shadow).toBeTruthy();
-    await waitFor(() => expect(shadow!.textContent).toContain(es.consentTitle));
-    expect(shadow!.querySelector('a[href="/p/privacy"]')?.textContent).toBe(es.consentPrivacyLink);
-    expect(shadow!.querySelector('style')!.textContent).not.toMatch(/:root\b/);
-    // The page outside the shadow root gets nothing but the host element.
-    expect(document.body.textContent).not.toContain(es.consentTitle);
-    stop();
+    try {
+      const host = document.querySelector('[data-owp-consent]');
+      const shadow = host?.shadowRoot;
+      expect(shadow).toBeTruthy();
+      await waitFor(() => expect(shadow!.textContent).toContain(ES_TITLE));
+      expect(shadow!.querySelector('a[href="/p/privacy"]')?.textContent).toBe(ES_PRIVACY);
+      // The installed sheet is the tokens + banner rules, rewritten for a shadow
+      // root: `:root` matches nothing there, and the dark-mode compounds keep working.
+      const css = shadow!.querySelector('style')!.textContent ?? '';
+      expect(css).toContain('--clay-strong');
+      expect(css).toContain(':host(.theme-dark)');
+      expect(css).toContain(':host(:not(.theme-light))');
+      expect(css).not.toMatch(/:root\b/);
+      // The page outside the shadow root gets nothing but the host element.
+      expect(document.body.textContent).not.toContain(ES_TITLE);
+    } finally { stop(); }
   });
 
   it('a choice is announced and focus returns to where the visitor was', async () => {
@@ -163,28 +217,32 @@ describe('ADR 1015 — the banner on a customer page', () => {
     const before = document.createElement('button');
     before.textContent = 'Page action';
     document.body.appendChild(before);
-    await mountBanner({ orgId: ORG, privacyHref: null });
-    const shadow = document.querySelector('[data-owp-consent]')!.shadowRoot!;
-    const accept = await waitFor(() => {
-      const b = [...shadow.querySelectorAll('button')].find((x) => x.textContent === en.consentAccept);
-      expect(b).toBeTruthy();
-      return b!;
-    });
-    before.focus();
-    accept.focus(); // focus moves from the page into the shadow root
-    await act(async () => { fireEvent.click(accept); });
-    // The banner's own live region is mounted with it (there is no app shell here).
-    await waitFor(() => expect(shadow.querySelector('[data-owp-live="polite"]')?.textContent).toBe(en.consentSavedOn));
-    await waitFor(() => expect(document.activeElement).toBe(before));
+    const stop = await mountBanner({ orgId: ORG, privacyHref: null });
+    try {
+      const shadow = document.querySelector('[data-owp-consent]')!.shadowRoot!;
+      const accept = await waitFor(() => {
+        const b = [...shadow.querySelectorAll('button')].find((x) => x.textContent === EN_ACCEPT);
+        expect(b).toBeTruthy();
+        return b!;
+      });
+      before.focus();
+      accept.focus(); // focus moves from the page into the shadow root
+      await act(async () => { fireEvent.click(accept); });
+      // The banner's own live region is mounted with it (there is no app shell here).
+      await waitFor(() => expect(shadow.querySelector('[data-owp-live="polite"]')?.textContent).toBe(EN_SAVED_ON));
+      await waitFor(() => expect(document.activeElement).toBe(before));
+    } finally { stop(); }
   });
 
   it('shows no privacy link when the workspace has none', async () => {
     stubFetch(site('opt-in'));
     setVisitorApiBase('');
-    await mountBanner({ orgId: ORG, privacyHref: null });
-    const shadow = document.querySelector('[data-owp-consent]')!.shadowRoot!;
-    await waitFor(() => expect(shadow.textContent).toContain(en.consentTitle));
-    expect(shadow.querySelector('a')).toBeNull();
+    const stop = await mountBanner({ orgId: ORG, privacyHref: null });
+    try {
+      const shadow = document.querySelector('[data-owp-consent]')!.shadowRoot!;
+      await waitFor(() => expect(shadow.textContent).toContain(EN_TITLE));
+      expect(shadow.querySelector('a')).toBeNull();
+    } finally { stop(); }
   });
 
   it('picks a shipped catalog for the page language', () => {

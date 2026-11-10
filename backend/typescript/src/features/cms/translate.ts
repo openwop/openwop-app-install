@@ -20,7 +20,7 @@
 import { resolveHeadlessAi } from '../../host/headlessAi.js';
 import { OpenwopError } from '../../types.js';
 import type { ChatMessage } from '../../providers/dispatch.js';
-import { sanitizeSectionOverlay, type SectionType } from './cmsService.js';
+import { restoreItemStates, sanitizeSectionOverlay, type SectionType } from './cmsService.js';
 import { createLogger } from '../../observability/logger.js';
 
 const log = createLogger('feature.cms.translate');
@@ -75,6 +75,9 @@ function extractJSONStrict(text: string): Record<string, unknown> | null {
   }
 }
 
+/** ADR 1038 D8 — re-exported for the translate tests; it lives with the validator. */
+export { restoreItemStates };
+
 /**
  * Translate a section's base `data` into `targetLocale`, returning a sanitized
  * overlay (only the fields the model produced, cleaned). Throws if the managed
@@ -110,7 +113,7 @@ export async function translateSectionData(
     const extracted = extractJSONStrict(completion);
     if (extracted === null) return { ok: false, reason: 'unparseable' };
     if (Object.keys(extracted).length === 0) return { ok: false, reason: 'empty_object' };
-    const overlay = sanitizeSectionOverlay(sectionType, extracted);
+    const overlay = sanitizeSectionOverlay(sectionType, restoreItemStates(data, extracted));
     if (Object.keys(overlay).length === 0) return { ok: false, reason: 'all_keys_dropped' };
     // XCH-CMS-1 (LLM-EXCHANGE-AUDIT Wave 5): a PARTIAL key drop stays a warn —
     // observable, sanitize-gated, human-reviewed.

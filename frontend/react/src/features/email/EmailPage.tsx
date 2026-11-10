@@ -12,7 +12,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { Trans, useTranslation } from 'react-i18next';
 import { confirm } from '../../ui/confirm.js';
 import { Modal } from '../../ui/Modal.js';
-import { TextField } from '../../ui/Field.js';
+import { TextField, TextareaField } from '../../ui/Field.js';
 import { formatList, formatNumber, formatRelativeTime } from '../../i18n/format.js';
 import { PageHeader } from '../../ui/PageHeader.js';
 import { Notice } from '../../ui/Notice.js';
@@ -81,6 +81,10 @@ export function EmailPage(): JSX.Element {
    *  `?org=` is honoured when the read confirms it exists. */
   const { orgs, orgId, setOrgId, orgsFailed, retry: retryOrgs } =
     useOrgSelection<Org>(listOrgs, access.enabled, searchParams.get('org') ?? '');
+  // EMAIL-TEMPLATE-VALIDATION-1: the action and handler share the same required
+  // fields. SMS has no subject; email and Markdown require one (ADR 0955 D8).
+  const templateReady = Boolean(orgId && nt.name.trim() && nt.body.trim()
+    && (nt.format === 'sms' || nt.subject.trim()));
   /** One-shot snapshot of the inbound `?org=` deep link (the Funnels idiom):
    *  keeps the orgs effect's dep list honest without a lint suppression. */
   const chooseOrg = useCallback((next: string) => {
@@ -238,12 +242,12 @@ export function EmailPage(): JSX.Element {
 
   const addTemplate = useCallback(async () => {
     // ADR 0955 D8 — an SMS template has no subject line.
-    if (!orgId || !nt.name.trim() || (nt.format !== 'sms' && !nt.subject.trim()) || !nt.body.trim()) return;
+    if (!templateReady) return;
     setTemplateBusy(true);
     try { await createTemplate(orgId, { name: nt.name.trim(), subject: nt.format === 'sms' ? '' : nt.subject.trim(), body: nt.body.trim(), format: nt.format }); setNt({ name: '', subject: '', body: '', format: 'text' }); load(orgId); toast.success(t('templateCreated')); }
     catch (e) { toast.error(e instanceof Error ? e.message : t('createFailed')); }
     finally { setTemplateBusy(false); }
-  }, [orgId, nt, load, t]);
+  }, [orgId, nt, templateReady, load, t]);
 
   const addCampaign = useCallback(async () => {
     if (!orgId || !campTpl) return;
@@ -535,9 +539,9 @@ export function EmailPage(): JSX.Element {
               </select>
             </label>
             {nt.format === 'sms' ? null : <label className="u-grid u-gap-1"><span className="u-label-sm">{t('subjectLabel')}</span><input value={nt.subject} onChange={(e) => setNt({ ...nt, subject: e.target.value })} placeholder={t('subjectPlaceholder')} /></label>}
-            <label className="u-grid u-gap-1"><span className="u-label-sm">{t('bodyLabel')}</span><input value={nt.body} onChange={(e) => setNt({ ...nt, body: e.target.value })} placeholder={t('bodyPlaceholder')} aria-describedby={nt.format === 'sms' ? 'email-new-sms-hint' : undefined} /></label>
+            <TextareaField label={t('bodyLabel')} value={nt.body} rows={nt.format === 'sms' ? 4 : 8} onChange={(e) => setNt({ ...nt, body: e.target.value })} placeholder={t('bodyPlaceholder')} aria-describedby={nt.format === 'sms' ? 'email-new-sms-hint' : undefined} />
             {nt.format === 'sms' ? <p id="email-new-sms-hint" className="muted u-fs-12 u-m-0">{t('smsHint', { count: smsSegments(nt.body) })}</p> : null}
-            <Button variant="primary" disabled={templateBusy || !nt.name.trim()} onClick={() => void addTemplate()}><PlusIcon /> {t('newTemplate')}</Button>
+            <Button variant="primary" disabled={templateBusy || !templateReady} onClick={() => void addTemplate()}><PlusIcon /> {t('newTemplate')}</Button>
           </div>
 
           {/* Templates collection (ADR 0520) — real `<Link>` cells to

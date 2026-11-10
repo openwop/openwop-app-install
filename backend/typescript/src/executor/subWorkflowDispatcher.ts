@@ -159,6 +159,10 @@ export interface SubWorkflowResult {
    *  per the spec's `running → failed` transition. Distinct from a
    *  pre-creation failure, which throws `DispatchCreationError` instead. */
   childRuntimeError?: { code: string; message: string };
+  /** RFC 0257 §B (ADR 1027) — the child completed but reached no terminal: its
+   *  `run.completed.skippedTerminals`, read from the child's recorded log. Absent
+   *  for any other outcome. */
+  childSkippedTerminals?: string[];
 }
 
 /** RFC 0037 §"Handoff state machine" — distinct error class for the
@@ -419,6 +423,7 @@ export async function dispatchSubWorkflow(
     outputMappingSkipped = true;
   }
 
+  const childSkippedTerminals = childStatus === 'completed' ? await readSkippedTerminals(storage, childRunId) : undefined;
   return {
     childRunId,
     childStatus,
@@ -426,7 +431,24 @@ export async function dispatchSubWorkflow(
     outputMappingSkipped,
     parentVariableWrites,
     ...(childRuntimeError ? { childRuntimeError } : {}),
+    ...(childSkippedTerminals ? { childSkippedTerminals } : {}),
   };
+}
+
+/**
+ * RFC 0257 §B — the marker the child's `run.completed` recorded, if any. Read from
+ * the log (the v1 spelling, so the major-2 vendor box never applies), not
+ * recomputed: the log is the fact a replay re-reads.
+ */
+async function readSkippedTerminals(storage: Storage, childRunId: string): Promise<string[] | undefined> {
+  const events = await storage.listEvents(childRunId, { contract: 1 });
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const ev = events[i]!;
+    if (ev.type !== 'run.completed') continue;
+    const st = (ev.payload as { skippedTerminals?: unknown } | null)?.skippedTerminals;
+    return Array.isArray(st) && st.length > 0 && st.every((x) => typeof x === 'string') ? [...(st as string[])] : undefined;
+  }
+  return undefined;
 }
 
 /**

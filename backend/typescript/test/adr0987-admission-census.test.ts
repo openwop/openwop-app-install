@@ -10,14 +10,30 @@
  *   - `reserveConcurrentSlot` is also called by creative-briefs, which mounts NO
  *     middleware, so it is a no-op there (it returns early without a session key);
  *   - `reservePlanRun` (monthly plan) has exactly one caller, `host/runStarter.ts`;
- *   - `insertRunWithStartContext` is called from 18 files;
- *   - `startWorkflowRun` has 39 code call sites in 32 files. ADR 0987's context
+ *   - `insertRunWithStartContext` is called from 18 files (19 since ADR 1042: the
+ *     channel-ingress conversation run, charged like any run — see the admission-lanes test);
+ *   - `startWorkflowRun` has 37 code call sites in 30 files (39 / 32 until the KickTodo
+ *     packages left, ADR 1031 P3). ADR 0987's context
  *     table says 43 in 34: that raw grep also matched 5 mentions in comments.
  *     (39 since ADR 0957 D2: `startClientReportRun` in campaign-ops/runLauncher.ts
  *     is the client-report "run now" lane, the third launcher in that file. It goes
  *     through the same `startWorkflowRun`, so it takes the same monthly check.)
  *
+ * CORRECTED 2026-11-03 (grade-tests w80): the bullets above are the P0 snapshot,
+ * kept for the trail. The pins below are as of P2: runQuotaMiddleware is mounted
+ * on 7 routes in 5 files (creative-briefs now mounts it), reserveConcurrentSlot is
+ * deleted, and reservePlanRun's one caller is `host/runInsert.ts` (not
+ * `host/runStarter.ts`).
+ *
  * Counts read code lines only (a line starting with `//`, `*` or `/*` is skipped).
+ * Known blind spot (human ask, not changed here): a call written on a line that
+ * starts with `*` (for example a wrapped multiplication or a JSDoc-looking
+ * continuation) is not counted. No current call site is affected.
+ *
+ * Sabotage witnesses (probes w80g3-cen-*, 2026-11-03; each reds only its case):
+ * removing creative-briefs' mount; reintroducing a `sessionInflightRuns` symbol;
+ * a second `reservePlanRun(` caller; dropping one insert call site; one fewer
+ * `startWorkflowRun(` site.
  *
  * P0 also reproduced the ">60 s slot loss" here, on `runQuotaMiddleware` alone. P1
  * moved `/runs` to admission counted inside the run insert, which the middleware
@@ -48,7 +64,13 @@ function tsFiles(dir: string): string[] {
   }
   return out;
 }
-const FILES = tsFiles(SRC).map((p) => ({ rel: relative(SRC, p), lines: readFileSync(p, 'utf8').split('\n') }));
+// ADR 1031 P3 — FIRST-PARTY sites only: `src/adopter/` (an adopter's own features,
+// present only in its tree) is left out, so these exact pins hold in openwop-app AND
+// in every adopter's tree. An adopter's call to `startWorkflowRun` takes the same
+// admission checks: they live inside the function, which is the point of the census.
+const FILES = tsFiles(SRC)
+  .map((p) => ({ rel: relative(SRC, p), lines: readFileSync(p, 'utf8').split('\n') }))
+  .filter((f) => !f.rel.startsWith('adopter/') && !f.rel.startsWith('adopter\\'));
 
 /** Code lines matching `re` (not comment lines, not the definition), by file. */
 function callSites(re: RegExp, definition: RegExp): Map<string, number> {
@@ -87,10 +109,11 @@ describe('ADR 0987 — the run-admission lane census (as of P2)', () => {
     expect(Object.fromEntries(callSites(/reservePlanRun\(/, /export async function reservePlanRun/))).toEqual({ 'host/runInsert.ts': 1 });
   });
 
-  it('insertRunWithStartContext is called from these 18 files', () => {
+  it('insertRunWithStartContext is called from these 19 files', () => {
     const m = callSites(/insertRunWithStartContext\(/, /export async function insertRunWithStartContext/);
     expect([...m.keys()].sort()).toEqual([
       'executor/subWorkflowDispatcher.ts',
+      'features/channel-ingress/ingress.ts', // ADR 1042 D7 — the channel conversation run (charged)
       'features/creative-briefs/routes.ts',
       'features/workflow-author/routes.ts',
       'host/canvasSurface.ts',
@@ -111,8 +134,9 @@ describe('ADR 0987 — the run-admission lane census (as of P2)', () => {
     ]);
   });
 
-  it('startWorkflowRun has 39 code call sites in 32 files (the monthly check, no per-day or concurrency check)', () => {
+  it('startWorkflowRun has 37 code call sites in 30 files (the monthly check, no per-day or concurrency check)', () => {
     const m = callSites(/startWorkflowRun\(/, /export async function startWorkflowRun/);
-    expect({ sites: total(m), files: m.size }).toEqual({ sites: 39, files: 32 });
+    // 39 / 32 until the KickTodo packages left (ADR 1031 P3).
+    expect({ sites: total(m), files: m.size }).toEqual({ sites: 37, files: 30 });
   });
 });

@@ -61,6 +61,9 @@ import { createOrg, createMember, __resetAccessStores } from '../src/host/access
 import { createHmac } from 'node:crypto';
 import type { Storage } from '../src/storage/storage.js';
 
+/** ADR 1035 — these cases test selection, not a destination: a host-fixed egress. */
+const FIXED = { fixedEndpoint: 'test: selection only' } as const;
+
 // ── ONE boot for the whole file. Every describe below runs against it, so a
 //    shuffled describe order never runs a block without initialised persistence.
 let server: http.Server;
@@ -244,13 +247,13 @@ describe('Connection resolver (most-specific: user → org → workspace, D2)', 
     await createSecretConnection({ tenantId: 't1', provider: 'servicenow', kind: 'api_key', secret: 'WS', scope: 'workspace' });
     await createSecretConnection({ tenantId: 't1', provider: 'servicenow', kind: 'api_key', secret: 'USER', scope: 'user', userId: 'u1' });
 
-    const forU1 = await resolveConnectionCredential({ tenantId: 't1', provider: 'servicenow', actingUserId: 'u1' });
+    const forU1 = await resolveConnectionCredential({ egress: FIXED,  tenantId: 't1', provider: 'servicenow', actingUserId: 'u1' });
     expect(forU1?.secret).toBe('USER');
     expect(forU1?.provenance.scopeAxis).toBe('user');
     expect(forU1?.provenance.actingUserId).toBe('u1');
 
     // a different user with no personal connection falls back to the workspace default
-    const forU2 = await resolveConnectionCredential({ tenantId: 't1', provider: 'servicenow', actingUserId: 'u2' });
+    const forU2 = await resolveConnectionCredential({ egress: FIXED,  tenantId: 't1', provider: 'servicenow', actingUserId: 'u2' });
     expect(forU2?.secret).toBe('WS');
     expect(forU2?.provenance.scopeAxis).toBe('workspace');
   });
@@ -260,8 +263,8 @@ describe('Connection resolver (most-specific: user → org → workspace, D2)', 
     const isoUser = await createSecretConnection({ tenantId: 't1-iso', provider: 'servicenow', kind: 'api_key', secret: 'ISO-USER', scope: 'user', userId: 'u1' });
     const isoWs = await createSecretConnection({ tenantId: 't1-iso', provider: 'servicenow', kind: 'api_key', secret: 'ISO-WS', scope: 'workspace' });
     // Positive control: the owning tenant resolves it.
-    expect((await resolveConnectionCredential({ tenantId: 't1-iso', provider: 'servicenow', actingUserId: 'u1' }))?.secret).toBe('ISO-USER');
-    const forOther = await resolveConnectionCredential({ tenantId: 't2-iso', provider: 'servicenow', actingUserId: 'u1' });
+    expect((await resolveConnectionCredential({ egress: FIXED,  tenantId: 't1-iso', provider: 'servicenow', actingUserId: 'u1' }))?.secret).toBe('ISO-USER');
+    const forOther = await resolveConnectionCredential({ egress: FIXED,  tenantId: 't2-iso', provider: 'servicenow', actingUserId: 'u1' });
     expect(forOther).toBeNull();
 
     // The resolve leg above is DOUBLE-GUARDED: even if the tenant row read
@@ -307,7 +310,7 @@ describe('OAuth2 token material — store, resolve, refresh-on-expiry (ADR 0024 
     });
     // The token POST goes through the (mocked) undici egress, not globalThis.fetch.
     vi.mocked(undici.fetch).mockClear();
-    const res = await resolveConnectionCredential({ tenantId: 'toauth', provider: 'google', actingUserId: 'u1' });
+    const res = await resolveConnectionCredential({ egress: FIXED,  tenantId: 'toauth', provider: 'google', actingUserId: 'u1' });
     expect(res?.secret).toBe('AT-1');
     expect(res?.provenance.scopeAxis).toBe('user');
     expect(vi.mocked(undici.fetch)).not.toHaveBeenCalled(); // not expired ⇒ no token-endpoint call
@@ -319,11 +322,11 @@ describe('OAuth2 token material — store, resolve, refresh-on-expiry (ADR 0024 
       tokens: { accessToken: 'AT-old', refreshToken: 'RT-keep', tokenType: 'Bearer', scopes: ['s'], expiresAt: new Date(Date.now() - 1000).toISOString() },
     });
     stubTokenEndpoint({ access_token: 'AT-new', token_type: 'Bearer', expires_in: 3600 });
-    const res = await resolveConnectionCredential({ tenantId: 'toauth2', provider: 'google', actingUserId: 'u1' });
+    const res = await resolveConnectionCredential({ egress: FIXED,  tenantId: 'toauth2', provider: 'google', actingUserId: 'u1' });
     expect(res?.secret).toBe('AT-new');
     // A second resolve should now hit the cache/stored token, still 'AT-new'.
     vi.restoreAllMocks();
-    const again = await resolveConnectionCredential({ tenantId: 'toauth2', provider: 'google', actingUserId: 'u1' });
+    const again = await resolveConnectionCredential({ egress: FIXED,  tenantId: 'toauth2', provider: 'google', actingUserId: 'u1' });
     expect(again?.secret).toBe('AT-new');
   });
 
@@ -333,7 +336,7 @@ describe('OAuth2 token material — store, resolve, refresh-on-expiry (ADR 0024 
       tokens: { accessToken: 'AT', refreshToken: 'RT-bad', tokenType: 'Bearer', scopes: ['s'], expiresAt: new Date(Date.now() - 1000).toISOString() },
     });
     stubTokenEndpoint({ error: 'invalid_grant' }, false);
-    const res = await resolveConnectionCredential({ tenantId: 'toauth3', provider: 'google', actingUserId: 'u1' });
+    const res = await resolveConnectionCredential({ egress: FIXED,  tenantId: 'toauth3', provider: 'google', actingUserId: 'u1' });
     expect(res).toBeNull();
     const probe = await probeConnection('toauth3', conn.connectionId);
     expect(probe?.ok).toBe(false);
@@ -364,17 +367,17 @@ describe('Org-shared connection: connections:use gate (ADR 0024 Phase C / D2)', 
   });
 
   it('hands the org credential to a member WITH connections:use', async () => {
-    const forOwner = await resolveConnectionCredential({ tenantId: 'torg', provider: 'servicenow', actingUserId: 'u1', orgId });
+    const forOwner = await resolveConnectionCredential({ egress: FIXED,  tenantId: 'torg', provider: 'servicenow', actingUserId: 'u1', orgId });
     expect(forOwner?.secret).toBe('ORG-SECRET');
     expect(forOwner?.provenance.scopeAxis).toBe('org');
     expect(forOwner?.provenance.scopeChecked).toBe(true);
   });
 
   it('withholds it from a member WITHOUT the scope, and from a non-member (fail-closed)', async () => {
-    expect(await resolveConnectionCredential({ tenantId: 'torg', provider: 'servicenow', actingUserId: 'u2', orgId })).toBeNull();
-    expect(await resolveConnectionCredential({ tenantId: 'torg', provider: 'servicenow', actingUserId: 'nobody', orgId })).toBeNull();
+    expect(await resolveConnectionCredential({ egress: FIXED,  tenantId: 'torg', provider: 'servicenow', actingUserId: 'u2', orgId })).toBeNull();
+    expect(await resolveConnectionCredential({ egress: FIXED,  tenantId: 'torg', provider: 'servicenow', actingUserId: 'nobody', orgId })).toBeNull();
     // No acting user at all ⇒ also withheld.
-    expect(await resolveConnectionCredential({ tenantId: 'torg', provider: 'servicenow' })).toBeNull();
+    expect(await resolveConnectionCredential({ egress: FIXED,  tenantId: 'torg', provider: 'servicenow' })).toBeNull();
   });
 });
 

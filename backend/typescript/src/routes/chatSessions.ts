@@ -24,6 +24,7 @@
  * bearer-authed probes still group consistently.
  */
 
+import { isChannelIngressConversation } from '../host/channelConversationGuard.js';
 import { chatAuthorSubject } from '../host/chatAuthorSubject.js';
 import { assertClientBindable } from '../host/runClientOrg.js';
 import { CONVERSATION_WORKFLOW_ID } from '../host/conversation.js';
@@ -42,6 +43,7 @@ import {
   dmKeyOf,
   ensureConversationMeta,
   getConversationMeta,
+  unionAgentParticipants,
   listConversationMetas,
   findByDmKey,
   markAsBoardGroup,
@@ -51,7 +53,9 @@ import {
   setConversationRun,
   setConversationFocus,
 } from '../host/conversationStore.js';
-import { focusReadable } from '../host/conversationFocus.js';
+import { focusAuthorized, getConversationFocusKind } from '../host/conversationFocus.js';
+import { callerSubject as actingSubjectOf } from '../host/requestSubject.js';
+import { agentMatchKeys, conversationHasAgent } from '../host/conversationAgentFilter.js';
 import { resolveBoardContextResult, resolveBoardCohortForCaller } from '../host/boardContextResolver.js';
 import { deleteConversationCompletely } from '../host/conversationCascade.js';
 import { readMarkersOf, readMarkersByConversation, type ReadMarkerView } from '../host/conversationReadState.js';
@@ -89,7 +93,9 @@ function tenantFromReq(req: Request): string {
 
 /** The acting user's stable subject (ADR 0005) — the conversation owner. */
 function actingUserOf(req: Request): string | undefined {
-  return req.userId ?? req.principal?.principalId;
+  // ADR 1040 D4 — the SAME helper the run's actor stamp uses (routes/runs.ts), so
+  // a focus bound here and re-checked on a tool call compare one spelling.
+  return actingSubjectOf(req);
 }
 
 /** The caller as a subjectRef, for stamping/comparing a message's `author_subject`
@@ -139,6 +145,20 @@ async function requireManageAsync(meta: ConversationMeta | null, req: Request, t
  *  (rename, delete, branch, run binding, focus — archive is a channel's exit, and a
  *  branch would copy other people's posts into a conversation the caller owns) or
  *  apply the channel's own write rules (edit, delete, react). */
+/**
+ * ADR 1042 (review round 3) — a channel-INGRESS conversation (a Telegram/Slack/
+ * WhatsApp/relay thread, type 'agent') holds outsiders' words and, when narrow, is
+ * stamped narrow on its run. Re-binding it to a fresh run would drop that stamp
+ * (full tools over outsider history), and a branch would copy the outsiders'
+ * transcript into an ordinary conversation. Both are refused (typed 409); the
+ * channel core opens its own, correctly stamped runs.
+ */
+async function refuseChannelIngress(tenantId: string, sessionId: string, what: string): Promise<void> {
+  if (await isChannelIngressConversation(tenantId, sessionId)) {
+    throw new OpenwopError('conflict', `A conversation from an external chat channel cannot be ${what}.`, 409, { reason: 'channel_ingress_conversation' });
+  }
+}
+
 function refuseChannel(meta: ConversationMeta | null, what: string): void {
   if (meta?.type === 'channel') {
     throw new OpenwopError('validation_error', `A channel cannot be ${what} here; use /host/openwop-app/channels/:id.`, 400, { code: 'channel_use_channel_routes' });
@@ -305,10 +325,17 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
   app.get('/host/openwop-app/chat/sessions', async (req, res, next) => {
     try {
       const tenantId = tenantFromReq(req);
-      const [sessions, metas, readByConversation] = await Promise.all([
+      // ADR 1040 D2 — `?agentId=` NARROWS the visible list to one agent's
+      // conversations. Validated before any read; applied after visibility.
+      const rawAgent = req.query.agentId;
+      if (rawAgent !== undefined && (typeof rawAgent !== 'string' || rawAgent.length === 0 || rawAgent.length > 200)) {
+        throw new OpenwopError('validation_error', 'agentId MUST be a non-empty string of 200 characters or fewer.', 400);
+      }
+      const [sessions, metas, readByConversation, agentKeys] = await Promise.all([
         storage.listChatSessions(tenantId),
         listConversationMetas(tenantId),
         readMarkersByConversation(tenantId),
+        typeof rawAgent === 'string' ? agentMatchKeys(tenantId, rawAgent) : Promise.resolve(null),
       ]);
       const byId = new Map(metas.map((m) => [m.conversationId, m]));
       // Enrich each header with its conversation meta (type + participants) so
@@ -331,6 +358,8 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
         // (channel-aware visibility), but only rail-LISTED for its members:
         // browse remains the discovery surface (ADR 0154).
         if (!isRailListed(meta ?? null, userId)) return false;
+        // ADR 1040 D2 — narrow only: a row already shown, AND naming this agent.
+        if (agentKeys && !conversationHasAgent(meta, agentKeys)) return false;
         return true;
       });
       res.json({ sessions: visible.map((s) => toConversation(s, byId.get(s.sessionId) ?? null, readByConversation.get(s.sessionId), callerSubject(req))) });
@@ -410,6 +439,13 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
 
       const now = new Date().toISOString();
       const tenantId = tenantFromReq(req);
+      // ADR 1040 D2 (review M4) — a meta can exist before its session row (an
+      // embed's focus bind creates one). Never create a row on top of a meta
+      // someone ELSE owns: answering 201 would silently adopt their conversation.
+      const prior = await getConversationMeta(tenantId, sessionId);
+      if (prior?.ownerUserId !== undefined && prior.ownerUserId !== actingUserOf(req)) {
+        throw new OpenwopError('idempotency_key_conflict', `chat_session "${sessionId}" already exists.`, 409);
+      }
       try {
         await storage.createChatSession({
           sessionId,
@@ -435,13 +471,26 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
 
       // The conversation meta sidecar (ADR 0043) — type + owner + participants,
       // keyed by the same id. The caller is the owner.
-      const meta = await ensureConversationMeta(tenantId, sessionId, {
+      const ensured = await ensureConversationMeta(tenantId, sessionId, {
         type: convType,
         ...(actingUserOf(req) ? { ownerUserId: actingUserOf(req) } : {}),
         participants,
         ...(boardId ? { boardId } : {}),
         ...(client ? { client } : {}),
       });
+      // ADR 1040 D2 — create-or-return kept a pre-existing meta's participants, so
+      // the creator's `agent:` stamp is unioned in (agents only; same owner only).
+      // The prior-owner check above ran before the row existed; a meta another
+      // user created in between is refused here too (grade-code minor 2).
+      if (ensured.ownerUserId !== undefined && ensured.ownerUserId !== actingUserOf(req)) {
+        throw new OpenwopError('idempotency_key_conflict', `chat_session "${sessionId}" already exists.`, 409);
+      }
+      let meta = ensured;
+      if (participants.some((r) => r.startsWith('agent:') && !ensured.participants.some((p) => p.subjectRef === r))) {
+        const merged = await unionAgentParticipants(tenantId, sessionId, actingUserOf(req), participants);
+        if (merged === 'foreign') throw new OpenwopError('idempotency_key_conflict', `chat_session "${sessionId}" already exists.`, 409);
+        if (merged) meta = merged;
+      }
       // ADR 0944 D2 — the meta row is create-or-return, so a row that already
       // existed keeps its own binding. Never report a binding that did not land.
       if ((meta.client?.orgId ?? undefined) !== clientOrgId && clientOrgId !== undefined) {
@@ -624,6 +673,7 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
       const runMeta = await getConversationMeta(tenantId, req.params.sessionId);
       await requireVisibleAsync(runMeta, req, tenantId, req.params.sessionId);
       refuseChannel(runMeta, 'bound to a conversation run'); // ADR 0879 (H3)
+      await refuseChannelIngress(tenantId, req.params.sessionId, 're-bound to another conversation run');
       const body = (req.body ?? {}) as { conversationRunId?: unknown };
       if (typeof body.conversationRunId !== 'string' || !ID_PATTERN.test(body.conversationRunId)) {
         throw new OpenwopError('validation_error', 'conversationRunId MUST match /^[A-Za-z0-9_-]{1,64}$/.', 400);
@@ -651,13 +701,16 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
     }
   });
 
-  // ADR 0777 — focus an EMBEDDED conversation on the entity beside it, so its
-  // agent's tools default to it and the UI may say "this canvas". Unlike the
-  // routes above it does NOT require a stored chat-session row: an embed is
-  // ephemeral (persist:false) until "Continue in full chat". Checks, in order:
-  // an acting user; the caller may see an EXISTING conversation; the caller may
-  // READ the entity (THE predicate for its kind). A refusal is the uniform 404 —
-  // and nothing is stored. The client value is only a request, never trusted.
+  // ADR 0777 / ADR 1040 D4 — focus an EMBEDDED conversation on the entity beside
+  // it, so its agent's tools default to it and the UI may say "this canvas" /
+  // "this book". Unlike the routes above it does NOT require a stored
+  // chat-session row: an embed is ephemeral (persist:false) until "Continue in
+  // full chat". Checks, in order: an acting user; a REGISTERED kind; the caller
+  // may see the conversation (its meta, or else its session row, so a row with
+  // no meta is never claimed by a stranger); the caller may MANAGE an existing
+  // meta (a participant cannot re-point the owner's tools); not a channel; the
+  // kind's `authorize` (feature toggle + read check). A refused entity is the
+  // uniform 404 and nothing is stored. The client value is only a request.
   // One registration for both verbs (one /v1 host-extension path ref, ADR 0642).
   app.route('/host/openwop-app/chat/sessions/:sessionId/focus')
     .put(async (req, res, next) => {
@@ -667,17 +720,33 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
         if (!caller) throw new OpenwopError('unauthenticated', 'Authentication required.', 401);
         if (!ID_PATTERN.test(req.params.sessionId)) throw new OpenwopError('validation_error', 'sessionId MUST match /^[A-Za-z0-9_-]{1,64}$/.', 400);
         const body = (req.body ?? {}) as { kind?: unknown; id?: unknown };
-        // CANVAS only (ADR 0777 §Correction): a workflow's binding is ADR 0773's
-        // pairing context, never a second mechanism here.
-        if (body.kind !== 'canvas' || typeof body.id !== 'string' || !body.id || body.id.length > 200) {
-          throw new OpenwopError('validation_error', "focus MUST be { kind: 'canvas', id }.", 400);
+        // A REGISTERED kind only (ADR 1040 D4). A builder workflow's binding is
+        // ADR 0773's pairing context, never a focus (ADR 0777 §Correction).
+        const kind = typeof body.kind === 'string' ? getConversationFocusKind(body.kind) : undefined;
+        if (!kind || typeof body.id !== 'string' || !body.id || body.id.length > 200) {
+          throw new OpenwopError('validation_error', 'focus MUST be { kind, id } with a registered kind.', 400);
         }
         const existing = await getConversationMeta(tenantId, req.params.sessionId);
-        if (existing) await requireVisibleAsync(existing, req, tenantId, req.params.sessionId);
+        if (existing) {
+          await requireVisibleAsync(existing, req, tenantId, req.params.sessionId);
+          // An OWNERLESS meta (a run or scope setter minted it: tenant-visible,
+          // so the manage gate would admit anyone) is never an embed's — those
+          // are created owned. Refuse rather than let any member steer it.
+          if (!existing.ownerUserId && !existing.ownerSubject) {
+            throw new OpenwopError('not_found', `chat_session "${req.params.sessionId}" not found.`, 404);
+          }
+          await requireManageAsync(existing, req, tenantId);
+        } else if (await storage.getChatSession(tenantId, req.params.sessionId)) {
+          // A session row with NO meta (a legacy, tenant-visible chat): binding it
+          // would mint a meta OWNED BY THIS CALLER and so claim the conversation
+          // from everyone else who can see it. Every embed row is created with its
+          // meta, so this is never an embed: refuse it (review M4).
+          throw new OpenwopError('not_found', `chat_session "${req.params.sessionId}" not found.`, 404);
+        }
         refuseChannel(existing, 'focused'); // ADR 0879 (H3)
-        const focus = { kind: body.kind, id: body.id } as const;
-        if (!(await focusReadable(tenantId, focus, caller))) {
-          throw new OpenwopError('not_found', `${focus.kind} "${focus.id}" not found.`, 404);
+        const focus = { kind: kind.kind, id: body.id };
+        if (!(await focusAuthorized(kind.kind, { tenantId, actingUserId: caller, ...(req.personalTenant ? { personalTenant: req.personalTenant } : {}) }, focus.id))) {
+          throw new OpenwopError('not_found', `${kind.label} "${focus.id}" not found.`, 404);
         }
         const meta = await setConversationFocus(tenantId, req.params.sessionId, focus, caller);
         res.status(200).json({ focus: meta.focus });
@@ -693,6 +762,7 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
         const existing = await getConversationMeta(tenantId, req.params.sessionId);
         if (existing) {
           await requireVisibleAsync(existing, req, tenantId, req.params.sessionId);
+          await requireManageAsync(existing, req, tenantId); // ADR 1040 D4 — same gate as bind
           await setConversationFocus(tenantId, req.params.sessionId, undefined, caller);
         }
         res.status(204).end();
@@ -713,6 +783,7 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
       const parentMeta = await getConversationMeta(tenantId, parentId);
       await requireVisibleAsync(parentMeta, req, tenantId, parentId); // 404 if not owner/participant
       refuseChannel(parentMeta, 'branched'); // ADR 0879 (H3) — would copy other members' posts into a conversation the caller owns
+      await refuseChannelIngress(tenantId, parentId, 'branched');
       const parentSession = await storage.getChatSession(tenantId, parentId);
       if (!parentSession) throw new OpenwopError('not_found', `chat_session "${parentId}" not found.`, 404);
 

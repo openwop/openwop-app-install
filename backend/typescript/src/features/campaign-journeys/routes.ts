@@ -10,7 +10,7 @@
  */
 import type { Request } from 'express';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
-import { requireFeatureEnabled, requireString } from '../featureRoute.js';
+import { requireFeatureEnabled, requireString, requireTenantScope } from '../featureRoute.js';
 import { resolveCallerUser } from '../users/usersGuards.js';
 import { assertOrgScope, type Scope } from '../../host/accessControlService.js';
 import { OpenwopError } from '../../types.js';
@@ -37,7 +37,11 @@ async function namedClient(tenantId: string, raw: unknown): Promise<string> {
 async function clientOf(req: Request, raw: unknown, scope: Scope): Promise<string> {
   const tenantId = tenantOf(req);
   const orgId = await namedClient(tenantId, raw);
+  // ADR 1024 D6.5 (`CDP2WF-19`) — with no client named, this checked NOTHING beyond the
+  // toggle, so a Viewer reset an enrollment and re-armed a journey (a second send to the
+  // same person). The workspace-level scope applies when the request names no client.
   if (orgId) await assertOrgScope(tenantId, (await resolveCallerUser(req)).userId, orgId, scope);
+  else await requireTenantScope(req, scope);
   return orgId;
 }
 
@@ -50,7 +54,8 @@ export function registerCampaignJourneysRoutes(deps: RouteDeps): void {
       await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
       const orgId = await clientOf(req, req.query.orgId, 'workspace:read');
       const journeyId = typeof req.query.journeyId === 'string' && req.query.journeyId.length > 0 ? req.query.journeyId : undefined;
-      res.json({ enrollments: await listEnrollments(tenantOf(req), journeyId, orgId || undefined) });
+      // Empty scope names the house account; undefined would include every client.
+      res.json({ enrollments: await listEnrollments(tenantOf(req), journeyId, orgId) });
     } catch (err) { next(err); }
   });
 

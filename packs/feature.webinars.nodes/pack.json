@@ -1,6 +1,6 @@
 {
   "name": "feature.webinars.nodes",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "kind": "node",
   "description": "Webinar connector node pack (ADR 0404) — `register` (push a registrant to the provider via the Connections broker + record the CRM registration) and `sync` (backfill-reconcile an event's attendance + no-shows). Over ctx.features.webinars; adapterOnly consumer of the zoom-webinar provider (the governed registrant write can never ride ctx.http.fetch).",
   "author": "OpenWOP App",
@@ -10,9 +10,9 @@
   "nodes": [
     {
       "typeId": "feature.webinars.nodes.register",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "label": "Webinar: Register Attendee",
-      "description": "Pushes a registrant to the webinar provider through the acting user's Connection (adapterOnly zoom-webinar) and records the CRM `registered` activity. Inputs: { orgId, webinarId, email, name? }. Output: { success, registrantId?, joinUrl?, error? }.",
+      "description": "Pushes a registrant to a webinar this client already tracks, through the Connections broker (adapterOnly zoom-webinar; pinned to the event's connection when it names one), and records the CRM `registered` activity. Requires workspace:write of the run's person (ADR 1054). Inputs: { orgId, webinarId, email, name? }. Output: { success, registrantId?, joinUrl?, error?, queued?, recorded? }. Failure codes: event_not_tracked, event_in_other_org, registration_not_recorded (nothing sent), provider_push_queued (Zoom did not confirm; queued for an operator), provider_push_failed.",
       "category": "integration",
       "role": "action",
       "capabilities": []

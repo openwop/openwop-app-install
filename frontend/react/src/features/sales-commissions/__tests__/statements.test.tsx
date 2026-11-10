@@ -26,13 +26,18 @@ import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatu
 type CommApi = typeof import('../commissionsClient.js');
 type MembersApi = typeof import('../../../orgs/orgMembers.js');
 type ConfirmApi = typeof import('../../../ui/confirm.js');
+type AccessApi = typeof import('../../../client/accessClient.js');
+type SessionApi = typeof import('../../../auth/backendSession.js');
 
 const listPlans = vi.fn<CommApi['listPlans']>();
 const listStatements = vi.fn<CommApi['listStatements']>();
 const payStatement = vi.fn<CommApi['payStatement']>();
 const approveStatement = vi.fn<CommApi['approveStatement']>();
+const computeStatement = vi.fn<CommApi['computeStatement']>();
 const loadOrgMembers = vi.fn<MembersApi['loadOrgMembers']>();
 const confirmMock = vi.fn<ConfirmApi['confirm']>();
+const getEffectiveAccess = vi.fn<AccessApi['getEffectiveAccess']>();
+let viewerId: string | undefined;
 
 vi.mock('../commissionsClient.js', async (orig) => ({
   ...(await orig<CommApi>()),
@@ -41,6 +46,7 @@ vi.mock('../commissionsClient.js', async (orig) => ({
   listStatements: (orgId: string) => listStatements(orgId),
   payStatement: (orgId: string, id: string) => payStatement(orgId, id),
   approveStatement: (orgId: string, id: string) => approveStatement(orgId, id),
+  computeStatement: (...a: Parameters<CommApi['computeStatement']>) => computeStatement(...a),
 }));
 // Spread the real module — `UserPicker` imports from it too, and enumerating
 // the exports left it with undefined helpers (the same partial-mock trap this
@@ -54,6 +60,15 @@ vi.mock('../../../ui/confirm.js', async (orig) => ({
   confirm: (o: Parameters<ConfirmApi['confirm']>[0]) => confirmMock(o),
 }));
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
+// ADR 1034 D11 — the page now asks which controls the caller may use.
+vi.mock('../../../client/accessClient.js', async (orig) => ({
+  ...(await orig<AccessApi>()),
+  getEffectiveAccess: (o: Parameters<AccessApi['getEffectiveAccess']>[0]) => getEffectiveAccess(o),
+}));
+vi.mock('../../../auth/backendSession.js', async (orig) => ({
+  ...(await orig<SessionApi>()),
+  useBackendSession: () => ({ user: viewerId ? { userId: viewerId, tenantId: 't', principalId: 'p', groups: [] } : null, resolved: true }),
+}));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
   useFeatureAccess: () => makeFeatureAccess(),
 }));
@@ -83,7 +98,10 @@ const view = async (): Promise<void> => {
 };
 
 beforeEach(() => {
-  for (const m of [listPlans, listStatements, payStatement, approveStatement, loadOrgMembers, confirmMock]) m.mockReset();
+  for (const m of [listPlans, listStatements, payStatement, approveStatement, computeStatement, loadOrgMembers, confirmMock, getEffectiveAccess]) m.mockReset();
+  // Default: a commissions MANAGER, so the existing cases see the manager controls.
+  getEffectiveAccess.mockResolvedValue({ roles: ['admin'], scopes: ['workspace:read', 'workspace:write', 'host:commissions:manage'], basis: 'member' });
+  viewerId = 'manager-1';
   listPlans.mockResolvedValue([PLAN]);
   listStatements.mockResolvedValue([stmt()]);
   loadOrgMembers.mockResolvedValue([{ memberId: 'm1', orgId: 'org-1', tenantId: 't', subject: 'user:rep-a', displayName: 'Ada Rep', roles: [], teamIds: [], createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' }]);
@@ -189,5 +207,81 @@ describe('COM2-G3: the table names the rep', () => {
     // Never a blank cell — the id is the only handle left.
     const table = await screen.findByRole('table');
     expect(within(table).getByText('user:rep-a')).toBeTruthy();
+  });
+});
+
+describe('ADR 1034 D11/D8 — controls only for the people the server lets use them', () => {
+  it('a rep (no manage scope) sees statements but no plan form, compute, submit or pay', async () => {
+    getEffectiveAccess.mockResolvedValue({ roles: ['editor'], scopes: ['workspace:read', 'workspace:write'], basis: 'member' });
+    listStatements.mockResolvedValue([stmt({ status: 'approved' }), stmt({ statementId: 'st-2', status: 'draft' })]);
+    await view();
+    const table = await screen.findByRole('table');
+    // Positive anchor: the rep's statements are listed…
+    expect(within(table).getAllByText('Ada Rep').length).toBe(2);
+    expect(await screen.findByText(/Only commission managers can create or change plans/)).toBeTruthy();
+    expect(screen.getByText(/A manager computes and approves them/)).toBeTruthy(); // rep lede, once access answered
+    // …and none of the controls the server would refuse.
+    expect(screen.queryByRole('button', { name: /mark paid/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /submit/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /compute/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /create plan/i })).toBeNull();
+  });
+
+  it('a manager is never offered "mark paid" on their own statement (the server refuses self-pay)', async () => {
+    viewerId = 'rep-a'; // the statement's subject is `user:rep-a` — the same person
+    await view();
+    const table = await screen.findByRole('table');
+    expect(within(table).getByText('Another manager must mark this paid')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /mark paid/i })).toBeNull();
+  });
+
+  it('an erased rep’s plan (no assignment) renders instead of crashing the panel', async () => {
+    const { assignment: _dropped, ...rest } = PLAN;
+    void _dropped;
+    listPlans.mockResolvedValue([rest]);
+    await view();
+    expect(await screen.findByText(/Not assigned to anyone/)).toBeTruthy();
+  });
+});
+
+describe('ADR 1034 (grade-ux H2–H5) — what the page says about reviews, left-off deals and access', () => {
+  it('a draft with a pending review reads "In review" and is not offered Submit again', async () => {
+    listStatements.mockResolvedValue([stmt({ status: 'draft', review: { status: 'pending', superseded: false } })]);
+    await view();
+    const table = await screen.findByRole('table');
+    expect(within(table).getByText('In review')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /submit/i })).toBeNull();
+  });
+
+  it('a review closed because deals were already paid offers Recompute, which recomputes THIS statement', async () => {
+    listStatements.mockResolvedValue([stmt({ status: 'draft', review: { status: 'rejected', superseded: true } })]);
+    computeStatement.mockResolvedValue(stmt({ status: 'draft', total: 0, excludedDeals: [{ dealId: 'd1', period: '2026-02' }] }));
+    await view();
+    const table = await screen.findByRole('table');
+    expect(within(table).getByText('Review closed: deals already approved')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /submit/i })).toBeNull();
+    fireEvent.click(within(table).getByRole('button', { name: 'Recompute' }));
+    await waitFor(() => expect(computeStatement).toHaveBeenCalledWith('org-1', 'pl-1', 'user:rep-a', '2026-Q1'));
+  });
+
+  it('a statement with left-off deals says so on the row', async () => {
+    listStatements.mockResolvedValue([stmt({ excludedDeals: [{ dealId: 'd1', period: '2026-02' }, { dealId: 'd2', period: '2026-02' }] })]);
+    await view();
+    const chip = within(await screen.findByRole('table')).getByText('2 deals left off');
+    expect(chip.textContent).toContain('Already counted on an approved statement of this plan (2026-02)'); // real text, not a hover-only title
+  });
+
+  it('a rep reads rep copy, and a failed access read is said out loud with a retry', async () => {
+    getEffectiveAccess.mockRejectedValueOnce(new Error('access down'));
+    listStatements.mockResolvedValue([]);
+    await view();
+    expect(await screen.findByText(/could not check what you can change here/i)).toBeTruthy();
+    // No "you are not a manager" claim on a read that did not answer.
+    expect(screen.queryByText(/Only commission managers/)).toBeNull();
+    // …nor rep copy: an unanswered read says nothing about who the reader is.
+    expect(screen.queryByText(/Your manager computes them each period/)).toBeNull();
+    getEffectiveAccess.mockResolvedValue({ roles: [], scopes: ['workspace:read', 'host:commissions:manage'], basis: 'member' });
+    fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
+    expect(await screen.findByRole('button', { name: /compute/i })).toBeTruthy();
   });
 });

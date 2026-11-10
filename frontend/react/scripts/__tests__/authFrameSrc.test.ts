@@ -8,6 +8,10 @@
  * instead of failing sign-in silently. The last case reads the repo's own
  * firebase.json and .env files, so removing the fix or re-adding the wildcard
  * reddens it.
+ *
+ * Sabotage-checked (w83 probes): the wildcard match, the `.web.app` suffix, the
+ * exact-origin rule, the `'self'` rule, the no-domain early return, the `app`
+ * target filter and the directive-name strip in `appFrameSrc`.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -21,7 +25,9 @@ const GOOGLE = "'self' https://apis.google.com https://accounts.google.com";
 describe('check-auth-frame-src', () => {
   it('a custom auth domain needs only self', () => {
     expect(authFrameSrcFindings('app.example.com', GOOGLE)).toEqual([]);
-    expect(authFrameSrcFindings('app.example.com', 'https://apis.google.com')).toHaveLength(1);
+    const findings = authFrameSrcFindings('app.example.com', 'https://apis.google.com');
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toContain("frame-src needs 'self'");
   });
 
   it('a default Firebase auth domain needs its exact origin', () => {
@@ -33,17 +39,25 @@ describe('check-auth-frame-src', () => {
   it('a Firebase wildcard is refused even where it would make sign-in work', () => {
     const findings = authFrameSrcFindings('acme.firebaseapp.com', `${GOOGLE} https://*.firebaseapp.com`);
     expect(findings.some((f) => f.includes('wildcard https://*.firebaseapp.com'))).toBe(true);
-    expect(authFrameSrcFindings(undefined, `${GOOGLE} https://*.web.app`)).toHaveLength(1);
+    const webApp = authFrameSrcFindings(undefined, `${GOOGLE} https://*.web.app`);
+    expect(webApp).toHaveLength(1);
+    expect(webApp[0]).toContain('wildcard https://*.web.app');
   });
 
   it('no auth domain configured: only the wildcard rule applies', () => {
     expect(authFrameSrcFindings('', GOOGLE)).toEqual([]);
+    // Even a frame-src with no 'self': with no auth domain there is no frame to admit.
+    expect(authFrameSrcFindings('', 'https://apis.google.com')).toEqual([]);
+    expect(authFrameSrcFindings(undefined, 'https://apis.google.com')).toEqual([]);
   });
 
   it("this repo's firebase.json and production auth domain pass", () => {
     const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-    const frameSrc = appFrameSrc(readFileSync(join(root, '..', '..', 'firebase.json'), 'utf8'));
+    const firebaseJson = readFileSync(join(root, '..', '..', 'firebase.json'), 'utf8');
+    const frameSrc = appFrameSrc(firebaseJson);
     expect(frameSrc, 'the app-wide CSP rule was not found').not.toBeNull();
+    // The source list, read independently of the parser (firebase.json carries one frame-src).
+    expect(frameSrc).toBe(/frame-src ([^;"]+)/.exec(firebaseJson)![1]!.trim());
     // Whatever auth domain this checkout's production build uses (an adopter's own,
     // or none) must be admitted; the showcase's is its custom domain, i.e. 'self'.
     const authDomain = loadEnv('production', root, 'VITE_').VITE_FIREBASE_AUTH_DOMAIN;

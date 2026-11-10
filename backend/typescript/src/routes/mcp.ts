@@ -65,8 +65,12 @@ export function registerMcpServerRoutes(app: Express, deps: Deps): void {
     log.info('mcp server mount disabled (set OPENWOP_MCP_SERVER_ENABLED=true to enable)');
     return;
   }
+  // ADR 1045 D6/D7 — the auth review this warning used to ask for is recorded
+  // in docs/adr/1045-mcp-a2a-server-hardening.md (method-by-method: auth,
+  // tenant source, the shared HTTP predicate, rate limit, audit). Enabling it in
+  // PRODUCTION is still an operator decision, recorded in ADR 1041.
   log.warn(
-    'mcp server mount ENABLED — POST /host/openwop-app/mcp is reachable. NEVER enable in production without auth review.',
+    'mcp server mount ENABLED — POST /host/openwop-app/mcp is reachable to authenticated, non-anonymous principals (auth review: ADR 1045). Production enable is an operator decision (ADR 1041).',
   );
 
   app.post('/host/openwop-app/mcp', async (req, res) => {
@@ -132,7 +136,10 @@ async function handleMcpRequest(req: Request, res: Response, deps: Deps): Promis
       && process.env.OPENWOP_TEST_SEAM_ENABLED !== 'true'
     ) {
       log.warn('mcp_anonymous_principal_refused', { path: req.path });
-      await recordMcpAudit({ tenantId: principal.tenants[0] ?? 'unknown', direction: 'inbound', method: 'unknown', target: mcpAuditTarget('mount'), principal: principal.principalId, outcome: 'unauthenticated', reason: 'anonymous_principal', durationMs: Date.now() - startedAtMs });
+      // ADR 1045 D5 — the tenant every decision on this request is made in
+      // (`tenantOf`, which `mcpCallerFor` resolves below), never
+      // `principal.tenants[0]` (`*` for a wildcard operator key).
+      await recordMcpAudit({ tenantId: tenantOf(req), direction: 'inbound', method: 'unknown', target: mcpAuditTarget('mount'), principal: principal.principalId, outcome: 'unauthenticated', reason: 'anonymous_principal', durationMs: Date.now() - startedAtMs });
       sendError(res, 401, 'unauthenticated', 'MCP requires an authenticated, non-anonymous principal (RFC 0153 §E); this host does not advertise anonymousActor.', { reason: 'anonymous_principal_refused' });
       return;
     }
@@ -173,7 +180,7 @@ async function handleMcpRequest(req: Request, res: Response, deps: Deps): Promis
       // reach the audit row; the closed `reason` code carries the fact and the
       // structured log above carries the value for diagnosis.
       await recordMcpAudit({
-        tenantId: principal.tenants[0] ?? 'unknown',
+        tenantId: caller.tenantId, // ADR 1045 D5
         direction: 'inbound',
         method: parsed.method,
         target: mcpAuditTarget('mount'),

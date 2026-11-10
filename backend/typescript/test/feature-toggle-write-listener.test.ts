@@ -3,7 +3,14 @@
  * must fire after EVERY stored write, carry the tenant on tenant-scoped writes,
  * and a failing listener must never fail the toggle write. ADR 0951 P2 review
  * #1: the write carries what was written, and an intent runs before the store
- * write, so a listener never has to re-read live state to learn what happened. */
+ * write, so a listener never has to re-read live state to learn what happened.
+ *
+ * Sabotage (witnessed, w80): dropping a write path's notify, the tenant on the
+ * write, the no-op guard, the listener catch, the budget timer, the intent
+ * order, the prepare rethrow/abandon, each settle branch, or the written-row
+ * read reds its case. `resolveWrittenToggle`'s null for an unwritten id is held
+ * by the rows guard AND `getToggleDefault`; a registered-but-unwritten id
+ * isolates the rows guard. */
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,7 +21,7 @@ import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { registerToggleDefault, __resetToggleDefaults } from '../src/host/featureToggles/registry.js';
 import {
   deleteConfig, disableTenantOverride, enableTenantOverride, getStoredConfig, purgeTenantOverrides,
-  registerToggleWriteIntent, registerToggleWriteListener, resolveWrittenToggle, retireToggleOverrides, saveConfig,
+  registerToggleWriteIntent, registerToggleWriteListener, resolveWrittenToggle, retireToggleOverrides, revisionOf, saveConfig,
   type ToggleWrite,
 } from '../src/host/featureToggles/service.js';
 import type { ToggleConfig } from '../src/host/featureToggles/types.js';
@@ -75,23 +82,30 @@ describe('feature toggle write seam budget', () => {
   it('a slow listener cannot hold the toggle write past its budget, and still completes', async () => {
     const { TOGGLE_WRITE_LISTENER_BUDGET_MS } = await import('../src/host/featureToggles/service.js');
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    let release!: () => void;
-    let finished = false;
-    registerToggleWriteListener('witness-failing', () => new Promise<void>((r) => { release = () => { finished = true; r(); }; }));
-    let saved = false;
-    const write = saveConfig({ ...DEF, status: 'on' }, 'test').then(() => { saved = true; });
-    // Not vi.waitFor: under fake timers it advances the clock it polls with.
-    for (let i = 0; i < 200 && !release; i++) await new Promise<void>((r) => { setImmediate(r); });
-    expect(release).toBeTypeOf('function');
-    await vi.advanceTimersByTimeAsync(TOGGLE_WRITE_LISTENER_BUDGET_MS - 1);
-    expect(saved).toBe(false);
-    await vi.advanceTimersByTimeAsync(1);
-    await write;
-    expect(saved).toBe(true);
-    expect(finished).toBe(false);
-    release();
-    expect(finished).toBe(true);
-    vi.useRealTimers();
+    try {
+      let release!: () => void;
+      let finished = false;
+      registerToggleWriteListener('witness-failing', () => new Promise<void>((r) => { release = () => { finished = true; r(); }; }));
+      let saved = false;
+      const write = saveConfig({ ...DEF, status: 'on' }, 'test').then(() => { saved = true; });
+      const tick = (): Promise<void> => new Promise<void>((r) => { setImmediate(r); });
+      // Not vi.waitFor: under fake timers it advances the clock it polls with.
+      for (let i = 0; i < 200 && !release; i++) await tick();
+      expect(release).toBeTypeOf('function');
+      await vi.advanceTimersByTimeAsync(TOGGLE_WRITE_LISTENER_BUDGET_MS - 1);
+      expect(saved).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      // A bounded drain, so a budget that never fires fails HERE by name instead
+      // of hanging the case on `await write`.
+      for (let i = 0; i < 50 && !saved; i++) await tick();
+      expect(saved, 'the write settles once the budget lapses').toBe(true);
+      await write;
+      expect(finished).toBe(false);
+      release();
+      expect(finished).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -117,10 +131,31 @@ describe('feature toggle write seam carries the write (ADR 0951 P2 review #1)', 
   });
 
   it('a write that did not land is abandoned, and a failing intent fails the write', async () => {
+    const prepared: string[] = [];
     const abandoned: string[] = [];
-    registerToggleWriteIntent('witness', { prepare: async () => {}, abandon: async (w) => { abandoned.push(w.writeId); } });
+    registerToggleWriteIntent('witness', { prepare: async (w) => { prepared.push(w.writeId); }, abandon: async (w) => { abandoned.push(w.writeId); } });
     await expect(saveConfig({ ...DEF, status: 'on' }, 'test', { expectedRevision: 'stale' })).rejects.toMatchObject({ httpStatus: 409 });
-    expect(abandoned, 'a stale revision is refused before any intent').toEqual([]);
+    expect(prepared, 'a stale revision is refused before any intent').toEqual([]);
+    expect(abandoned).toEqual([]);
+
+    // A compare-and-swap that LOSES (the row moved after the revision check) did
+    // not land: the prepared intent is abandoned and nobody is notified.
+    await saveConfig({ ...DEF, status: 'on' }, 'test');
+    prepared.length = 0;
+    calls.length = 0;
+    const rev = revisionOf(await getStoredConfig(DEF.id));
+    const cas = vi.spyOn(storage, 'kvCompareAndSwap').mockImplementationOnce(async (key) => ({ swapped: false, actual: await storage.kvGet(key) }));
+    try {
+      await expect(saveConfig({ ...DEF, status: 'off' }, 'test', { expectedRevision: rev })).rejects.toMatchObject({ httpStatus: 409 });
+    } finally { cas.mockRestore(); }
+    expect(prepared).toHaveLength(1);
+    expect(abandoned).toEqual(prepared);
+    expect(calls).toEqual([]);
+    expect((await getStoredConfig(DEF.id))?.status).toBe('on');
+    await deleteConfig(DEF.id, 'test');
+    prepared.length = 0;
+    calls.length = 0;
+
     registerToggleWriteIntent('witness', { prepare: async () => { throw new Error('marker store down'); } });
     await expect(saveConfig({ ...DEF, status: 'on' }, 'test')).rejects.toThrow('marker store down');
     expect(await getStoredConfig(DEF.id)).toBeNull();
@@ -139,6 +174,9 @@ describe('feature toggle write seam carries the write (ADR 0951 P2 review #1)', 
     expect(resolveWrittenToggle(off, DEF.id, { tenantId: 'tenant-a' })?.enabled).toBe(false);
     expect(resolveWrittenToggle(off, DEF.id, { tenantId: 'tenant-b' })?.enabled).toBe(true);
     expect(resolveWrittenToggle(off, 'not.written', { tenantId: 'tenant-a' })).toBeNull();
+    // A REGISTERED toggle this write did not touch: only the rows guard says null.
+    registerToggleDefault({ ...DEF, id: 'listener.unwritten', salt: 'listener.unwritten', status: 'on' });
+    expect(resolveWrittenToggle(off, 'listener.unwritten', { tenantId: 'tenant-a' })).toBeNull();
   });
 });
 

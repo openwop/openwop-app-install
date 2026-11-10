@@ -15,17 +15,19 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act } from '@testing-library/react';
 import type { RunEventDoc } from '@openwop/openwop';
+import type * as RunsClient from '../../client/runsClient.js';
+import i18n from '../../i18n/index.js';
 
 const { listMemory, getCapabilities } = vi.hoisted(() => ({
-  listMemory: vi.fn(),
-  getCapabilities: vi.fn(),
+  listMemory: vi.fn<typeof RunsClient.listMemory>(),
+  getCapabilities: vi.fn<typeof RunsClient.getCapabilities>(),
 }));
 vi.mock('../../client/runsClient.js', () => ({ listMemory, getCapabilities }));
 
 import { MemoryInspectorPage } from '../MemoryInspectorPage.js';
 import { RunMemoryPanel } from '../../runs/RunMemoryPanel.js';
 
-const ROW = { id: 'runsummary:r1', content: 'Run r1 of "wf" completed → {"text":"HI"}', tags: ['run-summary', 'run-id:r1'], createdAt: '2026-10-25T10:00:00.000Z' };
+const ROW: RunsClient.MemoryEntry = { id: 'runsummary:r1', content: 'Run r1 of "wf" completed → {"text":"HI"}', tags: ['run-summary', 'run-id:r1'], createdAt: '2026-10-25T10:00:00.000Z' };
 
 afterEach(cleanup);
 beforeEach(() => {
@@ -51,6 +53,7 @@ describe('ADR 0979 D4 — the run-summary ledger', () => {
     await mountPage();
     expect(document.body.textContent).toContain('You see the runs you started');
     expect(document.body.textContent).toContain('HI');
+    expect(document.body.textContent).toContain(i18n.t('memory:entryCount', { count: 1, n: '1' }));
     expect(screen.queryByRole('button', { name: /Delete memory entry/ })).toBeNull();
     expect(screen.queryByRole('checkbox')).toBeNull();
   });

@@ -190,7 +190,8 @@ export { keyDeclarationPermits };
  *  - `env-key` → `tenant-owner`: an `OPENWOP_API_KEYS` entry is the deployment
  *    operator's credential, "the tenant's own principal, in the tenant the config
  *    pinned it to". A member cannot mint one, so this is no escalation path. Its
- *    `bearer:<8>` id is NOT an RBAC subject (ADR 0601 C3).
+ *    `bearer:<id>` id (ADR 1045: a 16-hex digest of the key) is NOT an RBAC
+ *    subject (ADR 0601 C3).
  *  - `api-key` → the ISSUER (`ApiKeyRecord.createdBy`), with the key's declared
  *    scopes. A key is a delegation, so it can never hold more than its issuer
  *    holds NOW: the issuer's membership is re-read on every request, never

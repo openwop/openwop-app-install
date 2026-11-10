@@ -12,6 +12,7 @@
  * Pure: no store, no React, no network — unit-tested directly.
  */
 
+import { projectSourceOutput } from '../schema/sourceOutput.js';
 import type { BuilderEdge, BuilderNode } from '../schema/workflow.js';
 import { catalogEntry, catalogEntryByTypeId, defaultConfigFor } from '../palette/catalogRegistry.js';
 
@@ -208,14 +209,12 @@ function placeNewNode(op: Extract<EditOp, { kind: 'addNode' }>, all: readonly Ed
   return { x: ORIGIN_X, y: maxY + NEW_NODE_GAP_Y };
 }
 
-/** A port name the node really has: the requested one if the catalog lists it,
- *  else the node's first port (a model-named port the node lacks would leave an
- *  edge pointing at no handle — review CR-7). */
-function portOf(nodeKind: string | undefined, side: 'out' | 'in', requested?: string): string {
-  const entry = nodeKind ? catalogEntry(nodeKind) : undefined;
-  const ports = side === 'out' ? entry?.outputs : entry?.inputs;
+/** Existing target-input fallback only. Source binding is lossless and is
+ * projected separately as named/default/unresolved (BUILDER-PORT-1). */
+function targetPortOf(nodeKind: string | undefined, requested?: string): string {
+  const ports = nodeKind ? catalogEntry(nodeKind)?.inputs : undefined;
   if (requested && (!ports || ports.some((p) => p.name === requested))) return requested;
-  return ports?.[0]?.name ?? (side === 'out' ? 'out' : 'in');
+  return ports?.[0]?.name ?? 'in';
 }
 
 /** Apply ops to a builder graph. `applied[i]` says whether op i actually landed —
@@ -261,8 +260,9 @@ export function applyEditOpsToGraph(g: Graph, ops: readonly EditOp[]): { nodes: 
         if (!src || !tgt || edges.some((e) => e.id === op.edgeId)) { ok = false; break; }
         edges.push({
           id: op.edgeId, source: src.id, target: tgt.id,
-          sourcePort: portOf(src.kind, 'out', op.sourceOutput),
-          targetPort: portOf(tgt.kind, 'in', op.targetInput),
+          sourcePort: op.sourceOutput ?? 'out',
+          canonicalSourceOutput: op.sourceOutput ?? null,
+          targetPort: targetPortOf(tgt.kind, op.targetInput),
           ...(op.condition ? { condition: op.condition } : {}),
           ...(op.label ? { label: op.label } : {}),
           ...(op.triggerRule ? { triggerRule: op.triggerRule } : {}),
@@ -291,7 +291,7 @@ export function applyEditOpsToGraph(g: Graph, ops: readonly EditOp[]): { nodes: 
  *  nodes, and existing nodes/edges shown as "to be removed". */
 export interface GhostProjection {
   ghostNodes: Array<{ id: string; kind: string; name: string; position: { x: number; y: number }; index: number; gateSensitive: boolean; dropped: boolean }>;
-  ghostEdges: Array<{ id: string; source: string; target: string; sourcePort: string; targetPort: string; index: number; label?: string }>;
+  ghostEdges: Array<{ id: string; source: string; target: string; sourcePort: string; canonicalSourceOutput: string | null; targetPort: string; index: number; label?: string }>;
   marksByNode: Map<string, number[]>;
   removedNodeIds: Set<string>;
   removedEdgeIds: Set<string>;
@@ -333,7 +333,8 @@ export function projectGhosts(s: WorkflowEditSuggestion, g: Graph, statuses: rea
         const tgtKind = placed.find((n) => n.id === op.targetNodeId)?.kind;
         out.ghostEdges.push({
           id: op.edgeId, source: op.sourceNodeId, target: op.targetNodeId, index: o.index,
-          sourcePort: portOf(srcKind, 'out', op.sourceOutput), targetPort: portOf(tgtKind, 'in', op.targetInput),
+          sourcePort: projectSourceOutput({ sourcePort: op.sourceOutput ?? 'out', canonicalSourceOutput: op.sourceOutput ?? null }, catalogEntry(srcKind ?? '')?.outputs ?? []).handleId,
+          canonicalSourceOutput: op.sourceOutput ?? null, targetPort: targetPortOf(tgtKind, op.targetInput),
           ...(op.condition ? { label: conditionLabel(op.condition) } : op.label ? { label: op.label } : {}),
         });
         break;

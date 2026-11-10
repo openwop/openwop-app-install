@@ -31,6 +31,8 @@
 import type { CollabDocBinding } from '../../canvas/collabDocBinding.js';
 import { setActiveCollabFlush, useBuilderStore, cancelPendingBackendSync } from '../store/builderStore.js';
 import { workflowCollabSlice } from './workflowCollabShape.js';
+import { BuilderEditorMetadataError } from '../persistence/editorMetadata.js';
+import { definitionMetadataFor } from '../persistence/definitionMetadata.js';
 import { serializeWithIdMap } from '../schema/serialize.js';
 import type { BuilderEdge, BuilderNode } from '../schema/workflow.js';
 
@@ -56,8 +58,13 @@ export interface WorkflowCollabAdapter {
 function serializeDefinitionScalar(): string | null {
   try {
     const snap = useBuilderStore.getState().snapshot();
-    return JSON.stringify(serializeWithIdMap(snap).definition);
-  } catch {
+    return JSON.stringify({ ...serializeWithIdMap(snap).definition, metadata: definitionMetadataFor(snap) });
+  } catch (error) {
+    // Keep stale-beats-invalid graph behavior, but a refused metadata write must
+    // use the same visible failed-sync signal as solo autosave.
+    if (error instanceof BuilderEditorMetadataError) {
+      useBuilderStore.setState({ syncState: 'failed', syncFailureReason: error.reason });
+    }
     return null;
   }
 }

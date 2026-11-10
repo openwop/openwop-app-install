@@ -93,6 +93,27 @@ picked="$(gate_pick_free_port "$OCC_PORT")"
 if [ "$picked" != "$OCC_PORT" ]; then ok "gate_pick_free_port skips an occupied port (picked $picked)"
 else bad "gate_pick_free_port returned the OCCUPIED port $OCC_PORT"; fi
 
+# #5519: concurrent pickers must get DISTINCT ports. Probe-only picking handed
+# :8191 to a ci:quick and a live train at once, and the train went red with
+# EADDRINUSE. Six pickers start together and stay alive (as a booting harness
+# does); each must hold a different port. A dead owner's port is reclaimed, and a
+# child of the owner may re-pick its parent's port (a gate's own stages).
+PK_DIR="$(mktemp -d)"
+PK_START="$(gate_pick_free_port 46871)"
+pk() { OPENWOP_GATE_PORT_DIR="$PK_DIR/locks" bash -c '. "$1/scripts/lib/gate-ports.sh"; gate_pick_free_port "$2" >"$3"; sleep "$4"' _ "$ROOT" "$PK_START" "$1" "$2"; }
+pk_pids=""
+for i in 1 2 3 4 5 6; do pk "$PK_DIR/out.$i" 3 & pk_pids="$pk_pids $!"; done
+for _ in $(seq 1 50); do [ "$(cat "$PK_DIR"/out.* 2>/dev/null | wc -l | tr -d ' ')" = 6 ] && break; sleep 0.1; done
+check "$(cat "$PK_DIR"/out.* 2>/dev/null | sort -u | wc -l | tr -d ' ')" "6" \
+  "six concurrent pickers hold six distinct ports (#5519)"
+# shellcheck disable=SC2086
+wait $pk_pids
+pk "$PK_DIR/out.after" 0
+check "$(cat "$PK_DIR/out.after")" "$PK_START" "a port whose owner exited is reclaimed"
+check "$(OPENWOP_GATE_PORT_DIR="$PK_DIR/locks" bash -c '. "$1/scripts/lib/gate-ports.sh"; a="$(gate_pick_free_port "$2")"; b="$(bash -c ". \"$1/scripts/lib/gate-ports.sh\"; gate_pick_free_port $2")"; [ "$a" = "$b" ] && echo same || echo "$a/$b"' _ "$ROOT" "$PK_START")" \
+  "same" "a child of the owner may re-pick its parent's port"
+rm -rf "$PK_DIR"
+
 # ---------------------------------------------------------------- GATE-1
 # Ancestry must be walked, not peeked one level: the real chain is
 # subshell -> npm -> server, so the listener is a GRANDCHILD.
@@ -312,7 +333,13 @@ rm -rf "$EGT"
 # (2026-08-16: same tiles, reordered, +438px). These are asserted on the ACTUAL
 # env-assignment lines of the boot (a `\` continuation line each), not on the
 # comment above them, which also names both variables.
-E2E_BOOT="$(awk '/^  step "frontend: e2e \(Playwright/{f=1} f{print} /openwop-ci-e2e-backend\.pid$/ && f{exit}' "$ROOT/scripts/ci.sh")"
+# The boot lives in scripts/lib/e2e-backend.sh (shared with the pinned-baseline
+# generator, ADR 0863 D9 P5); the gate's e2e lane must source it and call it, or
+# these checks would pin a definition the gate no longer uses.
+E2E_LANE="$(awk '/^  step "frontend: e2e \(Playwright/{f=1} f{print} /npm run test:e2e -- --output=test-results\/required/ && f{exit}' "$ROOT/scripts/ci.sh")"
+check "$(printf '%s\n' "$E2E_LANE" | grep -cE '^\s+\. "\$ROOT/scripts/lib/e2e-backend\.sh"$|^\s+e2e_backend_start \|\| exit 1$')" "2" \
+  "the gate's e2e lane boots its backend through scripts/lib/e2e-backend.sh"
+E2E_BOOT="$(awk '/^e2e_backend_start\(\)/{f=1} f{print} /openwop-ci-e2e-backend\.pid$/ && f{exit}' "$ROOT/scripts/lib/e2e-backend.sh")"
 check "$(printf '%s\n' "$E2E_BOOT" | grep -cE '^\s+OPENWOP_MOUNT_LOCAL_PACKS=false \\$')" "1" \
   "ci e2e boot passes OPENWOP_MOUNT_LOCAL_PACKS=false (never re-points ~/.openwop-packs)"
 check "$(printf '%s\n' "$E2E_BOOT" | grep -cE '^\s+OPENWOP_PACK_DIR="\$E2E_PACK_DIR" \\$')" "1" \
@@ -722,6 +749,16 @@ if grep -q 'budget_env_dir "\$ROOT" "\$STEWARD_LANE_MODE"' "$ROOT/scripts/ci.sh"
 else
   bad "the #5006 wiring is broken (ci.sh call, the build's env prefix, or a vite.config loadEnv still on __dirname)"
 fi
+# ADR 1031 x ADR 0874 D4 — the same build is HOST CODE ONLY in an adopter bundle.
+# The behavior is pinned by frontend/react/scripts/__tests__/hostOnlyBuild.test.ts
+# and scripts/test-ci-frontend-static.py; this pins the three wiring points.
+if grep -q 'OPENWOP_BUDGET_HOST_ONLY="\$hostonly" OPENWOP_VITE_ENV_DIR="\$envd" fe_static_one' "$ROOT/scripts/ci.sh" \
+  && grep -q 'if \[ "\${OPENWOP_DISTRIBUTION:-default}" = default \]; then hostonly=1; fi' "$ROOT/scripts/ci.sh" \
+  && grep -q '\.\.\.hostOnlyPlugin({ distribution: distributionName, root: __dirname })' "$ROOT/frontend/react/vite.config.ts"; then
+  ok "ci.sh makes the adopter's budgeted default build host-code-only, and vite.config installs the plugin"
+else
+  bad "the host-only budget wiring is broken (ci.sh flag/prefix, its default-distribution condition, or the vite.config plugin)"
+fi
 rm -rf "$BET"
 
 # GATE-EPIPE — piping a shell variable into a SHORT-CIRCUITING grep is a
@@ -742,6 +779,15 @@ rm -rf "$BET"
 EPIPE_RE="printf [^|]*\| *grep -[A-Za-z]*"'(q|m1)'
 epipe_hits=$(grep -rhE "$EPIPE_RE" "$ROOT"/scripts/*.sh | grep -vE '^[[:space:]]*#' | grep -c . || true)
 check "$epipe_hits" "0" "no printf-piped-into-a-short-circuiting-grep survives (pipefail + EPIPE reads a TRUE condition as FALSE)"
+
+# The date-bomb sweep's non-vacuity floor must count a COLOURED vitest summary.
+# Vitest colours it outside an AI-agent session, and the bare regex read a passing
+# probe as zero tests on the remote gate VM (ADR 0863 D9 shadow 10, 2026-11-02).
+cs_count() { node --input-type=module -e "import('$ROOT/scripts/check-clockshift-armed.mjs').then(m => console.log(m.passedTests(process.argv[1])))" "$1"; }
+check "$(cs_count "$(printf '\033[2m      Tests \033[22m \033[1m\033[32m2 passed\033[39m\033[22m\033[2m | \033[22m\033[33m1 skipped\033[39m')")" "2" \
+  "clockshift floor: a coloured vitest summary counts its passed tests"
+check "$(cs_count '      Tests  2 passed | 1 skipped (3)')" "2" "clockshift floor: a plain summary counts too"
+check "$(cs_count 'No test files found, exiting with code 0')" "0" "clockshift floor: no summary is zero (still refused)"
 # The same race on the INNER grep of a two-stage pipe whose tail short-circuits.
 EPIPE_CHAIN_RE="printf [^|]*\| *grep -[AB][0-9]+ [^|]*\| *grep -[A-Za-z]*q"
 epipe_chain=$(grep -rhE "$EPIPE_CHAIN_RE" "$ROOT"/scripts/*.sh | grep -vE '^[[:space:]]*#' | grep -c . || true)
@@ -850,6 +896,72 @@ check "$rc" "3" "a train with a CUSTOM train dir is refused (exit 3) while the d
 grep -q "pid $HOLDER, PRs #70" "$TC/out" && ok "  ...naming the running train" || bad "  ...naming the running train: $(tail -2 "$TC/out")"
 kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null || true
 rm -rf "$TC"
+
+# The e2e lane's browser check must look where Playwright looks.
+. "$ROOT/scripts/lib/playwright-browsers.sh"
+pwt="$(mktemp -d)"; mkdir -p "$pwt/home/.cache/ms-playwright" "$pwt/persist/chromium-1" "$pwt/empty"
+pw() { ( HOME="${2:-$pwt/home}"; if [ "$1" = unset ]; then unset PLAYWRIGHT_BROWSERS_PATH; else PLAYWRIGHT_BROWSERS_PATH="$1"; fi
+         playwright_browsers_present && echo yes || echo no ); }
+check "$(pw unset)" yes "playwright browsers: the HOME cache counts when PLAYWRIGHT_BROWSERS_PATH is unset"
+check "$(pw "$pwt/persist" "$pwt/empty")" yes "playwright browsers: a populated PLAYWRIGHT_BROWSERS_PATH counts under a HOME with no cache (the remote gate VM's per-job HOME)"
+check "$(pw "$pwt/empty")" no "playwright browsers: an EMPTY PLAYWRIGHT_BROWSERS_PATH is absent, even with a HOME cache (Playwright looks only there)"
+check "$(pw "$pwt/missing")" no "playwright browsers: a missing PLAYWRIGHT_BROWSERS_PATH is absent"
+check "$(pw 0)" yes "playwright browsers: PLAYWRIGHT_BROWSERS_PATH=0 falls back to the default cache"
+rm -rf "$pwt"
+
+# ADR 0863 D9 P6: the pinned controller installs only the payload the policy pins.
+. "$ROOT/scripts/lib/remote-gate-payload.sh"
+rgc="$(mktemp -d)"; chmod 700 "$rgc"
+rg_sha="$(remote_gate_payload "$ROOT" HEAD "$rgc/p.tgz")"
+[[ "$rg_sha" =~ ^[0-9a-f]{64}$ ]] && [ -s "$rgc/p.tgz" ] && ok "remote-gate payload: builds on this git ($(git --version | cut -d' ' -f3)) and prints a sha256" \
+  || bad "remote-gate payload: no payload or no sha256 on git $(git --version | cut -d' ' -f3) (got '${rg_sha}'); two empty builds used to agree and pass the check below"
+sleep 1.1   # a second apart: archiving a tree used to stamp the current time into the sha
+check "$(remote_gate_payload "$ROOT" HEAD "$rgc/p2.tgz")" "$rg_sha" "remote-gate payload: the same commit builds the same sha256 a second later (the policy pin is reproducible)"
+mkdir "$rgc/x" && tar -xzf "$rgc/p.tgz" -C "$rgc/x" && rg_same=yes || rg_same=no
+for f in "${REMOTE_GATE_PAYLOAD_FILES[@]}"; do git -C "$ROOT" show "HEAD:scripts/$f" | cmp -s - "$rgc/x/$f" || rg_same="no ($f)"; done
+check "$rg_same" yes "remote-gate payload: extracts to the commit's exact bytes for every payload file"
+# Cross-version pin: the sha may depend on nothing but the commit. A fixture repo with a
+# fixed commit must build ONE known sha on every Mac and every git version, and the build
+# must never reach `git archive` (git 2.39 has no --mtime; train 379, 2026-11-05). If this
+# golden moves, every policy pin moves with it: re-mint the VM's pin in the same change.
+rgf="$(mktemp -d)"; git init -q "$rgf/r"; mkdir -p "$rgf/r/scripts/lib" "$rgf/bin"
+printf 'export const a = 1;\n' > "$rgf/r/scripts/a.mjs"; printf '#!/bin/sh\necho b\n' > "$rgf/r/scripts/lib/b.sh"; chmod 755 "$rgf/r/scripts/lib/b.sh"
+( cd "$rgf/r" && git add -A && GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \
+  GIT_AUTHOR_DATE="@1700000000 +0000" GIT_COMMITTER_DATE="@1700000000 +0000" git commit -qm fixture )
+real_git="$(command -v git)"
+printf '#!/bin/sh\nfor a in "$@"; do [ "$a" = archive ] && { echo "git archive is not allowed" >&2; exit 97; }; done\nexec "%s" "$@"\n' "$real_git" > "$rgf/bin/git"; chmod 755 "$rgf/bin/git"
+ln -s "$ROOT" "$rgf/root"   # run through a symlink: an argv[1] entry guard would build nothing (check-entry-guard)
+check "$(PATH="$rgf/bin:$PATH" node "$rgf/root/scripts/lib/remote-gate-payload.mjs" "$rgf/r" HEAD "$rgf/p.tgz" lib/b.sh a.mjs 2>&1)" \
+  "b76d3d2b254fcd91990e8d1aede714dc6095b413b1a01dcd9ae56c48ea940dcf" "remote-gate payload: a fixed commit builds the golden sha256 without git archive, run through a symlink (same bytes on any git version and host)"
+check "$(od -An -tu1 -j4 -N6 "$rgf/p.tgz" | xargs)" "0 0 0 0 2 3" "remote-gate payload: the gzip header carries no time and OS byte 3 on every host (node writes 19 on macOS)"
+check "$(tar -tvzf "$rgf/p.tgz" | awk '{print $1, $NF}' | tr '\n' ' ')" "-rw-r--r-- a.mjs drwxr-xr-x lib/ -rwxr-xr-x lib/b.sh " "remote-gate payload: sorted entries, a dir before its files, executable bit from the git mode"
+rm -rf "$rgf"
+printf '{"policySha256":"%s"}\n' "0000000000000000000000000000000000000000000000000000000000000000" > "$rgc/runner.json"
+OPENWOP_CI_CONFIG_DIR="$rgc" bash "$ROOT/scripts/remote-gate-install-controller.sh" HEAD >/dev/null 2>&1 && bad "remote-gate install accepted a payload that is not the pinned one" || ok "remote-gate install refuses a payload whose sha256 is not the pin"
+printf '{"policySha256":"%s"}\n' "$rg_sha" > "$rgc/runner.json"
+OPENWOP_CI_CONFIG_DIR="$rgc" bash "$ROOT/scripts/remote-gate-install-controller.sh" HEAD >/dev/null 2>&1 && [ -f "$rgc/install/$rg_sha/remote-gate.mjs" ] \
+  && ok "remote-gate install puts the pinned payload under install/<sha>" || bad "remote-gate install did not install the pinned payload"
+rm -rf "$rgc"
+
+# ADR 0863 D9: a -darwin baseline re-recorded without its -pinned twin must fail on
+# the Macs (2026-11-07: four were, and the VM's required visual tests went red).
+pbt="$(mktemp -d)"; pbs="$pbt/frontend/react/e2e/x.spec.ts-snapshots"; mkdir -p "$pbs"
+for n in a b; do printf 'mac-%s' "$n" > "$pbs/$n-chromium-darwin.png"; printf 'vm-%s' "$n" > "$pbs/$n-chromium-pinned.png"; done
+echo '{"version":1}' > "$pbt/frontend/react/e2e/pinned-baselines.lock.json"
+pbc() { node "$ROOT/scripts/check-pinned-baselines.mjs" --root "$pbt" "$@" 2>&1; }
+pbc --write >/dev/null; out="$(pbc)" && ok "pinned baselines: a lock written beside its images passes" || bad "pinned baselines: a fresh lock fails: $out"
+printf 'mac-a2' > "$pbs/a-chromium-darwin.png"
+out="$(pbc)"; rc=$?; [ "$rc" = 1 ] && grep -q 'x.spec.ts-snapshots/a-chromium: the -darwin image changed' <<< "$out" \
+  && ok "pinned baselines: a -darwin image re-recorded alone FAILS, naming the pair" || bad "pinned baselines: a lone -darwin change passed (rc $rc): $out"
+pbc --write >/dev/null; rm "$pbs/b-chromium-pinned.png"
+out="$(pbc)"; [ $? = 1 ] && grep -q 'b-chromium: has a -darwin image but no -pinned twin' <<< "$out" \
+  && ok "pinned baselines: a missing -pinned twin FAILS" || bad "pinned baselines: a missing twin passed: $out"
+rm "$pbs/b-chromium-darwin.png"
+out="$(pbc)"; [ $? = 1 ] && grep -q 'b-chromium: lock entry names no image' <<< "$out" \
+  && ok "pinned baselines: a lock entry with no images FAILS" || bad "pinned baselines: an orphan entry passed: $out"
+rm -rf "$pbt"
+grep -qF 'node "$ROOT/scripts/check-pinned-baselines.mjs"' "$ROOT/scripts/ci.sh" \
+  && ok "pinned baselines: the gate runs the check" || bad "pinned baselines: ci.sh does not run check-pinned-baselines.mjs"
 
 echo "== gate tooling: $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ] || exit 1

@@ -28,6 +28,7 @@ import { __resetConnectionsStore, createSecretConnection } from '../src/features
 
 let BASE: string;
 let server: http.Server;
+const savedEnv = { dsn: process.env.OPENWOP_STORAGE_DSN, secret: process.env.OPENWOP_SESSION_SECRET };
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
@@ -37,6 +38,8 @@ beforeAll(async () => {
 afterAll(async () => {
   __setSnsTransportForTest(null);
   await new Promise<void>((res) => server.close(() => res()));
+  if (savedEnv.dsn === undefined) delete process.env.OPENWOP_STORAGE_DSN; else process.env.OPENWOP_STORAGE_DSN = savedEnv.dsn;
+  if (savedEnv.secret === undefined) delete process.env.OPENWOP_SESSION_SECRET; else process.env.OPENWOP_SESSION_SECRET = savedEnv.secret;
 });
 
 // A non-signed-in tenant so byok setSecret uses the local path (no KMS in tests).
@@ -162,12 +165,15 @@ describe('ADR 0994 D4 — SES events', () => {
 
   it('a failed subscription confirmation answers 503 so SNS redelivers it', async () => {
     const id = await sesConfig();
-    __setSnsTransportForTest({ fetchCert: async () => PEM, confirm: async () => { throw new Error('sns down'); } });
+    const attempted: string[] = [];
+    __setSnsTransportForTest({ fetchCert: async () => PEM, confirm: async (url) => { attempted.push(url); throw new Error('sns down'); } });
     const res = await fetch(`${BASE}/host/openwop-app/public-email/events/${id}`, {
       method: 'POST', headers: { 'content-type': 'text/plain; charset=UTF-8' },
       body: JSON.stringify(signed({ Type: 'SubscriptionConfirmation', Message: 'confirm', SubscribeURL: 'https://sns.us-east-1.amazonaws.com/?Action=ConfirmSubscription&Token=t', Token: 't' })),
     });
     expect(res.status).toBe(503);
+    // The 503 is the failed confirmation, not an earlier refusal: it was attempted.
+    expect(attempted).toEqual(['https://sns.us-east-1.amazonaws.com/?Action=ConfirmSubscription&Token=t']);
   });
 
   it('the public route accepts SNS text/plain posts', async () => {

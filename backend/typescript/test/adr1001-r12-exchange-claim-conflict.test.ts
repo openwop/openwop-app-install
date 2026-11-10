@@ -9,8 +9,9 @@
  * question answers only (`clarify:<askId>` keys); this pins every other key.
  *
  * Through the real conversation route (`POST /runs/{id}/interrupts/gate`) on a
- * real conversation gate. The one stand-in is the managed model round, slowed so
- * the second POST lands while the first exchange still holds its claim.
+ * real conversation gate. The one stand-in is the managed model round, HELD on a
+ * promise the case releases only after the second POST has answered, so the
+ * first exchange provably still holds its claim (no real-time window).
  *
  * Pins:
  *  1. the in-flight duplicate is 409 `openwop-app.conflict`, and once the first
@@ -20,12 +21,15 @@
  *     client's dead-run teardown is correct there and must keep firing).
  *
  * Red on `origin/main` @ f382e70d1: pin 1 reads `interrupt_already_resolved`.
+ * Re-witnessed w80: the dead-run code on the in-flight branch, the in-flight
+ * branch disabled, and a stale window of zero each red pin 1; the terminal-run
+ * throw answering `conflict` reds pin 3.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-interface Round { text: string; toolUses: never[]; delayMs?: number }
+interface Round { text: string; toolUses: never[]; hold?: Promise<void> }
 const script = vi.hoisted(() => ({ rounds: [] as Round[] }));
 vi.mock('../src/providers/managedProvider.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/providers/managedProvider.js')>();
@@ -33,7 +37,7 @@ vi.mock('../src/providers/managedProvider.js', async (importOriginal) => {
     ...actual,
     dispatchManagedToolsRound: vi.fn(async () => {
       const next = script.rounds.shift() ?? { text: 'Done.', toolUses: [] };
-      if (next.delayMs) await new Promise((res) => setTimeout(res, next.delayMs));
+      if (next.hold) await next.hold;
       return next;
     }),
   };
@@ -94,12 +98,18 @@ const send = (runId: string, content: string, exchangeKey: string) =>
 describe('ADR 1001 R12 — the exchange claim refuses an in-flight duplicate with conflict', () => {
   it('a double-sent turn (same exchangeKey, first still in flight) is 409 openwop-app.conflict, and one turn is recorded', async () => {
     const runId = await openChat();
-    script.rounds = [{ text: 'one', toolUses: [], delayMs: 400 }, { text: 'two', toolUses: [] }];
-    const r1 = await send(runId, 'hello', 'k-double');
-    const r2 = await send(runId, 'hello', 'k-double');
-    expect(r1.status, JSON.stringify(r1.body).slice(0, 300)).toBe(200);
-    expect(r2.status, 'the in-flight claim refuses the duplicate').toBe(409);
-    expect(r2.body.error, 'not the dead-run code the chat client tears down on').toBe('openwop-app.conflict');
+    let release!: () => void;
+    const held = new Promise<void>((res) => { release = res; });
+    script.rounds = [{ text: 'one', toolUses: [], hold: held }, { text: 'two', toolUses: [] }];
+    try {
+      const r1 = await send(runId, 'hello', 'k-double');
+      const r2 = await send(runId, 'hello', 'k-double');
+      expect(r1.status, JSON.stringify(r1.body).slice(0, 300)).toBe(200);
+      expect(r2.status, 'the in-flight claim refuses the duplicate').toBe(409);
+      expect(r2.body.error, 'not the dead-run code the chat client tears down on').toBe('openwop-app.conflict');
+    } finally {
+      release();
+    }
     await vi.waitFor(async () => { expect(await agentTurnCount(runId)).toBe(1); }, { timeout: 8000, interval: 25 });
     expect(await userTurns(runId), 'the duplicate appended nothing').toEqual(['hello']);
 

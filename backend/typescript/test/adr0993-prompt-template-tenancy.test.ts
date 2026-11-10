@@ -15,6 +15,12 @@
  * - `chainmint-` not reserved → "refuses the reserved chain-mint namespace";
  * - `:render` composing fixtures only → "a tenant can render its own";
  * - dispatch back on the global `getTemplate` → the dispatch case.
+ * Re-witnessed in grade-tests wave 78 (one edit dropping both the tenant key prefix and
+ * the row filter in `tenantPromptTemplates.versionsOf`, since either alone is masked).
+ *
+ * Cases 1–6 duplicate the D5 block of `adr0993-prompt-library-probes.test.ts`, and case 7
+ * that file's D4 case plus an own-tenant positive control. Both files are protected
+ * (tenancy); merging them is the user's decision (tracker row TST-EPE-1, PROTECTED-LOW).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -60,6 +66,14 @@ function call(tenant: string, method: string, path: string, body?: unknown): Pro
   });
 }
 
+/** A refusal: the status AND the error code this route sends for it (two refusals
+ *  can share a status, wave 36). */
+async function expectRefusal(res: Response, status: number, code: string): Promise<void> {
+  const body = (await res.json()) as { error?: string };
+  expect(res.status, JSON.stringify(body)).toBe(status);
+  expect(body.error).toBe(code);
+}
+
 let n = 0;
 async function template(tenant: string, text = 'Hello {{name}}'): Promise<string> {
   const id = `adr0993h-t${n++}`;
@@ -71,10 +85,10 @@ async function template(tenant: string, text = 'Hello {{name}}'): Promise<string
 describe('ADR 0993 D5 — RFC 0028 user templates belong to one tenant', () => {
   it('tenant B cannot read, render, version or delete tenant A\'s template', async () => {
     const id = await template(TA, 'A secret {{x}}');
-    expect((await call(TB, 'GET', `/prompts/${id}`)).status).toBe(404);
-    expect((await call(TB, 'POST', '/prompts:render', { ref: `prompt:${id}`, variables: {} })).status).toBe(404);
-    expect((await call(TB, 'PUT', `/prompts/${id}`, { templateId: id, version: '2.0.0', kind: 'user', text: 'pwned' })).status).toBe(404);
-    expect((await call(TB, 'DELETE', `/prompts/${id}`)).status).toBe(404);
+    await expectRefusal(await call(TB, 'GET', `/prompts/${id}`), 404, 'openwop-app.prompt_template_not_found');
+    await expectRefusal(await call(TB, 'POST', '/prompts:render', { ref: `prompt:${id}`, variables: {} }), 404, 'openwop-app.prompt_template_not_found');
+    await expectRefusal(await call(TB, 'PUT', `/prompts/${id}`, { templateId: id, version: '2.0.0', kind: 'user', text: 'pwned' }), 404, 'openwop-app.prompt_update_not_found');
+    await expectRefusal(await call(TB, 'DELETE', `/prompts/${id}`), 404, 'openwop-app.prompt_delete_not_found');
     const listB = (await (await call(TB, 'GET', '/prompts?source=user')).json()) as { items: { templateId: string }[] };
     expect(listB.items.map((t) => t.templateId)).not.toContain(id);
     const own = await call(TA, 'GET', `/prompts/${id}`);
@@ -105,7 +119,9 @@ describe('ADR 0993 D5 — RFC 0028 user templates belong to one tenant', () => {
 
   it('the tenant writer refuses the reserved chain-mint namespace', async () => {
     const res = await call(TA, 'POST', '/prompts', { templateId: 'chainmint-abc-def', version: '1.0.0', kind: 'system', text: 'planted' });
-    expect(res.status).toBe(403);
+    await expectRefusal(res, 403, 'openwop-app.prompt_create_forbidden');
+    // Nothing was written under the reserved id.
+    await expectRefusal(await call(TA, 'GET', '/prompts/chainmint-abc-def'), 404, 'openwop-app.prompt_template_not_found');
   });
 
   it('dispatch resolves through the tenant resolver: the run\'s own tenant, never another', async () => {

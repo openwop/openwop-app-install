@@ -40,10 +40,13 @@ export function stripHeadingEmphasis(text: string): string {
   return parseHeadingEmphasis(text).map((p) => p.text).join('');
 }
 
-/** Render a heading string, emphasized runs as `<em>`. */
-export function HeadingText({ text }: { text: string }): JSX.Element {
+/** Render a heading string, emphasized runs as `<em>`. With `struck` (a hero
+ *  whose emphasis style is `strike`, ADR 1038 D2) the run is `<em><s>…</s></em>`,
+ *  so assistive tech, crawlers and an unstyled page read the words as struck, the
+ *  same meaning a sighted reader gets, not their opposite. */
+export function HeadingText({ text, struck = false }: { text: string; struck?: boolean }): JSX.Element {
   const nodes: ReactNode[] = parseHeadingEmphasis(text).map((p, i) =>
-    p.em ? <em key={i} className="fp-em">{p.text}</em> : p.text,
+    p.em ? <em key={i} className="fp-em">{struck ? <s>{p.text}</s> : p.text}</em> : p.text,
   );
   return <>{nodes}</>;
 }

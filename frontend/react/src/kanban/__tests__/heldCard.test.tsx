@@ -4,7 +4,13 @@
  * The note on such a card mixes a person's text with a machine line marked
  * `[auto:run-restore]`. The board must show the hold as a STATE with a Release
  * action, never print the marker, and an edit of the person's text must neither
- * release the hold nor merge the two lines.
+ * release the hold nor merge the two lines. The card is also the focus target for
+ * "show me this card" (Up next's held list).
+ *
+ * Sabotage (each reds the named case): print the raw note; drop the held state or its
+ * chip; hold every note; release with an empty note or without `ifBlockerNote`; save
+ * the edit without the machine line; take the machine line or the CAS base from the
+ * card as it is now instead of as it was when editing began; join an empty note.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import type { ComponentProps } from 'react';
@@ -40,6 +46,7 @@ describe('a held card on the board', () => {
     const container = view(card(`waiting on legal\n${MACHINE}`), vi.fn());
     expect(container.textContent).not.toContain('[auto:run-restore]');
     expect(container.textContent).toContain('waiting on legal');
+    expect(screen.getByText('Held')).toBeTruthy();
     expect(screen.getByRole('button', { name: /Release “Crashed thing”/ })).toBeTruthy();
   });
 

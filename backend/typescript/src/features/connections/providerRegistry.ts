@@ -375,6 +375,50 @@ const BUILTIN: ProviderManifest[] = [
     docsUrl: 'https://www.twilio.com/docs',
   },
   {
+    // ADR 1042 D1 (CHAN-P0-1) — a Telegram bot. The secret is the BotFather
+    // token; Telegram takes it in the URL PATH (`/bot<token>/sendMessage`), which
+    // `brokeredFetch`'s `{credential}` placeholder fills AFTER the host pin.
+    // GOVERNED: `adapterOnly` + zero consumer nodes — the only reach is the
+    // channel reply transport, never the generic http node. Inbound verifies the
+    // `x-telegram-bot-api-secret-token` header (inboundWebhooks.ts).
+    id: 'telegram',
+    label: 'Telegram bot',
+    vendor: 'Telegram',
+    category: 'communication',
+    kind: 'bearer',
+    authFlow: 'manual',
+    reach: 'openapi',
+    scopes: { read: [], write: [{ key: 'messages.send', label: 'Reply in chats the bot is in', scopes: [] }] },
+    refreshable: false,
+    defaultScopes: [],
+    consumerNodes: [],
+    adapterOnly: true,
+    apiHosts: ['api.telegram.org'],
+    openapiRef: 'https://core.telegram.org/bots/api',
+    docsUrl: 'https://core.telegram.org/bots/api',
+  },
+  {
+    // ADR 1042 D1 (CHAN-P0-1) — a Discord application's BOT token (sent as
+    // `Authorization: Bot <token>`). Inbound verifies the interaction Ed25519
+    // signature against the app's public key (the inbound signing secret).
+    // GOVERNED like `telegram`: adapterOnly, no consumer nodes.
+    id: 'discord',
+    label: 'Discord bot',
+    vendor: 'Discord',
+    category: 'communication',
+    kind: 'bearer',
+    authFlow: 'manual',
+    reach: 'openapi',
+    scopes: { read: [], write: [{ key: 'messages.send', label: 'Post in channels the bot can see', scopes: [] }] },
+    refreshable: false,
+    defaultScopes: [],
+    consumerNodes: [],
+    adapterOnly: true,
+    apiHosts: ['discord.com'],
+    openapiRef: 'https://discord.com/developers/docs/resources/message#create-message',
+    docsUrl: 'https://discord.com/developers/docs/intro',
+  },
+  {
     // ADR 0394 Phase 4 — WhatsApp via the Meta Cloud API DIRECT (the margin
     // path once the channel is proven on Twilio BSP). Bearer = a WABA
     // system-user token. GOVERNED write (ADR 0292): `adapterOnly` + zero

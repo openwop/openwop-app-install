@@ -21,12 +21,22 @@ import { transcriptToJson, transcriptToMarkdown } from './transcriptRenderer.js'
 import { parseOpenwopExport, parseChatGptExport } from './importParser.js';
 import { importConversation, IDEMPOTENCY_KEY } from './importService.js';
 import { authorizeConversationRead } from './access.js';
+import { isChannelIngressConversation } from '../../host/channelConversationGuard.js';
 
 /** An ASCII file name from a conversation title (header-safe; any title, any language). */
 export function exportFileName(title: string, ext: 'md' | 'json'): string {
   const slug = (title || '').normalize('NFKD').replace(/[^\x20-\x7e]/g, '').toLowerCase()
     .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
   return `${slug || 'conversation'}.${ext}`;
+}
+
+/** ADR 1042 (review round 4) — a channel-ingress conversation holds outsiders' words
+ *  and is erased with its thread; a downloaded or re-imported copy would escape that
+ *  erasure and be searchable. Export and import both refuse it (typed 409). */
+async function refuseChannelIngressCopy(tenantId: string, sessionId: string): Promise<void> {
+  if (await isChannelIngressConversation(tenantId, sessionId)) {
+    throw new OpenwopError('conflict', 'A conversation from an external chat channel cannot be exported or imported.', 409, { reason: 'channel_ingress_conversation' });
+  }
 }
 
 export function registerChatExportRoutes(deps: RouteDeps): void {
@@ -39,6 +49,7 @@ export function registerChatExportRoutes(deps: RouteDeps): void {
       const sessionId = req.params.sessionId;
       // ADR 0992 D8 — the one read helper the agent tool also calls (uniform 404).
       const { session } = await authorizeConversationRead(tenantId, sessionId, actingUserId);
+      await refuseChannelIngressCopy(tenantId, sessionId);
       const messages = await hostExtStorage().listChatSessionMessages(sessionId);
       const json = req.query.format === 'json';
       // ADR 0992 D9 — name the download after the conversation, not its UUID.
@@ -83,6 +94,10 @@ export function registerChatExportRoutes(deps: RouteDeps): void {
       if (key !== undefined && (typeof key !== 'string' || !IDEMPOTENCY_KEY.test(key))) {
         throw new OpenwopError('validation_error', '`idempotencyKey` MUST match /^[A-Za-z0-9_.:-]{1,128}$/.', 400, { field: 'idempotencyKey' });
       }
+      // ADR 1042 — an openwop-v1 export names its source conversation; a channel
+      // conversation's transcript is never re-imported as an ordinary one.
+      const sourceId = (body.data as { conversation?: { sessionId?: unknown } } | null)?.conversation?.sessionId;
+      if (typeof sourceId === 'string' && sourceId) await refuseChannelIngressCopy(tenantId, sourceId);
       const parsed = body.format === 'chatgpt' ? parseChatGptExport(body.data) : parseOpenwopExport(body.data);
       // D3 — the rows carry the importer's chat-author spelling, the same stamp the
       // chat append route writes, so DSAR erasure and author edits reach them.

@@ -21,7 +21,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 const SEAM = '__setMockArchiveGuardForTest';
-const MIN_WALKED_FILES = 2_301;
+const MIN_WALKED_FILES = 2_290; // 2293 after the KickTodo packages left (ADR 1031 P3)
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {

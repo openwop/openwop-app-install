@@ -6,7 +6,7 @@
  * to the app shell's RootRedirect so it forwards to /chat.
  */
 import { describe, it, expect } from 'vitest';
-import { shouldShowFrontPage, hasLegacyChatParams, LEGACY_CHAT_PARAMS } from '../rootRoute.js';
+import { shouldShowFrontPage, hasLegacyChatParams, LEGACY_CHAT_PARAMS, rootSplashPending } from '../rootRoute.js';
 
 const base = { onRoot: true, hasUser: false, search: '', authLoading: false, frontPageLoading: false, frontPageEnabled: true };
 
@@ -74,5 +74,36 @@ describe('shouldShowFrontPage', () => {
 
   it('front page disabled + resolved → not marketing (falls through to the app shell)', () => {
     expect(shouldShowFrontPage({ ...base, frontPageEnabled: false })).toBe(false);
+  });
+});
+
+/**
+ * First-visit splash hang (2026-11-05). The `/` branch used to splash on
+ * `authLoading || frontPageLoading`, so an auth SDK that never answered held the
+ * splash over a loaded, enabled pointer until the visitor reloaded.
+ *
+ * Sabotage that turns it red: return `o.authLoading || o.frontPageLoading`
+ * (the first case fails); drop the `!o.frontPageEnabled &&` guard (same); drop
+ * the auth term entirely (the pointer-off case fails, flashing an empty page
+ * before the app shell takes over).
+ */
+describe('rootSplashPending', () => {
+  const settled = { authLoading: false, frontPageLoading: false, frontPageEnabled: true };
+
+  it('CRITICAL: an enabled, resolved pointer renders the front page while auth is still resolving', () => {
+    expect(rootSplashPending({ ...settled, authLoading: true })).toBe(false);
+  });
+
+  it('splashes while the pointer itself is resolving', () => {
+    expect(rootSplashPending({ ...settled, frontPageLoading: true, frontPageEnabled: false })).toBe(true);
+    expect(rootSplashPending({ ...settled, frontPageLoading: true, authLoading: true, frontPageEnabled: false })).toBe(true);
+  });
+
+  it('pointer OFF: holds the splash until auth settles, so the app shell can take over without a flash', () => {
+    expect(rootSplashPending({ ...settled, frontPageEnabled: false, authLoading: true })).toBe(true);
+  });
+
+  it('everything settled → no splash', () => {
+    expect(rootSplashPending(settled)).toBe(false);
   });
 });

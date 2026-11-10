@@ -28,6 +28,7 @@ import {
   type PendingApproval,
 } from '../agents/approvalsClient.js';
 import { ContentReviewContext, ApprovalDecideBar, StrategyActivationSnapshot } from './ContentReviewContext.js';
+import { EmailSendReviewContext, emailSendApprovable } from './EmailSendReviewContext.js';
 import { ScaleIcon, CheckIcon, XIcon, ClockIcon, ColumnsIcon, BoxesIcon, ListIcon } from '../ui/icons/index.js';
 import { subscribeReviewSignal } from './signalBus.js';
 import { scrollBehavior } from '../ui/motion.js';
@@ -46,6 +47,8 @@ const isAssistantAction = (a: PendingApproval): boolean => a.kind === 'assistant
 const isRunProposal = (a: PendingApproval): boolean => !isAssistantAction(a) && (!a.kind || a.kind === 'run-proposal');
 const isContentPublish = (a: PendingApproval): boolean => a.kind === 'content-publish';
 const isStrategyActivation = (a: PendingApproval): boolean => a.kind === 'strategy-activation';
+/** ADR 0905 D3 — a campaign send: the approve must echo the digest of the review this card shows. */
+const isEmailSend = (a: PendingApproval): boolean => a.kind === 'email-campaign-send';
 /** ADR 0785 P4 — the user's own Claude Code asking to use a tool. Approving ALLOWS it. */
 const isClaudeCodePermission = (a: PendingApproval): boolean => a.kind === 'claude-code-permission';
 // R2 IB-SP-7 — the English `.replace(' ago','')` surgery is gone: ages now
@@ -130,11 +133,15 @@ export function NeedsYouInbox({ onResolved, focusApprovalId, onApprovalFocused }
     setBusy(a.approvalId);
     try {
       // ADR 0862 D1 — an assistant action approves the exact version this card shows.
-      const { runId } = await claimApproval(a.approvalId, undefined, a.action?.contentHash);
+      // ADR 0905 D3 — so does a campaign send: `EmailSendReviewContext` below renders the
+      // same row this digest covers. Keep the two together: the digest without the
+      // context would approve a subject and body the reviewer never saw.
+      const { runId } = await claimApproval(a.approvalId, undefined, isEmailSend(a) ? a.emailSend?.reviewHash : a.action?.contentHash);
       // R2 IB-SP-4 — the toast must describe what APPROVING DID, per kind
       // (the ApprovalsInbox ladder): published / activated / carried / ran.
       toast.success(
         isContentPublish(a) ? t('toastApprovedPublished')
+          : isEmailSend(a) ? t('toastApprovedEmailSend')
           : a.kind === 'funnel-publish' ? t('toastApprovedFunnelPublish')
           : isStrategyActivation(a) ? t('toastApprovedActivated')
           : isAssistantAction(a) ? t('toastApprovedCarry', { persona: a.persona })
@@ -163,6 +170,7 @@ export function NeedsYouInbox({ onResolved, focusApprovalId, onApprovalFocused }
       // which "Dismissed." did not say.
       toast.info(
         isContentPublish(a) ? t('toastRejectedToDraft')
+          : isEmailSend(a) ? t('toastEmailRejectedToDraft')
           : isStrategyActivation(a) ? t('toastStrategyRejectedToDraft')
             : t('toastDismissed'),
       );
@@ -281,6 +289,7 @@ export function NeedsYouInbox({ onResolved, focusApprovalId, onApprovalFocused }
             <div className="u-flex u-items-center u-gap-2 u-wrap">
               <span className="chip chip--warning">{t(
                 isContentPublish(a) ? 'approvalsContentGroup'
+                  : isEmailSend(a) ? 'approvalsEmailSendGroup'
                   : isStrategyActivation(a) ? 'approvalsStrategyGroup'
                   : a.kind === 'campaign-spend' ? 'approvalsSpendGroup'
                   : isClaudeCodePermission(a) ? 'approvalsClaudeCodeGroup'
@@ -300,6 +309,7 @@ export function NeedsYouInbox({ onResolved, focusApprovalId, onApprovalFocused }
             {/* ADR 0593 D4 (CMSAU-1) — BOTH deciding surfaces get the same
                 context and the same affordances; they used to disagree. */}
             {isContentPublish(a) && <ContentReviewContext a={a} />}
+            {isEmailSend(a) && <EmailSendReviewContext a={a} />}
             {/* ADR 0845 D6 — both deciding surfaces show what a strategy approval binds to. */}
             {isStrategyActivation(a) && <StrategyActivationSnapshot strategyId={a.strategyId} strategyTitle={a.strategyTitle} snapshot={a.strategySnapshot} />}
             {a.kind === 'funnel-publish' ? (
@@ -311,12 +321,14 @@ export function NeedsYouInbox({ onResolved, focusApprovalId, onApprovalFocused }
                 <CreativeReviewDecision approval={a} busy={busy === a.approvalId} onApprove={() => void approve(a)} onReject={(note) => reject(a, note)} />
               </Suspense>
             ) : (
-            <div className={isContentPublish(a) || isClaudeCodePermission(a) || isStrategyActivation(a) ? '' : 'action-bar u-justify-end'}>
+            <div className={isContentPublish(a) || isEmailSend(a) || isClaudeCodePermission(a) || isStrategyActivation(a) ? '' : 'action-bar u-justify-end'}>
               {/* STR3UX-9 — strategy activations get the same reason-capable bar here as in the full inbox (SGU-2). */}
-              {isContentPublish(a) || isClaudeCodePermission(a) || isStrategyActivation(a) ? (
+              {isContentPublish(a) || isEmailSend(a) || isClaudeCodePermission(a) || isStrategyActivation(a) ? (
                 // ADR 0785 P4 — a deny REASON goes back to Claude Code verbatim.
                 <ApprovalDecideBar
                   busy={busy === a.approvalId}
+                  // ADR 0905 D3 — no digest means nothing here can be approved; a reject still works.
+                  approveDisabled={isEmailSend(a) && !emailSendApprovable(a)}
                   onApprove={() => void approve(a)}
                   onReject={(note) => reject(a, note)}
                   {...(isClaudeCodePermission(a) ? { approveLabel: t('approvalsClaudeCodeAllow'), rejectLabel: t('approvalsClaudeCodeDeny') } : {})}

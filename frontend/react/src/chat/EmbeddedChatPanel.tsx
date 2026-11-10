@@ -8,6 +8,10 @@
  *
  * Override seams:
  *   - `agentId`          — REQUIRED; which agent to scope to (its persona/system prompt).
+ *   - `persist` / `conversationId` — ADR 1040 D1: a saved, reopenable, agent-stamped
+ *                          conversation instead of an ephemeral one.
+ *   - `composerPlaceholder` / `composerModifiers` / `hideContinueInFullChat` /
+ *     `toolLabels`       — ADR 1040 D3: the embed's chrome, the consumer's words.
  *   - `renderEmptyState` — the feature's context-aware empty state (defaults to none →
  *                          EmbeddedConversation falls back to the chat-page WelcomeCard).
  *   - `onManageProvider` — where "connect a provider" sends the user (default: the chat
@@ -37,8 +41,10 @@ import { StateCard } from '../ui/StateCard.js';
 import { AlertIcon, KeyIcon } from '../ui/icons/index.js';
 import { SessionExpiredCard } from './SessionExpiredCard.js';
 import { EmbeddedConversation, type EmbedBeforeSend, type EmbedToolActivity } from './EmbeddedConversation.js';
+import type { EmptyStateActions } from './ConversationView.js';
+import type { ToolLabels } from './lib/toolLabels.js';
 
-export type { EmbedBeforeSend, EmbedToolActivity };
+export type { EmbedBeforeSend, EmbedToolActivity, EmptyStateActions, ToolLabels };
 
 export function EmbeddedChatPanel({
   agentId,
@@ -55,9 +61,16 @@ export function EmbeddedChatPanel({
   prompt,
   stopSignal,
   focus,
+  persist,
+  conversationId,
+  composerPlaceholder,
+  composerModifiers,
+  hideContinueInFullChat,
+  toolLabels,
 }: {
   agentId: string;
-  renderEmptyState?: (onPick: (text: string) => void) => ReactNode;
+  /** The first argument SENDS; ADR 1040 D3 adds `actions.fill` (seed the composer). */
+  renderEmptyState?: (onPick: (text: string) => void, actions: EmptyStateActions) => ReactNode;
   tenantId?: string;
   /** ADR 0596 — fired once per finished turn; a "re-read your own state" tick. */
   onTurnSettled?: () => void;
@@ -81,8 +94,24 @@ export function EmbeddedChatPanel({
   stopSignal?: number;
   /** ADR 0777 — bind the conversation to the entity beside it, so the agent's
    *  tools default to it. `label` replaces `contextLabel` ONLY once the server
-   *  accepts the binding (it checks the caller may read the entity). */
-  focus?: { kind: 'canvas'; id: string; label: ReactNode };
+   *  accepts the binding (it checks the caller may read the entity).
+   *  ADR 1040 D4 — `kind` is any REGISTERED focus kind (`canvas`, or a
+   *  feature's `<featureId>.<entity>`); the server refuses an unregistered one. */
+  focus?: { kind: string; id: string; label: ReactNode };
+  /** ADR 1040 D1 — save the conversation (listed, reopenable, stamped with this
+   *  agent). Default false: the embed stays ephemeral. */
+  persist?: boolean;
+  /** ADR 1040 D1 — open this existing conversation (implies `persist`). The
+   *  current id is reported through `onConversationId`; passing that id back is
+   *  an echo, never a reload. */
+  conversationId?: string;
+  /** ADR 1040 D3 — composer wording and leading modifier chips. */
+  composerPlaceholder?: string;
+  composerModifiers?: ReactNode;
+  /** ADR 1040 D3 — hide "Continue in full chat" (a page that IS this agent's chat). */
+  hideContinueInFullChat?: boolean;
+  /** ADR 1040 D3 — display names for tool rows in the turn receipt. Display only. */
+  toolLabels?: ToolLabels;
 }): JSX.Element {
   const { t } = useTranslation('chat');
   const navigate = useNavigate();
@@ -148,6 +177,12 @@ export function EmbeddedChatPanel({
       {...(prompt !== undefined ? { prompt } : {})}
       {...(stopSignal !== undefined ? { stopSignal } : {})}
       {...(focus ? { focus } : {})}
+      {...(persist !== undefined ? { persist } : {})}
+      {...(conversationId !== undefined ? { conversationId } : {})}
+      {...(composerPlaceholder !== undefined ? { composerPlaceholder } : {})}
+      {...(composerModifiers !== undefined ? { composerModifiers } : {})}
+      {...(hideContinueInFullChat !== undefined ? { hideContinueInFullChat } : {})}
+      {...(toolLabels ? { toolLabels } : {})}
     />
   );
 }

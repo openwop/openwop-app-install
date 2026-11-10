@@ -19,29 +19,42 @@
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it } from 'vitest';
+// ADR 1031 P2 — feature-declared plan-limit keys are recorded at composition.
+import '../src/features/index.js';
 import {
-  displayablePlanLimits, ENFORCED_PLAN_LIMIT_KEYS, PLAN_LIMIT_AI_CREDITS_MONTHLY, PLAN_LIMIT_KICKTODO_ENROLLMENTS, PLAN_LIMIT_WORKFLOW_RUNS,
+  displayablePlanLimits, enforcedPlanLimitKeys, PLAN_LIMIT_AI_CREDITS_MONTHLY, PLAN_LIMIT_WORKFLOW_RUNS,
 } from '../src/host/planLimitsSeam.js';
+import { collectFeatureRatchetDeclarations } from './helpers/featureRatchetDeclarations.js';
 import { publicPricingCatalog } from '../src/features/billing/billingService.js';
 
 const SRC = join(__dirname, '..', 'src');
 const read = (rel: string) => readFileSync(join(SRC, rel), 'utf8');
 
-/** key → [enforcing file, the token that proves the file reads THAT key]. */
-const ENFORCEMENT_SITES: Record<string, [string, string]> = {
+/** key → [enforcing file (src-relative), the token that proves the file reads THAT key].
+ *  The host's keys; a feature declares its own (`enforcedPlanLimitSites` in its
+ *  ratchetDeclarations.ts, ADR 1031 P2), merged below. */
+const HOST_ENFORCEMENT_SITES: Record<string, [string, string]> = {
   [PLAN_LIMIT_WORKFLOW_RUNS]: ['host/planRunLimit.ts', 'resolvePlanLimit(tenantId, PLAN_LIMIT_WORKFLOW_RUNS)'],
   [PLAN_LIMIT_AI_CREDITS_MONTHLY]: ['host/managedCredits.ts', 'resolvePlanLimit(tenantId, PLAN_LIMIT_AI_CREDITS_MONTHLY)'],
-  [PLAN_LIMIT_KICKTODO_ENROLLMENTS]: ['features/kicktodo-commerce/tierGuard.ts', `'${PLAN_LIMIT_KICKTODO_ENROLLMENTS}'`],
 };
+let ENFORCEMENT_SITES: Record<string, readonly [string, string]> = HOST_ENFORCEMENT_SITES;
+beforeAll(async () => {
+  const merged: Record<string, readonly [string, string]> = { ...HOST_ENFORCEMENT_SITES };
+  for (const d of await collectFeatureRatchetDeclarations()) {
+    for (const [key, [file, token]] of Object.entries(d.declarations.enforcedPlanLimitSites ?? {})) merged[key] = [`${d.srcRel}/${file}`, token];
+  }
+  ENFORCEMENT_SITES = merged;
+});
 
 afterEach(() => { delete process.env.OPENWOP_BILLING_PLAN_LIMITS; });
 
 describe('ADR 0821 D6 — displayed limits ⊆ enforced limits', () => {
   it('/public/pricing drops an unenforced key and keeps every enforced one', () => {
-    process.env.OPENWOP_BILLING_PLAN_LIMITS = JSON.stringify({ pro: { workflowRuns: 1000, aiCreditsMonthly: 500, 'kicktodo.maxActiveEnrollments': 3, seats: 10 } });
+    process.env.OPENWOP_BILLING_PLAN_LIMITS = JSON.stringify({ pro: { workflowRuns: 1000, aiCreditsMonthly: 500, seats: 10 } });
     const pro = publicPricingCatalog().find((t) => t.tier === 'pro')!;
-    expect(pro.limits).toEqual({ workflowRuns: 1000, aiCreditsMonthly: 500, 'kicktodo.maxActiveEnrollments': 3 });
+    // (A feature-enforced key displays too: test/kicktodo/kicktodo-plan-limit-display.test.ts.)
+    expect(pro.limits).toEqual({ workflowRuns: 1000, aiCreditsMonthly: 500 });
     expect(pro.limits).not.toHaveProperty('seats');
   });
 
@@ -52,7 +65,7 @@ describe('ADR 0821 D6 — displayed limits ⊆ enforced limits', () => {
   });
 
   it('every enforced key has a named enforcement site that reads it', () => {
-    expect([...ENFORCED_PLAN_LIMIT_KEYS].sort()).toEqual(Object.keys(ENFORCEMENT_SITES).sort());
+    expect([...enforcedPlanLimitKeys()].sort()).toEqual(Object.keys(ENFORCEMENT_SITES).sort());
     for (const [key, [file, token]] of Object.entries(ENFORCEMENT_SITES)) {
       expect(read(file), `${key} must be read in ${file}`).toContain(token);
     }

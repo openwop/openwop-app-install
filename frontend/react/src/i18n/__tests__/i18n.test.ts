@@ -108,7 +108,8 @@ describe('catalogs', () => {
   // through the lazy per-locale path, so these tests exercise that loader.
   it('aggregates en eagerly across all namespaces; pt-BR is lazy-only', () => {
     // 132 namespaces MEASURED 2026-10-16 (e3c2492be) — the floor is the truth, not 40.
-    expect(NAMESPACES.length).toBeGreaterThanOrEqual(132);
+    // 128 after KickTodo's four namespaces left (ADR 1031 P3).
+    expect(NAMESPACES.length).toBeGreaterThanOrEqual(128);
     expect(Object.keys(resourcesByLocale)).toEqual(['en']);
   });
   it('lazy pt-BR has exact key parity with en in every namespace (no fallback leak)', async () => {
@@ -126,5 +127,14 @@ describe('catalogs', () => {
     const ptCommon = pt!.common as Record<string, string>;
     expect(ptCommon.save).toBe('Salvar');
     expect(ptCommon.cancel).toBe('Cancelar');
+  });
+});
+
+describe('i18next init', () => {
+  // i18next >= 25 logs a Locize sponsorship notice on init unless this is false;
+  // a white-label public site must not print a third party's ad in its console.
+  it('suppresses the vendor support notice', async () => {
+    const { default: i18n } = await import('../index.js');
+    expect(i18n.options.showSupportNotice).toBe(false);
   });
 });

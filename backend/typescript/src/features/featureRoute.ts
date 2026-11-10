@@ -13,7 +13,7 @@ import { isListedSuperadmin } from '../host/superadmin.js';
 import { isSellableBundleFeature } from '../host/featureBundles.js';
 import { checkEntitlement } from '../host/entitlementSeam.js';
 import type { ResolvedAssignment, ToggleSubject } from '../host/featureToggles/types.js';
-import { assertOrgScope, assertTenantScope, resolveSubjectScopesUnion, type Scope } from '../host/accessControlService.js';
+import { assertOrgScope, assertTenantScope, type Scope } from '../host/accessControlService.js';
 import { callerSubject, isOwnPersonalWorkspace, personalTenantOf } from '../host/requestSubject.js';
 import { credentialScopesIn, keyDeclarationPermits } from '../host/protocolAuthorization.js';
 import { resolveCallerUser } from './users/usersGuards.js';
@@ -70,93 +70,6 @@ export async function requireFeatureEnabled(req: Request, toggleId: string, labe
     await checkEntitlement(req, toggleId);
   }
   return assignment;
-}
-
-/**
- * ADR 0434 (KTFULL-B1/B2/B14/B15/B17) — the ONE KickTodo privileged gate.
- *
- * Every KickTodo authoring, publication, Factory-operation, moderation and
- * metrics-administration route pairs the feature toggle with
- * `host:kicktodo:manage` HERE, in one helper, rather than repeating the pair
- * per route file. The audit found five separate packages that each gated on
- * "feature enabled + identified caller" only, so ANY authenticated co-tenant
- * could publish or retire a challenge, drive the Factory, resolve a moderation
- * flag, or read tenant outcome metrics. A copy-pasted gate is an authorization
- * boundary that drifts; a shared one cannot be forgotten by the next route.
- *
- * Fail-closed via `requireTenantScope`: non-members resolve to zero scopes and
- * are denied. The personal-workspace owner short-circuit inside that helper is
- * what keeps the solo-user and anon-demo flows working.
- */
-export const KICKTODO_MANAGE_SCOPE: Scope = 'host:kicktodo:manage';
-
-/**
- * ADR 0458 CRITICAL-3 — the SUBJECT-based manage-authority predicate, shared by
- * the KickTodo authoring ROUTES (`requireKicktodoManage`) and the Challenge
- * Author's agent TOOLS (`kicktodo-creator/agentTools.ts`), so a route and a tool
- * can NEVER drift on who may drive the Factory. Fail-closed:
- *   - no subject (a scheduled/system turn with no acting human) ⇒ false;
- *   - the caller's OWN personal workspace (`tenantId === subject` — the subject
- *     `user:<id>`/`anon:<sid>` IS its own personal-tenant id) ⇒ true, the same
- *     implicit-owner short-circuit `requireTenantScope` grants via the request;
- *   - otherwise the caller's tenant-wide scope union MUST include
- *     `host:kicktodo:manage` (a non-member resolves to zero scopes ⇒ denied).
- * The wildcard-operator request escape stays in `requireKicktodoManage` (it is a
- * transport concept — an env/admin principal — with no tool equivalent).
- */
-export async function hasKicktodoManageAuthority(tenantId: string, subject?: string): Promise<boolean> {
-  if (!subject) return false;
-  if (tenantId === subject) return true; // implicit owner of one's own personal workspace
-  const { scopes } = await resolveSubjectScopesUnion(tenantId, subject);
-  return scopes.includes(KICKTODO_MANAGE_SCOPE);
-}
-
-/**
- * ADR 0459 P1 — the SUBJECT-based ENROLLMENT-authority predicate, shared by the
- * KickTodo participant enrollment ROUTES (`/enrollments/:id`, `/replan`,
- * `/materialize`, `/progress` in `kicktodo-core/routes.ts`) and the participant
- * replan agent TOOL (`openwop:kicktodo.replan`), so a route and a tool can NEVER
- * drift on who may drive an enrollment (the `hasKicktodoManageAuthority`
- * discipline, at participant scope). The authority is the participant's OWN
- * enrollment: the acting subject MUST be the enrollment's `ownerSubject`.
- * Fail-closed: a falsy subject (a scheduled/system turn with no acting human) ⇒
- * false; an absent or foreign enrollment ⇒ false (a uniform 404 at the route —
- * a foreign participant's enrollment is indistinguishable from absent, PRD §10.1).
- *
- * `getEnrollment` is loaded lazily: `featureRoute` is a hub imported by ~110
- * feature files, and `kicktodo-core/enrollmentService` transitively re-imports
- * this module (via `kickbotService` → `agentTools`), so a STATIC import would
- * close an ESM cycle through the hub. A dynamic import defers the binding to
- * call time (module cached after first) and keeps the graph acyclic.
- */
-export async function hasKicktodoEnrollmentAuthority(tenantId: string, enrollmentId: string, subject?: string): Promise<boolean> {
-  if (!subject || !enrollmentId) return false;
-  const { getEnrollment } = await import('./kicktodo-core/enrollmentService.js');
-  const e = await getEnrollment(tenantId, enrollmentId);
-  return !!e && e.ownerSubject === subject;
-}
-
-/**
- * ADR 0434 (KTFULL-B1/B2/B14/B15/B17) — the ONE KickTodo privileged gate; ADR
- * 0458 CRITICAL-3 refactor: the tenant-scope decision now DELEGATES to the
- * shared `hasKicktodoManageAuthority` predicate the agent tools also call, so the
- * two authorization surfaces cannot drift. Behavior is preserved: the
- * wildcard-operator principal and the implicit personal-workspace owner still
- * short-circuit (as `requireTenantScope` did), and a non-member is denied 403.
- */
-export async function requireKicktodoManage(req: Request, toggleId: string, label: string): Promise<void> {
-  await requireFeatureEnabled(req, toggleId, label);
-  // Wildcard operator principal (env API key / admin token / conformance harness)
-  // acts across tenants — the same trusted escape hatch requireTenantScope uses.
-  if (req.principal?.tenants?.includes('*')) return;
-  // Implicit personal-workspace owner (the req form; preserves the solo-user +
-  // anon-demo flows exactly). The predicate ALSO covers this via tenantId===subject,
-  // but keeping the req check makes the route a superset that can never regress.
-  if (isOwnPersonalWorkspace(req)) return;
-  const subject = callerSubject(req);
-  if (!(await hasKicktodoManageAuthority(tenantOf(req), subject ?? undefined))) {
-    throw new OpenwopError('forbidden_scope', `Missing required scope: ${KICKTODO_MANAGE_SCOPE}`, 403, { requiredScope: KICKTODO_MANAGE_SCOPE });
-  }
 }
 
 /** A required non-empty string body field (the validation every feature route

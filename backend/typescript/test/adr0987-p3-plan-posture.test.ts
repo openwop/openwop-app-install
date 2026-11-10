@@ -16,8 +16,15 @@
  *   - the healthy path is unchanged under strict (positive control), and a tenant
  *     with no limit never touches the counter, so a broken store cannot refuse it.
  *
- * Sabotage-witnessed: red when strict falls back to open on either failure, when
- * evaluation fails closed, or when the no-limit short-circuit moves after the read.
+ * Sabotage witnesses (probes w80g3-pp-*, 2026-11-03; each reds only its case):
+ * strict falls back to open on a counter error or on contention; evaluation
+ * fails closed on either; the no-limit short-circuit is skipped; the healthy
+ * CAS stops counting. The evaluation cases assert the counter was actually
+ * read (or contended, with retries), so they cannot pass on a short-circuit.
+ * "Nothing is counted" under contention holds by construction (the spy refuses
+ * every counter CAS); it guards against a future non-CAS write path.
+ * Every case reads and reserves with one `at`, so a UTC month boundary cannot
+ * split the counter key.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -56,18 +63,23 @@ function breakReads() {
   });
   return counterReads;
 }
-function contend() {
+function contend(): { counterSwaps: () => number } {
   const real = DurableCollection.prototype.compareAndSwap;
+  let n = 0;
   vi.spyOn(DurableCollection.prototype, 'compareAndSwap').mockImplementation(function (this: DurableCollection<unknown>, a: unknown, b: unknown) {
-    return isCounter(this) ? Promise.resolve(false) : real.call(this, a, b);
+    if (!isCounter(this)) return real.call(this, a, b);
+    n += 1;
+    return Promise.resolve(false);
   });
+  return { counterSwaps: () => n };
 }
 
 describe('ADR 0987 D5 — the plan limit fails closed under the strict profile', () => {
   it('positive control: the healthy path counts under strict', async () => {
     strict();
-    await reservePlanRun('t-ok');
-    expect(await planRunsThisMonth('t-ok')).toBe(1);
+    const at = new Date();
+    await reservePlanRun('t-ok', at);
+    expect(await planRunsThisMonth('t-ok', at)).toBe(1);
   });
 
   it('a counter error is a 503 plan_run_limit_unavailable under strict', async () => {
@@ -78,10 +90,12 @@ describe('ADR 0987 D5 — the plan limit fails closed under the strict profile',
 
   it('sustained contention is a 429 plan_run_limit_contention under strict, and nothing is counted', async () => {
     strict();
-    contend();
-    await expect(reservePlanRun('t-cas')).rejects.toMatchObject({ httpStatus: 429, details: { reason: 'plan_run_limit_contention' } });
+    const at = new Date();
+    const cas = contend();
+    await expect(reservePlanRun('t-cas', at)).rejects.toMatchObject({ httpStatus: 429, details: { reason: 'plan_run_limit_contention' } });
+    expect(cas.counterSwaps()).toBeGreaterThan(1);
     vi.restoreAllMocks();
-    expect(await planRunsThisMonth('t-cas')).toBe(0);
+    expect(await planRunsThisMonth('t-cas', at)).toBe(0);
   });
 
   it('a tenant with no limit never reads the counter, so a broken store cannot refuse it', async () => {
@@ -96,15 +110,23 @@ describe('ADR 0987 D5 — the plan limit fails closed under the strict profile',
 describe('ADR 0987 D5 — the plan limit stays open under the evaluation profile', () => {
   it('a counter error admits the run uncounted', async () => {
     evaluation();
-    breakReads();
-    await expect(reservePlanRun('t-err-e')).resolves.toBeDefined();
+    const at = new Date();
+    const reads = breakReads();
+    await expect(reservePlanRun('t-err-e', at)).resolves.toBeDefined();
+    // The error path was reached: the counter was read, not short-circuited.
+    expect(reads).toHaveBeenCalled();
+    vi.restoreAllMocks();
+    expect(await planRunsThisMonth('t-err-e', at)).toBe(0);
   });
 
   it('sustained contention admits the run uncounted', async () => {
     evaluation();
-    contend();
-    await expect(reservePlanRun('t-cas-e')).resolves.toBeDefined();
+    const at = new Date();
+    const cas = contend();
+    await expect(reservePlanRun('t-cas-e', at)).resolves.toBeDefined();
+    // The retry loop ran against the counter before admitting uncounted.
+    expect(cas.counterSwaps()).toBeGreaterThan(1);
     vi.restoreAllMocks();
-    expect(await planRunsThisMonth('t-cas-e')).toBe(0);
+    expect(await planRunsThisMonth('t-cas-e', at)).toBe(0);
   });
 });

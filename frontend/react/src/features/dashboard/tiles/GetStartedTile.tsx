@@ -15,6 +15,8 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import { listStoredRefs } from '../../../byok/lib/byokClient.js';
+import { refNamedProvider } from '../../../byok/lib/credentialRef.js';
+import { PROVIDERS } from '../../../byok/lib/providers.js';
 import { useEffectiveAccessState, isAdminCaller } from '../../../client/useEffectiveAccess.js';
 import { useAuth } from '../../../auth/useAuth.js';
 import { SignInButton } from '../../../auth/SignInButton.js';
@@ -38,6 +40,16 @@ interface Step {
 const count = (p: Promise<readonly unknown[]>): Promise<boolean | null> =>
   p.then((xs) => xs.length > 0, () => null);
 
+/** Providers a person can hold their own key for (the Keys page's list). */
+const BYOK_PROVIDER_IDS: readonly string[] = PROVIDERS.filter((p) => !p.managed && !p.hidden).map((p) => p.id);
+
+/** "Add your own model key" is done only by a stored ref that names an AI
+ *  provider. The vault also holds non-AI secrets (a webhook signing secret, an
+ *  email token), and counting those ticked the step for a workspace with no
+ *  model key at all (measured on myndhyve.ai, 2026-11-02). */
+const modelKeys = (): Promise<readonly string[]> =>
+  listStoredRefs().then((refs) => refs.filter((r) => refNamedProvider(r, BYOK_PROVIDER_IDS) !== null));
+
 export default function GetStartedTile(_props: DashboardTileProps): JSX.Element {
   const { t } = useTranslation('dashboard');
   const isAdmin = isAdminCaller(useEffectiveAccessState().access);
@@ -55,7 +67,7 @@ export default function GetStartedTile(_props: DashboardTileProps): JSX.Element 
     ];
     if (isAdmin) {
       checks.push(count(readConnections()).then((done) => ({ id: 'connect' as const, done, to: '/access?tab=connections' })));
-      checks.push(count(listStoredRefs()).then((done) => ({ id: 'key' as const, done, to: '/access?tab=keys', optional: true })));
+      checks.push(count(modelKeys()).then((done) => ({ id: 'key' as const, done, to: '/access?tab=keys', optional: true })));
     }
     void Promise.all(checks).then((s) => { if (live) setSteps(s); });
     return () => { live = false; };

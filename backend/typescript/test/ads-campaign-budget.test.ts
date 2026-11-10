@@ -1,12 +1,30 @@
 /**
- * ADR 0952 P3 — the adapter halves of a reallocation, against a local fixture
- * server (no real ad platform, no real token):
- *  - `getCampaignBudget` reads Meta's CBO `daily_budget` (minor units) and
- *    Google's campaign budget `amountMicros` (÷10⁴, mirroring the writer's ×10⁴).
- *    A Meta campaign without a campaign budget (ABO) is a typed failure.
+ * ADR 0952 P3 (+ residual b) and ADR 1022 D5 — the adapter halves of a budget
+ * change, against a local fixture server (no real ad platform, no real token):
+ *  - `getCampaignBudget` reads a Meta budget where it lives: on the campaign (CBO)
+ *    or on its ONE budgeted ad set (ABO, our own dispatch shape). Budgets split
+ *    across ad sets are `budget_split_across_ad_sets`, none is `no_daily_budget`,
+ *    and a campaign read under another ad account is `campaign_account_mismatch`.
+ *    Google `amountMicros` converts to minor units through the account currency
+ *    (USD in `adsCurrencyFixture`: ÷10⁴).
+ *  - `updateBudget` writes to that same object (the ad set for ABO).
  *  - `authorizeBudgetOps` lets ONE approved plan approval cover its ops: an op
  *    above the policy threshold that would ask for its own approval proceeds;
- *    an op NOT in the plan still asks. It refuses an unapproved approval.
+ *    an op NOT in the plan (another amount) still asks. It refuses an unapproved
+ *    approval and another tenant's.
+ *  - ADR 1022 D5: every budget change asks the cap checker; a blocking cap refuses
+ *    an increase and allows a decrease, and an unreadable budget or checker
+ *    refuses. M1: the checker is told the ledger's org (verified), else the
+ *    adapter's own (unverified).
+ * Ownership is stubbed to "owned": the seam has its own witnesses
+ * (adr1022-ads-ownership-seam).
+ *
+ * Sabotage (w86 probes, each alone, all red): ignore the ad-set split; skip the
+ * account match; return Google micros unconverted; write ABO to the campaign id;
+ * drop the approval status / tenant check or the spend-key mapping in
+ * `authorizeBudgetOps`; drop the amount from the spend key; skip the cap checker,
+ * treat every change as an increase, swallow a checker error, ignore an
+ * unreadable budget; drop the ledger org in `capTargetOrg`.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { answerCurrencyRead } from './adsCurrencyFixture.js';
@@ -14,7 +32,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
-import { makeAdsAdapter, authorizeBudgetOps, setAdsCapIncreaseChecker, __putDispatchRecordForTests, type AdsCapIncreaseChecker } from '../src/host/adsAdapter.js';
+import { makeAdsAdapter, setAdsCampaignOwnershipChecker, authorizeBudgetOps, setAdsCapIncreaseChecker, __putDispatchRecordForTests, type AdsCapIncreaseChecker } from '../src/host/adsAdapter.js';
 import { capBlocksIncrease } from '../src/features/campaign-intel/spendCaps.js';
 import { setGovernancePolicy } from '../src/host/governanceService.js';
 import { createCampaignSpendApproval, resolveApproval } from '../src/host/approvalService.js';
@@ -34,6 +52,10 @@ beforeAll(async () => {
   process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true';
   process.env.OPENWOP_GOOGLE_ADS_DEVELOPER_TOKEN = 'DEV';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  // This file tests the platform write path. Which org owns a campaign is the
+  // adapter seam's question, with its own witnesses (adr1022-ads-ownership-seam):
+  // here every campaign counts as the acting org's.
+  setAdsCampaignOwnershipChecker(async () => true);
   storage = app.locals.storage;
   await __resetConnectionsStore();
   srv = http.createServer((req, res) => {
@@ -85,7 +107,7 @@ beforeEach(() => { writes = []; });
 const adapter = () => makeAdsAdapter({ storage, tenantId: T, runId: 'budget-run', actingUserId: 'u1', orgId: T });
 
 describe('ADR 0952 P3 — getCampaignBudget', () => {
-  it('reads Meta CBO daily_budget and Google amountMicros; ABO is a typed failure, never a guess', async () => {
+  it('reads Meta CBO daily_budget and Google amountMicros; a split or missing budget is a typed failure, never a guess', async () => {
     meta['11'] = '5000';
     googleMicros['22'] = '75000000'; // 7,500 minor units at ×10⁴
     expect(await adapter().getCampaignBudget({ platform: 'meta', adAccountId: 'act_1', campaignId: '11' })).toEqual({ outcome: 'ok', platform: 'meta', dailyBudgetMinor: 5000 });
@@ -100,14 +122,16 @@ describe('ADR 0952 P3 — getCampaignBudget', () => {
     expect(await adapter().getCampaignBudget({ platform: 'meta', adAccountId: 'act_1', campaignId: '14' })).toEqual({ outcome: 'failed', error: 'no_daily_budget' });
     // Meta campaign ids are global: a campaign read under another accessible account is refused, never reported.
     expect(await adapter().getCampaignBudget({ platform: 'meta', adAccountId: 'act_2', campaignId: '11' })).toEqual({ outcome: 'failed', error: 'campaign_account_mismatch' });
-    expect((await adapter().getCampaignBudget({ platform: 'tiktok', adAccountId: '1', campaignId: '1' })).outcome).toBe('unsupported');
+    expect(await adapter().getCampaignBudget({ platform: 'tiktok', adAccountId: '1', campaignId: '1' })).toEqual({ outcome: 'unsupported', platform: 'tiktok', reason: 'not_sandbox_verified' });
     expect(writes).toHaveLength(0);
   });
 });
 
 describe('ADR 0952 P3 residual (b) — a Meta budget write goes where the budget lives', () => {
   it('an ABO campaign (our own dispatch shape) gets its ONE ad set updated, never the campaign', async () => {
-    await setGovernancePolicy(T, {}, 'test');
+    // A threshold far above these amounts: `{}` does not clear a threshold another
+    // case set (shuffle seed 11 ran the plan case first and this write asked).
+    await setGovernancePolicy(T, { adSpend: { approvalThresholdMinor: 10_000_000 } }, 'test');
     meta['15'] = undefined; adsetsOf['15'] = ['150']; meta['150'] = '3000';
     expect(await adapter().updateBudget({ platform: 'meta', adAccountId: 'act_1', campaignId: '15', dailyBudgetMinor: 4000 })).toMatchObject({ outcome: 'updated', target: '150' });
     expect(writes).toEqual([{ path: '/meta/150', body: { daily_budget: 4000 } }]);
@@ -127,7 +151,9 @@ describe('ADR 0952 P3 residual (b) — a Meta budget write goes where the budget
 describe('ADR 0952 P3 — authorizeBudgetOps', () => {
   it('one approved plan approval covers its ops above the threshold; an op outside the plan still asks', async () => {
     await setGovernancePolicy(T, { adSpend: { approvalThresholdMinor: 1000 } }, 'test');
-    const op = { platform: 'meta' as const, adAccountId: 'act_1', campaignId: '11', dailyBudgetMinor: 6000 };
+    // Its own CBO campaign: this case must not depend on case 1 having seeded one.
+    meta['18'] = '5000';
+    const op = { platform: 'meta' as const, adAccountId: 'act_1', campaignId: '18', dailyBudgetMinor: 6000 };
     const before = await adapter().updateBudget(op);
     expect(before.outcome).toBe('requires_approval');
     expect(writes).toHaveLength(0);
@@ -138,7 +164,7 @@ describe('ADR 0952 P3 — authorizeBudgetOps', () => {
     await authorizeBudgetOps(T, plan.approvalId, [op]);
 
     expect(await adapter().updateBudget(op)).toMatchObject({ outcome: 'updated', dailyBudgetMinor: 6000 });
-    expect(writes).toEqual([{ path: '/meta/11', body: { daily_budget: 6000 } }]);
+    expect(writes).toEqual([{ path: '/meta/18', body: { daily_budget: 6000 } }]);
     // A different amount is not in the plan: it asks for its own approval.
     expect((await adapter().updateBudget({ ...op, dailyBudgetMinor: 6100 })).outcome).toBe('requires_approval');
     // Another tenant cannot borrow the approval.

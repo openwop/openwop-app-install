@@ -26,6 +26,8 @@
  * pattern) since a chat-time tool scope carries no `storage`/`hostSuite`.
  */
 
+import { strictCurrencyExponent } from '../../host/currencyUnits.js';
+import type { BriefBudget } from './types.js';
 import { isTerminalRunStatus } from '@openwop/openwop';
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
@@ -99,6 +101,34 @@ async function loadBriefForTool(
   return { ok: true, brief };
 }
 
+/** Host-derived monetary grounding; stored budgets remain ISO minor units.
+ * Decimal insertion preserves safe integer precision without floating-point
+ * division or runtime-dependent Intl display exponents. */
+type PresentedAmount =
+  | { status: 'available'; major: string }
+  | { status: 'unavailable'; reason: 'amount_missing' | 'invalid_amount' | 'currency_missing' | 'unsupported_currency' };
+
+function presentBudget(budget: BriefBudget | undefined) {
+  if (!budget) return null;
+  const currency = budget.currency ?? null;
+  const exponent = strictCurrencyExponent(budget.currency);
+  const amount = (minor: number | undefined): PresentedAmount => {
+    if (minor === undefined) return { status: 'unavailable', reason: 'amount_missing' };
+    if (!Number.isSafeInteger(minor) || minor < 0) return { status: 'unavailable', reason: 'invalid_amount' };
+    if (!currency) return { status: 'unavailable', reason: 'currency_missing' };
+    if (exponent === null) return { status: 'unavailable', reason: 'unsupported_currency' };
+    const digits = String(minor).padStart(exponent + 1, '0');
+    return { status: 'available', major: exponent === 0 ? digits : `${digits.slice(0, -exponent)}.${digits.slice(-exponent)}` };
+  };
+  return {
+    unit: 'major_currency_units',
+    currency,
+    minorUnitExponent: exponent,
+    total: amount(budget.totalMinor),
+    perChannel: Object.fromEntries(Object.entries(budget.perChannel ?? {}).map(([channel, minor]) => [channel, amount(minor)])),
+  };
+}
+
 // ── READ: get-brief ──────────────────────────────────────────────────────────
 export async function runGetBriefTool(input: Record<string, unknown>, scope: ToolScope): Promise<ToolResult> {
   if (!(await featureEnabled(scope))) {
@@ -140,6 +170,7 @@ export async function runGetBriefTool(input: Record<string, unknown>, scope: Too
         // ADR 1020 D8 — a stale kernel is not used by generation; say so.
         kernelStale: b.kernelStale === true,
       },
+      budgetPresentation: presentBudget(b.budget),
       validation: validateBrief(b),
     }),
   };
@@ -306,7 +337,9 @@ export function registerCampaignBriefAgentTools(deps: StartRunDeps): void {
       description:
         'Read a campaign brief\'s full body — product, personas, brand, KB collection, channels, and the messaging kernel '
         + '(if generated) — plus its completeness validation. Ground revisions and kernel work in the ACTUAL brief instead '
-        + 'of a summary. Read-only.',
+        + 'of a summary. Raw budget.totalMinor and budget.perChannel values are ISO minor units, not amounts to quote directly. '
+        + 'Use budgetPresentation available major decimal strings with its currency when summarizing money; '
+        + 'report unavailable values as unavailable and never infer a currency or amount. Read-only.',
       inputSchema: {
         type: 'object',
         properties: { briefId: { type: 'string', description: 'The campaign brief id.' } },

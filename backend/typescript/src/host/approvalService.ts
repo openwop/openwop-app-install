@@ -32,9 +32,10 @@ const auditLog = createLogger('host.approvalService');
 
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected';
 
-/** Every approval `kind` discriminator (absent on a row ⇒ `run-proposal`). This
- *  tuple is the RUNTIME source of truth the APPR-5 redactor-completeness test
- *  enumerates; `ApprovalKind` derives from it so the type and the list can never
+/** Every HOST approval `kind` discriminator (absent on a row ⇒ `run-proposal`).
+ *  Feature-owned kinds are NOT here (ADR 1031 P2 — `FeatureApprovalKinds` below).
+ *  This tuple is the RUNTIME source of truth the APPR-5 redactor-completeness test
+ *  enumerates (with the registered feature kinds); `ApprovalKind` derives from it so the type and the list can never
  *  drift (adding a kind to the type means adding it here, which the test then
  *  requires a redactor for). */
 export const APPROVAL_KINDS = [
@@ -48,12 +49,6 @@ export const APPROVAL_KINDS = [
   'pm-scenario-select',
   'contact-merge',
   'warehouse-load',
-  'challenge-publish',
-  'community-profile',
-  'community-review',
-  'metrics-verifier-sample',
-  'connect-seller',
-  'kicktodo-plan-proposal',
   'environment-promotion',
   'dealer-registration',
   'territory-model-transition',
@@ -70,7 +65,23 @@ export const APPROVAL_KINDS = [
   'creative-publish-review',
   'funnel-publish',
 ] as const;
-export type ApprovalKind = (typeof APPROVAL_KINDS)[number];
+/** The kinds the HOST owns — the `APPROVAL_KINDS` tuple. Host tables
+ *  (`APPROVAL_AUDIENCE`, `KIND_DISPATCH`) are complete over exactly these. */
+export type HostApprovalKind = (typeof APPROVAL_KINDS)[number];
+/**
+ * ADR 1031 P2 — kinds a FEATURE owns, declared by module augmentation from the
+ * feature's own directory and registered at runtime through
+ * `registerFeatureApprovalKind` (`approvalKindRegistry.ts`) with their audience
+ * and decision recipe:
+ *
+ *   declare module '<path>/host/approvalService.js' {
+ *     interface FeatureApprovalKinds { 'my-kind': true }
+ *   }
+ *
+ * The value type is unused; only the keys matter.
+ */
+export interface FeatureApprovalKinds {}
+export type ApprovalKind = HostApprovalKind | Extract<keyof FeatureApprovalKinds, string>;
 
 /** A proposed-but-unstarted action awaiting human sign-off. */
 export interface PendingApproval {
@@ -246,7 +257,9 @@ export interface PendingApproval {
    *  BLOCKER 4 note: it needs a major→minor currency-exponent conversion that is a
    *  separate money-precision change, and the statement row already satisfies the
    *  money invariant. */
-  commissionStatement?: { statementId: string; subjectId: string; period: string; total: number; currency: string };
+  /** ADR 1034 D5 — `attainmentPct` and `lineDigest` widen the approve-what-you-saw pin to
+   *  what drives the money. Absent on cards minted before D5; such a card is stale. */
+  commissionStatement?: { statementId: string; subjectId: string; period: string; total: number; currency: string; attainmentPct?: number; lineDigest?: string };
   /** ADR 0387 / H2 — when `kind: 'environment-promotion'`, this approval gates a
    *  config promote/rollback (a pointer move) behind the tenant's opt-in
    *  `requireApprovalForPromotion`. `rosterId`/`persona`/`workflowId` are empty
@@ -256,27 +269,6 @@ export interface PendingApproval {
   /** ADR 0732 — `requestedBy` is the PROPOSER, recorded so a decide can refuse
    *  self-approval. Optional only for rows minted before that ADR (D5). */
   envPromotion?: { toEnv: string; fromEnv: string | null; snapshotHash: string; requestedBy?: string };
-  /** ADR 0459 P2 — when `kind: 'kicktodo-plan-proposal'`, this approval carries a
-   *  coach's plan-change proposal whose DECIDER is the participant (the inverse
-   *  of publication's separation-of-duties: the subject of the change holds the
-   *  authority). `rosterId`/`persona`/`workflowId` are empty (no agent, no run);
-   *  the decide path is `kicktodo-accountability`'s registered handler, which
-   *  delegates to `resolveProposal` — the ONE plan-applier, whose enrollment-owner
-   *  check remains the authority. The participant subject is carried in
-   *  `policy.approverRefs[0]` (also the visibility key — see reviewProjection). */
-  planProposal?: { circleId: string; enrollmentId: string; proposalId: string; coachSubject: string; note: string };
-  /** ADR 0415 D3 — when `kind: 'challenge-publish'`, this approval gates a
-   *  KickTodo Challenge Factory candidate's publication into the kicktodo-core
-   *  catalog. Separation of duties is enforced at the completing seam: the
-   *  resolver MUST differ from `challengePublish.submittedBy`. */
-  challengePublish?: { candidateId: string; challengeId: string; challengeVersion: number; submittedBy: string };
-  /** ADR 0426 — `community-profile`/`community-review` payload (opaque ref). */
-  community?: { refId: string; submittedBy: string };
-  /** ADR 0445 D2 — when `kind: 'connect-seller'`, this approval gates a KickTodo
-   *  AUTHOR'S request for payout onboarding (the seller lanes are approval-gated —
-   *  the CLAUDE.md multi-tenant phishing/squat posture). The Connect account
-   *  itself stays the tenant's ONE seller row via the existing Connect lane. */
-  connectSeller?: { submittedBy: string };
   /** ADR 0264 / CDP-B — when `kind: 'contact-merge'`, this approval gates a steward
    *  contact merge (a probabilistic match candidate). `rosterId`/`persona`/`workflowId`
    *  are empty (no agent, no run); the decide path is the crm feature's merge handler,
@@ -415,6 +407,10 @@ export interface PendingApproval {
   dataset?: string;
   table?: string;
   rowCount?: number;
+  /** ADR 1024 D3.1 — `sha256(JCS(rows))` of the exact batch this approval covers. A load
+   *  is allowed only when the batch it is about to insert has the same digest; a row
+   *  without one (minted before ADR 1024) is never allowed. */
+  rowsDigest?: string;
   /** Ecommerce gap plan §5B B3 — when `kind: 'commerce-spend'`, this approval
    *  gates an order-value or refund-value commerce action that met the tenant's
    *  `commerce.{order,refund}ApprovalThresholdMinor`. Same posture as
@@ -754,109 +750,21 @@ export function getAssistantActionProjector(): AssistantActionProjector | null {
 }
 
 /**
- * Create a campaign ad-spend approval (campaign gap plan §5B B3). Same durable
- * queue + CAS resolve as every other proposer — NOT a second approval store.
- * No agent, no run: the ads adapter (host/adsAdapter.ts) creates it when a live
- * dispatch/budget-set meets the tenant spend threshold, and re-checks it (by
- * `spendIdemKey`) on the next attempt — approve, then re-run, and the spend
- * proceeds. Amounts + ids only; never creative bytes or credentials.
+ * ADR 1031 P2 — persist a NEW pending approval a FEATURE built for its own kind
+ * (`registerFeatureApprovalKind`), through the SAME durable queue + status index
+ * every host creator uses — so a feature kind is never a second approval store.
+ * `ifAbsent`: insert-if-absent on `approvalId`, so a caller-derived deterministic
+ * id makes the create idempotent — the first create wins and every later one
+ * (including a concurrent one that lost the CAS) returns that row.
  */
-/** ADR 0415 D3 — the Challenge Factory publication gate (one queue, one inbox). */
-export async function createChallengePublishApproval(input: {
-  tenantId: string;
-  proposal: string;
-  candidateId: string;
-  challengeId: string;
-  challengeVersion: number;
-  submittedBy: string;
-}): Promise<PendingApproval> {
-  const approval: PendingApproval = {
-    approvalId: `appr:${randomUUID()}`,
-    tenantId: input.tenantId,
-    rosterId: 'host:kicktodo-factory',
-    persona: 'Challenge Factory',
-    workflowId: 'openwop-app.kicktodo.publish',
-    proposal: input.proposal,
-    kind: 'challenge-publish',
-    challengePublish: {
-      candidateId: input.candidateId,
-      challengeId: input.challengeId,
-      challengeVersion: input.challengeVersion,
-      submittedBy: input.submittedBy,
-    },
-    status: 'pending',
-    createdAt: nowIso(),
-  };
-  await approvals.put(approval);
-  await indexApproval(approval);
-  return approval;
-}
-
-/** ADR 0426 — community moderation approvals: `community-profile` gates a
- *  creator profile's public visibility; `community-review` resolves a flagged
- *  challenge review. Payload is the opaque ref; resolution identity rules
- *  (separation of duties) are enforced by the community service. */
-export async function createCommunityApproval(input: {
-  tenantId: string;
-  kind: 'community-profile' | 'community-review' | 'metrics-verifier-sample';
-  proposal: string;
-  refId: string;
-  submittedBy: string;
-  /** KTENG-3 / KTX-5 — a caller that has already CLAIMED a durable row naming
-   *  this approval passes the id it claimed, so the row and the approval agree.
-   *  Omitted ⇒ a fresh random id (unchanged behaviour). */
-  approvalId?: string;
-}): Promise<PendingApproval> {
-  const approval: PendingApproval = {
-    approvalId: input.approvalId ?? `appr:${randomUUID()}`,
-    tenantId: input.tenantId,
-    rosterId: 'host:kicktodo-community',
-    persona: 'KickTodo Community',
-    workflowId: 'openwop-app.kicktodo.community',
-    proposal: input.proposal,
-    kind: input.kind,
-    community: { refId: input.refId, submittedBy: input.submittedBy },
-    status: 'pending',
-    createdAt: nowIso(),
-  };
-  await approvals.put(approval);
-  await indexApproval(approval);
-  return approval;
-}
-
-/** ADR 0445 D2 — the connect-seller request act: an author asks the operator
- *  for payout onboarding. Same durable queue + CAS resolve as every other gate. */
-export async function createConnectSellerApproval(input: {
-  tenantId: string;
-  proposal: string;
-  submittedBy: string;
-  /** KTM-3 — a caller-derived DETERMINISTIC id makes the create idempotent: the
-   *  first create wins (insert-if-absent) and every later create with the same id
-   *  returns that row instead of minting a second inbox card. Omitted ⇒ a random
-   *  id, unchanged. */
-  approvalId?: string;
-}): Promise<PendingApproval> {
-  if (input.approvalId !== undefined) {
-    const prior = await approvals.get(input.approvalId);
+export async function insertApproval(approval: PendingApproval, opts: { ifAbsent?: boolean } = {}): Promise<PendingApproval> {
+  if (opts.ifAbsent) {
+    const prior = await approvals.get(approval.approvalId);
     if (prior) return prior;
-  }
-  const approval: PendingApproval = {
-    approvalId: input.approvalId ?? `appr:${randomUUID()}`,
-    tenantId: input.tenantId,
-    rosterId: 'host:kicktodo-commerce',
-    persona: 'KickTodo Commerce',
-    workflowId: 'openwop-app.kicktodo.commerce',
-    proposal: input.proposal,
-    kind: 'connect-seller',
-    connectSeller: { submittedBy: input.submittedBy },
-    status: 'pending',
-    createdAt: nowIso(),
-  };
-  if (input.approvalId !== undefined) {
     if (!(await approvals.compareAndSwap(null, approval))) {
       const winner = await approvals.get(approval.approvalId);
       if (winner) return winner; // a concurrent create with the same id won
-      throw new Error(`connect-seller approval ${approval.approvalId} could not be created.`);
+      throw new Error(`${approval.kind ?? 'run-proposal'} approval ${approval.approvalId} could not be created.`);
     }
   } else {
     await approvals.put(approval);
@@ -908,79 +816,6 @@ export async function createCompensationApproval(input: {
   await approvals.put(approval);
   await indexApproval(approval);
   return approval;
-}
-
-/**
- * ADR 0459 P2 — raise a KickTodo coach plan-change proposal as an approval card.
- * Same durable queue + CAS resolve as every other gate. No agent, no run:
- * `rosterId`/`persona`/`workflowId` are empty; the decide path is
- * `kicktodo-accountability`'s registered handler, which calls `resolveProposal`
- * (the ONE applier). The DECIDER is the participant — carried in
- * `policy.approverRefs[0]` (which is also the participant-only visibility key,
- * so the coach's free-text note never surfaces in another member's reviews rail).
- * `conversationId` is the circle's conversation so the card renders in-thread.
- */
-export async function createKicktodoPlanProposalApproval(input: {
-  tenantId: string;
-  conversationId: string;
-  circleId: string;
-  enrollmentId: string;
-  proposalId: string;
-  coachSubject: string;
-  participantSubject: string;
-  note: string;
-  proposal: string;
-}): Promise<PendingApproval> {
-  const approval: PendingApproval = {
-    approvalId: `appr:${randomUUID()}`,
-    tenantId: input.tenantId,
-    rosterId: '',
-    persona: '',
-    workflowId: '',
-    conversationId: input.conversationId,
-    kind: 'kicktodo-plan-proposal',
-    planProposal: {
-      circleId: input.circleId,
-      enrollmentId: input.enrollmentId,
-      proposalId: input.proposalId,
-      coachSubject: input.coachSubject,
-      note: input.note,
-    },
-    proposal: input.proposal,
-    // requiredApprovals:1 keeps the legacy single-decision path (no quorum badge);
-    // approverRefs names the participant as the sole decider AND the visibility key.
-    policy: { requiredApprovals: 1, approverRefs: [input.participantSubject] },
-    status: 'pending',
-    createdAt: nowIso(),
-  };
-  await approvals.put(approval);
-  await indexApproval(approval);
-  return approval;
-}
-
-/**
- * The plan-proposal decision handler, registered by the KICKTODO-ACCOUNTABILITY
- * feature at boot (core owns the hook; the feature depends on core — the
- * content-publish discipline). The core decide path dispatches here for
- * `kind: 'kicktodo-plan-proposal'` in BOTH the claim and reject paths. The
- * handler delegates to `resolveProposal`, whose enrollment-owner check is the
- * authority — it never bypasses it (the deciding subject is passed through).
- */
-export type PlanProposalApprovalHandler = (
-  tenantId: string,
-  approvalId: string,
-  outcome: 'approved' | 'rejected',
-  opts: { decidedByUserId?: string; note?: string },
-) => Promise<{ approval: PendingApproval; changed: boolean } | null>;
-
-let planProposalApprovalHandler: PlanProposalApprovalHandler | null = null;
-
-export function registerPlanProposalApprovalHandler(fn: PlanProposalApprovalHandler): void {
-  planProposalApprovalHandler = fn;
-}
-
-export function getPlanProposalApprovalHandler(): PlanProposalApprovalHandler | null {
-  return planProposalApprovalHandler;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1068,7 +903,14 @@ export type ApprovalEligibilityCheck = (
   approval: PendingApproval,
   /** `spellings` (ADR 0878): every spelling of the decider, for a kind whose check is
    *  a membership lookup — one human can be keyed two ways (`callerSubjectSpellings`). */
-  opts?: { isOperator?: boolean; isPersonalOwner?: boolean; spellings?: string[] },
+  opts?: {
+    isOperator?: boolean; isPersonalOwner?: boolean; spellings?: string[];
+    /** ADR 1024 D3.4 — which decision is being made. A check that treats approve and
+     *  reject differently (separation of duties binds approve only; a submitter may
+     *  withdraw) reads it. Both decide lanes pass it; absent means a caller that
+     *  predates the field, which a check must treat as the stricter `approved`. */
+    outcome?: 'approved' | 'rejected';
+  },
 ) => Promise<void>;
 
 const eligibilityChecks = new Map<string, ApprovalEligibilityCheck>();
@@ -1102,7 +944,7 @@ export async function assertApprovalEligibility(
   tenantId: string,
   decidedBy: string | undefined,
   approval: PendingApproval,
-  opts?: { isOperator?: boolean; isPersonalOwner?: boolean; spellings?: string[] },
+  opts?: { isOperator?: boolean; isPersonalOwner?: boolean; spellings?: string[]; outcome?: 'approved' | 'rejected' },
 ): Promise<void> {
   const check = approval.kind ? eligibilityChecks.get(approval.kind) : undefined;
   if (check) await check(tenantId, decidedBy, approval, opts);
@@ -1176,7 +1018,7 @@ function anonymizeApproverRefs(a: PendingApproval, subjectForms: ReadonlySet<str
  * Tenant-scoped, idempotent (re-running finds fields already at the sentinel /
  * rows already gone and no-ops), no notifications. Returns the count touched.
  */
-async function applyApprovalRedactorsForSubject(
+export async function applyApprovalRedactorsForSubject(
   tenantId: string,
   subject: string,
   opts: { onlyKind?: string } = {},
@@ -1357,11 +1199,6 @@ registerRetentionPurger({
 
 // ── Built-in kind redactors (the audited per-kind field maps, ADR 0464 §2.3) ──
 // Submission kinds: the SUBMITTER is a data subject; redact their id + proposal.
-registerApprovalRedactor('challenge-publish', { idFields: ['challengePublish.submittedBy'], textFields: ['proposal'] });
-registerApprovalRedactor('community-profile', { idFields: ['community.submittedBy'], textFields: ['proposal'] });
-registerApprovalRedactor('community-review', { idFields: ['community.submittedBy'], textFields: ['proposal'] });
-registerApprovalRedactor('metrics-verifier-sample', { idFields: ['community.submittedBy'], textFields: ['proposal'] });
-registerApprovalRedactor('connect-seller', { idFields: ['connectSeller.submittedBy'], textFields: ['proposal'] });
 // assistant-action + text-only kinds: NO first-party subject-id field in the
 // KIND-SPECIFIC payload, so a per-kind subject match can never fire — the
 // erasure this seam performs for these kinds is approver-ref anonymization
@@ -1379,7 +1216,7 @@ registerApprovalRedactor('connect-seller', { idFields: ['connectSeller.submitted
 // records (contact-merge — erased by the CRM feature per its retention
 // precedent) or tenant refs (page/order/strategy ids); the proposing agent's
 // `rosterId` (run-proposal) is agent identity handled by `deleteApprovalsForRoster`.
-for (const k of ['assistant-action', 'run-proposal', 'contact-merge', 'commerce-spend', 'warehouse-load'] as const) {
+for (const k of ['assistant-action', 'run-proposal', 'contact-merge', 'commerce-spend'] as const) {
   registerApprovalRedactor(k, { idFields: [], textFields: [] });
 }
 // ADR 0859 D3 — a content-publish row now records who SUBMITTED it (separation of
@@ -1388,6 +1225,8 @@ registerApprovalRedactor('content-publish', { idFields: ['submitters', 'submitte
 // ADR 0942 D10.2 — an autonomy-gated spend row records the run's requesters (subject ids).
 registerApprovalRedactor('campaign-spend', { idFields: ['submitters', 'submitterCauses'], textFields: [] });
 registerApprovalRedactor('creative-publish-review', { idFields: ['submitters'], textFields: [] }); // ADR 0945 × 0942
+// ADR 1024 D3.6 — a warehouse-load row records who asked for the load.
+registerApprovalRedactor('warehouse-load', { idFields: ['submitters'], textFields: [] });
 // ADR 0845 D5 — a strategy activation now records its SUBMITTER (a subject id) for the
 // separation-of-duties check; it is erased like every other subject ref.
 // ADR 0905 D3 — the submitters are subject ids; the pinned subject/body is template
@@ -1461,19 +1300,13 @@ registerApprovalRedactor('compensation-action', {
 });
 
 /**
- * ADR 0464 — the kicktodo-plan-proposal erasure, migrated onto the redactor
- * registry (behavior byte-identical to the ADR 0459 #2322 ops it replaces). The
- * kind's map is registered by `kicktodo-accountability` (it owns the kind); this
- * scoped wrapper is what the feature's own eraser invokes so plan-proposal is
- * reached even in tests that reset the erasers to only the kicktodo one. For a
- * subject who is the authoring COACH → both note copies redacted (coachSubject
- * preserved as the match key); for the deciding PARTICIPANT (approverRefs[0]) →
- * the card is deleted (row + index). A subject who is neither → no-op.
+ * Create a campaign ad-spend approval (campaign gap plan §5B B3). Same durable
+ * queue + CAS resolve as every other proposer — NOT a second approval store.
+ * No agent, no run: the ads adapter (host/adsAdapter.ts) creates it when a live
+ * dispatch/budget-set meets the tenant spend threshold, and re-checks it (by
+ * `spendIdemKey`) on the next attempt — approve, then re-run, and the spend
+ * proceeds. Amounts + ids only; never creative bytes or credentials.
  */
-export async function erasePlanProposalApprovalsForSubject(tenantId: string, subject: string): Promise<number> {
-  return applyApprovalRedactorsForSubject(tenantId, subject, { onlyKind: 'kicktodo-plan-proposal' });
-}
-
 export async function createCampaignSpendApproval(input: {
   tenantId: string;
   spendKind: 'publish' | 'budget' | 'audience' | 'launch' | 'reallocation';
@@ -1606,6 +1439,10 @@ export async function createWarehouseLoadApproval(input: {
   rowCount: number;
   idemKey: string;
   proposal: string;
+  /** ADR 1024 D3.1 — the digest of the rows this approval covers. */
+  rowsDigest: string;
+  /** ADR 1024 D3.4 — who asked (the load's acting user), for separation of duties. */
+  submitters?: string[];
   /** Multi-approver / quorum policy (ADR 0070). Omit for the single-decision gate. */
   policy?: ApprovalPolicy;
 }): Promise<PendingApproval> {
@@ -1620,6 +1457,8 @@ export async function createWarehouseLoadApproval(input: {
     dataset: input.dataset,
     table: input.table,
     rowCount: input.rowCount,
+    rowsDigest: input.rowsDigest,
+    ...(input.submitters && input.submitters.length > 0 ? { submitters: [...input.submitters] } : {}),
     spendIdemKey: input.idemKey,
     proposal: input.proposal,
     ...(input.policy ? { policy: input.policy } : {}),
@@ -1903,69 +1742,6 @@ export type FunnelPublishApprovalHandler = EmailSendApprovalHandler;
 let funnelPublishApprovalHandler: FunnelPublishApprovalHandler | null = null;
 export function registerFunnelPublishApprovalHandler(fn: FunnelPublishApprovalHandler): void { funnelPublishApprovalHandler = fn; }
 export function getFunnelPublishApprovalHandler(): FunnelPublishApprovalHandler | null { return funnelPublishApprovalHandler; }
-
-/**
- * ADR 0458 §2.2 (correction, 2026-09-15) — the challenge-publish decision handler,
- * registered by the `kicktodo-creator` FEATURE at boot (core owns the hook; the
- * feature depends on core, never the reverse — the content-publish discipline).
- * Until this existed, `kind: 'challenge-publish'` fell through the run-proposal
- * finalizer, which resolves the proposing roster entry first — and the factory's
- * approval names `host:kicktodo-factory`, which is a persona, not a roster row. So
- * every APPROVE from the reviews inbox 404'd ("Proposing agent no longer exists")
- * while REJECT worked, and the only way to publish was the creator's own
- * `complete-publication` route, which no client called after ADR 0458 P4 pointed
- * approvers at the inbox. The handler routes approve to `completePublication`
- * (separation of duties + gates re-run there, unchanged) and reject to a plain
- * resolve, so the inbox card, decide-by-email and the approvals routes share ONE
- * publication act.
- */
-export type ChallengePublishApprovalHandler = (
-  tenantId: string,
-  approvalId: string,
-  outcome: 'approved' | 'rejected',
-  opts: { decidedByUserId?: string; note?: string },
-) => Promise<{ approval: PendingApproval; changed: boolean } | null>;
-
-let challengePublishApprovalHandler: ChallengePublishApprovalHandler | null = null;
-
-export function registerChallengePublishApprovalHandler(fn: ChallengePublishApprovalHandler): void {
-  challengePublishApprovalHandler = fn;
-}
-
-export function getChallengePublishApprovalHandler(): ChallengePublishApprovalHandler | null {
-  return challengePublishApprovalHandler;
-}
-
-/**
- * KickTodo sign-off kinds — `community-profile`, `community-review`,
- * `metrics-verifier-sample`, `connect-seller`. Each is a governance sign-off whose
- * decision IS the act (or, for the last two, the record a feature reads back), not
- * a run. All four used to fall through the run-proposal finalizer, which resolves
- * the proposing roster entry first — and their approvals name host personas
- * (`host:kicktodo-community`, `host:kicktodo-commerce`) that are not roster rows.
- * So every APPROVE from the reviews inbox 404'd ("Proposing agent no longer
- * exists") while REJECT resolved the row without touching the profile or review it
- * was about: the moderation loop never closed. Same trap as challenge-publish and
- * commerce-spend; same cure. The owning kicktodo-* feature registers the handler at
- * boot (core owns the hook; the feature depends on core, never the reverse).
- */
-export type KicktodoSignoffKind = 'community-profile' | 'community-review' | 'metrics-verifier-sample' | 'connect-seller';
-export type KicktodoSignoffApprovalHandler = (
-  tenantId: string,
-  approvalId: string,
-  outcome: 'approved' | 'rejected',
-  opts: { decidedByUserId?: string; note?: string },
-) => Promise<{ approval: PendingApproval; changed: boolean } | null>;
-
-const kicktodoSignoffHandlers = new Map<KicktodoSignoffKind, KicktodoSignoffApprovalHandler>();
-
-export function registerKicktodoSignoffApprovalHandler(kind: KicktodoSignoffKind, fn: KicktodoSignoffApprovalHandler): void {
-  kicktodoSignoffHandlers.set(kind, fn);
-}
-
-export function getKicktodoSignoffApprovalHandler(kind: KicktodoSignoffKind): KicktodoSignoffApprovalHandler | null {
-  return kicktodoSignoffHandlers.get(kind) ?? null;
-}
 
 /**
  * ADR 0469 A4 — the anon-surface-write decision handler, registered by the
@@ -2666,9 +2442,17 @@ export async function createDealerRegistrationApproval(input: {
   };
   // A RESOLVED card for this registration must not be silently reopened by a re-submit
   // (that would resurrect a decided deal), so only create when nothing is there.
-  const existing = await approvals.get(approval.approvalId);
-  if (existing) return existing;
-  await approvals.put(approval);
+  // ADR 1034 (grade-code H3) — insert-if-absent, not get-then-put: the workflow surface now
+  // reaches this too, and a `put` racing a decide could write `pending` over a card that had
+  // just been resolved.
+  if (!(await approvals.putIfAbsent(approval))) {
+    const existing = await approvals.get(approval.approvalId);
+    if (!existing) throw new OpenwopError('conflict', 'Could not open a review for this registration. Try again.', 409, { regId: input.regId });
+    // Closing grade-code I4 — the winner may have crashed between its insert and its index
+    // write; re-indexing (an idempotent upsert) keeps the card visible in the inbox.
+    await indexApproval(existing);
+    return existing;
+  }
   await indexApproval(approval);
   return approval;
 }
@@ -2690,20 +2474,47 @@ export function getDealerRegistrationApprovalHandler(): DealerRegistrationApprov
 export async function createTerritoryTransitionApproval(input: {
   tenantId: string; orgId: string; modelId: string; transition: 'activate' | 'archive'; proposal: string;
 }): Promise<PendingApproval> {
-  const approval: PendingApproval = {
-    approvalId: `appr:${randomUUID()}`,
-    tenantId: input.tenantId,
-    rosterId: '', persona: '', workflowId: '',
-    kind: 'territory-model-transition',
-    orgId: input.orgId,
-    territoryTransition: { modelId: input.modelId, transition: input.transition },
-    proposal: input.proposal,
-    status: 'pending',
-    createdAt: nowIso(),
-  };
-  await approvals.put(approval);
-  await indexApproval(approval);
-  return approval;
+  // ADR 1034 D1 (architect H3) — find-or-create, race-safe. The id used to be a random
+  // UUID behind a separate find, so two concurrent submits (a run retry, a double click)
+  // minted two cards, and the find matched on `modelId` alone, so an ACTIVATE submit could
+  // be handed a pending ARCHIVE card. The id is now deterministic in (model, transition,
+  // generation): `generation` starts at this pair's count of earlier cards, so concurrent
+  // callers compute the same id and only one insert wins, while a re-submit after a
+  // rejection still gets a fresh card.
+  const prior = (await listApprovals(input.tenantId)).filter((a) => a.kind === 'territory-model-transition'
+    && a.territoryTransition?.modelId === input.modelId);
+  const pending = prior.find((a) => a.status === 'pending');
+  if (pending) {
+    if (pending.territoryTransition?.transition !== input.transition) {
+      throw new OpenwopError('conflict', `This model already has a pending ${pending.territoryTransition?.transition ?? 'other'} review. Decide it first.`, 409, { modelId: input.modelId, pendingApprovalId: pending.approvalId });
+    }
+    return pending;
+  }
+  // Insert-if-absent per generation (grade-code H3). A `get`-then-`put` here could write
+  // `pending` over a card a manager had just decided; and a decided card the listing missed
+  // (a lost index row) used to be handed back forever. A taken id whose card is resolved
+  // means "a later generation" — step to it (bounded).
+  const base = prior.filter((a) => a.territoryTransition?.transition === input.transition).length;
+  for (let generation = base; generation < base + 8; generation += 1) {
+    const approval: PendingApproval = {
+      approvalId: `appr:terrtx:${input.modelId}:${input.transition}:${generation}`,
+      tenantId: input.tenantId,
+      rosterId: '', persona: '', workflowId: '',
+      kind: 'territory-model-transition',
+      orgId: input.orgId,
+      territoryTransition: { modelId: input.modelId, transition: input.transition },
+      proposal: input.proposal,
+      status: 'pending',
+      createdAt: nowIso(),
+    };
+    if (await approvals.putIfAbsent(approval)) {
+      await indexApproval(approval);
+      return approval;
+    }
+    const existing = await approvals.get(approval.approvalId);
+    if (existing?.status === 'pending') { await indexApproval(existing); return existing; } // a concurrent submit's card
+  }
+  throw new OpenwopError('conflict', 'Could not open a review for this model. Try again.', 409, { modelId: input.modelId });
 }
 
 /** The pending transition approval for a model, or null (per-entity dedup — a
@@ -2722,6 +2533,7 @@ export function getTerritoryTransitionApprovalHandler(): TerritoryTransitionAppr
 /** Create a commission-statement approval (CFP-1 / D9, ADR 0280). */
 export async function createCommissionStatementApproval(input: {
   tenantId: string; orgId: string; statementId: string; subjectId: string; period: string; total: number; currency: string; proposal: string;
+  attainmentPct?: number; lineDigest?: string;
 }): Promise<PendingApproval> {
   const approval: PendingApproval = {
     approvalId: `appr:${randomUUID()}`,
@@ -2729,7 +2541,11 @@ export async function createCommissionStatementApproval(input: {
     rosterId: '', persona: '', workflowId: '',
     kind: 'commission-statement',
     orgId: input.orgId,
-    commissionStatement: { statementId: input.statementId, subjectId: input.subjectId, period: input.period, total: input.total, currency: input.currency },
+    commissionStatement: {
+      statementId: input.statementId, subjectId: input.subjectId, period: input.period, total: input.total, currency: input.currency,
+      ...(input.attainmentPct !== undefined ? { attainmentPct: input.attainmentPct } : {}),
+      ...(input.lineDigest !== undefined ? { lineDigest: input.lineDigest } : {}),
+    },
     proposal: input.proposal,
     status: 'pending',
     createdAt: nowIso(),
@@ -2742,6 +2558,17 @@ export async function createCommissionStatementApproval(input: {
 /** The pending approval for a statement, or null (per-entity dedup). */
 export async function findPendingCommissionStatementApproval(tenantId: string, statementId: string): Promise<PendingApproval | null> {
   return (await listApprovals(tenantId, 'pending')).find((a) => a.kind === 'commission-statement' && a.commissionStatement?.statementId === statementId) ?? null;
+}
+
+/** ADR 1034 D8 — subject erasure re-keys a statement (its id embeds the rep), so every card
+ *  that names it follows, pending or resolved. Otherwise the card kept the erased id in
+ *  `commissionStatement.statementId`, which the redactor does not cover. */
+export async function repointCommissionStatementApprovals(tenantId: string, fromStatementId: string, toStatementId: string): Promise<void> {
+  for (const a of await listApprovals(tenantId)) {
+    if (a.kind !== 'commission-statement' || a.commissionStatement?.statementId !== fromStatementId) continue;
+    // A CAS on the row just read: a decide landing in between must not be reverted by this write.
+    await approvals.compareAndSwap(a, { ...a, commissionStatement: { ...a.commissionStatement, statementId: toStatementId } });
+  }
 }
 
 export type CommissionStatementApprovalHandler = (

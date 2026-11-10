@@ -88,6 +88,34 @@ export function rekeyTenantSegment(s: string, from: string, to: string): string 
 }
 
 /**
+ * The substrings that select every row a fold from `from` could rewrite, so the fold
+ * reads those rows and not the whole table. Use them as plain substring tests
+ * (`strpos(col, $n) > 0` in Postgres, `instr(col, ?) > 0` in SQLite), never as `LIKE`
+ * patterns: a pattern needs wildcard escaping, and an escape the engine reads
+ * differently would select FEWER rows and leave orphans (pg-mem, which the tests run
+ * on, does not treat `\` as a `LIKE` escape). A substring test cannot under-select.
+ *
+ * Every rewrite in this file starts from `rekeyTenantSegment`, which returns its input
+ * unchanged unless the string INCLUDES `from`. A key is passed in raw, so the KEY is
+ * matched on `from` (needle 0). A value's strings are read out of its JSON text, where
+ * every string is JSON-escaped (`JSON.stringify` escapes `"`, `\` and control
+ * characters), so the VALUE is matched on the escaped form (needle 1). For an anon or
+ * user id the two are identical. A marker value is never decisive: a marker moves only
+ * when its key embeds `from`. So a row can be rewritten only if its key contains needle
+ * 0 or its value contains needle 1. The bounded read is therefore a SUPERSET of the rows the old full scan
+ * rewrote, and `planHostExtRekey` still decides each row, so the result is identical.
+ *
+ * Why: the fold used to `SELECT k, v FROM host_ext_kv` for the WHOLE table and parse
+ * every value on each sign-in that adopts an anon sandbox, so its memory grew with the
+ * database, not the tenant. Both production heap OOMs (2026-11-02, 2026-11-03) had two
+ * such folds in flight. That link is a SUSPICION: four other concurrent pairs did not
+ * crash. This bound is correct on its own terms, and it does not claim to fix the OOM.
+ */
+export function tenantFoldNeedles(from: string): [string, string] {
+  return [from, JSON.stringify(from).slice(1, -1)];
+}
+
+/**
  * Rewrite a secondary-index MARKER value for a tenant fold. A marker value is a
  * bare id string, or `{id, p}` JSON when the collection projects into its index
  * (mirror of `hostExtPersistence.parseMarker`/`markerValue` — keep in sync). We

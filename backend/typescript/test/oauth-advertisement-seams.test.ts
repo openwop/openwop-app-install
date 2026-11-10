@@ -5,6 +5,22 @@
  * public base for connectUrl, no grantable built-in held out of §B); each is
  * falsified here. The seams must configure-then-call the PRODUCTION builder
  * (R9), so the URL they return is asserted to carry what the builder adds.
+ *
+ * Sabotage-checked (w83 probes): the opt-in, the https base and the held-provider
+ * conditions; listing an unconfigured provider; the synthetic ids listed without
+ * the seams; S256; `iss` read from metadata; a per-provider redirect URI; the
+ * synthetic-only rule; expire-refresh's 404; the DV-SEC-1 conflict guard and its
+ * seam-minted exemption; the conflict-only pass-through for a re-sent or rival
+ * pack; the §B.4 pin; OPENWOP_OAUTH_DISABLED_PROVIDERS.
+ *
+ * CEILING, recorded (w74, w83): the anonymous refusal is held three times (the
+ * auth middleware answers 401 first, then the seam guard, then the route's own
+ * `!subject` check), so no single edit can turn that case red. It asserts the
+ * exact answer of the first layer.
+ *
+ * Packs meant as v2-only declare `>=2.0.0 <3.0.0`: an unbounded `>=2.0.0` is read
+ * as `<2.0.0` on a v2 host (packManifestV2Gate.ts), an empty range, so it never
+ * reached the v2 provider-identity check this file relies on.
  */
 import type { AddressInfo } from 'node:net';
 import { readFileSync } from 'node:fs';
@@ -32,6 +48,8 @@ vi.mock('../src/host/webhookEgressGuard.js', async (importOriginal) => {
 import { createApp } from '../src/index.js';
 import { __resetOAuthAdvertisement, oauthAdvertised, refreshOAuthAdvertisement } from '../src/features/connections/oauthAdvertisement.js';
 import { getProvider, registerProvider } from '../src/features/connections/providerRegistry.js';
+import { installConnectionPackManifest } from '../src/features/connections/connectionPackLoader.js';
+import { isOAuthConfigured } from '../src/features/connections/oauthFlow.js';
 import { __resetOAuthClientStore, getHostOAuthClient, setHostOAuthClient } from '../src/features/connections/oauthClientStore.js';
 
 let server: http.Server;
@@ -100,11 +118,14 @@ describe('ADR 0753 D11 — the oauth advert is honest or absent', () => {
   it('lists a real provider only when its OAuth client is configured', async () => {
     process.env.OPENWOP_OAUTH_SLACK_CLIENT_ID = 'cid';
     process.env.OPENWOP_OAUTH_SLACK_CLIENT_SECRET = 'cs';
-    const snap = await refreshOAuthAdvertisement(Date.now() + 60_000);
-    expect(snap.providers.some((p) => p.id === 'slack')).toBe(true);
-    expect(snap.providers.some((p) => p.id === 'dropbox')).toBe(false);
-    delete process.env.OPENWOP_OAUTH_SLACK_CLIENT_ID;
-    delete process.env.OPENWOP_OAUTH_SLACK_CLIENT_SECRET;
+    try {
+      const snap = await refreshOAuthAdvertisement(Date.now() + 60_000);
+      expect(snap.providers.some((p) => p.id === 'slack')).toBe(true);
+      expect(snap.providers.some((p) => p.id === 'dropbox')).toBe(false);
+    } finally {
+      delete process.env.OPENWOP_OAUTH_SLACK_CLIENT_ID;
+      delete process.env.OPENWOP_OAUTH_SLACK_CLIENT_SECRET;
+    }
   });
 });
 
@@ -132,19 +153,22 @@ describe('ADR 0753 D12 — seams configure, the production builder builds (R9)',
   });
 
   it('refuses to re-point a real provider (only synthetic ids, or a connection pack)', async () => {
-    expect((await start({ provider: 'google', authUrl: 'https://evil.example/a', tokenUrl: 'https://evil.example/t' })).status).toBe(400);
+    const r = await start({ provider: 'google', authUrl: 'https://evil.example/a', tokenUrl: 'https://evil.example/t' });
+    expect(r.status).toBe(400);
+    expect(((await r.json()) as { error: string }).error).toBe('validation_error');
     expect(getProvider('google')?.endpoints?.authorize).toBe('https://accounts.google.com/o/oauth2/v2/auth');
   });
 
   it('refuses an anonymous caller', async () => {
     const r = await start({ provider: 'synthetic', authUrl: 'https://as.suite.example/authorize', tokenUrl: 'https://as.suite.example/token' }, { 'content-type': 'application/json' });
-    expect(r.status).toBeGreaterThanOrEqual(401);
-    expect(r.status).toBeLessThan(404);
+    expect(r.status).toBe(401);
+    expect(((await r.json()) as { error: string }).error).toBe('unauthenticated');
   });
 
   it('expire-refresh: 404 when the caller holds no credential for the provider', async () => {
     const r = await fetch(`${BASE}/conformance/seams/sample/oauth/expire-refresh`, { method: 'POST', headers: H, body: JSON.stringify({ provider: 'synthetic' }) });
     expect(r.status).toBe(404);
+    expect(((await r.json()) as { error: string }).error).toBe('not_found');
   });
 });
 
@@ -157,6 +181,8 @@ describe('DV-SEC-1 — a connection pack cannot re-point a provider the seam did
   const start = (connection: Record<string, unknown>): Promise<Response> =>
     fetch(`${BASE}/conformance/seams/sample/oauth/authorize-start`, { method: 'POST', headers: H, body: JSON.stringify({ connection }) });
   const OPERATOR = { provider: 'google', clientId: 'operator-client', clientSecret: 'operator-secret', updatedBy: 'operator' };
+  /** A v2-only range (an unbounded `>=2.0.0` reads as `<2.0.0`, i.e. empty). */
+  const V2 = '>=2.0.0 <3.0.0';
 
   beforeEach(async () => {
     await __resetOAuthClientStore();
@@ -166,7 +192,7 @@ describe('DV-SEC-1 — a connection pack cannot re-point a provider the seam did
   afterAll(() => __resetOAuthClientStore());
 
   it('a conflict on a built-in id is refused and leaves the host client unchanged', async () => {
-    const res = await start(pack('google', '>=2.0.0'));
+    const res = await start(pack('google', V2));
     expect(res.status).toBe(409);
     expect(((await res.json()) as { error: string }).error).toBe('connection_provider_conflict');
     expect((await getHostOAuthClient('google'))?.clientId).toBe('operator-client');
@@ -183,7 +209,7 @@ describe('DV-SEC-1 — a connection pack cannot re-point a provider the seam did
     const google = getProvider('google')!;
     registerProvider({ ...google, id: 'boot-pack-provider' }, { packName: 'core.openwop.connections.boot' });
     await setHostOAuthClient({ ...OPERATOR, provider: 'boot-pack-provider' });
-    expect((await start(pack('boot-pack-provider', '>=2.0.0'))).status).toBe(409);
+    expect((await start(pack('boot-pack-provider', V2))).status).toBe(409);
     expect((await getHostOAuthClient('boot-pack-provider'))?.clientId).toBe('operator-client');
   });
 
@@ -191,14 +217,13 @@ describe('DV-SEC-1 — a connection pack cannot re-point a provider the seam did
     const google = getProvider('google')!;
     registerProvider({ ...google, id: 'shadowed-provider' });
     await setHostOAuthClient({ ...OPERATOR, provider: 'shadowed-provider' });
-    const { installConnectionPackManifest } = await import('../src/features/connections/connectionPackLoader.js');
     expect(installConnectionPackManifest(pack('shadowed-provider', '>=1.0.0')).installed).toBe(true);
     expect((await start(pack('shadowed-provider', '>=1.0.0'))).status).toBe(409);
     expect((await getHostOAuthClient('shadowed-provider'))?.clientId).toBe('operator-client');
   });
 
   it('a pack the seam created is configured, and re-sending it still reaches the grant (the pinning leg)', async () => {
-    const p = pack('seam-created-provider', '>=2.0.0');
+    const p = pack('seam-created-provider', V2);
     expect((await start(p)).status).toBe(201);
     const first = (await getHostOAuthClient('seam-created-provider'))?.clientId;
     expect(first).toBe('openwop-conformance-seam-created-provider');
@@ -208,14 +233,17 @@ describe('DV-SEC-1 — a connection pack cannot re-point a provider the seam did
   });
 
   it('the pinning leg (RFC 0199 §B.4): a re-sent MCP pack is refused on the pin, not by this guard', async () => {
-    const p = pack('seam-pinned-provider', '>=2.0.0') as { provider: Record<string, unknown> } & Record<string, unknown>;
+    const p = pack('seam-pinned-provider', V2) as { provider: Record<string, unknown> } & Record<string, unknown>;
     const auth = { kind: 'oauth2', authFlow: 'pkce', scopeModel: 'coarse', issuer: 'https://as.pin.example', endpoints: { authorize: 'https://as.pin.example/authorize', token: 'https://as.pin.example/token' } };
     const mcp = { ...p, provider: { ...p.provider, auth, reach: { mcp: { server: { url: 'https://mcp.pin.example/mcp', transport: 'http' } } } } };
     expect((await start(mcp)).status).toBe(201);
+    const saved = pin.servers;
     pin.servers = ['https://as.foreign.example'];
-    const later = await start(mcp);
-    expect(later.status).toBe(422);
-    expect(((await later.json()) as { error: string }).error).toBe('connection_auth_metadata_mismatch');
+    try {
+      const later = await start(mcp);
+      expect(later.status).toBe(422);
+      expect(((await later.json()) as { error: string }).error).toBe('connection_auth_metadata_mismatch');
+    } finally { pin.servers = saved; }
   });
 });
 
@@ -227,10 +255,10 @@ describe('ADR 0753 D6 — OPENWOP_OAUTH_DISABLED_PROVIDERS makes a held provider
     process.env.OPENWOP_OAUTH_DISABLED_PROVIDERS = 'google';
     try {
       expect(await oauthAdvertised()).toBe(true);
-      const { isOAuthConfigured } = await import('../src/features/connections/oauthFlow.js');
       expect(await isOAuthConfigured('google')).toBe(false);
       const r = await fetch(`${BASE}/host/openwop-app/connections/google/authorize`, { method: 'POST', headers: H, body: '{}' });
       expect(r.status).toBe(409);
+      expect(((await r.json()) as { error: string; message: string })).toMatchObject({ error: 'conflict', message: "OAuth is not configured for 'google' on this host." });
     } finally {
       delete process.env.OPENWOP_OAUTH_DISABLED_PROVIDERS;
     }

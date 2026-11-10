@@ -20,7 +20,7 @@ import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { callerSubject, tenantOf } from '../../host/requestSubject.js';
 import { resolveSubjectScopesUnion } from '../../host/accessControlService.js';
-import { credentialScopesIn, requireKeyLaneScope } from '../../host/protocolAuthorization.js';
+import { credentialScopesIn, requireKeyLaneScope, requireProtocolScope } from '../../host/protocolAuthorization.js';
 import { unadvertisedError } from '../../host/unadvertised.js';
 import { JcsRefusal } from '../../host/jcs.js';
 import {
@@ -36,9 +36,13 @@ import {
 import { assertCanRead, assertCanMutate, enumQuery } from './routes.js';
 import { proposalsFacet } from './capability.js';
 import { rfc0249WireAvailable } from '../../host/rfc0249Wire.js';
+import { installedPackManifest } from './installedPacks.js';
 import { PROPOSAL_KINDS, PROPOSAL_STATES, type Proposal, type ProposalKind, type ProposalState } from './types.js';
 
 const ID_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
+/** The manifest `name` pattern shared by both pack schemas. */
+const PACK_NAME_PATTERN = /^(core|vendor|community|private)\.[a-z][a-z0-9_-]*(\.[a-z][a-zA-Z0-9_-]*)+$/;
+const PACK_KINDS: readonly ProposalKind[] = ['workflow-chain-pack', 'agent-pack'];
 const LIST_LIMIT_DEFAULT = 50;
 const LIST_LIMIT_MAX = 200;
 
@@ -163,6 +167,21 @@ export function registerProposalsV2Routes(deps: RouteDeps): void {
         next(toV2Error(err));
       }
     };
+
+  // getInstalledPack (RFC 0253 §A, ADR 1033 D4). Unadvertised unless `readback`
+  // names a pack kind; then `manifest:read`. A name not installed in the caller's
+  // tenant, another tenant's, and a malformed one all answer the same 404.
+  app.get('/installed-packs/:packName', wrap(async (req, res) => {
+    const readback = proposalsFacet()?.readback ?? [];
+    if (!rfc0249WireAvailable() || !readback.some((k) => PACK_KINDS.includes(k))) {
+      throw unadvertisedError(req, { family: 'agents', facet: 'proposals.readback', message: 'agents.proposals.readback names no pack kind' });
+    }
+    await requireProtocolScope(req, 'manifest:read');
+    const name = req.params.packName;
+    const manifest = typeof name === 'string' && PACK_NAME_PATTERN.test(name) ? await installedPackManifest(tenantOf(req), name) : null;
+    if (!manifest) throw new OpenwopError('not_found', 'Installed pack not found.', 404);
+    res.json(manifest);
+  }));
 
   // listProposals
   app.get('/proposals', wrap(async (req, res) => {

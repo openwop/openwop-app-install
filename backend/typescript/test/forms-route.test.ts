@@ -133,6 +133,23 @@ describe('Forms: public render + submit', () => {
     expect(render.body.honeypotField).toBe('_hp_ref');
   });
 
+  it('ADR 0951 D2: the public render carries a field\'s sensitivity, so the page stays unrecorded', async () => {
+    // The renderer's data-owx-sensitivity (and so the replay refusal) depends on
+    // this key surviving the public projection; the frontend test stubs fetch.
+    // Sabotage-witnessed: stripping `sensitivity` from the public GET's fields turns this red.
+    const { owner, orgId } = await ownerWithOrg();
+    const form = (await owner.post(`/host/openwop-app/forms/orgs/${orgId}/forms`, {
+      ...CONTACT_FORM,
+      fields: [...CONTACT_FORM.fields, { key: 'condition', label: 'Condition', type: 'text', required: false, sensitivity: 'health' }],
+    })).body;
+    await owner.patch(`/host/openwop-app/forms/orgs/${orgId}/forms/${form.formId}/status`, { status: 'published' });
+    const render = await pub.get(`/host/openwop-app/public-forms/${form.formId}`);
+    expect(render.status).toBe(200);
+    const fields = render.body.fields as Array<{ key: string; sensitivity?: string }>;
+    expect(fields.find((f) => f.key === 'condition')?.sensitivity).toBe('health');
+    expect(fields.find((f) => f.key === 'name')).not.toHaveProperty('sensitivity');
+  });
+
   it('submit creates a CRM contact (contactId set via crmService)', async () => {
     const { owner, orgId } = await ownerWithOrg();
     const form = (await owner.post(`/host/openwop-app/forms/orgs/${orgId}/forms`, CONTACT_FORM)).body;

@@ -26,6 +26,7 @@ import { subjectScope, type Subject } from './subject.js';
 import { registerSubjectEraser } from './subjectErasure.js';
 import { ERASED, ERASED_USER_REF, subjectKeyForms } from './subjectErasureRedaction.js';
 import { createLogger } from '../observability/logger.js';
+import { OpenwopError } from '../types.js';
 
 const log = createLogger('host.conversationStore');
 
@@ -101,9 +102,10 @@ export interface ConversationParticipant {
   responsePolicy?: 'all' | 'mention';
 }
 
-/** ADR 0777 — CANVAS only: a builder WORKFLOW's binding is ADR 0773's pairing
- *  context (`builder-pair` PairContext), which owns that concept. */
-export interface ConversationFocus { kind: 'canvas'; id: string }
+/** ADR 0777 / ADR 1040 D4 — a REGISTERED focus kind (`host/conversationFocus.ts`
+ *  `registerConversationFocusKind`; the host's own is `canvas`). A builder
+ *  WORKFLOW's binding stays ADR 0773's pairing context, never a focus. */
+export interface ConversationFocus { kind: string; id: string }
 
 export interface ConversationMeta {
   conversationId: string;
@@ -198,13 +200,19 @@ export function dmKeyOf(a: SubjectRef, b: SubjectRef): string {
  *  the generic `injectedContextBlock` (ADR 0080 §Follow-on rename) so board
  *  conversations created before the rename keep their injected context. */
 async function loadMeta(key: string): Promise<ConversationMeta | null> {
-  const m = await metas.get(key);
+  return normalizeMeta(await metas.get(key));
+}
+
+function normalizeMeta(m: ConversationMeta | null): ConversationMeta | null {
   if (m && m.injectedContextBlock === undefined) {
     const legacy = (m as ConversationMeta & { strategyContext?: string }).strategyContext;
     if (legacy !== undefined) return { ...m, injectedContextBlock: legacy };
   }
   return m;
 }
+
+/** ADR 1040 D2 — bounded retries for the meta CAS loops (focus, participant union). */
+const META_CAS_ATTEMPTS = 5;
 
 export async function getConversationMeta(tenantId: string, conversationId: string): Promise<ConversationMeta | null> {
   return loadMeta(`${tenantId}:${conversationId}`);
@@ -240,21 +248,62 @@ export async function setConversationFocus(
   focus: ConversationFocus | undefined,
   callerUserId: string,
 ): Promise<ConversationMeta> {
+  // ADR 1040 D2 (review M3) — a CAS loop, not load-then-put: the embed binds
+  // its focus on mount while its first send may be creating the same meta
+  // (`ensureConversationMeta` with the `agent:` stamp). A plain put on the
+  // create branch overwrote that row and erased its participants.
   const key = `${tenantId}:${conversationId}`;
-  const existing = await loadMeta(key);
-  const ts = now();
-  if (existing) {
-    const next: ConversationMeta = { ...existing, updatedAt: ts };
-    if (focus) next.focus = focus; else delete next.focus;
-    await metas.put(next);
-    return next;
+  for (let attempt = 0; attempt < META_CAS_ATTEMPTS; attempt++) {
+    const raw = await metas.get(key);
+    const existing = normalizeMeta(raw);
+    const ts = now();
+    let next: ConversationMeta;
+    if (existing) {
+      next = { ...existing, updatedAt: ts };
+      if (focus) next.focus = focus; else delete next.focus;
+    } else {
+      next = {
+        conversationId, tenantId, type: 'agent', ownerUserId: callerUserId, participants: [], createdAt: ts, updatedAt: ts,
+        ...(focus ? { focus } : {}),
+      };
+    }
+    if (await metas.compareAndSwap(raw, next)) return next;
   }
-  const created: ConversationMeta = {
-    conversationId, tenantId, type: 'agent', ownerUserId: callerUserId, participants: [], createdAt: ts, updatedAt: ts,
-    ...(focus ? { focus } : {}),
-  };
-  await metas.put(created);
-  return created;
+  throw new OpenwopError('conflict', 'The conversation changed while its focus was being set; try again.', 409);
+}
+
+/**
+ * ADR 1040 D2 — when `POST /chat/sessions` finds the conversation's meta already
+ * there (an embed's focus bind created it first), the creator's requested
+ * `agent:` participants are UNIONED in, so an agent-scoped embed is still
+ * listed under its agent. Agents only: a user participant is never added this
+ * way. Returns `'foreign'` (and writes nothing) when the meta has a different
+ * owner — the route answers 409 rather than adopting someone else's meta.
+ */
+export async function unionAgentParticipants(
+  tenantId: string,
+  conversationId: string,
+  callerUserId: string | undefined,
+  refs: readonly SubjectRef[],
+): Promise<ConversationMeta | 'foreign' | null> {
+  const key = `${tenantId}:${conversationId}`;
+  const agents = refs.filter((r) => r.startsWith('agent:'));
+  for (let attempt = 0; attempt < META_CAS_ATTEMPTS; attempt++) {
+    const raw = await metas.get(key);
+    const existing = normalizeMeta(raw);
+    if (!raw || !existing) return null;
+    if (existing.ownerUserId !== undefined && existing.ownerUserId !== callerUserId) return 'foreign';
+    const missing = agents.filter((r) => !existing.participants.some((p) => p.subjectRef === r));
+    if (missing.length === 0) return existing;
+    const ts = now();
+    const next: ConversationMeta = {
+      ...existing,
+      participants: [...existing.participants, ...missing.map((subjectRef) => ({ subjectRef, role: 'member' as const, addedAt: ts }))],
+      updatedAt: ts,
+    };
+    if (await metas.compareAndSwap(raw, next)) return next;
+  }
+  throw new OpenwopError('conflict', 'The conversation changed while it was being created; try again.', 409);
 }
 
 /** ADR 0132 — set (or clear) a conversation's capability-scope CONFIG. Mirrors

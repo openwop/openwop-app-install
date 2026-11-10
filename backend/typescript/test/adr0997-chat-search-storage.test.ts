@@ -6,7 +6,23 @@
  *   `adr0997-chat-search-postgres-live.test.ts` (live-infra lane). SQLite folds
  *   ASCII case only; the engine's re-check covers other scripts.
  * - D6 the legacy-row purge: removes `hostsurf:search:<t>:chat-search:*` and
- *   nothing else, and is safe to run with no durable store wired.
+ *   nothing else, and is safe to run with no durable store wired WITHOUT
+ *   latching: a call made before boot wires the store must not stop the purge
+ *   from running once it is wired.
+ *
+ * Red when (wave 79 probes): newest-first order flipped; the needles OR'd; the
+ * session filter dropped; tombstones returned; `_` or `%` left unescaped; the
+ * limit ignored; empty needles not short-circuited; the key test matching a
+ * prefix of the index segment or any surface; the purge deleting nothing or
+ * every `hostsurf:search:` row; the no-store call latching the once-per-process
+ * promise.
+ * Double guard on the latch (both in `legacyIndexPurge.ts`): the no-store early
+ * return, AND the purge's `.catch`, which resets `done = null` when the scan
+ * throws for want of a store (`requireDurableStorage`). Removing either one
+ * alone is an equivalent mutant (wave 79 r2: `lp-nostore` vacuous). One edit
+ * that breaks both reds the no-store case (r3 `lp-nostore-both`).
+ * Equivalent mutant (recorded, not a gap): dropping the empty-`sessionIds`
+ * early return changes nothing, because `json_each('[]')` selects no session.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -55,11 +71,13 @@ describe('ADR 0997 D1 — searchChatMessages (SQLite)', () => {
   it('treats LIKE metacharacters literally and never returns a tombstone', async () => {
     expect(ids(await storage.searchChatMessages(['s1'], ['100%'], { limit: 10 }))).toEqual(['m2']);
     expect(ids(await storage.searchChatMessages(['s1'], ['1_0'], { limit: 10 }))).toEqual([]); // unescaped, `_` would match "100"
+    expect(ids(await storage.searchChatMessages(['s1'], ['h%r'], { limit: 10 }))).toEqual([]); // unescaped, `%` would match "Harbour" and "the … ready"
+    expect(ids(await storage.searchChatMessages(['s1'], ['plan_b'], { limit: 10 }))).toEqual(['m2']);
     expect(ids(await storage.searchChatMessages(['s1'], ['deleted'], { limit: 10 }))).toEqual([]);
   });
 
   it('honours the limit and empty inputs', async () => {
-    expect(await storage.searchChatMessages(['s1', 's2', 's3'], ['harbour'], { limit: 1 })).toHaveLength(1);
+    expect(ids(await storage.searchChatMessages(['s1', 's2', 's3'], ['harbour'], { limit: 1 }))).toEqual(['m5']);
     expect(await storage.searchChatMessages([], ['harbour'], { limit: 10 })).toEqual([]);
     expect(await storage.searchChatMessages(['s1'], [], { limit: 10 })).toEqual([]);
   });
@@ -73,10 +91,20 @@ describe('ADR 0997 D6 — legacy chat-search rows are purged', () => {
     expect(isLegacyChatSearchKey('hostsurf:vector:t:chat-search:x')).toBe(false);
   });
 
-  it('is a no-op with no durable store wired', async () => {
+  it('is a no-op with no durable store wired, and does not latch: a later call with a store still purges', async () => {
     setDurableStorage(null);
     __resetLegacyPurge();
     await expect(purgeLegacySearchIndexOnce()).resolves.toBeUndefined();
+    const k = 'hostsurf:search:t9:chat-search:c9%00m9';
+    await storage.kvSet(k, '{"id":"x","fields":{"text":"private"}}');
+    // No reset here: the earlier no-store call must not have used up the once-per-process purge.
+    setDurableStorage(storage);
+    try {
+      await purgeLegacySearchIndexOnce();
+      expect(await storage.kvGet(k)).toBeNull();
+    } finally {
+      setDurableStorage(null);
+    }
   });
 
   it('deletes the legacy rows and keeps every other key', async () => {
@@ -84,10 +112,13 @@ describe('ADR 0997 D6 — legacy chat-search rows are purged', () => {
     const kept = ['hostsurf:search:t1:default:doc1', 'hostsurf:kv:t1:chat-search', 'hostext:other'];
     for (const k of [...legacy, ...kept]) await storage.kvSet(k, '{"id":"x","fields":{"text":"private"}}');
     setDurableStorage(storage);
-    __resetLegacyPurge();
-    await purgeLegacySearchIndexOnce();
-    for (const k of legacy) expect(await storage.kvGet(k), k).toBeNull();
-    for (const k of kept) expect(await storage.kvGet(k), k).not.toBeNull();
-    setDurableStorage(null);
+    try {
+      __resetLegacyPurge();
+      await purgeLegacySearchIndexOnce();
+      for (const k of legacy) expect(await storage.kvGet(k), k).toBeNull();
+      for (const k of kept) expect(await storage.kvGet(k), k).not.toBeNull();
+    } finally {
+      setDurableStorage(null);
+    }
   });
 });

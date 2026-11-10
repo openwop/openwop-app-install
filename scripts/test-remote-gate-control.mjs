@@ -87,7 +87,7 @@ test('running cancellation reports pending cleanup, never stopped or GREEN', asy
 });
 
 for (const value of [
-  { version: 1, operation: 'start' },
+  { version: 1, operation: 'run' },
   { version: 1, operation: 'cancel', command: 'touch forbidden' },
   { version: 1, operation: 'cancel', root: '/tmp/peer' },
   { version: 2, operation: 'cancel' },
@@ -149,7 +149,7 @@ test('fetch returns the journal-bound bytes through the existing result receiver
   const f = fixture(t); const { job } = admitRemoteGateJob(f.input); transition(f, 'starting');
   const directory = join(job.directory, 'artifacts'); mkdirSync(directory, { mode: 0o700 });
   const contents = { 'result.json': JSON.stringify({ id: job.id, requestSha256: job.requestSha256 }),
-    'evidence.json': '{}', 'gate.log': 'synthetic gate\n', 'browser.tsv': 'synthetic browser ledger\n' };
+    'evidence.json': '{}', 'gate.log.gz': 'synthetic gate\n', 'browser.tsv': 'synthetic browser ledger\n' };
   for (const [name, bytes] of Object.entries(contents)) writeFileSync(join(directory, name), bytes, { mode: 0o600 });
   transition(f, 'running', { owner: { pid: 12345, startedAt: 'synthetic identity', executable: '/usr/local/bin/node' } });
   transition(f, 'completed', { exitCode: 0, resultSha256: sha256(Buffer.from(contents['result.json'])) });
@@ -161,13 +161,32 @@ test('fetch returns the journal-bound bytes through the existing result receiver
 test('log returns a finished job\'s kept log, refuses an unfinished one and other request bytes', async t => {
   const f = fixture(t); const logs = join(f.root, 'logs'); mkdirSync(logs, { mode: 0o700 });
   const { job } = admitRemoteGateJob(f.input);
-  writeFileSync(join(logs, `${job.id}.log`), 'red gate log\n', { mode: 0o600 });
+  writeFileSync(join(logs, `${job.id}.log.gz`), 'red gate log\n', { mode: 0o600 });
   const log = (raw) => f.response(f.framed({ version: 1, operation: 'log' }, raw), 'log', { logRoot: logs });
   await assert.rejects(log(), /not finished/, 'an unfinished job\'s log is not served');
   transition(f, 'starting'); transition(f, 'failed', { exitCode: 3 });
   const got = await log();
-  assert.equal(readFileSync(got.paths['gate.log'], 'utf8'), 'red gate log\n');
+  assert.equal(readFileSync(got.paths['gate.log.gz'], 'utf8'), 'red gate log\n');
   const other = Buffer.from(JSON.stringify({ ...f.request, commit: 'a'.repeat(40) }));
   await assert.rejects(log(other), /other bytes/, 'possession of THIS request\'s bytes is the right to read');
   assert.equal(readRemoteGateJob(f.input).state, 'failed'); f.untouchedSpool();
+});
+
+test('start launches an accepted job once, and nothing for any other state', async t => {
+  const f = fixture(t); admitRemoteGateJob(f.input);
+  const launched = [];
+  const start = async ({ id }) => { launched.push(id); };
+  const ask = () => f.response(f.framed({ version: 1, operation: 'start' }), 'status', { start });
+  await ask();
+  assert.deepEqual(launched, [f.request.id], 'an accepted job is handed to the launcher');
+  transition(f, 'starting');
+  await ask();
+  assert.deepEqual(launched, [f.request.id], 'a job past accepted is never launched again');
+  f.untouchedSpool();
+});
+
+test('start without an installed launcher is refused for an accepted job', async t => {
+  const f = fixture(t); admitRemoteGateJob(f.input);
+  await assert.rejects(f.response(f.framed({ version: 1, operation: 'start' }), 'status'), /no launcher configured/);
+  assert.equal(readRemoteGateJob(f.input).state, 'accepted'); f.untouchedSpool();
 });

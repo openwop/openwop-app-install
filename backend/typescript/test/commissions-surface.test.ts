@@ -108,8 +108,11 @@ describe('commissions P4 — governed surface writes + subject-scoped reads', ()
     expect((await statementsOf(ownerId)).map((s) => s.statementId).sort()).toEqual([statementId, ownerStmt.statement.statementId].sort());
     // A system run (no owner) sees none (fail-closed).
     expect(await statementsOf(undefined)).toHaveLength(0);
-    // listPlans is open to any tenant-scoped run.
-    expect((await surfaceFor(repId).listPlans!({ orgId })).plans).toHaveLength(2);
+    // listPlans: ADR 1034 D11 — a rep sees team plans and their OWN rep plan, never another
+    // rep's (it carries that rep's rates); a manager sees both. This used to assert the rep
+    // saw 2, i.e. it pinned the leak.
+    expect(((await surfaceFor(repId).listPlans!({ orgId })).plans as Array<{ planId: string }>).map((p) => p.planId)).toEqual([planId]);
+    expect((await surfaceFor(ownerId).listPlans!({ orgId })).plans).toHaveLength(2);
   });
 });
 

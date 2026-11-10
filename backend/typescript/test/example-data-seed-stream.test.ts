@@ -44,7 +44,7 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 describe('POST /example-data/seed streams when asked', () => {
   it('NDJSON: a 200 with a single terminal `result` line whose body matches the JSON shape', async () => {
     const res = await fetch(`${BASE}/host/openwop-app/example-data/seed`, {
-      method: 'POST', headers: { ...auth, accept: 'application/x-ndjson' }, body: '{}',
+      method: 'POST', headers: { ...auth, accept: 'application/x-ndjson' }, body: JSON.stringify({ expectedTenantId: 'default' }),
     });
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toContain('application/x-ndjson');
@@ -60,7 +60,7 @@ describe('POST /example-data/seed streams when asked', () => {
   });
 
   it('without the Accept header it still answers plain JSON (other callers are unchanged)', async () => {
-    const res = await fetch(`${BASE}/host/openwop-app/example-data/seed`, { method: 'POST', headers: auth, body: '{}' });
+    const res = await fetch(`${BASE}/host/openwop-app/example-data/seed`, { method: 'POST', headers: auth, body: JSON.stringify({ expectedTenantId: 'default' }) });
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toContain('application/json');
     const body = (await res.json()) as SeedBody;

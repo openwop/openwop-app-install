@@ -30,6 +30,7 @@ import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, renameS
 import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { adopterClaimedPackDirs } from '../host/adopterPackManifest.js';
 import { createLogger } from '../observability/logger.js';
 import { isTombstoned } from '../host/packTombstones.js';
 import { resolveDefaultPackDir } from '../packs/registryInstaller.js';
@@ -51,6 +52,9 @@ const log = createLogger('bootstrap.mountLocalPacks');
 // untouched; this only governs which dev-mounted local packs are surfaced.
 // ADR 0763 — `vendor.openwop-app.` is this host's own agent packs (renamed from
 // `feature.*.agents`); `feature.` still covers the node/chain/form/canvas packs.
+// ADR 1048 D6 — FIRST-PARTY prefixes only. An adopter's packs mount because
+// `packs/.adopter-manifest.json` claims them (`shouldMount` below), so a new
+// adopter never adds a row here.
 const DEFAULT_LOCAL_PACK_PREFIXES = ['core.openwop.', 'vendor.myndhyve.', 'vendor.openwop-app.', 'feature.'] as const;
 
 export function localPackPrefixes(): string[] {
@@ -510,8 +514,16 @@ function compareSemver(a: string, b: string): number {
   return 0;
 }
 
+/**
+ * ADR 1048 D6 — a directory the adopter manifest claims mounts BECAUSE it is
+ * claimed, whatever its prefix. That is the general rule for adopter packs: no
+ * adopter needs `OPENWOP_LOCAL_PACK_PREFIXES` (which REPLACES the default list)
+ * or a hard-coded row in `DEFAULT_LOCAL_PACK_PREFIXES`, which stays first-party.
+ * The claim is read from the code-anchored manifest, never from the mounted dir,
+ * and a mount still confers no trust — `classifyPackDir` decides that.
+ */
 function shouldMount(name: string): boolean {
-  return localPackPrefixes().some((p) => name.startsWith(p));
+  return localPackPrefixes().some((p) => name.startsWith(p)) || adopterClaimedPackDirs().has(name);
 }
 
 /**

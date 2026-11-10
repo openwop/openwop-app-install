@@ -33,8 +33,8 @@ function sourceWorkFor(config, id) {
 function keepLog(config, id, path) {
   if (!existsSync(path)) return;
   const logs = privateRoot(config.logRoot);
-  copyFileSync(path, join(logs, `${id}.log`));
-  const old = readdirSync(logs).filter(n => /^[a-f0-9]{32}\.log$/.test(n))
+  copyFileSync(path, join(logs, `${id}.log.gz`));
+  const old = readdirSync(logs).filter(n => /^[a-f0-9]{32}\.log\.gz$/.test(n))
     .map(n => [n, statSync(join(logs, n)).mtimeMs]).sort((a, b) => b[1] - a[1]).slice(KEEP_LOGS);
   for (const [n] of old) rmSync(join(logs, n), { force: true });
 }
@@ -57,8 +57,9 @@ export async function runInstalledJob({ config, id, table = processTableFor() })
       timing: config.timing ?? {},
     });
   } finally {
-    keepLog(config, id, join(artifactsDirectory, 'gate.log'));
+    keepLog(config, id, join(artifactsDirectory, 'gate.log.gz'));
     rmSync(work, { recursive: true, force: true });
+    rmSync(join(config.runnerRoot, `started-${id}`), { force: true });
   }
 }
 
@@ -81,7 +82,10 @@ export async function recoverInstalledJobs({ config, table = processTableFor(), 
       } else if (!TERMINAL.has(job.state)) {
         job = (await recoverRemoteGateJob({ job: input, table, now })).job;
       }
-      if (TERMINAL.has(job.state)) { const work = sourceWorkFor(config, id); if (work) rmSync(work, { recursive: true, force: true }); }
+      if (TERMINAL.has(job.state)) {
+        const work = sourceWorkFor(config, id); if (work) rmSync(work, { recursive: true, force: true });
+        rmSync(join(config.runnerRoot, `started-${id}`), { force: true });
+      }
       report.push({ id, state: job.state });
     } catch (error) { report.push({ id, error: String(error.message ?? error) }); }
   }

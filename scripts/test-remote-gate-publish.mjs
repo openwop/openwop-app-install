@@ -10,7 +10,7 @@ import { admitRemoteGateJob, readRemoteGateJob, requestRemoteGateCancellation,
   transitionRemoteGateJob } from './lib/remote-gate-job.mjs';
 import { publishRemoteGateArtifacts } from './lib/remote-gate-publish.mjs';
 import { remoteGateJobStatus, remoteGateJobResultFrame } from './lib/remote-gate-status.mjs';
-import { receiveRemoteGateFrame } from './lib/remote-gate-frame.mjs';
+import { receiveRemoteGateFrame, REMOTE_GATE_RESULT_FILES } from './lib/remote-gate-frame.mjs';
 import { sha256 } from './lib/remote-gate-result.mjs';
 
 // Actual private files, journal CAS, child processes and result framing; payloads
@@ -30,12 +30,12 @@ function fixture(t) {
   transitionRemoteGateJob({ ...input, expectedSequence: 1, state: 'running', details: { owner } });
   const artifactsDirectory = join(root, 'closed-output'); mkdirSync(artifactsDirectory, { mode: 0o700 });
   const contents = { 'evidence.json': Buffer.from('{"synthetic":true}\n'),
-    'gate.log': Buffer.from('synthetic complete log\n'), 'browser.tsv': Buffer.from('synthetic ledger\n') };
+    'gate.log.gz': Buffer.from('synthetic complete log\n'), 'browser.tsv': Buffer.from('synthetic ledger\n') };
   const result = { version: 1, id: job.id, requestSha256: job.requestSha256,
     ...Object.fromEntries(['runnerId', 'policySha256', 'commit', 'main', 'refsSha256', 'bundleSha256']
       .map(key => [key, request[key]])), treeBefore: request.tree, treeAfter: request.tree,
     exitCode: 0, artifacts: { evidence: sha256(contents['evidence.json']),
-      gateLog: sha256(contents['gate.log']), browserLedger: sha256(contents['browser.tsv']) } };
+      gateLog: sha256(contents['gate.log.gz']), browserLedger: sha256(contents['browser.tsv']) } };
   contents['result.json'] = Buffer.from(JSON.stringify(result));
   for (const [name, bytes] of Object.entries(contents)) writeFileSync(join(artifactsDirectory, name), bytes, { mode: 0o600 });
   return { input, job, result, contents, options: { ...input, expectedSequence: 2, owner, exitCode: 0, artifactsDirectory } };
@@ -48,7 +48,7 @@ test('all published bytes are fetchable only after completion; source changes ca
   assert.equal(outcome.changed, true);
   assert.equal(outcome.job.state, 'completed');
   assert.equal(outcome.job.details.resultSha256, sha256(f.contents['result.json']));
-  writeFileSync(join(f.options.artifactsDirectory, 'gate.log'), 'source changed');
+  writeFileSync(join(f.options.artifactsDirectory, 'gate.log.gz'), 'source changed');
   const result = await receiveRemoteGateFrame(Readable.from(remoteGateJobResultFrame(f.input),
     { objectMode: false }), { kind: 'result', root: f.input.root });
   for (const [name, bytes] of Object.entries(f.contents)) assert.deepEqual(readFileSync(result.paths[name]), bytes);
@@ -81,8 +81,8 @@ for (const [field, replacement] of [['id', '2'.repeat(32)], ['requestSha256', '0
 }
 
 test('changed artifact bytes cannot commit completion even if the source result was valid', t => {
-  const f = fixture(t); writeFileSync(join(f.options.artifactsDirectory, 'gate.log'), 'different actual bytes');
-  assert.throws(() => publishRemoteGateArtifacts(f.options), /gate.log bytes differ/);
+  const f = fixture(t); writeFileSync(join(f.options.artifactsDirectory, 'gate.log.gz'), 'different actual bytes');
+  assert.throws(() => publishRemoteGateArtifacts(f.options), /gate\.log\.gz bytes differ/);
   assert.equal(remoteGateJobStatus(f.input).artifactsReady, false);
 });
 
@@ -90,10 +90,10 @@ for (const [label, change, error] of [
   ['missing', path => rmSync(path), /ENOENT/],
   ['public', path => chmodSync(path, 0o644), /private artifact/],
   ['empty', path => truncateSync(path, 0), /private artifact/],
-  ['oversized', path => truncateSync(path, 256 * 1024 * 1024 + 1), /private artifact/],
+  ['oversized', path => truncateSync(path, REMOTE_GATE_RESULT_FILES['gate.log.gz'] + 1), /private artifact/],
 ]) {
   test(`${label} log leaves partial output unreachable and preserves it on retry`, t => {
-    const f = fixture(t); change(join(f.options.artifactsDirectory, 'gate.log'));
+    const f = fixture(t); change(join(f.options.artifactsDirectory, 'gate.log.gz'));
     assert.throws(() => publishRemoteGateArtifacts(f.options), error);
     const partial = readdirSync(join(f.job.directory, 'artifacts')).sort();
     assert(partial.includes('result.json'));
@@ -106,7 +106,7 @@ for (const [label, change, error] of [
 test('symlink input cannot read or alter another file', t => {
   const f = fixture(t); const peer = join(f.input.root, 'peer');
   writeFileSync(peer, 'preserve', { mode: 0o600 });
-  const path = join(f.options.artifactsDirectory, 'gate.log'); rmSync(path); symlinkSync(peer, path);
+  const path = join(f.options.artifactsDirectory, 'gate.log.gz'); rmSync(path); symlinkSync(peer, path);
   assert.throws(() => publishRemoteGateArtifacts(f.options), /ELOOP/);
   assert.equal(readFileSync(peer, 'utf8'), 'preserve');
   assert.equal(remoteGateJobStatus(f.input).artifactsReady, false);

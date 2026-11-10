@@ -18,13 +18,22 @@
  * Both scripts are DERIVED from the suite file, so a task added later is covered
  * by this test without editing it. Live, managed-tier runs of these suites are
  * the `scripts/eval-agent-suite.mts` lane (ADR 0889 D10), not this file.
+ *
+ * Sabotage-witnessed (wave 75): an extra tool in a manifest or a dropped
+ * `evalSuiteRef` reds "the manifest pins"; a suite targeting another agent reds
+ * "closed-world valid"; a golden grader that always passes reds "discriminates"
+ * (campaign-strategist's three golden tasks).
+ *
+ * DOUBLE GUARD: a violator's forbidden tool has no fixture, so `onMiss:"fail"`
+ * fails the trial with `fixture_miss` before the trajectory's `forbidden` grade
+ * can matter. Dropping the `forbidden` grade alone stays green here.
  */
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 import { loadAgentsFromManifest } from '../src/packs/agentLoader.js';
@@ -124,20 +133,26 @@ function stubArgs(schema: unknown, depth = 0): unknown {
 const argsFor = (tool: string): Record<string, unknown> => stubArgs(builtinAgentTool(tool)?.def.inputSchema) as Record<string, unknown>;
 
 type Round = { toolCalls: Array<{ name: string; input: Record<string, unknown> }> } | { content: string };
-interface Summary { passed: boolean; passedCount: number; taskCount: number; tasks: Array<{ taskId: string; passed: boolean }> }
+interface Summary { passed: boolean; taskCount: number; tasks: Array<{ taskId: string; passed: boolean }> }
 
 async function runSuite(suite: AgentEvalSuite, agentId: string, rounds: Record<string, Round[]>): Promise<Summary> {
   const c = await send('POST', '/runs', { mode: 'eval', evalSuiteRef: `${suite.suiteId}@${suite.version}`, agentId, configurable: { mockProvider: { id: 'tool-calls', rounds } } });
   expect(c.status, c.text.slice(0, 400)).toBe(201);
   const runId = String(c.json['runId']);
-  for (let i = 0; i < 800; i += 1) {
+  // A run has no settle hook to await: poll until terminal, failing on a timeout.
+  await vi.waitFor(async () => {
     const r = await send('GET', `/runs/${runId}`);
-    if (['completed', 'failed', 'cancelled'].includes(String(r.json['status']))) break;
-    await new Promise((res) => setTimeout(res, 25));
-  }
+    expect(['completed', 'failed', 'cancelled']).toContain(String(r.json['status']));
+  }, { timeout: 20_000, interval: 25 });
   const s = await send('GET', `/runs/${runId}/eval-summary`);
   expect(s.status, s.text.slice(0, 400)).toBe(200);
-  return s.json as unknown as Summary;
+  const tasks = s.json['tasks'];
+  if (!Array.isArray(tasks)) throw new Error(`eval-summary has no tasks: ${s.text.slice(0, 400)}`);
+  return {
+    passed: s.json['passed'] === true,
+    taskCount: Number(s.json['taskCount']),
+    tasks: tasks.map((t: { taskId: string; passed: boolean }) => ({ taskId: t.taskId, passed: t.passed })),
+  };
 }
 
 describe.each(ROLES)('ADR 0943 P1 — $agentId', (role) => {
@@ -148,7 +163,7 @@ describe.each(ROLES)('ADR 0943 P1 — $agentId', (role) => {
     for (const t of [...NEVER_ANY_ROLE, ...role.never]) expect(agent.toolAllowlist ?? []).not.toContain(t);
     const callable = new Set(builtinAgentToolIds());
     expect(role.allow.filter((t) => !callable.has(t))).toEqual([]);
-    expect(agent.evalSuite, 'the evalSuiteRef resolved through the loader').toBeDefined();
+    expect(agent.evalSuite, 'the evalSuiteRef resolved through the loader').toMatchObject({ targetAgentId: role.agentId, suiteId: suiteOf(role).suiteId });
     // The wire enum (RFC 0002), read from the vendored schema: `chat` is a HOST
     // resolver class, not a manifest value.
     expect(MODEL_CLASS_ENUM).toContain(agent.modelClass);

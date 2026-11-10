@@ -190,7 +190,12 @@ describe('ADR 0489 D3 — walkthrough anchor coverage ratchet', () => {
     // FLOOR = MEASURED TRUTH (108 nav-entry screens on e3c2492be, 2026-10-16). It was
     // `> 60`, so a scanner that silently dropped 47 screens passed (w51 probe
     // an-nav-drop). Lower it ONLY when a nav entry is genuinely deleted.
-    expect(screens.length).toBeGreaterThanOrEqual(108);
+    // 108 -> 99 (2026-11-05, ADR 1031 P3): MEASURED 112 before and 99 after; the
+    // 13 removed are exactly KickTodo's nav entries, which moved downstream with
+    // its packages (/today /plan /progress /discover /guide /circles /leaderboard
+    // /kicktodo/{community,metrics,org-programs,studio} /admin/kicktodo{,/safety}).
+    // None added. Before/after list in PR #5512.
+    expect(screens.length).toBeGreaterThanOrEqual(99);
     expect(new Set(screens.map((s) => s.path)).size, 'one screen per nav path').toBe(screens.length);
     expect(screens.filter((s) => s.file === null)).toEqual([]);
   });

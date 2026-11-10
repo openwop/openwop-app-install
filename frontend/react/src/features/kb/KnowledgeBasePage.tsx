@@ -83,7 +83,10 @@
  */
 import { Button } from '../../ui/Button.js';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { refsForExactProviders, useStoredCredentialRefs } from '../../byok/lib/useStoredCredentialRefs.js';
+import { StoredCredentialField } from '../../byok/components/StoredCredentialField.js';
 import { Link, useSearchParams } from 'react-router-dom';
+import { onAuthChange } from '../../client/config.js';
 import { useTranslation } from 'react-i18next';
 import { formatDateTime, formatNumber, formatRelativeTime } from '../../i18n/format.js';
 import { PageHeader } from '../../ui/PageHeader.js';
@@ -264,12 +267,65 @@ export function KnowledgeBasePage(): JSX.Element {
   // `orgs` null on failure BY DESIGN and hands back `orgsFailed` + `retry`;
   // `OrgSelectionState` owns the branch ORDER (failed → empty → children).
   const initialOrgId = useMemo(() => searchParams.get('org') ?? '', []); // eslint-disable-line react-hooks/exhaustive-deps
-  const { orgs, orgId, setOrgId, orgsFailed, retry: retryOrgs } = useOrgSelection<Org>(listOrgs, true, initialOrgId);
-  const [collections, setCollections] = useState<KbCollection[] | null>(null);
-  const [collectionsFailed, setCollectionsFailed] = useState(false);
+  const mounted = useRef(true);
+  const authGeneration = useRef(0);
+  const [authEpoch, setAuthEpoch] = useState(0);
+  const { orgs, orgId, setOrgId, orgsFailed, retry: retryOrgs } = useOrgSelection<Org>(listOrgs, true, initialOrgId, { scopeKey: authEpoch });
+  const routeOrgId = searchParams.get('org') ?? '';
+  const routeMatchesOrg = !routeOrgId || routeOrgId === orgId;
+  const scopeReady = routeMatchesOrg && Boolean(orgs?.some((o) => o.orgId === orgId));
+  const orgOwner = useMemo(() => ({ orgId, authEpoch }), [orgId, authEpoch]);
+  const currentOrg = useRef<typeof orgOwner | null>(orgOwner);
+  currentOrg.current = orgOwner;
+  const [collectionRead, setCollectionRead] = useState<{
+    owner: typeof orgOwner; data: KbCollection[] | null; failed: boolean;
+  } | null>(null);
+  const collections = scopeReady && collectionRead?.owner === orgOwner ? collectionRead.data : null;
+  const collectionsFailed = scopeReady && collectionRead?.owner === orgOwner && collectionRead.failed;
   const selectedId = searchParams.get('collection') ?? '';
-  const [docs, setDocs] = useState<KbDocument[] | null>(null);
-  const [docsFailed, setDocsFailed] = useState(false);
+  const selectionIntent = useMemo(() => ({ orgOwner, selectedId }), [orgOwner, selectedId]);
+  const currentIntent = useRef<typeof selectionIntent | null>(selectionIntent);
+  currentIntent.current = selectionIntent;
+  const selected = useMemo(() => collections?.find((c) => c.collectionId === selectedId) ?? null, [collections, selectedId]);
+  const documentOwner = useMemo(() => selected ? { orgOwner, collectionId: selected.collectionId } : null, [orgOwner, selected]);
+  const currentDocuments = useRef(documentOwner);
+  currentDocuments.current = documentOwner;
+  const [documentRead, setDocumentRead] = useState<{
+    owner: NonNullable<typeof documentOwner>; data: KbDocument[] | null; failed: boolean;
+  } | null>(null);
+  const docs = documentRead?.owner === documentOwner ? documentRead.data : null;
+  const docsFailed = documentRead?.owner === documentOwner && documentRead.failed;
+  const collectionSequence = useRef(0);
+  const documentSequence = useRef(0);
+  useEffect(() => {
+    mounted.current = true;
+    const unsubscribe = onAuthChange(() => {
+      currentOrg.current = null;
+      currentDocuments.current = null;
+      currentIntent.current = null;
+      const epoch = ++authGeneration.current;
+      setAuthEpoch(epoch);
+    });
+    return () => {
+      mounted.current = false;
+      unsubscribe();
+    };
+  }, []);
+  // Back/Forward reconciles through the existing org owner, after membership read.
+  useEffect(() => {
+    if (routeOrgId && routeOrgId !== orgId && orgs?.some((o) => o.orgId === routeOrgId)) {
+      currentOrg.current = null; currentDocuments.current = null; currentIntent.current = null;
+      setOrgId(routeOrgId);
+    }
+  }, [routeOrgId, orgId, orgs, setOrgId]);
+  const captureOrgAction = useCallback(() => {
+    if (!scopeReady || currentOrg.current !== orgOwner || currentIntent.current !== selectionIntent || !mounted.current) return null;
+    return () => mounted.current && currentOrg.current === orgOwner && currentIntent.current === selectionIntent;
+  }, [orgOwner, scopeReady, selectionIntent]);
+  const captureCollectionAction = useCallback(() => {
+    if (!selected || !scopeReady || currentOrg.current !== orgOwner || currentIntent.current !== selectionIntent || !mounted.current) return null;
+    return () => mounted.current && currentOrg.current === orgOwner && currentIntent.current === selectionIntent;
+  }, [orgOwner, selected, scopeReady, selectionIntent]);
   const [newName, setNewName] = useState('');
   const [docTitle, setDocTitle] = useState('');
   const [docText, setDocText] = useState('');
@@ -293,7 +349,10 @@ export function KnowledgeBasePage(): JSX.Element {
     | { kind: 'searching'; query: string }
     | { kind: 'results'; hits: SearchHit[]; query: string }
     | { kind: 'failed'; message: string; query: string };
-  const [searchState, setSearchState] = useState<SearchState>({ kind: 'idle' });
+  const [searchRead, setSearchRead] = useState<{ owner: typeof documentOwner; state: SearchState } | null>(null);
+  const searchState: SearchState = searchRead?.owner === documentOwner ? searchRead.state : { kind: 'idle' };
+  const setSearchState = useCallback((state: SearchState) => setSearchRead({ owner: currentDocuments.current, state }), []);
+  const searchSequence = useRef(0);
   /**
    * KBX-9 — one page-level `busy` used to gate six unrelated controls, so a slow
    * search disabled the whole ingest card and a slow upload disabled search.
@@ -326,7 +385,6 @@ export function KnowledgeBasePage(): JSX.Element {
 
   // The selected collection derives from ?collection= (validity: a param naming
   // no loaded collection reads as "none selected"). Writers mirror to the URL.
-  const selected = useMemo(() => collections?.find((c) => c.collectionId === selectedId) ?? null, [collections, selectedId]);
 
   /**
    * KBX-5 — the write lock, owned by the PAGE. Every consumer below derives
@@ -351,11 +409,16 @@ export function KnowledgeBasePage(): JSX.Element {
   const lockReason = writesLocked ? t('writesPausedShort') : accessPending ? t('accessChecking') : undefined;
 
   const selectOrg = useCallback((id: string) => {
+    currentOrg.current = null;
+    currentDocuments.current = null;
+    currentIntent.current = null;
     setOrgId(id);
     setCollQuery(''); // a stale rail filter must not hide the new org's collections
-    setSearchParams((p) => { const n = new URLSearchParams(p); n.set('org', id); n.delete('collection'); return n; }, { replace: true });
+    setSearchParams((p) => { const n = new URLSearchParams(p); n.set('org', id); n.delete('collection'); n.delete('doc'); return n; }, { replace: true });
   }, [setSearchParams, setOrgId]);
   const selectCollection = useCallback((id: string) => {
+    currentDocuments.current = null;
+    currentIntent.current = null;
     setSearchParams((p) => { const n = new URLSearchParams(p); if (id) n.set('collection', id); else n.delete('collection'); n.delete('doc'); return n; }, { replace: true });
   }, [setSearchParams]);
   /** The rail cell's href — the SAME transition `selectCollection` performs, as
@@ -374,8 +437,15 @@ export function KnowledgeBasePage(): JSX.Element {
     setSearchParams((p) => { const n = new URLSearchParams(p); if (id) n.set('doc', id); else n.delete('doc'); return n; }, { replace: true });
   }, [setSearchParams]);
   // The list carries metadata only, so fetch the open doc's full text on demand.
-  const [docContent, setDocContent] = useState<KbDocumentDetail | null>(null);
-  const [docLoading, setDocLoading] = useState(false);
+  const detailOwner = useMemo(() => documentOwner && selectedDoc ? { documentOwner, documentId: selectedDoc.documentId } : null, [documentOwner, selectedDoc]);
+  const currentDetail = useRef(detailOwner);
+  currentDetail.current = detailOwner;
+  const [detailRead, setDetailRead] = useState<{
+    owner: NonNullable<typeof detailOwner>; data: KbDocumentDetail | null; loading: boolean; failed: boolean;
+  } | null>(null);
+  const docContent = detailRead?.owner === detailOwner ? detailRead.data : null;
+  const docLoading = detailRead?.owner === detailOwner && detailRead.loading;
+  const docError = detailRead?.owner === detailOwner && detailRead.failed;
 
   /**
    * KBX-12 — focus after a destructive action, deferred past the reload.
@@ -389,7 +459,13 @@ export function KnowledgeBasePage(): JSX.Element {
    * unmounts the gated filter). Every chain ends on a heading that is mounted in
    * every state of its region.
    */
-  const [pendingFocus, setPendingFocus] = useState<'documents' | 'collections' | null>(null);
+  const [focusRequest, setFocusRequest] = useState<{
+    owner: typeof orgOwner | null; intent: typeof selectionIntent | null; target: 'documents' | 'collections';
+  } | null>(null);
+  const pendingFocus = focusRequest?.owner === orgOwner && (focusRequest.target === 'collections' || focusRequest.intent === selectionIntent) ? focusRequest.target : null;
+  const setPendingFocus = useCallback((target: 'documents' | 'collections' | null) => {
+    setFocusRequest(target ? { owner: currentOrg.current, intent: currentIntent.current, target } : null);
+  }, []);
   const docsHeadingRef = useRef<HTMLHeadingElement>(null);
   const docFilterRef = useRef<HTMLInputElement>(null);
   const collectionsHeadingRef = useRef<HTMLHeadingElement>(null);
@@ -404,33 +480,46 @@ export function KnowledgeBasePage(): JSX.Element {
    * three times while "fixing" it.
    */
   const reloadDocs = useCallback(() => {
-    if (!selectedId || !orgId) { setDocs(null); setDocsFailed(false); return; }
-    setDocs(null); setDocsFailed(false);
-    void listDocuments(orgId, selectedId).then((d) => { setDocs(d); setDocsFailed(false); })
-      .catch(() => { setDocs(null); setDocsFailed(true); });
-  }, [orgId, selectedId]);
+    const owner = documentOwner;
+    if (!owner || currentDocuments.current !== owner || currentOrg.current !== owner.orgOwner) return;
+    const sequence = ++documentSequence.current;
+    const isCurrent = () => mounted.current && currentDocuments.current === owner && currentOrg.current === owner.orgOwner && sequence === documentSequence.current;
+    setDocumentRead({ owner, data: null, failed: false });
+    void listDocuments(owner.orgOwner.orgId, owner.collectionId)
+      .then((data) => { if (isCurrent()) setDocumentRead({ owner, data, failed: false }); })
+      .catch(() => { if (isCurrent()) setDocumentRead({ owner, data: null, failed: true }); });
+  }, [documentOwner]);
 
-  /** Returns the promise (KBX-10): a select that shows an optimistic value must
-   *  know when the authoritative list has caught up before it drops it. */
+  /** Re-reads only the current org. Old write completions cannot refresh a
+   *  different org; retries in one org are owned by their latest issuance. */
   const loadCollections = useCallback((org: string): Promise<void> => {
-    setCollections(null); setCollectionsFailed(false);
-    return listCollections(org).then((c) => { setCollections(c); setCollectionsFailed(false); })
-      .catch(() => { setCollections(null); setCollectionsFailed(true); });
+    const owner = currentOrg.current;
+    if (!owner || owner.orgId !== org || !mounted.current) return Promise.resolve();
+    const sequence = ++collectionSequence.current;
+    const isCurrent = () => mounted.current && currentOrg.current === owner && sequence === collectionSequence.current;
+    setCollectionRead({ owner, data: null, failed: false });
+    return listCollections(org)
+      .then((data) => { if (isCurrent()) setCollectionRead({ owner, data, failed: false }); })
+      .catch(() => { if (isCurrent()) setCollectionRead({ owner, data: null, failed: true }); });
   }, []);
 
-  useEffect(() => { if (orgId) void loadCollections(orgId); }, [orgId, loadCollections]);
+  useEffect(() => { if (orgId && scopeReady) void loadCollections(orgId); }, [orgId, authEpoch, scopeReady, loadCollections]);
   // ADR 0904 D7 — the enrichment cost estimate and "your AI key is unavailable" state come
   // from the quality report; re-read with the collection list. Best-effort: absent on failure.
-  const [quality, setQuality] = useState<Map<string, CollectionQuality>>(new Map());
+  const [qualityRead, setQualityRead] = useState<{ owner: typeof orgOwner; data: Map<string, CollectionQuality> } | null>(null);
+  const quality = qualityRead?.owner === orgOwner && scopeReady ? qualityRead.data : new Map<string, CollectionQuality>();
   useEffect(() => {
     if (!orgId || collections === null) return;
+    const owner = orgOwner;
     let live = true;
-    getQuality(orgId).then((q) => { if (live) setQuality(new Map(q.map((c) => [c.collectionId, c]))); }).catch(() => { if (live) setQuality(new Map()); });
+    const isCurrent = () => live && mounted.current && currentOrg.current === owner;
+    getQuality(orgId).then((q) => { if (isCurrent()) setQualityRead({ owner, data: new Map(q.map((c) => [c.collectionId, c])) }); })
+      .catch(() => { if (isCurrent()) setQualityRead({ owner, data: new Map() }); });
     return () => { live = false; };
-  }, [orgId, collections]);
+  }, [orgId, orgOwner, collections]);
   // Load the selected collection's docs whenever the selection changes — incl.
   // a ?collection= deep-link resolving once the collections list arrives.
-  useEffect(() => { setSearchState({ kind: 'idle' }); setDocQuery(''); reloadDocs(); }, [reloadDocs]);
+  useEffect(() => { setSearchState({ kind: 'idle' }); setDocQuery(''); reloadDocs(); }, [reloadDocs, setSearchState]);
 
   useEffect(() => {
     if (!pendingFocus) return;
@@ -442,71 +531,83 @@ export function KnowledgeBasePage(): JSX.Element {
       focusFirst(newCollectionRef.current, collectionsHeadingRef.current);
     }
     setPendingFocus(null);
-  }, [pendingFocus, docs, docsFailed, collections, collectionsFailed]);
+  }, [pendingFocus, docs, docsFailed, collections, collectionsFailed, setPendingFocus]);
 
   // Fetch the open document's full text on demand (?doc= deep-link or a click).
   // A local error state renders an inline retry IN the reader — not a perpetual
   // skeleton (grade-ux DL-UX-3). `docReloadKey` re-runs the fetch on retry.
-  const [docError, setDocError] = useState(false);
   const [docReloadKey, setDocReloadKey] = useState(0);
   useEffect(() => {
-    if (!selectedDocId || !selectedId || !orgId) { setDocContent(null); return; }
+    const owner = detailOwner;
+    if (!owner) return;
     let active = true;
-    setDocLoading(true); setDocContent(null); setDocError(false);
-    void getDocument(orgId, selectedId, selectedDocId)
-      .then((d) => { if (active) setDocContent(d); })
-      .catch(() => { if (active) setDocError(true); })
-      .finally(() => { if (active) setDocLoading(false); });
+    const isCurrent = () => active && mounted.current && currentDetail.current === owner && currentDocuments.current === owner.documentOwner && currentOrg.current === owner.documentOwner.orgOwner;
+    setDetailRead({ owner, data: null, loading: true, failed: false });
+    void getDocument(owner.documentOwner.orgOwner.orgId, owner.documentOwner.collectionId, owner.documentId)
+      .then((data) => { if (isCurrent()) setDetailRead({ owner, data, loading: false, failed: false }); })
+      .catch(() => { if (isCurrent()) setDetailRead({ owner, data: null, loading: false, failed: true }); });
     return () => { active = false; };
-  }, [selectedDocId, selectedId, orgId, docReloadKey]);
+  }, [detailOwner, docReloadKey]);
 
   const create = useCallback(async () => {
+    const isCurrent = captureOrgAction();
+    if (!isCurrent) return;
     if (!newName.trim()) return;
     setCreating(true);
     try {
       await createCollection(orgId, newName.trim());
+      if (!isCurrent()) return;
       const created = newName.trim();
       setNewName('');
       void loadCollections(orgId);
       toast.success(t('collectionCreated', { name: created })); // KBX-11
     }
-    catch (e) { toast.error(kbActionError(e, 'createFailed')); }
-    finally { setCreating(false); }
-  }, [orgId, newName, loadCollections, t]);
+    catch (e) { if (isCurrent()) toast.error(kbActionError(e, 'createFailed')); }
+    finally { if (isCurrent()) setCreating(false); }
+  }, [captureOrgAction, orgId, newName, loadCollections, t]);
 
   const removeCollection = useCallback(async (collectionId: string, name: string) => {
+    const isCurrent = captureOrgAction();
+    if (!isCurrent) return;
     if (!(await confirm({ title: t('deleteCollectionConfirm', { name }), body: t('deleteCollectionBody'), danger: true, confirmLabel: t('common:delete') }))) return;
+    if (!isCurrent()) return;
     try {
       await deleteCollection(orgId, collectionId);
+      if (!isCurrent()) return;
       if (selectedId === collectionId) selectCollection('');
       void loadCollections(orgId);
       setPendingFocus('collections'); // KBX-12
       toast.success(t('collectionDeleted', { name })); // KBX-11
     }
-    catch (e) { toast.error(kbActionError(e, 'deleteFailed')); }
-  }, [orgId, selectedId, selectCollection, loadCollections, t]);
+    catch (e) { if (isCurrent()) toast.error(kbActionError(e, 'deleteFailed')); }
+  }, [captureOrgAction, orgId, selectedId, selectCollection, loadCollections, setPendingFocus, t]);
 
   const [docUrl, setDocUrl] = useState('');
 
   // ADR 0398 P2 — media-collection → KB source picker.
-  const [mediaCollections, setMediaCollections] = useState<MediaCollection[] | null>(null);
+  const [mediaRead, setMediaRead] = useState<{ owner: typeof orgOwner; data: MediaCollection[]; failed: boolean } | null>(null);
+  const mediaCollections = scopeReady && mediaRead?.owner === orgOwner ? mediaRead.data : null;
+  const mediaFailed = scopeReady && mediaRead?.owner === orgOwner && mediaRead.failed;
   const [mediaCollectionId, setMediaCollectionId] = useState('');
-  const [mediaFailed, setMediaFailed] = useState(false);
   useEffect(() => {
-    if (!orgId) { setMediaCollections(null); return; }
-    // `[]` on failure silently removed the media-ingest option (gated on
-    // `length > 0`), making a failed read indistinguishable from "this org has
-    // no media collections".
+    if (!orgId || !scopeReady) return;
+    const owner = orgOwner;
+    let live = true;
+    const isCurrent = () => live && mounted.current && currentOrg.current === owner;
     void listMediaCollections(orgId)
-      .then((mc) => { setMediaCollections(mc); setMediaFailed(false); })
-      .catch(() => { setMediaCollections([]); setMediaFailed(true); });
-  }, [orgId]);
+      .then((data) => { if (isCurrent()) setMediaRead({ owner, data, failed: false }); })
+      .catch(() => { if (isCurrent()) setMediaRead({ owner, data: [], failed: true }); });
+    return () => { live = false; };
+  }, [orgId, orgOwner, scopeReady]);
 
   const ingestFromMediaCollection = useCallback(async () => {
+    const isCurrent = captureCollectionAction();
+    if (!isCurrent) return;
     if (!selected || !mediaCollectionId) return;
     setImportingMedia(true);
     try {
       const r = await ingestMediaCollection(orgId, selected.collectionId, mediaCollectionId);
+      if (!isCurrent()) return;
       setMediaCollectionId('');
       reloadDocs();
       void loadCollections(orgId);
@@ -515,23 +616,26 @@ export function KnowledgeBasePage(): JSX.Element {
       } else {
         toast.success(t('mediaBridgeResult', { ingested: r.ingested }));
       }
-    } catch (e) { toast.error(kbActionError(e, 'ingestFailed')); }
-    finally { setImportingMedia(false); }
-  }, [orgId, selected, mediaCollectionId, reloadDocs, loadCollections, t]);
+    } catch (e) { if (isCurrent()) toast.error(kbActionError(e, 'ingestFailed')); }
+    finally { if (isCurrent()) setImportingMedia(false); }
+  }, [captureCollectionAction, orgId, selected, mediaCollectionId, reloadDocs, loadCollections, t]);
 
   // ADR 0351 P4 — ingest a web page by URL (fenced untrusted server-side).
   const ingestFromUrl = useCallback(async () => {
+    const isCurrent = captureCollectionAction();
+    if (!isCurrent) return;
     if (!selected || !docUrl.trim()) return;
     setAddingUrl(true);
     try {
       await ingestUrl(orgId, selected.collectionId, docUrl.trim());
+      if (!isCurrent()) return;
       setDocUrl('');
       reloadDocs();
       void loadCollections(orgId);
       toast.success(t('documentAdded'));
-    } catch (e) { toast.error(kbActionError(e, 'ingestFailed')); }
-    finally { setAddingUrl(false); }
-  }, [orgId, selected, docUrl, reloadDocs, loadCollections, t]);
+    } catch (e) { if (isCurrent()) toast.error(kbActionError(e, 'ingestFailed')); }
+    finally { if (isCurrent()) setAddingUrl(false); }
+  }, [captureCollectionAction, orgId, selected, docUrl, reloadDocs, loadCollections, t]);
 
   /**
    * KBX-10 — the three retrieval selects derived `value` straight from
@@ -544,25 +648,33 @@ export function KnowledgeBasePage(): JSX.Element {
    */
   const [cfgPending, setCfgPending] = useState<{ mode?: RetrievalMode; embedder?: EmbedderMode; enrichment?: EnrichmentMode; rerank?: RerankerKind }>({});
   // A different collection's config is not this one's optimistic value.
-  useEffect(() => { setCfgPending({}); }, [selectedId]);
+  useEffect(() => {
+    setCfgPending({}); setCreating(false); setIngesting(false); setUploading(false);
+    setAddingUrl(false); setImportingMedia(false); setMediaCollectionId('');
+    setDocTitle(''); setDocText(''); setDocUrl(''); setNewName('');
+  }, [selectionIntent]);
 
   const changeCfg = useCallback(async (
     patch: { mode?: RetrievalMode; embedder?: EmbedderMode; enrichment?: EnrichmentMode; rerank?: RerankerKind },
     apply: () => Promise<unknown>,
   ): Promise<void> => {
+    const isCurrent = captureCollectionAction();
+    if (!isCurrent) return;
     if (!selected) return;
     const key = Object.keys(patch)[0] as 'mode' | 'embedder' | 'enrichment' | 'rerank';
     setCfgPending((p) => ({ ...p, ...patch }));
     try {
       await apply();
+      if (!isCurrent()) return;
       await loadCollections(orgId);
+      if (!isCurrent()) return;
       toast.success(t('retrievalConfigSaved')); // KBX-11
     } catch (e) {
-      toast.error(kbActionError(e, 'retrievalModeFailed'));
+      if (isCurrent()) toast.error(kbActionError(e, 'retrievalModeFailed'));
     } finally {
-      setCfgPending((p) => { const n = { ...p }; delete n[key]; return n; });
+      if (isCurrent()) setCfgPending((p) => { const n = { ...p }; delete n[key]; return n; });
     }
-  }, [orgId, selected, loadCollections, t]);
+  }, [captureCollectionAction, orgId, selected, loadCollections, t]);
 
   const changeReranker = useCallback((rerank: RerankerKind) => (
     changeCfg({ rerank }, () => setReranker(orgId, selected!.collectionId, rerank))
@@ -582,46 +694,57 @@ export function KnowledgeBasePage(): JSX.Element {
   ), [orgId, selected, changeCfg]);
 
   const ingest = useCallback(async () => {
+    const isCurrent = captureCollectionAction();
+    if (!isCurrent) return;
     if (!selected || !docText.trim()) return;
     setIngesting(true);
     try {
       await ingestText(orgId, selected.collectionId, docTitle.trim() || t('untitled'), docText.trim());
+      if (!isCurrent()) return;
       setDocTitle(''); setDocText('');
       reloadDocs();
       void loadCollections(orgId);
       toast.success(t('documentAdded')); // KBX-11 — this path used to say nothing at all
-    } catch (e) { toast.error(kbActionError(e, 'ingestFailed')); }
-    finally { setIngesting(false); }
-  }, [orgId, selected, docTitle, docText, reloadDocs, loadCollections, t]);
+    } catch (e) { if (isCurrent()) toast.error(kbActionError(e, 'ingestFailed')); }
+    finally { if (isCurrent()) setIngesting(false); }
+  }, [captureCollectionAction, orgId, selected, docTitle, docText, reloadDocs, loadCollections, t]);
 
   // Upload a file (text/PDF/DOCX) — extracted to text server-side.
   const uploadFile = useCallback(async (file: File | undefined) => {
+    const isCurrent = captureCollectionAction();
+    if (!isCurrent) return;
     if (!selected || !file) return;
     if (!withinUploadCap(file)) { toast.error(t('fileTooLarge', { max: MAX_UPLOAD_MB })); return; }
     setUploading(true);
     try {
       const contentBase64 = await fileToBase64(file);
+      if (!isCurrent()) return;
       await ingestFile(orgId, selected.collectionId, { title: file.name, contentBase64, contentType: inferContentType(file) });
+      if (!isCurrent()) return;
       reloadDocs();
       void loadCollections(orgId);
       toast.success(t('documentAdded'));
-    } catch (e) { toast.error(kbActionError(e, 'ingestFailed')); }
-    finally { setUploading(false); }
-  }, [orgId, selected, reloadDocs, loadCollections, t]);
+    } catch (e) { if (isCurrent()) toast.error(kbActionError(e, 'ingestFailed')); }
+    finally { if (isCurrent()) setUploading(false); }
+  }, [captureCollectionAction, orgId, selected, reloadDocs, loadCollections, t]);
 
   const removeDoc = useCallback(async (documentId: string) => {
+    const isCurrent = captureCollectionAction();
+    if (!isCurrent) return;
     if (!selected) return;
     if (!(await confirm({ title: t('deleteDocConfirm'), body: t('deleteDocBody'), danger: true, confirmLabel: t('common:delete') }))) return;
+    if (!isCurrent()) return;
     try {
       await deleteDocument(orgId, selected.collectionId, documentId);
+      if (!isCurrent()) return;
       if (selectedDocId === documentId) selectDoc('');
       reloadDocs();
       void loadCollections(orgId);
       setPendingFocus('documents'); // KBX-12
       toast.success(t('documentDeleted')); // KBX-11
     }
-    catch (e) { toast.error(kbActionError(e, 'deleteFailed')); }
-  }, [orgId, selected, selectedDocId, selectDoc, reloadDocs, loadCollections, t]);
+    catch (e) { if (isCurrent()) toast.error(kbActionError(e, 'deleteFailed')); }
+  }, [captureCollectionAction, orgId, selected, selectedDocId, selectDoc, reloadDocs, loadCollections, setPendingFocus, t]);
 
   /**
    * KB-UX-1 — a failed search used to toast and RETURN, leaving `hits`
@@ -638,6 +761,10 @@ export function KnowledgeBasePage(): JSX.Element {
    */
   const runSearch = useCallback(async () => {
     if (!selected || !query.trim()) return;
+    const isCurrentScope = captureCollectionAction();
+    if (!isCurrentScope) return;
+    const sequence = ++searchSequence.current;
+    const isCurrent = () => isCurrentScope() && sequence === searchSequence.current;
     const asked = query.trim();
     // Clear FIRST. A retry that leaves stale hits up while the request is in
     // flight re-renders the previous answer under the new question. `searching`
@@ -646,12 +773,14 @@ export function KnowledgeBasePage(): JSX.Element {
     setSearchState({ kind: 'searching', query: asked });
     try {
       const results = await search(orgId, selected.collectionId, asked);
+      if (!isCurrent()) return;
       setSearchState({ kind: 'results', hits: results, query: asked });
       announce(results.length === 0 ? t('noMatches') : t('searchResultsAnnounce', { count: results.length }));
     } catch (e) {
+      if (!isCurrent()) return;
       setSearchState({ kind: 'failed', message: e instanceof Error ? e.message : t('searchFailed'), query: asked });
     }
-  }, [orgId, selected, query, t]);
+  }, [captureCollectionAction, orgId, selected, query, setSearchState, t]);
 
   if (access.loading) return <Skeleton />;
   if (!access.enabled) {
@@ -666,6 +795,7 @@ export function KnowledgeBasePage(): JSX.Element {
 
   return (
     <div>
+      <DeepLinkMissNotice show={Boolean(routeOrgId && orgs && !orgs.some((o) => o.orgId === routeOrgId))} onClear={() => selectOrg(orgId)} />
       <PageHeader eyebrow={t('eyebrow')} title={t('title')} lede={t('lede')} actions={orgPicker} />
 
       {/* KB-UX-4 — the branch ORDER (failed → zero-orgs → children) is the
@@ -750,7 +880,7 @@ export function KnowledgeBasePage(): JSX.Element {
               </div>
             ))}
             {/* KB2UX-1 — creating a collection needs `workspace:write` here. */}
-            {showWrites ? (
+            {scopeReady && showWrites ? (
               <div className="u-flex u-gap-1 u-mt-2">
                 <input ref={newCollectionRef} value={newName} onChange={(e) => setNewName(e.target.value)} placeholder={t('newCollectionPlaceholder')} aria-label={t('newCollectionPlaceholder')} disabled={accessPending} onKeyDown={(e) => { if (e.key === 'Enter' && !accessPending) void create(); }} />
                 <Button variant="quiet" disabled={creating || accessPending || !newName.trim()} aria-label={t('createCollection')} onClick={() => void create()}><PlusIcon /></Button>
@@ -1097,6 +1227,7 @@ export function KnowledgeBasePage(): JSX.Element {
                   separator saying otherwise. */}
               {selected.managed ? null : (
                 <ReindexPanel
+                  key={`${orgId}:${selected.collectionId}`}
                   reindex={reindex}
                   orgId={orgId}
                   collectionId={selected.collectionId}
@@ -1170,22 +1301,38 @@ function ReindexPanel({ reindex, orgId, collectionId, collectionName, currentPro
 }): JSX.Element {
   const { t } = useTranslation('kb');
   const [provider, setProvider] = useState<EmbeddingProvider>('local');
+  const [credentialRef, setCredentialRef] = useState('');
+  const selectionVersion = useRef(0);
+  const selectedChoice = useRef({ provider, credentialRef });
+  selectedChoice.current = { provider, credentialRef };
+  const confirming = useRef(false);
+  const permission = useRef({ canAct, actPending });
+  permission.current = { canAct, actPending };
   const [starting, setStarting] = useState(false);
   const { job, setJob, draining, setDraining } = reindex;
+  const keys = useStoredCredentialRefs({
+    enabled: canAct && provider !== 'local', scopeKey: `${orgId}:${collectionId}:${provider}`,
+    onInvalidate: () => { selectionVersion.current += 1; setCredentialRef(''); setStarting(false); setDraining(false); },
+  });
+  const eligibleRefs = refsForExactProviders(keys.refs ?? [], [provider]);
+  const selectedKeyUnverified = Boolean(credentialRef) && (!keys.isVerified() || !eligibleRefs.includes(credentialRef));
 
   /** Drain until the job leaves `running`, and RETURN the terminal job so the
    *  caller can tell `done` from `failed`/`cancelled`/`paused`. Returning void
    *  is what made every outcome look like success. */
   const runToCompletion = useCallback(async (): Promise<ReindexJob | null> => {
     let last: ReindexJob | null = null;
+    const identity = keys.capture();
     for (let i = 0; i < 10000; i++) {
+      if (!keys.isCurrent(identity)) return null;
       const next = await drainReindex(orgId, collectionId);
+      if (!keys.isCurrent(identity)) return null;
       setJob(next);
       last = next;
       if (next.status !== 'running') return next;
     }
     return last;
-  }, [orgId, collectionId, setJob]);
+  }, [orgId, collectionId, setJob, keys]);
 
   /** The ONE place a terminal reindex status becomes a message. */
   const reportTerminal = useCallback((terminal: ReindexJob | null): void => {
@@ -1218,34 +1365,49 @@ function ReindexPanel({ reindex, orgId, collectionId, collectionName, currentPro
    * one, whose cost is the least visible, did not.
    */
   const start = useCallback(async () => {
-    if (!(await confirm({
-      title: t('reindexStartConfirm', { name: collectionName }),
-      body: t('reindexStartBody'),
-      confirmLabel: t('reindexStartAction'),
-    }))) return;
+    if (provider !== selectedChoice.current.provider || credentialRef !== selectedChoice.current.credentialRef
+      || confirming.current || starting || !permission.current.canAct || permission.current.actPending
+      || (credentialRef && (!keys.isVerified() || !eligibleRefs.includes(credentialRef)))) return;
+    const identity = keys.capture();
+    const choice = selectionVersion.current;
+    const isCurrent = () => keys.isCurrent(identity) && choice === selectionVersion.current;
+    confirming.current = true;
+    let accepted: boolean;
+    try {
+      accepted = await confirm({
+        title: t('reindexStartConfirm', { name: collectionName }),
+        body: credentialRef ? `${t('reindexStartBody')} ${t('reindexKeyConfirm', { provider, ref: credentialRef })}` : t('reindexStartBody'),
+        confirmLabel: t('reindexStartAction'),
+      });
+    } finally { confirming.current = false; }
+    // Auth/provider/collection may change while the confirmation is visible.
+    if (!accepted || !isCurrent() || !permission.current.canAct || permission.current.actPending
+      || (credentialRef && !keys.isVerified())) return;
     setStarting(true);
     let started: ReindexJob;
     try {
-      started = await startReindex(orgId, collectionId, { provider });
+      started = await startReindex(orgId, collectionId, { provider, ...(provider !== 'local' && credentialRef ? { credentialRef } : {}) });
+      if (!isCurrent()) return;
       setJob(started);
     } catch (e) {
-      toast.error(kbActionError(e, 'reindexFailed'));
-      setStarting(false);
+      if (isCurrent()) toast.error(kbActionError(e, 'reindexFailed'));
       return;
-    }
-    setStarting(false);
+    } finally { if (isCurrent()) setStarting(false); }
     setDraining(true);
-    try { reportTerminal(await runToCompletion()); }
-    catch (e) { toast.error(kbActionError(e, 'reindexFailed')); }
-    finally { setDraining(false); }
-  }, [orgId, collectionId, collectionName, provider, runToCompletion, reportTerminal, setJob, setDraining, t]);
+    try {
+      const terminal = await runToCompletion();
+      if (isCurrent()) reportTerminal(terminal);
+    } catch (e) { if (isCurrent()) toast.error(kbActionError(e, 'reindexFailed')); }
+    finally { if (isCurrent()) setDraining(false); }
+  }, [orgId, collectionId, collectionName, provider, credentialRef, eligibleRefs, keys, starting, runToCompletion, reportTerminal, setJob, setDraining, t]);
 
   const resume = useCallback(async () => {
+    const identity = keys.capture();
     setDraining(true);
-    try { reportTerminal(await runToCompletion()); }
-    catch (e) { toast.error(kbActionError(e, 'reindexFailed')); }
-    finally { setDraining(false); }
-  }, [runToCompletion, reportTerminal, setDraining]);
+    try { const terminal = await runToCompletion(); if (keys.isCurrent(identity)) reportTerminal(terminal); }
+    catch (e) { if (keys.isCurrent(identity)) toast.error(kbActionError(e, 'reindexFailed')); }
+    finally { if (keys.isCurrent(identity)) setDraining(false); }
+  }, [runToCompletion, reportTerminal, setDraining, keys]);
 
   /** KBX-7 — confirmed, and named for what it destroys. `reindexCancel` used to
    *  read "Cancel" beside a progress bar, which does not distinguish "stop the
@@ -1339,15 +1501,22 @@ function ReindexPanel({ reindex, orgId, collectionId, collectionName, currentPro
           </div>
         ) : !canAct ? null : (
           <div className="u-flex u-items-center u-gap-2 u-wrap">
-            <select value={provider} onChange={(e) => setProvider(e.target.value as EmbeddingProvider)} className="u-w-auto" disabled={busy} aria-label={t('reindexLabel')}>
+            <select value={provider} onChange={(e) => { selectionVersion.current += 1; selectedChoice.current = { provider: e.target.value as EmbeddingProvider, credentialRef: '' }; setCredentialRef(''); setProvider(e.target.value as EmbeddingProvider); }} className="u-w-auto" disabled={busy} aria-label={t('reindexLabel')}>
               <option value="local">{t('reindexProviderLocal')}</option>
               <option value="openai">OpenAI</option>
               <option value="google">Google</option>
               <option value="cohere">Cohere</option>
             </select>
-            <Button variant="primary" className="u-fs-12" disabled={busy || actPending} onClick={() => void start()}>{t('reindexStart')}</Button>
+            <Button variant="primary" className="u-fs-12" disabled={busy || actPending || selectedKeyUnverified} onClick={() => void start()}>{t('reindexStart')}</Button>
           </div>
         )}
+        {canAct && !active && provider !== 'local' ? <>
+          <StoredCredentialField label={t('reindexKeyLabel')} help={t('reindexKeyHelp')} value={credentialRef} refs={eligibleRefs} emptyLabel={t('reindexKeyDefault')} disabled={busy || keys.pending} onChange={ref => { selectionVersion.current += 1; selectedChoice.current = { provider, credentialRef: ref }; setCredentialRef(ref); }} />
+          {keys.pending ? <Notice variant={keys.failed ? 'warning' : 'info'} announce={t(keys.failed ? 'reindexKeysFailed' : 'reindexKeysLoading')}>
+            {t(keys.failed ? 'reindexKeysFailed' : 'reindexKeysLoading')}
+            {keys.failed ? <Button variant="link" disabled={busy} onClick={keys.retry}>{t('common:retry')}</Button> : null}
+          </Notice> : eligibleRefs.length === 0 ? <Notice variant="info">{t('reindexKeysEmpty')}</Notice> : null}
+        </> : null}
         <span className="field-help">{t('reindexHint', { current: currentProvider })}</span>
         {canAct ? null : <span className="field-help">{t('reindexOwnerOnly')}</span>}
       </div>

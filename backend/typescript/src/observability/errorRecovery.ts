@@ -21,6 +21,7 @@
  */
 
 import { AiProviderError } from '../aiProviders/aiProvidersHost.js';
+import { isStreamIncompleteError } from '../providers/dispatch.js';
 
 export type ErrorCategory =
   | 'network'      // fetch failed, DNS, connection reset
@@ -330,6 +331,10 @@ function classifyNativeError(err: Error): ClassifiedError | null {
 export function classifyDispatchError(err: unknown): ClassifiedError {
   if (err instanceof AiProviderError) {
     return classifyAiProviderError(err);
+  }
+  // ADR 1026 — the raw form a managed/chat dispatch propagates unmapped.
+  if (isStreamIncompleteError(err)) {
+    return { category: 'network', action: 'retry', userMessage: 'The provider stopped partway through its reply. Retry usually works.' };
   }
   if (err instanceof Error) {
     const m = PROVIDER_STATUS_RE.exec(err.message);

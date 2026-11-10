@@ -106,7 +106,12 @@ export function __resetExceptionSources(): void {
  *  per-source try/catch so a thrown source is reported degraded, never silently
  *  empty; each source capped + `truncated`-flagged. Also emits a synthetic
  *  `degraded` ExceptionRow for a down source so the ledger SHOWS the outage. */
-export async function listExceptions(tenantId: string): Promise<ListExceptionsResult> {
+export async function listExceptions(
+  tenantId: string,
+  /** ADR 1031 P2 — where a degraded source's "retry" action points: the page the
+   *  CALLER renders the ledger on (the host names no product page). */
+  opts: { degradedHref: string },
+): Promise<ListExceptionsResult> {
   if (!tenantId) return { rows: [], sources: [] };
   const rows: ExceptionRow[] = [];
   const results: ExceptionSourceResult[] = [];
@@ -130,7 +135,7 @@ export async function listExceptions(tenantId: string): Promise<ListExceptionsRe
         severity: 'degraded',
         label: `The "${key}" exception feed could not be read.`,
         owner: { kind: 'system', ref: 'system', label: key },
-        action: { labelKey: 'exceptionActionRetry', href: '/admin/kicktodo' },
+        action: { labelKey: 'exceptionActionRetry', href: opts.degradedHref },
         audit: { detectedAt: new Date().toISOString(), tenantId },
       });
       results.push({ key, ok: false, count: 0, truncated: false, error: message });

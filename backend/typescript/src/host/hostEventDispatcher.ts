@@ -213,6 +213,77 @@ export function chainIdOfDefinition(definition: { metadata?: unknown } | null | 
   return typeof meta?.chainId === 'string' && meta.chainId.length > 0 ? meta.chainId : undefined;
 }
 
+/**
+ * The client (org) an event-triggered workflow is bound to, decided by the workflow's
+ * OWNING feature (host code never imports a feature). A resolver returns:
+ *  - `undefined` — not my workflow, ask the next resolver;
+ *  - `null` — mine, and not org-bound (e.g. a journey in a workspace with no clients);
+ *  - an org id — mine, and it may only start for an event about that org.
+ *
+ * Found by fl2-86 (feature-loop row 73 area): a journey chain is instantiated per client,
+ * but its binding carried no org, so client A's post-webinar journey started on client B's
+ * `host.webinar.attended` and mailed B's attendee under A's brand.
+ */
+export type EventTriggerOrgResolver = (tenantId: string, definition: { metadata?: unknown }) => Promise<string | null | undefined>;
+const eventTriggerOrgResolvers: EventTriggerOrgResolver[] = [];
+
+/** A feature registers how to read its event-triggered workflows' client (idempotent by reference). */
+export function registerEventTriggerOrgResolver(fn: EventTriggerOrgResolver): void {
+  if (!eventTriggerOrgResolvers.includes(fn)) eventTriggerOrgResolvers.push(fn);
+}
+
+/**
+ * The host events whose payload ALWAYS names the org (`payload.orgId`), read from their
+ * emitters: a form submission (`forms/emit.ts`), the webinar phases
+ * (`webinarProcessor.ts`), every deal transition (`crm/entities/deals.ts`, the org-scoped
+ * entity) and a contact conversion (`convertService.ts`). Contact events otherwise never
+ * do: contacts are tenant-scoped (`contactsService.ts`, "no orgId"). Only these can start
+ * an org-bound workflow, so the binding route refuses any other event for one.
+ */
+export const ORG_CARRYING_EVENT_TYPES: readonly string[] = [
+  'host.forms.submission.created',
+  'host.webinar.registered', 'host.webinar.attended', 'host.webinar.no-show',
+  'host.crm.deal.created', 'host.crm.deal.updated', 'host.crm.deal.deleted', 'host.crm.deal.stage-changed', 'host.crm.deal.won', 'host.crm.deal.lost',
+  'host.crm.contact.converted',
+];
+const ORG_CARRYING_SPELLINGS: ReadonlySet<string> = new Set(ORG_CARRYING_EVENT_TYPES.flatMap((t) => [...hostEventTypeSpellings(t)]));
+export function eventTypeCarriesOrg(eventType: string): boolean {
+  return [...hostEventTypeSpellings(eventType)].some((t) => ORG_CARRYING_SPELLINGS.has(t));
+}
+
+/** The org a workflow definition is bound to for event triggers, or null (not org-bound).
+ *  Throws when a resolver does (an org that is no longer a client). */
+export async function eventTriggerOrgOf(tenantId: string, definition: { metadata?: unknown }): Promise<string | null> {
+  for (const r of eventTriggerOrgResolvers) {
+    const bound = await r(tenantId, definition);
+    if (bound !== undefined) return bound || null;
+  }
+  return null;
+}
+
+/** May this binding start for this event? An org-bound workflow starts only for an event
+ *  whose `payload.orgId` is its org; an event naming no org never starts one. A resolver
+ *  that throws (the bound org is no longer a client, a store error) refuses: this guard
+ *  only ever narrows what a binding can start. */
+async function eventMatchesBoundOrg(tenantId: string, workflowId: string, payload: unknown): Promise<{ ok: true } | { ok: false; reason: string }> {
+  if (!deps || eventTriggerOrgResolvers.length === 0) return { ok: true };
+  let bound: string | null | undefined;
+  try {
+    const wf = await resolveTenantWorkflow(deps.hostSuite.workflowCatalog, tenantId, workflowId);
+    if (!wf?.definition) return { ok: true }; // startRun resolves (and refuses) the same id itself
+    for (const r of eventTriggerOrgResolvers) {
+      bound = await r(tenantId, wf.definition);
+      if (bound !== undefined) break;
+    }
+  } catch (err) {
+    return { ok: false, reason: `org_scope_unresolved:${err instanceof Error ? err.message : String(err)}` };
+  }
+  if (!bound) return { ok: true };
+  const eventOrg = payload && typeof payload === 'object' ? (payload as { orgId?: unknown }).orgId : undefined;
+  if (typeof eventOrg !== 'string' || eventOrg === '') return { ok: false, reason: 'event_has_no_org' };
+  return eventOrg === bound ? { ok: true } : { ok: false, reason: 'other_org' };
+}
+
 /** Does the BOUND workflow descend from `chainId`? A catalog miss or an
  *  unreadable definition answers `false` — the binding then proceeds to
  *  `startRun`, which resolves (and refuses) the same id on its own path; this
@@ -327,6 +398,12 @@ export async function emitHostEvent(event: HostEvent): Promise<void> {
           chainId: origin.chainId,
           ...(origin.runId ? { runId: origin.runId } : {}),
         });
+        continue;
+      }
+      // fl2-86 — an org-bound workflow starts only for an event about its own org.
+      const scope = await eventMatchesBoundOrg(binding.tenantId, binding.workflowId, safePayload);
+      if (!scope.ok) {
+        log.info('host_event_org_scope_skipped', { type: event.type, tenantId: event.tenantId, workflowId: binding.workflowId, bindingId: binding.bindingId, reason: scope.reason });
         continue;
       }
       const budget = await checkAutonomousRunBudget(deps.storage, event.tenantId, Date.now());

@@ -215,11 +215,22 @@ export function registerConsentRoutes(deps: RouteDeps): void {
   // header echo). `no-store`, because it depends on request headers a shared cache
   // would not key on. Registered BEFORE the token read so `posture` is never parsed
   // as a token.
+  //
+  // An unknown org and the `consent` toggle OFF answer the SAME `{ regime: null }`
+  // (no consent posture here), never the lane's 404: every public page reads this
+  // on load, so the 404 put a console error on each visit to a site without the
+  // banner. Still uniform, so it reveals no more than the 404 did; the client
+  // already reads `null` as "unknown" (no banner, nothing written). Every OTHER
+  // route on this lane keeps the uniform 404.
   app.get(`${PUB}/:orgId/posture`, async (req, res, next) => {
     try {
-      const tenantId = await resolvePublicTenant(req.params.orgId);
-      const { mode } = visitorDefaultRegime(await getPolicy(tenantId), visitorRegionOf(req));
       res.setHeader('Cache-Control', 'private, no-store');
+      const tenantId = await resolvePublicTenant(req.params.orgId).catch((err: unknown) => {
+        if (err instanceof OpenwopError && err.code === 'not_found') return null;
+        throw err;
+      });
+      if (tenantId === null) { res.json({ regime: null }); return; }
+      const { mode } = visitorDefaultRegime(await getPolicy(tenantId), visitorRegionOf(req));
       // ADR 0951 D1 — the optional choices this site asks about (session recording
       // only when the org has replay ON and storage configured). The banner shows
       // nothing it was not told is offered, so the recorder can never be consented

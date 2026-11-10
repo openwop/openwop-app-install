@@ -15,13 +15,25 @@
  *
  *   Device lifecycle (operator bearer):
  *     POST   .../relay/register             — issue relayId + activation code
- *     POST   .../relay/activate             — exchange code → device token
+ *     POST   .../relay/activate             — exchange code → device token (binds the owner, ADR 1043 D3)
  *     POST   .../relay/revoke               — deactivate a relay
+ *     GET    .../relay/devices              — this workspace's relays with presence and canRevoke (ADR 1042 CHAN-P0-8, ADR 1043 D3)
  *   Device loop (x-openwop-device-token; bearer-public per auth allowlist):
  *     POST   .../device/heartbeat           — keepalive + status report
+ *     POST   .../device/rotate              — rotate the device token (ADR 1043 D1)
  *     POST   .../device/inbound             — ingest a platform message
  *     GET    .../device/outbound            — pull pending egress for this relay
- *     POST   .../device/ack                 — acknowledge delivered egress
+ *     POST   .../device/ack                 — acknowledge delivered AND failed egress (ADR 1043 D1)
+ *
+ * ADR 1043 D1 is the contract the openwop-cli relay implements: every device
+ * auth refusal is a 401 with `details.reason` (`device_token_missing`,
+ * `device_token_invalid`, `device_token_expired`, `device_revoked`).
+ *
+ * ADR 1043 D9 (CHAN-P1b) — in conversation mode a device admits a peer only when
+ * that device's OWNER approved it (channel-ingress's sender store, keyed by the
+ * device's lane; the routes live in that feature). The connector policy, allowlist
+ * and pairing below govern the legacy workflow lane only, and a pairing request
+ * is never answered.
  *   Outbound enqueue (operator bearer / bridge):
  *     POST   .../relay/enqueue              — queue an egress for a relay
  *   Connectors (operator bearer):  GET|POST .../connectors[/:id[/enable|disable|test]]
@@ -55,6 +67,20 @@ import {
   type RelayDeviceRecord,
 } from '../messaging/types.js';
 import { syntheticNotifyDeliverer, type NotifyDeliverer } from '../messaging/notifyDeliverer.js';
+import { claimRelayInbound, deleteRelayInboundClaims, releaseRelayInbound } from '../messaging/inboundClaims.js';
+import { deleteRelayOwner, getRelayOwnerRecord, recordRelayOwner } from '../messaging/relayOwner.js';
+import {
+  ACTIVATION_MAX_FAILURES, EGRESS_MAX_ATTEMPTS, OFFLINE_AFTER_MS, TOKEN_GRACE_MS,
+  activationFailuresOf, clearEgressAttempts, clearRegistration, egressAttempts, getPresence, getRegistration, relayPresenceOf,
+  purgeRelayLifecycle, recordActivationFailure, recordEgressAttempt, recordHeartbeat, recordRegistration,
+  recordTokenGrace, relayForGraceToken,
+} from '../messaging/relayLifecycle.js';
+import { selectRoutingRule } from '../messaging/bridge.js';
+import { isRelayGroup } from '../messaging/groupDetection.js';
+import { enforceChannelInboundRateLimit } from '../middleware/rateLimit.js';
+import { createLogger } from '../observability/logger.js';
+
+const relayLog = createLogger('routes.messaging');
 
 const DM_POLICIES: readonly DmPolicy[] = ['pairing', 'allowlist', 'open', 'disabled'];
 const GROUP_POLICIES: readonly GroupPolicy[] = ['allowlist', 'open', 'disabled'];
@@ -63,7 +89,31 @@ type NotifyKind = (typeof NOTIFY_KINDS)[number];
 
 const BASE = '/host/openwop-app/messaging';
 
+/** ADR 1042 D7 — the conversation-mode handler for relay messages (registered by
+ *  the channel-ingress feature; dependency inversion, this route never imports it). */
+export interface RelayConversationalIngress {
+  enabled(tenantId: string): Promise<boolean>;
+  /** ADR 1043 D9 + ADR 1042 D12 — the admission (the owner's self lane, or a sender
+   *  approved on THIS device), run BEFORE the device's inbound budget is spent. A
+   *  stranger is recorded as pending under the recorder's own budget and cap. */
+  admit(input: { tenantId: string; relayId: string; channel: RelayChannel; envelope: ChatIngressEnvelope; ownerUserId: string; ownerAccountId?: string }):
+    Promise<{ admitted: true } | { admitted: false; reason: string }>;
+  ingest(input: { tenantId: string; relayId: string; channel: RelayChannel; envelope: ChatIngressEnvelope; ownerUserId: string; ownerPersonalTenant?: string; ownerAccountId?: string }):
+    Promise<{ status: 'accepted'; conversationId: string } | { status: 'dropped'; reason: string }>;
+  /** ADR 1043 D3 — a revoked device's lane (settings, approvals, pending senders) goes with it. */
+  onRevoked?(tenantId: string, relayId: string): Promise<void>;
+}
+let relayIngress: RelayConversationalIngress | null = null;
+export function registerRelayConversationalIngress(handler: RelayConversationalIngress | null): void {
+  relayIngress = handler;
+}
+
 const DEVICE_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+/** ADR 1043 D1 — the device rotates on its first heartbeat past this (7 days before expiry). */
+const ROTATE_BEFORE_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
+const rotateAfterOf = (tokenExpiresAt: string): string =>
+  new Date(Date.parse(tokenExpiresAt) - ROTATE_BEFORE_EXPIRY_MS).toISOString();
+const mintDeviceToken = (): string => `dtok_${randomUUID().replace(/-/g, '')}`;
 const ACTIVATION_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const HEARTBEAT_INTERVAL_SECONDS = 30;
 const OUTBOUND_POLL_INTERVAL_SECONDS = 5;
@@ -104,6 +154,12 @@ export function registerMessagingRoutes(app: Express, deps: Deps): void {
         registeredAt: new Date(now).toISOString(),
       };
       await storage.upsertRelayDevice(record);
+      // ADR 1043 D3 — registration records WHO registered (never the body) and the
+      // device's OWN platform account (`accountId`: a WhatsApp JID or E.164, a Signal
+      // number, an iMessage handle; ADR 1042 review N1). The owner is bound at
+      // ACTIVATION, by the same person.
+      const accountId = optionalAccountId((req.body ?? {}).accountId);
+      await recordRegistration({ relayId: record.relayId, tenantId, ...(req.userId ? { registeredBy: req.userId } : {}), ...(accountId ? { accountId } : {}) });
       res.status(201).json({
         relayId: record.relayId,
         channel: record.channel,
@@ -121,34 +177,60 @@ export function registerMessagingRoutes(app: Express, deps: Deps): void {
       const relayId = requireString(body.relayId, 'relayId');
       const activationCode = requireString(body.activationCode, 'activationCode');
       const device = await storage.getRelayDevice(relayId);
-      if (!device || device.status === 'revoked') {
+      // ADR 1043 D3 — the caller's tenant must be the device's (the same 404 as an
+      // unknown relay, so a relay id from another tenant reveals nothing).
+      if (!device || device.status === 'revoked' || (device.tenantId !== resolveTenant(req) && !isWildcard(req))) {
         throw new OpenwopError('not_found', 'relay not found', 404);
+      }
+      // ADR 1043 M2 — WHO may activate is checked BEFORE any code is compared or
+      // counted: the person who registered it, or (for a device an operator key
+      // registered) a workspace admin. Anyone else gets the same 404 as an unknown
+      // relay and counts nothing, so no member can burn another member's code.
+      const registration = await getRegistration(relayId);
+      const callerKey = req.userId ?? req.principal?.principalId ?? 'anonymous';
+      const mayActivate = registration?.registeredBy
+        ? registration.registeredBy === req.userId
+        : await isRelayWorkspaceAdmin(req);
+      if (!mayActivate) throw new OpenwopError('not_found', 'relay not found', 404);
+      const locked = (n: number) => n >= ACTIVATION_MAX_FAILURES;
+      if (registration?.locked || locked(activationFailuresOf(registration, callerKey)) || (device.status === 'registered' && !device.activationCode)) {
+        throw new OpenwopError('forbidden', 'activation is locked for this relay after too many wrong codes; register the device again', 403, { reason: 'activation_locked' });
       }
       if (
         device.activationCode !== activationCode ||
         !device.activationExpiresAt ||
         Date.parse(device.activationExpiresAt) < Date.now()
       ) {
-        throw new OpenwopError('invalid_request', 'activation code invalid or expired', 400);
+        // Count the wrong code for (device, caller); the fifth locks this caller out.
+        const count = await recordActivationFailure(relayId, device.tenantId, callerKey);
+        if (locked(count)) {
+          throw new OpenwopError('forbidden', 'activation is locked for this relay after too many wrong codes; register the device again', 403, { reason: 'activation_locked' });
+        }
+        throw new OpenwopError('invalid_request', 'activation code invalid or expired', 400, {
+          attemptsLeft: Math.max(0, ACTIVATION_MAX_FAILURES - count),
+        });
       }
-      const deviceToken = `dtok_${randomUUID().replace(/-/g, '')}`;
+      const deviceToken = mintDeviceToken();
       const tokenExpiresAt = new Date(Date.now() + DEVICE_TOKEN_TTL_MS).toISOString();
-      const updated: RelayDeviceRecord = {
-        ...device,
-        status: 'active',
-        deviceTokenHash: hashToken(deviceToken),
-        tokenExpiresAt,
-      };
-      delete updated.activationCode;
-      delete updated.activationExpiresAt;
-      await storage.upsertRelayDevice(updated);
+      // ADR 1043 M3 — a conditional, column-only write: only a device still
+      // `registered` with THIS code is activated (two racing activations mint one token).
+      if (!(await storage.activateRelayDevice(relayId, activationCode, hashToken(deviceToken), tokenExpiresAt))) {
+        throw new OpenwopError('conflict', 'this relay was activated or changed meanwhile', 409, { reason: 'activation_conflict' });
+      }
+      // ADR 1043 D3 — the owner is the ACTIVATING person (ADR 1042 D7: never the body).
+      const accountId = optionalAccountId(body.accountId) ?? registration?.accountId;
+      const ownerBound = !!req.userId;
+      if (req.userId) await recordRelayOwner(relayId, device.tenantId, req.userId, req.personalTenant, accountId);
+      await clearRegistration(relayId);
       res.json({
         relayId,
         channel: device.channel,
         deviceToken, // returned once; only the hash is persisted
         tokenExpiresAt,
+        rotateAfter: rotateAfterOf(tokenExpiresAt),
         heartbeatIntervalSeconds: HEARTBEAT_INTERVAL_SECONDS,
         outboundPollIntervalSeconds: OUTBOUND_POLL_INTERVAL_SECONDS,
+        ownerBound,
       });
     } catch (err) {
       next(err);
@@ -163,12 +245,69 @@ export function registerMessagingRoutes(app: Express, deps: Deps): void {
       if (!device || (device.tenantId !== tenantId && !isWildcard(req))) {
         throw new OpenwopError('not_found', 'relay not found', 404);
       }
-      const revoked: RelayDeviceRecord = { ...device, status: 'revoked' };
-      delete revoked.deviceTokenHash;
-      delete revoked.tokenExpiresAt;
-      await storage.upsertRelayDevice(revoked);
+      // ADR 1043 D3 (coordinator follow-up) — only the device's OWNER or a
+      // workspace admin (the connections routes' workspace-level manage check).
+      if (!(await canRevokeRelay(req, device))) {
+        throw new OpenwopError('forbidden', 'Only the relay\'s owner or a workspace admin can revoke it.', 403, { reason: 'relay_revoke_forbidden', relayId });
+      }
+      // ADR 1043 M3 — column-only: nothing loaded earlier is written back.
+      await storage.revokeRelayDevice(relayId);
       await storage.deleteRelayOutbound(relayId);
+      // ADR 1043 D3 — the device's lifecycle rows, its owner and its lane go with it.
+      await purgeRelayLifecycle(relayId, device.tenantId);
+      // ADR 1043 RELAY-LOG-RETENTION-1 — and its delivery log and inbound dedup claims
+      // (both name the contacts it talked to).
+      await storage.deleteDeliveryLogForRelay(device.tenantId, relayId);
+      await deleteRelayInboundClaims(device.tenantId, { relayIds: [relayId] });
+      await deleteRelayOwner(relayId);
+      // ADR 1043 D1 — a tombstone for the revoked token until it would have expired,
+      // so the relay is told `device_revoked` (stop for good), not `device_token_invalid`.
+      if (device.deviceTokenHash && device.tokenExpiresAt) {
+        await recordTokenGrace(device.deviceTokenHash, relayId, device.tenantId, device.tokenExpiresAt);
+      }
+      if (relayIngress?.onRevoked) await relayIngress.onRevoked(device.tenantId, relayId).catch(() => undefined);
       res.json({ relayId, revoked: true });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ADR 1042 CHAN-P0-8 + ADR 1043 D3 — the relay devices of the caller's workspace,
+  // for the channels settings page. The SAME tenant predicate as `relay/revoke`
+  // (`resolveTenant`). Never a secret (no token hash, no activation code). The
+  // owner's own platform account (`accountId`) is shown only to that owner.
+  // `online` derives from the ONE presence source (ADR 1043: `relayPresenceOf`,
+  // the sweep's offline mark or a heartbeat older than OFFLINE_AFTER_MS), and
+  // `canRevoke` is the revoke route's own predicate (`canRevokeRelay`).
+  app.get(`${BASE}/relay/devices`, async (req, res, next) => {
+    try {
+      const tenantId = resolveTenant(req);
+      const caller = req.userId ?? req.principal?.principalId;
+      const now = Date.now();
+      const admin = await isRelayWorkspaceAdmin(req);
+      const devices = await Promise.all((await storage.listRelayDevices(tenantId)).map(async (d) => {
+        const owner = await getRelayOwnerRecord(d.relayId, d.tenantId);
+        const ownedByCaller = owner !== null && caller !== undefined && owner.ownerUserId === caller;
+        const p = await getPresence(d.relayId);
+        const presence = relayPresenceOf(d, p, now);
+        const lastHeartbeatAt = p?.lastHeartbeatAt ?? d.lastHeartbeatAt;
+        return {
+          relayId: d.relayId,
+          channel: d.channel,
+          ...(d.deviceName ? { deviceName: d.deviceName } : {}),
+          status: d.status,
+          registeredAt: d.registeredAt,
+          ...(lastHeartbeatAt ? { lastHeartbeatAt } : {}),
+          online: presence === 'online',
+          presence,
+          ...(p?.offlineSince ? { offlineSince: p.offlineSince } : {}),
+          owner: owner
+            ? { userId: owner.ownerUserId, ownedByCaller, ...(ownedByCaller && owner.ownerAccountId ? { accountId: owner.ownerAccountId } : {}) }
+            : null,
+          canRevoke: d.status !== 'revoked' && (ownedByCaller || admin),
+        };
+      }));
+      res.json({ devices });
     } catch (err) {
       next(err);
     }
@@ -178,19 +317,60 @@ export function registerMessagingRoutes(app: Express, deps: Deps): void {
 
   app.post(`${BASE}/device/heartbeat`, async (req, res, next) => {
     try {
-      const device = await requireDevice(req, storage);
+      const { device } = await authDevice(req, storage);
       const reported = optionalString((req.body ?? {}).status);
-      await storage.upsertRelayDevice({
-        ...device,
-        lastHeartbeatAt: new Date().toISOString(),
-        ...(reported ? { lastReportedStatus: reported } : {}),
-      });
+      const at = new Date().toISOString();
+      // ADR 1043 M3 — touch only the heartbeat columns, and only while the device is
+      // still active with the token it authenticated against: a revoke or a rotation
+      // that landed after auth is never undone by this write.
+      let touched = !!device.deviceTokenHash && await storage.touchRelayDeviceHeartbeat(device.relayId, device.deviceTokenHash, at, reported?.slice(0, 64));
+      if (!touched) {
+        const fresh = (await authDevice(req, storage)).device; // throws device_revoked / _invalid / _expired
+        touched = !!fresh.deviceTokenHash && await storage.touchRelayDeviceHeartbeat(fresh.relayId, fresh.deviceTokenHash, at, reported?.slice(0, 64));
+        if (!touched) throw new OpenwopError('conflict', 'the relay changed during the heartbeat; retry', 409, { reason: 'relay_changed' });
+      }
+      // ADR 1043 D3 — presence; a device the sweep marked offline is back.
+      if (await recordHeartbeat(device.relayId, device.tenantId, device.channel, at)) {
+        await storage.appendDeliveryLog({
+          logId: `dlv_${randomUUID()}`, tenantId: device.tenantId, relayId: device.relayId, channel: device.channel,
+          direction: 'inbound', conversationId: '', status: 'online', detail: 'device heartbeat resumed', at,
+        });
+      }
       res.json({
         ok: true,
-        serverTime: new Date().toISOString(),
+        serverTime: at,
+        ...(device.tokenExpiresAt ? { tokenExpiresAt: device.tokenExpiresAt, rotateAfter: rotateAfterOf(device.tokenExpiresAt) } : {}),
         heartbeatIntervalSeconds: HEARTBEAT_INTERVAL_SECONDS,
         outboundPollIntervalSeconds: OUTBOUND_POLL_INTERVAL_SECONDS,
       });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ADR 1043 D1 — rotate the device token. The previous token keeps working for a
+  // 10-minute grace, so a client that dies before saving the new one still has a
+  // token; a rotation presented WITH the previous token is refused (a stolen old
+  // token cannot fork the device).
+  app.post(`${BASE}/device/rotate`, async (req, res, next) => {
+    try {
+      const { device, viaGrace } = await authDevice(req, storage);
+      if (viaGrace) {
+        // The client holds the PREVIOUS token: its last rotation answer was lost.
+        // There is no safe re-auth from an old token (a stolen one could fork the
+        // device), so the relay is told plainly and must be set up again.
+        throw new OpenwopError('unauthenticated', 'this token was replaced by a rotation whose answer the relay never saved; run relay setup again', 401, { reason: 'device_token_superseded' });
+      }
+      const deviceToken = mintDeviceToken();
+      const now = Date.now();
+      const tokenExpiresAt = new Date(now + DEVICE_TOKEN_TTL_MS).toISOString();
+      const previousTokenValidUntil = new Date(now + TOKEN_GRACE_MS).toISOString();
+      // ADR 1043 M3 — swap only from the hash this request authenticated with.
+      if (!device.deviceTokenHash || !(await storage.rotateRelayDeviceToken(device.relayId, device.deviceTokenHash, hashToken(deviceToken), tokenExpiresAt))) {
+        throw new OpenwopError('conflict', 'the relay changed during the rotation; retry', 409, { reason: 'relay_changed' });
+      }
+      await recordTokenGrace(device.deviceTokenHash, device.relayId, device.tenantId, previousTokenValidUntil);
+      res.json({ relayId: device.relayId, deviceToken, tokenExpiresAt, rotateAfter: rotateAfterOf(tokenExpiresAt), previousTokenValidUntil });
     } catch (err) {
       next(err);
     }
@@ -201,72 +381,143 @@ export function registerMessagingRoutes(app: Express, deps: Deps): void {
       const device = await requireDevice(req, storage);
       const envelope = parseIngress(req.body, device.channel);
       const sessionKey = `${device.channel}:${envelope.conversationId}`;
-      const existing = await storage.getMessagingSession(sessionKey);
-      await storage.upsertMessagingSession({
-        sessionKey,
-        tenantId: device.tenantId,
-        channel: device.channel,
-        conversationId: envelope.conversationId,
-        peerId: envelope.peerId,
-        ...(envelope.peerDisplay ? { peerDisplay: envelope.peerDisplay } : {}),
-        lastInboundAt: envelope.timestamp,
-        messageCount: (existing?.messageCount ?? 0) + 1,
-        ...(existing?.lastRunId ? { lastRunId: existing.lastRunId } : {}),
-      });
-
-      // Per-connector access policy + pairing/allowlist (Phase C). Strictly opt-
-      // in: if no enabled connector exists for (tenant, channel) OR no policy
-      // row is set, behavior is unchanged (open). The gate may decide to drop
-      // the message, mint a pairing code, or pass through to the bridge.
-      const gate = await evaluatePolicyGate(storage, device, envelope);
-      if (gate.action === 'drop') {
-        await storage.appendDeliveryLog({
-          logId: `dlv_${randomUUID()}`, tenantId: device.tenantId, relayId: device.relayId, channel: device.channel,
-          direction: 'inbound', conversationId: envelope.conversationId, status: 'dropped', detail: gate.reason, at: new Date().toISOString(),
-        });
-        res.status(202).json({ accepted: false, sessionKey, dropped: gate.reason });
-        return;
-      }
-      if (gate.action === 'pair') {
-        const pairing = await mintPairingCode(storage, gate.connectorId, device, envelope);
-        await enqueueOutbound(storage, device.relayId, {
-          channel: device.channel,
-          conversationId: envelope.conversationId,
-          text: `Pairing requested. To approve this peer, run:\n  openwop messaging pairing approve --connector ${gate.connectorId} --code ${pairing.code}\n(Expires in 1h.)`,
-        });
-        await storage.appendDeliveryLog({
-          logId: `dlv_${randomUUID()}`, tenantId: device.tenantId, relayId: device.relayId, channel: device.channel,
-          direction: 'inbound', conversationId: envelope.conversationId, status: 'pairing-pending', detail: pairing.pairingId, at: new Date().toISOString(),
-        });
-        res.status(202).json({ accepted: false, sessionKey, pairing: { pairingId: pairing.pairingId, code: pairing.code, expiresAt: pairing.expiresAt } });
-        return;
-      }
-
-      let runId: string | undefined;
-      if (bridge) {
-        const result = await bridge.onInbound({
-          device: { relayId: device.relayId, tenantId: device.tenantId, channel: device.channel },
-          envelope,
-          sessionKey,
-        });
-        if (result && result.runId) {
-          runId = result.runId;
-          const s = await storage.getMessagingSession(sessionKey);
-          if (s) await storage.upsertMessagingSession({ ...s, lastRunId: runId });
+      // ADR 1042 D7 — with Channels into chat on for the tenant, a message no
+      // routing rule claims becomes a turn in the device owner's main-chat
+      // conversation (no `messaging_sessions` history, no `uppercase` default).
+      // A matching rule keeps its workflow/agent; with the feature off nothing
+      // here changes.
+      const conversational = relayIngress !== null
+        && (await relayIngress.enabled(device.tenantId).catch(() => false))
+        && selectRoutingRule(await storage.listMessagingRoutingRules(device.tenantId), device, envelope) === undefined;
+      // ADR 1043 D9 + ADR 1042 D12 — conversation mode ADMITS before the device's
+      // inbound budget is spent: an ownerless device, the owner's outgoing chatter,
+      // a stranger or an un-addressed group is acknowledged and dropped here, so
+      // nobody outside the device's approvals can push it into 429s. A stranger is
+      // recorded as pending under the recorder's own budget and cap.
+      if (conversational && relayIngress) {
+        const owner = await getRelayOwnerRecord(device.relayId, device.tenantId);
+        const admission = owner
+          ? await relayIngress.admit({
+            tenantId: device.tenantId, relayId: device.relayId, channel: device.channel, envelope, ownerUserId: owner.ownerUserId,
+            ...(owner.ownerAccountId ? { ownerAccountId: owner.ownerAccountId } : {}),
+          })
+          : { admitted: false as const, reason: 'no-owner' };
+        if (!admission.admitted) {
+          // Security review of #5573 (C1): an admission drop writes NO delivery-log row.
+          // It runs before any budget, so a stranger or a busy un-addressed group could
+          // otherwise grow `messaging_delivery_log` (no retention, no erasure) with
+          // outsiders' chat ids. A stranger is already recorded, bounded, by the
+          // pending recorder; this logs only the reason, never a chat or sender id.
+          relayLog.info('relay_inbound_dropped', { relayId: device.relayId, channel: device.channel, reason: admission.reason });
+          res.status(202).json({ accepted: false, sessionKey, dropped: admission.reason });
+          return;
         }
       }
-      await storage.appendDeliveryLog({
-        logId: `dlv_${randomUUID()}`,
-        tenantId: device.tenantId,
-        relayId: device.relayId,
-        channel: device.channel,
-        direction: 'inbound',
-        conversationId: envelope.conversationId,
-        status: runId ? 'bridged' : 'ingested',
-        ...(runId ? { detail: `run ${runId}` } : {}),
-        at: new Date().toISOString(),
-      });
-      res.status(202).json({ accepted: true, sessionKey, ...(runId ? { runId } : {}) });
+      // ADR 1042 D6 — the per-device inbound budget (after auth, so only a real
+      // device has a bucket; after admission in conversation mode). 429 +
+      // Retry-After; the device retries.
+      if (enforceChannelInboundRateLimit(res, `relay:${device.relayId}`)) return;
+      // ADR 1042 D5 — one platform message is processed once. A duplicate (a
+      // device retry, a platform redelivery) is acknowledged and does nothing.
+      if (!(await claimRelayInbound(device, envelope.conversationId, envelope.platformMessageId))) {
+        res.status(202).json({ accepted: true, sessionKey, deduped: true });
+        return;
+      }
+      try {
+        const existing = conversational ? null : await storage.getMessagingSession(sessionKey);
+        if (!conversational) await storage.upsertMessagingSession({
+          sessionKey,
+          tenantId: device.tenantId,
+          channel: device.channel,
+          conversationId: envelope.conversationId,
+          peerId: envelope.peerId,
+          ...(envelope.peerDisplay ? { peerDisplay: envelope.peerDisplay } : {}),
+          lastInboundAt: envelope.timestamp,
+          messageCount: (existing?.messageCount ?? 0) + 1,
+          ...(existing?.lastRunId ? { lastRunId: existing.lastRunId } : {}),
+        });
+
+        if (conversational && relayIngress) {
+          // ADR 1043 D9 (CHAN-P1b) — conversation mode admits by the DEVICE's own
+          // approvals, which its owner manages (checked above before the budget, and
+          // again by the ingest at dispatch). The tenant-wide connector, policy,
+          // allowlist and pairing below are the legacy workflow lane's only: a peer
+          // approved there, or on another member's device, is never admitted here.
+          // The CURRENT owner (security review M4), read per message.
+          const owner = await getRelayOwnerRecord(device.relayId, device.tenantId);
+          const outcome = owner
+            ? await relayIngress.ingest({ tenantId: device.tenantId, relayId: device.relayId, channel: device.channel, envelope, ...owner })
+            : { status: 'dropped' as const, reason: 'no-owner' };
+          await storage.appendDeliveryLog({
+            logId: `dlv_${randomUUID()}`, tenantId: device.tenantId, relayId: device.relayId, channel: device.channel,
+            direction: 'inbound', conversationId: envelope.conversationId,
+            status: outcome.status === 'accepted' ? 'bridged' : 'dropped',
+            detail: outcome.status === 'accepted' ? `conversation ${outcome.conversationId}` : outcome.reason,
+            at: new Date().toISOString(),
+          });
+          res.status(202).json(outcome.status === 'accepted'
+            ? { accepted: true, sessionKey, conversationId: outcome.conversationId }
+            : { accepted: false, sessionKey, dropped: outcome.reason });
+          return;
+        }
+
+        // The legacy workflow lane: the per-connector access policy + pairing/allowlist
+        // (Phase C), admin-configured (ADR 1043 H1). Strictly opt-in: if no enabled
+        // connector exists for (tenant, channel) OR no policy row is set, behavior is
+        // unchanged (open). The gate may drop the message, record a pairing request,
+        // or pass through to the bridge.
+        const gate = await evaluatePolicyGate(storage, device, envelope);
+        if (gate.action === 'drop') {
+          await storage.appendDeliveryLog({
+            logId: `dlv_${randomUUID()}`, tenantId: device.tenantId, relayId: device.relayId, channel: device.channel,
+            direction: 'inbound', conversationId: envelope.conversationId, status: 'dropped', detail: gate.reason, at: new Date().toISOString(),
+          });
+          res.status(202).json({ accepted: false, sessionKey, dropped: gate.reason });
+          return;
+        }
+        if (gate.action === 'pair') {
+          // ADR 1043 D9 — the request is recorded for a workspace admin (`GET pairing`)
+          // and NOTHING is sent to the stranger: a pairing prompt would go out from
+          // the device owner's personal account to anyone who writes in.
+          const pairing = await mintPairingCode(storage, gate.connectorId, device, envelope);
+          await storage.appendDeliveryLog({
+            logId: `dlv_${randomUUID()}`, tenantId: device.tenantId, relayId: device.relayId, channel: device.channel,
+            direction: 'inbound', conversationId: envelope.conversationId, status: 'pairing-pending', detail: pairing.pairingId, at: new Date().toISOString(),
+          });
+          res.status(202).json({ accepted: false, sessionKey, pairing: { pairingId: pairing.pairingId, code: pairing.code, expiresAt: pairing.expiresAt } });
+          return;
+        }
+
+        let runId: string | undefined;
+        if (bridge) {
+          const result = await bridge.onInbound({
+            device: { relayId: device.relayId, tenantId: device.tenantId, channel: device.channel },
+            envelope,
+            sessionKey,
+          });
+          if (result && result.runId) {
+            runId = result.runId;
+            const s = await storage.getMessagingSession(sessionKey);
+            if (s) await storage.upsertMessagingSession({ ...s, lastRunId: runId });
+          }
+        }
+        await storage.appendDeliveryLog({
+          logId: `dlv_${randomUUID()}`,
+          tenantId: device.tenantId,
+          relayId: device.relayId,
+          channel: device.channel,
+          direction: 'inbound',
+          conversationId: envelope.conversationId,
+          status: runId ? 'bridged' : 'ingested',
+          ...(runId ? { detail: `run ${runId}` } : {}),
+          at: new Date().toISOString(),
+        });
+        res.status(202).json({ accepted: true, sessionKey, ...(runId ? { runId } : {}) });
+      } catch (err) {
+        // A failed attempt gives its claim back, so the device's retry lands.
+        await releaseRelayInbound(device.relayId, envelope.conversationId, envelope.platformMessageId).catch(() => undefined);
+        throw err;
+      }
     } catch (err) {
       next(err);
     }
@@ -276,7 +527,10 @@ export function registerMessagingRoutes(app: Express, deps: Deps): void {
     try {
       const device = await requireDevice(req, storage);
       const limit = Math.min(Number(req.query.limit) || 50, 200);
-      const messages = await storage.listRelayOutbound(device.relayId, limit);
+      const queued = await storage.listRelayOutbound(device.relayId, limit);
+      // ADR 1043 D1 — each egress carries how many transient failures it has seen.
+      const messages = [];
+      for (const m of queued) messages.push({ ...m, attempts: await egressAttempts(m.egressId) });
       res.json({ relayId: device.relayId, messages });
     } catch (err) {
       next(err);
@@ -286,12 +540,48 @@ export function registerMessagingRoutes(app: Express, deps: Deps): void {
   app.post(`${BASE}/device/ack`, async (req, res, next) => {
     try {
       const device = await requireDevice(req, storage);
-      const egressIds = (req.body ?? {}).egressIds;
-      if (!Array.isArray(egressIds)) {
-        throw new OpenwopError('invalid_request', 'egressIds[] is required', 400);
+      const body = (req.body ?? {}) as { egressIds?: unknown; failed?: unknown };
+      // ADR 1043 D1 — `egressIds` were delivered; `failed[]` were not. At least one.
+      if (body.egressIds !== undefined && !Array.isArray(body.egressIds)) {
+        throw new OpenwopError('invalid_request', 'egressIds MUST be an array', 400);
       }
-      const acked = await storage.ackRelayOutbound(device.relayId, egressIds.map(String));
-      res.json({ acked });
+      if (body.failed !== undefined && !Array.isArray(body.failed)) {
+        throw new OpenwopError('invalid_request', 'failed MUST be an array', 400);
+      }
+      if (body.egressIds === undefined && body.failed === undefined) {
+        throw new OpenwopError('invalid_request', 'egressIds[] or failed[] is required', 400);
+      }
+      const at = new Date().toISOString();
+      const log = (egressId: string, status: string, detail: string) => storage.appendDeliveryLog({
+        logId: `dlv_${randomUUID()}`, tenantId: device.tenantId, relayId: device.relayId, channel: device.channel,
+        direction: 'outbound', conversationId: '', status, detail: `egress ${egressId}: ${detail}`, at,
+      });
+      // Only ids this device still has queued count (an ack is idempotent, and one
+      // device can never ack or fail another device's egress).
+      const pending = new Map((await storage.listRelayOutbound(device.relayId, 1000)).map((m) => [m.egressId, m]));
+      const delivered = Array.isArray(body.egressIds) ? body.egressIds.map(String).filter((id) => pending.has(id)) : [];
+      const acked = delivered.length ? await storage.ackRelayOutbound(device.relayId, delivered) : 0;
+      for (const id of delivered) {
+        await clearEgressAttempts(id).catch(() => undefined);
+        await log(id, 'delivered', 'delivered');
+      }
+      let failed = 0;
+      let deadLettered = 0;
+      for (const raw of Array.isArray(body.failed) ? body.failed : []) {
+        const f = (raw ?? {}) as { egressId?: unknown; error?: unknown; permanent?: unknown };
+        const egressId = typeof f.egressId === 'string' ? f.egressId : '';
+        if (!pending.has(egressId) || delivered.includes(egressId)) continue;
+        const error = (typeof f.error === 'string' && f.error ? f.error : 'unknown error').slice(0, 200);
+        failed += 1;
+        const count = f.permanent === true ? EGRESS_MAX_ATTEMPTS : await recordEgressAttempt(egressId, device.relayId, device.tenantId, error);
+        if (count >= EGRESS_MAX_ATTEMPTS) {
+          await storage.ackRelayOutbound(device.relayId, [egressId]);
+          await clearEgressAttempts(egressId).catch(() => undefined);
+          await log(egressId, 'failed', f.permanent === true ? `permanent: ${error}` : `max_attempts: ${error}`);
+          deadLettered += 1;
+        }
+      }
+      res.json({ acked, failed, deadLettered });
     } catch (err) {
       next(err);
     }
@@ -308,6 +598,14 @@ export function registerMessagingRoutes(app: Express, deps: Deps): void {
       if (!device || (device.tenantId !== tenantId && !isWildcard(req))) {
         throw new OpenwopError('not_found', 'relay not found', 404);
       }
+      // ADR 1043 H1 — sending AS a device is its OWNER's act only. Another member
+      // (an admin included) cannot queue a send through someone's personal account.
+      // A device with no owner (an operator key registered it) only the wildcard
+      // operator may drive. The host's own replies enqueue by function call.
+      if (!(await isRelayOwnerCaller(req, device)) && !(isWildcard(req) && !(await getRelayOwnerRecord(device.relayId, device.tenantId)))) {
+        throw new OpenwopError('forbidden', 'Only the relay\'s owner can send through it.', 403, { reason: 'relay_owner_required', relayId });
+      }
+      if (device.status !== 'active') throw new OpenwopError('conflict', 'relay is not active', 409, { reason: 'relay_not_active', relayId });
       const egress = await enqueueOutbound(storage, relayId, {
         channel: device.channel,
         conversationId: requireString(body.conversationId, 'conversationId'),
@@ -334,6 +632,7 @@ export function registerMessagingRoutes(app: Express, deps: Deps): void {
 
   app.post(`${BASE}/connectors`, async (req, res, next) => {
     try {
+      await requireRelayAdmin(req); // ADR 1043 H1 — workspace-wide relay config
       const tenantId = resolveTenant(req);
       const body = req.body ?? {};
       const channel = assertChannel(body.channel);
@@ -366,6 +665,7 @@ export function registerMessagingRoutes(app: Express, deps: Deps): void {
 
   app.post(`${BASE}/connectors/:id/enable`, async (req, res, next) => {
     try {
+      await requireRelayAdmin(req); // ADR 1043 H1 — workspace-wide relay config
       const c = await getConnectorOr404(req, storage);
       const updated = { ...c, enabled: true, updatedAt: new Date().toISOString() };
       await storage.upsertMessagingConnector(updated);
@@ -377,6 +677,7 @@ export function registerMessagingRoutes(app: Express, deps: Deps): void {
 
   app.post(`${BASE}/connectors/:id/disable`, async (req, res, next) => {
     try {
+      await requireRelayAdmin(req); // ADR 1043 H1 — workspace-wide relay config
       const c = await getConnectorOr404(req, storage);
       const updated = { ...c, enabled: false, updatedAt: new Date().toISOString() };
       await storage.upsertMessagingConnector(updated);
@@ -394,7 +695,7 @@ export function registerMessagingRoutes(app: Express, deps: Deps): void {
       // only green when an active device for this channel has heartbeated
       // recently. Without one, outbound just queues undelivered — report that
       // honestly rather than a false-positive.
-      const FRESH_MS = 90_000;
+      const FRESH_MS = OFFLINE_AFTER_MS; // ADR 1043 — the ONE presence window
       const now = Date.now();
       const devices = (await storage.listRelayDevices(c.tenantId)).filter(
         (d) => d.channel === c.channel && d.status === 'active',
@@ -427,6 +728,7 @@ export function registerMessagingRoutes(app: Express, deps: Deps): void {
 
   app.get(`${BASE}/sessions`, async (req, res, next) => {
     try {
+      await requireRelayAdmin(req); // ADR 1043 H1 — workspace-wide relay config
       const sessions = await storage.listMessagingSessions(listTenantFilter(req));
       res.json({ sessions });
     } catch (err) {
@@ -436,6 +738,7 @@ export function registerMessagingRoutes(app: Express, deps: Deps): void {
 
   app.get(`${BASE}/sessions/:key`, async (req, res, next) => {
     try {
+      await requireRelayAdmin(req); // ADR 1043 H1 — workspace-wide relay config
       res.json(await getSessionOr404(req, storage));
     } catch (err) {
       next(err);
@@ -444,6 +747,7 @@ export function registerMessagingRoutes(app: Express, deps: Deps): void {
 
   app.delete(`${BASE}/sessions/:key`, async (req, res, next) => {
     try {
+      await requireRelayAdmin(req); // ADR 1043 H1 — workspace-wide relay config
       const s = await getSessionOr404(req, storage);
       await storage.deleteMessagingSession(s.sessionKey);
       res.json({ sessionKey: s.sessionKey, deleted: true });
@@ -468,6 +772,7 @@ export function registerMessagingRoutes(app: Express, deps: Deps): void {
 
   app.put(`${BASE}/connectors/:id/policy`, async (req, res, next) => {
     try {
+      await requireRelayAdmin(req); // ADR 1043 H1 — workspace-wide relay config
       const c = await getConnectorOr404(req, storage);
       const body = req.body ?? {};
       const existing = await storage.getMessagingPolicy(c.connectorId);
@@ -517,6 +822,7 @@ export function registerMessagingRoutes(app: Express, deps: Deps): void {
 
   app.post(`${BASE}/routing`, async (req, res, next) => {
     try {
+      await requireRelayAdmin(req); // ADR 1043 H1 — workspace-wide relay config
       const tenantId = resolveTenant(req);
       const body = req.body ?? {};
       const wf = optionalString(body.workflowId);
@@ -542,6 +848,7 @@ export function registerMessagingRoutes(app: Express, deps: Deps): void {
 
   app.delete(`${BASE}/routing/:ruleId`, async (req, res, next) => {
     try {
+      await requireRelayAdmin(req); // ADR 1043 H1 — workspace-wide relay config
       // Scope the delete to the caller's tenant unless wildcard.
       const found = await getRoutingRuleOr404(req, storage);
       await storage.deleteMessagingRoutingRule(found.ruleId);
@@ -556,6 +863,7 @@ export function registerMessagingRoutes(app: Express, deps: Deps): void {
 
   app.get(`${BASE}/identities`, async (req, res, next) => {
     try {
+      await requireRelayAdmin(req); // ADR 1043 H1 — workspace-wide relay config
       const identities = await storage.listMessagingIdentities(listTenantFilter(req));
       res.json({ identities });
     } catch (err) {
@@ -565,6 +873,7 @@ export function registerMessagingRoutes(app: Express, deps: Deps): void {
 
   app.post(`${BASE}/identities`, async (req, res, next) => {
     try {
+      await requireRelayAdmin(req); // ADR 1043 H1 — workspace-wide relay config
       const tenantId = resolveTenant(req);
       const body = req.body ?? {};
       const identityId = optionalString(body.identityId);
@@ -604,6 +913,7 @@ export function registerMessagingRoutes(app: Express, deps: Deps): void {
 
   app.get(`${BASE}/identities/:id`, async (req, res, next) => {
     try {
+      await requireRelayAdmin(req); // ADR 1043 H1 — workspace-wide relay config
       res.json(await getIdentityOr404(req, storage));
     } catch (err) {
       next(err);
@@ -613,6 +923,7 @@ export function registerMessagingRoutes(app: Express, deps: Deps): void {
   // Unlink a single peer (?channel=&peerId=) or delete the whole identity.
   app.delete(`${BASE}/identities/:id`, async (req, res, next) => {
     try {
+      await requireRelayAdmin(req); // ADR 1043 H1 — workspace-wide relay config
       const identity = await getIdentityOr404(req, storage);
       const channel = optionalString(req.query.channel);
       const peerId = optionalString(req.query.peerId);
@@ -641,7 +952,19 @@ export function registerMessagingRoutes(app: Express, deps: Deps): void {
         ...(optionalString(req.query.status) ? { status: String(req.query.status) } : {}),
         ...(optionalString(req.query.limit) ? { limit: clampLimit(req.query.limit) } : {}),
       };
-      const entries = await storage.listDeliveryLog(filter);
+      const all = await storage.listDeliveryLog(filter);
+      // ADR 1043 H1 — the log names other members' contacts: a non-admin sees
+      // only the rows of relays they own.
+      let entries = all;
+      if (!(await isRelayWorkspaceAdmin(req))) {
+        const caller = req.userId ?? req.principal?.principalId;
+        const owned = new Set<string>();
+        for (const d of await storage.listRelayDevices(resolveTenant(req))) {
+          const o = await getRelayOwnerRecord(d.relayId, d.tenantId);
+          if (o && caller !== undefined && o.ownerUserId === caller) owned.add(d.relayId);
+        }
+        entries = all.filter((e) => !!e.relayId && owned.has(e.relayId));
+      }
       res.json({ entries });
     } catch (err) {
       next(err);
@@ -684,6 +1007,7 @@ export function registerMessagingRoutes(app: Express, deps: Deps): void {
 
   app.get(`${BASE}/pairing`, async (req, res, next) => {
     try {
+      await requireRelayAdmin(req); // ADR 1043 H1 — workspace-wide relay config
       const scope = await tenantConnectorScope(storage, req);
       const requested = optionalString(req.query.connectorId);
       if (requested && !scope.owns(requested)) {
@@ -701,6 +1025,7 @@ export function registerMessagingRoutes(app: Express, deps: Deps): void {
 
   app.post(`${BASE}/pairing/approve`, async (req, res, next) => {
     try {
+      await requireRelayAdmin(req); // ADR 1043 H1 — workspace-wide relay config
       const body = req.body ?? {};
       const connectorId = requireString(body.connectorId, 'connectorId');
       const code = requireString(body.code, 'code');
@@ -729,6 +1054,7 @@ export function registerMessagingRoutes(app: Express, deps: Deps): void {
 
   app.get(`${BASE}/allowlist`, async (req, res, next) => {
     try {
+      await requireRelayAdmin(req); // ADR 1043 H1 — workspace-wide relay config
       const scope = await tenantConnectorScope(storage, req);
       const requested = optionalString(req.query.connectorId);
       if (requested && !scope.owns(requested)) {
@@ -744,6 +1070,7 @@ export function registerMessagingRoutes(app: Express, deps: Deps): void {
 
   app.post(`${BASE}/allowlist`, async (req, res, next) => {
     try {
+      await requireRelayAdmin(req); // ADR 1043 H1 — workspace-wide relay config
       const body = req.body ?? {};
       const connectorId = requireString(body.connectorId, 'connectorId');
       const channel = assertChannel(body.channel);
@@ -768,6 +1095,7 @@ export function registerMessagingRoutes(app: Express, deps: Deps): void {
 
   app.delete(`${BASE}/allowlist`, async (req, res, next) => {
     try {
+      await requireRelayAdmin(req); // ADR 1043 H1 — workspace-wide relay config
       const connectorId = requireString(req.query.connectorId, 'connectorId');
       const channel = assertChannel(req.query.channel);
       const peerId = requireString(req.query.peerId, 'peerId');
@@ -854,17 +1182,86 @@ function listTenantFilter(req: Request): string | undefined {
   return req.tenantId;
 }
 
+/**
+ * ADR 1043 D3 — a workspace admin for relay purposes: the SAME workspace-level
+ * manage check the connections routes use (`authorizeManage` on a row with no
+ * owner and no org ⇒ `host:connections:manage` on the caller's workspace).
+ */
+export async function isRelayWorkspaceAdmin(req: Request): Promise<boolean> {
+  // Imported lazily: a static import of the connections routes from here forms a
+  // module-init cycle (media → profiles → chatContext) at app boot.
+  const { authorizeManage } = await import('../features/connections/routes.js');
+  try {
+    await authorizeManage(req, { connectionId: 'relay-devices' });
+    return true;
+  } catch (err) {
+    if (err instanceof OpenwopError && err.httpStatus === 403) return false;
+    throw err;
+  }
+}
+
+/** ADR 1043 H1 — is the caller this device's owner? */
+async function isRelayOwnerCaller(req: Request, device: RelayDeviceRecord): Promise<boolean> {
+  const caller = req.userId ?? req.principal?.principalId;
+  const owner = await getRelayOwnerRecord(device.relayId, device.tenantId);
+  return !!owner && caller !== undefined && owner.ownerUserId === caller;
+}
+
+/**
+ * ADR 1043 H1 — workspace-wide relay configuration (connectors, policy, allowlist,
+ * pairing, routing, identities, sessions) changes how EVERY member's relay admits
+ * and routes messages, so it is a workspace admin's act (the same check as revoke).
+ */
+async function requireRelayAdmin(req: Request): Promise<void> {
+  if (!(await isRelayWorkspaceAdmin(req))) {
+    throw new OpenwopError('forbidden', 'Only a workspace admin can manage the workspace\'s messaging relay settings.', 403, { reason: 'relay_admin_required' });
+  }
+}
+
+/** ADR 1043 D3 — may this caller revoke this device? Its owner, or a workspace admin. */
+async function canRevokeRelay(req: Request, device: RelayDeviceRecord): Promise<boolean> {
+  if (await isRelayOwnerCaller(req, device)) return true;
+  return isRelayWorkspaceAdmin(req);
+}
+
 async function requireDevice(req: Request, storage: Storage): Promise<RelayDeviceRecord> {
+  return (await authDevice(req, storage)).device;
+}
+
+/**
+ * ADR 1043 D1 — authenticate a device token. Every refusal is a 401 with a
+ * `details.reason` the relay acts on. A previous token still in its rotation
+ * grace authenticates (`viaGrace`), and is refused by the rotate route.
+ */
+async function authDevice(req: Request, storage: Storage): Promise<{ device: RelayDeviceRecord; viaGrace: boolean }> {
   const token = req.header('x-openwop-device-token');
-  if (!token) throw new OpenwopError('unauthenticated', 'x-openwop-device-token header required', 401);
-  const device = await storage.getRelayDeviceByTokenHash(hashToken(token));
-  if (!device || device.status !== 'active') {
-    throw new OpenwopError('unauthenticated', 'invalid or revoked device token', 401);
+  if (!token) throw new OpenwopError('unauthenticated', 'x-openwop-device-token header required', 401, { reason: 'device_token_missing' });
+  const hash = hashToken(token);
+  let device = await storage.getRelayDeviceByTokenHash(hash);
+  let viaGrace = false;
+  if (!device) {
+    const relayId = await relayForGraceToken(hash);
+    if (relayId) { device = await storage.getRelayDevice(relayId); viaGrace = true; }
   }
-  if (device.tokenExpiresAt && Date.parse(device.tokenExpiresAt) < Date.now()) {
-    throw new OpenwopError('unauthenticated', 'device token expired', 401);
+  if (!device) throw new OpenwopError('unauthenticated', 'invalid device token', 401, { reason: 'device_token_invalid' });
+  if (device.status !== 'active') throw new OpenwopError('unauthenticated', 'this relay was revoked', 401, { reason: 'device_revoked' });
+  // Fail closed (review prep, P1): a token with NO expiry, or an unparseable one,
+  // is expired. Every path that writes a token hash (activate, rotate) also
+  // writes `tokenExpiresAt`, so only a legacy or corrupt row lands here.
+  const expiresAt = device.tokenExpiresAt ? Date.parse(device.tokenExpiresAt) : Number.NaN;
+  if (!Number.isFinite(expiresAt) || expiresAt < Date.now()) {
+    throw new OpenwopError('unauthenticated', 'device token expired', 401, { reason: 'device_token_expired' });
   }
-  return device;
+  return { device, viaGrace };
+}
+
+const ACCOUNT_ID_RE = /^[A-Za-z0-9_.:+@;-]{1,128}$/;
+/** ADR 1042 N1 / ADR 1043 D6 — the device's own account id, or 400. */
+export function optionalAccountId(raw: unknown): string | undefined {
+  const v = optionalString(raw)?.trim();
+  if (!v) return undefined;
+  if (!ACCOUNT_ID_RE.test(v)) throw new OpenwopError('invalid_request', 'accountId is not a valid platform account id', 400, { field: 'accountId' });
+  return v;
 }
 
 async function getConnectorOr404(req: Request, storage: Storage) {
@@ -920,6 +1317,7 @@ function parseIngress(raw: unknown, channel: RelayChannel): ChatIngressEnvelope 
   if (command && typeof command.name === 'string') {
     envelope.command = { name: command.name, ...(typeof command.args === 'string' ? { args: command.args } : {}) };
   }
+  if (body.fromMe === true) envelope.fromMe = true; // ADR 1042 D9 — only an explicit true
   if (Array.isArray(body.mentions)) {
     envelope.mentions = body.mentions.filter((m): m is string => typeof m === 'string' && m.length > 0);
   }
@@ -971,6 +1369,9 @@ type PolicyGateResult =
  * + allowlist + pairing + requireMention). Opt-in by design: if no enabled
  * connector for (tenant, channel) OR no policy row → action 'allow' (the
  * legacy pass-through). `evaluatePolicyGate` is exported for direct testing.
+ *
+ * ADR 1043 D9 — the LEGACY WORKFLOW LANE only. Conversation mode never reads it:
+ * a relay device there admits by its own owner's approvals (channel-ingress).
  */
 export async function evaluatePolicyGate(
   storage: Storage,
@@ -985,10 +1386,8 @@ export async function evaluatePolicyGate(
 
   // Heuristic group detection: channel-native group/chat prefixes, or a Discord
   // guildId in channelMeta. DMs route on the source number/jid/handle directly.
-  const guild = envelope.channelMeta && (envelope.channelMeta as { guildId?: unknown }).guildId;
-  const isGroup = envelope.conversationId.startsWith('group:')
-    || envelope.conversationId.startsWith('chat:')
-    || typeof guild === 'string';
+  // ADR 1042 — one explicit per-channel rule, shared with the channel core.
+  const isGroup = isRelayGroup(device.channel, envelope);
   const gate = isGroup ? policy.groupPolicy : policy.dmPolicy;
   if (gate === 'disabled') return { action: 'drop', connectorId: connector.connectorId, reason: 'disabled' };
 

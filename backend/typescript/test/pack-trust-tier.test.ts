@@ -346,12 +346,15 @@ describe('ADR 0555 P0 — pack trust tiers', () => {
     classifyPackDir(packDir);
     expect(packTrustSummary()).toEqual({
       steward: 0,
+      // ADR 1048 — no adopter manifest in openwop-app, so none is rejected.
+      adopter: 0,
       operatorTrusted: 0,
       untrusted: 1,
       revoked: 0,
       breakGlassed: 0,
       // The repo's committed manifest is found, so the policy is satisfiable.
       stewardManifestMissing: false,
+      adopterManifestRejected: false,
     });
   });
 });

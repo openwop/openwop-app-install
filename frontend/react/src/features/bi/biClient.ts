@@ -7,6 +7,12 @@ import { readErrorMessage, readErrorDetail } from '../../client/errorEnvelope.js
 
 const orgBase = (orgId: string): string => `${config.baseUrl}/host/openwop-app/bi/orgs/${encodeURIComponent(orgId)}`;
 
+/** The closed filter-op vocabulary (mirrors the backend `METRIC_FILTER_OPS`, which
+ *  validates authoritatively). */
+export const METRIC_FILTER_OPS = ['eq', 'neq', 'in', 'gt', 'gte', 'lt', 'lte', 'contains'] as const;
+export type MetricFilterOp = (typeof METRIC_FILTER_OPS)[number];
+export interface MetricFilter { key: string; op: MetricFilterOp; value: string | number | boolean | Array<string | number> }
+
 export interface MetricSummary {
   metricId: string;
   title: string;
@@ -14,10 +20,22 @@ export interface MetricSummary {
   entityType: string;
   aggregate: string;
   field?: string;
+  /** ADR 1052 D12 — round-tripped by the editor, so a save keeps what the metric measures. */
+  filters?: MetricFilter[];
   groupBy?: string;
   timeField?: string;
   system?: boolean;
+  /** BI84WF-12 — a pre-1052 workspace-wide metric: read-only until moved into one org. */
+  legacy?: boolean;
+  /** ADR 1052 D1 — the definition no longer fits its entity type; it cannot run. */
+  stale?: { field: string };
+  /** ADR 1052 D8 — the version an edit is made against (stored metrics only). */
+  updatedAt?: string;
 }
+
+/** ADR 1052 D11 — what this caller may do with the org's catalog (a projection; the
+ *  server re-checks every write). */
+export interface MetricCatalog { metrics: MetricSummary[]; viewer: { canManage: boolean } }
 
 export interface MetricRunPoint { key: string; value: number; n: number }
 export interface MetricRunResult {
@@ -28,7 +46,14 @@ export interface MetricRunResult {
   points: MetricRunPoint[];
   groupedBy?: string;
   bucket?: string;
+  /** ADR 1052 D2 — kernel types read one org's rows; custom types the whole workspace. */
+  scope?: 'org' | 'tenant';
   totalRows: number;
+  /** ADR 1052 D3 — only the largest groups (or the latest buckets) are shown. */
+  groupsTruncated?: boolean;
+  droppedGroups?: number;
+  /** ADR 1052 D4 — rows a bucketed run could not place in time. */
+  undatedRows?: number;
 }
 
 /**
@@ -45,12 +70,22 @@ export interface MetricRunResult {
  * input: entityType / field / groupBy / timeField / filters), which the form can
  * now put ON the control instead of in one detached notice.
  */
-export interface BiRequestError extends Error { field?: string }
+export interface BiRequestError extends Error {
+  field?: string;
+  /** ADR 1052 — `details.reason`: `metric_stale` (the definition no longer fits its
+   *  type) or `metric_changed` (someone saved it since it was loaded). */
+  reason?: string;
+  /** `details.index` — which filter the server refused. */
+  index?: number;
+  status?: number;
+}
 
 /** Parse an ErrorEnvelope body into a message + the field it blames. */
 export async function biErrorFrom(res: Response, ctx: string): Promise<BiRequestError> {
   let detail = '';
   let field: string | undefined;
+  let reason: string | undefined;
+  let index: number | undefined;
   try {
     // H27 — through the ONE shared envelope reader, so this client tolerates a
     // nested body from an older peer for the deprecation window instead of
@@ -60,9 +95,16 @@ export async function biErrorFrom(res: Response, ctx: string): Promise<BiRequest
     detail = readErrorMessage(body) ?? detail;
     const blamed = readErrorDetail(body, 'field');
     if (typeof blamed === 'string') field = blamed;
+    const why = readErrorDetail(body, 'reason');
+    if (typeof why === 'string') reason = why;
+    const at = readErrorDetail(body, 'index');
+    if (typeof at === 'number') index = at;
   } catch { /* non-JSON */ }
   const err: BiRequestError = new Error(detail || `${ctx} returned ${res.status}`);
   if (field) err.field = field;
+  if (reason) err.reason = reason;
+  if (index !== undefined) err.index = index;
+  err.status = res.status;
   return err;
 }
 
@@ -71,9 +113,11 @@ async function asJson<T>(res: Response, ctx: string): Promise<T> {
   return (await res.json()) as T;
 }
 
-export async function listBiMetrics(orgId: string): Promise<MetricSummary[]> {
+export async function listBiMetrics(orgId: string): Promise<MetricCatalog> {
   const res = await fetch(`${orgBase(orgId)}/metrics`, fetchOpts({ headers: authedHeaders() }));
-  return (await asJson<{ metrics: MetricSummary[] }>(res, 'listBiMetrics')).metrics;
+  const body = await asJson<{ metrics: MetricSummary[]; viewer?: { canManage?: boolean } }>(res, 'listBiMetrics');
+  // An older server sends no `viewer`: offer no writes rather than writes that 403.
+  return { metrics: body.metrics, viewer: { canManage: body.viewer?.canManage === true } };
 }
 
 export async function runBiMetric(
@@ -99,8 +143,11 @@ export interface MetricBody {
   entityType: string;
   aggregate: string;
   field?: string;
+  filters?: MetricFilter[];
   groupBy?: string;
   timeField?: string;
+  /** ADR 1052 D8 — updates only: the version loaded; a newer row answers 409. */
+  expectedUpdatedAt?: string;
 }
 
 export async function createBiMetric(orgId: string, metricId: string, body: MetricBody): Promise<MetricSummary> {
@@ -125,4 +172,10 @@ export async function deleteBiMetric(orgId: string, metricId: string): Promise<v
   const res = await fetch(`${orgBase(orgId)}/metrics/${encodeURIComponent(metricId)}`, fetchOpts({ method: 'DELETE', headers: authedHeaders() }));
   // One parse, not a second copy of it (this inline one carried the same bug).
   if (!res.ok) throw await biErrorFrom(res, 'deleteBiMetric');
+}
+
+/** BI84WF-12 — move a pre-1052 workspace-wide metric into this organization. */
+export async function adoptBiMetric(orgId: string, metricId: string): Promise<MetricSummary> {
+  const res = await fetch(`${orgBase(orgId)}/metrics/${encodeURIComponent(metricId)}/adopt`, fetchOpts({ method: 'POST', headers: authedHeaders() }));
+  return (await asJson<{ metric: MetricSummary }>(res, 'adoptBiMetric')).metric;
 }

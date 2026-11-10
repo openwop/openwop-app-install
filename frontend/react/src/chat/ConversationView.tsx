@@ -47,6 +47,17 @@ import type { ChatMessage } from './types.js';
 import type { ContentPart } from './hooks/useChatSession.js';
 import type { AgentMentionEntry } from './lib/agentMentions.js';
 
+/** ADR 1040 D3 — what an empty state may do with a starter prompt. */
+export interface EmptyStateActions {
+  /** Put the text in the composer for the person to edit and send. It REPLACES
+   *  any draft, as the default welcome's cards do. Prefer it for starters: a
+   *  starter that `send`s fires a turn on one click, so it should look like an
+   *  action, not a suggestion. */
+  fill: (text: string) => void;
+  /** Send the text as a turn now. */
+  send: (text: string) => void;
+}
+
 export interface ConversationViewProps {
   messages: readonly ChatMessage[];
   tenantId: string;
@@ -58,7 +69,10 @@ export interface ConversationViewProps {
   // builder embed) can supply a context-aware one. Receives the same composer-
   // seed callback as the default so example prompts still work.
   onPickSuggestion: (text: string) => void;
-  renderEmptyState?: (onPick: (text: string) => void) => ReactNode;
+  /** The first argument SENDS (unchanged). ADR 1040 D3 — the second also offers
+   *  `fill`, which only seeds the composer (what the default welcome does), so a
+   *  surface can choose "fill the box, send on Enter" starters. */
+  renderEmptyState?: (onPick: (text: string) => void, actions: EmptyStateActions) => ReactNode;
 
   // Composer
   onSend: (text: string, attachments?: readonly ContentPart[]) => void;
@@ -251,7 +265,7 @@ export function ConversationView(props: ConversationViewProps): JSX.Element {
                 composer", and an agent pill alone is "@iris " with no task) — the
                 person reads, edits, then sends. A host's own empty state keeps
                 its send semantics. */}
-            {renderEmptyState ? renderEmptyState(onPickSuggestion) : <WelcomeCard onPickSuggestion={fillComposer} />}
+            {renderEmptyState ? renderEmptyState(onPickSuggestion, { fill: fillComposer, send: onPickSuggestion }) : <WelcomeCard onPickSuggestion={fillComposer} />}
           </div>
         )
       ) : (

@@ -26,13 +26,63 @@ gate_port_in_use() {
   lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
 }
 
-# Echo the first free port at or above $1. Returns non-zero (echoing the START
-# port) when the scan is exhausted, so callers can distinguish "found one" from
-# "gave up" — without that, an exhausted scan silently returns a BUSY port and
-# the readiness probe is then answered by the OCCUPANT.
+# PORT RESERVATIONS (#5519). A probe proves a port free NOW, but the caller binds
+# it seconds later, so two pickers running at once (a ci:quick in one worktree,
+# a train's gate in another) both chose :8191 and the later bind failed with
+# EADDRINUSE, turning security train 201 red. So the picker also RESERVES the port
+# it returns: one file per port in a machine-wide directory, created by a hard
+# link, which is atomic and fails if the file exists. The file names the owning
+# shell ($$; inside `$(…)` that is still the calling script). Another picker skips
+# a port whose owner is alive, unless that owner is its own ancestor (a gate's
+# child stage re-picking the port its parent chose keeps today's behaviour).
+# Nobody releases a reservation: the owner's death does, or the TTL (pid reuse).
+# The directory is under /tmp, not the git common dir, because ports are
+# MACHINE-wide: a second clone (or another repo's gate) has its own common dir and
+# would never see our reservations. /tmp is cleaned on this machine; losing the
+# directory only releases reservations early (the old race, briefly), never a
+# wrong port, and the next picker recreates it.
+gate_port_lock_dir() { printf '%s' "${OPENWOP_GATE_PORT_DIR:-/tmp/openwop-gate-ports-$(id -u)}"; }
+
+# 0 when this shell now holds port $1 (or an ancestor does), 1 when a live
+# process outside our ancestry holds it. An unusable lock directory degrades to
+# the old probe-only behaviour rather than failing the gate.
+gate_reserve_port() {
+  local d f tok moved owner at now ttl="${OPENWOP_GATE_PORT_TTL_S:-7200}"
+  d="$(gate_port_lock_dir)"
+  mkdir -p "$d" 2>/dev/null && [ -w "$d" ] || return 0
+  f="$d/$1"; now="$(date +%s)"
+  tok="$(mktemp "$d/.tok.XXXXXX" 2>/dev/null)" || return 0
+  printf '%s %s\n' "$$" "$now" >"$tok"
+  if ln "$tok" "$f" 2>/dev/null; then rm -f "$tok"; return 0; fi
+  read -r owner at <"$f" 2>/dev/null || { owner=""; at=0; }
+  if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null && [ $((now - ${at:-0})) -lt "$ttl" ]; then
+    rm -f "$tok"
+    gate_is_descendant_of "$$" "$owner" && return 0
+    return 1
+  fi
+  # Stale (owner dead, or older than the TTL). Reclaim by MOVING it aside: only
+  # one reclaimer gets the file. Re-read what was moved, because between our read
+  # and the move a peer may have reclaimed it and written a FRESH reservation; if
+  # so, put it back and lose.
+  moved="$tok.stale"
+  if ! mv "$f" "$moved" 2>/dev/null; then rm -f "$tok"; return 1; fi
+  read -r owner at <"$moved" 2>/dev/null || { owner=""; at=0; }
+  if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null && [ $((now - ${at:-0})) -lt "$ttl" ]; then
+    ln "$moved" "$f" 2>/dev/null; rm -f "$moved" "$tok"; return 1
+  fi
+  rm -f "$moved"
+  if ln "$tok" "$f" 2>/dev/null; then rm -f "$tok"; return 0; fi
+  rm -f "$tok"; return 1
+}
+
+# Echo the first free port at or above $1, reserved for the calling script (see
+# above). Returns non-zero (echoing the START port) when the scan is exhausted, so
+# callers can distinguish "found one" from "gave up" — without that, an exhausted
+# scan silently returns a BUSY port and the readiness probe is then answered by
+# the OCCUPANT.
 gate_pick_free_port() {
   local p="$1" tries=0
-  while gate_port_in_use "$p"; do
+  while gate_port_in_use "$p" || ! gate_reserve_port "$p"; do
     p=$((p + 1)); tries=$((tries + 1))
     if [ "$tries" -gt 40 ]; then echo "$1"; return 1; fi
   done

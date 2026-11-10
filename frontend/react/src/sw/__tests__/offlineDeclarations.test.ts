@@ -107,8 +107,8 @@ describe('ADR 0873 D4 — navigationOwnershipErrors', () => {
   });
 
   it('refuses a navigation BROADER than an owned route (it would cover other features)', () => {
-    const feature = { id: 'kt', routes: [route('/admin/kicktodo')], offline: { navigations: ['/admin'] } };
-    expect(navigationOwnershipErrors(feature)).toEqual(['kt: navigation /admin is not under one of its own routes']);
+    const feature = { id: 'w', routes: [route('/admin/widgets')], offline: { navigations: ['/admin'] } };
+    expect(navigationOwnershipErrors(feature)).toEqual(['w: navigation /admin is not under one of its own routes']);
   });
 
   it('never treats a "/" route as owning everything', () => {

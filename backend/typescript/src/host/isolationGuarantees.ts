@@ -128,6 +128,9 @@ export const NO_GUARANTEES: AdapterGuarantees = Object.freeze(
  */
 export const TIER_REQUIRED_GUARANTEES: Readonly<Record<PackTrustTier, readonly IsolationGuarantee[]>> = Object.freeze({
   steward: [],
+  // ADR 1048 — the adopter's own release artifact, attested by its repo exactly
+  // as steward is by upstream's; containing it would cost a process per node.
+  adopter: [],
   'operator-trusted': [],
   untrusted: [
     'separate-process',

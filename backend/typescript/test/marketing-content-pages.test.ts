@@ -48,7 +48,7 @@ describe('marketing content pages — real + published (ADR 0486 follow-up)', ()
     const status = await admin('GET', '/host/openwop-app/example-data/status');
     const steps = (await status.json() as { steps: { id: string }[] }).steps;
     expect(steps.some((s) => s.id === 'marketing-content-pages')).toBe(true);
-    const run = await admin('POST', '/host/openwop-app/example-data/run', { steps: ['marketing-content-pages'] });
+    const run = await admin('POST', '/host/openwop-app/example-data/run', { steps: ['marketing-content-pages'], expectedTenantId: 'default' });
     expect(run.status).toBe(200);
     // The dashboard count is the seeder's own read of the pages it owns: the five
     // non-demo pages (white-label is demo-only).

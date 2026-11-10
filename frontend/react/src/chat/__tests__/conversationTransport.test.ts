@@ -102,21 +102,21 @@ describe('turnsToBubbles', () => {
   it('maps a workflow_run REFERENCE turn to a run-backed bubble, never raw JSON', () => {
     const bubbles = turnsToBubbles([
       turn({
-        messageId: 'c:2:agent', role: 'agent', turnIndex: 2, from: 'host:challenge-author',
+        messageId: 'c:2:agent', role: 'agent', turnIndex: 2, from: 'host:research-author',
         content: {
-          kind: 'workflow_run', runId: 'run-123', agentId: 'host:challenge-author',
-          workflowId: 'openwop-app.kicktodo.challenge-factory', workflowName: 'Challenge Factory',
+          kind: 'workflow_run', runId: 'run-123', agentId: 'host:research-author',
+          workflowId: 'example.research-factory', workflowName: 'Research Factory',
         },
-        agent: { agentId: 'host:challenge-author' },
+        agent: { agentId: 'host:research-author' },
       }),
     ]);
     expect(bubbles[0]).toEqual({
       id: 'c:2:agent', role: 'workflow_run', content: '',
       runRef: {
-        runId: 'run-123', agentId: 'host:challenge-author',
-        workflowId: 'openwop-app.kicktodo.challenge-factory', workflowName: 'Challenge Factory',
+        runId: 'run-123', agentId: 'host:research-author',
+        workflowId: 'example.research-factory', workflowName: 'Research Factory',
       },
-      agentPersona: 'host:challenge-author',
+      agentPersona: 'host:research-author',
     });
     expect(JSON.stringify(bubbles[0]?.content)).not.toContain('workflow_run');
   });
@@ -247,8 +247,8 @@ describe('openConversationSession — ADR 0975 D8 agent scope', () => {
   it('carries the agent it opens with as metadata.agentScope, beside the chat session id', async () => {
     openConversation.mockResolvedValue({ runId: 'run-a' });
     listOpenInterrupts.mockResolvedValue([{ interruptId: 'i-gate', nodeId: 'gate', kind: 'conversation.start', data: null, createdAt: '2026-10-26T00:00:00.000Z' }]);
-    await openConversationSession({ chatSessionId: 's-1', agentScope: 'vendor.openwop-app.kicktodo.agents.challenge-author' });
-    expect(openConversation.mock.calls[0]![0]).toMatchObject({ metadata: { chatSessionId: 's-1', agentScope: 'vendor.openwop-app.kicktodo.agents.challenge-author' } });
+    await openConversationSession({ chatSessionId: 's-1', agentScope: 'vendor.example.agents.author' });
+    expect(openConversation.mock.calls[0]![0]).toMatchObject({ metadata: { chatSessionId: 's-1', agentScope: 'vendor.example.agents.author' } });
   });
 
   it('sends no agentScope when none is given', async () => {
@@ -340,8 +340,8 @@ describe('seedRunState', () => {
   const AT = '2026-07-25T12:00:00.000Z';
 
   it('prefers the workflow NAME the dispatching tool supplied', () => {
-    const s = seedRunState({ runId: 'r1', workflowId: 'wf.x', workflowName: 'Challenge Factory' }, 'Workflow run', AT);
-    expect(s.workflowName).toBe('Challenge Factory');
+    const s = seedRunState({ runId: 'r1', workflowId: 'wf.x', workflowName: 'Research Factory' }, 'Workflow run', AT);
+    expect(s.workflowName).toBe('Research Factory');
     expect(s.workflowId).toBe('wf.x');
     expect(s.runId).toBe('r1');
     expect(s.status).toBe('running');

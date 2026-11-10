@@ -1413,6 +1413,21 @@ No new human binding. A second Mac's account gets
    and the VM reads as busy (fallback for everyone) until it ends. It cannot
    produce a merge, a deploy or a bus result, but no remote result may be used
    for merging while this is open.
+
+   > **CLOSED 2026-11-02: admission no longer launches.** A `source` frame now
+   > only rebuilds and admits the job (`accepted`). The runner starts on a new
+   > control operation, `start`, which the controller sends only after it has
+   > seen the job's status, so it always holds the request bytes that can cancel
+   > it. `start` launches only an `accepted` job, once (an exclusive marker), and
+   > only through the installed launcher. A job admitted but never started is
+   > cancelled at the next admission after `acceptedStartGraceMs` (default 5 min):
+   > `accepted` -> `cancelled` launches nothing, and its checkout is removed.
+   > This changes the control contract: control could inspect, cancel and fetch;
+   > it can now also *start an admitted job*, never admit or choose a command.
+   > Witness: e2e "a submission whose reply is lost never runs, and the next
+   > admission cancels it". It goes red when admission launches again. Linux and
+   > macOS pass. Provisioning also re-runs when the worker payload's sha256
+   > changes, so a new payload needs only a metadata update and a restart.
 6. **A policy upgrade made the worker busy for good.** Jobs journaled under the
    old pin no longer validated, and an unreadable job counts as unfinished. A job
    for another runner or policy is now **retired**: a policy changes only at
@@ -1440,3 +1455,207 @@ controller's 3-h bound.
 locally is compared lane by lane, with the Linux pixel baselines as the expected
 gap. The remote result has no merge use until the user and the release manager
 sign off.
+
+### D9 P5: visual baselines from a pinned image (user decision, 2026-11-02)
+
+**Shadow comparison (shadow 8):** the candidate was `main` + #5475 + #5480 + #5487.
+Every lane matched the local train result:
+- gate tooling;
+- frontend lint, build and vitest (1177/1177);
+- backend vitest (2,999 files);
+- every self-test;
+- the ratchets;
+- 110 e2e tests.
+
+The exceptions were the 12 visual-snapshot tests (plus 1 advisory), which refuse
+because baselines exist only for darwin. The VM gate took 29 min, against ~45 min
+on a Mac. Cleanup was verified, with 4,443 processes owned.
+
+**Decision (user, in openwop-app-d8):** generate a baseline set **inside the
+official, version-pinned Playwright image**, have the user review it side by side
+against the Mac set before it is committed, and have the VM render in that same
+image.
+
+**Design.**
+- **Where pixels come from.** Pixels come from the browser, not the test runner.
+  The two visual spec files connect to a remote browser named by
+  `OPENWOP_E2E_PINNED_WS`, through a file-level `test.use({ connectOptions })`
+  with `exposeNetwork: '<loopback>'`, so the browser reaches the runner's
+  `localhost`. Every other e2e test keeps the local browser.
+  > **Corrected 2026-11-02 (shadow 9):** this first used the global
+  > `PW_TEST_CONNECT_WS_ENDPOINT`, which moved every e2e test into the container.
+  > The 12 visual tests passed on the VM against the Mac-recorded `-pinned` set,
+  > but 4 network-egress specs (WebRTC, self-navigation to the runner's sinks)
+  > went red, for a reason that belongs to the container, not the app. Only the
+  > visual specs need the pinned renderer. The browser runs from
+  `mcr.microsoft.com/playwright:v1.60.0-noble` **pinned by its amd64 digest**
+  (`sha256:83192064…71fd9`; Playwright 1.60.0 is the locked version) through
+  `run-server`. The app stack and the runner stay where they are.
+- **Naming.** Baselines rendered that way are keyed by the rendering environment,
+  not the runner's OS: a fixed `-pinned` suffix instead of `-{platform}`. A Mac
+  runner driving the pinned container therefore produces the same files the VM
+  compares against. The darwin set is untouched, and Mac gates keep using it.
+- **Guard.** The visual specs still refuse on a platform that has no baselines,
+  with the remedy named. They accept `darwin` with a local browser, or any runner
+  with the pinned remote browser. A remote browser that is not the pinned one
+  must refuse: the endpoint is checked against the expected browser build.
+- **Generation.** `scripts/e2e-pinned-baselines.sh` boots the same e2e backend
+  as `ci.sh`, starts the pinned `run-server`, and runs only the visual specs
+  with `--update-snapshots`. It writes `*-pinned.png` and a contact sheet
+  (darwin | pinned) for the user's review. It is never part of a gate.
+- **VM.** Provisioning installs Docker, pulls the image **by digest**, and runs
+  `run-server` on 127.0.0.1 as a service. The gate env sets the two
+  `PW_TEST_CONNECT_*` variables, and `playwright_browsers_present` treats a
+  configured remote browser as present.
+- **Qualification.** The baselines are generated on a Mac (amd64 emulated) and
+  compared on the VM (native amd64). If the VM passes against them, two
+  independent amd64 environments agree. If they differ, that is reported, not
+  re-recorded.
+
+**Release-manager conditions before any merge use:**
+- (a) two consecutive shadow runs with no `interrupted`;
+- (b) the fallback path exercised once for real: VM unreachable, then a local
+  gate decides;
+- the user's and the release manager's sign-off.
+
+### D9 P6: merge-train gates remote-first (off by default) — 2026-11-02
+
+The design was approved by the release manager with four changes, which are all
+folded in. **It is OFF unless `OPENWOP_REMOTE_GATE=1`**, and stays off until the
+user and the release manager sign off.
+
+- **Order.** `gate_train` tries the FULL train gate on the remote VM first,
+  through `scripts/lib/remote-gate-train.sh`:
+  - green → the gate pass;
+  - **red → final.** No local second chance, and no bisection, because local
+    halves could merge what the remote gate failed. The log says to re-run with
+    `OPENWOP_REMOTE_GATE=0` to find the culprit;
+  - **anything else is a fallback**, and the local gate runs exactly as before:
+    unreachable, the disabled flag, busy, timeout, interrupted, refused, a host-key
+    mismatch, or the closed worker faults.
+
+  Bisection sub-gates are always local.
+- **Busy VM.** A busy VM falls back at once and never queues. The log prints
+  `remote fallback: busy (held by <host>)`. The holder comes from the bus (the
+  newest `remote-start` with no `remote-end` from another host), because the
+  worker cannot name it: requests carry no submitter.
+- **Time bound.** `OPENWOP_REMOTE_GATE_TRAIN_MAX_MIN` (default 75) bounds the whole
+  remote attempt. Past it the controller cancels the remote job and the train
+  falls back.
+- **Acceptance record.** It is written to
+  `<git-common-dir>/remote-gate/train-*.json`, **outside the train worktree**. The
+  candidate cannot pre-place or alter what lets it merge. `merge_train` refuses
+  unless the record names this request, the train's commit and its tree.
+- **The controller is pinned.** It never runs from the train (the candidate) nor
+  from this checkout. It runs from
+  `~/.config/openwop-ci/install/<policy-sha>/`, installed by
+  `scripts/remote-gate-install-controller.sh <commit>` only when the payload's
+  sha256 equals the policy pin. **One payload definition**
+  (`scripts/lib/remote-gate-payload.sh`) feeds both the VM's provisioning and the
+  Macs' installs, so controller and worker are the same code.
+- **Where it ran.** Every gate logs `gate ran on: remote openwop-ci-gate (request …,
+  policy …, N min)`, `gate runs on: local <host>`, or `remote fallback: <reason>`.
+  The bus gains `remote-start` and `remote-end` events, and the train result
+  carries `where`.
+- **Tracegate.** Remote footprints are never ingested. With remote gates on, each
+  train WARNs when a local lane's last complete full run is more than 24 h old,
+  because its STALE checks run only locally.
+
+**Found while building it: the policy pin was not reproducible.** `git archive
+<commit>:scripts` archives a tree, which stamps the current time into every entry,
+so the sha256 changed from one second to the next. The earlier pins that matched
+did so because both builds ran within the same second. The payload now uses
+`--mtime=@<commit time>` (git ≥ 2.43). Witness: the gate-tooling case builds
+twice, a second apart; it is red without `--mtime`.
+
+> **CORRECTED 2026-11-05 — `--mtime` does not exist on Apple git 2.39.5** (it
+> arrived in git 2.42, not 2.43). There, `git archive` printed usage and wrote
+> nothing, and train 379 went red at "remote-gate install did not install the
+> pinned payload". The witness above passed anyway: both builds hashed an empty
+> file and agreed. The payload is now written by `scripts/lib/remote-gate-payload.mjs`:
+> a ustar archive from the commit's blobs (sorted, mtime = commit time, root,
+> 0644/0755) gzipped by node's zlib under a fixed header (mtime 0, OS 3). No git
+> archive and no system zlib, so the sha depends only on the commit. Tests: a
+> fixed fixture commit must build one golden sha with `git archive` refused by a
+> PATH shim, run through a symlink; the build must print a sha and extract to the
+> commit's bytes. **The sha differs from the git ≥ 2.42 builds, so a pin minted
+> from them must be re-minted.**
+
+**Tests** (`test-merge-train-bisect.sh`, fake pinned controller), 45/45. The cases:
+- remote green merges with no local gate, and its record is not in the train
+  worktree;
+- remote red is final, with no local gate and nothing landed;
+- busy falls back to one local gate;
+- the disabled-flag drill makes the local gate decide;
+- a mismatched record refuses the merge;
+- no pinned install falls back;
+- with the switch off, the remote gate is never called.
+
+Sabotage checks:
+- removing the no-bisect rule lets a remote-red train's halves merge locally (red);
+- removing the record check lets a mismatched record land (red).
+
+Gate tooling 97/97 (payload reproducibility; the installer refuses a wrong pin and
+installs the right one).
+
+**Remaining before any merge use:**
+- (b) the real fallback drill, on a real train with the VM flagged;
+- the user's and the release manager's sign-off.
+
+### D9 shadow record and the baseline decisions — 2026-11-02/03
+
+**User decisions (in openwop-app-d8):**
+- **All 53 `-pinned` baselines approved** after a side-by-side review against the
+  darwin set (2026-11-02).
+- **The `-pinned` set is merge-gating on the remote gate**, as `-darwin` is on the
+  Macs (2026-11-02). A visual red on the VM is a real red, not advisory.
+
+**Shadow runs.** Each ran the full canonical gate on the VM for a candidate train
+while the real train gated locally. None was used to merge. What each one found:
+
+| Shadow | Finding | Fix |
+|---|---|---|
+| 1 | merge-train fetched origin before its freeze check | #5475 |
+| 2 | preflight waiter's PID race; a newer controller ran against an older worker | #5480; one payload definition (P6) |
+| 3 | #5480's `printf \| grep -q` broke the EPIPE ratchet; rsync missing on the VM | here-string; rsync installed |
+| 4 | no git identity in the VM's gate environment | identity in worker.json |
+| 5 | a full gate's log outgrew 256 MiB and could not be fetched | 1 GiB bound; the controller says why a fetch failed |
+| 6 | ci.sh's Chromium check ignored `PLAYWRIGHT_BROWSERS_PATH` | #5487 |
+| 7 | interrupted once, with no reason logged | the runner logs details and the cleanup verdict |
+| 8 | every lane matched the local train except the 12 visual tests (no Linux baselines) | P5 |
+| 9 | a global remote browser broke 4 network-egress specs | only the visual specs use the pinned browser |
+| 10 | the clockshift floor misread vitest's coloured output | #5496 |
+| 11 | a candidate conflict between #5487 and #5496; a green gate refused locally because `origin/main` had moved | #5496 re-placed; shadows run from a private clone with a pinned `origin/main` |
+| 12 | green on the VM, but the result fetch stalled | the log travels gzipped; the fetch is retried |
+| 13 | **fully accepted** | — |
+
+**Shadow 13** (candidate `main` 8615a9d10 + #5475 + #5480 + #5487 + #5496 + the
+pinned baselines): the full gate was green on the VM in **32 min** (34 with
+transfer, against ~45 on a Mac), the result was fetched on the first try, and the
+Mac validator **ACCEPTED** it (commit 73cc59ed6, tree a91c011f2, required and
+advisory browser lanes passed, `mergeAuthorized: false`).
+
+**Release-manager condition (a)** — two consecutive shadows with no `interrupted` —
+is met (shadows 8, 9 and 10, and every one after). Condition (b), the real fallback
+drill, and both sign-offs remain, after the VM is re-provisioned from `main`.
+
+> **Corrected 2026-11-08 (shadow 14): the two baseline sets drift apart unless a check
+> ties them.** After the merges the VM was re-provisioned from `main` 5d208fb35 (payload
+> a423823d) and shadow 14 ran the full gate there. It was **red on two required visual
+> tests** (`public-home` light and dark), and correctly so: on 2026-11-07, b927451a8
+> (public-home) and b9ef29fcc (builder, ADR 1065) re-recorded four `-darwin` baselines
+> on a Mac and left their `-pinned` twins as they were. The Macs passed; the VM, rendering
+> the new page against the old `-pinned` image, did not. With the remote gate first, that
+> red is **final for the whole train**, so a darwin-only re-baseline would red every
+> VM-first train that carried it.
+>
+> **Fix:** `frontend/react/e2e/pinned-baselines.lock.json` records the sha256 of each
+> `-darwin` image that its `-pinned` twin was rendered beside. The generator writes it
+> after a clean recording (`check-pinned-baselines.mjs --write`). The gate, `ci:quick`
+> included, runs `scripts/check-pinned-baselines.mjs` and fails on a changed `-darwin`
+> image, a missing twin or entry, or an orphan entry, naming the remedy. So an author
+> re-baselining visuals now learns on the Mac to re-run `scripts/e2e-pinned-baselines.sh`
+> (Docker), not in a VM train. The lock was seeded from the `-darwin` images at
+> 21c895056, the commit that added the `-pinned` set; on `main` it reports exactly the four
+> stale pairs. The four were then regenerated in the same PR. Condition (b), the fallback
+> drill, waits for this to merge.

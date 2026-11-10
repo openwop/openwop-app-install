@@ -4,6 +4,7 @@
  * page editor AND the host-level home-page editor (Admin → Content → Front page)
  * use ONE editor. It's a controlled component: give it `sections` + `onChange`.
  */
+import { DesignJsonFields } from './DesignJsonFields.js';
 import { Button } from '../../ui/Button.js';
 import { useEffect, useId, useRef, useState } from 'react';
 import { useTranslation, Trans } from 'react-i18next';
@@ -12,6 +13,8 @@ import { formatNumber } from '../../i18n/format.js';
 import { ArrowDownIcon, ArrowUpIcon, ImageIcon, PlusIcon, TrashIcon } from '../../ui/icons/index.js';
 import { handleTablistKeyDown } from '../../ui/rovingTabs.js';
 import { FIELD_NAME_RE, FIELDS_MAX_KEYS } from './fieldsSection.js';
+import { HeroArtFields } from './HeroArtFields.js';
+import { isHeroArtVisual, type HeroArtVisual } from './heroArtSpec.js';
 import { SECTION_TYPES, type MediaAssetRef, type Section, type SectionType, type SharedSection, type TranslationStatus } from './cmsClient.js';
 
 /** Name a BCP-47 tag in the reader's language (endonym fallback to the tag). */
@@ -33,6 +36,13 @@ export function blankSection(type: SectionType): Section {
               : type === 'entityList' ? { heading: '', tenantId: '', typeName: '', titleField: '' }
                 : type === 'entityDetail' ? { heading: '', tenantId: '', typeName: '', entityId: '', titleField: '' }
                   : type === 'video' ? { title: '', description: '', src: '', poster: '', length: '' }
+                    // ADR 1080 — a design section starts empty; the server asks for what it needs.
+                    : type === 'statusTable' ? { columns: [], rows: [] }
+                    : type === 'dateCalc' ? { leadWeeks: 10, floatDays: 10, approveDays: 5 }
+                    : type === 'conversation' ? { exchanges: [] }
+                    : type === 'featureIndex' ? { groups: [] }
+                    : type === 'decisionTree' ? { trees: [] }
+                    : type === 'scheduleSim' ? { milestones: [], decisions: [] }
                     : { columns: [{ text: '' }] };
   return { sectionId: `new:${Math.random().toString(36).slice(2)}`, type, data };
 }
@@ -225,7 +235,324 @@ function FieldsEditor({ data, baseData, onChange }: { data: Record<string, unkno
  *  textareas use the SANS register the public page renders them in (the app-wide
  *  `textarea` default is mono, which suits code, not copy — RFCW-UX-10). */
 export function SectionFields(props: { section: Section; assets: MediaAssetRef[]; onChange: (data: Record<string, unknown>) => void; onPickMedia?: (() => Promise<string | null>) | undefined; /** The base layer, when `section.data` is a locale overlay (ADR 0748 — `fields` needs it). */ baseData?: Record<string, unknown> | undefined }): JSX.Element {
-  return <div className="cms-section-fields"><SectionFieldsBody {...props} /></div>;
+  // ADR 1029 D2 — motion is presentation, kept on the base layer only (the server
+  // drops it from an overlay), and never on `fields`, the protocol's open body.
+  const showMotion = props.section.type !== 'fields' && props.baseData === undefined;
+  // ADR 1050 D5 — the band, on the base layer of each type the validator tones.
+  const showTone = (TONED_TYPES as readonly string[]).includes(props.section.type) && props.baseData === undefined;
+  return (
+    <div className="cms-section-fields">
+      <SectionFieldsBody {...props} />
+      {showTone ? <ToneField d={props.section.data} onChange={props.onChange} /> : null}
+      {showMotion ? <MotionField d={props.section.data} onChange={props.onChange} /> : null}
+    </div>
+  );
+}
+
+/** ADR 0920 D1 / ADR 1050 D5 — the section types whose validator keeps `tone`
+ *  (cmsService's `...tone()` cases; pinned by adr1029-mirror-parity). */
+const TONED_TYPES = ['richText', 'image', 'cta', 'columns', 'faq', 'quotes', 'video', 'statusTable', 'dateCalc', 'conversation', 'featureIndex', 'decisionTree', 'scheduleSim'] as const satisfies readonly SectionType[];
+
+const ACTIVITY_MAX_ROWS = 6; // mirrors the server's MAX.activityItems (ADR 1029 D5)
+const FLOW_MAX_STEPS = 6; // mirrors the server's MAX.flowNodes (ADR 1038 D8)
+
+/** ADR 1029 D5 — the hero's activity card: a title and up to six rows, each an
+ *  actor, what they did, the status word the visitor reads, and a styling state. */
+function ActivityFields({ value, onChange }: { value: unknown; onChange: (v: Record<string, unknown>) => void }): JSX.Element {
+  const { t } = useTranslation('cms');
+  const a = (typeof value === 'object' && value !== null && !Array.isArray(value) ? value : {}) as Record<string, unknown>;
+  const rows = (Array.isArray(a.items) ? a.items : []) as Array<Record<string, unknown>>;
+  const setRows = (next: Array<Record<string, unknown>>): void => onChange({ ...a, items: next });
+  const setRow = (i: number, patch: Record<string, unknown>): void => setRows(rows.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+  return (
+    <fieldset className="u-grid u-gap-2 u-border-0 u-p-0 u-m-0">
+      <legend className="u-label-sm">{t('activityEditorLegend')}</legend>
+      <label className="u-grid u-gap-1"><span className="u-label-sm">{t('activityTitleLabel')}</span><input value={str(a.title)} onChange={(e) => onChange({ ...a, title: e.target.value })} placeholder={t('activityFigureLabel')} /></label>
+      {rows.map((r, i) => {
+        const n = formatNumber(i + 1);
+        return (
+          <div key={i} className="surface-card u-grid u-gap-1 u-p-2">
+            <input aria-label={t('activityActorAria', { n })} value={str(r.actor)} onChange={(e) => setRow(i, { actor: e.target.value })} placeholder={t('activityActorPlaceholder')} />
+            <input aria-label={t('activityActionAria', { n })} value={str(r.action)} onChange={(e) => setRow(i, { action: e.target.value })} placeholder={t('activityActionPlaceholder')} />
+            <div className="u-grid u-gap-1 u-grid-2">
+              <input aria-label={t('activityStatusAria', { n })} value={str(r.status)} onChange={(e) => setRow(i, { status: e.target.value })} placeholder={t('activityStatusPlaceholder')} />
+              <input aria-label={t('activityMetaAria', { n })} value={str(r.meta)} onChange={(e) => setRow(i, { meta: e.target.value })} placeholder={t('activityMetaPlaceholder')} />
+            </div>
+            <label className="u-grid u-gap-1">
+              <span className="u-label-sm">{t('activityStateLabel')}</span>
+              <select value={str(r.state)} onChange={(e) => setRow(i, { state: e.target.value || undefined })}>
+                <option value="">{t('activityStateNone')}</option>
+                <option value="done">{t('activityStateDone')}</option>
+                <option value="waiting">{t('activityStateWaiting')}</option>
+                <option value="approved">{t('activityStateApproved')}</option>
+                <option value="flagged">{t('activityStateFlagged')}</option>
+              </select>
+            </label>
+            <Button variant="quiet" className="u-w-auto" onClick={() => setRows(rows.filter((_, j) => j !== i))} aria-label={t('activityRemoveRowAria', { n })}><TrashIcon /> {t('removeItem')}</Button>
+          </div>
+        );
+      })}
+      {rows.length < ACTIVITY_MAX_ROWS
+        ? <Button variant="quiet" className="u-w-auto" onClick={() => setRows([...rows, { actor: '', action: '' }])}><PlusIcon /> {t('activityAddRow')}</Button>
+        : null}
+      <label className="u-grid u-gap-1"><span className="u-label-sm">{t('activityResultLabel')}</span><input value={str(a.result)} onChange={(e) => onChange({ ...a, result: e.target.value })} placeholder={t('activityResultPlaceholder')} /></label>
+    </fieldset>
+  );
+}
+
+/** ADR 1038 D8 — a step's status word and styling state, shared by the hero
+ *  flow and a `flow` columns item. The state only styles the mark; the status
+ *  is the words a visitor reads. */
+function FlowStepState({ n, status, state, showState, onChange }: { n: string; status: string; state: string; showState: boolean; onChange: (patch: Record<string, unknown>) => void }): JSX.Element {
+  const { t } = useTranslation('cms');
+  return (
+    <div className="u-grid u-gap-1 u-grid-2">
+      <label className="u-grid u-gap-1">
+        <span className="u-label-sm">{t('flowStatusLabel')}</span>
+        <input aria-label={t('flowStatusAria', { n })} value={status} onChange={(e) => onChange({ status: e.target.value })} placeholder={t('flowStatusPlaceholder')} />
+      </label>
+      {/* The mark follows the base language (a translation's state is synced
+          from it on save, ADR 1038 D8), so a translator edits only the words. */}
+      {showState ? <label className="u-grid u-gap-1">
+        <span className="u-label-sm">{t('flowStateLabel')}</span>
+        <select aria-label={t('flowStateAria', { n })} value={state} onChange={(e) => onChange({ state: e.target.value || undefined })}>
+          <option value="">{t('flowStateNone')}</option>
+          <option value="idle">{t('flowStateIdle')}</option>
+          <option value="done">{t('flowStateDone')}</option>
+          <option value="waiting">{t('flowStateWaiting')}</option>
+        </select>
+      </label> : null}
+    </div>
+  );
+}
+
+/** ADR 1038 D8 — the hero's flow picture: a caption and two to six steps. */
+function FlowFields({ value, onChange, showState }: { value: unknown; onChange: (v: Record<string, unknown>) => void; showState: boolean }): JSX.Element {
+  const { t } = useTranslation('cms');
+  const f = (typeof value === 'object' && value !== null && !Array.isArray(value) ? value : {}) as Record<string, unknown>;
+  const nodes = (Array.isArray(f.nodes) ? f.nodes : []) as Array<Record<string, unknown>>;
+  const setNodes = (next: Array<Record<string, unknown>>): void => onChange({ ...f, nodes: next });
+  const setNode = (i: number, patch: Record<string, unknown>): void => setNodes(nodes.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+  return (
+    <fieldset className="u-grid u-gap-2 u-border-0 u-p-0 u-m-0">
+      <legend className="u-label-sm">{t('flowEditorLegend')}</legend>
+      <p className="u-label-sm muted u-m-0">{t('flowEditorHint')}</p>
+      <label className="u-grid u-gap-1"><span className="u-label-sm">{t('flowCaptionLabel')}</span><input value={str(f.label)} onChange={(e) => onChange({ ...f, label: e.target.value })} /></label>
+      {nodes.map((r, i) => {
+        const n = formatNumber(i + 1);
+        return (
+          <div key={i} className="surface-card u-grid u-gap-1 u-p-2">
+            <input aria-label={t('flowLabelAria', { n })} value={str(r.label)} onChange={(e) => setNode(i, { label: e.target.value })} placeholder={t('flowLabelPlaceholder')} />
+            <input aria-label={t('flowTextAria', { n })} value={str(r.text)} onChange={(e) => setNode(i, { text: e.target.value })} placeholder={t('flowTextPlaceholder')} />
+            <FlowStepState n={n} status={str(r.status)} state={str(r.state)} showState={showState} onChange={(patch) => setNode(i, patch)} />
+            <Button variant="quiet" className="u-w-auto" onClick={() => setNodes(nodes.filter((_, j) => j !== i))} aria-label={t('flowRemoveAria', { n })}><TrashIcon /> {t('removeItem')}</Button>
+          </div>
+        );
+      })}
+      {nodes.filter((r) => str(r.label).trim()).length < 2 ? <p className="u-label-sm u-m-0" role="status">{t('flowNeedsTwoHint')}</p> : null}
+      {nodes.length < FLOW_MAX_STEPS
+        ? <Button variant="quiet" className="u-w-auto" onClick={() => setNodes([...nodes, { label: '' }])}><PlusIcon /> {t('flowAddStep')}</Button>
+        : <p className="u-label-sm muted u-m-0">{t('flowHeroMaxHint')}</p>}
+    </fieldset>
+  );
+}
+
+/** ADR 1038 D2 — how the heading's `*marked*` words look. Presentation, so base
+ *  layer only; "Accent" (the default) removes the key. */
+function EmphasisField({ d, onChange }: { d: Record<string, unknown>; onChange: (data: Record<string, unknown>) => void }): JSX.Element {
+  const { t } = useTranslation('cms');
+  const hintId = useId();
+  const choose = (v: string): void => {
+    const { emphasis: _drop, ...rest } = d;
+    onChange(v ? { ...rest, emphasis: v } : rest);
+  };
+  return (
+    <div className="u-grid u-gap-1">
+      <label className="u-grid u-gap-1">
+        <span className="u-label-sm">{t('emphasisLabel')}</span>
+        <select value={typeof d.emphasis === 'string' && d.emphasis !== 'accent' ? d.emphasis : ''} onChange={(e) => choose(e.target.value)} aria-describedby={hintId}>
+          <option value="">{t('emphasisAccent')}</option>
+          <option value="strike">{t('emphasisStrike')}</option>
+          <option value="underline">{t('emphasisUnderline')}</option>
+          <option value="highlight">{t('emphasisHighlight')}</option>
+        </select>
+      </label>
+      <span id={hintId} className="u-label-sm muted">{t('emphasisHint')}</span>
+    </div>
+  );
+}
+
+/** ADR 1038 D3 — whether a stats band's figures count up. Presentation, so base
+ *  layer only; unticking removes the key. */
+function CountField({ d, onChange }: { d: Record<string, unknown>; onChange: (data: Record<string, unknown>) => void }): JSX.Element {
+  const { t } = useTranslation('cms');
+  const hintId = useId();
+  const choose = (on: boolean): void => {
+    const { count: _drop, ...rest } = d;
+    onChange(on ? { ...rest, count: true } : rest);
+  };
+  return (
+    <div className="u-grid u-gap-1">
+      <label className="u-flex u-gap-2 u-items-center">
+        <input type="checkbox" checked={d.count === true} onChange={(e) => choose(e.target.checked)} aria-describedby={hintId} />
+        <span>{t('statsCountLabel')}</span>
+      </label>
+      <span id={hintId} className="u-label-sm muted">{t('statsCountHint')}</span>
+    </div>
+  );
+}
+
+/** ADR 1038 D1 — whether the hero's card plays once on load. Presentation, so
+ *  base layer only (the server drops it from an overlay); unticking removes the
+ *  key rather than storing `still`. */
+function PlayField({ d, onChange }: { d: Record<string, unknown>; onChange: (data: Record<string, unknown>) => void }): JSX.Element {
+  const { t } = useTranslation('cms');
+  const hintId = useId();
+  const choose = (on: boolean): void => {
+    const { play: _drop, ...rest } = d;
+    onChange(on ? { ...rest, play: 'once' } : rest);
+  };
+  return (
+    <div className="u-grid u-gap-1">
+      <label className="u-flex u-gap-2 u-items-center">
+        <input type="checkbox" checked={d.play === 'once'} onChange={(e) => choose(e.target.checked)} aria-describedby={hintId} />
+        <span>{t('activityPlayLabel')}</span>
+      </label>
+      <span id={hintId} className="u-label-sm muted">{t('activityPlayHint')}</span>
+    </div>
+  );
+}
+
+/** ADR 1047 — the hero's hub picture: the centre (label, optional eyebrow and
+ *  picture with alt text) and 2–8 places, each a label, optional index and an
+ *  optional icon slug from the column icon set. */
+function HubFields({ value, onChange, assets, onPickMedia }: { value: unknown; onChange: (v: Record<string, unknown>) => void; assets: MediaAssetRef[]; onPickMedia?: (() => Promise<string | null>) | undefined }): JSX.Element {
+  const { t } = useTranslation('cms');
+  const h = (typeof value === 'object' && value !== null && !Array.isArray(value) ? value : {}) as Record<string, unknown>;
+  const c = (typeof h.center === 'object' && h.center !== null ? h.center : {}) as Record<string, unknown>;
+  const spokes = (Array.isArray(h.spokes) ? h.spokes : []) as Array<Record<string, unknown>>;
+  const setCenter = (patch: Record<string, unknown>): void => onChange({ ...h, center: { ...c, ...patch } });
+  const setSpokes = (next: Array<Record<string, unknown>>): void => onChange({ ...h, spokes: next });
+  const setSpoke = (i: number, patch: Record<string, unknown>): void => setSpokes(spokes.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+  return (
+    <fieldset className="u-grid u-gap-2 u-border-0 u-p-0 u-m-0">
+      <legend className="u-label-sm">{t('hubEditorLegend')}</legend>
+      <div className="u-grid u-gap-1 u-grid-2">
+        <label className="u-grid u-gap-1"><span className="u-label-sm">{t('hubCenterLabel')}</span><input value={str(c.label)} onChange={(e) => setCenter({ label: e.target.value })} /></label>
+        <label className="u-grid u-gap-1"><span className="u-label-sm">{t('hubCenterEyebrowLabel')}</span><input value={str(c.eyebrow)} onChange={(e) => setCenter({ eyebrow: e.target.value || undefined })} /></label>
+      </div>
+      <MediaTokenField value={str(c.imageToken)} assets={assets} onChange={(v) => setCenter({ imageToken: v || undefined })} label={t('hubCenterImageLabel')} onPickMedia={onPickMedia} />
+      {str(c.imageToken) ? (
+        <label className="u-grid u-gap-1"><span className="u-label-sm">{t('altTextLabel')}</span><input value={str(c.alt)} onChange={(e) => setCenter({ alt: e.target.value })} /></label>
+      ) : null}
+      {spokes.map((r, i) => {
+        const n = formatNumber(i + 1);
+        return (
+          <div key={i} className="surface-card u-grid u-gap-1 u-p-2">
+            <input aria-label={t('hubSpokeLabelAria', { n })} value={str(r.label)} onChange={(e) => setSpoke(i, { label: e.target.value })} />
+            <div className="u-grid u-gap-1 u-grid-2">
+              <input aria-label={t('hubSpokeIndexAria', { n })} value={str(r.index)} onChange={(e) => setSpoke(i, { index: e.target.value || undefined })} placeholder="01" />
+              <input aria-label={t('hubSpokeIconAria', { n })} value={str(r.icon)} onChange={(e) => setSpoke(i, { icon: e.target.value || undefined })} placeholder={t('columnIconPlaceholder')} />
+            </div>
+            <Button variant="quiet" className="u-w-auto" onClick={() => setSpokes(spokes.filter((_, j) => j !== i))} aria-label={t('hubRemoveSpokeAria', { n })}><TrashIcon /> {t('removeItem')}</Button>
+          </div>
+        );
+      })}
+      {spokes.length < 8
+        ? <Button variant="quiet" className="u-w-auto" onClick={() => setSpokes([...spokes, { label: '' }])}><PlusIcon /> {t('hubAddSpoke')}</Button>
+        : null}
+    </fieldset>
+  );
+}
+
+/** ADR 1047 — a feature card's callout, status pills and folded disclosure. */
+function FeatureItemFields({ c, setCol, i }: { c: Record<string, unknown>; setCol: (i: number, patch: Record<string, unknown>) => void; i: number }): JSX.Element {
+  const { t } = useTranslation('cms');
+  const co = (typeof c.callout === 'object' && c.callout !== null ? c.callout : {}) as Record<string, unknown>;
+  const mo = (typeof c.more === 'object' && c.more !== null ? c.more : {}) as Record<string, unknown>;
+  const tags = (Array.isArray(c.tags) ? c.tags : []) as Array<Record<string, unknown>>;
+  const setTags = (next: Array<Record<string, unknown>>): void => setCol(i, { tags: next.length > 0 ? next : undefined });
+  return (
+    <div className="u-grid u-gap-1">
+      <div className="u-grid u-gap-1 u-grid-2">
+        <label className="u-grid u-gap-1"><span className="u-label-sm">{t('featureCalloutLabelLabel')}</span><input value={str(co.label)} onChange={(e) => setCol(i, { callout: { ...co, label: e.target.value || undefined } })} /></label>
+        <label className="u-grid u-gap-1"><span className="u-label-sm">{t('featureCalloutTextLabel')}</span><input value={str(co.text)} onChange={(e) => setCol(i, { callout: { ...co, text: e.target.value } })} /></label>
+      </div>
+      {tags.map((tg, j) => {
+        const n = formatNumber(j + 1);
+        return (
+          <div key={j} className="u-grid u-gap-1 u-grid-2">
+            <input aria-label={t('featureTagLabelAria', { n })} value={str(tg.label)} onChange={(e) => setTags(tags.map((x, k) => (k === j ? { ...x, label: e.target.value } : x)))} />
+            <div className="u-flex u-gap-1 u-items-center">
+              <select aria-label={t('featureTagStateLabel')} value={str(tg.state)} onChange={(e) => setTags(tags.map((x, k) => (k === j ? { ...x, state: e.target.value || undefined } : x)))}>
+                <option value="">{t('featureTagStateNone')}</option>
+                <option value="now">{t('featureTagStateNow')}</option>
+                <option value="soon">{t('featureTagStateSoon')}</option>
+              </select>
+              <Button variant="quiet" className="u-w-auto" onClick={() => setTags(tags.filter((_, k) => k !== j))} aria-label={t('featureRemoveTagAria', { n })}><TrashIcon /></Button>
+            </div>
+          </div>
+        );
+      })}
+      {tags.length < 6 ? <Button variant="quiet" className="u-w-auto" onClick={() => setTags([...tags, { label: '' }])}><PlusIcon /> {t('featureAddTag')}</Button> : null}
+      <label className="u-grid u-gap-1"><span className="u-label-sm">{t('featureMoreLabelLabel')}</span><input value={str(mo.label)} onChange={(e) => setCol(i, { more: { ...mo, label: e.target.value || undefined } })} /></label>
+      <label className="u-grid u-gap-1"><span className="u-label-sm">{t('featureMoreTextLabel')}</span><textarea rows={3} value={str(mo.text)} onChange={(e) => setCol(i, { more: { ...mo, text: e.target.value } })} /></label>
+    </div>
+  );
+}
+
+/** ADR 0920 D1 / ADR 1050 D5 — the section's band. "Default" removes the key, so
+ *  a section that never chose keeps its exact markup. */
+function ToneField({ d, onChange }: { d: Record<string, unknown>; onChange: (data: Record<string, unknown>) => void }): JSX.Element {
+  const { t } = useTranslation('cms');
+  const value = typeof d.tone === 'string' && d.tone !== 'default' ? d.tone : '';
+  const choose = (v: string): void => {
+    if (v) { onChange({ ...d, tone: v }); return; }
+    const { tone: _drop, ...rest } = d;
+    onChange(rest);
+  };
+  return (
+    <label className="u-grid u-gap-1 u-mt-2">
+      <span className="u-label-sm">{t('toneLabel')}</span>
+      <select value={value} onChange={(e) => choose(e.target.value)}>
+        <option value="">{t('toneDefault')}</option>
+        <option value="muted">{t('toneMuted')}</option>
+        <option value="inverse">{t('toneInverse')}</option>
+        <option value="accent">{t('toneAccent')}</option>
+      </select>
+    </label>
+  );
+}
+
+/** ADR 1029 D2 — how the section moves as it scrolls into view. "Page default"
+ *  removes the key, so a section that never chose keeps the page-load rise. */
+function MotionField({ d, onChange }: { d: Record<string, unknown>; onChange: (data: Record<string, unknown>) => void }): JSX.Element {
+  const { t } = useTranslation('cms');
+  const hintId = useId();
+  const value = typeof d.motion === 'string' ? d.motion : '';
+  const choose = (v: string): void => {
+    if (v) { onChange({ ...d, motion: v }); return; }
+    const { motion: _drop, ...rest } = d;
+    onChange(rest);
+  };
+  return (
+    <div className="u-grid u-gap-1 u-mt-2">
+      <label className="u-grid u-gap-1">
+        <span className="u-label-sm">{t('motionLabel')}</span>
+        <select value={value} onChange={(e) => choose(e.target.value)} aria-describedby={hintId}>
+          <option value="">{t('motionDefault')}</option>
+          <option value="none">{t('motionNone')}</option>
+          <option value="reveal">{t('motionReveal')}</option>
+          <option value="stagger">{t('motionStagger')}</option>
+          <option value="rise">{t('motionRise')}</option>
+          <option value="slide-start">{t('motionSlideStart')}</option>
+          <option value="slide-end">{t('motionSlideEnd')}</option>
+          <option value="zoom">{t('motionZoom')}</option>
+        </select>
+      </label>
+      <span id={hintId} className="u-label-sm muted">{t('motionHint')}</span>
+    </div>
+  );
 }
 
 function SectionFieldsBody({ section, assets, onChange, onPickMedia, baseData }: { section: Section; assets: MediaAssetRef[]; onChange: (data: Record<string, unknown>) => void; onPickMedia?: (() => Promise<string | null>) | undefined; /** The base layer, when `section.data` is a locale overlay (ADR 0748 — `fields` needs it). */ baseData?: Record<string, unknown> | undefined }): JSX.Element {
@@ -240,25 +567,61 @@ function SectionFieldsBody({ section, assets, onChange, onPickMedia, baseData }:
         <div className="u-grid u-gap-2">
           <label className="u-grid u-gap-1"><span className="u-label-sm">{t('heroEyebrowLabel')}</span><input value={str(d.eyebrow)} onChange={(e) => set('eyebrow', e.target.value)} placeholder={t('heroEyebrowPlaceholder')} /></label>
           <HeadingField d={d} set={set} />
+          {baseData === undefined ? <EmphasisField d={d} onChange={onChange} /> : null}
           <label className="u-grid u-gap-1"><span className="u-label-sm">{t('heroSubheadingLabel')}</span><textarea rows={2} value={str(d.subheading)} onChange={(e) => set('subheading', e.target.value)} /></label>
+          <label className="u-grid u-gap-1"><span className="u-label-sm">{t('heroBodyLabel')}</span><textarea rows={2} value={str(d.body)} onChange={(e) => set('body', e.target.value || undefined)} /></label>
           <label className="u-grid u-gap-1">
             <span className="u-label-sm">{t('heroVisualLabel')}</span>
-            <select value={str(d.visual) || (str(d.imageToken) ? 'image' : 'workflow')} onChange={(e) => set('visual', e.target.value)}>
+            <select
+              value={str(d.visual) || (str(d.imageToken) ? 'image' : 'workflow')}
+              onChange={(e) => {
+                // ADR 1038 D8 — a flow needs two steps to show, so start with two.
+                const flowNodes = (d.flow as { nodes?: unknown } | undefined)?.nodes;
+                if (e.target.value === 'flow' && !(Array.isArray(flowNodes) && flowNodes.length > 0)) onChange({ ...d, visual: 'flow', flow: { ...(d.flow as object | undefined), nodes: [{ label: '' }, { label: '' }] } });
+                else set('visual', e.target.value);
+              }}
+            >
               <option value="workflow">{t('heroVisualWorkflow')}</option>
               <option value="journey">{t('heroVisualJourney')}</option>
               <option value="run">{t('heroVisualRun')}</option>
               <option value="film">{t('heroVisualFilm')}</option>
               <option value="image">{t('heroVisualImage')}</option>
               <option value="plan">{t('heroVisualPlan')}</option>
+              <option value="activity">{t('heroVisualActivity')}</option>
+              <option value="hub">{t('heroVisualHub')}</option>
+              <option value="flow">{t('heroVisualFlow')}</option>
+              <option value="receipt">{t('heroVisualReceipt')}</option>
+              <option value="apps">{t('heroVisualApps')}</option>
+              <option value="versus">{t('heroVisualVersus')}</option>
+              <option value="fanout">{t('heroVisualFanout')}</option>
+              <option value="phone">{t('heroVisualPhone')}</option>
+              <option value="wall">{t('heroVisualWall')}</option>
+              <option value="tally">{t('heroVisualTally')}</option>
+              <option value="log">{t('heroVisualLog')}</option>
               <option value="none">{t('heroVisualNone')}</option>
             </select>
           </label>
+          {/* ADR 1066 D1 — presentation, so the base layer only (like `tone`). */}
+          {baseData === undefined && (str(d.visual) === 'flow' || isHeroArtVisual(str(d.visual))) ? (
+            <label className="u-grid u-gap-1">
+              <span className="u-label-sm">{t('heroPlacementLabel')}</span>
+              <select value={str(d.placement)} onChange={(e) => set('placement', e.target.value || undefined)}>
+                <option value="">{t('heroPlacementSide')}</option>
+                <option value="below">{t('heroPlacementBelow')}</option>
+              </select>
+            </label>
+          ) : null}
           <div className="u-grid u-gap-1 u-grid-2">
             <input aria-label={t('heroPrimaryLabelAria')} value={str(d.ctaLabel)} onChange={(e) => set('ctaLabel', e.target.value)} placeholder={t('heroPrimaryLabelPlaceholder')} />
             <input aria-label={t('heroPrimaryUrlAria')} value={str(d.ctaUrl)} onChange={(e) => set('ctaUrl', e.target.value)} placeholder={t('heroPrimaryUrlPlaceholder')} />
             <input aria-label={t('heroSecondaryLabelAria')} value={str(d.ctaLabel2)} onChange={(e) => set('ctaLabel2', e.target.value)} placeholder={t('heroSecondaryLabelPlaceholder')} />
             <input aria-label={t('heroSecondaryUrlAria')} value={str(d.ctaUrl2)} onChange={(e) => set('ctaUrl2', e.target.value)} placeholder={t('heroSecondaryUrlPlaceholder')} />
           </div>
+          {str(d.visual) === 'activity' ? <ActivityFields value={d.activity} onChange={(v) => set('activity', v)} /> : null}
+          {str(d.visual) === 'activity' && baseData === undefined ? <PlayField d={d} onChange={onChange} /> : null}
+          {str(d.visual) === 'flow' ? <FlowFields value={d.flow} onChange={(v) => set('flow', v)} showState={baseData === undefined} /> : null}
+          {isHeroArtVisual(str(d.visual)) ? <HeroArtFields visual={str(d.visual) as HeroArtVisual} value={d[str(d.visual)]} onChange={(v) => set(str(d.visual), Object.keys(v).length > 0 ? v : undefined)} showState={baseData === undefined} /> : null}
+          {str(d.visual) === 'hub' ? <HubFields value={d.hub} onChange={(v) => set('hub', v)} assets={assets} onPickMedia={onPickMedia} /> : null}
           <MediaTokenField value={str(d.imageToken)} assets={assets} onChange={(v) => set('imageToken', v)} label={t('heroImageLabel')} onPickMedia={onPickMedia} />
           {str(d.imageToken) ? (
             <label className="u-grid u-gap-1"><span className="u-label-sm">{t('altTextLabel')}</span><input value={str(d.alt)} onChange={(e) => set('alt', e.target.value)} /></label>
@@ -275,9 +638,22 @@ function SectionFieldsBody({ section, assets, onChange, onPickMedia, baseData }:
     case 'image':
       return (
         <div className="u-grid u-gap-2">
+          {/* ADR 1032 — an optional head, and a browser frame for screenshots. */}
+          <HeadFields d={d} set={set} />
+          <label className="u-grid u-gap-1"><span className="u-label-sm">{t('videoLedeLabel')}</span><input value={str(d.lede)} onChange={(e) => set('lede', e.target.value)} /></label>
           <MediaTokenField value={str(d.token)} assets={assets} onChange={(v) => set('token', v)} label={t('imageLabel')} onPickMedia={onPickMedia} />
           <label className="u-grid u-gap-1"><span className="u-label-sm">{t('altTextLabel')}</span><input value={str(d.alt)} onChange={(e) => set('alt', e.target.value)} /></label>
           <label className="u-grid u-gap-1"><span className="u-label-sm">{t('captionLabel')}</span><input value={str(d.caption)} onChange={(e) => set('caption', e.target.value)} /></label>
+          <label className="u-grid u-gap-1">
+            <span className="u-label-sm">{t('imageFrameLabel')}</span>
+            <select value={str(d.frame)} onChange={(e) => set('frame', e.target.value || undefined)}>
+              <option value="">{t('imageFrameNone')}</option>
+              <option value="browser">{t('imageFrameBrowser')}</option>
+            </select>
+          </label>
+          {str(d.frame) === 'browser' ? (
+            <label className="u-grid u-gap-1"><span className="u-label-sm">{t('imageFrameUrlLabel')}</span><input value={str(d.frameUrl)} onChange={(e) => set('frameUrl', e.target.value)} placeholder="example.com/dashboard" /></label>
+          ) : null}
         </div>
       );
     case 'cta':
@@ -290,15 +666,16 @@ function SectionFieldsBody({ section, assets, onChange, onPickMedia, baseData }:
         </div>
       );
     case 'columns': {
-      const cols: { title?: string; text?: string; href?: string; icon?: string }[] = Array.isArray(d.columns) ? d.columns : [];
-      const setCol = (i: number, patch: Record<string, string>): void =>
+      const cols: { status?: string; state?: string; title?: string; text?: string; href?: string; icon?: string; eyebrow?: string; wide?: boolean; tall?: boolean; items?: { label?: string; meta?: string }[]; imageToken?: string; alt?: string; frameUrl?: string; highlight?: boolean; callout?: unknown; tags?: unknown; more?: unknown; unit?: string; ctaLabel?: string; ctaUrl?: string }[] = Array.isArray(d.columns) ? d.columns : [];
+      const setCol = (i: number, patch: Record<string, unknown>): void =>
         set('columns', cols.map((x, j) => (j === i ? { ...x, ...patch } : x)));
+      const layout = str(d.layout) || 'cards';
       return (
         <div className="u-grid u-gap-2">
           <HeadFields d={d} set={set} />
           <label className="u-grid u-gap-1">
             <span className="u-label-sm">{t('layoutLabel')}</span>
-            <select value={str(d.layout) || 'cards'} onChange={(e) => set('layout', e.target.value)}>
+            <select value={layout} onChange={(e) => set('layout', e.target.value)}>
               <option value="cards">{t('layoutCards')}</option>
               <option value="showcase">{t('layoutShowcase')}</option>
               <option value="steps">{t('layoutSteps')}</option>
@@ -312,18 +689,97 @@ function SectionFieldsBody({ section, assets, onChange, onPickMedia, baseData }:
               <option value="progress">{t('layoutProgress')}</option>
               <option value="tiles">{t('layoutTiles')}</option>
               <option value="list">{t('layoutList')}</option>
+              {/* ADR 1029 D5 */}
+              <option value="timeline">{t('layoutTimeline')}</option>
+              <option value="incidents">{t('layoutIncidents')}</option>
+              <option value="board">{t('layoutBoard')}</option>
+              <option value="gallery">{t('layoutGallery')}</option>
+              <option value="bento">{t('layoutBento')}</option>
+              <option value="marquee">{t('layoutMarquee')}</option>
+              {/* ADR 1047 */}
+              <option value="features">{t('layoutFeatures')}</option>
+              <option value="flow">{t('layoutFlow')}</option>
             </select>
           </label>
+          {layout === 'features' ? (
+            // ADR 1047 — the words each pill state means, shown as a legend.
+            <div className="u-grid u-gap-1 u-grid-2">
+              <label className="u-grid u-gap-1"><span className="u-label-sm">{t('featureLegendNowLabel')}</span><input value={str((d.tagLegend as Record<string, unknown> | undefined)?.now)} onChange={(e) => set('tagLegend', { ...(d.tagLegend as Record<string, unknown> | undefined), now: e.target.value || undefined })} /></label>
+              <label className="u-grid u-gap-1"><span className="u-label-sm">{t('featureLegendSoonLabel')}</span><input value={str((d.tagLegend as Record<string, unknown> | undefined)?.soon)} onChange={(e) => set('tagLegend', { ...(d.tagLegend as Record<string, unknown> | undefined), soon: e.target.value || undefined })} /></label>
+            </div>
+          ) : null}
+          {/* ADR 1029 D5 — the marquee shows only names; say so, so no one fills
+              in text, links or icons that never appear. */}
+          {layout === 'marquee' ? <p className="u-label-sm muted u-m-0">{t('layoutMarqueeHint')}</p> : null}
+          {layout === 'stats' && baseData === undefined ? <CountField d={d} onChange={onChange} /> : null}
           {cols.map((c, i) => (
             <div key={i} className="surface-card u-grid u-gap-1 u-p-2">
               <input aria-label={t('columnTitleAria', { n: formatNumber(i + 1) })} value={c.title ?? ''} onChange={(e) => setCol(i, { title: e.target.value })} placeholder={t('columnTitlePlaceholder', { n: formatNumber(i + 1) })} />
               <textarea aria-label={t('columnTextAria', { n: formatNumber(i + 1) })} rows={2} value={c.text ?? ''} onChange={(e) => setCol(i, { text: e.target.value })} placeholder={t('columnTextPlaceholder')} />
-              <label className="u-grid u-gap-1"><span className="u-label-sm">{t('columnLinkLabel')}</span><input value={c.href ?? ''} onChange={(e) => setCol(i, { href: e.target.value })} placeholder={t('columnLinkPlaceholder')} /></label>
-              <label className="u-grid u-gap-1"><span className="u-label-sm">{t('columnIconLabel')}</span><input value={c.icon ?? ''} onChange={(e) => setCol(i, { icon: e.target.value })} placeholder={t('columnIconPlaceholder')} /></label>
+              {/* ADR 1029 D5 — a marquee shows names only, so its items have no link
+                  or icon to fill in (stored values are kept, just not offered). */}
+              {layout !== 'marquee' && layout !== 'flow' ? (
+                <>
+                  <label className="u-grid u-gap-1"><span className="u-label-sm">{t('columnLinkLabel')}</span><input value={c.href ?? ''} onChange={(e) => setCol(i, { href: e.target.value })} placeholder={t('columnLinkPlaceholder')} /></label>
+                  <label className="u-grid u-gap-1"><span className="u-label-sm">{t('columnIconLabel')}</span><input value={c.icon ?? ''} onChange={(e) => setCol(i, { icon: e.target.value })} placeholder={t('columnIconPlaceholder')} /></label>
+                </>
+              ) : null}
+              {layout === 'timeline' || layout === 'incidents' || layout === 'bento' || layout === 'features' || layout === 'list' ? (
+                <label className="u-grid u-gap-1"><span className="u-label-sm">{t(layout === 'timeline' || layout === 'incidents' ? 'columnWhenLabel' : 'columnEyebrowLabel')}</span><input value={c.eyebrow ?? ''} onChange={(e) => setCol(i, { eyebrow: e.target.value })} /></label>
+              ) : null}
+              {layout === 'list' ? (
+                // ADR 1069 D1 — a plan card's price unit and its own button.
+                <div className="u-grid u-gap-1 u-grid-2">
+                  <label className="u-grid u-gap-1"><span className="u-label-sm">{t('columnUnitLabel')}</span><input value={c.unit ?? ''} onChange={(e) => setCol(i, { unit: e.target.value || undefined })} /></label>
+                  <span />
+                  <label className="u-grid u-gap-1"><span className="u-label-sm">{t('columnCtaLabelLabel')}</span><input value={c.ctaLabel ?? ''} onChange={(e) => setCol(i, { ctaLabel: e.target.value || undefined })} /></label>
+                  <label className="u-grid u-gap-1"><span className="u-label-sm">{t('columnCtaUrlLabel')}</span><input value={c.ctaUrl ?? ''} onChange={(e) => setCol(i, { ctaUrl: e.target.value || undefined })} /></label>
+                </div>
+              ) : null}
+              {layout === 'flow' ? (
+                <FlowStepState n={formatNumber(i + 1)} status={c.status ?? ''} state={c.state ?? ''} showState={baseData === undefined} onChange={(patch) => setCol(i, patch)} />
+              ) : null}
+              {layout === 'bento' ? (
+                <label className="u-flex u-gap-1 u-items-center"><input type="checkbox" checked={c.wide === true} onChange={(e) => setCol(i, { wide: e.target.checked ? true : undefined })} /><span className="u-label-sm">{t('columnWideLabel')}</span></label>
+              ) : null}
+              {layout === 'bento' ? (
+                // ADR 1070 D1 — a tile two rows tall.
+                <label className="u-flex u-gap-1 u-items-center"><input type="checkbox" checked={c.tall === true} onChange={(e) => setCol(i, { tall: e.target.checked ? true : undefined })} /><span className="u-label-sm">{t('columnTallLabel')}</span></label>
+              ) : null}
+              {layout === 'bento' ? (
+                // ADR 1032 — the tile's inset card (its first item).
+                <div className="u-grid u-gap-1 u-grid-2">
+                  <label className="u-grid u-gap-1"><span className="u-label-sm">{t('bentoInsetTitleLabel')}</span><input value={c.items?.[0]?.label ?? ''} onChange={(e) => setCol(i, { items: e.target.value ? [{ label: e.target.value, ...(c.items?.[0]?.meta ? { meta: c.items[0].meta } : {}) }] : undefined })} /></label>
+                  <label className="u-grid u-gap-1"><span className="u-label-sm">{t('bentoInsetMetaLabel')}</span><input value={c.items?.[0]?.meta ?? ''} onChange={(e) => setCol(i, { items: [{ label: c.items?.[0]?.label ?? '', ...(e.target.value ? { meta: e.target.value } : {}) }] })} /></label>
+                </div>
+              ) : null}
+              {layout === 'bento' || layout === 'marquee' || layout === 'features' ? (
+                // ADR 1037 — the item's picture, its alt text and an optional
+                // browser-frame address.
+                <>
+                  <MediaTokenField value={c.imageToken ?? ''} assets={assets} onChange={(v) => setCol(i, { imageToken: v || undefined })} label={t('columnImageLabel')} onPickMedia={onPickMedia} />
+                  {c.imageToken ? (
+                    <div className="u-grid u-gap-1 u-grid-2">
+                      <label className="u-grid u-gap-1"><span className="u-label-sm">{t('altTextLabel')}</span><input value={c.alt ?? ''} onChange={(e) => setCol(i, { alt: e.target.value })} /></label>
+                      <label className="u-grid u-gap-1"><span className="u-label-sm">{t('imageFrameUrlLabel')}</span><input value={c.frameUrl ?? ''} onChange={(e) => setCol(i, { frameUrl: e.target.value || undefined })} placeholder="example.com" /></label>
+                    </div>
+                  ) : null}
+                </>
+              ) : null}
+              {layout === 'bento' || layout === 'list' ? (
+                <label className="u-flex u-gap-1 u-items-center"><input type="checkbox" checked={c.highlight === true} onChange={(e) => setCol(i, { highlight: e.target.checked ? true : undefined })} /><span className="u-label-sm">{t('columnHighlightLabel')}</span></label>
+              ) : null}
+              {layout === 'features' ? <FeatureItemFields c={c as Record<string, unknown>} setCol={setCol} i={i} /> : null}
               <Button variant="quiet" className="u-w-auto" onClick={() => set('columns', cols.filter((_, j) => j !== i))} aria-label={t('removeItem')}><TrashIcon /> {t('removeItem')}</Button>
             </div>
           ))}
-          <Button variant="quiet" className="u-w-auto" onClick={() => set('columns', [...cols, { title: '', text: '' }])}><PlusIcon /> {t('addItem')}</Button>
+          {layout === 'flow' && cols.length > FLOW_MAX_STEPS
+            ? <p className="u-label-sm u-m-0" role="status">{t('flowTooManyHint', { n: formatNumber(cols.length) })}</p>
+            : layout === 'flow' && cols.length === FLOW_MAX_STEPS
+            ? <p className="u-label-sm muted u-m-0">{t('flowMaxHint')}</p>
+            : <Button variant="quiet" className="u-w-auto" onClick={() => set('columns', [...cols, { title: '', text: '' }])}><PlusIcon /> {t('addItem')}</Button>}
+          {layout === 'rows' ? <ToggleFields value={d.toggles} onChange={(v) => set('toggles', v)} /> : null}
+          {layout === 'rows' ? <DiagramFields value={d.diagram} onChange={(v) => set('diagram', v)} /> : null}
         </div>
       );
     }
@@ -451,6 +907,9 @@ function SectionFieldsBody({ section, assets, onChange, onPickMedia, baseData }:
     }
     case 'video':
       return <VideoSectionFields d={d} set={set} />;
+    // ADR 1080 — the design section types edit as JSON.
+    case 'statusTable': case 'dateCalc': case 'conversation': case 'featureIndex': case 'decisionTree': case 'scheduleSim':
+      return <DesignJsonFields d={d} set={set} head={<HeadFields d={d} set={set} />} />;
     default:
       return <span className="u-label-sm">{t('unknownSection')}</span>;
   }
@@ -459,6 +918,58 @@ function SectionFieldsBody({ section, assets, onChange, onPickMedia, baseData }:
 /** ADR 0843 — a `video` section: the film's URLs (https only — the server
  *  refuses anything else on save), its title, play-button length and the
  *  screen-reader description that also feeds the page's VideoObject. */
+/** ADR 1032 — a `rows` section's try-it switches: a title and up to six
+ *  labelled switches with their starting position. */
+function ToggleFields({ value, onChange }: { value: unknown; onChange: (v: unknown) => void }): JSX.Element {
+  const { t } = useTranslation('cms');
+  const v = (typeof value === 'object' && value !== null ? value : {}) as { title?: string; items?: { label?: string; on?: boolean }[] };
+  const items = Array.isArray(v.items) ? v.items : [];
+  const put = (next: { title?: string; items: { label?: string; on?: boolean }[] }): void =>
+    onChange(next.items.length === 0 && !next.title ? undefined : next);
+  return (
+    <fieldset className="surface-card u-grid u-gap-1 u-p-2">
+      <legend className="u-label-sm">{t('togglesLegend')}</legend>
+      <label className="u-grid u-gap-1"><span className="u-label-sm">{t('togglesTitleLabel')}</span><input value={v.title ?? ''} onChange={(e) => put({ ...(e.target.value ? { title: e.target.value } : {}), items })} /></label>
+      {items.map((it, i) => (
+        <div key={i} className="u-flex u-gap-1 u-items-center">
+          <input aria-label={t('toggleLabelAria', { n: formatNumber(i + 1) })} value={it.label ?? ''} onChange={(e) => put({ ...v, items: items.map((x, j) => (j === i ? { ...x, label: e.target.value } : x)) })} />
+          <label className="u-flex u-gap-1 u-items-center"><input type="checkbox" checked={it.on === true} onChange={(e) => put({ ...v, items: items.map((x, j) => (j === i ? { label: x.label ?? '', ...(e.target.checked ? { on: true } : {}) } : x)) })} /><span className="u-label-sm">{t('toggleOnLabel')}</span></label>
+          <Button variant="quiet" className="u-w-auto" onClick={() => put({ ...v, items: items.filter((_, j) => j !== i) })} aria-label={t('removeItem')}><TrashIcon /></Button>
+        </div>
+      ))}
+      {items.length < 6 ? <Button variant="quiet" className="u-w-auto" onClick={() => put({ ...v, items: [...items, { label: '' }] })}><PlusIcon /> {t('addToggle')}</Button> : null}
+    </fieldset>
+  );
+}
+
+/** ADR 1068 D2 — a `rows` section's workflow diagram: up to eight boxes (a
+ *  short mono label, one line of text), one of which may wait for a person, and
+ *  a caption. Fewer than two boxes saves as no diagram. */
+function DiagramFields({ value, onChange }: { value: unknown; onChange: (v: unknown) => void }): JSX.Element {
+  const { t } = useTranslation('cms');
+  const v = (typeof value === 'object' && value !== null ? value : {}) as { caption?: string; nodes?: { label?: string; text?: string; waiting?: boolean }[] };
+  const nodes = Array.isArray(v.nodes) ? v.nodes : [];
+  const put = (next: { caption?: string; nodes: { label?: string; text?: string; waiting?: boolean }[] }): void =>
+    onChange(next.nodes.length === 0 && !next.caption ? undefined : next);
+  const setNode = (i: number, patch: Partial<{ label: string; text: string; waiting: boolean }>): void =>
+    put({ ...v, nodes: nodes.map((x, j) => (j === i ? { ...x, ...patch } : patch.waiting ? { ...x, waiting: false } : x)) });
+  return (
+    <fieldset className="surface-card u-grid u-gap-1 u-p-2">
+      <legend className="u-label-sm">{t('diagramLegend')}</legend>
+      {nodes.map((n, i) => (
+        <div key={i} className="u-flex u-gap-1 u-items-center">
+          <input aria-label={t('diagramLabelAria', { n: formatNumber(i + 1) })} value={n.label ?? ''} onChange={(e) => setNode(i, { label: e.target.value })} />
+          <input aria-label={t('diagramTextAria', { n: formatNumber(i + 1) })} value={n.text ?? ''} onChange={(e) => setNode(i, { text: e.target.value })} />
+          <label className="u-flex u-gap-1 u-items-center"><input type="checkbox" checked={n.waiting === true} onChange={(e) => setNode(i, { waiting: e.target.checked })} /><span className="u-label-sm">{t('diagramWaitingLabel')}</span></label>
+          <Button variant="quiet" className="u-w-auto" onClick={() => put({ ...v, nodes: nodes.filter((_, j) => j !== i) })} aria-label={t('removeItem')}><TrashIcon /></Button>
+        </div>
+      ))}
+      {nodes.length < 8 ? <Button variant="quiet" className="u-w-auto" onClick={() => put({ ...v, nodes: [...nodes, { label: '' }] })}><PlusIcon /> {t('addDiagramNode')}</Button> : null}
+      <label className="u-grid u-gap-1"><span className="u-label-sm">{t('diagramCaptionLabel')}</span><input value={v.caption ?? ''} onChange={(e) => put({ ...(e.target.value ? { caption: e.target.value } : {}), nodes })} /></label>
+    </fieldset>
+  );
+}
+
 function VideoSectionFields({ d, set }: { d: Record<string, unknown>; set: (k: string, v: unknown) => void }): JSX.Element {
   const { t } = useTranslation('cms');
   const urlHintId = useId();
@@ -474,6 +985,11 @@ function VideoSectionFields({ d, set }: { d: Record<string, unknown>; set: (k: s
       <HeadFields d={d} set={set} />
       <label className="u-grid u-gap-1"><span className="u-label-sm">{t('videoLedeLabel')}</span><input value={str(d.lede)} onChange={(e) => set('lede', e.target.value)} /></label>
       <label className="u-grid u-gap-1"><span className="u-label-sm">{t('videoTitleLabel')}</span><input value={str(d.title)} onChange={(e) => set('title', e.target.value)} /></label>
+      {/* ADR 1068 D1 — the play chip's words (empty: the title) and a visible caption. */}
+      <div className="u-grid u-gap-1 u-grid-2">
+        <label className="u-grid u-gap-1"><span className="u-label-sm">{t('videoChipLabelLabel')}</span><input value={str(d.chipLabel)} onChange={(e) => set('chipLabel', e.target.value)} placeholder={str(d.title)} /></label>
+        <label className="u-grid u-gap-1"><span className="u-label-sm">{t('videoCaptionLabel')}</span><input value={str(d.caption)} onChange={(e) => set('caption', e.target.value)} /></label>
+      </div>
       {url('src', t('videoSrcLabel'), 'https://…/film.mp4')}
       {url('poster', t('videoPosterLabel'), 'https://…/poster.jpg')}
       {url('captions', t('videoCaptionsLabel'), 'https://…/film.en.vtt')}
@@ -488,7 +1004,39 @@ function VideoSectionFields({ d, set }: { d: Record<string, unknown>; set: (k: s
         <textarea rows={4} value={str(d.description)} onChange={(e) => set('description', e.target.value)} aria-describedby={descHintId} />
         <span id={descHintId} className="u-label-sm muted">{t('videoDescriptionHint')}</span>
       </label>
+      {/* ADR 1032 — a second film beside the first, and a footnote under both. */}
+      <SecondFilmFields value={d.film2} onChange={(v) => set('film2', v)} />
+      <label className="u-grid u-gap-1"><span className="u-label-sm">{t('videoNoteLabel')}</span><input value={str(d.note)} onChange={(e) => set('note', e.target.value)} /></label>
     </div>
+  );
+}
+
+/** ADR 1032 — the second film of a `video` section. Off ⇒ no `film2` at all. */
+function SecondFilmFields({ value, onChange }: { value: unknown; onChange: (v: unknown) => void }): JSX.Element {
+  const { t } = useTranslation('cms');
+  const f = (typeof value === 'object' && value !== null ? value : null) as Record<string, unknown> | null;
+  const put = (k: string, v: string): void => onChange({ ...(f ?? {}), [k]: v });
+  const field = (k: string, label: string, type: 'url' | 'text' = 'text', placeholder?: string): JSX.Element => (
+    <label className="u-grid u-gap-1"><span className="u-label-sm">{label}</span><input type={type} value={str(f?.[k])} onChange={(e) => put(k, e.target.value)} placeholder={placeholder} /></label>
+  );
+  return (
+    <fieldset className="surface-card u-grid u-gap-1 u-p-2">
+      <legend className="u-label-sm">{t('videoSecondFilmLegend')}</legend>
+      <label className="u-flex u-gap-1 u-items-center"><input type="checkbox" checked={f !== null} onChange={(e) => onChange(e.target.checked ? { title: '', description: '', src: '', poster: '', length: '' } : undefined)} /><span className="u-label-sm">{t('videoSecondFilmToggle')}</span></label>
+      {f ? (
+        <>
+          {field('title', t('videoTitleLabel'))}
+          {field('chipLabel', t('videoChipLabelLabel'))}
+          {field('caption', t('videoCaptionLabel'))}
+          {field('src', t('videoSrcLabel'), 'url', 'https://…/film.mp4')}
+          {field('poster', t('videoPosterLabel'), 'url', 'https://…/poster.jpg')}
+          {field('captions', t('videoCaptionsLabel'), 'url', 'https://…/film.en.vtt')}
+          {field('youtubeUrl', t('videoYoutubeLabel'), 'url', 'https://www.youtube.com/watch?v=…')}
+          {field('length', t('videoLengthLabel'), 'text', '1:57')}
+          <label className="u-grid u-gap-1"><span className="u-label-sm">{t('videoDescriptionLabel')}</span><textarea rows={3} value={str(f.description)} onChange={(e) => put('description', e.target.value)} /></label>
+        </>
+      ) : null}
+    </fieldset>
   );
 }
 

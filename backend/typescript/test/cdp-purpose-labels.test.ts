@@ -6,8 +6,9 @@
  *
  * Sabotage-witnessed (/grade-tests w38): `normalizeLabel`'s `out.sort()` → `out`, `isNoOnwardUse`
  * dropping the length check, `isNonWidening`'s `onw.every(...)` → `true`, `reEmitLabel`'s narrowTo
- * intersection → `normalizeLabel(narrowTo)`, and `selectEligible`'s `dropNoOnwardUse` ternary forced
- * off each turn a case below red.
+ * intersection → `normalizeLabel(narrowTo)` each turn a case below red. (The `selectEligible`
+ * drop is witnessed in `adr1024-destination-sync-egress.test.ts` since ADR 1024 made it
+ * unconditional.)
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -17,7 +18,6 @@ import {
   isNonWidening,
   reEmitLabel,
 } from '../src/features/cdp/purposeLabels.js';
-import { prepareSyncBatch } from '../src/features/destination-sync/destinationSyncService.js';
 
 describe('CDP-1d purpose-label algebra (RFC 0128)', () => {
   it('normalize: absent vs [] vs set are distinct; dedupes + sorts; malformed → undefined', () => {
@@ -82,19 +82,7 @@ describe('CDP-1d purpose-label algebra (RFC 0128)', () => {
     }
   });
 
-  it('destination-sync []-fail-closed: a []-labelled record is dropped from egress (opt-in)', () => {
-    const sync = { syncMode: 'batch' as const, cursorField: 'updatedAt', fieldMap: [{ from: 'email', to: 'EMAIL' }] };
-    const records = [
-      { email: 'a@x', permittedPurposes: ['analytics'] }, // labelled → passes
-      { email: 'b@x', permittedPurposes: [] },             // [] → dropped (no onward use)
-      { email: 'c@x' },                                    // unlabelled → passes
-    ];
-    // opt-in OFF (flag off) → no suppression, all three egress
-    expect(prepareSyncBatch(sync, records).count).toBe(3);
-    // opt-in ON → the []-record is dropped, the other two field-map through
-    const guarded = prepareSyncBatch(sync, records, { dropNoOnwardUse: true });
-    expect(guarded.count).toBe(2);
-    expect(guarded.dropped).toBe(1);
-    expect(guarded.payloads).toEqual([{ EMAIL: 'a@x' }, { EMAIL: 'c@x' }]);
-  });
+  // The destination-sync `[]` drop moved to `adr1024-destination-sync-egress.test.ts` (D2):
+  // it now also reads the erasure barrier, which needs booted persistence, and it is no
+  // longer opt-in, so the "flag off ships all three" leg this file pinned is gone.
 });

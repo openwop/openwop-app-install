@@ -348,6 +348,9 @@ export const messages = {
   segStatusFailed: 'failed',
   segStatusSuspended: 'suspended',
   segStatusCut: 'stopped with the run',
+  segStatusIncomplete: "earlier attempt (incomplete)",
+  timelineObservedDuration: "{{duration}} observed",
+  timelineHistoryHint: "Timeline positions follow recorded timestamps, including inherited history. Run duration measures the current execution.",
   timelineDurationMs: '{{n}}ms',
   timelineDurationSeconds: '{{n}}s',
   timelineDurationMinutes: '{{m}}m {{s}}s',
@@ -434,7 +437,7 @@ export const messages = {
   flagRate: 'Flag rate',
   eventViewAria: 'Event view',
   eventStreamHeading: 'Event stream',
-  eventStreamConnError: 'Event stream connection error (will reconnect)',
+  eventStreamConnError: 'Live event updates stopped. Reload this page to reconnect.',
   runRefreshFailed: 'Couldn’t refresh the run after its last update — the details below may be out of date.',
   streamModeLabel: 'mode',
   eventViewTimeline: 'Timeline',
@@ -445,6 +448,10 @@ export const messages = {
   retentionPin: 'Pin',
   retentionUnpin: 'Unpin',
   retentionPinTitle: 'Keep this run indefinitely (exempt from retention cleanup)',
+
+  // RFC 0257 (ADR 1027 P3) — a completed run that reached no terminal node.
+  statusCompletedNoFinalStep: 'Completed: no final step ran',
+  noFinalStepRanNotice: 'This run completed without running any final step: every final step ({{steps}}) was skipped by its conditions, so it produced no deliverable.',
 
   // ADR 0475 — debug loop: provenance chips + Debug in builder + bulk redrive.
   summaryProvenance: 'Provenance',

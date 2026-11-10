@@ -14,7 +14,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { applyBrandIdentity, hydrateBrandSingleton, readCachedIdentity, cacheIdentity, GENERATOR_OWNED_TOKENS, splitGeneratorOwnedOverride } from './applyBrand.js';
+import { applyBrandIdentity, hydrateBrandSingleton, readCachedIdentity, cacheIdentity, GENERATOR_OWNED_TOKENS, splitGeneratorOwnedOverride, hasGenerativeTheme, toThemeInputs } from './applyBrand.js';
 import { brand } from './brand.js';
 import { BRAND_DEFAULTS } from './defaults.js';
 
@@ -145,5 +145,13 @@ describe('splitGeneratorOwnedOverride (ADR 0510 §5)', () => {
     expect(body, 'backend GENERATOR_OWNED_TOKENS not found — the mirror contract moved').not.toBe('');
     const backendTokens = [...body.matchAll(/'([^']+)'/g)].map((x) => x[1]).sort();
     expect([...GENERATOR_OWNED_TOKENS].sort()).toEqual(backendTokens);
+  });
+});
+
+describe('ADR 1029 D6 — the motion preset reaches the generator', () => {
+  it('a theme that sets only motion is generative, and its motion is passed through', () => {
+    expect(hasGenerativeTheme({ motion: 'lively' })).toBe(true);
+    expect(toThemeInputs({ motion: 'lively' })).toEqual({ motion: 'lively' });
+    expect(hasGenerativeTheme({ defaultMode: 'dark' })).toBe(false);
   });
 });

@@ -66,11 +66,11 @@ export async function resolveMoodBoardNames(b: CreativeBrief): Promise<Map<strin
  *  RESOLVED asset name only — raw `masset:` ids never print, and unresolvable
  *  ids are dropped (CB-CODE-6). `audience: 'internal'` (the authed PDF) keeps
  *  the selection notes + the internal needsAsset note; `'shared'` (the public
- *  page) renders neither. */
-export function briefToMarkdown(b: CreativeBrief, opts: { moodBoardNames: ReadonlyMap<string, string>; audience: 'internal' | 'shared' }): string {
+ *  page) renders neither. The PDF renderer owns its visible title; only that
+ *  producer passes includeTitle:false. Other Markdown keeps its H1. */
+export function briefToMarkdown(b: CreativeBrief, opts: { moodBoardNames: ReadonlyMap<string, string>; audience: 'internal' | 'shared'; includeTitle?: boolean }): string {
   const lines: string[] = [
-    `# ${b.title}`,
-    '',
+    ...(opts.includeTitle === false ? [] : [`# ${b.title}`, '']),
     `**Asset type:** ${b.assetType} · **Status:** ${b.status} · **Version:** ${b.version}`,
     '',
     '## Scene',
@@ -286,7 +286,7 @@ export function registerCreativeBriefsRoutes(deps: RouteDeps): void {
       const { orgId, tenantId } = await authz(req, 'workspace:read');
       const b = await getBrief(tenantId, orgId, req.params.briefId);
       if (!b) throw notFound(req.params.briefId);
-      const pdf = await renderMarkdownToPdf(briefToMarkdown(b, { moodBoardNames: await resolveMoodBoardNames(b), audience: 'internal' }), { title: b.title });
+      const pdf = await renderMarkdownToPdf(briefToMarkdown(b, { moodBoardNames: await resolveMoodBoardNames(b), audience: 'internal', includeTitle: false }), { title: b.title });
       res.setHeader('content-type', 'application/pdf');
       res.setHeader('content-disposition', `attachment; filename="${b.title.replace(/[^\w.-]+/g, '_').slice(0, 80)}.pdf"`);
       res.send(pdf);

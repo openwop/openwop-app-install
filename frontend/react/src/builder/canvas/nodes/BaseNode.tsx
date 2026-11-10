@@ -7,10 +7,11 @@
  * glow so the canvas doubles as an execution view.
  */
 
+import type { SourceProjection } from '../../schema/sourceOutput.js';
 import { CATEGORY_LABEL_KEYS } from '../../palette/categoryLabels.js';
 import { Button } from '../../../ui/Button.js';
 import { memo, useEffect, useState, type ReactNode } from 'react';
-import { Handle, NodeToolbar, Position, type NodeProps } from '@xyflow/react';
+import { Handle, NodeToolbar, Position, useUpdateNodeInternals, type NodeProps } from '@xyflow/react';
 import { useTranslation } from 'react-i18next';
 import { catalogEntry } from '../../palette/catalogRegistry.js';
 import { formatUsd } from '../../../i18n/format.js';
@@ -41,6 +42,7 @@ export interface NodeConnectState {
 
 interface NodeData extends Record<string, unknown> {
   kind: string;
+  virtualSourceOutputs?: SourceProjection[];
   name: string;
   /** Live run status painted by the execution overlay; undefined when idle. */
   runStatus?: NodeRunStatus;
@@ -124,11 +126,25 @@ function BaseNodeImpl({ id, data, selected }: NodeProps) {
   const { t } = useTranslation('builder');
   const d = data as NodeData;
   const entry = catalogEntry(d.kind);
+  const virtualOutputs = d.virtualSourceOutputs ?? [];
+  const handlesInRows = Boolean(entry && (entry.inputs.length > 1 || entry.outputs.length + virtualOutputs.length > 1));
+  const updateNodeInternals = useUpdateNodeInternals();
+  // XYFlow does not remeasure cached handle IDs on an ordinary data change.
+  // Include order, labels and row/center layout: ID-only or same-size changes
+  // need an explicit refresh just as added/removed handles do. Hooks precede
+  // both unknown-kind and annotation returns so a catalog update stays lawful.
+  const handleLayout = entry && !entry.clientOnly ? JSON.stringify([
+    handlesInRows,
+    entry.inputs.map(p => p.name),
+    virtualOutputs.map(p => [p.handleId, p.label]),
+    entry.outputs.map(p => p.name),
+  ]) : null;
+  useEffect(() => {
+    if (handleLayout !== null) updateNodeInternals(id);
+  }, [id, handleLayout, updateNodeInternals]);
   if (!entry) {
     return <div className="builder-node builder-node-unknown">{t('unknownNodePrefix', { kind: d.kind })}</div>;
   }
-  // NPV2-U-9 — see the handle render below.
-  const handlesInRows = entry.inputs.length > 1 || entry.outputs.length > 1;
   // Client-only nodes (sticky notes, future annotations) get a distinct
   // render: no ports, no run status (they never execute), no missing-
   // capability warnings (preflight skips them), and the prominent
@@ -281,6 +297,9 @@ function BaseNodeImpl({ id, data, selected }: NodeProps) {
       {!handlesInRows && entry.inputs.map((p) => (
         <Handle key={`in-${p.name}`} id={p.name} type="target" position={Position.Left} style={{ top: '50%', background: entry.accent }} />
       ))}
+      {!handlesInRows && virtualOutputs.map(p => (
+        <Handle key={p.handleId} id={p.handleId} type="source" position={Position.Right} isConnectable={false} style={{ top: '50%', background: entry.accent }} />
+      ))}
       {!handlesInRows && entry.outputs.map((p) => (
         <Handle key={`out-${p.name}`} id={p.name} type="source" position={Position.Right} style={{ top: '50%', background: entry.accent }} />
       ))}
@@ -327,6 +346,12 @@ function BaseNodeImpl({ id, data, selected }: NodeProps) {
           ))}
         </div>
         <div className="builder-node-ports-col builder-node-ports-col-right">
+          {virtualOutputs.map(p => (
+            <div key={p.handleId} className="builder-node-port builder-node-port-right" title={p.missing ? p.label : t('defaultSourceOutputHelp')}>
+              {handlesInRows && <Handle id={p.handleId} type="source" position={Position.Right} isConnectable={false} style={{ background: entry.accent }} />}
+              <span className="builder-node-port-label">{p.label}</span>
+            </div>
+          ))}
           {entry.outputs.map((p) => (
             <div key={p.name} className="builder-node-port builder-node-port-right">
               {handlesInRows && (

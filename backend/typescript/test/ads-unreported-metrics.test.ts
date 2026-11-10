@@ -21,7 +21,7 @@ import { topBottomPerformers } from '../src/features/campaign-intel/budgetPlanne
 import type { CampaignPerformanceRecord } from '../src/features/campaign-connectors/types.js';
 
 const ORG = 'org-unrep';
-const row = (platform: 'meta' | 'tiktok', date: string, spend: number, revenue: number | null): ParsedRow => {
+const row = (platform: 'meta' | 'tiktok' | 'google', date: string, spend: number, revenue: number | null): ParsedRow => {
   const base = { spend, impressions: 1000, clicks: 50, conversions: 5, revenue };
   return { platform, campaignName: `${platform} c`, adSet: '(campaign)', date, ...base, ...computeDerived(base) };
 };
@@ -83,5 +83,67 @@ describe('ADR 0907 — unreported metrics stay out of the ratios', () => {
     await recordAccountRows(T, ORG, plan, [{ date: '2026-10-01', campaignId: '9', campaignName: 'TT', impressions: 10, clicks: 1, spend: 5, conversions: 2, revenue: null }]);
     const [r] = await listRecords(T, ORG);
     expect(r).toMatchObject({ platform: 'tiktok', conversions: 2, revenue: null, roas: 0 });
+  });
+});
+
+// PERF-4: keep the numeric sentinel assertions above; availability is additive.
+// These cases call actual persistence and KPI aggregation, not a copied reducer.
+describe('PERF-4 — reporting availability is distinct from numeric ROAS', () => {
+  it('mixed Google revenue and unreported Meta retain numeric math and expose exact platform counts', async () => {
+    const tenant = 'user:perf4-mixed-platform';
+    await persistRecords(tenant, ORG, [row('google', '2026-10-02', 100, 500), row('meta', '2026-10-02', 100, null)], 'csv');
+    const result = await kpiSummary(tenant, ORG);
+    expect(result.recordCount).toBe(2);
+    expect(result.totals).toMatchObject({ spend: 200, revenue: 500, roas: 5, reportedRevenueRecordCount: 1 });
+    expect(result.byPlatform.find(p => p.platform === 'google')).toMatchObject({ spend: 100, revenue: 500, roas: 5, reportedRevenueRecordCount: 1 });
+    expect(result.byPlatform.find(p => p.platform === 'meta')).toMatchObject({ spend: 100, revenue: 0, roas: 0, reportedRevenueRecordCount: 0 });
+    expect(result.unreported).toEqual({ conversions: 0, revenue: 1 });
+    expect((await listRecords(tenant, ORG)).find(p => p.platform === 'meta')?.revenue).toBeNull();
+  });
+
+  it('all-null revenue emits explicit zero availability for totals and every platform, retaining numeric sentinels', async () => {
+    const tenant = 'user:perf4-all-unreported';
+    await persistRecords(tenant, ORG, [row('google', '2026-10-02', 100, null), row('meta', '2026-10-02', 100, null)], 'csv');
+    const result = await kpiSummary(tenant, ORG);
+    expect(result.totals).toMatchObject({ spend: 200, revenue: 0, roas: 0, reportedRevenueRecordCount: 0 });
+    expect(result.byPlatform).toHaveLength(2);
+    expect(result.byPlatform.map(p => ({ platform: p.platform, revenue: p.revenue, roas: p.roas, reportedRevenueRecordCount: p.reportedRevenueRecordCount })).sort((a, b) => a.platform.localeCompare(b.platform))).toEqual([
+      { platform: 'google', revenue: 0, roas: 0, reportedRevenueRecordCount: 0 },
+      { platform: 'meta', revenue: 0, roas: 0, reportedRevenueRecordCount: 0 },
+    ]);
+    expect(result.unreported).toEqual({ conversions: 0, revenue: 2 });
+  });
+
+  it('measured zero revenue counts as reported and leaves the existing zero ROAS unchanged', async () => {
+    const tenant = 'user:perf4-measured-zero';
+    await persistRecords(tenant, ORG, [row('meta', '2026-10-02', 100, 0)], 'csv');
+    const result = await kpiSummary(tenant, ORG);
+    expect(result.totals).toMatchObject({ spend: 100, revenue: 0, roas: 0, reportedRevenueRecordCount: 1 });
+    expect(result.byPlatform).toEqual([expect.objectContaining({ platform: 'meta', revenue: 0, roas: 0, reportedRevenueRecordCount: 1 })]);
+    expect(result).not.toHaveProperty('unreported');
+  });
+
+  it('partially reported rows within a platform keep the reporting-only denominator and counts sum across platforms', async () => {
+    const tenant = 'user:perf4-partial-platform';
+    await persistRecords(tenant, ORG, [row('meta', '2026-10-01', 100, 400), row('meta', '2026-10-02', 100, null), row('meta', '2026-10-03', 50, 0), row('google', '2026-10-01', 50, 100)], 'csv');
+    const result = await kpiSummary(tenant, ORG);
+    expect(result.recordCount).toBe(4);
+    expect(result.totals).toMatchObject({ spend: 300, revenue: 500, roas: 2.5, reportedRevenueRecordCount: 3 });
+    expect(result.byPlatform.find(p => p.platform === 'meta')).toMatchObject({ spend: 250, revenue: 400, roas: 2.6667, reportedRevenueRecordCount: 2 });
+    expect(result.byPlatform.find(p => p.platform === 'google')).toMatchObject({ spend: 50, revenue: 100, roas: 2, reportedRevenueRecordCount: 1 });
+    expect(result.totals.reportedRevenueRecordCount).toBe(result.byPlatform.reduce((sum, platform) => {
+      if (platform.reportedRevenueRecordCount === undefined) throw new Error('New server omitted a platform reporting count');
+      return sum + platform.reportedRevenueRecordCount;
+    }, 0));
+    expect(result.unreported).toEqual({ conversions: 0, revenue: 1 });
+  });
+
+  it('zero-spend reported revenue still counts a reporting row without changing the zero-denominator sentinel', async () => {
+    const tenant = 'user:perf4-zero-spend';
+    await persistRecords(tenant, ORG, [row('meta', '2026-10-02', 0, 10)], 'csv');
+    const result = await kpiSummary(tenant, ORG);
+    expect(result.totals).toMatchObject({ spend: 0, revenue: 10, roas: 0, reportedRevenueRecordCount: 1 });
+    expect(result.byPlatform).toEqual([expect.objectContaining({ platform: 'meta', spend: 0, revenue: 10, roas: 0, reportedRevenueRecordCount: 1 })]);
+    expect(result).not.toHaveProperty('unreported');
   });
 });

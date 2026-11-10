@@ -6,6 +6,8 @@
  * nodes. Pure functions; high-value coverage.
  */
 import { describe, it, expect } from 'vitest';
+import { serializeWorkflow } from '../serialize.js';
+import { projectSourceOutput } from '../sourceOutput.js';
 import {
   fromCanonicalDefinition,
   looksCanonical,
@@ -84,20 +86,32 @@ describe('fromCanonicalDefinition — happy path', () => {
     expect(res.nodes[1]!.position).toEqual({ x: 220, y: 0 });
   });
 
-  it('inherits default ports when edges omit them', () => {
-    // uppercase → uppercase: the catalog ports are `text`/`text`, which differ
-    // from BOTH fallbacks (`out`/`in`) — a noop source would read `out` either
-    // way and could not tell "inherited" from "defaulted".
-    const res = fromCanonicalDefinition({
-      nodes: [
-        { id: 'a', typeId: 'local.openwop-app.uppercase' },
-        { id: 'b', typeId: 'local.openwop-app.uppercase' },
-      ],
-      edges: [{ sourceNodeId: 'a', targetNodeId: 'b' }],
-    });
-    const e = res.edges[0]!;
-    expect(e.sourcePort).toBe('text');
-    expect(e.targetPort).toBe('text');
+  it('preserves omitted source semantics while keeping the existing inherited target port', () => {
+    const nodes = [
+      { id: 'a', typeId: 'local.openwop-app.uppercase' },
+      { id: 'b', typeId: 'local.openwop-app.uppercase' },
+    ];
+    const res = fromCanonicalDefinition({ nodes, edges: [{ sourceNodeId: 'a', targetNodeId: 'b' }] });
+    const e = res.edges[0];
+    if (!e) throw new Error('Imported default edge missing');
+    // BUILDER-PORT-1: the previous sourcePort='text' assertion pinned the
+    // first-catalog inference that lost wire omission. Literal out is only the
+    // compatibility placeholder; null and the separate default handle own meaning.
+    expect(e.sourcePort).toBe('out');
+    expect(e.targetPort).toBe('text'); // target-port behavior is unchanged.
+    expect(e.canonicalSourceOutput).toBeNull();
+    const saved = { ...res, id: 'wf.default-source', version: '1.0.0', createdAt: 'now', updatedAt: 'now' };
+    expect(serializeWorkflow(saved).edges[0]).not.toHaveProperty('sourceOutput');
+    expect(projectSourceOutput(e, [{ name: 'text', type: 'string' }])).toMatchObject({ label: 'Default output', virtual: true, type: 'any' });
+    expect(projectSourceOutput(e, [{ name: 'text', type: 'string' }]).handleId).not.toBe('text');
+    // An explicit text binding remains text, not omission or the placeholder.
+    const named = fromCanonicalDefinition({ nodes, edges: [{ sourceNodeId: 'a', targetNodeId: 'b', sourceOutput: 'text' }] });
+    const namedEdge = named.edges[0];
+    if (!namedEdge) throw new Error('Imported named edge missing');
+    expect(namedEdge.sourcePort).toBe('text');
+    expect(namedEdge.canonicalSourceOutput).toBe('text');
+    expect(namedEdge.targetPort).toBe('text');
+    expect(serializeWorkflow({ ...saved, edges: named.edges }).edges[0]).toHaveProperty('sourceOutput', 'text');
   });
 
   it('preserves a valid triggerRule and drops an invalid one', () => {

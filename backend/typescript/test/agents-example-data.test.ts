@@ -53,7 +53,7 @@ beforeAll(async () => {
   });
   // Every case below reads the seeded tenant; seeding here (not in case 1)
   // keeps the file order-independent. No assertions in the hook.
-  firstSeed = await api('/host/openwop-app/example-data/seed', { method: 'POST', body: '{}' });
+  firstSeed = await api('/host/openwop-app/example-data/seed', { method: 'POST', body: JSON.stringify({ expectedTenantId: 'default' }) });
 });
 
 afterAll(async () => {
@@ -109,7 +109,7 @@ describe('agents-demo backend foundations', () => {
     expect(iris.roleKey).toBe('chief-of-staff');
 
     // Re-seed is a no-op (does not clobber the existing roster).
-    const second = await api<{ seeded: boolean; domains: string[] }>('/host/openwop-app/example-data/seed', { method: 'POST', body: '{}' });
+    const second = await api<{ seeded: boolean; domains: string[] }>('/host/openwop-app/example-data/seed', { method: 'POST', body: JSON.stringify({ expectedTenantId: 'default' }) });
     expect(second.body.seeded).toBe(false);
     expect(second.body.domains).toEqual(SEED_DOMAINS);
     const rosterAgain = await api<{ roster: RosterEntry[] }>('/host/openwop-app/roster');
@@ -304,7 +304,7 @@ describe('agents-demo backend foundations', () => {
     try {
       const res = await api<{ seeded: boolean; agents: number }>('/host/openwop-app/example-data/seed', {
         method: 'POST',
-        body: '{}',
+        body: JSON.stringify({ expectedTenantId: 'default' }),
       });
       expect(res.status).toBe(200);
       expect(res.body.seeded).toBe(false);
@@ -375,7 +375,7 @@ describe('demo seed heal mode — restores missing surfaces (live bug 2026-06-04
 
     // Silent auto-seed shape (no heal): the board MUST stay gone — the auto
     // path must never resurrect a deliberate deletion.
-    const plain = await api<{ seeded: boolean; healed?: unknown }>('/host/openwop-app/example-data/seed', { method: 'POST', body: '{}' });
+    const plain = await api<{ seeded: boolean; healed?: unknown }>('/host/openwop-app/example-data/seed', { method: 'POST', body: JSON.stringify({ expectedTenantId: 'default' }) });
     expect(plain.status).toBe(200);
     expect(plain.body.healed).toBeUndefined();
     expect((await listBoardsWithCards('default')).some((b) => b.rosterId === victimRoster)).toBe(false);
@@ -384,7 +384,7 @@ describe('demo seed heal mode — restores missing surfaces (live bug 2026-06-04
     // Explicit heal: the board comes back, WITH its sample cards.
     const heal = await api<{ seeded: boolean; healed: { boards: number; schedules: number; profiles: number; prunedLegacy: number; orgChart: boolean } }>(
       '/host/openwop-app/example-data/seed',
-      { method: 'POST', body: JSON.stringify({ heal: true }) },
+      { method: 'POST', body: JSON.stringify({ heal: true, expectedTenantId: 'default' }) },
     );
     expect(heal.status).toBe(200);
     expect(heal.body.healed.boards).toBe(1);
@@ -398,7 +398,7 @@ describe('demo seed heal mode — restores missing surfaces (live bug 2026-06-04
     // Heal is idempotent: a second heal finds nothing missing.
     const again = await api<{ healed: { boards: number; schedules: number; profiles: number; prunedLegacy: number; orgChart: boolean } }>(
       '/host/openwop-app/example-data/seed',
-      { method: 'POST', body: JSON.stringify({ heal: true }) },
+      { method: 'POST', body: JSON.stringify({ heal: true, expectedTenantId: 'default' }) },
     );
     expect(again.body.healed).toEqual({ boards: 0, schedules: 0, profiles: 0, prunedLegacy: 0, orgChart: false });
   });

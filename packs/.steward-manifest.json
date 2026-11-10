@@ -302,9 +302,9 @@
       "digest": "16d26a745b5602377826836face0f8a83eb82075f15e52dae2a51f2bc4b61d60"
     },
     "feature.bi.nodes": {
-      "version": "1.0.1",
+      "version": "1.1.0",
       "files": 2,
-      "digest": "7c024530cb17f4e46af45ed22fa905505ba318d1fcd2220cf2398834b8862b40"
+      "digest": "2a77d96453a81828b87da602ca96882d95da5b31a74196b8c040be684b32f998"
     },
     "feature.brand.nodes": {
       "version": "1.4.0",
@@ -347,9 +347,9 @@
       "digest": "a3f0e320d7d5be74c5c5db5cf1b37fbacae3192ef034b779a8a7e2c3ff9cfdfe"
     },
     "feature.campaign-journeys.nodes": {
-      "version": "1.9.0",
+      "version": "1.10.0",
       "files": 2,
-      "digest": "3eee76b496623144bb898d68abc62bf7216037faadf003503d0743e44f49ad32"
+      "digest": "d50eaba9c36c6958bf903e4a2232e0908a7bc6c475beee0042a6e2ee9c275059"
     },
     "feature.campaign-ops.nodes": {
       "version": "1.4.0",
@@ -437,14 +437,14 @@
       "digest": "531b6f067891fd89ec291bc698a7a49999531ca944e0c7cf97d18349ce94715b"
     },
     "feature.dealers.nodes": {
-      "version": "1.0.1",
+      "version": "1.1.0",
       "files": 2,
-      "digest": "5f6099a3e3debb65f981a334ab75242adc4f43ae5bcbacc6fa7ebd06a2c040f8"
+      "digest": "aa47cd0493101d46c33e385ca8f5c3720617e0e5c97afab0dd872b641ec97e35"
     },
     "feature.destination-sync.nodes": {
-      "version": "1.0.1",
+      "version": "1.1.0",
       "files": 2,
-      "digest": "b230801f8fcabc873945d0b565cd312e87d8cba18e5d04a62bc2645dc4a0dec8"
+      "digest": "689a12bb8160b23b50384dfb104a60a1f49edc7dacfe3fd011c2c5a66a685bfd"
     },
     "feature.discovery.nodes": {
       "version": "1.0.1",
@@ -515,11 +515,6 @@
       "version": "1.3.0",
       "files": 11,
       "digest": "ca41927367c91b458374dc6ade87ee8ee58b3ae8b9f2c8ab173eca6473d8ed7b"
-    },
-    "feature.kicktodo.nodes": {
-      "version": "1.39.0",
-      "files": 41,
-      "digest": "aac2f7f8aa51b2d5c811ce91f152997d65b7ae74998e22dce6f65b53b9f410fc"
     },
     "feature.knowledge-sync.nodes": {
       "version": "1.0.1",
@@ -607,9 +602,9 @@
       "digest": "abbd39efaff6231394781f3f1157c819e5cfb5976410b4bcb36a602113fdfc8b"
     },
     "feature.territories.nodes": {
-      "version": "1.2.1",
+      "version": "1.3.0",
       "files": 2,
-      "digest": "0adbac0ec5a17d56fc45e998452ca2cfb2402a8e277f81aa83a1d7f5df1585bd"
+      "digest": "0260ffee34340eb24475facfb205cbcc94f4902637e507269ae1b5cbf8d15f94"
     },
     "feature.tool-output-compaction.nodes": {
       "version": "1.2.2",
@@ -627,9 +622,9 @@
       "digest": "39b378c661c32d9ad16b3b366980a06c009e0bb72cd9bfc73e0bcf5c8884dac0"
     },
     "feature.webinars.nodes": {
-      "version": "1.0.2",
+      "version": "1.1.0",
       "files": 2,
-      "digest": "84219b6f7b5c993faea8fc853175324a6a230f7b33ee770d59ddd38aac2ee244"
+      "digest": "7196a976eb657847765d8c1b4f84647ae947f86c3812e5fb6a6a3b7cfb985589"
     },
     "feature.whatsapp.nodes": {
       "version": "1.0.1",
@@ -985,11 +980,6 @@
       "version": "1.0.3",
       "files": 2,
       "digest": "3ac964cca2d59f3a809644e90f53716b24a8ab4408486822d1340b15b0d64097"
-    },
-    "vendor.openwop-app.kicktodo.agents": {
-      "version": "1.9.4",
-      "files": 15,
-      "digest": "13e76f41a202f529da87a7710ba82c9bc94471c812b7b00d7668e68447dc999e"
     },
     "vendor.openwop-app.marketplace.agents": {
       "version": "1.0.3",

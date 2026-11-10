@@ -8,7 +8,7 @@ import { authedHeaders, config, fetchOpts } from '../../client/config.js';
 export interface Org { orgId: string; name: string }
 export type FieldType = 'text' | 'email' | 'number' | 'textarea' | 'select' | 'checkbox';
 export const FIELD_TYPES: readonly FieldType[] = ['text', 'email', 'number', 'textarea', 'select', 'checkbox'];
-export interface FormField { key: string; label: string; type: FieldType; required: boolean; options?: string[]; /** UX_UPGRADE-forms F-G1 — optional per-field help text. */ description?: string; /** F9 — number-only authored constraints. */ min?: number; max?: number; step?: number; /** ADR 0808 — conditional visibility (edge-condition grammar over an earlier field). */ when?: { type: 'equals' | 'notEquals' | 'contains' | 'truthy' | 'falsy'; left: string; right?: unknown } }
+export interface FormField { key: string; label: string; type: FieldType; required: boolean; options?: string[]; /** UX_UPGRADE-forms F-G1 — optional per-field help text. */ description?: string; /** F9 — number-only authored constraints. */ min?: number; max?: number; step?: number; /** ADR 0808 — conditional visibility (edge-condition grammar over an earlier field). */ when?: { type: 'equals' | 'notEquals' | 'contains' | 'truthy' | 'falsy'; left: string; right?: unknown }; /** ADR 0951 D2 — a page carrying one is never session-recorded. */ sensitivity?: 'payment' | 'health' | 'credential' | undefined }
 export type FormStatus = 'draft' | 'published';
 
 /** ADR 0246 — routes this form's submissions to a priority-matrix intake list. */

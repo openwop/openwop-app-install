@@ -31,6 +31,7 @@ import { join } from 'node:path';
 import { assertReachableUrl } from '../src/routes/webhooks.js';
 import { assertPushUrlAllowed } from '../src/host/a2aTaskStore.js';
 import { validateBaseUrl } from '../src/features/priority-matrix/federationService.js';
+import { declaredPathTable } from './helpers/featureRatchetTables.js';
 
 /** Reduce any guard to a comparable disposition so every case reads alike. */
 /** For OpenwopError-shaped guards whose `code` is the same for every arm,
@@ -143,10 +144,11 @@ describe('ADR 0607 — the shared predicate preserves ADR 0606 ordering everywhe
  * writes down which arm covers it. That is the whole mechanism — it does not try
  * to verify the arm, it forces the question to be answered by a human once.
  */
-const DISPATCHER_SITES: Record<string, string> = {
+const HOST_DISPATCHER_SITES: Record<string, string> = {
   // Fixed by ADR 0606/0607 — now delegate to the shared ordered predicate.
   'host/webhookDeliveryWorker.ts': 'assertEgressSchemeAllowed at delivery; registration uses assertEgressUrlAllowed',
-  'routes/registerAllRoutes.ts': 'A2A push sink — assertEgressSchemeAllowed, honorDevFlag:false',
+  // ADR 1045 push follow-up moved the A2A push sink out of registerAllRoutes.ts.
+  'host/a2aPushDelivery.ts': 'A2A push sink — assertPushUrlAllowed + assertEgressSchemeAllowed, honorDevFlag:false, redirect:manual',
   'features/priority-matrix/federationService.ts': 'assertEgressUrlAllowed at config time + assertEgressSchemeAllowed on the peer GET',
   // ADR 0747 (RFC 0201 §D) — the endpoint-verification POST. Registration runs
   // assertEgressUrlAllowed (via assertReachableUrl) first; the verifier then
@@ -163,7 +165,6 @@ const DISPATCHER_SITES: Record<string, string> = {
   'host/imageProviderAdapter.ts': 'own scheme + denied-host arms',
   'host/sandboxAdapters/e2bAdapter.ts': 'own scheme + denied-host arms',
   'providers/dispatch.ts': 'own scheme + denied-host arms',
-  'features/kicktodo-integrations/calendarProviderAdapter.ts': 'own scheme + denied-host arms',
   'host/knowledgeSourceFetch.ts': 'routes through guardedEgressFetch (scheme arm is its step 2)',
   'host/brokeredEgress.ts': 'tenant egress-policy engine (assertEgressAllowed) in front of the dial',
   // ADR 0875 D6 — the UCP buyer merchant fetch moved onto the pinned dispatcher (it
@@ -174,6 +175,8 @@ const DISPATCHER_SITES: Record<string, string> = {
   'host/connectionInjection.ts': 'pack-facing safeFetch — its OWN flag (safeFetchPrivateEgressAllowed), deliberately not the webhook one',
   'host/effectEscapeLedger.ts': 'docblock reference only — no dial in this file',
 };
+/** ADR 1031 P2 — plus each feature package's rows (`ratchetTables.json`, `adr0607.dispatcherSites`). */
+const DISPATCHER_SITES: Record<string, string> = { ...HOST_DISPATCHER_SITES, ...declaredPathTable<string>('adr0607.dispatcherSites') };
 
 describe('ADR 0607 ratchet — every guarded-dispatcher site is classified', () => {
   const SRC = join(__dirname, '..', 'src');
@@ -196,8 +199,9 @@ describe('ADR 0607 ratchet — every guarded-dispatcher site is classified', () 
   it('finds the dispatcher sites at all (non-vacuity floor)', () => {
     // Without this, a broken walk would make every assertion below pass on an
     // empty set — the ratchet would report green having enumerated nothing.
-    // Measured 17 on ab2aff6e8 (/grade-tests w58); equals DISPATCHER_SITES' size.
-    expect(sites.length).toBeGreaterThanOrEqual(17);
+    // Measured 17 on ab2aff6e8 (/grade-tests w58); 16 after the KickTodo packages left
+    // (ADR 1031 P3). Equals DISPATCHER_SITES' size.
+    expect(sites.length).toBeGreaterThanOrEqual(16);
   });
 
   it('no UNCLASSIFIED egress site — a new one must declare which arm covers it', () => {
@@ -213,7 +217,7 @@ describe('ADR 0607 ratchet — every guarded-dispatcher site is classified', () 
   it('the three ADR 0606/0607 sites reference the shared predicate by name', () => {
     for (const f of [
       'host/webhookDeliveryWorker.ts',
-      'routes/registerAllRoutes.ts',
+      'host/a2aPushDelivery.ts',
       'features/priority-matrix/federationService.ts',
       'host/webhookEndpointVerification.ts',
     ]) {

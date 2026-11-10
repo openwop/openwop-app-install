@@ -400,6 +400,8 @@ changes when the key rotates. Telling an operator to create a member row named
 after eight characters of their secret is not an exit — it is an instruction that
 cannot be followed and would break on the next rotation if it could.
 
+> **CORRECTED 2026-11-05 (ADR 1045, TST-FUD-GC-1):** an env key's principal id is now `bearer:<16 hex of sha256(key)>`, not `bearer:<first 8 chars>`; the 8-char form made two keys sharing a prefix one principal (one budget, one audit identity, and an operator-issuer check that let a surviving key vouch for a removed one). Legacy 8-char ids in stored rows are honoured as operator issuers only when exactly one configured key has that prefix. See ADR 1045 § "Env-key principal collision".
+
 **(b) The blanket sentence "a principal with no member row now loses every gated
 MCP tool" is FALSE IN DEMO MODE.** `accessControlService.ts:1271` grants exactly
 that principal OWNER when `demoMode() && isSinglePrincipalTenant(tenantId)`. So

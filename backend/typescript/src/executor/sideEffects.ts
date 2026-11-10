@@ -60,7 +60,9 @@
  * omission from being silent in the meantime.
  */
 
-import { MANIFEST_FAST_PATH_SERVED } from './sideEffectFloor.generated.js';
+import { MANIFEST_DECLARED_TYPE_IDS, MANIFEST_FAST_PATH_SERVED } from './sideEffectFloor.generated.js';
+import { featureSideEffectingNodeTypes } from '../host/featureContributions.js';
+import { adopterDeclaredTypeIds, adopterServedTypeIds } from '../host/adopterPackManifest.js';
 
 /**
  * The pre-ADR-0572 hand-maintained list. RETAINED, not superseded, for two
@@ -104,14 +106,9 @@ const SIDE_EFFECTING_TYPE_PATTERNS: readonly RegExp[] = [
   // programmatic registration), which is why `feature.whatsapp.nodes.send` above
   // needed the same explicit entry.
   /^feature\.notifications\.nodes\.notify$/,
-  // Same family, reached the OTHER way: this node delivers a cohort session's
-  // T-minus reminder into the circle conversation through the accountability
-  // host surface (`features/kicktodo-accountability/sessionService.ts`, which
-  // imports `getNotificationEmitter`), not through its own pack `.mjs`. Found by
-  // the grade pass as a live counterexample to the notify entry above — the
-  // emitter is reachable from a node in two different ways, and only one of them
-  // is visible in pack source.
-  /^feature\.kicktodo\.nodes\.session-reminder$/,
+  // (ADR 1031 P2 — a node reaching the emitter the OTHER way, through its own
+  // feature's host surface rather than its pack `.mjs`, is declared by that feature:
+  // `hostContributions.sideEffectingNodeTypes`, read in `isSideEffectingNode`.)
   // ADR 0617 D2 — the users lifecycle nodes. Each is a durable status write
   // that ALSO bumps the target's session epoch (ends live sessions) and emits
   // `host.users.user.deactivated` / `.reactivated`, which a tenant binding turns
@@ -271,8 +268,79 @@ export function isSideEffectingNode(typeId: string, module?: { sideEffecting?: b
   // is that a pack's own declaration binds the host without anyone having to
   // remember a regex.
   if (MANIFEST_FAST_PATH_SERVED.has(typeId)) return true;
+  // ADR 1048 D5 — the ADOPTER build's served set, from its validated manifest.
+  // Add-only: it can classify more, never fewer (replay.md requirement 4).
+  if (adopterServedTypeIds().has(typeId)) return true;
+  // `sideEffecting` is set by programmatic modules AND, since ADR 1048, by the
+  // runtime manifest floor (`classifyUnbuiltPackNode` below) for pack nodes no
+  // build classified.
   if (module?.sideEffecting === true) return true;
+  if (featureSideEffectingNodeTypes().includes(typeId)) return true;
   return SIDE_EFFECTING_TYPE_PATTERNS.some((re) => re.test(typeId));
+}
+
+/**
+ * ADR 1048 D5 — THE RUNTIME MANIFEST FLOOR. Before it, a dispatchable pack node
+ * that no build scanned (a registry install, a break-glass pack, an adopter
+ * pack upstream never saw) was classified FAIL-OPEN: `isSideEffectingNode`
+ * returned false, the executor re-executed it on every replay fork, and an
+ * effect that bypasses the ADR 0531 seams (a record insert, an approval) happened
+ * twice. Measured, not inferred: `adr1048-replay-unclassified-pack-node.test.ts`
+ * was written first and went red on the base exactly that way.
+ *
+ * Called by `packs/tarballLoader.ts` once per node as it registers a
+ * DISPATCHABLE pack. Returns:
+ *
+ *   null         a build already classified this typeId (upstream's
+ *                `MANIFEST_DECLARED_TYPE_IDS`, or the valid adopter manifest's
+ *                `declared`). NEVER reclassified here: the build's static reach
+ *                analysis held its AI nodes LIVE so the ADR 0326 invocation log
+ *                serves the provider call (RFC 0041 §B). Setting the module flag —
+ *                a decisive arm — would override that holdback.
+ *   { served }   classified from the pack's OWN manifest entry. SERVED (the
+ *                recorded outcome is reproduced, never re-executed) when the
+ *                entry is ABSENT, its role is missing or outside the closed
+ *                taxonomy, its role is `side-effect`, or it carries the
+ *                `side-effectful` capability — except under `gate` /
+ *                `streaming-output`, whose fast-path semantics ADR 0572 leaves
+ *                unresolved and the build holds live too.
+ *
+ * It cannot run the build's AI-reach analysis, so an unknown AI node with a
+ * side-effect declaration is SERVED rather than run live under the invocation
+ * log: safe (no live spend, no duplicate), at the cost of §B divergence
+ * detection for that node until a build classifies it.
+ */
+const RUNTIME_FLOOR_ROLES: ReadonlySet<string> = new Set(['pure', 'read', 'gate', 'action', 'side-effect', 'streaming-output']);
+const RUNTIME_FLOOR_HELD_ROLES: ReadonlySet<string> = new Set(['gate', 'streaming-output']);
+
+export interface RuntimeFloorDecision {
+  served: boolean;
+  why: 'no-manifest-entry' | 'role-unknown' | 'role-side-effect' | 'capability-side-effectful' | 'live';
+}
+
+export function classifyUnbuiltPackNode(
+  typeId: string,
+  decl: { role?: unknown; capabilities?: unknown } | undefined,
+): RuntimeFloorDecision | null {
+  if (MANIFEST_DECLARED_TYPE_IDS.has(typeId) || adopterDeclaredTypeIds().has(typeId)) return null;
+  if (!decl) return { served: true, why: 'no-manifest-entry' };
+  const role = typeof decl.role === 'string' ? decl.role : null;
+  if (role === null || !RUNTIME_FLOOR_ROLES.has(role)) return { served: true, why: 'role-unknown' };
+  if (role === 'side-effect') return { served: true, why: 'role-side-effect' };
+  const caps = Array.isArray(decl.capabilities) ? decl.capabilities : [];
+  if (caps.includes('side-effectful') && !RUNTIME_FLOOR_HELD_ROLES.has(role)) return { served: true, why: 'capability-side-effectful' };
+  return { served: false, why: 'live' };
+}
+
+/** Every node the runtime floor classified, for readiness and the census. */
+const runtimeClassified = new Map<string, RuntimeFloorDecision & { pack: string }>();
+
+export function recordRuntimeFloorDecision(typeId: string, pack: string, d: RuntimeFloorDecision): void {
+  runtimeClassified.set(typeId, { ...d, pack });
+}
+
+export function runtimeClassifiedNodes(): ReadonlyMap<string, RuntimeFloorDecision & { pack: string }> {
+  return runtimeClassified;
 }
 
 /** One node's recorded terminal outcome in the source run's event log. */

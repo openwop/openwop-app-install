@@ -1,5 +1,7 @@
 /** `creativeBriefs` namespace (ADR 0353). */
 export const messages = {
+  chooseOrg: "Choose an organization",
+  orgUnavailable: "This organization is unavailable in this workspace. Choose an organization you can access.",
   reelPending: 'Your reel is still generating — this can take a few minutes. You can leave this page; we\'ll pick it up when you come back to this brief in this tab.',
   eyebrow: 'MARKETING',
   title: 'Creative Briefs',
@@ -177,7 +179,9 @@ export const messages = {
   "judgeCheckCase_colour-drift": "Colour changed",
   "judgeCheckCase_logo-swap": "Logo swapped",
   "judgeCheckCase_extra-part": "Extra part added",
-  judgeCheckCaseResult: "expected {{expected}}, got {{outcome}}",
+  judgeCheckCaseResult: 'expected {{expected}}, judge {{judged}}, combined {{outcome}}',
+  judgeCheckResultsHelp: 'A case is right only when both the AI judge and the combined checks match the expected result.',
+  judgeCheckNotReturned: 'not returned',
   judgeCheckExpect_pass: "pass",
   judgeCheckExpect_fail: "fail",
   judgeCheckExpect_not_pass: "fail or review",

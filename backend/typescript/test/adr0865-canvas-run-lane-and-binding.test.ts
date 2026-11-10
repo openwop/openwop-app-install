@@ -85,9 +85,9 @@ describe('ADR 0865 B17 — the run-lane canvas gate (ctx.canvas)', () => {
     expect((await canvasOf({ tenantId: WS, actingUserId: OTHER }).read(priv.canvasId)).state).toEqual({ secret: 1 });
   });
 
-  it('26: a privileged type is refused on the run lane, and the editor registration marks KickTodo\'s outline privileged', async () => {
-    expect(isPrivilegedCanvasType('canvas.challenge-outline')).toBe(true);
+  it('26: a privileged type is refused on the run lane (a feature\'s own registration is pinned by its owner, ADR 1031 P2)', async () => {
     registerCanvasTypeOwner('test.adr0865-privileged', 'drawings', { privileged: true });
+    expect(isPrivilegedCanvasType('test.adr0865-privileged')).toBe(true);
     const c = await createCanvasForTenant(WS, { canvasTypeId: 'test.adr0865-privileged', initialState: {} });
     const err = await canvasOf(member()).write(c.canvasId, { x: 1 }).catch((e: unknown) => e as { code?: string; blockedBy?: string });
     expect(err).toMatchObject({ code: 'host_capability_disabled', blockedBy: 'privileged' });

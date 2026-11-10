@@ -61,7 +61,7 @@ import { withLlmSpan, PROVIDER_DISPATCH_SPAN } from '../observability/llmSpans.j
 import { enterprisePosture } from '../host/deployPosture.js';
 import { subscriptionLoginDetected, subscriptionRequireDetectedLogin } from './subscriptionCliDetect.js';
 import type { AiProviderPolicy, ProviderPolicyResolver } from '../host/index.js';
-import { dispatchChat, type ChatMessage, type ProviderId } from '../providers/dispatch.js';
+import { dispatchChat, isStreamIncompleteError, type ChatMessage, type ProviderId } from '../providers/dispatch.js';
 import { dispatchMockToolsRound, hasPendingDivergenceProgram } from '../providers/dispatchMock.js';
 import { explicitRefNamesOtherProvider, pickCredentialRef } from './credentialRefLadder.js';
 import { dispatchAnthropicToolsRound, type ToolsRoundRequest, type ToolsRoundResult } from '../providers/dispatchAnthropicTools.js';
@@ -2994,6 +2994,14 @@ async function mapDispatchErrors<T>(provider: string, fn: () => Promise<T>): Pro
     if (err instanceof AiProviderError) {
       recordProviderCall(provider, classifyProviderOutcome(err));
       throw err;
+    }
+    // ADR 1026 — the provider stopped mid-stream. Transient, like a 5xx: the
+    // structured loop and the chat retry both retry it rather than parse the
+    // fragment. There is no HTTP status to report (the response was a 200).
+    if (isStreamIncompleteError(err)) {
+      const mapped = new AiProviderError('provider_unavailable', 'Provider stream ended without a finish reason.', { provider, reason: 'stream_incomplete', upstreamMessage: err.message.slice(0, 200) });
+      recordProviderCall(provider, classifyProviderOutcome(mapped));
+      throw mapped;
     }
     const msg = err instanceof Error ? err.message : String(err);
     // Provider error shapes (e.g., "anthropic_429: ...", "openai_404: ...")

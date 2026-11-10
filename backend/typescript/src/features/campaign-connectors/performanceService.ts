@@ -173,12 +173,12 @@ export async function kpiSummary(tenantId: string, orgId: string, campaignId?: s
   // that reported its numerator (`spendR`, `spendC`, `clicksC`), so a platform
   // that cannot report revenue does not drag ROAS toward 0. `unreported`
   // counts the rows left out, so a reader can say so.
-  type Acc = { spend: number; impressions: number; clicks: number; conversions: number; revenue: number; spendC: number; clicksC: number; spendR: number };
-  const zero = (): Acc => ({ spend: 0, impressions: 0, clicks: 0, conversions: 0, revenue: 0, spendC: 0, clicksC: 0, spendR: 0 });
+  type Acc = { spend: number; impressions: number; clicks: number; conversions: number; revenue: number; spendC: number; clicksC: number; spendR: number; reportedRevenueRecordCount: number };
+  const zero = (): Acc => ({ spend: 0, impressions: 0, clicks: 0, conversions: 0, revenue: 0, spendC: 0, clicksC: 0, spendR: 0, reportedRevenueRecordCount: 0 });
   const add = (a: Acc, r: CampaignPerformanceRecord): void => {
     a.spend += r.spend; a.impressions += r.impressions; a.clicks += r.clicks;
     if (r.conversions !== null) { a.conversions += r.conversions; a.spendC += r.spend; a.clicksC += r.clicks; }
-    if (r.revenue !== null) { a.revenue += r.revenue; a.spendR += r.spend; }
+    if (r.revenue !== null) { a.revenue += r.revenue; a.spendR += r.spend; a.reportedRevenueRecordCount += 1; }
   };
   const t = zero();
   const byPlat = new Map<AdPlatform, Acc>();
@@ -195,7 +195,9 @@ export async function kpiSummary(tenantId: string, orgId: string, campaignId?: s
     if (!end || r.date > end) end = r.date;
   }
   const div = (a: number, b: number): number => (b > 0 ? Number((a / b).toFixed(4)) : 0);
-  const pub = ({ spend, impressions, clicks, conversions, revenue }: Acc) => ({ spend, impressions, clicks, conversions, revenue });
+  // PERF-4: numeric sentinels/math stay compatible; disclose numerator availability
+  // separately, counting actual nonnull rows rather than spend or revenue truthiness.
+  const pub = ({ spend, impressions, clicks, conversions, revenue, reportedRevenueRecordCount }: Acc) => ({ spend, impressions, clicks, conversions, revenue, reportedRevenueRecordCount });
   return {
     totals: { ...pub(t), ctr: div(t.clicks, t.impressions), cpc: div(t.spend, t.clicks), cvr: div(t.conversions, t.clicksC), cpa: div(t.spendC, t.conversions), roas: div(t.revenue, t.spendR) },
     byPlatform: [...byPlat.entries()].map(([platform, p]) => ({ platform, ...pub(p), roas: div(p.revenue, p.spendR) })).sort((a, b) => b.spend - a.spend),

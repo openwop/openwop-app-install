@@ -156,3 +156,25 @@ describe('generateTheme — invariants', () => {
     expect(ratioOf(high.light['--ink-3'], high.light['--paper'])).toBeGreaterThanOrEqual(7);
   });
 });
+
+describe('ADR 1029 D6 — the motion preset', () => {
+  const MOTION_KEYS = ['--ease-reveal', '--reveal-distance', '--rise-distance', '--stagger-step', '--slide-distance', '--zoom-from', '--hover-lift'];
+  const motionOf = (m: Record<string, string>) => Object.fromEntries(Object.entries(m).filter(([k]) => MOTION_KEYS.includes(k)));
+
+  it('a theme that sets ONLY motion keeps it (the stock fast path does not drop it), in light and dark alike', () => {
+    const t = generateTheme({ motion: 'lively' });
+    expect(motionOf(t.light)).toEqual({ '--ease-reveal': 'cubic-bezier(0, 0, 0.1, 1)', '--reveal-distance': '28px', '--rise-distance': '64px', '--stagger-step': '10%', '--slide-distance': '56px', '--zoom-from': '0.92', '--hover-lift': '5px' });
+    expect(motionOf(t.dark)).toEqual(motionOf(t.light));
+    // Colour stays stock: the motion preset is not a custom theme in colour.
+    expect(t.light['--clay']).toBe(STOCK_ACCENT);
+  });
+
+  it('subtle drops the travel; calm and absent emit nothing; it also rides a custom-colour theme', () => {
+    // ADR 1038 D6: subtle also drops the sideways travel and the zoom.
+    expect(motionOf(generateTheme({ motion: 'subtle' }).light)).toEqual({ '--reveal-distance': '0px', '--rise-distance': '0px', '--stagger-step': '4%', '--slide-distance': '0px', '--zoom-from': '1', '--hover-lift': '0px' });
+    expect(motionOf(generateTheme({ motion: 'calm' }).light)).toEqual({});
+    expect(motionOf(generateTheme({}).light)).toEqual({});
+    const custom = generateTheme({ accentSeed: 'oklch(58% 0.13 250)', motion: 'subtle' });
+    expect(motionOf(custom.dark)['--reveal-distance']).toBe('0px');
+  });
+});

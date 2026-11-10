@@ -31,6 +31,7 @@ import { provisionDemoFeatures } from '../src/host/demoProvision.js';
 import { filterVisibleCrmRecords } from '../src/host/crmRecordVisibility.js';
 import { buildFeatureSurfaces } from '../src/host/featureSurfaces.js';
 import { createOrg } from '../src/host/accessControlService.js';
+import { createPage, transitionPage } from '../src/features/cms/cmsService.js';
 
 let BASE: string;
 let server: http.Server;
@@ -215,11 +216,13 @@ describe('§1 opt-outs — a lapsed plan never darkens a PUBLIC lane (ADR 0419 s
     // The tenant's own authenticated lanes are paywalled (the plan excludes docs)...
     expect((await resolveOne('docs', { tenantId: 'user:adr0819c-docs' }))?.blockedBy).toBe('plan');
     // ...but a visitor reading the public docs is not the operator's customer.
+    // A refused lane answers the SAME empty nav as an org with no docs (uniform,
+    // `listPublishedDocs`), so the org publishes one: served ⇒ it is listed.
+    const page = await createPage({ tenantId: 'user:adr0819c-docs', orgId: org.orgId, title: 'Public guide', slug: 'public-guide', collection: 'docs', sections: [{ type: 'hero', data: { heading: 'G' } }], createdBy: 'u-docs' });
+    await transitionPage('user:adr0819c-docs', org.orgId, page.pageId, 'publish', 'u-docs');
     const res = await fetch(`${BASE}/host/openwop-app/public/${org.orgId}/docs`);
-    // A refused lane answers 404 `not_found` (docsService `listPublishedDocs`);
-    // served, the org has no published docs yet, so the nav is empty.
     expect(res.status).toBe(200);
-    expect(((await res.json()) as { docs: unknown }).docs).toEqual([]);
+    expect(((await res.json()) as { docs: Array<{ slug: string }> }).docs.map((d) => d.slug)).toEqual(['public-guide']);
   });
 });
 

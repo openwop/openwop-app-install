@@ -18,7 +18,7 @@
  */
 
 import type { EdgeDef, WorkflowDefinition } from '../../executor/types.js';
-import { APPROVAL_GATE_TYPE_IDS } from '../../host/approvalGateTypeIds.js';
+import { isApprovalGateTypeId } from '../../host/approvalGateTypeIds.js';
 
 export type EdgeCondition = NonNullable<EdgeDef['condition']>;
 type WorkflowNode = WorkflowDefinition['nodes'][number];
@@ -236,7 +236,7 @@ export function normalizeEditOps(input: NormalizeInput): NormalizeResult {
             ...(isObj(raw.inputs) ? { inputs: raw.inputs } : {}), ...(pos ? { position: pos } : {}),
           },
           dependsOn: [], preimages: [{ path: `nodes.${nodeId}`, present: false }],
-          gateSensitive: APPROVAL_GATE_TYPE_IDS.has(typeId),
+          gateSensitive: isApprovalGateTypeId(typeId),
           summary: `Add ${name ?? typeId}`,
         });
         return;
@@ -251,7 +251,7 @@ export function normalizeEditOps(input: NormalizeInput): NormalizeResult {
           op: { kind, nodeId: id },
           dependsOn: [],
           preimages: [{ path: `nodes.${id}`, present: true, value: node }, ...incident.map((e) => ({ path: `edges.${e.edgeId}`, present: true, value: e }))],
-          gateSensitive: APPROVAL_GATE_TYPE_IDS.has(node.typeId) || incident.some((e) => touchesGate(e, headNodes)),
+          gateSensitive: isApprovalGateTypeId(node.typeId) || incident.some((e) => touchesGate(e, headNodes)),
           summary: `Remove ${node.name ?? id}`,
         });
         return;
@@ -267,7 +267,7 @@ export function normalizeEditOps(input: NormalizeInput): NormalizeResult {
           op: { kind, nodeId: target.nodeId, path, value: raw.value },
           dependsOn: target.dependsOn !== undefined ? [target.dependsOn] : [],
           preimages: [{ path: `nodes.${target.nodeId}.config.${path}`, ...pre }],
-          gateSensitive: headNode ? APPROVAL_GATE_TYPE_IDS.has(headNode.typeId) : false,
+          gateSensitive: headNode ? isApprovalGateTypeId(headNode.typeId) : false,
           summary: `${headNode?.name ?? target.nodeId} · ${path}`,
         });
         return;
@@ -383,7 +383,7 @@ function nodeIdsTouched(op: EditOp): string[] {
 
 function isGateId(nodeId: string, nodes: ReadonlyMap<string, WorkflowNode>): boolean {
   const n = nodes.get(nodeId);
-  return !!n && APPROVAL_GATE_TYPE_IDS.has(n.typeId);
+  return !!n && isApprovalGateTypeId(n.typeId);
 }
 
 function touchesGate(edge: EdgeDef, nodes: ReadonlyMap<string, WorkflowNode>): boolean {

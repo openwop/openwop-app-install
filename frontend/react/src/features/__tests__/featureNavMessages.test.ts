@@ -14,7 +14,17 @@
  * Sabotage-witnessed: w55g1-nm-* (round 1), w55g1-nm-*-r2 (round 2).
  */
 import { describe, expect, it } from 'vitest';
+import { join } from 'node:path';
+import { featureGateDeclarations } from '../../../scripts/featureGateDeclarations.mjs';
 import { applyFeatureNavMessages, FRONTEND_FEATURES, type FrontendFeature } from '../registry.js';
+import { loadFeatureExtensions } from '../featureExtensions.js';
+
+/** Every shipped nav catalog: the eager `navMessages` and (ADR 1031 P2) the lazy
+ *  `lazyExtensions().navMessages` the admin rail reads. Both obey the same rules. */
+async function shippedNavCatalogs(): Promise<Array<Pick<FrontendFeature, 'id' | 'navMessages'>>> {
+  const lazy = (await loadFeatureExtensions()).flatMap(({ feature, ext }) => (ext.navMessages ? [{ id: feature.id, navMessages: ext.navMessages }] : []));
+  return [...FRONTEND_FEATURES.filter((f) => f.navMessages), ...lazy];
+}
 
 /** The nav-catalog cap (ADR 0916): ≤ 8 keys per locale, each `<feature id>.`-prefixed, values ≤ 160 chars. */
 function navCatalogViolations(features: readonly Pick<FrontendFeature, 'id' | 'navMessages'>[]): string[] {
@@ -45,7 +55,7 @@ describe('applyFeatureNavMessages (ADR 0916)', () => {
     expect(added).toEqual([['fr', { 'bookai-author-suite.books': 'Livres' }], ['pt-BR', { 'bookai-author-suite.books': 'Livros' }]]);
   });
 
-  it('every shipped navMessages stays a nav catalog: at most 8 keys of 160 chars per locale, all prefixed', () => {
+  it('every shipped navMessages stays a nav catalog: at most 8 keys of 160 chars per locale, all prefixed', async () => {
     // The check itself can fail: a synthetic over-cap declaration trips each of the three limits,
     // and an at-cap one (8 keys, 160 chars, prefixed) does not.
     const atCap = Object.fromEntries(Array.from({ length: 8 }, (_, i) => [`demo.k${i}`, 'x'.repeat(160)]));
@@ -60,10 +70,15 @@ describe('applyFeatureNavMessages (ADR 0916)', () => {
     // Over the SHIPPED features this is empty while case 3 holds (no feature declares navMessages),
     // so for shipped features it is a deliberate double guard with case 3: it is the standing rule
     // once case 3 relaxes (probes w55g1-nm-shipped-over-cap / -unprefixed red both).
-    expect(navCatalogViolations(FRONTEND_FEATURES)).toEqual([]);
+    expect(navCatalogViolations(await shippedNavCatalogs())).toEqual([]);
   });
 
-  it('no shipped feature declares navMessages yet (adding them is a reviewed change)', () => {
-    expect(FRONTEND_FEATURES.filter((f) => f.navMessages).map((f) => f.id)).toEqual([]);
+  it('only reviewed features declare navMessages (adding one is a reviewed change)', async () => {
+    // ADR 1031 P2 — the review is recorded by the declaring package itself
+    // (`navMessages.reviewedFeatureIds` in its gateDeclarations.json), so the list
+    // travels with the package; an unreviewed declaration is still red here.
+    const reviewed = featureGateDeclarations(join(__dirname, '..', '..')).flatMap(({ decl }) =>
+      ((decl.navMessages as { reviewedFeatureIds?: string[] } | undefined)?.reviewedFeatureIds ?? []));
+    expect([...new Set((await shippedNavCatalogs()).map((f) => f.id))].sort()).toEqual([...new Set(reviewed)].sort());
   });
 });

@@ -22,11 +22,19 @@
  *   - `c.orgId !== orgId` dropped in `adAccountsForOrg`: "only an ACTIVE,
  *     ORG-scoped…";
  *   - the `ad_variants` condition removed: "a brief without ads…".
+ * Re-probed 2026-11-04 (w84g1-*): the node's `ready` short-circuit, the card's
+ * item label, `c.status === 'active'`, the `reconnect:` naming and the second
+ * suspend each red their case.
+ *
+ * Double guard (recorded): a person's connection is skipped by `c.userId` AND by
+ * `c.orgId !== orgId` in `adAccountsForOrg`, because `createSecretConnection`
+ * keeps `orgId` only on an org-scoped row (a user-scoped row cannot name an org).
+ * So the `c.userId` check is an equivalent mutant here (w84g1-pf-userid vacuous).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { randomBytes } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
@@ -84,13 +92,19 @@ async function campaignFor(orgId: string, withAds: boolean): Promise<MarketingCa
   return (await ensureDraftCampaign(TENANT, brief, adminUser)).campaign;
 }
 
+/** Wait for `ok`; a timeout FAILS (a named assertion), never returns the stale value. */
 async function until<T>(read: () => Promise<T>, ok: (v: T) => boolean, ms = 15_000): Promise<T> {
-  const end = Date.now() + ms;
-  for (;;) {
+  return vi.waitFor(async () => {
     const v = await read();
-    if (ok(v) || Date.now() > end) return v;
-    await new Promise((r) => setTimeout(r, 50));
-  }
+    expect(ok(v), 'until: condition not reached').toBe(true);
+    return v;
+  }, { timeout: ms, interval: 50 });
+}
+
+/** Narrow a nullable result, failing the case with a message instead of a cast. */
+function must<T>(v: T | null | undefined, what: string): T {
+  if (v === null || v === undefined) throw new Error(`expected ${what}`);
+  return v;
 }
 
 interface OpenInterrupt { token: string; nodeId: string; kind: string; data?: { questions?: Array<{ question?: string }> } }
@@ -105,14 +119,14 @@ async function launchToCard(c: MarketingCampaign): Promise<{ runId: string; card
   expect(run?.status, JSON.stringify({ status: run?.status, error: run?.error })).toMatch(/^waiting/);
   const cards = await openInterrupts(r.body.runId);
   expect(cards).toHaveLength(1);
-  return { runId: r.body.runId, card: cards[0] as OpenInterrupt };
+  return { runId: r.body.runId, card: must(cards[0], 'the checklist card') };
 }
 
 const stageOf = (runId: string) => storage.getRun(stageRunId(TENANT, bareRunId(runId), 'drafts'));
 
 async function checkAgain(token: string): Promise<void> {
   const res = await call('POST', `/interrupts/${token}`, { resumeValue: { answers: [] } });
-  expect([200, 202, 204], JSON.stringify(res.body)).toContain(res.status);
+  expect(res.status, JSON.stringify(res.body)).toBe(200);
 }
 
 beforeAll(async () => {
@@ -159,14 +173,18 @@ describe('ADR 0961 P1 — the preflight checklist card', () => {
     expect((await storage.getRun(bareRunId(runId)))?.status).toMatch(/^waiting/);
     expect(await stageOf(runId)).toBeNull();
     // A third round alternates back to the first key and still asks.
-    await checkAgain((again[0] as OpenInterrupt).token);
-    const third = await until(() => openInterrupts(runId), (cs) => cs.length === 1 && cs[0]?.token !== again[0]?.token);
+    const second = must(again[0], 'the second card');
+    await checkAgain(second.token);
+    const third = await until(() => openInterrupts(runId), (cs) => cs.length === 1 && cs[0]?.token !== second.token);
     expect(third).toHaveLength(1);
+    expect(third[0]?.token).not.toBe(second.token);
+    expect((await storage.getRun(bareRunId(runId)))?.status).toMatch(/^waiting/);
+    expect(await stageOf(runId)).toBeNull();
 
     // The client connects its own ad account; "Check again" now proceeds.
     const conn = await createSecretConnection({ tenantId: TENANT, provider: 'meta-ads', kind: 'bearer', secret: 'test-token', scope: 'org', orgId: c.orgId });
     try {
-      await checkAgain((third[0] as OpenInterrupt).token);
+      await checkAgain(must(third[0], 'the third card').token);
       const done = await until(() => storage.getRun(bareRunId(runId)), (r) => r?.status === 'completed' || r?.status === 'failed');
       expect(done?.status, JSON.stringify({ status: done?.status, error: done?.error })).toBe('completed');
       expect((await stageOf(runId))?.workflowId).toBe('campaign-studio.campaign-orchestration');
@@ -179,21 +197,23 @@ describe('ADR 0961 P1 — the preflight checklist card', () => {
     const other = await createSecretConnection({ tenantId: TENANT, provider: 'google-ads', kind: 'bearer', secret: 't', scope: 'org', orgId: orgB });
     const workspace = await createSecretConnection({ tenantId: TENANT, provider: 'tiktok-ads', kind: 'bearer', secret: 't', scope: 'workspace' });
     const personal = await createSecretConnection({ tenantId: TENANT, provider: 'linkedin-ads', kind: 'bearer', secret: 't', scope: 'user', userId: adminUser });
+    let staleId: string | undefined;
     try {
       const a = await adAccountsForOrg(TENANT, orgA);
       expect(a.active).toEqual([]);
       expect((await adAccountsForOrg(TENANT, orgB)).active).toEqual(['google']);
       // One that needs reconsent is named, not counted.
       const stale = await createSecretConnection({ tenantId: TENANT, provider: 'meta-ads', kind: 'bearer', secret: 't', scope: 'org', orgId: orgA });
+      staleId = stale.connectionId;
       await __setConnectionStatusForTests(stale.connectionId, 'needs-reconsent');
       expect(await adAccountsForOrg(TENANT, orgA)).toEqual({ active: [], inactive: ['meta'] });
       // …and the checklist names it as a reconnect, not a fresh connect.
       const c = await campaignFor(orgA, true);
       const pf = await call<{ preflight: { items: Array<{ id: string; missing?: string[] }> } }>('GET', `/host/openwop-app/campaign-autopilot/campaigns/${c.id}/preflight`);
       expect(pf.body.preflight.items.find((i) => i.id === 'ad-account')).toMatchObject({ status: 'missing', missing: ['reconnect:meta'] });
-      await revokeConnection(TENANT, stale.connectionId);
     } finally {
       for (const x of [other, workspace, personal]) await revokeConnection(TENANT, x.connectionId).catch(() => undefined);
+      if (staleId) await revokeConnection(TENANT, staleId).catch(() => undefined);
     }
   });
 

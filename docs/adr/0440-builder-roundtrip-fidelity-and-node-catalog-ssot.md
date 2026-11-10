@@ -6,6 +6,75 @@ Status: **implemented** (P1–P3, 2026-07-19; record below)
 **Depends on:** ADR 0369 (workflow lifecycle: runs replay/fork by RE-RESOLVING the definition, no per-run snapshot), ADR 0163 (per-tenant workflow ownership), ADR 0435 (which made walkthroughs builder-openable and thereby made P1 reachable).
 **Surface:** SPA (builder serialize/deserialize + catalog registry) + one host-extension route guard. **NO new RFC** — nothing here changes the wire; P1 makes the host *more* faithful to the existing `workflow-definition.schema.json`, which is the opposite of a wire risk.
 
+
+## Correction (2026-11-06) — typed cross-stack test process boundary
+
+The parallel-edge regression originally imported the real backend chain loader
+and scheduler directly into the frontend test project. Although execution was
+small, these imports pulled the backend type graph into the frontend test
+compiler. The canonical seventeen-way gate exhausted its heap; the source
+closure investigation identified this avoidable type-program coupling.
+
+Keep every real expansion, scheduler, parser, serializer and edge assertion.
+Following the existing ADR 0988 typed support-process pattern, backend-owned
+`test/support/builderContractProcess.ts` performs one bounded pure contract
+request; the frontend test client receives structurally checked JSON over IPC.
+Both helpers are checked by their owning existing TypeScript projects. No
+compiler exclusion, unchecked dynamic import, assertion suppression, app boot,
+provider, database or production architecture change is introduced. The same
+helper validates actual builder POST definitions for the launch-defaults tests;
+that follow-up depends on this helper rather than duplicating its source.
+
+## Correction (2026-11-07) — preserve omitted versus explicitly named source outputs (BUILDER-PORT-1)
+
+A real catalog import/serialize witness executed two ordinary failures: omitted
+HTTP/KV source outputs were rewritten to the first catalog field (`status` and
+`found`); an explicitly named-port control passed. This demonstrates frontend
+roundtrip loss, not a live backend delivery or notification-body result.
+
+The builder now authors a host-local optional `canonicalSourceOutput` field:
+null preserves wire omission, a string preserves an exact named output (including
+`out` and `output`), and absence retains legacy cached sourcePort behavior. One
+schema helper owns serialization, semantic equality and the visual projection.
+Omitted imports and suggested edges use the literal `out` compatibility
+placeholder; it never decides canonical meaning or default-edge geometry. The
+previous inherited sourcePort=`text` test oracle pinned catalog inference and
+is corrected to `out` plus canonical-null, roundtrip and default-handle checks;
+the inherited target-port and exact named-text controls remain intact.
+
+Default edges attach to a separately derived collision-safe **Default output**
+handle. Missing-name IDs use fixed-width UTF-16 code-unit hex, preserving arbitrary
+JavaScript strings including lone surrogates without URI encoding or lossy
+replacement. Collision suffixes use `:` outside that encoded alphabet,
+so distinct missing names cannot alias after a real catalog-name collision.
+Missing explicit outputs stay honestly unresolved, never attached to a
+wrong catalog field. The scheduler remains unchanged: omission selects an own
+`output` property when present, otherwise the source output map. Default is not
+universally a whole-response claim, and unknown output types are not claimed to
+be the first scalar field's type. Virtual handles are display-only. BaseNode explicitly requests XYFlow
+internal-handle refresh after any committed handle/layout signature change,
+including same-size ID changes that ResizeObserver cannot establish; the hook
+and effect precede every conditional return. Mocked geometry tests prove the
+refresh request, not live cached bounds or rendered edge positions. The
+Canvas projection is explicitly bound to the current resolved UI language so
+unchanged graphs do not retain stale translated labels. Existing
+named drag/keyboard connections record their exact deliberate choice.
+
+Store history, non-binding edits, scoped local cache, workflow duplication,
+canonical autosave/reload and whole-edge collaboration retain this scalar
+metadata; canonical POSTs never contain it or a virtual handle ID. Node clipboard
+remains node-only. Old saved scalar bindings cannot be reverse-inferred, and old
+editor clients are not promised to preserve new metadata in mixed-version rooms.
+The accepted workflow schema, executor, packs and authorization are unchanged;
+this is host fidelity work, not a new wire field or RFC.
+
+Regression cases are authored for real shipped catalog schemas, exact named and
+legacy controls, actual pure scheduler/validator projection via the existing
+ADR 0988 typed support-process seam, autosave/head reload, history/duplication,
+Yjs field merge and visible Pair/canvas/inspector binding interpretation. All
+new implementation checks are **NOT RUN at source checkpoint**; no gate or
+live acceptance is inferred from authored cases or the earlier original witness.
+
 ## Why this exists
 
 Two user-visible bugs, one root cause, and one live regression.
@@ -191,6 +260,44 @@ route.
 | P3 | all-row ingestion + `mergeWithStatic`, static list demoted to overlay, precedence fix, palette/resolution split, parity test | Implemented |
 | P4 | cross-tenant overwrite guard on POST (`isForeignOwned`, shared with GET/DELETE); route-level tenant test | Implemented |
 
+## WF-BLD-2 correction — durable builder launch defaults (2026-11-05)
+
+**Status: implemented in isolated candidate; full gate/deployment pending.** The inspector's raw
+`defaultInputs` string reaches the local cache, but the canonical save omits it;
+a successful server reload restores `{}` while the name survives. A small
+actual-library save/head-read diagnostic reproduced this independently of
+autosave timing.
+
+Preserve this host editor state at
+`metadata.customProperties["openwop-app.builder"].defaultInputs` as a raw string,
+including temporarily invalid JSON and explicit empty edits. This uses the
+canonical metadata customProperties extension slot, not a new top-level
+WorkflowDefinition field. Run still explicitly validates/sends inputs; the
+executor does not acquire runtime-default semantics. No RFC required.
+
+All existing definitionMetadataFor writers and the collaboration definition
+scalar must carry the same value; canonical read/import restores it before the
+legacy top-level defaultInputs fallback. Preserve unknown metadata/siblings,
+explicit clears, variables/inputSchema, revisions/forks and room authority.
+Existing body/room limits apply; no new arbitrary cap or unsaved-state UI. No
+credential value is resolved/copied into metadata; explicit refs remain names.
+Raw text is editor content, never a substitute for the Secrets Vault or a
+claim of comprehensive secret-pattern detection.
+
+Malformed customProperties/reserved containers or nonstring owned leaves stay
+opaque on passive reads; a write refuses through the existing failed-sync path,
+retaining the local draft. This also refuses unrelated saves of that malformed
+import until its metadata is corrected; no silent overwrite or new dirty flag.
+Unknown valid siblings survive. Blank metadata strings override legacy defaults.
+
+Focused original-source red and fixed diagnostics, all-writer source inventory,
+and the implementation record live in the acting task's
+builder-launch-defaults-plan.md / default-inputs-fix.md. The existing main Run
+rejects invalid JSON; debugger behavior remains unchanged (it currently omits
+invalid input). Full merge gate and deployed save/reload acceptance remain due.
+
+Candidate diagnostics: original source with final harness12FAIL/17PASS across3files; fixed88PASS across7files, scoped ESLint and i18n checks exit0. Canonical compiler/build/full gate and deployed acceptance remain pending root coordination.
+
 ## Open questions
 
 1. Should the `validateWorkflowDefinition` whitelist widen to the full `WorkflowNode` schema? Separate ADR. Forcing function: the first pack or chain that ships a node carrying `agent` or `credentialsRef` — today none do.
@@ -204,3 +311,20 @@ route.
    > stays open for them.
 2. Should `NodeRegistry` modules declare optional config/input/output schemas so `buildNodeCatalog` emits them for `local` rows, giving host nodes real Inspector fields? Additive to P3.
 3. ~~Should P2's guard refuse, or auto-fork to a new `workflowId`?~~ **Resolved: neither.** A falsifying test showed the harm is bounded and already fail-closed, so P2 ships as disclosure — see the correction note under P2. Auto-fork was rejected separately: minting a definition implicitly behind a debounced autosave would silently change the identity of the thing the author is editing.
+
+
+## WF-BLD-1 correction — parallel port edges are not cycles (2026-11-05)
+
+A live Messaging Kernel template opened correctly in the builder but Run refused
+its three-node forward DAG as cyclic before creating a run. The shipped chain
+has five edges: generate→approve, approve→promote, and three generate→promote
+field bindings. Builder Kahn validation counted every incoming port edge but
+relaxed each distinct successor once. The backend scheduler already counts
+distinct upstream nodes; the builder now uses that same dependency count.
+
+All authored port/condition edges remain present and serialize unchanged; only
+the frontend validation counter changes. Genuine cycles and self-loops remain
+refused. No backend, pack, approval semantics, authorization, wire or replay
+contract changes, and no new RFC. Regression coverage uses actual shipped chain
+expansion, canonical import and serialization, plus arbitrary parallel ports with
+condition/trigger preservation and actual cycle/self-loop controls.

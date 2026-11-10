@@ -3,16 +3,27 @@
  * the PINNED template version's subject and body (approve what you see), the sender,
  * the audience definition, and the recipient count at submit, labelled as an estimate
  * (membership is resolved at send, after consent and suppression).
+ *
+ * A row without `emailSend.reviewHash` cannot be approved: the server refuses an approve
+ * that does not echo the digest. Every deciding surface (`/inbox`, the Approvals inbox,
+ * the chat review card) disables Approve on `!emailSendApprovable(row)`, and this
+ * component says why (NYI-EMAIL-1 and its follow-up).
  */
 import type { JSX } from 'react';
 import { useTranslation } from 'react-i18next';
 import { formatNumber } from '../i18n/format.js';
 import type { PendingApproval } from '../agents/approvalsClient.js';
 
+/** True when the row carries the digest an approve must echo. */
+export function emailSendApprovable(a: Pick<PendingApproval, 'emailSend'>): boolean {
+  return !!a.emailSend?.reviewHash;
+}
+
 export function EmailSendReviewContext({ a }: { a: Pick<PendingApproval, 'emailSend'> }): JSX.Element | null {
   const { t } = useTranslation('notifications');
   const e = a.emailSend;
-  if (!e) return null;
+  const missing = emailSendApprovable(a) ? null : <p className="muted u-fs-12 u-m-0">{t('emailReviewMissing')}</p>;
+  if (!e) return missing;
   return (
     <div className="u-grid u-gap-1 u-fs-13">
       <div className="u-flex u-gap-2 u-wrap u-items-center">
@@ -27,6 +38,7 @@ export function EmailSendReviewContext({ a }: { a: Pick<PendingApproval, 'emailS
         <strong>{e.subject}</strong>
         <pre className="u-fs-13 u-m-0 u-prewrap">{e.body}</pre>
       </div>
+      {missing}
     </div>
   );
 }

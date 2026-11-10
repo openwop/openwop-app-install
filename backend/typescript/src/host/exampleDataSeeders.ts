@@ -26,7 +26,6 @@ import { countDemoCdp, seedDemoCdp, clearDemoCdp } from './demoCdpSeed.js';
 import { countDemoContentMarketing, seedDemoContentMarketing, clearDemoContentMarketing } from './demoContentMarketingSeed.js';
 import { countDemoEntities, seedDemoEntities, clearDemoEntities } from './demoEntitiesSeed.js';
 import { countDemoAppBuilder, seedDemoAppBuilder, clearDemoAppBuilder } from './demoAppBuilderSeed.js';
-import { countDemoKicktodo, seedDemoKicktodo, clearDemoKicktodo } from './demoKicktodoSeed.js';
 import { countDemoWalkthroughs, seedDemoWalkthroughs, clearDemoWalkthroughs } from './demoWalkthroughsSeed.js';
 import { clearTutorialRows, countTutorialRows, seedTutorials } from '../features/tutorials/tutorialsService.js';
 import { clearAgencyOpsDemo, countAgencyOpsDemo, seedAgencyOpsDemo } from './demoAgencyOpsSeed.js';
@@ -73,6 +72,7 @@ import {
   seedUcpReferenceMerchant,
   clearUcpReferenceMerchant,
 } from './ucpReferenceMerchantSeed.js';
+import { composeExampleDataSeeders } from './featureDemoContributions.js';
 
 export type SeedAction = 'created' | 'skipped' | 'error' | 'cleared';
 
@@ -709,17 +709,6 @@ const ucpReferenceMerchantSeeder: ExampleDataSeeder = {
   },
 };
 
-/** The registry. Order = seed order (dependencies first). */
-const demoKicktodoSeeder: ExampleDataSeeder = {
-  id: 'demo-kicktodo',
-  label: 'KickTodo challenges',
-  description:
-    'Three published challenges (Sleep Reset, Deep Work, Morning Movement) plus one enrollment, so Discover, Today, Plan, Progress and Journal all render real content. Skipped when the kicktodo-core toggle is off.',
-  count: (tenantId) => countDemoKicktodo(tenantId),
-  seed: (tenantId) => seedDemoKicktodo(tenantId),
-  clear: (tenantId) => clearDemoKicktodo(tenantId),
-};
-
 /** ADR 0927 D2 — the synthetic agency demo for campaign operations. */
 const demoAgencyOpsSeeder: ExampleDataSeeder = {
   id: 'demo-agency-ops',
@@ -730,7 +719,19 @@ const demoAgencyOpsSeeder: ExampleDataSeeder = {
   clear: (tenantId) => clearAgencyOpsDemo(tenantId),
 };
 
-export const EXAMPLE_DATA_SEEDERS: readonly ExampleDataSeeder[] = [demoPeopleSeeder, demoMediaSeeder, agentsSeeder, advisorsSeeder, workforcesSeeder, demoCrmSeeder, demoTerritoriesSeeder, demoDealersSeeder, demoSalesCommissionsSeeder, demoSalesMapsSeeder, demoProductionSeeder, cmsHomepageSeeder, featurePagesSeeder, comparisonPageSeeder, marketingContentPagesSeeder, marketingLegalPagesSeeder, workflowAuthorSeeder, demoWalkthroughsSeeder, tutorialsSeeder, strategyShowcaseSeeder, campaignShowcaseSeeder, commerceShowcaseSeeder, demoCommerceDepthSeeder, demoMerchandisingSeeder, demoCdpSeeder, demoEntitiesSeeder, demoContentMarketingSeeder, demoOpsPlanningSeeder, demoAppBuilderSeeder, ucpReferenceMerchantSeeder, demoJobSearchSeeder, demoKicktodoSeeder, demoAgencyOpsSeeder];
+/** The registry. Order = seed order (dependencies first). Feature-contributed seeders
+ *  (`BackendFeature.demo.seeders`, ADR 1031) run after these. */
+export const EXAMPLE_DATA_SEEDERS: readonly ExampleDataSeeder[] = [demoPeopleSeeder, demoMediaSeeder, agentsSeeder, advisorsSeeder, workforcesSeeder, demoCrmSeeder, demoTerritoriesSeeder, demoDealersSeeder, demoSalesCommissionsSeeder, demoSalesMapsSeeder, demoProductionSeeder, cmsHomepageSeeder, featurePagesSeeder, comparisonPageSeeder, marketingContentPagesSeeder, marketingLegalPagesSeeder, workflowAuthorSeeder, demoWalkthroughsSeeder, tutorialsSeeder, strategyShowcaseSeeder, campaignShowcaseSeeder, commerceShowcaseSeeder, demoCommerceDepthSeeder, demoMerchandisingSeeder, demoCdpSeeder, demoEntitiesSeeder, demoContentMarketingSeeder, demoOpsPlanningSeeder, demoAppBuilderSeeder, ucpReferenceMerchantSeeder, demoJobSearchSeeder, demoAgencyOpsSeeder];
+
+/**
+ * ADR 1031 — the registry a run actually walks: the host seeders above, then
+ * any a feature contributed on `BackendFeature.demo.seeders` (an adopter's
+ * features cannot edit the array above). Equal to `EXAMPLE_DATA_SEEDERS` when no
+ * feature contributes, which is the case in openwop-app itself.
+ */
+function allSeeders(): ExampleDataSeeder[] {
+  return composeExampleDataSeeders(EXAMPLE_DATA_SEEDERS);
+}
 
 export interface ExampleDataStepStatus {
   id: string;
@@ -742,7 +743,7 @@ export interface ExampleDataStepStatus {
 /** Per-step live counts for the dashboard. */
 export async function exampleDataStatus(tenantId: string, storage: Storage): Promise<ExampleDataStepStatus[]> {
   return Promise.all(
-    EXAMPLE_DATA_SEEDERS.map(async (s) => ({
+    allSeeders().map(async (s) => ({
       id: s.id,
       label: s.label,
       description: s.description,
@@ -754,9 +755,9 @@ export async function exampleDataStatus(tenantId: string, storage: Storage): Pro
 /** Resolve a requested step-id list to seeders, preserving registry order.
  *  Unknown ids are ignored; an empty/absent list means ALL steps. */
 function selected(steps?: readonly string[]): ExampleDataSeeder[] {
-  if (!steps || steps.length === 0) return [...EXAMPLE_DATA_SEEDERS];
+  if (!steps || steps.length === 0) return allSeeders();
   const want = new Set(steps);
-  return EXAMPLE_DATA_SEEDERS.filter((s) => want.has(s.id));
+  return allSeeders().filter((s) => want.has(s.id));
 }
 
 /**
@@ -771,8 +772,9 @@ function selected(steps?: readonly string[]): ExampleDataSeeder[] {
  * operation never grows beyond the explicit selection (architect ruling).
  */
 function selectedForSeed(steps?: readonly string[]): { steps: ExampleDataSeeder[]; autoIncluded: ReadonlySet<string> } {
-  if (!steps || steps.length === 0) return { steps: [...EXAMPLE_DATA_SEEDERS], autoIncluded: new Set() };
-  const byId = new Map(EXAMPLE_DATA_SEEDERS.map((s) => [s.id, s]));
+  const registry = allSeeders();
+  if (!steps || steps.length === 0) return { steps: registry, autoIncluded: new Set() };
+  const byId = new Map(registry.map((s) => [s.id, s]));
   const want = new Set<string>();
   const visit = (id: string): void => {
     if (want.has(id)) return;
@@ -784,7 +786,7 @@ function selectedForSeed(steps?: readonly string[]): { steps: ExampleDataSeeder[
   for (const id of steps) visit(id);
   const named = new Set(steps);
   const autoIncluded = new Set([...want].filter((id) => !named.has(id)));
-  return { steps: EXAMPLE_DATA_SEEDERS.filter((s) => want.has(s.id)), autoIncluded };
+  return { steps: registry.filter((s) => want.has(s.id)), autoIncluded };
 }
 
 function emptySummary(): RunSummary {

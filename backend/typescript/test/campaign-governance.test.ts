@@ -31,7 +31,7 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { __hostExtStorage } from '../src/host/hostExtPersistence.js';
 import { setGovernancePolicy } from '../src/host/governanceService.js';
 import { listApprovals, resolveApproval } from '../src/host/approvalService.js';
-import { makeAdsAdapter } from '../src/host/adsAdapter.js';
+import { makeAdsAdapter, setAdsCampaignOwnershipChecker } from '../src/host/adsAdapter.js';
 import { setKernel } from '../src/features/campaign-brief/briefService.js';
 
 const FINALIZE_KERNEL = {
@@ -49,6 +49,10 @@ beforeAll(async () => {
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  // This file tests the platform write path. Which org owns a campaign is the
+  // adapter seam's question, with its own witnesses (adr1022-ads-ownership-seam):
+  // here every campaign counts as the acting org's.
+  setAdsCampaignOwnershipChecker(async () => true);
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   for (const id of ['campaign-brief', 'campaign-orchestration']) {
     const d = getToggleDefault(id);
@@ -191,7 +195,7 @@ describe('B3 — ad-spend governance gate in the ads adapter', () => {
 
   it('at/above the threshold: requires a campaign-spend approval; approved → gate opens; below: passes straight through', async () => {
     const TENANT = freshTenant();
-    const adapter = makeAdsAdapter({ storage: storageOrThrow(), tenantId: TENANT, runId: 'run-1', actingUserId: 'user-1' });
+    const adapter = makeAdsAdapter({ storage: storageOrThrow(), tenantId: TENANT, runId: 'run-1', actingUserId: 'user-1', orgId: TENANT });
     await setGovernancePolicy(TENANT, { adSpend: { approvalThresholdMinor: 5_000 } }, 'test');
 
     // Above threshold → requires_approval + a pending campaign-spend approval.
@@ -223,7 +227,7 @@ describe('B3 — ad-spend governance gate in the ads adapter', () => {
 
   it('explicit actionPolicy: disabled refuses; draft-only forces a preview; budget mutation honors the threshold', async () => {
     const TENANT = freshTenant();
-    const adapter = makeAdsAdapter({ storage: storageOrThrow(), tenantId: TENANT, runId: 'run-2', actingUserId: 'user-1' });
+    const adapter = makeAdsAdapter({ storage: storageOrThrow(), tenantId: TENANT, runId: 'run-2', actingUserId: 'user-1', orgId: TENANT });
 
     await setGovernancePolicy(TENANT, { actionPolicy: { 'ads.publish': 'disabled' }, adSpend: {} }, 'test');
     const r1 = await adapter.publishAd({ ...publishArgs, briefId: 'brief-spend-3' });

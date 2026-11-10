@@ -116,9 +116,15 @@ const SPEC_RE = /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)['"]((?:\.\.?\/)[^'"]
  */
 export function scanFeatureImports(srcDir, root = ROOT) {
   const featuresDir = resolve(srcDir, 'features');
+  // ADR 1031 — an adopter's feature packages (`src/adopter/features/<id>/`) are
+  // feature code, not shell: their imports of first-party features are the same
+  // feature→feature edges as inside `src/features/` (layer 1b), and adopter
+  // features are never excludable by a manifest. Out of this gate's scope.
+  const adopterFeaturesDir = resolve(srcDir, 'adopter', 'features');
   const hits = [];
   for (const file of walk(srcDir)) {
     if (resolve(file).startsWith(featuresDir + sep)) continue; // layer 1b, not this gate
+    if (resolve(file).startsWith(adopterFeaturesDir + sep)) continue; // ADR 1031 — feature code (layer 1b)
     const src = readFileSync(file, 'utf8');
     for (const m of src.matchAll(SPEC_RE)) {
       const target = resolve(dirname(file), m[1]);

@@ -145,6 +145,16 @@ export async function resolveToolApproval(
   return { ok: true, record: updated };
 }
 
+/** ADR 1042 (security review H2) — spend an `approved` row: the call it allowed has
+ *  run, so it is removed and the next call of the tool asks again (channel-ingress
+ *  turns only). Only an `approved` row is removed (a pending ask or a denial stays).
+ *  Returns whether a row was spent. */
+export async function spendToolApproval(tenantId: string, conversationId: string, toolName: string): Promise<boolean> {
+  const existing = await ledger.get(key(tenantId, conversationId, toolName));
+  if (!existing || existing.status !== 'approved') return false;
+  return ledger.delete(key(tenantId, conversationId, toolName));
+}
+
 /** All approval records for a conversation (the fold source + the FE list). */
 export async function listToolApprovals(tenantId: string, conversationId: string): Promise<ToolApprovalRecord[]> {
   return ledger.listByPrefix(`${tenantId}:${conversationId}:`);

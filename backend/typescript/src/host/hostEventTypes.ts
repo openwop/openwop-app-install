@@ -170,7 +170,7 @@ const EMITTED: readonly string[] = [
   ...family('host.commission', { plan: ['created', 'updated', 'deleted'], statement: ['computed', 'approved', 'paid'] }),
   // features/dealers/emit.ts — `dealerMutated` call sites (registration verb is the approval outcome).
   ...family('host.dealer', {
-    dealer: ['created', 'updated', 'deleted', 'portal-issued'],
+    dealer: ['created', 'updated', 'deleted', 'portal-issued', 'portal-revoked'],
     outlet: ['created', 'updated', 'deleted'],
     registration: ['created', 'approved', 'rejected'],
   }),

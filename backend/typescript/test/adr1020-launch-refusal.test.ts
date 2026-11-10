@@ -21,24 +21,35 @@ const parse = (r: ReturnType<typeof launchRefusalResult>) => (r ? (JSON.parse(r.
 describe('ADR 1020 D5 — launchRefusalResult', () => {
   it('the feature gate: plan, toggle and unresolved each keep their reason and the feature', () => {
     for (const [blockedBy, reason] of [['plan', 'not_entitled'], ['toggle', 'feature_disabled'], ['unresolved', 'feature_unavailable']] as const) {
-      const r = launchRefusalResult(new WorkflowFeatureRefusedError('campaign-channels', blockedBy, 'campaign-studio.channel.landing-page'));
+      const err = new WorkflowFeatureRefusedError('campaign-channels', blockedBy, 'campaign-studio.channel.landing-page');
+      const r = launchRefusalResult(err);
       expect(r?.isError).toBe(true);
-      expect(parse(r)).toMatchObject({ error: 'forbidden', reason, feature: 'campaign-channels' });
+      const body = parse(r);
+      expect(body).toMatchObject({ error: 'forbidden', reason, feature: 'campaign-channels' });
+      // A host sentence, never the thrower's own text, and none of its other details.
+      expect(typeof body?.message).toBe('string');
+      expect(body?.message).not.toBe(err.message);
+      expect(String(body?.message).length).toBeGreaterThan(20);
+      expect(body).not.toHaveProperty('workflowId');
     }
   });
 
   it('the budget hard cap and the plan run limit keep their code and reason', () => {
+    // Realistic thrower messages (long enough that "a copy" and "a host sentence" differ on content, not length).
     const cases: Array<[OpenwopError, string, string]> = [
-      [new OpenwopError('rate_limited', 'x', 429, { workflowId: 'w', reason: 'workflow_budget_exhausted' }), 'rate_limited', 'workflow_budget_exhausted'],
-      [new OpenwopError('rate_limited', 'x', 429, { reason: 'plan_run_limit_reached', limit: 10, month: '2026-10' }), 'rate_limited', 'plan_run_limit_reached'],
-      [new OpenwopError('rate_limited', 'x', 429, { reason: 'plan_run_limit_contention', retryAfterS: 2 }), 'rate_limited', 'plan_run_limit_contention'],
-      [new OpenwopError('service_unavailable', 'x', 503, { reason: 'plan_run_limit_unavailable', retryAfterS: 5 }), 'service_unavailable', 'plan_run_limit_unavailable'],
+      [new OpenwopError('rate_limited', 'Workflow w has exhausted its daily budget (hard cap on).', 429, { workflowId: 'w', reason: 'workflow_budget_exhausted' }), 'rate_limited', 'workflow_budget_exhausted'],
+      [new OpenwopError('rate_limited', 'Plan run limit of 10 reached for 2026-10.', 429, { reason: 'plan_run_limit_reached', limit: 10, month: '2026-10' }), 'rate_limited', 'plan_run_limit_reached'],
+      [new OpenwopError('rate_limited', 'Plan run limit counter contended; retry after 2 s.', 429, { reason: 'plan_run_limit_contention', retryAfterS: 2 }), 'rate_limited', 'plan_run_limit_contention'],
+      [new OpenwopError('service_unavailable', 'Plan run limit store unavailable; retry after 5 s.', 503, { reason: 'plan_run_limit_unavailable', retryAfterS: 5 }), 'service_unavailable', 'plan_run_limit_unavailable'],
     ];
     for (const [err, error, reason] of cases) {
-      const body = parse(launchRefusalResult(err));
+      const r = launchRefusalResult(err);
+      expect(r?.isError).toBe(true);
+      const body = parse(r);
       expect(body).toMatchObject({ error, reason });
       // A host sentence, never the thrower's own text.
-      expect(body?.message).not.toBe('x');
+      expect(typeof body?.message).toBe('string');
+      expect(body?.message).not.toBe(err.message);
       expect(String(body?.message).length).toBeGreaterThan(20);
     }
   });

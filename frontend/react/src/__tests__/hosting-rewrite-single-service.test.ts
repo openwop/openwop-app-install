@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 /**
- * check-hosting-wire-rewrites (4): every Cloud Run rewrite names ONE target.
+ * check-hosting-wire-rewrites (4): every Cloud Run rewrite names ONE target. This is
+ * assertion (4) of the ADR 0614 gate on firebase.json.
  *
  * MEASURED 2026-10-25 on a white-label sync: an adopter's firebase.json renames
  * every serviceId to its own service, and the sync auto-merged two new upstream
@@ -20,7 +21,9 @@ import { join, resolve } from 'node:path';
  *
  * Sabotage (witnessed): delete the (4) block → both red cases fail (the exit is
  * still 1, but from the manifest read, and the message assertions catch it);
- * compare serviceId only → the region case fails.
+ * compare serviceId only → the region case fails; pick the minority target as the
+ * majority → the offending source is no longer listed, and both red cases fail;
+ * flag a single target → the real-file control fails.
  */
 const ROOT = resolve(__dirname, '../../../..');
 const SCRIPT = resolve(__dirname, '../../scripts/check-hosting-wire-rewrites.cjs');
@@ -33,9 +36,13 @@ function runWith(mutate: (rewrites: Rewrite[]) => string) {
   const source = mutate(cfg.hosting.rewrites);
   const dir = mkdtempSync(join(tmpdir(), 'hosting-rewrites-'));
   const fb = join(dir, 'firebase.json');
-  writeFileSync(fb, JSON.stringify(cfg, null, 2));
-  const r = spawnSync(process.execPath, [SCRIPT, fb], { encoding: 'utf8' });
-  return { source, status: r.status, stderr: r.stderr };
+  try {
+    writeFileSync(fb, JSON.stringify(cfg, null, 2));
+    const r = spawnSync(process.execPath, [SCRIPT, fb], { encoding: 'utf8' });
+    return { source, status: r.status, stderr: r.stderr };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 describe('check-hosting-wire-rewrites — one Cloud Run target', () => {

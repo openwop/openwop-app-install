@@ -68,6 +68,41 @@ The lock is the structural fix (it makes *every* seeder's guard safe under
 re-click); the two board guards are correctness fixes that also serve as
 defense-in-depth; the timeout raise removes the trigger.
 
+## Correction — workspace intent on cross-origin writes (2026-11-07)
+
+The direct Cloud Run stream preserves the long-request budget but does not carry
+Firebase Hosting's active-workspace cookie. An OIDC bearer without that matching
+cookie resolves its Personal workspace (ADR 0015), so a selected-workspace seed
+could create data in Personal while same-origin preview and inventory still show
+the selected workspace. Streaming transport is not workspace authority.
+
+All four example-data write routes (`run`, `clear`, `provision-demo`, and the
+legacy `seed`) now require `expectedTenantId` as an **assertion only** against
+`tenantOf(req)`, before seed locks, streamed headers or effects. It never changes
+the authenticated tenant. Existing membership, write authority, provisioning
+superadmin and seed kill-switch checks remain authoritative. A missing assertion
+or mismatch refuses without attempting the write; read-only `dryRun: true` may
+omit it. Older callers must add the assertion, and an older SPA fails closed
+during a backend-first rollout rather than silently writing elsewhere.
+
+The SPA captures the opaque host workspace ID from a fresh same-origin
+`/me/workspaces` read through the existing `listMyWorkspaces` owner with
+`rememberTenant: false`, rejects auth-change races and suppresses old-workspace
+progress/results. Mutation handlers use the epoch owning rendered hydrated status
+and selection, so a retained control cannot capture a new workspace in the same
+React batch after an auth signal (including A→B→A). Operation-local captures do not warm the global run-ID tenant
+cache before stale-response validation; all other workspace readers retain their
+default cache warming. Only the exact `['demo-walkthroughs']` selection uses the
+existing same-origin JSON run route, emitting equivalent step/summary callbacks.
+All other seed selections, clear and provisioning retain direct NDJSON and their
+long-stream budget. Personal streams still work when the assertion matches;
+shared-workspace direct streams without matching authentication refuse honestly.
+This containment does not claim general cross-origin shared-workspace support.
+A future purpose-bound write capability needs separate review; existing run-event
+or collaboration tickets are not seed capabilities. No global tenant header,
+role/config changes or new OpenWOP protocol field is introduced: these are
+non-normative host-extension bodies, so no new RFC is needed.
+
 ## Alternatives considered
 
 - **Only raise the timeout.** Removes the trigger but leaves the guards

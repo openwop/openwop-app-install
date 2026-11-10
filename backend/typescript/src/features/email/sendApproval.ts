@@ -313,7 +313,7 @@ async function notifyReviewRequested(approval: PendingApproval, submittedBy: str
         priority: 'normal',
         title: `Review requested: ${approval.emailSend?.templateName ?? 'an email campaign'}`,
         message: 'An email campaign was submitted for review and is waiting for an approver.',
-        actionUrl: '/approvals',
+        actionUrl: `/inbox?approval=${encodeURIComponent(approval.approvalId)}`,
         metadata: { approvalId: approval.approvalId, kind: 'email-campaign-send', campaignId: approval.emailSend?.campaignId ?? '' },
       });
     }

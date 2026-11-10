@@ -86,7 +86,7 @@ async function pending(): Promise<Approval[]> {
 
 describe('approval inbox — agents propose, humans dispose', () => {
   beforeAll(async () => {
-    await api('/host/openwop-app/example-data/seed', { method: 'POST', body: '{}' });
+    await api('/host/openwop-app/example-data/seed', { method: 'POST', body: JSON.stringify({ expectedTenantId: 'default' }) });
   });
   afterEach(() => { vi.restoreAllMocks(); });
 

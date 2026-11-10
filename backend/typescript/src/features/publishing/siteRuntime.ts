@@ -23,12 +23,13 @@ import { join, resolve } from 'node:path';
 import type { Request, Response } from 'express';
 import { resolveOne } from '../../host/featureToggles/service.js';
 import { createLogger } from '../../observability/logger.js';
-import { boundSiteOf, SITE_RUNTIME_TOGGLE } from '../../host/boundSite.js';
+import { boundSiteOf, DESIGNED_PAGES_TOGGLE, SITE_RUNTIME_TOGGLE } from '../../host/boundSite.js';
+import { siteBrandCssFor } from '../../host/siteBrand.js';
 import { hasPublishedPage } from './publishingService.js';
 
 const log = createLogger('site-runtime');
 
-export { SITE_RUNTIME_TOGGLE } from '../../host/boundSite.js';
+export { DESIGNED_PAGES_TOGGLE, SITE_RUNTIME_TOGGLE } from '../../host/boundSite.js';
 
 
 /** D7 — the prerender document policy. JSON-LD blocks are data, not script. */
@@ -52,7 +53,7 @@ export function setPrerenderSecurityHeaders(res: Response): void {
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
 }
 
-interface RuntimeManifest { entry: string; files: ReadonlySet<string> }
+interface RuntimeManifest { entry: string; files: ReadonlySet<string>; /** ADR 1030 D2 */ style?: string }
 
 /** Where the runtime build lands in the image (Dockerfile `site-runtime` stage). */
 function runtimeDir(): string {
@@ -73,10 +74,12 @@ async function readManifest(): Promise<RuntimeManifest | null> {
     throw err;
   }
   try {
-    const raw = JSON.parse(text) as { entry?: unknown; files?: unknown };
+    const raw = JSON.parse(text) as { entry?: unknown; files?: unknown; style?: unknown };
     const files = Array.isArray(raw.files) ? raw.files.filter((f): f is string => typeof f === 'string' && SAFE_FILE.test(f)) : [];
     if (typeof raw.entry !== 'string' || !files.includes(raw.entry)) return null;
-    return { entry: raw.entry, files: new Set(files) };
+    // ADR 1030 D2 — the stylesheet is served only if it is also a listed file.
+    const style = typeof raw.style === 'string' && raw.style.endsWith('.css') && files.includes(raw.style) ? raw.style : undefined;
+    return { entry: raw.entry, files: new Set(files), ...(style ? { style } : {}) };
   } catch {
     log.warn('site_runtime_manifest_malformed', {});
     return null;
@@ -136,6 +139,38 @@ export async function siteRuntimeTagFor(res: Response): Promise<string | null> {
   return `<script type="module" src="${attr(runtimeAssetPath(site.orgId, manifest.entry))}" data-owp-org="${attr(site.orgId)}"${privacy ? ` data-owp-privacy="${attr(privacy)}"` : ''}></script>`;
 }
 
+/**
+ * ADR 1030 D4 — the designed-pages `<link>` for this response, or null when the
+ * page must stay plain: not a bound host, the host kill switch, no stylesheet in
+ * the image, or the workspace's `custom-domains.designed-pages` off (an
+ * unreadable toggle counts as off). Independent of the visitor runtime: a
+ * stylesheet needs no script.
+ */
+export async function siteStyleTagFor(res: Response): Promise<string | null> {
+  const site = boundSiteOf(res);
+  if (!site || hostDisabled()) return null;
+  const manifest = await loadRuntimeManifest();
+  if (!manifest?.style) return null;
+  const on = await resolveOne(DESIGNED_PAGES_TOGGLE, { tenantId: site.tenantId }).then((r) => Boolean(r?.enabled)).catch(() => false);
+  if (!on) return null;
+  const link = `<link rel="stylesheet" href="${attr(runtimeAssetPath(site.orgId, manifest.style))}">`;
+  // ADR 1030 P2 — the workspace's chosen brand, as one inline token block after
+  // the sheet (so it wins). Generator-made values in the injector's grammar; ''
+  // when the site chose no brand.
+  const tokens = await siteBrandCssFor(site.tenantId, site.orgId);
+  return tokens ? `${link}\n<style>${tokens}</style>` : link;
+}
+
+/** Put the designed-pages link in `<head>` and mark `<body data-owp-site>` (every
+ *  site.css rule is scoped to it). Unchanged when `link` is null. */
+export function withStyleTag(html: string, link: string | null): string {
+  if (!link) return html;
+  const head = html.indexOf('</head>');
+  const body = html.indexOf('<body>');
+  if (head < 0 || body < 0 || body < head) return html;
+  return `${html.slice(0, head)}${link}\n${html.slice(head, body)}<body data-owp-site>${html.slice(body + '<body>'.length)}`;
+}
+
 /** The workspace's own privacy page on its custom domain, when published; the
  *  banner shows no link otherwise. Cached a minute per org (a page read must not
  *  scan the org's pages every time). A failed read is "none". */
@@ -164,9 +199,10 @@ export function withRuntimeTag(html: string, tag: string | null): string {
  *  turning the toggle or the host switch off must take effect at once. */
 export async function sendPrerenderHtml(res: Response, html: string): Promise<void> {
   setPrerenderSecurityHeaders(res);
-  const tag = await siteRuntimeTagFor(res);
-  if (tag) res.setHeader('Cache-Control', 'no-cache');
-  res.type('html').send(withRuntimeTag(html, tag));
+  const [tag, style] = await Promise.all([siteRuntimeTagFor(res), siteStyleTagFor(res)]);
+  // Either names a hashed file only the CURRENT image holds (see above).
+  if (tag || style) res.setHeader('Cache-Control', 'no-cache');
+  res.type('html').send(withRuntimeTag(withStyleTag(html, style), tag));
 }
 
 /** D6 — serve one manifest-named runtime file, or 404. */

@@ -63,6 +63,9 @@ const MOBILE_PRIMARY_PATHS = ['/today', '/discover', '/plan', '/progress', '/gui
  * nothing.
  */
 function SiteNav(): JSX.Element | null {
+  // ADR 1031 P2 — the site nav landmark is named for the PRODUCT (it read the literal
+  // 'KickTodo' from the nav catalog in every locale, for every adopter).
+  const brand = useBrand();
   const { site } = useResolvedNav();
   const { t: tn } = useTranslation('nav');
   const location = useLocation();
@@ -141,7 +144,7 @@ function SiteNav(): JSX.Element | null {
 
   return (
     <>
-      <nav className="site-nav site-nav--desktop" aria-label={tn('siteNavLabel')}>
+      <nav className="site-nav site-nav--desktop" aria-label={brand.productName}>
         {items.map((it) => (
           <NavLink
             key={it.to}
@@ -158,7 +161,7 @@ function SiteNav(): JSX.Element | null {
         <span className="sr-only" aria-live="polite">
           {activeItem ? tn('siteNavCurrent', { label: labelOf(activeItem) }) : ''}
         </span>
-        <nav className="site-mobile-nav__primary" aria-label={tn('siteNavLabel')}>
+        <nav className="site-mobile-nav__primary" aria-label={brand.productName}>
           {mobilePrimary.map((it) => {
             const Icon = it.icon;
             return (

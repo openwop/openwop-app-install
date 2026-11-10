@@ -39,7 +39,8 @@
  * @see RFCS/0049 (RBAC scopes), RFCS/0087 §B (org position confers no authority)
  */
 
-import { KICKTODO_OPERATOR_ROLE, liveOperatorActivation } from './operatorActivationLedger.js';
+import { liveOperatorActivation } from './operatorActivationLedger.js';
+import { featureActivationRoleFor, featureAdminScopes, setHostScopeVocabulary } from './featureScopes.js';
 import { randomUUID, createHash } from 'node:crypto';
 import { DurableCollection, countOrgHostExtRows } from './hostExtPersistence.js';
 import { registerTenantIndexAdoption } from './tenantIndexAdoption.js';
@@ -51,7 +52,7 @@ import { demoMode } from './demoMode.js';
 import { registerSubjectEraser } from './subjectErasure.js';
 import { ERASED, subjectKeyForms } from './subjectErasureRedaction.js';
 import { isPersonalTenantId } from './requestSubject.js';
-import { delegationOf, isConfiguredOperatorIssuer, isDelegatedSubject, isNarrowingDeclaration, keyPolicyMode, notifyIssuerRemoved, notifySubjectRekeyed, reportKeyPolicy } from './delegatedSubject.js';
+import { delegationOf, isConfiguredOperatorIssuerFor, isDelegatedSubject, isNarrowingDeclaration, keyPolicyMode, notifyIssuerRemoved, notifySubjectRekeyed, reportKeyPolicy } from './delegatedSubject.js';
 import { isSessionAuthorityRegistered, resolveSessionSubject } from './sessionAuthority.js';
 
 const accessLog = createLogger('host.accessControl');
@@ -119,7 +120,6 @@ export const MANAGEMENT_SCOPES = [
   'host:org:manage',
   'host:teams:manage',
   'host:members:manage',
-  'host:kicktodo:manage',
   // ADR 0711 — BYOK writes in a SHARED workspace. The secret store is tenant-wide:
   // one active-config binding and one key set serve every member, so "first member
   // to click sets it for everyone" and "any member can delete the workspace key"
@@ -174,12 +174,6 @@ export const MANAGEMENT_SCOPES = [
   // attestation (+ future template/number management). Reserved to built-in
   // admin/owner, never mintable onto a custom role.
   'host:whatsapp:manage',
-  // ADR 0434 / KTFULL-B1..B2 — KickTodo authoring, publication, Factory
-  // operation, moderation and outcome-metric administration. Publishing a
-  // challenge is a CONTENT-SAFETY act (the factory's gates decide what real
-  // people are told to do), so it is admin-class authority, never "any
-  // authenticated co-tenant".
-  'host:kicktodo:manage',
   // ── ADR 0554 P3 / RFC 0151 §E — compensation operator recovery ─────────────
   //
   // THREE scopes, and the split is the control, not the naming. Boundary row 8
@@ -236,7 +230,29 @@ export const MANAGEMENT_SCOPES = [
  */
 export const DELEGABLE_HOST_SCOPES = ['host:comments:write'] as const;
 
-export type Scope = (typeof PROTOCOL_SCOPES)[number] | (typeof MANAGEMENT_SCOPES)[number] | (typeof DELEGABLE_HOST_SCOPES)[number];
+/**
+ * ADR 1031 P2 (security) — management scopes a composed FEATURE registers
+ * (`BackendFeature.security.scopes`, sealed by `features/featureSecurity.ts`).
+ * Declared into the type by module augmentation from the feature's directory:
+ *
+ *   declare module '<path>/host/accessControlService.js' {
+ *     interface FeatureScopes { 'host:<ns>:<verb>': true }
+ *   }
+ */
+export interface FeatureScopes {}
+export type Scope = (typeof PROTOCOL_SCOPES)[number] | (typeof MANAGEMENT_SCOPES)[number] | (typeof DELEGABLE_HOST_SCOPES)[number] | Extract<keyof FeatureScopes, string>;
+
+/**
+ * ADR 1031 P2 — the full management vocabulary: the host's `MANAGEMENT_SCOPES`
+ * with the feature-registered admin-tier scopes inserted right after
+ * `host:members:manage` (where `host:kicktodo:manage` sat when the host listed
+ * it, so every ordered projection — the key policy's `allowed` list — is
+ * unchanged). Read at call time: features register at composition.
+ */
+export function managementScopes(): string[] {
+  const at = MANAGEMENT_SCOPES.indexOf('host:members:manage') + 1;
+  return [...MANAGEMENT_SCOPES.slice(0, at), ...featureAdminScopes(), ...MANAGEMENT_SCOPES.slice(at)];
+}
 
 /** ADR 0947 D2 — a scope implied by another, applied wherever role scopes are
  *  unioned. One direction only: writing the workspace includes commenting on it. */
@@ -284,7 +300,7 @@ export interface AccessRole {
 
 const VIEWER_SCOPES: Scope[] = ['manifest:read', 'runs:read', 'artifacts:read', 'audit:read', 'workspace:read'];
 const EDITOR_SCOPES: Scope[] = [...VIEWER_SCOPES, 'runs:create', 'runs:cancel', 'workspace:write', 'approvals:respond', 'host:comments:write'];
-const ADMIN_SCOPES: Scope[] = [
+const ADMIN_SCOPES_HEAD: Scope[] = [
   ...EDITOR_SCOPES,
   'webhooks:manage',
   'packs:publish',
@@ -317,19 +333,21 @@ const ADMIN_SCOPES: Scope[] = [
   'host:app-deploy:manage',
   // ADR 0394 — admin/owner record the WhatsApp no-training attestation.
   'host:whatsapp:manage',
-  // ADR 0434 / KTFULL-B1..B2 — KickTodo authoring, publication, Factory
-  // operation, moderation and outcome-metric administration. Publishing a
-  // challenge is a CONTENT-SAFETY act (the factory's gates decide what real
-  // people are told to do), so it is admin-class authority, never "any
-  // authenticated co-tenant".
-  'host:kicktodo:manage',
-  // ADR 0554 P3 — admin may START and RETRY an unwind: both run the inverse the
-  // workflow AUTHOR declared, and nothing else.
+];
+// ADR 0554 P3 — admin may START and RETRY an unwind: both run the inverse the
+// workflow AUTHOR declared, and nothing else.
+const ADMIN_SCOPES_TAIL: Scope[] = [
   'host:compensation:start',
   'host:compensation:retry',
 ];
-const OWNER_SCOPES: Scope[] = [
-  ...ADMIN_SCOPES,
+/** ADR 1031 P2 — admin = the host's admin scopes, then every feature-registered
+ *  admin-tier scope (`host:kicktodo:manage` sat exactly here when the host listed
+ *  it: a content-safety act, admin-class), then the compensation rung. Computed
+ *  at call time, so the registered scopes are always included. */
+function adminScopes(): Scope[] {
+  return [...ADMIN_SCOPES_HEAD, ...(featureAdminScopes() as Scope[]), ...ADMIN_SCOPES_TAIL];
+}
+const OWNER_EXTRA_SCOPES: Scope[] = [
   'host:org:manage',
   // ADR 0554 P3 — OWNER-ONLY, and this line is the control. Waiving (or
   // substituting) departs from the authored §B contract: it leaves a committed
@@ -339,12 +357,13 @@ const OWNER_SCOPES: Scope[] = [
   // the "separate permissions" boundary would be a label.
   'host:compensation:waive',
 ];
+function ownerScopes(): Scope[] { return [...adminScopes(), ...OWNER_EXTRA_SCOPES]; }
 
 export const BUILT_IN_ROLES: Record<BuiltInRoleId, AccessRole> = {
   viewer: { id: 'viewer', name: 'Viewer', description: 'Read-only access to runs, artifacts, audit, and workspace.', scopes: VIEWER_SCOPES, builtIn: true },
   editor: { id: 'editor', name: 'Editor', description: 'Create and cancel runs, write workspace, respond to approvals.', scopes: EDITOR_SCOPES, builtIn: true },
-  admin: { id: 'admin', name: 'Admin', description: 'Editor plus webhook/pack management and team/member/group administration.', scopes: ADMIN_SCOPES, builtIn: true },
-  owner: { id: 'owner', name: 'Owner', description: 'Full access including organization management.', scopes: OWNER_SCOPES, builtIn: true },
+  admin: { id: 'admin', name: 'Admin', description: 'Editor plus webhook/pack management and team/member/group administration.', get scopes() { return adminScopes(); }, builtIn: true },
+  owner: { id: 'owner', name: 'Owner', description: 'Full access including organization management.', get scopes() { return ownerScopes(); }, builtIn: true },
 };
 
 export const BUILT_IN_ROLE_IDS = Object.keys(BUILT_IN_ROLES) as BuiltInRoleId[];
@@ -1913,7 +1932,7 @@ export async function resolveEffectiveAccess(
   if (opts.memberId === undefined && isDelegatedSubject(opts.subject)) {
     return viaDelegation<EffectiveAccess>('effective-access', tenantId, opts.subject, {
       direct: (subject) => resolveEffectiveAccessDirect(tenantId, { ...opts, subject }),
-      owner: () => ({ roles: ['owner'], scopes: [...OWNER_SCOPES], basis: 'tenant-owner' }),
+      owner: () => ({ roles: ['owner'], scopes: ownerScopes(), basis: 'tenant-owner' }),
       none: () => ({ roles: [], scopes: [], basis: 'none' }),
       // A delegation holds scopes, not roles: a role-keyed check must not pass for it.
       narrow: (issuer, scopes) => ({ roles: [], scopes, basis: issuer.basis === 'none' ? 'none' : 'member' }),
@@ -1948,10 +1967,13 @@ async function viaDelegation<T extends { scopes: Scope[] }>(
   if (!d || d.tenantId !== tenantId) {
     next = r.none();
   } else {
-    // `bearer:<8>` is an operator env key's subject: the tenant's own principal
-    // while that key is still configured, nobody once it is rotated out.
+    // `bearer:<id>` is an operator env key's subject: the tenant's own principal
+    // while that key is still configured FOR THIS TENANT (or `*`), nobody once it
+    // is rotated out or re-scoped away. ADR 1045 (TST-FUD-GC-1 follow-up): this
+    // read was tenant-less, so a key moved from tenant A to B kept the
+    // delegations it minted in A as owner. `d.tenantId === tenantId` here.
     const issuer = d.issuer.startsWith('bearer:')
-      ? (isConfiguredOperatorIssuer(d.issuer) ? r.owner() : r.none())
+      ? (isConfiguredOperatorIssuerFor(d.issuer, tenantId) ? r.owner() : r.none())
       : isPersonalTenantId(tenantId) ? r.owner() : await r.direct(d.issuer);
     // ADR 0947 D2 — a declared `workspace:write` covers what it implies, so a
     // key minted before `host:comments:write` existed keeps commenting.
@@ -1991,7 +2013,8 @@ export function membershipDefinesPresence(tenantId: string): boolean {
 export async function delegationIssuerIsLive(tenantId: string, subject: string): Promise<boolean> {
   const d = await delegationOf(subject);
   if (!d || d.tenantId !== tenantId) return false;
-  if (d.issuer.startsWith('bearer:')) return isConfiguredOperatorIssuer(d.issuer);
+  // ADR 1045 (TST-FUD-GC-1 follow-up) — bound to the delegation's tenant.
+  if (d.issuer.startsWith('bearer:')) return isConfiguredOperatorIssuerFor(d.issuer, tenantId);
   // A DISABLED account (SCIM deprovision, an admin's deactivate) loses its
   // sessions; its keys must not outlive them. Only a row that says disabled
   // counts: "no row" is an issuer this host never registered (a seed actor), and
@@ -2046,7 +2069,8 @@ async function notifyIfLastMembershipGone(tenantId: string, subject: string): Pr
  * must still not grant what the issuer lacks.
  */
 export async function delegationIssuerScopes(tenantId: string, issuer: string): Promise<readonly Scope[]> {
-  if (issuer.startsWith('bearer:')) return isConfiguredOperatorIssuer(issuer) ? [...OWNER_SCOPES] : [];
+  // ADR 1045 (TST-FUD-GC-1 follow-up) — bound to the key's tenant.
+  if (issuer.startsWith('bearer:')) return isConfiguredOperatorIssuerFor(issuer, tenantId) ? ownerScopes() : [];
   if (isDelegatedSubject(issuer)) return [];
   return (await resolveTenantLevelScopes(tenantId, issuer)).scopes;
 }
@@ -2104,7 +2128,7 @@ async function resolveEffectiveAccessDirect(
           subject: opts.subject ?? opts.memberId,
           note: 'OPENWOP_DEMO_MODE grants anonymous owner scope — MUST be off in any real deploy',
         });
-        return { roles: ['owner'], scopes: [...OWNER_SCOPES], basis: 'tenant-owner' };
+        return { roles: ['owner'], scopes: ownerScopes(), basis: 'tenant-owner' };
       }
       return { roles: [], scopes: [], basis: 'none' };
     }
@@ -2121,7 +2145,7 @@ async function resolveEffectiveAccessDirect(
     return { roles, scopes: unionScopes(roles, customById), basis: 'member', memberId: member.memberId, directRoles, groupRoles };
   }
   // No member context → the tenant owner principal, implicitly `owner`.
-  return { roles: ['owner'], scopes: [...OWNER_SCOPES], basis: 'tenant-owner' };
+  return { roles: ['owner'], scopes: ownerScopes(), basis: 'tenant-owner' };
 }
 
 /**
@@ -2165,13 +2189,13 @@ export async function resolveTenantLevelScopes(
   const direct = async (sub: string): Promise<Level> => {
     const union = await resolveSubjectScopesUnionDirect(tenantId, sub);
     if (union.basis === 'member') return union;
-    if (isSinglePrincipalTenant(tenantId)) return { scopes: [...OWNER_SCOPES], basis: 'tenant-owner' };
+    if (isSinglePrincipalTenant(tenantId)) return { scopes: ownerScopes(), basis: 'tenant-owner' };
     return { scopes: [], basis: 'none' };
   };
   if (isDelegatedSubject(subject)) {
     return viaDelegation<Level>('tenant-level', tenantId, subject, {
       direct,
-      owner: () => ({ scopes: [...OWNER_SCOPES], basis: 'tenant-owner' }),
+      owner: () => ({ scopes: ownerScopes(), basis: 'tenant-owner' }),
       none: () => ({ scopes: [], basis: 'none' }),
       narrow: (issuer, scopes) => ({ scopes, basis: issuer.basis === 'none' ? 'none' : 'member' }),
     });
@@ -2261,7 +2285,7 @@ export async function resolveSubjectScopesUnion(
       // ADR 0910 D4 — a key the operator issued never inherits an ACTIVATION: the
       // key asked for less (ADR 0795 D1), and it must not outlive the 8 h window.
       direct: (sub) => resolveSubjectScopesUnionDirect(tenantId, sub, { activations: false }),
-      owner: () => ({ scopes: [...OWNER_SCOPES], basis: 'member' }),
+      owner: () => ({ scopes: ownerScopes(), basis: 'member' }),
       none: () => ({ scopes: [], basis: 'none' }),
       narrow: (issuer, scopes) => ({ scopes, basis: issuer.basis }),
     });
@@ -2309,8 +2333,12 @@ async function resolveSubjectScopesUnionDirect(
     // end it at the next request; nothing waits for the sweep). Only declared
     // default workspaces pay the point read.
     if (opts.activations !== false && isDeclaredDefaultWorkspace(tenantId) && mine.some(isWorkspaceRootMembership)) {
-      const live = await liveOperatorActivation(tenantId, subject);
-      if (live) for (const s of KICKTODO_OPERATOR_ROLE.scopes) scopeSet.add(s);
+      // ADR 1031 P2 — the role is the one the workspace's declaring feature
+      // registered (KickTodo's `kicktodo-operator` over `host-kicktodo`); a
+      // workspace whose feature registered none grants nothing on activation.
+      const role = featureActivationRoleFor(tenantId);
+      const live = role ? await liveOperatorActivation(tenantId, subject) : null;
+      if (live && role) for (const s of role.scopes) scopeSet.add(s as Scope);
     }
     return { scopes: [...scopeSet], basis: 'member' };
   } catch (err) {
@@ -2424,3 +2452,11 @@ export async function __resetAccessStores(): Promise<void> {
   await groups.__clear();
   await customRoles.__clear();
 }
+
+// ADR 1031 P2 — hand the host vocabulary to the feature-scope leaf, which checks
+// every registered scope and activation role against it (whichever loaded first).
+setHostScopeVocabulary({
+  all: [...PROTOCOL_SCOPES, ...MANAGEMENT_SCOPES, ...DELEGABLE_HOST_SCOPES],
+  management: MANAGEMENT_SCOPES,
+  builtInRoleIds: BUILT_IN_ROLE_IDS,
+});

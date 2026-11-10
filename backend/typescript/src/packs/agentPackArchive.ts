@@ -14,7 +14,7 @@
  * registers, so `packs/` never imports a feature (ADR 0001).
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { createLogger } from '../observability/logger.js';
 
 const log = createLogger('packs.agentPackArchive');
@@ -114,6 +114,23 @@ function compareVersions(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
+/**
+ * TST-FIA-GC1 — temp dirs a fetch in THIS process is still installing into. The prune
+ * below runs inside that same install (`installPackFromRegistry` ends with it), and it
+ * sweeps `.tmp-*` dirs by `Date.now() - mtime`. With the wall clock more than an hour
+ * ahead of the file's mtime (a clock step, or a test clock shift) it deleted the
+ * fetch's own temp dir mid-flight. A live dir is never swept, whatever the clocks say.
+ * The pack dir is per instance, so another process's live dir is not in scope.
+ */
+const liveArchiveTemps = new Set<string>();
+
+/** Mark `dir` as being installed into until the returned release is called. */
+export function holdArchiveTemp(dir: string): () => void {
+  const key = resolve(dir);
+  liveArchiveTemps.add(key);
+  return () => { liveArchiveTemps.delete(key); };
+}
+
 /** Drop archived versions beyond the newest ten that no deployment row names. */
 export async function pruneAgentPackArchive(packDir: string, packName: string): Promise<string[]> {
   if (!isSafeSegment(packName)) return [];
@@ -123,6 +140,7 @@ export async function pruneAgentPackArchive(packDir: string, packName: string): 
   // temp dirs older than an hour so they never accumulate.
   for (const e of readdirSync(root)) {
     if (!e.startsWith('.tmp-')) continue;
+    if (liveArchiveTemps.has(resolve(join(root, e)))) continue; // a fetch is installing into it
     try {
       if (Date.now() - statSync(join(root, e)).mtimeMs > 3_600_000) rmSync(join(root, e), { recursive: true, force: true });
     } catch { /* gone already */ }

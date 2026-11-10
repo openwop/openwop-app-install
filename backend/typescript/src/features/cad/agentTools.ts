@@ -38,7 +38,7 @@ import { listOrgs, resolveEffectiveAccess } from '../../host/accessControlServic
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { getNodeRegistry } from '../../executor/nodeRegistry.js';
 import { createCanvasForTenant, updateCanvasForTenant, getCanvasForCaller, canvasWriteAllowed } from '../../host/canvasSurface.js';
-import { resolveFocusedId } from '../../host/conversationFocus.js';
+import { resolveAuthorizedFocus } from '../../host/conversationFocus.js';
 import { validateCadDoc, CAD_SOLID_KINDS } from './validateCadDoc.js';
 
 export const CAD_GET_DESIGN_TOOL_ID = 'openwop:cad.get-design';
@@ -160,10 +160,16 @@ export function registerCadAgentTools(): void {
       if (!scope.actingUserId) return { content: JSON.stringify({ model: null }) };
       const gate = await resolveOrgScope(scope, str(input.orgId), 'workspace:read');
       if ('content' in gate) return gate;
-      // ADR 0777 — an explicit id wins; otherwise the model open beside this
-      // embedded chat. Either way the SAME read predicate applies below.
-      const canvasId = await resolveFocusedId(scope, 'canvas', str(input.canvasId));
-      if (!canvasId) return toolError('validation_error', '`canvasId` is required (no model is open beside this chat).');
+      // ADR 0777 / ADR 1040 D4 — an explicit id wins; otherwise the model open
+      // beside this embedded chat. The helper authorizes EITHER for this turn's
+      // acting user, and the SAME read predicate applies again below.
+      const explicit = str(input.canvasId);
+      const canvasId = await resolveAuthorizedFocus(scope, 'canvas', explicit);
+      if (!canvasId) {
+        return explicit
+          ? untrustedToolError('not_found', 'That CAD model (id below) was not found in this workspace.', explicit)
+          : toolError('validation_error', '`canvasId` is required (no model is open beside this chat).');
+      }
       const canvas = await getCanvasForCaller(scope.tenantId, canvasId, { subject: scope.actingUserId });
       if (!canvas || canvas.canvasTypeId !== CAD_CANVAS_TYPE) {
         return untrustedToolError('not_found', 'That CAD model (id below) was not found in this workspace.', canvasId);

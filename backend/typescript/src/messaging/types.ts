@@ -29,6 +29,9 @@ export interface ChatOutboundComponent {
 export interface ChatIngressEnvelope {
   channel: RelayChannel;
   platformMessageId: string;
+  /** ADR 1042 D9 — the platform marks this message as sent by the device's own
+   *  account (from-me / note-to-self). Only `true` counts; host-ext, non-normative. */
+  fromMe?: boolean;
   conversationId: string;
   peerId: string;
   peerDisplay?: string;

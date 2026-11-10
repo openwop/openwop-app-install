@@ -22,6 +22,17 @@ import type { AdPlatform, CampaignPerformanceRecord } from '../src/features/camp
 
 afterEach(() => { __resetCircuitBreakers(); vi.useRealTimers(); });
 
+it('retains full campaign names containing separators in performer and anomaly results', () => {
+  // Campaign names are user content: decoding a group key must not truncate it.
+  const rows = Array.from({ length: 11 }, (_, i) => rec('google', `2026-06-${String(i + 1).padStart(2, '0')}`, {
+    campaignName: 'Launch::EU::Q4', spend: i === 10 ? 1000 : 1,
+  }));
+  expect(topBottomPerformers(rows).top[0]?.campaignName).toBe('Launch::EU::Q4');
+  const anomalies = detectAnomalies(rows);
+  expect(anomalies.length).toBeGreaterThan(0);
+  expect(anomalies.every((a) => a.campaignName === 'Launch::EU::Q4')).toBe(true);
+});
+
 function rec(platform: AdPlatform, date: string, over: Partial<CampaignPerformanceRecord> = {}): CampaignPerformanceRecord {
   return {
     id: `${platform}:${date}`, tenantId: 't', orgId: 'o', platform,
@@ -32,6 +43,19 @@ function rec(platform: AdPlatform, date: string, over: Partial<CampaignPerforman
 }
 
 describe('planBudget (P1)', () => {
+  it('refuses same-platform and non-finite scenario shifts instead of reporting lost conversions', () => {
+    // A shift must transfer allocation between two different platforms. The
+    // same row used as source and destination previously lost the source share.
+    const plan = planBudget([rec('google', '2026-06-01'), rec('meta', '2026-06-01')], {
+      totalBudgetMinor: 20_000, targetConversions: 20, horizonDays: 7,
+    });
+    expect(scenarioShift(plan, 'google', 'google', 0.2)).toBeNull();
+    expect(scenarioShift(plan, 'GOOGLE', 'google', 0.2)).toBeNull();
+    expect(scenarioShift(plan, 'google', 'meta', Number.NaN)).toBeNull();
+    expect(scenarioShift(plan, 'google', 'meta', Number.POSITIVE_INFINITY)).toBeNull();
+    expect(scenarioShift(plan, 'google', 'meta', 0.2)).toEqual({ expectedConversions: 20, delta: 0 });
+  });
+
   it('no history → infeasible with a note (structured noteCode + English mirror)', () => {
     const p = planBudget([], { totalBudgetMinor: 50_000_00, targetConversions: 500, horizonDays: 90 });
     expect(p.verdict).toBe('infeasible');

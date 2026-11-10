@@ -214,6 +214,8 @@ project-scoped, and the board is in the caller's active tenant, the caller must 
 > before. `requireTenantScope` itself is NOT changed: widening it for env keys would
 > move BYOK and governance too, which is out of this ADR's scope. The composition is a
 > small helper in `routes/kanban.ts` and calls only shared primitives.
+>
+> > **CORRECTED 2026-11-05 (ADR 1045, TST-FUD-GC-1):** an env key's principal id is now `bearer:<16 hex of sha256(key)>`, not `bearer:<first 8 chars>`; the 8-char form made two keys sharing a prefix one principal (one budget, one audit identity, and an operator-issuer check that let a surviving key vouch for a removed one). Legacy 8-char ids in stored rows are honoured as operator issuers only when exactly one configured key has that prefix. See ADR 1045 § "Env-key principal collision".
 
 `authorizeCard` still tries the ADR 0049 assignee carve-out before surfacing that 403,
 so an assignee without write scope can still progress their own card.

@@ -8,6 +8,7 @@ import type { BackendFeature } from '../types.js';
 import { registerBiRoutes } from './routes.js';
 import { registerBiAgentTools } from './agentTools.js';
 import { buildBiSurface } from './surface.js';
+import { registerBiErasure } from './erasure.js';
 
 export const biFeature: BackendFeature = {
   id: 'bi',
@@ -17,6 +18,7 @@ export const biFeature: BackendFeature = {
   registerRoutes: (deps) => {
     registerBiRoutes(deps);
     registerBiAgentTools(); // ADR 0308 seam
+    registerBiErasure(); // ADR 1052 D13
   },
   surface: { id: 'bi', build: buildBiSurface },
   toggleDefault: {

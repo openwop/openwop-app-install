@@ -241,16 +241,22 @@ describe('DRC-3 — org RBAC forbidden_scope: the write door closes while the re
   // The viewer cases use a real member row (deterministic viewer scopes). The
   // NON-member case below pins OPENWOP_DEMO_MODE unset: the demo-mode owner bypass
   // (LEAK-9) is the only env fork on that path, so pinned it is deterministic.
-  let drawingId: string;
+  let drawingId: string, privateDrawingId: string;
   beforeAll(async () => {
     await setDrawings('on');
     const [org] = await listOrgs(TENANT);
     await createMember({ tenantId: TENANT, orgId: org!.orgId, subject: 'u-viewer', displayName: 'Vera Viewer', roles: ['viewer'] });
-    // A real drawing (authored by the owner) for the read-allowed assertion.
+    // Org RBAC is sufficient for this org-owned drawing. A tool-created
+    // user-owned drawing additionally requires its private owner's identity.
+    const shared = await createCanvasForTenant(TENANT, {
+      canvasTypeId: 'canvas.drawing', name: 'Shared drawing',
+      ownerSubject: { kind: 'org', id: org!.orgId }, initialState: VALID_DRAWING,
+    });
+    drawingId = shared.canvasId;
     const created = JSON.parse(
       (await provider({ actingUserId: 'u-1' }).executeTool({ name: DRAWINGS_RENDER_TOOL_ID, input: { drawing: VALID_DRAWING } })).content,
     ) as { canvasId: string };
-    drawingId = created.canvasId;
+    privateDrawingId = created.canvasId;
   });
 
   it('render (workspace:write) is refused for a viewer — structured forbidden_scope, not a throw', async () => {
@@ -266,6 +272,12 @@ describe('DRC-3 — org RBAC forbidden_scope: the write door closes while the re
     expect(out.isError).toBeFalsy();
     const res = JSON.parse(out.content) as { drawing: { title: string } | null };
     expect(res.drawing?.title).toBe('House');
+  });
+
+  it('keeps a user-owned drawing private even from a viewer with workspace:read', async () => {
+    const out = await provider({ actingUserId: 'u-viewer' }).executeTool({ name: DRAWINGS_GET_DESIGN_TOOL_ID, input: { canvasId: privateDrawingId } });
+    expect(out.isError).toBe(true);
+    expect(JSON.parse(out.content)).toMatchObject({ error: 'not_found' });
   });
 
   it('a same-tenant NON-member (no org membership, demo mode off) is refused BOTH doors', async () => {

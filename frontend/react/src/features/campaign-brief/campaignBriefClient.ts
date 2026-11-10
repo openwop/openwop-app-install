@@ -52,7 +52,7 @@ export interface BriefInput {
 export interface ValidationResult { valid: boolean; issues: Array<{ field: string; message: string }>; enabledChannels: CampaignChannel[] }
 
 export interface OrgRef { orgId: string; name: string }
-export interface BrandRef { id: string; name: string }
+export interface BrandRef { id: string; name: string; orgId: string }
 
 export class FeatureDisabledError extends Error {}
 

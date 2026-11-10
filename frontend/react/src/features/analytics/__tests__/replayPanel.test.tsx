@@ -2,6 +2,15 @@
  * ADR 0951 P2.4 — the recording viewer is inert: it draws numbers as SVG
  * rectangles and never turns recording content into markup, links or requests.
  * The client is mocked; the panel's own states, playback and drawing run for real.
+ *
+ * Red when (sabotage-witnessed, /grade-tests wave 80): a move after release
+ * counts as a drag, or an event AT t is excluded; the list is not sorted newest
+ * first (the fixture arrives oldest first); the root node is drawn; masked
+ * nodes lose the mask class; the viewport ignores scroll; anything but
+ * rect/circle is drawn; only the first chunk is fetched; a 404 chunk is fatal;
+ * a 403 on the list or on a chunk is not "no access"; the player waits for
+ * every chunk, or drops the "loading the rest" status; "older" ignores the
+ * cursor or keeps a spent one.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -37,7 +46,8 @@ describe('ADR 0951 P2.4 — replay viewer', () => {
   });
 
   it('lists recordings newest first and plays one back as rectangles only', async () => {
-    vi.mocked(listReplaySessions).mockResolvedValue({ sessions: [session, { ...session, sessionId: 's-0', startedAt: '2026-10-27T12:00:00.000Z' }] });
+    // Oldest first, as the server might page them: the panel must sort.
+    vi.mocked(listReplaySessions).mockResolvedValue({ sessions: [{ ...session, sessionId: 's-0', startedAt: '2026-10-27T12:00:00.000Z' }, session] });
     vi.mocked(getReplayChunk).mockImplementation(async (_o, _s, index) => (index === 0
       ? [frame(0), { type: 'pointer', at: 10, action: 'move', x: 24, y: 40 }]
       : [frame(10_000, 2), { type: 'scroll', at: 10_010, x: 0, y: 400 }]));
@@ -46,7 +56,7 @@ describe('ADR 0951 P2.4 — replay viewer', () => {
     expect(watch).toHaveLength(2);
     fireEvent.click(watch[0]!);
     const figure = await screen.findByRole('img', { name: /Masked recording of a visit/ });
-    expect(vi.mocked(getReplayChunk).mock.calls.map((c) => c.slice(1))).toEqual([['s-1', 0], ['s-1', 1]]);
+    expect(vi.mocked(getReplayChunk).mock.calls).toEqual([['org-1', 's-1', 0], ['org-1', 's-1', 1]]);
     expect(figure.querySelectorAll('rect')).toHaveLength(2);
     expect(figure.querySelectorAll('rect.replay-mask')).toHaveLength(1);
     expect(figure.getAttribute('viewBox')).toBe('0 0 800 600');

@@ -11,6 +11,23 @@
 
 ---
 
+> **CORRECTION 2026-11-06 — KB-BYOK-1, explicit saved reindex key.**
+> The existing per-collection `EmbeddingSpec.credentialRef` was not selectable
+> from Reindex: its provider-only request could refuse a stored labeled key.
+> Reindex reuses a shared name-only BYOK loader/controlled field, also used by
+> Run options, while workflow configuration stays in its existing owner.
+> Explicit selection pins only the reference name in the existing target spec;
+> after successful cutover, indexing and search use this collection spec. It does
+> not change other defaults. Blank retains existing default resolution and local reindex sends no key.
+> Provider/scope/auth changes invalidate selections and pending confirmations.
+> The existing KB admission rejects an explicitly named known vendor key for a
+> different embedding provider before embedder resolution/new job writes; opaque
+> legacy aliases retain their existing semantics. UI filtering keeps the exact/
+> colon convention, without inventing backend Vertex key-name semantics or new
+> model-catalog validation. No vault scan, alias, default/binding change, secret
+> value, protocol field or new route is added. Serving vectors remain unchanged
+> until the existing successful cutover. Implementation verification pending.
+
 ## Context (boundaries audit first)
 
 Per the `/architect` scope rule, the corpus was audited before claiming anything is

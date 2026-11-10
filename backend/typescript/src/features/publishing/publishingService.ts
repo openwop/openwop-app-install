@@ -14,7 +14,7 @@ import { contentUrl, optionalCleanContent, escapeXml } from '../../host/boundedS
 import { getOrg } from '../../host/accessControlService.js';
 import { resolveMediaAsset } from '../../host/inMemorySurfaces.js';
 import { createLogger } from '../../observability/logger.js';
-import { getPage, getPublishedBySlug, getVersion, listPages, getContentLanguageSettings, localizePage, resolveSharedRefs, type Page, type PageListFilter, type Section } from '../cms/cmsService.js';
+import { getPage, getPublishedBySlug, getVersion, listPages, getContentLanguageSettings, localizePage, resolveSharedRefs, type Page, type PageListFilter, type PageSiteNav, type Section, type SiteNavFeatured } from '../cms/cmsService.js';
 // ADR 0593 D1 — the ONE approval-gate predicate (see the class-enumeration note
 // in `putSeo`). Publishing already depends on cms for its page reads.
 import { liveEditRefusal, refuseLiveEdit } from '../cms/contentApproval.js';
@@ -397,6 +397,15 @@ export async function sitemapXml(orgId: string, baseUrl: string): Promise<string
   return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls}\n</urlset>\n`;
 }
 
+/** One row of the public-site nav list (ADR 0486; `nav` per ADR 1049). */
+export interface PublicNavPage { slug: string; title: string; nav?: Omit<PageSiteNav, 'featured'> }
+
+/** ADR 1062 D2 — the mega menu's featured card: the `siteNav.featured` of the
+ *  first published, indexable, non-post page that sets one, HOME FIRST (home is
+ *  the usual owner and is not itself a nav row), then by title. `slug` lets the
+ *  shell resolve a `#fragment` href against the owning page. */
+export interface PublicNavFeatured extends SiteNavFeatured { slug: string }
+
 /** ADR 0486 — the public-site NAV list: published marketing pages (slug + title)
  *  for the public shell's menu, so EVERY published page is reachable from the
  *  home page without a stale hard-coded list. Rides the SAME published-only +
@@ -406,15 +415,31 @@ export async function sitemapXml(orgId: string, baseUrl: string): Promise<string
  *  author who kept a page out of the sitemap MUST NOT find it promoted into the
  *  PRIMARY visible menu — the same `!seo?.noindex` exclusion sitemap.xml applies).
  *  Sorted by title; bounded by `capPublic`. Draft/unpublished pages never appear
- *  (no dishonest 404 link). */
-export async function listPublicNavPages(orgId: string): Promise<Array<{ slug: string; title: string }>> {
+ *  (no dishonest 404 link).
+ *
+ *  ADR 1049 — each row also carries the page's `siteNav` placement as `nav`
+ *  (group / label / description / order / primary), OMITTED when the page has
+ *  none, so a site that never sets it reads byte-identically to ADR 0486. Still
+ *  sorted by title here; the shell orders by `nav.order` within each group.
+ *
+ *  ADR 1062 — the list ships with the featured card, from the SAME read. Each
+ *  row's `nav` omits `featured` (it travels once, at the top level), so a site
+ *  that never sets it reads byte-identically. */
+export async function listPublicNav(orgId: string): Promise<{ pages: PublicNavPage[]; featured?: PublicNavFeatured }> {
   const { rows } = await listPublishedWithSeo(orgId);
-  return capPublic(
-    rows
-      .filter(({ page, seo }) => page.slug !== 'home' && page.kind !== 'post' && !seo?.noindex)
-      .sort((a, b) => (a.page.title.toLowerCase() < b.page.title.toLowerCase() ? -1 : 1)),
+  const eligible = rows.filter(({ page, seo }) => page.kind !== 'post' && !seo?.noindex);
+  const byTitle = (a: (typeof rows)[number], b: (typeof rows)[number]): number => (a.page.title.toLowerCase() < b.page.title.toLowerCase() ? -1 : 1);
+  const pages = capPublic(
+    eligible.filter(({ page }) => page.slug !== 'home').sort(byTitle),
     orgId, 'nav',
-  ).map(({ page }) => ({ slug: page.slug, title: page.title }));
+  ).map(({ page }) => {
+    const { featured: _featured, ...nav } = page.siteNav ?? {};
+    return { slug: page.slug, title: page.title, ...(Object.keys(nav).length > 0 ? { nav } : {}) };
+  });
+  const owner = [...eligible].sort((a, b) => (a.page.slug === 'home' ? -1 : b.page.slug === 'home' ? 1 : byTitle(a, b)))
+    .find(({ page }) => page.siteNav?.featured);
+  const featured = owner?.page.siteNav?.featured;
+  return { pages, ...(owner && featured ? { featured: { slug: owner.page.slug, ...featured } } : {}) };
 }
 
 /** ADR 1015 — whether the org has a published, non-post page at `slug` (the
@@ -570,6 +595,7 @@ export interface PublicBlogPost {
 const PROSE_KEYS = new Set([
   'heading', 'subheading', 'eyebrow', 'text', 'lede', 'blurb', 'caption',
   'title', 'label', 'alt', 'ctaLabel', 'ctaLabel2',
+  'body', // ADR 1066 D2 — the hero's second paragraph
 ]);
 
 /** Stop counting past this many words (~2h of reading). The blog list is an
@@ -746,6 +772,18 @@ function descriptionFrom(page: Page): string {
  * Any OTHER org keeps the vendor path: it has no platform-origin document door,
  * so there is no truer URL to name (a bound custom domain is ADR 0391's job).
  */
+/** A page's address on its workspace's custom domain: the paths the custom-domain
+ *  guard maps back to the page prerender (`middleware/customDomain.ts`
+ *  `documentRewrite`): `/` for home, `/pricing`, `/blog/:slug` for a post,
+ *  `/p/:slug` for everything else. */
+export function customDomainPageUrl(siteOrigin: string, page: { slug: string; kind?: string }): string {
+  const origin = siteOrigin.replace(/\/+$/, '');
+  if (page.kind === 'post') return `${origin}/blog/${encodeURIComponent(page.slug)}`;
+  if (page.slug === 'home') return `${origin}/`;
+  if (page.slug === 'pricing') return `${origin}/pricing`;
+  return `${origin}/p/${encodeURIComponent(page.slug)}`;
+}
+
 export function publicPageUrl(baseUrl: string, orgId: string, page: { slug: string; kind?: string; collection?: string }): string {
   const siteOrg = process.env.OPENWOP_PUBLIC_SITE_ORG_ID?.trim();
   if (siteOrg && siteOrg === orgId) {

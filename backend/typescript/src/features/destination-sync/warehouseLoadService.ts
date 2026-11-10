@@ -31,7 +31,9 @@ import type { Storage } from '../../storage/storage.js';
 import { brokeredPost, type BrokeredEgressDeps } from '../../host/brokeredEgress.js';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { actionPolicyOf } from '../../host/governanceService.js';
-import { createWarehouseLoadApproval, getApproval } from '../../host/approvalService.js';
+import { createWarehouseLoadApproval, getApproval, resolveApproval } from '../../host/approvalService.js';
+import { canonicalize } from '../../host/canonicalJson.js';
+import { emitReviewUpdatedSignal } from '../../notifications/notify.js';
 import { stampConnectionUse } from '../../host/connectionInjection.js';
 import { getDestinationSync, buildWarehouseRows, type WarehouseRow } from './destinationSyncService.js';
 
@@ -68,12 +70,28 @@ function requireStorage(): Storage {
 interface WarehouseApprovalMapRow { idemKey: string; tenantId: string; approvalId: string; }
 const warehouseApprovals = new DurableCollection<WarehouseApprovalMapRow>('cdp:warehouse-load-approval', (r) => r.idemKey);
 
-/** Fork-stable per-BATCH idempotency key (mirrors adsAdapter's spendKey): tenant + sync +
- *  destination + the pre-sync cursor MARKER. NO runId, NO random — an approve-then-rerun of
- *  the same batch reuses the approval and a `:fork` can't re-ask. Components are JSON-encoded
- *  before hashing so a `:` inside an id can't collide two tenants' keys. */
-function warehouseBatchKey(tenantId: string, syncId: string, dataset: string, table: string, marker: string): string {
+/** The batch SLOT: tenant + sync + destination + the pre-sync cursor MARKER. NO runId, NO
+ *  random. Components are JSON-encoded before hashing so a `:` inside an id can't collide
+ *  two tenants' keys. One pending approval per slot (ADR 1024 D3.2).
+ *
+ *  This is byte-for-byte the pre-ADR-1024 batch key, on purpose: a map row written before
+ *  the change sits at exactly this key, so the slot index finds (and supersedes) it. */
+function warehouseSlotKey(tenantId: string, syncId: string, dataset: string, table: string, marker: string): string {
   return `whload:${createHash('sha256').update(JSON.stringify([tenantId, syncId, dataset, table, marker])).digest('hex')}`;
+}
+
+/** ADR 1024 D3.1 (`CDP2WF-6`) — the digest of the exact rows a load would insert. The key
+ *  used to be the slot alone, and in `batch`/`event` mode the cursor never moves, so ONE
+ *  approval admitted every later load of ANY rows at that slot. insertIds are a pure
+ *  function of (sync, record key, marker) and the canonical form sorts keys, so the same
+ *  records rebuild the same digest: approve-then-rerun and a `:fork` reuse the decision. */
+export function warehouseRowsDigest(rows: readonly WarehouseRow[]): string {
+  return createHash('sha256').update(canonicalize(rows.map((r) => [r.insertId, r.json]))).digest('hex');
+}
+
+/** The fork-stable per-BATCH idempotency key: the slot plus the rows digest. */
+function warehouseBatchKey(slotKey: string, rowsDigest: string): string {
+  return `whbatch:${createHash('sha256').update(JSON.stringify([slotKey, rowsDigest])).digest('hex')}`;
 }
 
 type WarehouseGateVerdict =
@@ -82,9 +100,52 @@ type WarehouseGateVerdict =
   | { verdict: 'disabled' }
   | { verdict: 'requires-approval'; approvalId: string; approvalStatus: 'pending' | 'rejected' };
 
+/** ADR 1024 D3.2 — a new batch at a slot supersedes the slot's previous pending approval,
+ *  so changed batches do not pile up in the inbox, and the slot index moves to the new row.
+ *
+ *  - The slot row is moved with a CAS loop (architect pass 2, N3): two loads at one slot
+ *    must not each supersede the other's row.
+ *  - The previous row is resolved by the system (`resolveApproval`, a CAS; there is no
+ *    human decider, so not `rejectApproval`): `rejected`, the only terminal non-approved
+ *    status, with the governance chain outcome `superseded` (the CMS precedent,
+ *    `approvalService.ts` `chainOutcome`), then the inbox is told.
+ *  - Its batch map row is deleted (N2): otherwise the same rows coming back later would find
+ *    a rejected approval and stay refused forever, instead of asking again.
+ *  A failure here is logged and never blocks the new approval. */
+async function moveSlotTo(tenantId: string, slotKey: string, approvalId: string): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const prev = (await warehouseApprovals.get(slotKey).catch(() => undefined)) ?? null;
+    if (prev && prev.tenantId === tenantId && prev.approvalId === approvalId) return;
+    const next: WarehouseApprovalMapRow = { idemKey: slotKey, tenantId, approvalId };
+    if (!(await warehouseApprovals.compareAndSwap(prev, next).catch(() => false))) continue;
+    if (prev && prev.tenantId === tenantId) await supersede(tenantId, prev.approvalId);
+    return;
+  }
+  log.warn('warehouse-load slot index contended; previous approval left pending', { tenantId });
+}
+
+async function supersede(tenantId: string, approvalId: string): Promise<void> {
+  try {
+    const approval = await getApproval(approvalId);
+    if (!approval || approval.tenantId !== tenantId || approval.status !== 'pending') return;
+    const lock = await resolveApproval(approval.approvalId, { status: 'rejected', note: 'Superseded by a newer batch for the same sync.', chainOutcome: 'superseded' });
+    if (!lock?.changed) return;
+    // Delete the batch map row only while it still points at THIS approval (grade-code M1/M2):
+    // a concurrent load of the same rows may already have re-pointed it at its own pending
+    // row, and a pre-ADR-1024 row's batch key IS the slot key just moved to the new row.
+    if (approval.spendIdemKey) {
+      const row = await warehouseApprovals.get(approval.spendIdemKey).catch(() => undefined);
+      if (row && row.approvalId === approval.approvalId) await warehouseApprovals.compareAndDelete(row).catch(() => false);
+    }
+    emitReviewUpdatedSignal({ tenantId, reviewId: `approval:${approval.approvalId}`, status: 'rejected', approvalId: approval.approvalId });
+  } catch (e) {
+    log.warn('warehouse-load supersede failed', { error: e instanceof Error ? e.message : String(e) });
+  }
+}
+
 async function evaluateWarehouseGate(
   deps: BrokeredEgressDeps,
-  idemKey: string,
+  keys: { slotKey: string; idemKey: string; rowsDigest: string },
   describe: { syncId: string; dataset: string; table: string; rowCount: number },
 ): Promise<WarehouseGateVerdict> {
   // The action policy — UNSET defaults to `approval-required` (the CORRECT fail-closed posture
@@ -100,12 +161,16 @@ async function evaluateWarehouseGate(
   if (policy === 'draft-only') return { verdict: 'draft-only' };
 
   // approval-required (or unset) — mint-or-consult the batch's warehouse-load approval.
-  const mapped = await warehouseApprovals.get(idemKey).catch(() => undefined);
+  const mapped = await warehouseApprovals.get(keys.idemKey).catch(() => undefined);
   if (mapped && mapped.tenantId === deps.tenantId) {
     const approval = await getApproval(mapped.approvalId);
     if (approval && approval.tenantId === deps.tenantId) {
-      if (approval.status === 'approved') return { verdict: 'allow' };
-      return { verdict: 'requires-approval', approvalId: approval.approvalId, approvalStatus: approval.status === 'rejected' ? 'rejected' : 'pending' };
+      // The digest on the ROW must match too: the map key already carries it, but the
+      // row is what a person approved, and a row without one predates ADR 1024.
+      if (approval.status === 'approved' && approval.rowsDigest === keys.rowsDigest) return { verdict: 'allow' };
+      if (approval.status !== 'approved') {
+        return { verdict: 'requires-approval', approvalId: approval.approvalId, approvalStatus: approval.status === 'rejected' ? 'rejected' : 'pending' };
+      }
     }
   }
   const approval = await createWarehouseLoadApproval({
@@ -114,11 +179,30 @@ async function evaluateWarehouseGate(
     dataset: describe.dataset,
     table: describe.table,
     rowCount: describe.rowCount,
-    idemKey,
+    idemKey: keys.idemKey,
+    rowsDigest: keys.rowsDigest,
+    ...(deps.actingUserId ? { submitters: [deps.actingUserId] } : {}),
     proposal: `Load ${describe.rowCount} row(s) into BigQuery ${describe.dataset}.${describe.table} (reverse-ETL warehouse write)`,
   });
-  await warehouseApprovals.put({ idemKey, tenantId: deps.tenantId, approvalId: approval.approvalId }).catch((e) =>
-    log.warn('warehouse-load approval map write failed', { error: e instanceof Error ? e.message : String(e) }));
+  // Claim the batch key insert-if-absent (grade-code M1): two loads of the same rows racing
+  // here must end with ONE approval, not two where the slot move orphans the one a person
+  // then approves. The loser supersedes its own fresh row and defers to the winner's.
+  const mine: WarehouseApprovalMapRow = { idemKey: keys.idemKey, tenantId: deps.tenantId, approvalId: approval.approvalId };
+  if (!(await warehouseApprovals.putIfAbsent(mine).catch(() => false))) {
+    const winner = await warehouseApprovals.get(keys.idemKey).catch(() => undefined);
+    const won = winner && winner.tenantId === deps.tenantId ? await getApproval(winner.approvalId).catch(() => null) : null;
+    // An approved row for OTHER rows (a pre-digest row) is not this batch's decision.
+    if (won && won.tenantId === deps.tenantId && (won.status !== 'approved' || won.rowsDigest === keys.rowsDigest)) {
+      await supersede(deps.tenantId, approval.approvalId);
+      if (won.status === 'approved') return { verdict: 'allow' };
+      return { verdict: 'requires-approval', approvalId: won.approvalId, approvalStatus: won.status === 'rejected' ? 'rejected' : 'pending' };
+    }
+    // The key points at nothing usable (a row deleted out from under it, or a decision on
+    // other rows): take it over.
+    await warehouseApprovals.put(mine).catch((e) =>
+      log.warn('warehouse-load approval map write failed', { error: e instanceof Error ? e.message : String(e) }));
+  }
+  await moveSlotTo(deps.tenantId, keys.slotKey, approval.approvalId);
   return { verdict: 'requires-approval', approvalId: approval.approvalId, approvalStatus: 'pending' };
 }
 
@@ -188,7 +272,7 @@ export async function warehouseLoad(
   if (sync.destinationKind !== 'warehouse') return { status: 'not_configured', error: 'not_a_warehouse_sync' };
   if (!sync.project || !sync.dataset || !sync.table) return { status: 'not_configured', error: 'missing_warehouse_target' };
 
-  const built = buildWarehouseRows(sync, args.records);
+  const built = await buildWarehouseRows(sync, args.records);
   const nextCursor = built.nextCursor;
   // Nothing to load (empty batch / all filtered by the CDC watermark) — a no-op success, no
   // gate, no insert. Advancing the (unchanged) cursor is harmless and the workflow's job.
@@ -196,8 +280,13 @@ export async function warehouseLoad(
     return { status: 'loaded', loaded: 0, failed: 0, errors: [], ...(nextCursor !== undefined ? { nextCursor } : {}) };
   }
 
-  const idemKey = warehouseBatchKey(deps.tenantId, sync.syncId, sync.dataset, sync.table, sync.cursor ?? '');
-  const gate = await evaluateWarehouseGate(deps, idemKey, { syncId: sync.syncId, dataset: sync.dataset, table: sync.table, rowCount: built.rows.length });
+  const slotKey = warehouseSlotKey(deps.tenantId, sync.syncId, sync.dataset, sync.table, sync.cursor ?? '');
+  const rowsDigest = warehouseRowsDigest(built.rows);
+  const gate = await evaluateWarehouseGate(
+    deps,
+    { slotKey, idemKey: warehouseBatchKey(slotKey, rowsDigest), rowsDigest },
+    { syncId: sync.syncId, dataset: sync.dataset, table: sync.table, rowCount: built.rows.length },
+  );
   if (gate.verdict === 'disabled') return { status: 'disabled' };
   if (gate.verdict === 'draft-only') {
     return { status: 'dry_run', wouldLoad: built.rows.length, loaded: 0, rows: built.rows, ...(nextCursor !== undefined ? { nextCursor } : {}) };

@@ -170,7 +170,7 @@ describe('R2 review fold-in — the remaining push/chip branches', () => {
     await act(async () => {});
     fireEvent.click(await screen.findByRole('button', { name: /Push to Zoom/ }));
     await act(async () => {});
-    expect(vi.mocked(toast.info)).toHaveBeenCalledWith(expect.stringMatching(/Pushed 2; 1 failed/));
+    expect(vi.mocked(toast.info)).toHaveBeenCalledWith(expect.stringMatching(/Pushed 2; 1 still queued: Zoom could not be reached/));
     expect(vi.mocked(toast.success)).toHaveBeenCalledTimes(1); // only the full push succeeded
   });
 

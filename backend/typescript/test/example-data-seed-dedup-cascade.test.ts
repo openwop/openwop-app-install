@@ -66,7 +66,7 @@ async function api<T = unknown>(path: string, init: RequestInit = {}): Promise<{
   return { status: res.status, body: (text.length ? JSON.parse(text) : null) as T };
 }
 const roster = async (): Promise<RosterEntry[]> => (await api<{ roster: RosterEntry[] }>('/host/openwop-app/roster')).body.roster;
-const heal = () => api('/host/openwop-app/example-data/seed', { method: 'POST', body: JSON.stringify({ heal: true }) });
+const heal = () => api('/host/openwop-app/example-data/seed', { method: 'POST', body: JSON.stringify({ heal: true, expectedTenantId: 'default' }) });
 
 /** Idris on the default tenant, created by an explicit heal when missing. */
 async function ensureIdris(): Promise<RosterEntry> {
@@ -135,7 +135,7 @@ describe('demo-seed dedup + roster-delete cascade', () => {
     expect((await api(`/host/openwop-app/roster/${idris.rosterId}`, { method: 'DELETE' })).status).toBe(204);
 
     // Plain auto-seed on a known tenant respects the deletion.
-    await api('/host/openwop-app/example-data/seed', { method: 'POST', body: '{}' });
+    await api('/host/openwop-app/example-data/seed', { method: 'POST', body: JSON.stringify({ expectedTenantId: 'default' }) });
     expect((await roster()).some((r) => r.persona === 'Idris')).toBe(false);
     expect((await roster()).length).toBe(9);
 

@@ -99,4 +99,13 @@ export const messages = {
   outletsLoadFailed: "No se pudieron cargar los puntos de venta, así que este distribuidor puede tener ubicaciones que no aparecen aquí.",
   registrationsLoadFailed: "No se pudieron cargar los registros de oportunidades, así que esta lista puede estar incompleta.",
   dealerNameUnavailable: "(no se pudo cargar el nombre del distribuidor)",
+  // ADR 1034 D9
+  revokePortalButton: 'Revocar enlace de socio',
+  revokePortalTitle: '¿Revocar este enlace de socio?',
+  revokePortalBody: 'El socio ya no podrá abrir su portal ni registrar operaciones con el enlace actual. Puedes emitir uno nuevo más tarde.',
+  portalRevokedToast: 'Enlace de socio revocado',
+  portalRevokeFailed: 'No se pudo revocar el enlace de socio',
+  portalExpiresNotice: 'Deja de funcionar el {{date}}. Cópialo ahora: no se vuelve a mostrar.',
+  suspendConfirmTitle: '¿Suspender a {{name}}?',
+  suspendConfirmBody: 'Su enlace de socio deja de funcionar hasta que lo reactives. Los enlaces también caducan 180 días después de emitirse, así que quizá tengas que emitir uno nuevo.',
 } as const;

@@ -63,7 +63,7 @@ import { ensureFeatureDefaultOrgs } from './host/featureDefaultOrgs.js';
 import { setDefaultWorkspaceTargets } from './host/workspaceJoinLedger.js';
 import { registerMembershipRootedWorkspaces } from './host/accessControlService.js';
 import { ensureRegistryPacksInstalled } from './bootstrap/installRegistryPacks.js';
-import { featurePackNames, featureDefaultOrgs, pinnedPackRef } from './features/index.js';
+import { featurePackNames, featureDefaultOrgs, pinnedPackRef, startFeatureDaemons } from './features/index.js';
 import { ensureLocalPacksMounted } from './bootstrap/mountLocalPacks.js';
 import { registerClamavScannerFromEnv } from './host/uploadScanClamav.js';
 import { recordChainPackLoad } from './host/chainPackLoadStatus.js';
@@ -116,7 +116,6 @@ import { backfillKnowledgeSyncJobs } from './features/knowledge-sync/knowledgeSy
 import { startCrmSnapshotDaemon } from './features/crm/snapshotDaemon.js';
 import { startFunnelWeeklySummaryDaemon, weeklySummaryEnabled } from './features/billing/funnelWeeklySummary.js';
 import { startOperatorAccessSweepDaemon } from './host/operatorAccess.js';
-import { startVerifierSampleDaemon } from './features/kicktodo-metrics/verifierSampleDaemon.js';
 import { listCrmOrgScopes } from './features/crm/crmEntitiesService.js';
 import { startRetentionSweepDaemon, idempotencyTtlDays } from './host/retentionSweepDaemon.js';
 import { defaultRetentionDays } from './storage/runRetentionStamp.js';
@@ -1044,14 +1043,10 @@ async function main(): Promise<void> {
   // eligibility review, notifies the other superadmins, deletes ended rows. It
   // decides no authority (D4 checks every activation at use time).
   const operatorAccessSweepDaemon = startOperatorAccessSweepDaemon();
-  // ADR 0432 P3 (chat-first-port G9) — the verifier-sample igniter: monthly,
-  // mint a deterministic sample of goal verdicts as `metrics-verifier-sample`
-  // approvals so the FP/FN metric has a denominator. Per-tenant kicktodo-metrics
-  // toggle checked inside the pass; env-gated START (default OFF) like the other
-  // opt-in sweep daemons.
-  const verifierSampleDaemon = process.env.OPENWOP_KICKTODO_VERIFIER_SAMPLING_ENABLED === 'true'
-    ? startVerifierSampleDaemon({ storage }, listRosterTenants)
-    : null;
+  // ADR 1031 — features' own background work (`BackendFeature.onStart`), last,
+  // after the host's daemons: e.g. kicktodo-metrics' verifier-sample igniter
+  // (ADR 0432 P3), which this file used to import and start by name.
+  const featureDaemons = startFeatureDaemons({ storage, hostSuite, listRosterTenants });
   // SHUTDOWN-1 — this handler used to stop the daemons and drain the pool but
   // never close the HTTP server and never exit, so the `app.listen` handle held
   // the event loop open forever: after SIGTERM the process stayed ALIVE, still
@@ -1103,7 +1098,7 @@ async function main(): Promise<void> {
       crmSnapshotDaemon?.stop();
       funnelWeeklySummaryDaemon?.stop();
       operatorAccessSweepDaemon.stop();
-      verifierSampleDaemon?.stop();
+      for (const d of featureDaemons) d.handle.stop();
       // Flush buffered OTel spans before exit (DATA-4). Best-effort; don't
       // block shutdown if the exporter is wedged.
       void shutdownTracer();

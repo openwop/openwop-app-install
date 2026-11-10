@@ -135,6 +135,8 @@ direction (the ADR 0592 CMS precedent).
 
 ### D7 — What each kind's installer would need (deferred, filed)
 
+> **2026-11-03:** both pack kinds are decided by ADR 1033: they install per tenant and read back through RFC 0253. Agent packs install as tenant-owned agents under the user-authored agent limits.
+
 | Kind | Real install path | Why not in this ADR |
 |---|---|---|
 | `workflow-chain-pack` | validate an RFC 0013 manifest closed-world → `expandChain` → `registerWorkflowDurable` + `recordOwnership` (the from-chain lane, ADR 0770 stage-check-commit) | a second, unsigned chain ingest door; needs its own security decision (pack trust, disabled-pack choke, node allowlist). The only producer emits no manifest. |

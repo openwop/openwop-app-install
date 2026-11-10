@@ -331,6 +331,21 @@ describe('ADR 0905 D3 — review lifecycle through the inbox', () => {
     expect((await approve(t.owner, approvalId)).status).toBe(409);
   });
 
+  // NYI-EMAIL-1 — this was `/approvals`, a path the SPA has no route for.
+  it('the review-requested notification opens this approval on the inbox', async () => {
+    const t = await team();
+    // Addressed rows only (ADR 0672 D1), so this needs a configured approver.
+    const member = (await listMembers(t.tenantId, t.orgId)).find((m) => m.subject === t.clientId)!;
+    const group = await createGroup({ tenantId: t.tenantId, orgId: t.orgId, name: 'Client approvers', memberIds: [member.memberId] });
+    expect((await t.owner.put(E(t.orgId, '/settings/approvers'), { groupRefs: [group.groupId] })).status).toBe(200);
+    const approvalId = await submit(t.editor, t.orgId, t.campaignId);
+    const inbox = await t.clientUser.get('/host/openwop-app/notifications?limit=50');
+    expect(inbox.status, JSON.stringify(inbox.body)).toBe(200);
+    const sent = (inbox.body.notifications as Array<{ type: string; actionUrl?: string }>).filter((n) => n.type === 'approval.email-send-review-requested');
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.actionUrl).toBe(`/inbox?approval=${encodeURIComponent(approvalId)}`);
+  });
+
   it('reject returns the campaign to draft with the reviewer note ("changes requested")', async () => {
     const t = await team();
     const approvalId = await submit(t.editor, t.orgId, t.campaignId);

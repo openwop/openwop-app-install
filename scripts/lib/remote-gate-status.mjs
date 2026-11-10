@@ -58,7 +58,7 @@ export function* remoteGateJobResultFrame(input) {
   const job = readRemoteGateJob(input);
   assert.equal(job.state, 'completed', 'job artifacts are not ready');
   const directory = privateRoot(join(job.directory, 'artifacts'));
-  const paths = Object.fromEntries(['result.json', 'evidence.json', 'gate.log', 'browser.tsv']
+  const paths = Object.fromEntries(['result.json', 'evidence.json', 'gate.log.gz', 'browser.tsv']
     .map(name => [name, join(directory, name)]));
   for (const path of Object.values(paths)) {
     const stat = lstatSync(path);

@@ -127,8 +127,8 @@ export function TemplatePreflightModal({
   );
   const anyFeatureDisabled = featureRows.some((f) => !f.enabled);
 
-  // Only claim "zero connections" when the host actually DERIVED requirements
-  // (an older backend omits the block — say nothing rather than overpromise).
+  // ADR 1065: only explicit no-account metadata may receive a positive label.
+  // Missing or older metadata stays unknown even when literal rows are empty.
   //
   // §Correction (grade-ux TPI-2): this ignored unanswered REQUIRED inputs, so a
   // green "ready to go" chip rendered directly above a blank required field on
@@ -136,7 +136,7 @@ export function TemplatePreflightModal({
   // ready. `missingRequired` is the same helper `RunInputsDialog` already uses.
   const unanswered = missingRequired(variables, values);
   const zeroConfig =
-    requirements != null && connectionRows.length === 0 && missingNodes.length === 0 && pinMismatches.length === 0
+    requirements?.connectionUsage === 'none' && connectionRows.length === 0 && missingNodes.length === 0 && pinMismatches.length === 0
     && !anyFeatureDisabled && unanswered.length === 0;
 
   return (
@@ -166,6 +166,12 @@ export function TemplatePreflightModal({
               {t('preflightFeaturesNotice', {
                 features: featureRows.filter((f) => !f.enabled).map((f) => f.label).join(', '),
               })}
+            </Notice>
+          ) : null}
+          {requirements.connectionUsage !== 'none' && connectionRows.length === 0 ? (
+            <Notice variant="info" announce={t(requirements.connectionUsage === 'uses' ? 'preflightAccountUsage' : 'preflightAccountUnknown')}>
+              {t(requirements.connectionUsage === 'uses' ? 'preflightAccountUsage' : 'preflightAccountUnknown')}{' '}
+              <Button variant="link" onClick={() => nav('/access?tab=connections')}>{t('preflightReviewConnections')}</Button>
             </Notice>
           ) : null}
           {zeroConfig ? (

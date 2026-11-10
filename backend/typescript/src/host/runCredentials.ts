@@ -18,7 +18,7 @@
  */
 
 import { isManagedRef, refNamedProvider } from '../aiProviders/credentialRefLadder.js';
-import { resolveSecret } from '../byok/secretResolver.js';
+import { resolveUserNamedSecret } from '../byok/userNamedSecret.js';
 
 /** The run-level `configurable` that lets `prepareRunSecrets` resolve `ref`
  *  into the run's secret set. Empty for a managed ref or none. */
@@ -86,7 +86,7 @@ export async function runAiCredentialRefViolation(
   if (refNamedProvider(ref, byokProviders) === null) {
     return `configurable.ai.credentialRef must name a key for one of: ${byokProviders.join(', ')} (e.g. byok:<provider> or <provider>:<label>).`;
   }
-  if ((await resolveSecret(ref, { tenantId })) === null) {
+  if ((await resolveUserNamedSecret(ref, { tenantId })) === null) {
     return 'configurable.ai.credentialRef does not resolve to a key in this workspace\'s Secrets Vault.';
   }
   return null;

@@ -8,7 +8,9 @@
  * description, or toolAllowlist to the real tool universe:
  *   1. every pack-declared node typeId (packs/&#42;/pack.json nodes[]),
  *   2. every host-registered node typeId (bootstrap/nodes.ts),
- *   3. every host agent tool (agentToolProvider.ts + features/&#42;/agentTools.ts).
+ *   3. every host agent tool (agentToolProvider.ts + features/&#42;/agentTools.ts,
+ *      and the ADR 1031 adopter root adopter/features/&#42;/agentTools.ts, which an
+ *      adopter checkout populates and this repo never does).
  * A prompt that names a tool the model cannot call is a lie to the model; a new
  * one fails here instead of shipping.
  *
@@ -47,10 +49,12 @@ function collectUniverse(): Set<string> {
   //    host/workflowComposeTool.ts, the one core module outside the two scan
   //    patterns whose tool ids appear in pack manifests/prompts)
   const toolSources = [join(SRC_DIR, 'host/agentToolProvider.ts'), join(SRC_DIR, 'host/workflowComposeTool.ts')];
-  const featuresDir = join(SRC_DIR, 'features');
-  for (const feature of readdirSync(featuresDir)) {
-    const agentTools = join(featuresDir, feature, 'agentTools.ts');
-    if (existsSync(agentTools)) toolSources.push(agentTools);
+  for (const featuresDir of [join(SRC_DIR, 'features'), join(SRC_DIR, 'adopter/features')]) {
+    if (!existsSync(featuresDir)) continue; // the adopter root exists only downstream
+    for (const feature of readdirSync(featuresDir)) {
+      const agentTools = join(featuresDir, feature, 'agentTools.ts');
+      if (existsSync(agentTools)) toolSources.push(agentTools);
+    }
   }
   // Host subsystems that register their own chat tools from `host/<sub>/agentTools.ts`
   // (ADR 0889 D8: `host/evals/agentTools.ts`, allowlisted by the Agent Author pack).

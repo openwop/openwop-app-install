@@ -13,7 +13,7 @@
  *      recomputed hash: a sub-only hash goes red here);
  *   3. expired → 401 `unauthenticated`, `details.reason: expired`;
  *   4. wrong audience → 401 `audience_mismatch`, `details.reason: wrong_audience`;
- *   5. an allow-listed env API key still works alongside OIDC (`bearer:<8>`, `['*']`);
+ *   5. an allow-listed env API key still works alongside OIDC (`bearer:<sha256 16 hex>`, `['*']`);
  *   6. a non-JWT, non-allow-listed bearer → 401 with the "not recognized" message
  *      (the bearer-branch refusal, distinguishable from the generic
  *      missing-credential 401 further down the middleware).
@@ -31,6 +31,7 @@ import { createHash, createSign, generateKeyPairSync, type KeyObject } from 'nod
 import { authMiddleware, _resetOidcVerifier } from '../src/middleware/auth.js';
 import { registerPersonalTenantSessionAuthority, registerSessionAuthority } from '../src/host/sessionAuthority.js';
 import { usersSessionAuthority } from '../src/features/users/feature.js';
+import { envKeyPrincipalId } from '../src/middleware/envKeyPrincipal.js';
 
 // ── tiny synthetic OIDC issuer ───────────────────────────────────
 
@@ -188,7 +189,7 @@ describe('P3.1 OIDC bearer verification', () => {
       const res = await call('admin-test-key');
       expect(res.status).toBe(200);
       const body = (await res.json()) as { principalId: string; tenants: string[] };
-      expect(body.principalId).toBe('bearer:admin-te');
+      expect(body.principalId).toBe(envKeyPrincipalId('admin-test-key'));
       expect(body.tenants).toEqual(['*']);
     } finally {
       delete process.env.OPENWOP_API_KEYS;

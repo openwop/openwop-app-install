@@ -60,6 +60,7 @@ const SEG_STATUS_KEYS: Record<SegStatus, string> = {
   failed: 'segStatusFailed',
   suspended: 'segStatusSuspended',
   cut: 'segStatusCut',
+  incomplete: 'segStatusIncomplete',
 };
 
 interface Props {
@@ -76,7 +77,7 @@ interface Props {
 
 /** `cut` — still open when the RUN reached terminal (a run-duration breach or a
  *  cancel stops a node without a terminal node event; ADR 0772 D1). */
-type SegStatus = 'running' | 'completed' | 'failed' | 'suspended' | 'cut';
+type SegStatus = 'running' | 'completed' | 'failed' | 'suspended' | 'cut' | 'incomplete';
 
 interface Segment {
   nodeId: string;
@@ -94,6 +95,7 @@ const SEG_COLOR: Record<SegStatus, string> = {
   failed: 'var(--color-danger)',
   suspended: 'var(--color-ai)',
   cut: 'var(--ink-3)',
+  incomplete: 'var(--ink-3)',
 };
 
 const RUN_TERMINAL_TYPES: ReadonlySet<string> = new Set(['run.completed', 'run.failed', 'run.cancelled']);
@@ -144,7 +146,16 @@ function buildSegments(events: readonly RunEventDoc[]): {
       // Close any dangling open segment first (defensive — a started
       // without a prior close means an out-of-order or missing event).
       const prior = open.get(nodeId);
-      if (prior && prior.endMs === null) prior.endMs = ms;
+      if (prior && prior.endMs === null) {
+        // The old attempt has no terminal event (for example a copied fork
+        // checkpoint). Only its recorded span is known, not the idle gap until
+        // this new attempt. Keep it inspectable without claiming live work.
+        prior.endMs = prior.events.reduce((end, event) => {
+          const recorded = Date.parse(event.timestamp);
+          return Number.isFinite(recorded) ? Math.max(end, recorded) : end;
+        }, prior.startMs);
+        prior.status = 'incomplete';
+      }
       const seg: Segment = {
         nodeId,
         startMs: Number.isNaN(ms) ? 0 : ms,
@@ -248,6 +259,7 @@ export function RunTimeline({ events, onForkFrom, onSelectSeq, readState, onRetr
 
   return (
     <div className="run-timeline">
+      <p className="muted u-fs-12 u-m-0">{t('timelineHistoryHint')}</p>
       <div className="run-timeline-axis muted">
         <span>0</span>
         <span>{fmtDuration(span)}</span>
@@ -290,7 +302,8 @@ export function RunTimeline({ events, onForkFrom, onSelectSeq, readState, onRetr
                 const endMs = seg.endMs ?? maxMs;
                 const width = Math.max(pct(endMs) - left, 1.5);
                 const isSel = selected?.nodeId === seg.nodeId && selected.startSeq === seg.startSeq;
-                const dur = seg.endMs != null ? fmtDuration(seg.endMs - seg.startMs) : t('timelineRunning');
+                const elapsed = seg.endMs != null ? fmtDuration(seg.endMs - seg.startMs) : t('timelineRunning');
+                const dur = seg.status === 'incomplete' ? t('timelineObservedDuration', { duration: elapsed }) : elapsed;
                 const statusLabel = t(SEG_STATUS_KEYS[seg.status]);
                 return (
                   <button

@@ -6,14 +6,18 @@
  * recorded outcome. It reads nothing and leaves the live cooldown alone.
  *
  * Sabotage (run red, then reverted): declare the sync node `role:"action"`
- * (and regenerate the floor). The replay then re-executes the node, which finds
- * the cooldown the source run claimed and reports `cooldown` instead of the
- * recorded `synced`.
+ * (and regenerate the floor). w83: the same break at `isSideEffectingNode`
+ * (the sync typeId not fast-path served).
+ *
+ * The fork runs with `Date` moved past the 15-minute cooldown. Without that, a
+ * re-executed node would meet the source run's own cooldown, so "reads nothing"
+ * and "the cooldown is untouched" could not fail on their own: a re-run past the
+ * cooldown would read the platform again and re-claim it.
  */
 
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { getSetCookies } from './headerCookies.js';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
@@ -58,7 +62,7 @@ beforeAll(async () => {
   await new Promise<void>((r) => meta.listen(0, '127.0.0.1', r));
   process.env.OPENWOP_META_API_BASE = `http://127.0.0.1:${(meta.address() as AddressInfo).port}`;
   registerProvider({ id: 'meta-ads', label: 'Meta Ads', kind: 'oauth2', authFlow: 'manual', reach: 'openapi', scopes: { read: [] }, refreshable: true, defaultScopes: [], consumerNodes: [], apiHosts: ['127.0.0.1'] });
-});
+}, 120_000);
 
 afterAll(async () => {
   delete process.env.OPENWOP_META_API_BASE;
@@ -77,14 +81,14 @@ function client() {
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
 }
 type Client = ReturnType<typeof client>;
+const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
+/** The run's terminal status (no hook to await a run, so a bounded poll). */
 async function settle(c: Client, runId: string): Promise<string> {
-  let status = 'pending';
-  for (let i = 0; i < 120; i++) {
-    status = (await c.get(`/runs/${runId}`)).body.status ?? 'pending';
-    if (status === 'completed' || status === 'failed' || status === 'cancelled') break;
-    await new Promise((r) => setTimeout(r, 25));
-  }
-  return status;
+  return vi.waitFor(async () => {
+    const status = (await c.get(`/runs/${runId}`)).body.status ?? 'pending';
+    if (!TERMINAL.has(status)) throw new Error(`run ${runId} still ${status}`);
+    return status;
+  }, { timeout: 5_000, interval: 25 });
 }
 async function syncOutputs(c: Client, runId: string): Promise<Record<string, unknown>> {
   const events = (await c.get(`/runs/${runId}/debug-bundle`)).body.events ?? [];
@@ -116,11 +120,18 @@ describe('ADR 1022 D6 — a replay fork of daily-metrics reads nothing and keeps
     const claimedAt = (await getSyncStatus(tenantId, orgId))[0]?.lastSyncAt;
     expect(claimedAt).toEqual(expect.any(String));
 
-    const replay = await owner.post(`/runs/${src}:fork`, { mode: 'replay', fromSeq: 0 });
-    expect(replay.status, JSON.stringify(replay.body)).toBe(201);
-    expect(await settle(owner, replay.body.runId!)).toBe('completed');
-    expect(await syncOutputs(owner, replay.body.runId!)).toEqual(recorded);
-    expect(insightReads, 'the replay read nothing from the platform').toBe(1);
-    expect((await getSyncStatus(tenantId, orgId))[0]?.lastSyncAt, 'the live cooldown is untouched').toBe(claimedAt);
+    // Past the cooldown: a node that re-executed now would read and re-claim.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(Date.now() + 16 * 60_000);
+    try {
+      const replay = await owner.post(`/runs/${src}:fork`, { mode: 'replay', fromSeq: 0 });
+      expect(replay.status, JSON.stringify(replay.body)).toBe(201);
+      expect(await settle(owner, replay.body.runId!)).toBe('completed');
+      expect(insightReads, 'the replay read nothing from the platform').toBe(1);
+      expect((await getSyncStatus(tenantId, orgId))[0]?.lastSyncAt, 'the live cooldown is untouched').toBe(claimedAt);
+      expect(await syncOutputs(owner, replay.body.runId!)).toEqual(recorded);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

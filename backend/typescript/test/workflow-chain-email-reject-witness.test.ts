@@ -56,11 +56,15 @@ const SEND = 'core.openwop.integration.email-send';
 /** Floors at the MEASURED corpus, 19d13e682 (grade-tests wave 64): 12 mailing
  *  chains, 13 email-send nodes, 37 approval gates upstream of a send or carrying
  *  a `falsy approved` leg (all 37 declare `config.actions`, so the allowance
- *  leaves all 37). The old floors were 10 / 11 / 17 / 10. */
+ *  leaves all 37). The old floors were 10 / 11 / 17 / 10.
+ *  ADR 1031 P3 (2026-11-05): the gate population measured 40 before and 34
+ *  after; the six removed are exactly KickTodo's (`challenge-factory:outline-approve`,
+ *  `:gate-0`..`:gate-3`, `replan:approve` — the six WF-EM-5 below names), none
+ *  added. They now live downstream. Inventory in PR #5512. */
 const MAILING_CHAINS_FLOOR = 12;
 const MAILING_SENDS_FLOOR = 13;
-const REJECT_GATES_FLOOR = 37;
-const DECLARED_GATES_FLOOR = 37;
+const REJECT_GATES_FLOOR = 34;
+const DECLARED_GATES_FLOOR = 34;
 const GATE = 'core.chat.approvalGate';
 
 /** The real UI resume payloads. `action` is the VALIDATED field on the wire
@@ -500,6 +504,8 @@ describe('WF-EM-5 — a gate whose rejection branch is terminal refuses non-deci
    * decisions and the email cure WAS a straight copy. Both packs now declare
    * `actions: ["approve","reject"]` (factory 1.5.4, replan 1.0.3), and the
    * behavioural leg below drives all six through the real gate + validator.
+   * Since ADR 1031 P3 (2026-11-05) the six ship downstream in the KickTodo repo,
+   * so this corpus no longer holds them; the floors above were re-measured.
    *
    * Kept as an (empty) exact-match set so a NEW undeclared gate still has to be
    * argued into it by name, rather than the population silently re-widening.

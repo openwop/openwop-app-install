@@ -42,11 +42,11 @@ export const messages = {
   // is SUBMITTED for review (CFP-1 / D9) — the copy says "submit", never "apply".
   submitActivate: 'Submit to activate',
   submitArchive: 'Submit to archive',
-  liveNotice: 'This model is live — it drives CRM record visibility and forecasting. Clone a planning model to make changes.',
+  liveNotice: 'This model is live — it drives CRM record visibility and forecasting. To make changes, create a new planning model.',
   confirmActivateTitle: 'Submit this model to go live?',
   submitActivateBody: "This is an org-wide change, so it goes to your workspace's Reviews inbox first. Once a manager approves it there, this model becomes live — driving CRM record visibility and forecasting, replacing the current active model.",
   confirmArchiveTitle: 'Submit this model to archive?',
-  submitArchiveBody: "This is an org-wide change, so it goes to your workspace's Reviews inbox first. Once a manager approves it there, the model becomes read-only history and can't be re-activated (clone it into a new planning model instead).",
+  submitArchiveBody: "This is an org-wide change, so it goes to your workspace's Reviews inbox first. Once a manager approves it there, the model becomes read-only history and can't be re-activated (create a new planning model instead).",
   confirmDeleteTitle: 'Delete this archived model?',
   confirmDeleteBody: 'This permanently removes the model and ALL its territories, assignment rules, and quotas. It cannot be undone. (Only archived models can be deleted.)',
 
@@ -192,4 +192,5 @@ export const messages = {
   field_stage: "Lifecycle stage",
   field_company: "Company name",
   field_score: "Lead score",
+  managerOnlyLifecycle: 'Only a territory manager can activate or archive models.',
 } as const;

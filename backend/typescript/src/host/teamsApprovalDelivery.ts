@@ -27,6 +27,15 @@ import { registerSubjectEraser } from './subjectErasure.js';
 import { subjectKeyForms } from './subjectErasureRedaction.js';
 import { brokeredFetch } from './brokeredEgress.js';
 
+/**
+ * ADR 1042 D2 — the provider the card is sent through. `microsoft365` is the
+ * vendored connection pack (`examples/connection-packs/microsoft365`, loaded at
+ * boot): it pins `graph.microsoft.com` and carries `ChatMessage.Send` in its
+ * `teams.write` group. The built-in `microsoft-graph` has no chat scope, so it
+ * is NOT a substitute (`teams-delivery-provider.test.ts` pins both facts).
+ */
+export const TEAMS_DELIVERY_PROVIDER = 'microsoft365';
+
 /** The action-needed types worth a Teams card (review.updated etc. are not). */
 const DELIVERABLE_TYPES = new Set(['openwop-app.workflow.approval-needed', 'workflow.input_needed']);
 
@@ -132,7 +141,7 @@ async function defaultTransport(opts: Parameters<TeamsDeliveryTransport>[0]): Pr
   await brokeredFetch(
     { storage: opts.storage, tenantId: opts.tenantId, runId: opts.correlationId, actingUserId: opts.actingUserId },
     {
-      provider: 'microsoft365',
+      provider: TEAMS_DELIVERY_PROVIDER,
       url: `https://graph.microsoft.com/v1.0/chats/${encodeURIComponent(opts.chatId)}/messages`,
       method: 'POST',
       contentType: 'application/json',

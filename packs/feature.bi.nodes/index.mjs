@@ -17,15 +17,17 @@ function ensure(ctx, method) {
 }
 function str(v) { return typeof v === 'string' ? v : ''; }
 
+// ADR 1052 D0 — the catalog is per org: both catalog reads name the org, and the
+// host checks the run's person may read it.
 export async function listMetrics(ctx) {
   const bi = ensure(ctx, 'listMetrics');
-  const out = await bi.listMetrics({});
+  const out = await bi.listMetrics({ orgId: str((ctx.inputs ?? {}).orgId) });
   return { status: 'success', outputs: { metrics: out.metrics ?? [] } };
 }
 
 export async function getCatalog(ctx) {
   const bi = ensure(ctx, 'getCatalog');
-  const out = await bi.getCatalog({});
+  const out = await bi.getCatalog({ orgId: str((ctx.inputs ?? {}).orgId) });
   return { status: 'success', outputs: out };
 }
 

@@ -38,7 +38,7 @@ import {
   feedRss,
   getSeo,
   listPublicBlog,
-  listPublicNavPages,
+  listPublicNav,
   publicPageBySlug,
   putSeo,
   robotsTxt,
@@ -48,6 +48,7 @@ import {
 } from './publishingService.js';
 import { pageMarkdown } from './sectionMarkdown.js';
 import { sendError } from '../../middleware/errorEnvelope.js';
+import { boundSiteOrigin } from '../../host/boundSite.js';
 
 export function registerPublishingRoutes(deps: RouteDeps): void {
   const { app } = deps;
@@ -99,9 +100,9 @@ export function registerPublishingRoutes(deps: RouteDeps): void {
   // `/pages/:slug` (distinct exact path; the `:slug` route needs a segment).
   app.get(`${PUB}/pages`, async (req, res, next) => {
     try {
-      const pages = await listPublicNavPages(req.params.orgId);
+      const { pages, featured } = await listPublicNav(req.params.orgId); // ADR 1062 D2 — + the featured card
       res.setHeader('Cache-Control', 'public, max-age=300, stale-while-revalidate=3600');
-      res.json({ pages });
+      res.json({ pages, ...(featured ? { featured } : {}) });
     } catch (err) { next(err); }
   });
 
@@ -229,6 +230,7 @@ export function registerPublishingRoutes(deps: RouteDeps): void {
       const out = await prerenderPageCached(
         req.params.orgId, req.params.slug, publicBaseUrl(req),
         req.headers['accept-language'], process.env.OPENWOP_PUBLIC_SITE_NAME,
+        boundSiteOrigin(res),
       );
       if (out === null) {
         // Unrenderable (unknown future section type): honest-off. On a custom
@@ -266,6 +268,7 @@ export function registerPublishingRoutes(deps: RouteDeps): void {
         publicBaseUrl(req),
         process.env.OPENWOP_PUBLIC_SITE_NAME,
         req.headers['accept-language'],
+        boundSiteOrigin(res),
       );
       logDoc('blog_index_prerender');
       // ADR 0668 D3 — this route has advertised `Vary: Accept-Language` since PUB2-B2 and

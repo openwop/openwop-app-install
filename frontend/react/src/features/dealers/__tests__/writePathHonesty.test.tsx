@@ -51,6 +51,13 @@ vi.mock('../dealersClient.js', async (orig) => ({
   getDealer: (orgId: string, dealerId: string) => getDealer(orgId, dealerId),
 }));
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
+// ADR 1034 D9 — suspending now confirms first (it kills the partner's link).
+type ConfirmApi = typeof import('../../../ui/confirm.js');
+const confirmMock = vi.fn<ConfirmApi['confirm']>();
+vi.mock('../../../ui/confirm.js', async (orig) => ({
+  ...(await orig<ConfirmApi>()),
+  confirm: (o: Parameters<ConfirmApi['confirm']>[0]) => confirmMock(o),
+}));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', async (orig) => ({
   ...(await orig<typeof import('../../../featureToggles/FeatureAccessContext.js')>()),
   useFeatureAccess: () => makeFeatureAccess(),
@@ -87,6 +94,8 @@ beforeEach(() => {
   listRegistrations.mockResolvedValue([]);
   createOutlet.mockResolvedValue({ ...OUTLET, outletId: 'o2', name: 'Store A' });
   updateDealer.mockResolvedValue(DEALER);
+  confirmMock.mockReset();
+  confirmMock.mockResolvedValue(true);
 });
 afterEach(cleanup);
 
@@ -109,6 +118,17 @@ describe('DLR2-M4 — a suspension documented as reversible needs a reversal', (
     fireEvent.click(screen.getByRole('button', { name: /suspend/i }));
     await waitFor(() => expect(updateDealer).toHaveBeenCalled());
     expect(updateDealer.mock.calls[0]).toEqual(['org-1', 'd1', { status: 'suspended' }]);
+    // ADR 1034 D9 — it said, before doing it, that the partner's link stops working.
+    expect(confirmMock.mock.calls[0]?.[0]).toMatchObject({ danger: true, body: expect.stringMatching(/partner link stops working/) });
+  });
+
+  it('declining the suspend confirm suspends nothing (ADR 1034 D9)', async () => {
+    confirmMock.mockResolvedValue(false);
+    await view();
+    fireEvent.click(screen.getByRole('button', { name: /suspend/i }));
+    await waitFor(() => expect(confirmMock).toHaveBeenCalled());
+    await act(async () => {});
+    expect(updateDealer).not.toHaveBeenCalled();
   });
 });
 

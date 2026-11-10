@@ -23,7 +23,7 @@ vi.mock('../src/host/hostEventDispatcher.js', async (orig) => ({ ...(await orig<
 
 import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
-import { makeAdsAdapter, setAdsCapChecker, type SetDeliveryStatusArgs } from '../src/host/adsAdapter.js';
+import { makeAdsAdapter, setAdsCampaignOwnershipChecker, setAdsCapChecker, type SetDeliveryStatusArgs } from '../src/host/adsAdapter.js';
 import { getApproval, resolveApproval } from '../src/host/approvalService.js';
 import { __resetConnectionsStore, createSecretConnection } from '../src/features/connections/connectionsService.js';
 import { registerProvider } from '../src/features/connections/providerRegistry.js';
@@ -41,6 +41,10 @@ beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  // This file tests the platform write path. Which org owns a campaign is the
+  // adapter seam's question, with its own witnesses (adr1022-ads-ownership-seam):
+  // here every campaign counts as the acting org's.
+  setAdsCampaignOwnershipChecker(async () => true);
   storage = app.locals.storage;
   await __resetConnectionsStore();
   srv = http.createServer((req, res) => {

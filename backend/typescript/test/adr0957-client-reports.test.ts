@@ -137,6 +137,15 @@ describe('ADR 0957 P0 — client reports', () => {
     expect(report.snapshot.metrics['kpi.spend'].lineage.notes).toContain(WINDOW_NOTE);
     expect(report.snapshot.metrics['kpi.spend'].lineage.notes).toContain('unreported-conversions:1');
     expect(report.snapshot.tables['kpi.byPlatform'].rows).toHaveLength(kpi.byPlatform.length);
+    expect(kpi.totals.reportedRevenueRecordCount).toBe(1);
+    expect(report.snapshot.metrics['kpi.reportedRevenueRecordCount']).toMatchObject({ value: 1, unit: 'count', previous: null });
+    expect(report.snapshot.metrics['kpi.reportedRevenueRecordCount']).not.toHaveProperty('currency');
+    expect(report.snapshot.tables['kpi.byPlatform'].columns).toContain('reportedRevenueRecordCount');
+    expect(report.snapshot.tables['kpi.byPlatform'].rows).toEqual(kpi.byPlatform);
+    const readback = await call<ReportRes>(operatorCookie, 'GET', `/clients/${orgA}/reports/${report.reportId}`);
+    expect(readback.status, readback.raw).toBe(200);
+    expect(readback.body.report.snapshot).toEqual(report.snapshot);
+    expect(readback.body.report.snapshotHash).toBe(report.snapshotHash);
     // Client B's spend is not in client A's report.
     expect(report.snapshot.metrics['kpi.spend'].value).toBe(200.5);
 
@@ -144,6 +153,54 @@ describe('ADR 0957 P0 — client reports', () => {
     expect(report.snapshot.metrics['attribution.unattributedConversions'].value).toBe(attr.unattributedConversions);
     expect(report.snapshot.tables['attribution.campaigns'].rows).toHaveLength(attr.rows.length);
     expect(report.snapshotHash).toBe(snapshotHashOf(report.snapshot));
+  });
+
+  it.each([
+    {
+      name: 'all-unreported',
+      rows: [row('2026-09-01', 100, 10, null), row('2026-09-02', 100, 10, null)],
+      expected: 0, platforms: { meta: 0 },
+    },
+    {
+      name: 'measured-zero',
+      rows: [{ ...row('2026-09-01', 100, 10, 0), platform: 'google', revenue: 0 }],
+      expected: 1, platforms: { google: 1 },
+    },
+    {
+      name: 'mixed-platform',
+      rows: [row('2026-09-01', 100, 10, null), { ...row('2026-09-01', 100, 10, 0), platform: 'google', revenue: 0 }, { ...row('2026-09-02', 100, 10, 1), platform: 'google', revenue: 50 }],
+      expected: 2, platforms: { meta: 0, google: 2 },
+    },
+  ] satisfies Array<{ name: string; rows: Parameters<typeof persistRecords>[2]; expected: number; platforms: Record<string, number> }>)('copies $name revenue reporting counts verbatim into a frozen client snapshot', async ({ rows, expected, platforms }) => {
+    // Isolate these fixtures so the original client-A totals/authorization
+    // assertions above retain their exact independent input population.
+    const clientOrg = (await createOrg({ tenantId: TENANT, createdBy: 'seed', name: 'Count fixture' })).orgId;
+    await createMember({ tenantId: TENANT, orgId: clientOrg, subject: operatorUserId, displayName: 'Operator', roles: ['editor'] });
+    expect((await call(adminCookie, 'POST', '/clients', { name: 'Count fixture', orgId: clientOrg })).status).toBe(201);
+    await persistRecords(TENANT, clientOrg, rows, 'csv');
+    const definition = await call<DefRes>(operatorCookie, 'POST', `/clients/${clientOrg}/report-definitions`, { ...DEF, sections: [{ kind: 'kpi' }] });
+    expect(definition.status, definition.raw).toBe(201);
+    const computed = await call<ReportRes>(operatorCookie, 'POST', `/clients/${clientOrg}/report-definitions/${definition.body.definition.definitionId}/reports`, {});
+    expect(computed.status, computed.raw).toBe(201);
+    const source = await kpiSummary(TENANT, clientOrg);
+    expect(source.totals.reportedRevenueRecordCount).toBe(expected);
+    const snapshot = computed.body.report.snapshot;
+    expect(snapshot.metrics['kpi.reportedRevenueRecordCount']).toMatchObject({ value: expected, unit: 'count' });
+    expect(snapshot.metrics['kpi.reportedRevenueRecordCount']).not.toHaveProperty('currency');
+    // Preserve all source numeric sentinels, including real zero ROAS.
+    for (const [key, value] of Object.entries(source.totals)) expect(snapshot.metrics[`kpi.${key}`]?.value, key).toBe(value);
+    expect(snapshot.tables['kpi.byPlatform'].rows).toEqual(source.byPlatform);
+    expect(snapshot.tables['kpi.byPlatform'].columns).toContain('reportedRevenueRecordCount');
+    expect(source.byPlatform.map((platform) => platform.platform).sort()).toEqual(Object.keys(platforms).sort());
+    for (const [name, count] of Object.entries(platforms)) {
+      const platform = source.byPlatform.find((entry) => entry.platform === name);
+      if (!platform) throw new Error(`source platform missing: ${name}`);
+      expect(platform.reportedRevenueRecordCount).toBe(count);
+    }
+    const stored = await call<ReportRes>(operatorCookie, 'GET', `/clients/${clientOrg}/reports/${computed.body.report.reportId}`);
+    expect(stored.status, stored.raw).toBe(200);
+    expect(stored.body.report.snapshot).toEqual(snapshot);
+    expect(stored.body.report.snapshotHash).toBe(snapshotHashOf(snapshot));
   });
 
   it('an email section reads its campaign only when it is this client\'s', async () => {
@@ -209,14 +266,18 @@ describe('ADR 0957 P0 — client reports', () => {
   });
 
   it('a stored report is frozen: its hash is its snapshot\'s, and new data makes a new report', async () => {
-    const d = await call<DefRes>(operatorCookie, 'POST', `/clients/${orgA}/report-definitions`, DEF);
+    // Its own client: new spend on client A would move "the snapshot equals..."'s 200.5.
+    const orgC = (await createOrg({ tenantId: TENANT, createdBy: 'seed', name: 'Client C' })).orgId;
+    expect((await call(adminCookie, 'POST', '/clients', { name: 'Client C', orgId: orgC })).status).toBe(201);
+    await createMember({ tenantId: TENANT, orgId: orgC, subject: operatorUserId, displayName: 'Operator', roles: ['editor'] });
+    const d = await call<DefRes>(operatorCookie, 'POST', `/clients/${orgC}/report-definitions`, DEF);
     const id = d.body.definition.definitionId;
-    const r1 = (await call<ReportRes>(operatorCookie, 'POST', `/clients/${orgA}/report-definitions/${id}/reports`, {})).body.report;
-    await persistRecords(TENANT, orgA, [row('2026-09-03', 10, 5, 1)], 'csv');
-    const r2 = (await call<ReportRes>(operatorCookie, 'POST', `/clients/${orgA}/report-definitions/${id}/reports`, {})).body.report;
+    const r1 = (await call<ReportRes>(operatorCookie, 'POST', `/clients/${orgC}/report-definitions/${id}/reports`, {})).body.report;
+    await persistRecords(TENANT, orgC, [row('2026-09-03', 10, 5, 1)], 'csv');
+    const r2 = (await call<ReportRes>(operatorCookie, 'POST', `/clients/${orgC}/report-definitions/${id}/reports`, {})).body.report;
     expect(r2.reportId).not.toBe(r1.reportId);
     expect(r2.snapshotHash).not.toBe(r1.snapshotHash);
-    const again = await getReport(TENANT, orgA, r1.reportId);
+    const again = await getReport(TENANT, orgC, r1.reportId);
     if (!again) throw new Error('stored report missing');
     expect(again.snapshotHash).toBe(r1.snapshotHash);
     expect(snapshotHashOf(again.snapshot)).toBe(r1.snapshotHash);
@@ -235,6 +296,7 @@ describe('ADR 0957 P0 — client reports', () => {
   });
 
   it('subject erasure tombstones the author on definitions and reports, and keeps them', async () => {
+    expect((await call<DefRes>(operatorCookie, 'POST', `/clients/${orgA}/report-definitions`, DEF)).status).toBe(201);
     const before = await call<{ definitions: ReportDefinition[] }>(operatorCookie, 'GET', `/clients/${orgA}/report-definitions`);
     expect(before.body.definitions.some((x) => x.createdBy === operatorUserId)).toBe(true);
     const out = await eraseCampaignOpsSubject(TENANT, operatorUserId);

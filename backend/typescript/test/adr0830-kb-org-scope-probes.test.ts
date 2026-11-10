@@ -261,15 +261,17 @@ describe('KBCD-5 — the workspace-root shortcut is for single-principal tenants
 });
 
 describe('TENANT_SCOPED_KB_ORGS — the named allow-arm, and only it', () => {
-  it('a member recalls `_team` / `_kickbot` (no org row, no member rows), but NOT an unlisted pseudo-org', async () => {
+  // ADR 1031 round 3 — a FEATURE-declared namespace (KickTodo's `_kickbot`) is pinned by
+  // its owner: test/kicktodo/kicktodo-kb-namespace.test.ts. The declaration seam is
+  // test/adr1031-round3-host-tables.test.ts.
+  it('a member recalls `_team` (no org row, no member rows), but NOT an unlisted pseudo-org', async () => {
     const f = await fixture();
-    for (const [org, text] of [['_team', 'Team portfolio: Ana knows welding.'], ['_kickbot', 'KickBot guidance: break the challenge into steps.'], ['_unlisted', 'Unlisted pseudo-org: vault code 4471.']] as const) {
+    for (const [org, text] of [['_team', 'Team portfolio: Ana knows welding.'], ['_unlisted', 'Unlisted pseudo-org: vault code 4471.']] as const) {
       const col = await createCollection(f.tenantId, org, 'sys', { name: org });
       await ingestDocument(f.tenantId, org, 'sys', col.collectionId, { title: org, text }, {}, PREAUTHORIZED_CALLER);
     }
-    const r = JSON.stringify(await tenantRetrieve(f.tenantId, { query: 'welding KickBot guidance vault code', resultLimit: 20 }, { subject: f.memberId }));
+    const r = JSON.stringify(await tenantRetrieve(f.tenantId, { query: 'welding vault code', resultLimit: 20 }, { subject: f.memberId }));
     expect(r).toContain('Ana knows welding');
-    expect(r).toContain('break the challenge');
     expect(r, 'no org row must NOT mean allowed in general').not.toContain('vault code 4471');
     const s = buildKbSurface({ tenantId: f.tenantId, runId: 'r-t', actingUserId: f.memberId });
     expect(((await s.listCollections({ orgId: '_team' })) as { collections: unknown[] }).collections).toHaveLength(1);

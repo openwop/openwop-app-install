@@ -109,3 +109,22 @@ describe('comparison section — partial (localization) overlay', () => {
     expect(overlay.rows).toBeUndefined();
   });
 });
+
+// The compare page's TEXT matrix (myndhyve.ai design, CMP-03/04/05): an opt-in
+// `style`. Red when: 'text' is dropped; an unknown style is accepted on the base;
+// an overlay with a bad style throws instead of dropping it; an absent style
+// starts emitting a value.
+describe('comparison section — style', () => {
+  it("keeps style 'text' and emits nothing when absent", () => {
+    expect(matrix({ style: 'text' }).style).toBe('text');
+    expect(matrix({ style: ' text ' }).style).toBe('text');
+    expect('style' in matrix()).toBe(false);
+  });
+
+  it('refuses an unknown style on the base, and drops it from an overlay', () => {
+    expect(() => matrix({ style: 'bold' })).toThrow(/comparison\.style must be one of: text/);
+    const overlay = sanitizeSectionOverlay('comparison', { heading: 'Comparação', style: 'bold' }) as Record<string, unknown>;
+    expect(overlay.heading).toBe('Comparação');
+    expect(overlay.style).toBeUndefined();
+  });
+});

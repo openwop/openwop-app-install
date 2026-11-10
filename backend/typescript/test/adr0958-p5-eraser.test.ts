@@ -31,6 +31,10 @@
  *   - match collaborators in every tenant instead of `tenantId` → the
  *     isolation case red;
  *   - ignore the agency's hold → the hold case red.
+ * Re-measured w78 (each red alone): no email half; accepted intakes deleted;
+ * the credit kept; no asset redaction; no invite purge; no grant revoke; no
+ * hold check; and the isolation case's two tenant guards (the tenant-indexed
+ * reader and the `c.tenantId` check) broken together in one edit.
  * Stated, NOT witnessed: a pending intake is closed by CAS before it is
  * deleted, so an accept racing the erasure fails its final CAS and rolls back
  * (or wins, and the retry treats the intake as accepted). That window needs
@@ -89,7 +93,8 @@ function client() {
 
 
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('IHDR-fixture-bytes-0001')]);
-const pngNo = (i: number): Buffer => Buffer.concat([PNG, Buffer.from(`-${i}-${Math.random()}`)]);
+let seq = 0; // unique, deterministic bytes
+const pngNo = (i: number): Buffer => Buffer.concat([PNG, Buffer.from(`-${i}`)]);
 const RIGHTS = { license: 'work-for-hire', modelReleases: true, credit: 'Dana Studio', attest: true };
 
 let n = 0;
@@ -126,7 +131,7 @@ async function acceptedVendor(s: Awaited<ReturnType<typeof setup>>) {
   const grant = await s.grantFor(inv.body.collaborator.collaboratorId);
   const upload = (name: string, note?: string) => vendor.post<{ intake: { intakeId: string; files: Array<{ fileId: string }> } }>(
     `/host/openwop-app/collab/grants/${grant.grantId}/intakes`,
-    { files: [{ name, contentType: 'image/png', contentBase64: pngNo(Math.random()).toString('base64') }], rights: RIGHTS, ...(note ? { note } : {}) },
+    { files: [{ name, contentType: 'image/png', contentBase64: pngNo(seq++).toString('base64') }], rights: RIGHTS, ...(note ? { note } : {}) },
   );
   return { vendor, userId, email, collaborator: inv.body.collaborator, grant, upload };
 }
@@ -148,7 +153,7 @@ describe('ADR 0958 P5 — the agency erases a collaborator by email', () => {
     const after = (await listGrants(s.tenantId, s.orgId)).find((x) => x.grantId === g.grantId);
     expect(after?.status).toBe('revoked');
     expect(after?.revokedBy).toBe('system:erasure');
-    await expect(resolveActiveResource(token, 'collab_invite')).rejects.toThrow();
+    await expect(resolveActiveResource(token, 'collab_invite')).rejects.toMatchObject({ httpStatus: 404, code: 'not_found' });
   });
 
   it('exit criterion: an accepted file stays with the supplier anonymized; files never taken are deleted', async () => {

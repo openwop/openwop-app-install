@@ -54,6 +54,8 @@ const kpi: SectionSource = async (section, ctx, into) => {
   Object.assign(into.metrics, {
     [`${k}.spend`]: metric(t.spend, 'currency', lin, money),
     [`${k}.revenue`]: metric(t.revenue, 'currency', lin, money),
+    // Availability is a source count, not revenue truthiness or a spend ratio.
+    [`${k}.reportedRevenueRecordCount`]: metric(t.reportedRevenueRecordCount, 'count', lin),
     [`${k}.impressions`]: metric(t.impressions, 'count', lin),
     [`${k}.clicks`]: metric(t.clicks, 'count', lin),
     [`${k}.conversions`]: metric(t.conversions, 'count', lin),
@@ -64,8 +66,8 @@ const kpi: SectionSource = async (section, ctx, into) => {
     [`${k}.roas`]: metric(t.roas, 'ratio', lin),
   });
   into.tables[`${k}.byPlatform`] = {
-    columns: ['platform', 'spend', 'impressions', 'clicks', 'conversions', 'revenue', 'roas'],
-    rows: s.byPlatform.map((p) => ({ platform: p.platform, spend: p.spend, impressions: p.impressions, clicks: p.clicks, conversions: p.conversions, revenue: p.revenue, roas: p.roas })),
+    columns: ['platform', 'spend', 'impressions', 'clicks', 'conversions', 'revenue', 'reportedRevenueRecordCount', 'roas'],
+    rows: s.byPlatform.map((p) => ({ platform: p.platform, spend: p.spend, impressions: p.impressions, clicks: p.clicks, conversions: p.conversions, revenue: p.revenue, ...(p.reportedRevenueRecordCount !== undefined ? { reportedRevenueRecordCount: p.reportedRevenueRecordCount } : {}), roas: p.roas })),
     lineage: lin,
   };
 };

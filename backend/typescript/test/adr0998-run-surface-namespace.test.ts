@@ -17,7 +17,7 @@
  * rows); with the host-lane guard removed, the refusal legs go red; with the
  * fail-closed strip turned into a pass-through, the stubbed-backend legs go red.
  */
-import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import { describe, expect, it, beforeAll, afterAll, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -64,13 +64,12 @@ async function runNode(typeId: string, config: Record<string, unknown>, inputs: 
   const create = await jsonFetch<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs }) });
   expect(create.status).toBe(201);
   const { runId } = create.body;
+  // Run-settle: no hook to await, so poll the real run status (bounded, 2 s / 25 ms).
   let status = 'pending';
-  for (let i = 0; i < 80; i++) {
-    await new Promise((r) => setTimeout(r, 25));
-    const snap = await jsonFetch<{ status: string }>(`/runs/${runId}`);
-    status = snap.body.status;
-    if (['completed', 'failed', 'cancelled'].includes(status)) break;
-  }
+  await vi.waitFor(async () => {
+    status = (await jsonFetch<{ status: string }>(`/runs/${runId}`)).body.status;
+    expect(['completed', 'failed', 'cancelled'], `run ${runId} settled`).toContain(status);
+  }, { timeout: 2_000, interval: 25 });
   // A run id is `<tenant>/<uuid>` on this host (the conformance storage scenarios read it the same way).
   const tenantId = runId.includes('/') ? runId.slice(0, runId.indexOf('/')) : '';
   const bundle = await jsonFetch<{ events?: BundleEvent[] }>(`/runs/${runId}/debug-bundle`);
@@ -143,8 +142,18 @@ describe('ADR 0998: a run cannot POISON or DELETE a host feature namespace', () 
     const host = buildHostSurfaceBundle({ tenantId: await runTenant() });
     await host.db.vector.upsert({ namespace: 'user:target-del', items: [{ id: 'h2', vector: VEC, metadata: { content: 'KEEP' } }] });
 
+    // Positive control: the run holds its OWN h2 under the same name, so a delete that silently
+    // no-ops cannot pass — the run's row must go while the host's stays.
+    const seed = await runNode('core.db.vector-upsert', { collection: 'x', namespace: 'user:target-del' }, { items: [{ id: 'h2', vector: VEC, metadata: { content: 'RUN-OWN-DEL' } }] });
+    expect(seed.status).toBe('completed');
+    const before = await runNode('core.db.vector-query', { collection: 'x', namespace: 'user:target-del', topK: 5 }, { vector: VEC });
+    expect(contents(before.out)).toEqual(['RUN-OWN-DEL']);
+
     const del = await runNode('core.db.vector-delete', { collection: 'x', namespace: 'user:target-del' }, { ids: ['h2'] });
     expect(del.status).toBe('completed');
+    const after = await runNode('core.db.vector-query', { collection: 'x', namespace: 'user:target-del', topK: 5 }, { vector: VEC });
+    expect(after.status).toBe('completed');
+    expect(contents(after.out), "the run's own row is deleted").toEqual([]);
     expect(contents(await host.db.vector.query({ namespace: 'user:target-del', vector: VEC, topK: 5 }))).toEqual(['KEEP']);
   });
 
@@ -154,6 +163,7 @@ describe('ADR 0998: a run cannot POISON or DELETE a host feature namespace', () 
 
     const poison = await runNode('core.db.search-index', { index: 'chat-search' }, { docs: [{ id: 'keep-1', fields: { text: 'injectedword' } }] });
     expect(poison.status).toBe('completed');
+    expect(poison.out.indexed, 'the run did index its doc (into its own keyspace)').toBe(1);
     expect(hitIds(await host.db.search.query({ index: 'chat-search', q: 'injectedword' }))).toEqual([]);
 
     // core.openwop.db ships no search-delete node; the vector leg above witnesses delete.
@@ -206,16 +216,16 @@ describe('ADR 0998: the run lane FAILS CLOSED on anything outside its keyspace',
   function stubbedRunLane(): ReturnType<typeof runNamespacedBundle> {
     const fn = (res: Record<string, unknown>): SurfaceFn => async () => res;
     const raw = {
-      vector: { upsert: fn({}), delete: fn({}), query: fn({ matches: [{ id: 'a', namespace: 'user:victim', metadata: { content: 'SECRET' } }, { id: 'b', namespace: 'wf:mine', metadata: { content: 'OWN' } }] }) } as VectorSurface,
-      search: { index: fn({}), delete: fn({}), query: fn({ hits: [{ id: 'h', index: 'chat-search', fields: { text: 'SECRET' } }] }) } as SearchSurface,
-      nosql: { insert: fn({}), update: fn({}), delete: fn({}), find: fn({ datasource: 'host-ds', docs: [] }) } as NoSqlSurface,
+      vector: { upsert: fn({}), delete: fn({}), query: fn({ matches: [{ id: 'a', namespace: 'user:victim', metadata: { content: 'SECRET' } }, { id: 'b', namespace: 'wf:mine', metadata: { content: 'OWN' } }] }) } satisfies VectorSurface,
+      search: { index: fn({}), delete: fn({}), query: fn({ hits: [{ id: 'h', index: 'chat-search', fields: { text: 'SECRET' } }] }) } satisfies SearchSurface,
+      nosql: { insert: fn({}), update: fn({}), delete: fn({}), find: fn({ datasource: 'host-ds', docs: [] }) } satisfies NoSqlSurface,
       blob: {
         get: fn({ found: true, key: 'retention-export/r.ndjson', contentBase64: 'U0VDUkVU' }),
         put: fn({ ok: true, key: 'wf:mine.txt' }),
         delete: fn({ ok: true }),
         presign: fn({ url: 'u' }),
         list: fn({ entries: [{ key: 'retention-export/r.ndjson', sizeBytes: 1 }, { key: 'wf:mine.txt', sizeBytes: 1 }] }),
-      } as BlobSurface,
+      } satisfies BlobSurface,
     };
     const fake = { ...buildHostSurfaceBundle({ tenantId: 'adr0998-stub' }) };
     hostLaneSurfaces(raw).bind(fake);
@@ -239,10 +249,10 @@ describe('ADR 0998: the run lane FAILS CLOSED on anything outside its keyspace',
   });
 
   it('a single-item result naming a foreign key is an error that names no key', async () => {
-    const err = await stubbedRunLane().storage.blob.get({ key: 'x' }).catch((e: unknown) => e as Error & { code?: string });
-    expect(err).toBeInstanceOf(Error);
-    expect((err as { code?: string }).code).toBe('RUN_KEYSPACE_VIOLATION');
-    expect((err as Error).message).not.toMatch(/retention-export|SECRET/);
+    const err: unknown = await stubbedRunLane().storage.blob.get({ key: 'x' }).then(() => undefined, (e: unknown) => e);
+    if (!(err instanceof Error)) throw new Error('the foreign single-item result must reject with an Error');
+    expect(Object.getOwnPropertyDescriptor(err, 'code')?.value).toBe('RUN_KEYSPACE_VIOLATION');
+    expect(err.message).not.toMatch(/retention-export|SECRET/);
   });
 });
 

@@ -23,8 +23,10 @@
  * @see docs/adr/0035-async-durable-a2a-tasks.md
  */
 
+import { createHash } from 'node:crypto';
 import { runAgentDispatch, AgentNotFoundError } from './agentDispatch.js';
 import { isA2aDispatchable } from './a2aCard.js';
+import { A2aPushCredentialInvalidError, pushAuthorizationFrom } from './a2aPushCredential.js';
 import { classifyA2aOutcome, recordA2aRequest } from '../observability/metricSeams.js';
 import {
   getA2aTask,
@@ -81,6 +83,23 @@ export interface A2aServerOptions {
    * access to a task it already holds.
    */
   tenantId?: string;
+  /** ADR 1045 D1 — the authenticated peer principal, stamped on every record
+   *  this codec writes (attribution; never projected onto the wire). */
+  principalId?: string;
+}
+
+/**
+ * ADR 1045 D4 — the task id a `message/send` with no `params.id` opens.
+ *
+ * It used to be `a2a:<agentId>` for EVERY tenant, so tenant B's send overwrote
+ * tenant A's task and carried A's push config forward: B's transitions were
+ * pushed to A's URL. With a tenant of record the id is per tenant (a digest, so
+ * the tenant id itself is not echoed to the peer). Without one (the unit-level
+ * handler with no tenant) it keeps the legacy shape.
+ */
+export function derivedA2aTaskId(agentId: string, tenantId: string | undefined): string {
+  if (!tenantId) return `a2a:${agentId}`;
+  return `a2a:${agentId}:${createHash('sha256').update(tenantId).digest('hex').slice(0, 16)}`;
 }
 
 function ok(id: string | number, result: unknown): A2aJsonRpcResponse {
@@ -193,10 +212,22 @@ async function dispatchA2aRequest(
         typeof req.params?.contextId === 'string'
           ? req.params.contextId
           : undefined;
-      const taskId = taskIdOf(req.params) ?? `a2a:${agentId}`;
+      const suppliedTaskId = taskIdOf(req.params);
+      const taskId = suppliedTaskId ?? derivedA2aTaskId(agentId, opts.tenantId);
       // Carry forward any existing record's contextId + push-config across a
       // resume re-send into the same task id (read once, reused on each upsert).
-      const existing = durable ? await getA2aTask(taskId) : null;
+      // ADR 1045 D4 — read through the tenant check: a record another tenant
+      // holds is neither resumed nor carried from (its push config would send
+      // this tenant's transitions to that tenant's URL). A peer-supplied id
+      // held elsewhere answers exactly as a missing task does (§E).
+      const existing = !durable
+        ? null
+        : opts.tenantId
+          ? await getA2aTaskFor(taskId, opts.tenantId, 'legacy')
+          : await getA2aTask(taskId);
+      if (durable && opts.tenantId && !existing && (await getA2aTask(taskId))) {
+        return rpcError(req.id, -32001, `task not found: ${taskId}`);
+      }
       const carry = {
         ...(contextId ? { contextId } : existing?.contextId ? { contextId: existing.contextId } : {}),
         ...(existing?.pushConfig ? { pushConfig: existing.pushConfig } : {}),
@@ -204,6 +235,7 @@ async function dispatchA2aRequest(
         // writes, including a resume into an unbound pre-P2 task (which is how
         // the legacy rows finish migrating without a migration).
         ...(opts.tenantId ? { tenantId: opts.tenantId, protocolVersion: '0.3' } : {}),
+        ...(opts.principalId ? { principalId: opts.principalId } : {}),
       };
 
       // Durable lifecycle: persist `working` for the turn, so a caller that
@@ -312,7 +344,7 @@ async function dispatchA2aRequest(
         (typeof req.params?.taskId === 'string' ? req.params.taskId : undefined);
       if (!taskId) return rpcError(req.id, -32602, 'params.id is required');
       const cfg = req.params?.pushNotificationConfig as
-        | { url?: unknown; tokenFingerprint?: unknown }
+        | { url?: unknown; tokenFingerprint?: unknown; authentication?: unknown; token?: unknown }
         | undefined;
       const url = typeof cfg?.url === 'string' ? cfg.url : undefined;
       if (!url) return rpcError(req.id, -32602, 'params.pushNotificationConfig.url is required');
@@ -322,17 +354,23 @@ async function dispatchA2aRequest(
         return rpcError(req.id, -32001, `task not found: ${taskId}`);
       }
       try {
+        // RFC 0214 §A/§C — 0.3 `authentication` ({schemes[], credentials}) or
+        // `token` is the destination credential each push to `url` carries;
+        // sealed before it is persisted, never echoed.
+        const authorization = pushAuthorizationFrom(cfg);
         const rec = await setA2aTaskPushConfig(taskId, {
           url,
           ...(typeof cfg?.tokenFingerprint === 'string'
             ? { tokenFingerprint: cfg.tokenFingerprint }
             : {}),
+          ...(authorization !== undefined ? { authorization } : {}),
         });
         if (!rec) return rpcError(req.id, -32001, `task not found: ${taskId}`);
         return ok(req.id, { taskId: rec.taskId, pushNotificationConfig: { url: rec.pushConfig?.url } });
       } catch (err) {
-        // SSRF refusal — surface as an invalid-params JSON-RPC error.
+        // SSRF refusal or an unusable credential — invalid-params JSON-RPC error.
         if (err instanceof A2aPushUrlDeniedError) return rpcError(req.id, -32602, err.message);
+        if (err instanceof A2aPushCredentialInvalidError) return rpcError(req.id, -32602, err.message);
         return rpcError(req.id, -32603, err instanceof Error ? err.message : String(err));
       }
     }

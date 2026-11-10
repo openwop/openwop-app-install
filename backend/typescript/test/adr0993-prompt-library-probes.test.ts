@@ -18,10 +18,23 @@
  * for the same reason): the tenant `GET` is not publicly cacheable (H3), the
  * tenant writer refuses `chainmint-` (H2), and the export's outsider/no-caller arms
  * (M4). Their sabotage witnesses are recorded in ADR 0993.
+ *
+ * Re-witnessed by sabotage in grade-tests wave 78: the tenant key prefix AND row filter
+ * both dropped (one edit; either alone is masked by the other) reds D5 and D4; the read
+ * predicate dropped from the write lane reds D2; the revision check dropped reds D3; a
+ * blind CAS reds P61CD-1; the private-delete arm or the doubled-spelling forms dropped
+ * reds D6; the readable filter or the org-membership filter dropped reds D7; the
+ * `private, no-store` branch, the `chainmint-` reservation, render-from-resolved, the
+ * `available` flag, the per-owner import claim, the integer check and the id grammar
+ * each red their own case.
+ *
+ * The D5 block duplicates `adr0993-prompt-template-tenancy.test.ts` (both protected;
+ * dedupe is a user decision, tracker row TST-EPE-1).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
+import { readFileSync } from 'node:fs';
 import { createApp } from '../src/index.js';
 import { issueApiKey } from '../src/features/developer-keys/apiKeyService.js';
 import { createOrg } from '../src/host/accessControlService.js';
@@ -31,7 +44,9 @@ import { ERASED } from '../src/host/subjectErasureRedaction.js';
 import {
   createEntry, deleteEntry, getEntry, getEntryUnfiltered, listEntries, updateEntry,
 } from '../src/features/prompts/promptLibraryService.js';
-import { buildExportBundle } from '../src/features/portability/portabilityService.js';
+import { applyImport, buildExportBundle } from '../src/features/portability/portabilityService.js';
+import { listTemplates } from '../src/host/promptStore.js';
+import { resolveTenantTemplate } from '../src/host/tenantPromptTemplates.js';
 import { createMember } from '../src/host/accessControlService.js';
 import { createLink, resolveShared } from '../src/features/sharing/sharingService.js';
 import { hostExtStorage } from '../src/host/hostExtPersistence.js';
@@ -68,6 +83,14 @@ function call(tenant: string, method: string, path: string, body?: unknown): Pro
   });
 }
 
+/** A refusal: the status AND the error code this route sends for it (two refusals
+ *  can share a status, wave 36). */
+async function expectRefusal(res: Response, status: number, code: string): Promise<void> {
+  const body = (await res.json()) as { error?: string };
+  expect(res.status, JSON.stringify(body)).toBe(status);
+  expect(body.error).toBe(code);
+}
+
 let n = 0;
 async function template(tenant: string, text = 'Hello {{name}}'): Promise<string> {
   const id = `adr0993-t${n++}`;
@@ -82,10 +105,10 @@ const OTHER = userIdFor(TA, 'oidc:other');
 describe('D5 — RFC 0028 user templates belong to one tenant', () => {
   it('tenant B cannot read, render, version or delete tenant A\'s template', async () => {
     const id = await template(TA, 'A secret {{x}}');
-    expect((await call(TB, 'GET', `/prompts/${id}`)).status).toBe(404);
-    expect((await call(TB, 'POST', '/prompts:render', { ref: `prompt:${id}`, variables: {} })).status).toBe(404);
-    expect((await call(TB, 'PUT', `/prompts/${id}`, { templateId: id, version: '2.0.0', kind: 'user', text: 'pwned' })).status).toBe(404);
-    expect((await call(TB, 'DELETE', `/prompts/${id}`)).status).toBe(404);
+    await expectRefusal(await call(TB, 'GET', `/prompts/${id}`), 404, 'openwop-app.prompt_template_not_found');
+    await expectRefusal(await call(TB, 'POST', '/prompts:render', { ref: `prompt:${id}`, variables: {} }), 404, 'openwop-app.prompt_template_not_found');
+    await expectRefusal(await call(TB, 'PUT', `/prompts/${id}`, { templateId: id, version: '2.0.0', kind: 'user', text: 'pwned' }), 404, 'openwop-app.prompt_update_not_found');
+    await expectRefusal(await call(TB, 'DELETE', `/prompts/${id}`), 404, 'openwop-app.prompt_delete_not_found');
     const listB = (await (await call(TB, 'GET', '/prompts?source=user')).json()) as { items: { templateId: string }[] };
     expect(listB.items.map((t) => t.templateId)).not.toContain(id);
     const own = await call(TA, 'GET', `/prompts/${id}`);
@@ -102,7 +125,6 @@ describe('D5 — RFC 0028 user templates belong to one tenant', () => {
 
   it('a user template lives in storage, not a module map (it survives a restart or a second instance)', async () => {
     const id = await template(TA, 'durable');
-    const { listTemplates } = await import('../src/host/promptStore.js');
     expect(listTemplates().map((t) => t.templateId), 'the global, in-memory layers do not hold it').not.toContain(id);
     const row = await hostExtStorage().kvGet(`hostext:proposal-installed-prompts:${TA}::${id}::1.0.0`);
     expect((JSON.parse(row ?? '{}') as { tenant?: string }).tenant, 'the storage row holds it').toBe(TA);
@@ -116,20 +138,24 @@ describe('D5 — RFC 0028 user templates belong to one tenant', () => {
   });
 
   it('dispatch resolves through the tenant resolver: the run\'s own tenant, never another', async () => {
-    const { resolveTenantTemplate } = await import('../src/host/tenantPromptTemplates.js');
     const id = await template(TA, 'mine');
     const own = await resolveTenantTemplate(TA, id);
     expect(own && own !== 'ambiguous' ? own.template.text : null).toBe('mine');
     expect(await resolveTenantTemplate(TB, id)).toBeNull();
     // The wiring: both dispatch sites call the tenant resolver with the run's tenant.
-    const src = (await import('node:fs')).readFileSync(new URL('../src/bootstrap/nodes.ts', import.meta.url), 'utf8');
+    // A two-call-site wiring ratchet: both dispatch sites are private functions in
+    // nodes.ts, so their argument is pinned in source; the resolver's own behaviour is
+    // asserted behaviourally just above.
+    const src = readFileSync(new URL('../src/bootstrap/nodes.ts', import.meta.url), 'utf8');
     expect(src.match(/resolveTenantTemplate\(ctx\.tenantId,/g)?.length, 'both dispatch call sites').toBe(2);
     expect(src).not.toMatch(/\bgetTemplate\(/);
   });
 
   it('the tenant writer refuses the reserved chain-mint namespace', async () => {
     const res = await call(TA, 'POST', '/prompts', { templateId: 'chainmint-abc-def', version: '1.0.0', kind: 'system', text: 'planted' });
-    expect(res.status).toBe(403);
+    await expectRefusal(res, 403, 'openwop-app.prompt_create_forbidden');
+    // Nothing was written under the reserved id.
+    await expectRefusal(await call(TA, 'GET', '/prompts/chainmint-abc-def'), 404, 'openwop-app.prompt_template_not_found');
   });
 });
 
@@ -220,6 +246,9 @@ describe('D7 — export carries only what the exporter may read', () => {
 describe('review fixes (grade-code / code-review, 2026-10-27)', () => {
   it('P61CD-1: a text edit that loses the race does not wedge later edits, and leaves no body behind', async () => {
     const e = await createEntry(TA, 'org-race', OWNER, { name: 'r', template: { kind: 'user', text: 'v1' }, visibility: 'org' });
+    // The two edits are NOT forced to interleave (no hold seam); they do today, because
+    // each awaits its read before its CAS. Sabotage-witnessed (wave 78): a blind CAS
+    // (re-reading the row at swap time) lets both land and reds this case.
     const [a, b] = await Promise.allSettled([
       updateEntry(TA, 'org-race', e.entryId, OWNER, { text: 'from A' }),
       updateEntry(TA, 'org-race', e.entryId, OTHER, { name: 'renamed by B' }),
@@ -266,10 +295,10 @@ describe('review fixes (grade-code / code-review, 2026-10-27)', () => {
   });
 
   it('P61CD-4: ids and versions are validated; a key-aliasing id or a non-semver version is refused', async () => {
-    expect((await call(TA, 'POST', '/prompts', { templateId: 'a', version: 'b::1.0.0', kind: 'user', text: 'SQUAT' })).status).toBe(400);
-    expect((await call(TA, 'POST', '/prompts', { templateId: 'a::b', version: '1.0.0', kind: 'user', text: 'x' })).status).toBe(400);
+    await expectRefusal(await call(TA, 'POST', '/prompts', { templateId: 'a', version: 'b::1.0.0', kind: 'user', text: 'SQUAT' }), 400, 'openwop-app.prompt_create_invalid');
+    await expectRefusal(await call(TA, 'POST', '/prompts', { templateId: 'a::b', version: '1.0.0', kind: 'user', text: 'x' }), 400, 'openwop-app.prompt_create_invalid');
     const id = await template(TA);
-    expect((await call(TA, 'PUT', `/prompts/${id}`, { templateId: id, version: 'zzz', kind: 'user', text: 'x' })).status).toBe(400);
+    await expectRefusal(await call(TA, 'PUT', `/prompts/${id}`, { templateId: id, version: 'zzz', kind: 'user', text: 'x' }), 400, 'openwop-app.prompt_update_invalid');
   });
 
   it('P61CD-9: a non-integer expectedRevision is a 400, not an eternal 409', async () => {
@@ -288,7 +317,6 @@ describe('review fixes (grade-code / code-review, 2026-10-27)', () => {
   });
 
   it('P61CD-5: a co-member\'s private import of a name does not block or reveal mine', async () => {
-    const { applyImport } = await import('../src/features/portability/portabilityService.js');
     const id = await template(TA);
     const org = await createOrg({ tenantId: TA, createdBy: 'oidc:imp-a', name: 'Import org', ownerSubject: 'oidc:imp-a' });
     await createMember({ tenantId: TA, orgId: org.orgId, subject: 'oidc:imp-b', displayName: 'b', roles: ['editor'] });

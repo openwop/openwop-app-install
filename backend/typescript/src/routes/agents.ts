@@ -16,6 +16,7 @@ import { plantNegotiationAuditRun } from './negotiationAuditRun.js';
 import { randomUUID } from 'node:crypto';
 import { vendorPath } from '../middleware/protocolVersion.js';
 import { listNormativeRoster } from '../host/rosterService.js';
+import { listTenantInstalledAgents } from '../host/tenantInstalledPacks.js';
 import type { Express, NextFunction, Request, Response } from 'express';
 import { createLogger } from '../observability/logger.js';
 import { recordProtocolVersion, type ServedProfile } from '../observability/metricSeams.js';
@@ -46,7 +47,7 @@ import { COPILOT_PROVIDER_ID } from '../aiProviders/copilotSubscription.js';
 import { storeSubscriptionCredential, subscriptionCredentialRef } from '../byok/subscriptionCredential.js';
 import { removeSecret } from '../byok/secretResolver.js';
 import { callerSubject, personalTenantOf } from '../host/requestSubject.js';
-import { requireProtocolScope } from '../host/protocolAuthorization.js';
+import { requireProtocolScope, requireProtocolScopeIn } from '../host/protocolAuthorization.js';
 import { requireNonAnonymousPrincipal } from '../middleware/auth.js';
 import { apiKeysConfigured } from '../middleware/apiKeyTenants.js';
 import type { LogReasonCode } from '../observability/logReasonCodes.js';
@@ -55,16 +56,20 @@ import { buildLiveDispatchLane } from '../host/liveDispatchLane.js';
 import { advertisedCapabilitySet, mergeDegraded } from '../host/agentCapabilities.js';
 import { projectMemoryDegradation, type MemoryDimension } from '../host/memoryDimensions.js';
 import { handleA2aRequest, type A2aJsonRpcRequest } from '../host/a2aServer.js';
-import { createA2aSurface, getPublishedAgentCard, A2aVersionRefusedError, type A2aCallRecord } from '../host/a2aSurface.js';
+import { createA2aSurface, A2aVersionRefusedError, type A2aCallRecord } from '../host/a2aSurface.js';
+import { resolveA2aCaller, authorizeA2aMethod, A2A_RUN_STARTING_METHODS, type A2aCaller } from '../host/a2aCaller.js';
+import { enforceA2aPrincipalRateLimit } from '../middleware/rateLimit.js';
 import { traceContextFromHeaders } from '../host/traceContext.js';
 import { startPeerAuthorityProbe, settlePeerAuthorityProbe } from '../host/a2aPeerAuthorityProbe.js';
 import {
-  getA2aTask,
+  getA2aTaskFor,
   upsertA2aTask,
   setA2aTaskPushConfig,
   assertPushUrlAllowed,
+  publicTaskRecord,
   A2aPushUrlDeniedError,
 } from '../host/a2aTaskStore.js';
+import { A2aPushCredentialInvalidError, pushAuthorizationFrom } from '../host/a2aPushCredential.js';
 import { startWorkflowRun } from '../host/runStarter.js';
 import { requestOrigin } from '../host/requestOrigin.js';
 import type { HostAdapterSuite } from '../host/index.js';
@@ -173,6 +178,10 @@ async function listVisibleAgents(
     const known = new Set(entries.map((e) => e.agentId));
     for (const r of await storage.listUserAgents(tenant)) {
       if (!known.has(r.agentId)) entries.push(userRecordToEntry(r, await currentRevision(tenant, r.agentId)));
+    }
+    // ADR 1033 P2 — agents from packs this tenant installed, read through like user agents.
+    for (const a of await listTenantInstalledAgents(tenant)) {
+      if (!known.has(a.agentId)) entries.push(toEntry(a));
     }
   }
   return entries;
@@ -836,16 +845,32 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
   // host.a2a advertisement flip); 404 when off. JSON-RPC `agent/getCard` AND a
   // GET-able static card at `/.well-known/agent-card.json` (below) both serve
   // the v0.3 AgentCard.
-  app.post('/host/openwop-app/a2a', (req, res) => {
+  app.post('/host/openwop-app/a2a', (req, res, next) => {
     if (process.env.OPENWOP_A2A_SERVER_ENABLED !== 'true') {
       res.status(404).json({ error: 'not_found', message: 'a2a server endpoint disabled (set OPENWOP_A2A_SERVER_ENABLED=true)' });
       return;
     }
-    void handleA2aPost(req, res);
+    // ADR 1045 D1 (CHAN-P6-1) — the caller is resolved BEFORE the body is read,
+    // so an unauthenticated or anonymous caller gets a flat 401 envelope and
+    // learns nothing about the methods served. Express 4 does not catch an
+    // async rejection, so the whole handler is wrapped and errors reach `next`.
+    void (async () => {
+      const caller = resolveA2aCaller(req);
+      const method = (req.body as { method?: unknown } | undefined)?.method;
+      // ADR 1045 D2 (CHAN-P6-2) — per-principal budget on the methods that
+      // start work; on exceed the canonical 429 is already sent.
+      if (typeof method === 'string' && A2A_RUN_STARTING_METHODS.has(method)
+        && enforceA2aPrincipalRateLimit(res, caller.tenantId, caller.principalId)) {
+        return;
+      }
+      // ADR 1045 D6 — the same protocol scope the HTTP sibling route takes.
+      await authorizeA2aMethod(req, caller, method);
+      await handleA2aPost(req, res, caller);
+    })().catch(next);
   });
 
   /** ADR 0552 P2 — one route, TWO codecs, chosen by the `A2A-Version` header. */
-  const handleA2aPost = async (req: Request, res: Response): Promise<void> => {
+  const handleA2aPost = async (req: Request, res: Response, caller: A2aCaller): Promise<void> => {
     // RFC 0152 §B / ADR 0552 P1 — version negotiation, BEFORE any dispatch.
     // "A host MUST NOT silently downgrade an authenticated request." A peer that
     // explicitly asks for a version this host does not serve is refused here; it
@@ -904,7 +929,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
       });
       return;
     }
-    const tenantId = (req as AgentReqLike).tenantId ?? 'default';
+    const { tenantId } = caller;
     const codecVersion = codecVersionFor(version);
     try {
       // ADR 0552 P2 — the codec split. `codecVersionFor` resolves an absent
@@ -917,10 +942,10 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
           principal: {
             tenantId,
             // §E — the tenant of record and the peer principal both come from
-            // the authenticated identity. `anon` is the honest name for an
-            // unauthenticated peer, not a shared bucket to bind tasks into: an
-            // unauthenticated caller can still only read its own tenant's rows.
-            principalId: req.principal?.principalId ?? 'anon',
+            // the authenticated identity (ADR 1045 D1, `resolveA2aCaller`).
+            // ADR 1045 D1 — always the authenticated principal; an
+            // unauthenticated or anonymous caller never reaches this line.
+            principalId: caller.principalId,
             protocolVersion: codecVersion,
           },
           // At 1.0 a Task IS a run, so the codec needs real storage. Without it
@@ -931,7 +956,10 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
         res.status(200).json(rpc10);
         return;
       }
-      const agentCard = getPublishedAgentCard(tenantId) ?? buildA2aCard03(requestOrigin(req));
+      // ADR 1045 D3 — the host card only. A workflow-published card was
+      // withdrawn: it could claim skills and capabilities routing does not
+      // honour (`a2a-integration.md` §C).
+      const agentCard = buildA2aCard03(requestOrigin(req));
       // ADR 0035 / RFC 0100 — durable Tasks (persist + tasks/get/resubscribe +
       // push) are wired on the same env-gated server when
       // OPENWOP_A2A_DURABLE_TASKS=true; otherwise the synchronous core (today's
@@ -943,6 +971,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
         availableTools: [...builtinAgentToolIds()],
         durableTasks: process.env.OPENWOP_A2A_DURABLE_TASKS === 'true',
         tenantId,
+        principalId: caller.principalId,
       });
       // JSON-RPC transport is always HTTP 200; method/params errors live in the body.
       res.status(200).json(rpc);
@@ -990,13 +1019,13 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
       return;
     }
     const era = cardVersionFor(asked);
-    const tenantId = (req as AgentReqLike).tenantId ?? 'default';
-    // A tenant-PUBLISHED card (ctx.a2a.publishAgentCard) is a 0.3-era artifact —
-    // it is whatever a workflow handed us, and 1.0 removed the fields it is
-    // built around. Serving it under a 1.0 request would emit "a card with both
-    // shapes", which §C says "is neither". So it overrides the legacy card only.
+    // ADR 1045 D3 — this public GET serves the HOST card only, generated from
+    // the routing SSoT. It used to serve a tenant-published card for whatever
+    // tenant the request resolved to (`default` for an unauthenticated caller),
+    // which was both a dishonest-claim risk and a tenant-scoped artifact on a
+    // public path (RFC 0202 §D).
     if (era === LEGACY_A2A_PROTOCOL_VERSION) {
-      res.status(200).json(getPublishedAgentCard(tenantId) ?? buildA2aCard03(requestOrigin(req)));
+      res.status(200).json(buildA2aCard03(requestOrigin(req)));
       return;
     }
     res.status(200).json(buildA2aCard10(requestOrigin(req)));
@@ -1047,7 +1076,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
         res.status(400).json({ error: 'validation_error', message: 'Field `peerUrl` is required.' });
         return;
       }
-      const tenantId = (req as AgentReqLike).tenantId ?? 'default';
+      const { tenantId } = resolveA2aCaller(req);
       const calls: A2aCallRecord[] = [];
       // ADR 0858 P4 — the run whose log the client's `negotiation.decided`
       // lands on (`routes/negotiationAuditRun.ts`); named in every answer.
@@ -1127,7 +1156,12 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
         res.status(404).json({ error: 'not_found', message: 'a2a durable tasks disabled (set OPENWOP_A2A_SERVER_ENABLED=true OPENWOP_A2A_DURABLE_TASKS=true)' });
         return;
       }
-      const tenantId = (req as AgentReqLike).tenantId ?? 'default';
+      // ADR 1045 D1/D4 — the seam drives the real store, so it takes the real
+      // caller and binds the record to it (it used to write an UNBOUND record,
+      // readable by any tenant under the legacy arm).
+      const caller = resolveA2aCaller(req);
+      await requireProtocolScopeIn(req, caller.tenantId, 'runs:create');
+      const { tenantId } = caller;
       const scenario = (req.body as { scenario?: string })?.scenario ?? 'paused-at-approval';
       if (scenario !== 'paused-at-approval') {
         res.status(400).json({ error: 'validation_error', message: 'Only scenario `paused-at-approval` is supported by this sample seam.' });
@@ -1144,7 +1178,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
         res.status(500).json({ error: 'internal', message: 'sample approval-gate workflow did not resolve' });
         return;
       }
-      await upsertA2aTask({ taskId: runId, runId, state: 'input-required', interruptKind: 'approval' });
+      await upsertA2aTask({ taskId: runId, runId, tenantId, principalId: caller.principalId, state: 'input-required', interruptKind: 'approval' });
       res.status(201).json({ taskId: runId });
     } catch (err) {
       next(err);
@@ -1161,14 +1195,19 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
         res.status(404).json({ error: 'not_found', message: 'a2a durable tasks disabled (set OPENWOP_A2A_SERVER_ENABLED=true OPENWOP_A2A_DURABLE_TASKS=true)' });
         return;
       }
-      const rec = await getA2aTask(req.params.taskId);
+      // ADR 1045 D4 — tenant-bound read: a foreign task is 404, exactly as a
+      // missing one (`a2a-integration.md` §E). It used to read by id alone.
+      const caller = resolveA2aCaller(req);
+      await requireProtocolScopeIn(req, caller.tenantId, 'runs:read');
+      const rec = await getA2aTaskFor(req.params.taskId, caller.tenantId, 'strict');
       if (!rec) {
         res.status(404).json({ error: 'not_found', message: 'durable task not found' });
         return;
       }
       // The persisted record is already the a2a-task-state.schema.json shape
-      // (taskId, runId, contextId?, state, interruptKind?, updatedAt, pushConfig?).
-      res.status(200).json(rec);
+      // (taskId, runId, contextId?, state, interruptKind?, updatedAt, pushConfig?),
+      // minus the sealed push credential, which no read returns (RFC 0214 §A).
+      res.status(200).json(publicTaskRecord(rec));
     } catch (err) {
       next(err);
     }
@@ -1185,7 +1224,9 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
         res.status(404).json({ error: 'not_found', message: 'a2a durable tasks disabled (set OPENWOP_A2A_SERVER_ENABLED=true OPENWOP_A2A_DURABLE_TASKS=true)' });
         return;
       }
-      const body = (req.body ?? {}) as { taskId?: string; url?: string; tokenFingerprint?: string };
+      const caller = resolveA2aCaller(req);
+      await requireProtocolScopeIn(req, caller.tenantId, 'webhooks:manage');
+      const body = (req.body ?? {}) as { taskId?: string; url?: string; tokenFingerprint?: string; authentication?: unknown; token?: unknown };
       if (typeof body.taskId !== 'string' || typeof body.url !== 'string') {
         res.status(400).json({ error: 'validation_error', message: 'Fields `taskId` and `url` are required.' });
         return;
@@ -1199,15 +1240,33 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
         }
         throw err;
       }
+      // ADR 1045 D4 — authorize the task before touching the push store, so a
+      // config cannot be attached to (or used to probe for) a foreign task.
+      if (!(await getA2aTaskFor(body.taskId, caller.tenantId, 'strict'))) {
+        res.status(404).json({ error: 'not_found', message: 'durable task not found' });
+        return;
+      }
+      // RFC 0214 §A — the same destination credential the JSON-RPC Create takes.
+      let authorization: string | undefined;
+      try {
+        authorization = pushAuthorizationFrom(body);
+      } catch (err) {
+        if (err instanceof A2aPushCredentialInvalidError) {
+          res.status(400).json({ error: 'validation_error', message: err.message });
+          return;
+        }
+        throw err;
+      }
       const updated = await setA2aTaskPushConfig(body.taskId, {
         url: body.url,
         ...(typeof body.tokenFingerprint === 'string' ? { tokenFingerprint: body.tokenFingerprint } : {}),
+        ...(authorization !== undefined ? { authorization } : {}),
       });
       if (!updated) {
         res.status(404).json({ error: 'not_found', message: 'durable task not found' });
         return;
       }
-      res.status(200).json(updated);
+      res.status(200).json(publicTaskRecord(updated));
     } catch (err) {
       next(err);
     }

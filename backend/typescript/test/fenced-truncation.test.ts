@@ -78,6 +78,7 @@ describe('truncateFencedContent — the fence survives any budget', () => {
     // Reproduced from the review, pinned as a literal so the class is named.
     const short = fenceUntrustedBlock('y'.repeat(4), 'x');
     const text = short.length >= 210 ? short : fenceUntrustedBlock('y'.repeat(210 - short.length + 4), 'x');
+    expect(text.length, 'the fixture is the measured 210-char payload').toBe(210);
     expect(truncateFencedContent(text, text.length - 1).length).toBeLessThanOrEqual(text.length - 1);
     expect(truncateFencedContent(text, 1)).toBe(''); // budget 1 < '[truncated]'.length
     expect(truncateFencedContent(text, 11)).toBe('[truncated]');
@@ -95,13 +96,17 @@ describe('truncateFencedContent — the fence survives any budget', () => {
       expect(out.length).toBeLessThanOrEqual(budget);
     }
     const fenced = fenceUntrustedBlock(plain, 'x');
+    let checked = 0;
     for (const budget of [300, 301, 512, 1000]) {
       const out = truncateFencedContent(fenced, budget);
       const bodyEnd = out.indexOf('\n[truncated by the host]\n');
       if (bodyEnd <= 0) continue;
+      checked += 1;
       const code = out.charCodeAt(bodyEnd - 1);
       expect(code >= 0xd800 && code <= 0xdbff, `budget ${budget} split a pair inside the fence`).toBe(false);
     }
+    // Anti-vacuity: every budget above reached the in-fence check (none skipped).
+    expect(checked).toBe(4);
   });
 
   it('keeps the END marker at EVERY budget, including absurd ones (fail closed)', () => {
@@ -176,6 +181,14 @@ describe('truncateFencedContent — the fence survives any budget', () => {
  * whether it can truncate. The one leg that greps source text is scoped to the
  * files classified `TRUNCATES`, and it reads them with comments STRIPPED — a
  * docblock naming `.slice(` is not a `.slice(`.
+ *
+ * What each TRUNCATES leg enforces (wave 82): the GUARD is "the file calls
+ * `truncateFencedContent(`". The no-bare-slice leg is still NAME-based (the four
+ * spellings in its regex), so a fenced value under another local name can still be
+ * sliced without tripping it — read it as a tripwire for the named defect, not a proof.
+ * Sabotages measured red (wave 82): the sideband back to `resultText.slice(` (TRUNCATES),
+ * titleGenerator unfenced (PRODUCES), a comment naming `untrustedContent.js` in an
+ * unclassified file (unclassified), titleGenerator's import path changed (stale row).
  */
 describe('CALL-SITE RATCHET — every handler of fenced text is classified', () => {
   const SRC = join(process.cwd(), 'src');
@@ -478,14 +491,16 @@ describe('CALL-SITE RATCHET — every handler of fenced text is classified', () 
   });
 
   it('every PRODUCES file really does fence, and no EXEMPT row is silent', () => {
-    for (const [f, v] of Object.entries(CLASSIFIED)) {
+    const producers = Object.entries(CLASSIFIED).filter(([, v]) => v.kind === 'PRODUCES');
+    const exempt = Object.entries(CLASSIFIED).filter(([, v]) => v.kind === 'EXEMPT');
+    expect(producers.length, 'the PRODUCES loop is vacuous with no rows').toBeGreaterThanOrEqual(1);
+    expect(exempt.length, 'the EXEMPT loop is vacuous with no rows').toBeGreaterThanOrEqual(1);
+    for (const [f] of producers) {
       const code = stripComments(readFileSync(join(SRC, f), 'utf8'));
-      if (v.kind === 'PRODUCES') {
-        expect(code, `${f} is PRODUCES but calls no fencing function`)
-          .toMatch(/fenceUntrusted\w*\s*\(|defang\w*Fence\s*\(|neutralizeUntrusted\s*\(|toModel(?:Workflow)?ToolResult\s*\(|fenceThrownToolError\s*\(/); // ADR 0999 D2 / TOC2CD-14
-      }
-      if (v.kind === 'EXEMPT') expect(v.why.length, `${f} is EXEMPT with no stated reason`).toBeGreaterThan(60);
+      expect(code, `${f} is PRODUCES but calls no fencing function`)
+        .toMatch(/fenceUntrusted\w*\s*\(|defang\w*Fence\s*\(|neutralizeUntrusted\s*\(|toModel(?:Workflow)?ToolResult\s*\(|fenceThrownToolError\s*\(/); // ADR 0999 D2 / TOC2CD-14
     }
+    for (const [f, v] of exempt) expect(v.why.length, `${f} is EXEMPT with no stated reason`).toBeGreaterThan(60);
   });
 
   it('the OTHER slice in the sideband is accounted for, not overlooked', () => {

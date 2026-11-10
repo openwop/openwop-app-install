@@ -89,14 +89,19 @@ describe('the Email hub templates collection', () => {
     expect(screen.queryByRole('button', { name: /delete template/i })).toBeNull();
   });
 
-  it('does not render the editor inline any more', async () => {
-    const { container } = renderHub();
-    await screen.findByRole('link', { name: /Welcome/ });
-    // The editor's multi-line body was the hub's only <textarea> — the CREATE
-    // form's body is a single-line <input> and legitimately stays here. If a
-    // textarea reappears, the stacked editor is back and the URL has stopped
-    // meaning anything.
-    expect(container.querySelector('textarea')).toBeNull();
+  it('keeps editing on the detail page while allowing a multiline create form', async () => {
+    renderHub();
+    const cell = await screen.findByRole('link', { name: /Welcome/ });
+    // EMAIL-1: CREATE legitimately has a textarea now. The routing contract is
+    // no editing controls in a collection cell or stacked detail editor on the
+    // hub, not the obsolete page-wide absence of every textarea.
+    const createBody = screen.getByRole('textbox', { name: 'Body' });
+    if (!(createBody instanceof HTMLTextAreaElement)) throw new Error('Expected multiline create Body');
+    expect(createBody.value).toBe('');
+    expect(cell.querySelector('textarea,input,select,button')).toBeNull();
+    expect(screen.queryByRole('heading', { level: 1, name: 'Welcome' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^save$/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^delete$/i })).toBeNull();
   });
 });
 
@@ -106,6 +111,11 @@ describe('the template detail page', () => {
     await waitFor(() => expect(client.getTemplate).toHaveBeenCalledWith('o1', 'tpl1'));
     // The entity name IS the page h1 (§4.5 rule 12).
     expect(await screen.findByRole('heading', { level: 1, name: 'Welcome' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^delete$/i })).toBeTruthy();
+    const editorBody = screen.getByRole('textbox', { name: 'Body' });
+    if (!(editorBody instanceof HTMLTextAreaElement)) throw new Error('Expected detail Body editor');
+    expect(editorBody.value).toBe('Hello!');
     expect(client.listTemplates).not.toHaveBeenCalled();
   });
 

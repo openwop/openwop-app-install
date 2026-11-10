@@ -639,6 +639,59 @@ describe('useChatSession conversation send lifecycle (integration)', () => {
     expect(result.current.isSending).toBe(false);
   });
 
+  it.each(['empty', 'user-only', 'prior-reply', 'batched-progress'])('preserves the second submitted user when a newer%s tail lacks its fresh canonical reply', async variant => {
+    const { result } = renderHook(() => useChatSession({ persist: false }));
+    await act(async () => { await result.current.send('hi', CONFIG); });
+    expect(result.current.session.messages.map(m => m.content)).toEqual(['hi', 'ok']);
+    sendConversationTurnMock.mockResolvedValueOnce({ turns: [], lastSeq: 7 });
+    const turns: Awaited<ReturnType<Transport['fetchTurns']>>['turns'] = variant === 'user-only'
+      ? [{ messageId: 'c:3:user', role: 'user', turnIndex: 3, from: 'user', content: 'Finish the journey proposal without running it', ts: 0 }]
+      : variant === 'prior-reply' ? [{ messageId: 'c:2:agent', role: 'agent', turnIndex: 2, from: 'assistant', content: 'ok', ts: 0 }] : [];
+    fetchTurnsMock.mockResolvedValueOnce({ turns, lastSeq: 9 });
+    let pending: Promise<void>;
+    await act(async () => {
+      pending = result.current.send('Finish the journey proposal without running it', CONFIG);
+      await vi.waitFor(() => expect(sendConversationTurnMock).toHaveBeenCalledTimes(2));
+    });
+    expect(result.current.session.messages.some(m => m.role === 'user' && m.content === 'Finish the journey proposal without running it')).toBe(true);
+    if (variant !== 'batched-progress') {
+      await act(async () => {
+        await captured!.onEvent({ ...evt('agent.toolCalled', { toolName: 'catalog.draft', callId: 'second-search', agentId: 'architect' }), sequence: 8 });
+      });
+      expect(result.current.session.messages.some(m => m.agentEvents?.toolCalls.some(c => c.callId === 'second-search'))).toBe(true);
+    }
+    await act(async () => {
+      if (variant === 'batched-progress') captured!.onEvent({ ...evt('agent.toolCalled', { toolName: 'catalog.draft', callId: 'second-search', agentId: 'architect' }), sequence: 8 });
+      // A terminal signal can precede read-side canonical visibility. The tail
+      // advanced through progress events, but does not yet contain this pair.
+      await captured!.onEvent({ ...evt('conversation.exchanged', { turn: { role: 'agent' } }), sequence: 9 });
+      await pending!;
+    });
+    expect(fetchTurnsMock).toHaveBeenCalledWith('conv-run-1', 2);
+    expect(result.current.session.messages.some(m => m.role === 'user' && m.content === 'Finish the journey proposal without running it'), 'a newer empty tail must not erase the submitted user').toBe(true);
+    expect(result.current.session.messages.some(m => m.content === 'ok')).toBe(true);
+    expect(result.current.session.messages.some(m => m.meta?.error?.message)).toBe(true);
+    expect(result.current.session.messages.some(m => m.agentEvents?.toolCalls.some(c => c.callId === 'second-search'))).toBe(true);
+    expect(result.current.isSending).toBe(false);
+  });
+
+  it('reconciles a fresh agent-only second reply without losing the prior canonical pair', async () => {
+    const { result } = renderHook(() => useChatSession({ persist: false }));
+    await act(async () => { await result.current.send('hi', CONFIG); });
+    sendConversationTurnMock.mockResolvedValueOnce({ turns: [], lastSeq: 7 });
+    fetchTurnsMock.mockResolvedValueOnce({ turns: [{ messageId: 'c:4:agent', role: 'agent', turnIndex: 4, from: 'assistant', content: 'new canonical reply', ts: 0 }], lastSeq: 9 });
+    await act(async () => {
+      const sending = result.current.send('second question', CONFIG);
+      await vi.waitFor(() => expect(sendConversationTurnMock).toHaveBeenCalledTimes(2));
+      await captured!.onEvent({ ...evt('agent.toolCalled', { toolName: 'catalog.draft', callId: 'second-search', agentId: 'architect' }), sequence: 8 });
+      await captured!.onEvent({ ...evt('conversation.exchanged', { turn: { role: 'agent' } }), sequence: 9 });
+      await sending;
+    });
+    expect(result.current.session.messages.map(m => m.content)).toEqual(['hi', 'ok', 'new canonical reply']);
+    expect(result.current.session.messages.some(m => m.meta?.error)).toBe(false);
+    expect(result.current.isSending).toBe(false);
+  });
+
   it('a failed exchange keeps the user message and appends a classified error bubble', async () => {
     sendConversationTurnMock.mockRejectedValueOnce(
       Object.assign(new Error('no key'), { code: 'credential_unavailable' }),
@@ -760,7 +813,7 @@ describe('useChatSession workflow_run lifecycle (integration)', () => {
   it('ADR 0712 — a declared credentialRef left unset runs on the chat\'s valid BYOK key, via configurable only', async () => {
     vi.mocked(getWorkflowRunInputs).mockResolvedValueOnce([
       { name: 'topic', type: 'string', required: true },
-      { name: 'kicktodo_challenge_factory_a2ec352bceed_credentialRef', type: 'string', required: false },
+      { name: 'example_factory_a2ec352bceed_credentialRef', type: 'string', required: false },
     ]);
     vi.mocked(getActiveConfig).mockResolvedValueOnce({
       config: { provider: 'google', model: 'gemini-3.5-flash-lite', credentialRef: 'byok:google' }, valid: true, anonymous: false,

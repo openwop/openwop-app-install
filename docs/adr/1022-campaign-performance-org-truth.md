@@ -8,6 +8,24 @@ unchanged) · Feature loop round 2, row 71 · Extends ADR 0159 (connectors + per
 (paid-media spend control), ADR 0956 (attribution) · Rides ADR 0832 (the org-scope surface floor)
 and ADR 0816 (notification audience) · RFC gate: none (host work)
 
+
+> **Correction (2026-11-07, PERF-4 — reporting availability is not numeric zero).**
+> Raw revenue remains number|null, and the existing numeric KPI revenue/ROAS
+> sentinels and reporting-only denominator are unchanged. The summary now emits
+> optional `reportedRevenueRecordCount` on totals and each platform, always an
+> integer including 0 from the new server, counting actual nonnull revenue rows.
+> Measured zero and zero-spend reported rows each count; the count does not establish
+> a mathematically defined ratio when its denominator is 0. Campaign Performance
+> renders localized Not reported only when the count is exactly 0. An absent field
+> from an older server keeps legacy numeric rendering; it cannot establish
+> reporting availability. Partial reporting retains the existing disclosure.
+> This additive host DTO/UI repair changes no imports, stored records, providers,
+> ratio math, optimizer, currencies or public OpenWOP schema (no new RFC).
+> Other consumers are not all repaired: campaign-ops report section projection
+> still drops the optional counts, so generated-report honesty is not qualified.
+> New actual-service and page-fixture regressions are authored **NOT RUN** at
+> the source checkpoint; no fixed, gate, deployed or live acceptance is claimed.
+
 ## Context
 
 Row 71's workflows grade (`docs/steward/workflows-assessment/2026-10-31-campaign-performance-row71.md`,
@@ -245,3 +263,47 @@ D7's failed run is the signal; M7 filed `-46`.
 > saves of the same id at the same moment can still both win: filed. `CP71CD-8`: every sync-state
 > write is a CAS merge. Grades: WF C → A−, code B− → A−, UX C+ → B+.
 
+
+## Follow-ups after implementation
+
+- **Q-1 (#5467, 2026-11-02): the core `ad-budget-update` node.** The node took a caller-chosen
+  campaign id and called `ctx.ads.updateBudget` with no ownership check. It now resolves the
+  run's org (the host-written client stamp), applies the ADR 0832 floor, and asks the same
+  `orgOwnsAdCampaign` predicate as `CP71CD-1`, which campaign-intel registers through a host
+  setter (`setAdsCampaignOwnershipChecker`). An unstamped run could name its org with `orgId`.
+
+  > **CORRECTED (adapter seam, 2026-11-02): the check moved into the adapter, and the
+  > `orgId` fallback was removed.** The executor hands `ctx.ads` to every node, so a pack could
+  > call `updateBudget` or `setDeliveryStatus` directly and skip the node's check. Both methods
+  > now ask the predicate first (`adsOwnershipRefusal` in `adsAdapter.ts`), dry runs and pauses
+  > included. The org comes only from inputs a caller cannot choose: the stored run's client
+  > stamp, else `deps.orgId` (the executor's `run.tenantId`, or the org a feature route
+  > authorized). The node's `orgId` fallback came from node config, which is caller-controlled,
+  > so the seam could not honour it without reopening the bypass. It was removed (option A,
+  > decided by the lead). That affects 0 production runs: row 71 measured that production has
+  > never run a connector. A step that names an org other than its run's is now refused
+  > (`forbidden_scope`). The callers keep their earlier typed refusals; the seam is the
+  > backstop. The ADR 0832 floor stays at the callers, because the adapter has no
+  > `orgScopeSubject`: "floor at the seam" is filed. Witness:
+  > `adr1022-ads-ownership-seam` (a pack node in a real run; five guards sabotage-witnessed).
+
+- **The read door (Q-7 PR 3, 2026-11-04): `getMetrics`.** The write doors met the seam, but
+  `getMetrics` still read a caller-chosen campaign: through the core `ad-metrics` node or a
+  pack's `ctx.ads.getMetrics`, a run for client A could read client B's spend, clicks and CPC
+  over a shared agency token. It now asks `adsOwnershipRefusal` first (same org resolution),
+  and the node keeps the seam's code (`ad_campaign_not_in_org`, `capability_not_provided`,
+  `forbidden_scope`) as a TYPED refusal, never `metrics: null` ("no data"). Witnessed red on
+  `main` first. Witness: `adr1022-ad-metrics-org` (node and pack lanes, two guards
+  sabotage-witnessed). Still filed: `getCampaignBudget`, also a read of a caller-chosen
+  campaign on `ctx.ads` (`campaign-connectors`), which today meets the seam only when it runs
+  inside `updateBudget`.
+
+  > **CORRECTED (2026-11-04, report only, not implemented) — "the adapter has no
+  > `orgScopeSubject`" is not a blocker for the floor at the seam.** The seam already reads
+  > the stored run (`adsActingOrg`), and the run carries `metadata.orgScopeSubject` (the
+  > executor reads it from there, `executor.ts` `bundleOrgScopeSubject` and the node context
+  > build), while `deps.actingUserId` is already in the adapter's deps. So for a run lane the
+  > seam could call `assertRunScopeOrg({ tenantId, actingUserId, orgScopeSubject:
+  > run.metadata.orgScopeSubject }, org, 'workspace:write')` with no change to its deps. Route
+  > lanes (no stored run) already ran `requireOrgScopeFor`; actorless runs stay a no-op, as at
+  > the node. "Floor at the seam" stays filed: feasible, not done.

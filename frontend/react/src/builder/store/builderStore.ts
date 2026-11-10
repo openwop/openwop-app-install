@@ -11,6 +11,7 @@
  * users hit the cap.
  */
 
+import { sameSourceBinding } from '../schema/sourceOutput.js';
 import { applyEditOpsToGraph, type EditOp } from '../pair/suggestionModel.js';
 import { create, type StateCreator } from 'zustand';
 import type { RunEventDoc } from '@openwop/openwop';
@@ -19,6 +20,7 @@ import { catalogEntry, defaultConfigFor } from '../palette/catalogRegistry.js';
 import { upsertSavedWorkflow, deleteSavedWorkflow } from '../persistence/localStore.js';
 import { saveWorkflow as saveBackendWorkflow } from '../persistence/backendStore.js';
 import { serializeWorkflow } from '../schema/serialize.js';
+import { BuilderEditorMetadataError } from '../persistence/editorMetadata.js';
 import { definitionMetadataFor } from '../persistence/definitionMetadata.js';
 import { SyncFailureError } from '../../client/config.js';
 import { toast } from '../../ui/toast.js';
@@ -243,7 +245,7 @@ async function runBackendSyncNow(queued: SavedWorkflow, opts: { keepalive?: bool
       // `exactOptionalPropertyTypes`.
       ...(err instanceof SyncFailureError
         ? { syncFailureStatus: err.status, syncFailureReason: err.reason }
-        : {}),
+        : err instanceof BuilderEditorMetadataError ? { syncFailureReason: err.reason } : {}),
     });
   }
 }
@@ -500,7 +502,7 @@ export interface BuilderState {
   /** Remove several nodes (and their incident edges) in one undo entry. */
   removeNodes(ids: string[]): void;
   addEdge(edge: Omit<BuilderEdge, 'id'>): void;
-  updateEdge(id: string, patch: Partial<Omit<BuilderEdge, 'id' | 'source' | 'target' | 'sourcePort' | 'targetPort'>>): void;
+  updateEdge(id: string, patch: Partial<Omit<BuilderEdge, 'id' | 'source' | 'target' | 'sourcePort' | 'canonicalSourceOutput' | 'targetPort'>>): void;
   removeEdge(id: string): void;
   /** ADR 0773 D5 — apply kept suggestion ops as ONE undo entry, through the
    *  ordinary persist → CAS autosave. The AI has no other write path. */
@@ -692,7 +694,7 @@ export const builderStoreInitializer: StateCreator<BuilderState> = (set, get) =>
     pushHistory(set, get);
     set({
       nodes: [...get().nodes, node],
-      edges: [...get().edges, { id: `e_${crypto.randomUUID().slice(0, 8)}`, source: from.source, sourcePort: from.sourcePort, target: id, targetPort: from.targetPort }],
+      edges: [...get().edges, { id: `e_${crypto.randomUUID().slice(0, 8)}`, source: from.source, sourcePort: from.sourcePort, canonicalSourceOutput: from.sourcePort, target: id, targetPort: from.targetPort }],
       selectedNodeId: id,
       selectedNodeIds: [id],
     });
@@ -847,13 +849,16 @@ export const builderStoreInitializer: StateCreator<BuilderState> = (set, get) =>
   },
 
   addEdge(edge) {
+    // New authoring controls deliberately choose a named port. Legacy loaded
+    // edges are left untouched; normalize before semantic duplicate comparison.
+    edge = { ...edge, canonicalSourceOutput: edge.canonicalSourceOutput === undefined ? edge.sourcePort : edge.canonicalSourceOutput };
     // Reject duplicates and self-loops.
     if (edge.source === edge.target) return;
     const exists = get().edges.some(
       (e) =>
         e.source === edge.source &&
         e.target === edge.target &&
-        e.sourcePort === edge.sourcePort &&
+        sameSourceBinding(e, edge) &&
         e.targetPort === edge.targetPort,
     );
     if (exists) return;

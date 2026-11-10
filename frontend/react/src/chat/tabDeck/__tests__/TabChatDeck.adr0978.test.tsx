@@ -10,6 +10,16 @@
  *        only once its tabs prove to belong to this workspace;
  *   D5 — a kind tab whose feature is off never mounts; drafts key on the uid;
  *   D6 — deck keyboard actions move DOM focus; closing a busy tab says where it went.
+ *
+ * Refusal has a double guard: `useTabDeck.openTab` and the reducer both honour the
+ * shared `selectEvictionVictim` decision, so the reducer's own line is held by
+ * `tabDeckModel.test` and this file breaks the shared decision instead.
+ *
+ * Sabotage (witnessed): removing each busy signal from `protectedIds` (live blocked,
+ * live running, streaming, server running, pending review), the refusal decision or
+ * its toast, the seed gate, the sweep's predicate, delete or once-only guard, the
+ * workspace subject, the legacy forget in either direction, the no-notice rule, the
+ * feature check on a kind tab, the uid draft scope, and each keyboard focus request.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, screen, fireEvent, act, within, cleanup } from '@testing-library/react';
@@ -18,6 +28,7 @@ import { useEffect } from 'react';
 import type { UseChatSessionsResult } from '../../hooks/useChatSessions.js';
 import type { ChatSessionHeader } from '../../../client/chatSessionsClient.js';
 import type { BYOKActiveConfig } from '../../../byok/lib/useBYOKConfig.js';
+import type { ReviewRequest } from '../../reviews/reviewClient.js';
 import type { DeckRailSectionProps } from '../tabKindRegistry.js';
 import type { TabDeckState } from '../tabDeckModel.js';
 
@@ -29,6 +40,7 @@ const h = vi.hoisted(() => ({
   streaming: new Set<string>(),
   running: new Set<string>(),
   sessions: [] as ChatSessionHeader[],
+  reviews: [] as ReviewRequest[],
   remove: null as null | ((id: string) => Promise<void>),
   tenantIds: new Map<string, string | undefined>(),
   visible: new Set<string>(),
@@ -61,7 +73,7 @@ vi.mock('../../../auth/useAuth.js', () => ({ useAuth: () => ({ user: h.uid ? { u
 vi.mock('../../conversations/useRunningConversations.js', () => ({ useRunningConversations: () => h.running }));
 vi.mock('../../reviews/reviewClient.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../reviews/reviewClient.js')>()),
-  listReviews: async () => [],
+  listReviews: async () => h.reviews,
   getReview: async () => { throw new Error('not used in this test'); },
 }));
 vi.mock('../../../ui/toast.js', async (importOriginal) => {
@@ -78,6 +90,7 @@ import { tabButtonId } from '../TabStrip.js';
 import { HARD_MAX_TABS } from '../tabDeckModel.js';
 import { registerDeckTabKind, __clearDeckTabKindsForTest } from '../tabKindRegistry.js';
 import { LS_TABDECK_VERSION } from '../../lib/storageKeys.js';
+import { useReviewStatusStore } from '../../reviews/reviewStatusStore.js';
 
 const OLD = '2026-01-01T00:00:00.000Z';
 const row = (o: Partial<ChatSessionHeader> & { sessionId: string }): ChatSessionHeader => ({
@@ -133,6 +146,7 @@ beforeEach(() => {
   localStorage.clear();
   h.uid = 'u1'; h.workspace = 'ws-test';
   h.blocked = new Set(); h.liveRunning = new Set(); h.streaming = new Set(); h.running = new Set(); h.sessions = []; h.remove = null;
+  h.reviews = []; useReviewStatusStore.setState({ reviews: [] }); // a module-level store outlives a case
   h.tenantIds.clear(); h.visible = new Set(); h.toasts = [];
   __clearDeckTabKindsForTest();
 });
@@ -179,6 +193,18 @@ describe('ADR 0978 D1 — the tabs that need you are never auto-evicted', () => 
     expect(stripIds()).toContain('r0');
     expect(stripIds()).not.toContain('r1'); // the next-least-recent idle tab went instead
   });
+
+  it('a restored, never-visited tab with a review waiting on you survives (ADR 0776 signal)', async () => {
+    const ids = Array.from({ length: 8 }, (_, i) => `r${i}`);
+    seedDeck('u1@ws-test', ids, { active: 'r7' });
+    h.sessions = ids.map((id) => row({ sessionId: id }));
+    h.reviews = [{ reviewId: 'rev1', source: 'interrupt', kind: 'approval', status: 'pending', tenantId: 't1', conversationId: 'r0', requestedAt: OLD, actions: [], provenanceRefs: [] }];
+    await mount();
+    await vi.waitFor(() => expect(useReviewStatusStore.getState().reviews).toHaveLength(1));
+    await clickNewTab();
+    expect(stripIds()).toContain('r0');
+    expect(stripIds()).not.toContain('r1');
+  });
 });
 
 describe('ADR 0978 D2 — the hard ceiling is absolute', () => {
@@ -211,6 +237,7 @@ describe('ADR 0978 D2 — the hard ceiling is absolute', () => {
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'open fake' })); });
     expect(seed).not.toHaveBeenCalled();
     expect(stripIds()).toHaveLength(HARD_MAX_TABS);
+    expect(h.toasts).toContain('Every open tab is busy, so nothing opened. Close a tab to open another.');
   });
 });
 
@@ -236,6 +263,7 @@ describe('ADR 0978 D4 — the working set is per workspace', () => {
     await mount();
     await act(async () => { vi.advanceTimersByTime(500); });
     expect(storedIds('u1@ws-other')).toEqual(['a1', 'a2']);
+    expect(stripIds()).not.toContain('a1');
     expect(storedIds('u1@ws-test')).not.toBeNull(); // this workspace saved its own set
   });
 

@@ -7,12 +7,23 @@
  * decision resumed the source and the fork stranded at the gate. The re-create
  * path now registers the fork. Driven through the real `:fork` route.
  *
- * Sabotage note (2026-10-20): drop the `recordApprovalWaiter` call in
- * `executor/forkInterrupts.ts` → red (the fork stays `waiting-external`).
+ * Sabotage note (2026-10-20, re-probed 2026-11-04 as w84g1-fw-waiter): drop the
+ * `recordApprovalWaiter` call in `executor/forkInterrupts.ts` → red (the fork stays
+ * `waiting-external`).
+ *
+ * The same case also pins three consequences that rest on the replay effect gate
+ * and the attended fork posture (ADR 0942 D10.4), which have their own tests:
+ *   - the resumed REPLAY fork fails `replay_source_missing` (a replay never fires an
+ *     effect its source did not record);
+ *   - the resumed BRANCH fork re-runs its chokepoint and waits on its OWN approval,
+ *     never the source's;
+ *   - a fork taken after the approval finalized is woken by the existing dispatch
+ *     recovery, completes with the source's recorded output, and makes no second
+ *     platform call (`platformCalls` unchanged).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import type { HostAdapterSuite } from '../src/host/index.js';
@@ -30,10 +41,12 @@ import { registerProvider } from '../src/features/connections/providerRegistry.j
 import { createBrief } from '../src/features/campaign-brief/briefService.js';
 import { ensureDraftCampaign } from '../src/features/campaign-orchestration/campaignService.js';
 import { stampCampaignRun } from '../src/features/campaign-orchestration/campaignRunTag.js';
+import { __putDispatchRecordForTests } from '../src/host/adsAdapter.js';
 import { AUTONOMY_TOGGLE, bindClientPresetIfAbsent, reconcileApprovalWaits } from '../src/host/autonomyPolicy/index.js';
 import type { WorkflowDefinition } from '../src/executor/types.js';
 import type { RunRecord } from '../src/types.js';
 import { bareRunId } from './support/bareRunId.js';
+import { envKeyPrincipalId } from '../src/middleware/envKeyPrincipal.js';
 
 const T = 'default';
 let server: http.Server;
@@ -78,14 +91,20 @@ describe('ADR 0942 — a fork inside a spend wait is resumed by the decision', (
   it('the decision resumes the source and every fork waiting on it; a branch fork then asks for its own approval', async () => {
     const orgId = (await createOrg({ tenantId: T, createdBy: 'u-owner', name: 'Fork client', ownerSubject: 'u-owner' })).orgId;
     await createMember({ tenantId: T, orgId, subject: 'u-admin-2', displayName: 'Admin', roles: ['admin'] });
+    // A live budget change needs write access in the client org for the person the
+    // run acts for: u-requester on the source, the dev-token principal on each fork.
+    for (const subject of ['u-requester', envKeyPrincipalId('dev-token')]) await createMember({ tenantId: T, orgId, subject, displayName: subject, roles: ['editor'] });
     await bindClientPresetIfAbsent(T, orgId, 'guarded@1', 'u-owner');
     const brief = await createBrief(T, orgId, 'u-owner', { name: 'Fork launch', channels: [{ type: 'email_sequence', enabled: true, config: {} }] });
     const campaign = (await ensureDraftCampaign(T, brief, 'u-owner')).campaign;
-    const def = {
-      workflowId: 'wf.p3.fork', name: 'wf.p3.fork', version: '1.0.0',
+    // The budget node refuses a campaign its run's org does not own: seed the
+    // dispatch row the launch of platform campaign 9 would have written.
+    await __putDispatchRecordForTests({ tenantId: T, platform: 'google', platformCampaignId: '9', platformAdSetId: 'as-9', platformAdId: 'ad-9', adAccountId: '1234567890', createdAt: new Date().toISOString(), campaignId: campaign.id, orgId });
+    const def: WorkflowDefinition = {
+      workflowId: 'wf.p3.fork',
       nodes: [{ nodeId: 'budget', typeId: 'core.openwop.connectors.ad-budget-update', config: { platform: 'google', adAccountId: '1234567890', campaignId: '9', dailyBudgetMinor: 41_000, dryRun: false } }],
       edges: [],
-    } as unknown as WorkflowDefinition;
+    };
     registerHostWorkflow(def);
     const now = new Date().toISOString();
     const src: RunRecord = {
@@ -108,9 +127,8 @@ describe('ADR 0942 — a fork inside a spend wait is resumed by the decision', (
       const body = (await res.json()) as { runId?: string };
       expect(res.status, JSON.stringify(body)).toBe(201);
       const id = bareRunId(body.runId ?? '');
-      // Let the fork's dispatch reach its re-created gate.
-      for (let i = 0; i < 50 && (await storage.getRun(id))?.status !== expected; i++) await new Promise((r) => setTimeout(r, 20));
-      expect((await storage.getRun(id))?.status, mode).toBe(expected);
+      // Let the fork's dispatch reach its re-created gate (a timeout fails this named assertion).
+      await vi.waitFor(async () => expect((await storage.getRun(id))?.status, mode).toBe(expected), { timeout: 10_000, interval: 20 });
       return id;
     };
     const replayFork = await forkOf('replay');

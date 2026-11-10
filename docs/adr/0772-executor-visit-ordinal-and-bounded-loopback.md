@@ -10,6 +10,25 @@ dispatch), 0585 (dispatch lease), 0632 (pause/resume), 0637 (mid-sequence replay
 0751 (fork of a suspended checkpoint), 0755 (fork dispatch options), and RFC 0058
 (run-duration bound).
 
+
+## Correction (2026-11-06) — fork history is not child execution time
+
+A real branch inherited source timestamps hours before its own execution. The
+header correctly measured the child snapshot, while analytics timed the entire
+inherited event gap. Analytics now accepts the same authoritative current
+snapshot timing/status; missing or invalid terminal timing stays unknown, never
+a fallback to an inherited terminal. Event-only consumers retain their fallback.
+
+A repeated node start also closed the old span without changing its running
+status, then removed it from the open map, leaving ghost live work after the
+child completed. Such missing-terminal attempts are now explicitly incomplete
+and show only their recorded span, not the idle gap to the next attempt. They
+remain selectable, with unchanged original timestamps and event sequences. A
+timeline hint separates history positions from current execution duration.
+Ordinary live, completed, failed/cancelled and properly closed retry behavior
+remain under regression controls. This is host UI derivation only: no backend
+fork/replay/checkpoint/event semantics, wire schema, capability or RFC change.
+
 ## Context
 
 The run half of the product is where OpenWOP's protocol guarantees are actually

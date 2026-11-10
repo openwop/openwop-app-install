@@ -13,7 +13,7 @@
 import { Button } from '../../ui/Button.js';
 import { useEffect, useRef, useState, lazy, Suspense } from 'react';
 import { Link, useInRouterContext } from 'react-router-dom';
-import { EmailSendReviewContext } from '../../notifications/EmailSendReviewContext.js';
+import { EmailSendReviewContext, emailSendApprovable } from '../../notifications/EmailSendReviewContext.js';
 import { Notice, StatusBadge } from '../../ui/index.js';
 import { confirm } from '../../ui/confirm.js';
 import { decideErrorMessage } from '../../interrupts/decideErrorMessage.js';
@@ -25,6 +25,7 @@ import { ReviewRequestError, type ReviewRequest, type ReviewAction } from './rev
 import { AssetPreviewModal } from './AssetPreviewModal.js';
 import { ReviewHandoff } from './ReviewHandoff.js';
 import { CardHost } from '../registry/CardHost.js';
+import { featureReviewCardSections } from '../../features/featureExtensions.js';
 import { registerDefaultCards } from '../registry/defaultCards.js';
 import { useCanOpenRunDetail } from '../runDetailAccess.js';
 
@@ -33,7 +34,6 @@ import { useCanOpenRunDetail } from '../runDetailAccess.js';
 const ComposedWorkflowSection = lazy(() => import('./ComposedWorkflowSection.js'));
 // ADR 0501 step 4 — lazy for the same reason as the composed section: the strip and
 // inbox sit on the entry path and the chunk budget is tight.
-const PlanProposalPreview = lazy(() => import('./PlanProposalPreview.js').then((m) => ({ default: m.PlanProposalPreview })));
 // ADR 0862 D3 — lazy for the same reason: only assistant-action reviews render it.
 const AssistantActionFields = lazy(() => import('../../assistantAction/AssistantActionFields.js'));
 
@@ -135,6 +135,10 @@ export function ReviewCard({ review, onDecide, onOpenArtifact, compact }: Props)
   // and points at the builder (whose save-then-approve self-heals the view).
   const composedDegraded = !!review.composedWorkflow && !resolved && !review.composedWorkflow.expired && !review.composedWorkflow.liveDefinitionHash;
   const offeredActions = composedDegraded ? review.actions.filter((a) => a.action !== 'approve') : review.actions;
+  // ADR 0905 D3 — an email send without its review digest cannot be approved (the server
+  // refuses an approve that does not echo it). Approve stays visible but dead, and
+  // EmailSendReviewContext says why; reject still works.
+  const emailApproveBlocked = review.kind === 'email-campaign-send' && !emailSendApprovable(review);
   // ADR 0778 D10 correction — a typed answer is collected on the card, by the
   // chat's own form for the interrupt kind, and posted through `onDecide` with
   // `value`. The run page is admin-tier, so linking there stranded members.
@@ -157,9 +161,9 @@ export function ReviewCard({ review, onDecide, onOpenArtifact, compact }: Props)
 
   async function decide(action: ReviewAction, value?: unknown): Promise<void> {
     if (inFlight.current) return;
-    // ADR 0778 (`APUX-9`) — REJECT is irreversible (a rejected gate fails its
-    // node; a rejected proposal is gone), and the inline ApprovalCard already
-    // confirms it (ISU-12). This card did not.
+    // ADR 0778 (`APUX-9`) / ADR 0600 rejection-copy correction — confirm
+    // rejection without predicting the interrupt's terminal run outcome.
+    // Non-interrupt proposals keep their separate request-closing wording.
     if (action.action === 'reject' && !(await confirm({
       title: review.source === 'interrupt' ? t('interrupts:rejectConfirmTitle') : t('reviewRejectConfirmTitle'),
       body: review.source === 'interrupt' ? t('interrupts:rejectConfirmBody') : t('reviewRejectConfirmBody'),
@@ -257,16 +261,9 @@ export function ReviewCard({ review, onDecide, onOpenArtifact, compact }: Props)
       {review.assistantAction ? <AssistantActionFields payload={review.assistantAction.payload} /> : null}
       {review.kind === 'email-campaign-send' ? <EmailSendReviewContext a={review} /> : null}
 
-      {/* ADR 0501 step 4 — only while the decision is still open: once resolved, a
-          "what this would do" panel describes a choice already made. */}
-      {review.planProposal && !resolved ? (
-        <Suspense fallback={null}>
-          <PlanProposalPreview
-            enrollmentId={review.planProposal.enrollmentId}
-            proposalId={review.planProposal.proposalId}
-          />
-        </Suspense>
-      ) : null}
+      {/* ADR 1031 P2 — feature-contributed sections (e.g. KickTodo's ADR 0501 coach
+          plan-proposal preview), each deciding whether it applies to this review. */}
+      {featureReviewCardSections().map(({ id, component: Section }) => <Section key={id} review={review} resolved={resolved} />)}
 
       {resolved && review.decisionNote ? (
         <blockquote className="review-card__decision-note muted u-fs-12" aria-label={t('reviewNoteLabel')}>
@@ -423,7 +420,7 @@ export function ReviewCard({ review, onDecide, onOpenArtifact, compact }: Props)
                   type="button"
                   className={`${cls} u-flex u-items-center u-gap-2`}
                   onClick={() => void decide(a)}
-                  disabled={busy !== null}
+                  disabled={busy !== null || (a.action === 'approve' && emailApproveBlocked)}
                   aria-busy={busy === a.action}
                 >
                   {glyph === 'check' ? <CheckIcon size={14} /> : glyph === 'x' ? <XIcon size={14} /> : null}

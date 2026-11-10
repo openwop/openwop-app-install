@@ -24,6 +24,11 @@
  *   - purge with `purgePortalForOrg` alone (the old demo teardown) → the
  *     vendor record survives (red);
  *   - drop the legal-hold check → the hold case red.
+ * Added w78: the "other org" is now a second client org in the SAME tenant
+ * (it was a different tenant, which proved only tenant isolation), so purging
+ * every collaborator of the tenant reds; and the bound-index row is read
+ * directly (`usableGrantsForUser` re-checks the record, so it could not see a
+ * stray index row).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -41,7 +46,7 @@ import { getIntake, listIntakes, __heldBytesExistForTests } from '../src/feature
 import { purgeCollaborationForOrg } from '../src/features/campaign-ops/erasure.js';
 import { countOrgHostExtRows } from '../src/host/hostExtPersistence.js';
 import { listAssets } from '../src/features/media/mediaService.js';
-import { getCollaborator, listCollaborators, listGrants, usableGrantsForUser, type CollaboratorGrant, type ExternalCollaborator } from '../src/host/externalCollaborators.js';
+import { getCollaborator, listCollaborators, listGrants, usableGrantsForUser, __boundIndexHasForTests, type CollaboratorGrant, type ExternalCollaborator } from '../src/host/externalCollaborators.js';
 
 let BASE: string;
 let server: http.Server;
@@ -80,7 +85,8 @@ function client() {
 
 
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('IHDR-fixture-bytes-0001')]);
-const pngNo = (i: number): Buffer => Buffer.concat([PNG, Buffer.from(`-${i}-${Math.random()}`)]);
+let seq = 0; // unique, deterministic bytes
+const pngNo = (i: number): Buffer => Buffer.concat([PNG, Buffer.from(`-${i}`)]);
 const RIGHTS = { license: 'work-for-hire', modelReleases: true, credit: 'Dana Studio', attest: true };
 
 let n = 0;
@@ -89,8 +95,13 @@ async function setup() {
   const admin = client();
   const login = await admin.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: `agency-td-${n}@agency.test`, tenantId });
   expect(login.status).toBe(201);
-  const org = await admin.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Northwind Coffee' });
-  expect((await admin.post('/host/openwop-app/campaign-ops/clients', { name: 'Northwind Coffee', orgId: org.body.orgId })).status).toBe(201);
+  return addClient(tenantId, admin, 'Northwind Coffee');
+}
+
+/** One more client org (with a campaign) in an existing agency tenant. */
+async function addClient(tenantId: string, admin: ReturnType<typeof client>, name: string) {
+  const org = await admin.post<{ orgId: string }>('/host/openwop-app/orgs', { name });
+  expect((await admin.post('/host/openwop-app/campaign-ops/clients', { name, orgId: org.body.orgId })).status).toBe(201);
   const orgId = org.body.orgId;
   const cBrief = await createCampaignBrief(tenantId, orgId, 'seed', { name: 'Spring roast launch', objective: 'Sell 500 bags' });
   const campaign = await finalizeFromBrief(tenantId, cBrief, 'seed');
@@ -108,7 +119,7 @@ async function setup() {
 /** A vendor who signed in and accepted, with a grant to upload. */
 async function acceptedVendor(s: Awaited<ReturnType<typeof setup>>) {
   const vendor = client();
-  const v = await vendor.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: `photographer-td-${n}@studio.test` });
+  const v = await vendor.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: `photographer-td-${n}-${seq++}@studio.test` });
   const userId = v.body.user.userId;
   const email = (await getUser(userId))?.email ?? '';
   const inv = await s.invite(email);
@@ -117,7 +128,7 @@ async function acceptedVendor(s: Awaited<ReturnType<typeof setup>>) {
   const grant = await s.grantFor(inv.body.collaborator.collaboratorId);
   const upload = (name: string, note?: string) => vendor.post<{ intake: { intakeId: string; files: Array<{ fileId: string }> } }>(
     `/host/openwop-app/collab/grants/${grant.grantId}/intakes`,
-    { files: [{ name, contentType: 'image/png', contentBase64: pngNo(Math.random()).toString('base64') }], rights: RIGHTS, ...(note ? { note } : {}) },
+    { files: [{ name, contentType: 'image/png', contentBase64: pngNo(seq++).toString('base64') }], rights: RIGHTS, ...(note ? { note } : {}) },
   );
   return { vendor, userId, email, collaborator: inv.body.collaborator, grant, upload };
 }
@@ -126,7 +137,8 @@ async function acceptedVendor(s: Awaited<ReturnType<typeof setup>>) {
 describe('ADR 0958 P5 — org teardown of external collaboration', () => {
   it('removes every collaborator, grant, invite link and intake of the org, and nothing else', async () => {
     const s = await setup();
-    const other = await setup();
+    const other = await addClient(s.tenantId, s.admin, 'Other Client'); // same tenant, another org
+    const stranger = await setup(); // another tenant
     const baseline = await countOrgHostExtRows(s.tenantId, s.orgId);
     const v = await acceptedVendor(s);
     const neverAccepted = await s.invite(`never-td-${n}@studio.test`);
@@ -141,19 +153,26 @@ describe('ADR 0958 P5 — org teardown of external collaboration', () => {
     const ov = await acceptedVendor(other);
     const otherUp = await ov.upload('other.png');
     expect(otherUp.status).toBe(201);
+    const sv = await acceptedVendor(stranger);
+    const strangerUp = await sv.upload('stranger.png');
+    expect(strangerUp.status).toBe(201);
+    expect(await __boundIndexHasForTests(v.userId, v.collaborator.collaboratorId)).toBe(true); // control
     const assetsBefore = (await listAssets(s.tenantId, s.orgId)).length;
     expect(await countOrgHostExtRows(s.tenantId, s.orgId)).toBeGreaterThan(baseline);
 
-    expect(await purgeCollaborationForOrg(s.tenantId, s.orgId)).toBeGreaterThan(0);
+    // Measured w78: 7 rows (the vendor's three intakes, grant and record; the
+    // never-accepted invite's link and record).
+    expect(await purgeCollaborationForOrg(s.tenantId, s.orgId)).toBe(7);
 
     expect(await listCollaborators(s.tenantId, s.orgId)).toEqual([]);
     expect(await listGrants(s.tenantId, s.orgId)).toEqual([]);
     expect(await listIntakes(s.tenantId, s.orgId)).toEqual([]);
     expect((await usableGrantsForUser(v.userId)).filter((u) => u.tenantId === s.tenantId)).toEqual([]);
+    expect(await __boundIndexHasForTests(v.userId, v.collaborator.collaboratorId)).toBe(false);
     for (const up of [pending, rejected]) {
       expect(await __heldBytesExistForTests(s.tenantId, s.orgId, up.body.intake.files[0]!.fileId)).toBe(false);
     }
-    await expect(resolveActiveResource(neverAccepted.body.invite.token, 'collab_invite')).rejects.toThrow();
+    await expect(resolveActiveResource(neverAccepted.body.invite.token, 'collab_invite')).rejects.toMatchObject({ httpStatus: 404, code: 'not_found' });
     // The accepted file is the media library's; it stays.
     expect(await getAssetByIdForTenant(s.tenantId, acc.body.assets[0]!.assetId)).not.toBeNull();
     expect((await listAssets(s.tenantId, s.orgId)).length).toBe(assetsBefore);
@@ -161,9 +180,12 @@ describe('ADR 0958 P5 — org teardown of external collaboration', () => {
     const left = await countOrgHostExtRows(s.tenantId, s.orgId);
     const mediaOnly = await countOrgHostExtRows(s.tenantId, s.orgId, ['extcollab', 'campaign-ops:intake', 'sharing']);
     expect(left).toBe(mediaOnly);
-    // Another org is untouched.
+    // Another org of the same tenant, and another tenant, are untouched.
     expect(await getCollaborator(other.tenantId, other.orgId, ov.collaborator.collaboratorId)).not.toBeNull();
     expect((await getIntake(other.tenantId, other.orgId, otherUp.body.intake.intakeId))?.status).toBe('submitted');
+    expect(await __boundIndexHasForTests(ov.userId, ov.collaborator.collaboratorId)).toBe(true);
+    expect(await getCollaborator(stranger.tenantId, stranger.orgId, sv.collaborator.collaboratorId)).not.toBeNull();
+    expect((await getIntake(stranger.tenantId, stranger.orgId, strangerUp.body.intake.intakeId))?.status).toBe('submitted');
     // A second run is a no-op.
     expect(await purgeCollaborationForOrg(s.tenantId, s.orgId)).toBe(0);
   });

@@ -131,6 +131,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { stripComments } from './helpers/stripComments.js';
+import { declaredPathList } from './helpers/featureRatchetTables.js';
 
 const SRC_ROOT = join(__dirname, '..', 'src');
 
@@ -666,7 +667,9 @@ describe('WF-KB-2 — registerWorkflow call sites are classified by definition O
     expect(moduleConst.inTreeLiteral, 'a module-const literal pin site').toBe(true);
     expect(moduleConst.tier3, 'resolved by the const resolver, not the tier-3 fallback').toBe(false);
     // …and the drained file must NOT come back. Asserted by name (the WF-COS-1 idiom).
-    expect(sites.has('features/kicktodo-core/conveneTurnWorkflow.ts'), 'convene-turn — drained, must not regress').toBe(false);
+    // ADR 1031 P2 — drained pin sites are declared by their package
+    // (`ratchetTables.json` pathTables `workflowPinSite.drained`).
+    for (const f of declaredPathList('workflowPinSite.drained')) expect(sites.has(f), `${f} — drained, must not regress`).toBe(false);
     // `host/workflowAuthorSeed.ts` is the owned-seed lane (WFAWF-6 / ADR 0596 R2):
     // it iterates a module array and pairs `registerWorkflow(s.definition)` with
     // `recordOwnership`, so it is a SANCTIONED site (recordsOwnership), NOT a pin

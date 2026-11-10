@@ -130,6 +130,8 @@ const { getLayout, putLayout } = vi.hoisted(() => ({ getLayout: vi.fn(), putLayo
 vi.mock('../dashboardClient.js', async (orig) => ({
   ...(await orig<typeof import('../dashboardClient.js')>()),
   putNote, getNote, getLayout, putLayout,
+  // `runsWindow.readMyRuns` (NeedsYouTile, the run tiles) reads through here.
+  listOwnRuns: () => Promise.resolve({ runs: [], truncated: false }),
 }));
 vi.mock('../../../auth/useAuth.js', () => ({ useAuth: () => ({ user: null, loading: false }) }));
 vi.mock('../../../auth/backendSession.js', async (orig) => ({
@@ -197,12 +199,6 @@ vi.mock('../../../client/runsClient.js', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   listMyRuns: () => Promise.resolve([]),
 }));
-vi.mock('../../../client/kicktodoClient.js', async (importOriginal) => ({
-  ...(await importOriginal<Record<string, unknown>>()),
-  listEnrollments: () => Promise.resolve([]),
-  getProgress: () => Promise.resolve(null),
-  getToday: () => Promise.resolve(null),
-}));
 vi.mock('../../../kanban/kanbanClient.js', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   listAssignedToMe: () => Promise.resolve([]),
@@ -212,10 +208,44 @@ vi.mock('../../priority-matrix/priorityMatrixClient.js', async (importOriginal) 
   listPortfolio: () => Promise.resolve([]),
 }));
 
+// ── ADR 0661, again: the population grew (train 399, 2026-11-06) ─────────────────
+//
+// Train 399 went red on `/host/openwop-app/orgs`: the guard caught ONE live fetch,
+// load-dependent, passing alone. A fetch recorder found FOUR on every render, from
+// direct reads the count above predates: `useDashboardOrg` → `accessClient.listOrgs`,
+// `NeedsYouTile` → `approvalsClient.listApprovals`, `sharedReads.readConnections` →
+// `connectionsClient.listConnections`, and `runsWindow.readMyRuns` →
+// `dashboardClient.listOwnRuns` (mocked above). Same isolation argument: tile DATA is
+// incidental to W-1. The case below now RECORDS every fetch and asserts none happened,
+// so the next tile that reads directly fails this file every run, not one gate in N.
+vi.mock('../../../client/accessClient.js', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  listOrgs: () => Promise.resolve([]),
+}));
+vi.mock('../../../agents/approvalsClient.js', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  listApprovals: () => Promise.resolve([]),
+}));
+vi.mock('../../connections/connectionsClient.js', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  listConnections: () => Promise.resolve([]),
+}));
+
 import { DashboardPage } from '../DashboardPage.js';
 
 describe('W-1 · a failed layout save keeps a standing notice until a save succeeds', () => {
-  beforeEach(() => { getLayout.mockResolvedValue(null); });
+  // Every fetch the page makes, recorded instead of sent. ADR 0661's guard sees only
+  // the calls that land before the test ends; this sees all of them, deterministically.
+  const liveFetches: string[] = [];
+  beforeEach(() => {
+    getLayout.mockResolvedValue(null);
+    liveFetches.length = 0;
+    vi.stubGlobal('fetch', (input: RequestInfo | URL) => {
+      liveFetches.push(input instanceof Request ? input.url : String(input));
+      return Promise.reject(new Error('live fetch from the W-1 dashboard test'));
+    });
+  });
+  afterEach(() => { vi.unstubAllGlobals(); });
 
   it('keeps a STANDING surface (not a toast), cleared by the next successful save', async () => {
     // The first cut clicked "Customize" and guarded on `putLayout` having been
@@ -247,5 +277,10 @@ describe('W-1 · a failed layout save keeps a standing notice until a save succe
     await act(async () => { vi.advanceTimersByTime(2000); await Promise.resolve(); });
     expect(putLayout).toHaveBeenCalledTimes(2);
     expect(screen.queryByText(/isn’t saving/i)).toBeNull();
+    // No tile reached the network: every read above is mocked at its client. The
+    // tiles are lazy, so let every dynamic import settle (and their effects run)
+    // first; without this the reads land after the case ends, which is the race.
+    for (let i = 0; i < 3; i++) await act(async () => { await vi.dynamicImportSettled(); });
+    expect(liveFetches, 'a dashboard tile fetched for real; mock its client (ADR 0661)').toEqual([]);
   });
 });

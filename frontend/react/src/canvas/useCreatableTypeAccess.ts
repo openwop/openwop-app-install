@@ -11,6 +11,7 @@ import { useFeatureAccess } from '../featureToggles/FeatureAccessContext.js';
 export function useCreatableTypeAccess(): Record<string, { enabled: boolean }> {
   return {
     slides: useFeatureAccess('slides'),
+    films: useFeatureAccess('films'),
     drawings: useFeatureAccess('drawings'),
     cad: useFeatureAccess('cad'),
     'campaign-studio': useFeatureAccess('campaign-studio'),

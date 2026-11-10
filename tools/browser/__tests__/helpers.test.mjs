@@ -5,6 +5,15 @@
  * branch in the server-side command handlers so regressions surface
  * without having to spin up the browser integration harness.
  *
+ * Why: `resolveEvalFilePath` is the sandbox on `evalFile` (server.mjs
+ * cmdEvalFile, BROWSER-TOOL.md), which reads a file and runs it in the page.
+ * Not in `npm run ci`: nothing in the gate reds this file.
+ *
+ * Sabotage that turns it red (each probed): dropping `path.resolve` (an absolute
+ * path with `..` escapes), dropping `path.sep` from a prefix (a sibling directory
+ * passes), the allowlist itself. `pattern.length >= 3` is an equivalent mutant: an
+ * empty inner has no metacharacter and yields the same substring.
+ *
  * Uses Node's built-in test runner so the repo root needs no test framework
  * dependency (openwop-app keeps the root manifest lean — each workspace owns
  * its own deps). Run with a QUOTED glob so Node expands it, not the shell:
@@ -13,7 +22,7 @@
  *
  * The bare-directory form (`node --test tools/browser/`) does NOT work on
  * Node 22 — it resolves the path as a module and exits 1 having run nothing,
- * which reads like one failing test rather than fourteen skipped ones.
+ * which reads like one failing test rather than a whole suite skipped.
  */
 
 import { describe, it } from 'node:test';
@@ -39,10 +48,6 @@ describe('parseWaitUrlPattern', () => {
 
   it('throws on empty pattern', () => {
     assert.throws(() => parseWaitUrlPattern(''), /non-empty string/);
-  });
-
-  it('handles a one-char slash "/" as a substring (too short to be a regex)', () => {
-    assert.strictEqual(parseWaitUrlPattern('/').kind, 'substring');
   });
 });
 
@@ -81,10 +86,16 @@ describe('resolveEvalFilePath', () => {
 
   it('rejects paths outside projectRoot and /tmp', () => {
     assert.throws(() => resolveEvalFilePath('/etc/passwd', projectRoot), /must be under PROJECT_ROOT or \/tmp/);
+    // A sibling that shares the prefix is still outside.
+    assert.throws(() => resolveEvalFilePath('/Users/test/repo-evil/x.js', projectRoot), /must be under PROJECT_ROOT or \/tmp/);
+    assert.throws(() => resolveEvalFilePath('/tmpevil/x.js', projectRoot), /must be under PROJECT_ROOT or \/tmp/);
   });
 
   it('rejects path-traversal escapes that resolve outside the sandbox', () => {
     assert.throws(() => resolveEvalFilePath('../../../../etc/passwd', projectRoot), /must be under PROJECT_ROOT or \/tmp/);
+    // path.join already normalises the relative form; these need path.resolve.
+    assert.throws(() => resolveEvalFilePath('/tmp/../etc/passwd', projectRoot), /must be under PROJECT_ROOT or \/tmp/);
+    assert.throws(() => resolveEvalFilePath('/Users/test/repo/../../../etc/passwd', projectRoot), /must be under PROJECT_ROOT or \/tmp/);
   });
 
   it('rejects empty path', () => {

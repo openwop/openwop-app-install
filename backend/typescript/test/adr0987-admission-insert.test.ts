@@ -11,14 +11,27 @@
  *   - S03-T2: five runs still running after 61 s still hold their slots;
  *   - D4: a run suspended on approval (`waiting-approval`) releases its slot, and a
  *     terminal run releases its slot, with no release call anywhere;
- *   - a refused run writes no row;
- *   - the stored scope is a digest, never the raw tenant or session (S03-R4).
+ *   - a refused run writes no row (held by the insert transaction: the count and the
+ *     insert are one SQLite write transaction, so a refusal rolls the row back).
+ *
+ * CORRECTED 2026-11-03 (grade-tests wave 78, TST-EPA-1): this header also listed "the
+ * stored scope is a digest, never the raw tenant or session (S03-R4)". No case here
+ * asserts it, and no gate-lane test does: `Storage` exposes no reader for
+ * `admission_key`. The digest is computed in `middleware/rateLimit.ts`
+ * `setRunAdmission`; the gap is a grade-code row, not a claim of this file.
+ *
+ * Every refusal is asserted as the concurrency 429 (`details.reason:
+ * 'session_concurrent'`), not as any 429.
  *
  * The cross-instance half (two processes, one Postgres) is
  * `adr0987-admission-two-process-postgres-live.test.ts`.
  *
  * `Date` is faked (only `Date`, so the 120 s `core.delay` timers stay real and the
  * runs stay running), as `adr0771-key-run-budget.test.ts` does.
+ *
+ * Sabotage-witnessed (wave 78): the count check `>=` turned `>` reds S03-T2 and D4;
+ * `waiting-approval` added to the holding states reds D4; `cancelled` added reds the
+ * terminal case; one constant scope key for every session reds "separate users".
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import http from 'node:http';
@@ -78,6 +91,14 @@ async function startRun(u: { cookie: string; wf: string }): Promise<number> {
   await r.arrayBuffer();
   return r.status;
 }
+/** A run start the store refuses for concurrency: the rate-limit 429 naming the
+ *  session-concurrency limiter (not the per-minute or per-day window). */
+async function expectConcurrencyRefusal(u: { cookie: string; wf: string }): Promise<void> {
+  const r = await fetch(`${BASE}/runs`, { method: 'POST', headers: { 'content-type': 'application/json', cookie: u.cookie }, body: JSON.stringify({ workflowId: u.wf, inputs: {} }) });
+  const body = (await r.json()) as { error?: string; details?: { reason?: string } };
+  expect(r.status).toBe(429);
+  expect(body).toMatchObject({ error: 'rate_limited', details: { reason: 'session_concurrent' } });
+}
 const runsOf = async (u: { tenant: string; wf: string }) => storage.listRuns({ tenantId: u.tenant, workflowId: u.wf, limit: 100 });
 
 describe('ADR 0987 D2 — admission counted inside the run insert', () => {
@@ -87,7 +108,7 @@ describe('ADR 0987 D2 — admission counted inside the run insert', () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(Date.now() + 61_000);
     const before = (await runsOf(u)).length;
-    expect(await startRun(u)).toBe(429);
+    await expectConcurrencyRefusal(u);
     expect((await runsOf(u)).length).toBe(before); // nothing written
     expect((await runsOf(u)).filter((r) => r.status === 'pending' || r.status === 'running')).toHaveLength(CAP);
   });
@@ -95,7 +116,7 @@ describe('ADR 0987 D2 — admission counted inside the run insert', () => {
   it('D4: a run suspended on approval releases its slot', async () => {
     const u = await user();
     for (let i = 0; i < CAP; i += 1) expect(await startRun(u)).toBe(201);
-    expect(await startRun(u)).toBe(429);
+    await expectConcurrencyRefusal(u);
     const [first] = await runsOf(u);
     await storage.updateRun(first!.runId, { status: 'waiting-approval' });
     expect(await startRun(u)).toBe(201);
@@ -104,6 +125,7 @@ describe('ADR 0987 D2 — admission counted inside the run insert', () => {
   it('a terminal run releases its slot, with no release call', async () => {
     const u = await user();
     for (let i = 0; i < CAP; i += 1) expect(await startRun(u)).toBe(201);
+    await expectConcurrencyRefusal(u); // the scope is full before the release
     const [first] = await runsOf(u);
     await storage.updateRun(first!.runId, { status: 'cancelled', completedAt: new Date().toISOString() });
     expect(await startRun(u)).toBe(201);
@@ -113,6 +135,7 @@ describe('ADR 0987 D2 — admission counted inside the run insert', () => {
     const a = await user();
     const b = await user();
     for (let i = 0; i < CAP; i += 1) expect(await startRun(a)).toBe(201);
-    expect(await startRun(b)).toBe(201);
+    await expectConcurrencyRefusal(a); // A is at its cap...
+    expect(await startRun(b)).toBe(201); // ...and B's scope is its own
   });
 });

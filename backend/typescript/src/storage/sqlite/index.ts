@@ -10,7 +10,7 @@
 import Database from 'better-sqlite3';
 import { aggregateHostExtTenantActivity, HOSTEXT_ACTIVITY_ROW_CAP } from '../hostExtActivity.js';
 import { withRemovalStamp } from '../runRetentionStamp.js';
-import { planHostExtRekey, rekeyTenantSegment, runBudgetBucketBelongsTo } from '../tenantMigration.js';
+import { planHostExtRekey, rekeyTenantSegment, runBudgetBucketBelongsTo, tenantFoldNeedles } from '../tenantMigration.js';
 import { TERMINAL_RUN_STATUSES } from '@openwop/openwop';
 import { EventEmitter } from 'node:events';
 import { mkdirSync } from 'node:fs';
@@ -2321,7 +2321,9 @@ export function openSqliteStorage(dbPath: string): Storage {
         const budgetMoveIns = db.prepare(`INSERT OR IGNORE INTO run_budget (bucket, window_start, count) VALUES (?, ?, ?)`);
         const budgetMoveDel = db.prepare(`DELETE FROM run_budget WHERE bucket = ?`);
         let runBudgetMoved = 0;
-        for (const r of db.prepare(`SELECT bucket, window_start, count FROM run_budget`).all() as Array<{ bucket: string; window_start: number; count: number }>) {
+        // Bounded to buckets that contain `from` (tenantFoldNeedles).
+        const [fromNeedle, fromJsonNeedle] = tenantFoldNeedles(from);
+        for (const r of db.prepare(`SELECT bucket, window_start, count FROM run_budget WHERE instr(bucket, ?) > 0`).all(fromNeedle) as Array<{ bucket: string; window_start: number; count: number }>) {
           const nb = rekeyTenantSegment(r.bucket, from, to);
           if (nb === r.bucket) continue;
           budgetMoveIns.run(nb, r.window_start, r.count);
@@ -2339,9 +2341,10 @@ export function openSqliteStorage(dbPath: string): Storage {
           .prepare(
             `SELECT k, v FROM host_ext_kv
              WHERE k NOT LIKE 'hostext:access-orgs:%'    AND k NOT LIKE 'hostext:access-members:%'
-               AND k NOT LIKE 'hostextidx:access-orgs:%' AND k NOT LIKE 'hostextidx:access-members:%'`,
+               AND k NOT LIKE 'hostextidx:access-orgs:%' AND k NOT LIKE 'hostextidx:access-members:%'
+               AND (instr(k, ?) > 0 OR instr(v, ?) > 0)`,
           )
-          .all() as Array<{ k: string; v: string }>;
+          .all(fromNeedle, fromJsonNeedle) as Array<{ k: string; v: string }>;
         const upd = db.prepare(`UPDATE host_ext_kv SET v = ?, updated_at = ? WHERE k = ?`);
         const insIfAbsent = db.prepare(`INSERT OR IGNORE INTO host_ext_kv (k, v, updated_at) VALUES (?, ?, ?)`);
         const del = db.prepare(`DELETE FROM host_ext_kv WHERE k = ?`);
@@ -3008,6 +3011,36 @@ export function openSqliteStorage(dbPath: string): Storage {
         record.registeredAt, record.lastHeartbeatAt ?? null, record.lastReportedStatus ?? null,
       );
     },
+    async activateRelayDevice(relayId, activationCode, tokenHash, tokenExpiresAt) {
+      const res = db.prepare(
+        `UPDATE relay_devices SET status = 'active', device_token_hash = ?, token_expires_at = ?,
+           activation_code = NULL, activation_expires_at = NULL
+         WHERE relay_id = ? AND status = 'registered' AND activation_code = ?`,
+      ).run(tokenHash, tokenExpiresAt, relayId, activationCode);
+      return res.changes > 0;
+    },
+    async touchRelayDeviceHeartbeat(relayId, tokenHash, at, reportedStatus) {
+      const res = db.prepare(
+        `UPDATE relay_devices SET last_heartbeat_at = ?, last_reported_status = COALESCE(?, last_reported_status)
+         WHERE relay_id = ? AND status = 'active' AND device_token_hash = ?`,
+      ).run(at, reportedStatus ?? null, relayId, tokenHash);
+      return res.changes > 0;
+    },
+    async rotateRelayDeviceToken(relayId, expectedHash, nextHash, tokenExpiresAt) {
+      const res = db.prepare(
+        `UPDATE relay_devices SET device_token_hash = ?, token_expires_at = ?
+         WHERE relay_id = ? AND status = 'active' AND device_token_hash = ?`,
+      ).run(nextHash, tokenExpiresAt, relayId, expectedHash);
+      return res.changes > 0;
+    },
+    async revokeRelayDevice(relayId) {
+      const res = db.prepare(
+        `UPDATE relay_devices SET status = 'revoked', device_token_hash = NULL, token_expires_at = NULL,
+           activation_code = NULL, activation_expires_at = NULL
+         WHERE relay_id = ?`,
+      ).run(relayId);
+      return res.changes > 0;
+    },
     async getRelayDevice(relayId) {
       const row = db.prepare(`SELECT * FROM relay_devices WHERE relay_id = ?`).get(relayId) as Record<string, unknown> | undefined;
       return row ? rowToRelayDeviceSqlite(row) : null;
@@ -3225,6 +3258,17 @@ export function openSqliteStorage(dbPath: string): Storage {
       params.push(lim);
       const rows = db.prepare(`SELECT * FROM messaging_delivery_log ${where} ORDER BY at DESC LIMIT ?`).all(...params) as Array<Record<string, unknown>>;
       return rows.map(rowToDeliveryLogSqlite);
+    },
+    async pruneDeliveryLog(cutoffIso, exceptTenants) {
+      // ADR 1043 RELAY-LOG-RETENTION-1. Served by `idx_messaging_delivery_log_at` (mig 52).
+      const held = exceptTenants.length ? ` AND tenant_id NOT IN (${exceptTenants.map(() => '?').join(',')})` : '';
+      return db.prepare(`DELETE FROM messaging_delivery_log WHERE at < ?${held}`).run(cutoffIso, ...exceptTenants).changes;
+    },
+    async deleteDeliveryLogForConversation(tenantId, conversationId) {
+      return db.prepare(`DELETE FROM messaging_delivery_log WHERE tenant_id = ? AND conversation_id = ?`).run(tenantId, conversationId).changes;
+    },
+    async deleteDeliveryLogForRelay(tenantId, relayId) {
+      return db.prepare(`DELETE FROM messaging_delivery_log WHERE tenant_id = ? AND relay_id = ?`).run(tenantId, relayId).changes;
     },
 
     async appendMessagingTurn(record) {

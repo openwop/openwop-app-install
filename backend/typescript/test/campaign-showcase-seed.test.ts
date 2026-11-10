@@ -198,11 +198,15 @@ describe('campaign showcase seeder', () => {
     // FU-CODE-3 — the already-seeded RETROFIT leg: strip the SEED-1/SEED-3
     // additions (the state of a tenant seeded before they shipped), then
     // re-seed — the retrofit fills ONLY the missing pieces via the real
-    // update paths, without demoting the confirmed brief or staling the kernel.
+    // update paths. Protected-context edits demote even seeded content and
+    // retain the old kernel as stale until a fresh generation/review.
     await updateBrand(TENANT, brand.id, {
       governance: { lockLevel: brand.governance.lockLevel, allowedEditors: brand.governance.allowedEditors, requireApproval: brand.governance.requireApproval },
     });
-    await updateBrief(TENANT, brief.id, { groundingPolicy: '', competitors: [] }); // both sanitize to "absent"
+    const stripped = await updateBrief(TENANT, brief.id, { groundingPolicy: '', competitors: [] }); // both sanitize to "absent"
+    if (!stripped) throw new Error('Expected retained showcase brief');
+    expect(stripped.status).toBe('draft');
+    expect(stripped.kernelStale).toBe(true);
     const stamped = (await listAssets(TENANT, orgId, { tag: 'subscription-box' }))[0]!;
     await updateAsset(TENANT, orgId, stamped.assetId, {
       marketing: { ...(stamped.marketing ?? {}), personaIds: (stamped.marketing?.personaIds ?? []).filter((id) => id !== homePersona.id) },
@@ -217,17 +221,30 @@ describe('campaign showcase seeder', () => {
     const briefAfter = (await listBriefs(TENANT)).find((b) => b.createdBy === CAMPAIGN_SHOWCASE_SEED_ACTOR)!;
     expect(briefAfter.groundingPolicy).toBe('best-effort');
     expect(briefAfter.competitors).toEqual([...CAMPAIGN_SHOWCASE.brief.competitors]);
-    expect(briefAfter.status).toBe('confirmed'); // neither field is PROTECTED content
-    expect(briefAfter.kernelStale).toBe(false);
+    expect(briefAfter.status).toBe('draft'); // protected retrofit is not approval
+    expect(briefAfter.kernelStale).toBe(true);
+    expect(briefAfter.kernel).toEqual(brief.kernel); // retain history, never manufacture a fresh kernel
+    expect(briefAfter.version).toBe((stripped.version ?? 1) + 1);
+    await expect(finalizeFromBrief(TENANT, briefAfter, CAMPAIGN_SHOWCASE_SEED_ACTOR))
+      .rejects.toMatchObject({ code: 'conflict', details: { reason: 'kernel_stale', briefId: brief.id } });
+    expect((await listCampaigns(TENANT)).find((c) => c.id === campaign.id)).toEqual(campaign);
     const restamped = (await listAssets(TENANT, orgId, { tag: 'subscription-box' }))[0]!;
     expect(restamped.marketing?.personaIds).toContain(homePersona.id);
     expect(restamped.marketing?.product).toBe(brief.productName); // merge, never replace
 
     // Fill-if-absent ONLY: a user-tuned value survives the next retrofit pass.
-    await updateBrief(TENANT, brief.id, { groundingPolicy: 'strict' });
+    const userTuned = await updateBrief(TENANT, brief.id, { groundingPolicy: 'strict', competitors: ['User-authored competitor'] });
+    if (!userTuned) throw new Error('Expected user-tuned showcase brief');
     const retro2 = await seedCampaignShowcase(TENANT, storage);
     expect(retro2.retrofitted).toEqual({ compliancePolicy: 0, groundingPolicy: 0, competitors: 0, assetPersonaStamps: 0 });
-    expect((await listBriefs(TENANT)).find((b) => b.createdBy === CAMPAIGN_SHOWCASE_SEED_ACTOR)!.groundingPolicy).toBe('strict');
+    const afterNoop = (await listBriefs(TENANT)).find((b) => b.createdBy === CAMPAIGN_SHOWCASE_SEED_ACTOR);
+    if (!afterNoop) throw new Error('Expected retained user-tuned brief');
+    expect(afterNoop.groundingPolicy).toBe('strict');
+    expect(afterNoop.competitors).toEqual(['User-authored competitor']);
+    expect(afterNoop.version).toBe(userTuned.version); // no hidden edit/reapproval on a no-op retrofit
+    expect(afterNoop.status).toBe('draft');
+    expect(afterNoop.kernelStale).toBe(true);
+    expect(afterNoop.kernel).toEqual(userTuned.kernel);
 
     // Clears cleanly — only its own entities (incl. the linked perf rows), and
     // scrubs the stamped persona ids off the demo assets (no orphan refs to

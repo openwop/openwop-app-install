@@ -30,7 +30,7 @@ describe('ADR 0915 — feature-declared public paths', () => {
   it.each([
     ['the feature root', '/host/openwop-app/bookai-author-suite'],
     ['the root with a trailing slash', '/host/openwop-app/bookai-author-suite/'],
-    ['another feature\'s namespace', '/host/openwop-app/kicktodo/reader'],
+    ['another feature\'s namespace', '/host/openwop-app/other-feature/reader'],
     ['outside the vendor tree', '/public/reader'],
     ['a wildcard', '/host/openwop-app/bookai-author-suite/*'],
     ['a parent hop', '/host/openwop-app/bookai-author-suite/../admin'],

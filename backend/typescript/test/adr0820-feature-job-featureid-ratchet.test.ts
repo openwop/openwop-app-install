@@ -21,23 +21,21 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { stripComments } from './helpers/stripComments.js';
+import { declaredPathTable } from './helpers/featureRatchetTables.js';
 
 const SRC = join(__dirname, '..', 'src');
 const FEATURES = join(SRC, 'features');
 
 /** file (relative to src/) → [max unstamped calls, reason]. */
-const UNSTAMPED_ALLOWED: Record<string, [number, string]> = {
+const HOST_UNSTAMPED_ALLOWED: Record<string, [number, string]> = {
   'features/assistant/loops.ts': [1, 'assistant is core (no toggle); its loops are gated by their own actor/connection checks'],
   'features/kb/kbService.ts': [1, 'kb is core; the reindex driver deliberately carries NO featureId (see its docblock)'],
   'features/goals/goalsService.ts': [1, 'goals is core (no toggle)'],
   'features/projects/projectScheduleService.ts': [1, 'projects is core (no toggle)'],
   'features/portability/portabilityService.ts': [1, 'an import restores a user schedule verbatim and DISABLED; user schedules carry no featureId'],
-  'features/kicktodo-core/kickbotCoachTurnService.ts': [1, 'KickTodo distribution feature, not in a sellable bundle; its workflows gate per node'],
-  'features/kicktodo-core/agentTools.ts': [1, 'KickTodo distribution feature, not in a sellable bundle'],
-  'features/kicktodo-core/enrollmentService.ts': [1, 'KickTodo distribution feature, not in a sellable bundle'],
-  'features/kicktodo-integrations/calendarSyncService.ts': [1, 'KickTodo distribution feature, not in a sellable bundle'],
-  'features/kicktodo-accountability/sessionService.ts': [1, 'KickTodo distribution feature, not in a sellable bundle'],
 };
+/** ADR 1031 P2 — plus each feature package's rows (`ratchetTables.json`, `adr0820.unstampedAllowed`). */
+const UNSTAMPED_ALLOWED: Record<string, [number, string]> = { ...HOST_UNSTAMPED_ALLOWED, ...declaredPathTable<[number, string]>('adr0820.unstampedAllowed') };
 
 function walk(dir: string): string[] {
   const out: string[] = [];
@@ -83,7 +81,8 @@ describe('ADR 0820 §7 / G6 — feature-registered scheduler jobs carry featureI
   }
 
   it('the scan sees the calls (cannot pass by finding nothing)', () => {
-    expect(totalCalls).toBeGreaterThanOrEqual(15);
+    // 13 after the KickTodo packages left (ADR 1031 P3; was 15).
+    expect(totalCalls).toBeGreaterThanOrEqual(13);
   });
 
   it('the CRM Gmail sync job is stamped', () => {

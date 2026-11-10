@@ -16,7 +16,8 @@
  *    collaborator grant route, and the kind is not offered to them; no agent tool
  *    or node calls the grant mint (a census of every caller);
  *  - each mode has one lane: a signed-in collaborator's grant is refused through
- *    a link, and a link-only collaborator's grant through a session;
+ *    a link, and a link-only collaborator's grant through a session; a link is
+ *    bound to the tenant AND the org it was minted in;
  *  - a pre-P1 approver row is adopted with its id kept, so the approval row's
  *    `client-approver:<id>` still names the same person.
  *
@@ -137,7 +138,7 @@ beforeAll(async () => {
   expect(a.status, a.raw).toBe(201);
   ann = a.body.approver;
   expect((await call(adminCookie, 'PATCH', ops(''), { approvalPolicy: 'client' })).status).toBe(200);
-});
+}, 120_000);
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 describe('ADR 0958 P1 — the approval link is backed by a grant', () => {
@@ -207,6 +208,7 @@ describe('ADR 0958 P1 — the approval link is backed by a grant', () => {
     const { cs } = await inReview('Member grant');
     const r = await call<{ message?: string }>(adminCookie, 'POST', ops(`/collaborators/${ann.approverId}/grants`), { resource: { kind: CHANGE_SET_GRANT_KIND, id: cs.changeSetId }, actions: ['decide'] });
     expect(r.status, r.raw).toBe(400);
+    expect(r.body.message).toMatch(/must be one of/);
     expect(r.body.message).not.toContain(CHANGE_SET_GRANT_KIND);
     expect(await grantFor(cs.changeSetId)).toBeUndefined();
   });
@@ -247,6 +249,8 @@ describe('ADR 0958 P1 — the approval link is backed by a grant', () => {
     // And the link names the tenant and org it was minted in, never another.
     await expect(checkGrantLink({ tenantId: TENANT, orgId: 'org-elsewhere', resourceId: `${cs.changeSetId}:${annGrant.grantId}`, action: 'view', target: { kind: CHANGE_SET_GRANT_KIND, id: cs.changeSetId } }))
       .rejects.toMatchObject({ httpStatus: 404 });
+    await expect(checkGrantLink({ tenantId: 'tenant-elsewhere', orgId: orgA, resourceId: `${cs.changeSetId}:${annGrant.grantId}`, action: 'view', target: { kind: CHANGE_SET_GRANT_KIND, id: cs.changeSetId } }))
+      .rejects.toMatchObject({ httpStatus: 404 });
   });
 
   it('a pre-P1 approver row is adopted with its id, so the approval row names the same person', async () => {
@@ -258,10 +262,15 @@ describe('ADR 0958 P1 — the approval link is backed by a grant', () => {
     const dan = (await listApprovers(TENANT, orgA)).find((a) => a.approverId === approverId);
     expect(dan).toMatchObject({ email: 'dan@client.test', status: 'active', createdAt: at });
     expect(await legacy.get(`${TENANT}::${orgA}::${approverId}`), 'the legacy row is gone once adopted').toBeNull();
-    const { cs, approvalId } = await inReview('Adopted');
-    const r = await call<{ links: Array<{ approverId: string; url: string }> }>(adminCookie, 'POST', ops(`/change-sets/${cs.changeSetId}/approval-links`));
-    const token = tokenOf(r.body.links.find((l) => l.approverId === approverId)!.url);
-    expect((await decide(token, { action: 'approve', expectedChangeSetHash: cs.hash })).status).toBe(200);
-    expect((await getApproval(approvalId))?.decidedBy).toBe(`client-approver:${approverId}`);
+    try {
+      const { cs, approvalId } = await inReview('Adopted');
+      const r = await call<{ links: Array<{ approverId: string; url: string }> }>(adminCookie, 'POST', ops(`/change-sets/${cs.changeSetId}/approval-links`));
+      const token = tokenOf(r.body.links.find((l) => l.approverId === approverId)!.url);
+      expect((await decide(token, { action: 'approve', expectedChangeSetHash: cs.hash })).status).toBe(200);
+      expect((await getApproval(approvalId))?.decidedBy).toBe(`client-approver:${approverId}`);
+    } finally {
+      // Ann must stay the client's only active approver for the panel case, in any order.
+      expect((await call(adminCookie, 'DELETE', ops(`/approvers/${approverId}`))).status).toBe(200);
+    }
   });
 });

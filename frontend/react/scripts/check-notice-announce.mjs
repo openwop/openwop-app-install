@@ -25,6 +25,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { LEGACY_SILENT_READ_SITES } from './notice-announce-0598-cohort.mjs';
+import { declaredRows } from './featureGateDeclarations.mjs';
 import { readGateBaseline } from './gateBaseline.mjs';
 
 // Scan root. Overridable ONLY so the gate's own tests can point the REAL
@@ -40,13 +41,12 @@ const BASELINE = readGateBaseline('check-notice-announce', 'OPENWOP_SILENT_SUCCE
  * Success notices that must STAY silent, each with why. The reason has to be
  * about the STATE that renders it, never about the copy.
  */
-const EXPECTED_SILENT = [
+const HOST_EXPECTED_SILENT = [
   // [file, rule, reason] — the RULE is part of the key. A file exempted for one
   // rule must not silently inherit the exemption for the other; that is how a
   // second rule quietly stops enforcing anything.
   ['a11y/A11yIssuesPanel.tsx', 'success', 'the empty-issues state display, not the act of checking'],
   ['agents/AgentConnectionStatusPanel.tsx', 'success', '`allConfigured` is standing status, not an outcome'],
-  ['features/kicktodo/ProgressPage.tsx', 'success', '`completed` celebration re-renders on every visit'],
   ['settings/FreeTierSettingsPage.tsx', 'success', 'the "Serving: …" banner describes the current setting'],
   ['settings/HeartbeatSettingsPage.tsx', 'success', 'a banner describing current settings'],
   ['workforces/WorkforcesGalleryPage.tsx', 'success', '`allClear` is standing status'],
@@ -79,6 +79,9 @@ const EXPECTED_SILENT = [
   // one announcement for the same reason.
   ['settings/EventBindingsPage.tsx', 'failed-read', 'catalogFailed', 'co-occurs with workflowsFailed, which already announces — the polite slot holds one string'],
 ];
+/** ADR 1031 P2 — plus every feature package's own `noticeAnnounce.expectedSilent`
+ *  rows (`<feature>/gateDeclarations.json`). Same staleness check over the union. */
+const EXPECTED_SILENT = [...HOST_EXPECTED_SILENT, ...declaredRows(SRC, 'noticeAnnounce', 'expectedSilent')];
 // Rule-1 (success) exemptions stay FILE-keyed — a page has at most one success
 // notice in practice. Rule-2 (failed-read) exemptions are keyed by file + the
 // FLAG the notice is gated on, because a page can hold several failed reads and
@@ -609,7 +612,10 @@ const NEW_BASELINE = readGateBaseline(
   // 127 → 126 (2026-11-01): CP71UX-12 (feature loop round 2 row 71, ADR 1022) —
   // the campaign-connectors page's top `error` Notice now passes `announce`.
   // Row deleted.
-  scanningRealTree ? 126 : 0,
+  // 126 → 124 (2026-11-06): creative private-link recovery (ADR 0522) now
+  // announces deepLinkError; delete its exact cohort row and tighten to the
+  // measured 124 (one existing unit of slack is removed as well).
+  scanningRealTree ? 124 : 0,
 );
 /** (file, flag) -> the recorded ceiling. */
 const NEW_COHORT = new Map(LEGACY_SILENT_READ_SITES.map(([f, flag, n]) => [`${f}${SITE_SEP}${flag}`, n]));

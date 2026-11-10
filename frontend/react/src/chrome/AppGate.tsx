@@ -1,5 +1,5 @@
 import { Button } from '../ui/Button.js';
-import { FormEvent, useMemo, useState } from 'react';
+import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { brand } from '../brand/brand.js';
 import { SignInButton } from '../auth/SignInButton.js';
@@ -99,6 +99,10 @@ function PasswordGate({ children }: { children: React.ReactNode }): JSX.Element 
 function SignInGate({ children }: { children: React.ReactNode }): JSX.Element {
   const { t } = useTranslation('chrome');
   const { user, loading, isConfigured } = useAuth();
+  // The visitor sees plain copy; the operator detail goes to the console.
+  useEffect(() => {
+    if (!loading && !isConfigured) console.warn('[app-gate] appGate mode is "sign-in" but no Firebase Auth config (VITE_FIREBASE_*) is set for this build.');
+  }, [loading, isConfigured]);
   if (user) return <>{children}</>;
   return (
     <GateShell

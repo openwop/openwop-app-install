@@ -56,8 +56,10 @@ describe('ADR 0724 §D0 — the class gate\'s REAL population, pinned after a fu
 
   it('R1: the population is non-trivial (a boot that registers nothing would make every pin below vacuous)', () => {
     // MEASURED 211 live tools at 2404797bf (the census file's four tables sum to the same
-    // exact set). Floor = measured − 2, so a boot that drops a handful of registrations reds.
-    expect(ids.length).toBeGreaterThanOrEqual(209);
+    // exact set); 205 once KickTodo's packages left for the adopter repo (ADR 1031 P3; an
+    // adopter's tree registers more, which this floor admits). Floor = measured − 2, so a
+    // boot that drops a handful of registrations reds.
+    expect(ids.length).toBeGreaterThanOrEqual(203);
   });
   it('R2: every registered agent tool id is `openwop:`-prefixed — the namespace the egress classifier does NOT key on', () => {
     expect(ids.filter((i) => !i.startsWith('openwop:'))).toEqual([]);

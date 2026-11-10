@@ -15,6 +15,9 @@
  *    (`host:org:manage`) on the client org: its owner may onboard; an editor, an admin,
  *    or an agency owner who is not a member there is 403; the workspace root gets
  *    `400 not_a_client_org`.
+ * DOUBLE GUARDS: the root refusal is the route's check and `sellerRows`'s (same
+ * code); the operator import refuses at its own check and at the bind conflict
+ * (same reason).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -33,6 +36,7 @@ import { listPayouts } from '../src/features/commerce-connect/orders.js';
 import { importSellers, reconcileSellerBindings } from '../src/features/commerce-connect/adminOps.js';
 import { startOnboarding, syncSellerFromStripe, getSeller } from '../src/features/commerce-connect/onboarding.js';
 import { handleConnectEvent } from '../src/features/commerce-connect/webhookHandlers.js';
+import type { ConnectStripeEvent } from '../src/features/billing/connectEventHook.js';
 
 let BASE = ''; let server: http.Server; let n = 0;
 let stripe: http.Server;
@@ -49,7 +53,7 @@ beforeAll(async () => {
     const d = getToggleDefault(id);
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
   }
-});
+}, 120_000);
 beforeAll(async () => {
   // A mock Stripe (the commerce-connect-live-lane precedent): each account create
   // mints a fresh id, slowly enough that two concurrent onboards overlap.
@@ -119,10 +123,13 @@ describe('ADR 0948 P0b — a client org settles only through its own seller', ()
     expect(await resolveStorefrontSettlement(T, T)).toMatchObject({ kind: 'connect', destinationAccountId: agencyAcct });
     expect(await resolveStorefrontSettlement(T, client)).toEqual({ kind: 'demo', reason: 'client_seller_required' });
 
-    const clientAcct = `acct_client_${n++}`;
-    await clientSellers.put(ready({ tenantId: T, orgId: client, stripeAccountId: clientAcct, onboardingState: 'pending', chargesEnabled: false }));
+    // Half-onboarded on a BOUND account: only the seller's own state can refuse it.
+    const halfAcct = `acct_half_${n++}`;
+    await bindSellerAccount(T, halfAcct, client);
+    await clientSellers.put(ready({ tenantId: T, orgId: client, stripeAccountId: halfAcct, onboardingState: 'pending', chargesEnabled: false }));
     expect(await resolveStorefrontSettlement(T, client)).toEqual({ kind: 'demo', reason: 'connect_incomplete' });
 
+    const clientAcct = `acct_client_${n++}`;
     await clientSellers.put(ready({ tenantId: T, orgId: client, stripeAccountId: clientAcct }));
     // Ready but not yet bound: the binding is what attributes the account's
     // webhooks, so an unbound account is never a charge destination.
@@ -155,8 +162,8 @@ describe('ADR 0948 P0b — a client org settles only through its own seller', ()
     await clientSellers.put(ready({ tenantId: T, orgId: client, stripeAccountId: clientAcct, onboardingState: 'pending', chargesEnabled: false, capabilities: [] }));
     await bindSellerAccount(T, clientAcct, client);
 
-    const ev = (id: string, account: string, type: string, object: Record<string, unknown>) =>
-      ({ event: { id, type, account, data: { object } } }) as Parameters<typeof handleConnectEvent>[0];
+    const ev = (id: string, account: string, type: string, object: Record<string, unknown>): { event: ConnectStripeEvent } =>
+      ({ event: { id, type, account, data: { object } } });
     expect(await handleConnectEvent(ev(`evt_${n++}`, clientAcct, 'account.updated', { charges_enabled: true, payouts_enabled: true, country: 'US', capabilities: { card_payments: 'active', transfers: 'active' } }))).toEqual({ handled: true });
     expect(await getSeller(T, client)).toMatchObject({ onboardingState: 'enabled', chargesEnabled: true });
     expect(await getSeller(T)).toMatchObject({ stripeAccountId: agencyAcct, onboardingState: 'enabled' });
@@ -192,7 +199,7 @@ describe('ADR 0948 P0b — the live lane and the tenant-lane readers', () => {
     const urls = { returnUrl: 'https://x/r', refreshUrl: 'https://x/f' };
     const both = await Promise.allSettled([startOnboarding(T, urls, {}, client), startOnboarding(T, urls, {}, client)]);
     expect(both.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
-    expect(both.filter((r) => r.status === 'rejected').map((r) => (r as PromiseRejectedResult).reason.httpStatus)).toEqual([409]);
+    expect(both.find((r) => r.status === 'rejected')).toMatchObject({ reason: { httpStatus: 409 } });
     const created = stripeCalls.filter((c) => c.path.endsWith('/accounts'));
     expect(created).toHaveLength(1);
     expect(decodeURIComponent(created[0]!.body)).toContain(`metadata[orgId]=${client}`);
@@ -250,11 +257,11 @@ async function getAs(cookie: string, path: string): Promise<{ status: number; bo
   const res = await fetch(`${BASE}${path}`, { headers: { cookie } });
   return { status: res.status, body: (await res.json().catch(() => ({}))) as Record<string, unknown> };
 }
-async function postAs(cookie: string, path: string): Promise<{ status: number; code?: string }> {
+async function postAs(cookie: string, path: string): Promise<{ status: number; error?: string; code?: string }> {
   const res = await fetch(`${BASE}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', cookie, origin: BASE }, body: '{}' });
   const text = await res.text();
-  const body: { details?: { code?: string } } = text ? JSON.parse(text) : {};
-  return { status: res.status, code: body.details?.code };
+  const body: { error?: string; details?: { code?: string } } = text ? JSON.parse(text) : {};
+  return { status: res.status, ...(body.error ? { error: body.error } : {}), ...(body.details?.code ? { code: body.details.code } : {}) };
 }
 
 describe('ADR 0948 P0b — the client-seller routes', () => {
@@ -273,7 +280,7 @@ describe('ADR 0948 P0b — the client-seller routes', () => {
     await createMember({ tenantId: T, orgId: client, subject: editorUser, displayName: 'Editor', roles: ['editor'] });
 
     const onboard = (org: string): string => `/host/openwop-app/commerce-connect/orgs/${encodeURIComponent(org)}/seller/onboard`;
-    expect((await postAs(editorCookie, onboard(client))).status).toBe(403);
+    expect(await postAs(editorCookie, onboard(client))).toMatchObject({ status: 403, error: 'forbidden_scope' });
     const ok = await postAs(adminCookie, onboard(client));
     expect(ok.status, JSON.stringify(ok)).toBe(201);
     expect(await getSeller(T, client)).toMatchObject({ orgId: client, mode: 'demo' });
@@ -285,7 +292,7 @@ describe('ADR 0948 P0b — the client-seller routes', () => {
     const clientAdmin = (await upsertFromPrincipal({ tenantId: T, principalId: clientAdminP, source: 'oidc' })).userId;
     await createMember({ tenantId: T, orgId: T, subject: clientAdmin, displayName: 'Viewer', roles: ['viewer'] });
     await createMember({ tenantId: T, orgId: client, subject: clientAdmin, displayName: 'Client admin', roles: ['admin'] });
-    expect((await postAs(clientAdminCookie, onboard(client))).status).toBe(403);
+    expect(await postAs(clientAdminCookie, onboard(client))).toMatchObject({ status: 403, error: 'forbidden_scope' });
 
     // The agency owner holds no authority INSIDE a client org unless it is a member
     // there (ADR 0815 D1b: an org-scoped check reads that org's membership). This
@@ -294,9 +301,9 @@ describe('ADR 0948 P0b — the client-seller routes', () => {
     const rootCookie = await session(T, owner);
     const rootUser = (await upsertFromPrincipal({ tenantId: T, principalId: owner, source: 'oidc' })).userId;
     await createMember({ tenantId: T, orgId: T, subject: rootUser, displayName: 'Agency owner', roles: ['owner'] });
-    expect((await postAs(rootCookie, onboard(client))).status).toBe(403);
+    expect(await postAs(rootCookie, onboard(client))).toMatchObject({ status: 403, error: 'forbidden_scope' });
     // The workspace root uses the tenant routes; the client route refuses it.
-    expect(await postAs(rootCookie, onboard(T))).toEqual({ status: 400, code: 'not_a_client_org' });
+    expect(await postAs(rootCookie, onboard(T))).toMatchObject({ status: 400, code: 'not_a_client_org' });
 
     // The read: the client's owner sees the client's seller, never the agency's.
     const read = await getAs(adminCookie, `/host/openwop-app/commerce-connect/orgs/${encodeURIComponent(client)}/seller`);
@@ -309,9 +316,10 @@ describe('ADR 0948 P0b — the client-seller routes', () => {
     // Readiness tells the page who can act: the owner may onboard, the editor may not.
     const payments = (cookie: string) => getAs(cookie, `/host/openwop-app/commerce/orgs/${encodeURIComponent(client)}/payments`);
     await setSecret('billing:stripe-key', 'sk_test_mock');
-    expect((await payments(adminCookie)).body).toMatchObject({ clientOrg: true, canOnboardClient: true });
-    expect((await payments(editorCookie)).body).toMatchObject({ clientOrg: true, canOnboardClient: false });
-    await removeSecret('billing:stripe-key');
+    try {
+      expect((await payments(adminCookie)).body).toMatchObject({ clientOrg: true, canOnboardClient: true });
+      expect((await payments(editorCookie)).body).toMatchObject({ clientOrg: true, canOnboardClient: false });
+    } finally { await removeSecret('billing:stripe-key'); }
   });
 });
 
@@ -340,18 +348,17 @@ describe('ADR 0948 P0b — integration hardening (charge only on a confirmed bin
     await bindSellerAccount(T, clientAcct, client);
     expect(await resolveStorefrontSettlement(T, client)).toMatchObject({ kind: 'connect', destinationAccountId: clientAcct });
 
-    const ev = (type: string, object: Record<string, unknown>) =>
-      ({ event: { id: `evt_da_${n++}`, type, account: clientAcct, data: { object } } }) as Parameters<typeof handleConnectEvent>[0];
+    const ev = (type: string, object: Record<string, unknown>): { event: ConnectStripeEvent } =>
+      ({ event: { id: `evt_da_${n++}`, type, account: clientAcct, data: { object } } });
     expect(await handleConnectEvent(ev('account.application.deauthorized', {}))).toEqual({ handled: true });
     expect(await getSeller(T, client)).toMatchObject({ onboardingState: 'deauthorized', chargesEnabled: false });
-    const after = await resolveStorefrontSettlement(T, client);
-    expect(after.kind, 'never the agency account, never the platform').toBe('demo');
+    expect(await resolveStorefrontSettlement(T, client), 'never the agency account, never the platform').toEqual({ kind: 'demo', reason: 'connect_incomplete' });
     expect(await resolveStorefrontSettlement(T, T)).toMatchObject({ kind: 'connect', destinationAccountId: agencyAcct });
 
     // A later account.updated that disables charges keeps it demo too.
     await clientSellers.put(ready({ tenantId: T, orgId: client, stripeAccountId: clientAcct }));
     await handleConnectEvent(ev('account.updated', { charges_enabled: false, payouts_enabled: false, country: 'US', capabilities: { card_payments: 'inactive', transfers: 'inactive' } }));
-    expect((await resolveStorefrontSettlement(T, client)).kind).toBe('demo');
+    expect(await resolveStorefrontSettlement(T, client)).toEqual({ kind: 'demo', reason: 'connect_incomplete' });
   });
 
   it('an anon: tenant can never onboard a client seller, and its client lane is demo/anon', async () => {

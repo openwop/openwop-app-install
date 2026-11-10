@@ -6,6 +6,7 @@
 import type { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { isInternalHref } from '../../lib/internalHref.js';
+import { ArrowRightIcon } from '../../ui/icons/index.js';
 
 /** An http(s)/mailto URL is safe as an external link; anything else is not. */
 export const isSafeHref = (url: string): boolean => /^(https?:|mailto:)/i.test(url.trim());
@@ -21,7 +22,11 @@ export function CtaLink({ label, url, primary, ariaLabel, icon }: { label: strin
   if (!label) return null;
   const cls = `fp-btn ${primary ? 'fp-btn--primary' : 'fp-btn--ghost'}`;
   // ADR 0920 D3 — an optional leading glyph (the hero's play icon); decorative.
-  const body = icon ? <><span className="fp-btn__icon" aria-hidden="true">{icon}</span>{label}</> : label;
+  // A primary call-to-action without one carries a trailing arrow (the site
+  // design's primary button); decorative too, so the accessible name stays the label.
+  const body = icon
+    ? <><span className="fp-btn__icon" aria-hidden="true">{icon}</span>{label}</>
+    : primary ? <>{label}<span className="fp-btn__arrow" aria-hidden="true"><ArrowRightIcon size={16} /></span></> : label;
   if (isInternal(url)) return <Link className={cls} to={url} aria-label={ariaLabel}>{body}</Link>;
   if (isFragment(url)) return <a className={cls} href={url.trim()} aria-label={ariaLabel}>{body}</a>;
   if (url && isSafeHref(url)) return <a className={cls} href={url} rel="noopener noreferrer" aria-label={ariaLabel}>{body}</a>;

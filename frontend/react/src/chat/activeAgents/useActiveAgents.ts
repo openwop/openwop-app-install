@@ -28,7 +28,7 @@
  */
 
 import { canonicalAgentId } from '../agentIdAliases.js';
-import { useCallback, useMemo, type Dispatch, type SetStateAction } from 'react';
+import { useCallback, useEffect, useMemo, useRef, type Dispatch, type SetStateAction } from 'react';
 import type { ChatSession } from '../types.js';
 import type { AgentMentionEntry } from '../lib/agentMentions.js';
 import {
@@ -53,6 +53,10 @@ export interface UseActiveAgentsResult {
    *  Resets the routing voice to the default assistant; membership is the
    *  server's, the routing choice is the user's. */
   setLineup: (rows: readonly ActiveAgentRow[]) => void;
+  /** Initial participant hydration for THIS session only. Merges membership without
+   *  stealing the current voice/local additions or resurrecting a local removal.
+   *  Unlike setLineup, this is not a wholesale conversation selection. */
+  restoreLineup: (sessionId: string, rows: readonly ActiveAgentRow[]) => void;
   /** Used by the panel's row-click. */
   switchTo: (agentId: string) => void;
   /** Used by the panel's `×` button. */
@@ -68,6 +72,14 @@ export function useActiveAgents(
   session: ChatSession,
   setSession: Dispatch<SetStateAction<ChatSession>>,
 ): UseActiveAgentsResult {
+  // Local intent while the initial participants/catalog read is outstanding.
+  // Not persisted membership and never a second catalog; reset on session change.
+  const removedBeforeRestore = useRef({ sessionId: session.id, ids: new Set<string>() });
+  useEffect(() => {
+    if (removedBeforeRestore.current.sessionId !== session.id) {
+      removedBeforeRestore.current = { sessionId: session.id, ids: new Set<string>() };
+    }
+  }, [session.id]);
   const lineup = useMemo<readonly ActiveAgentRow[]>(() => {
     // ADR 0763 — a lineup saved (or derived) before the agent-id rename carries
     // legacy ids; read it in canonical form so every comparison below agrees.
@@ -79,6 +91,8 @@ export function useActiveAgents(
 
   const activateAgent = useCallback((rawEntry: AgentMentionEntry): string => {
     const entry = { ...rawEntry, agentId: canonicalAgentId(rawEntry.agentId) };
+    // A deliberate re-add supersedes an earlier local removal.
+    if (removedBeforeRestore.current.sessionId === session.id) removedBeforeRestore.current.ids.delete(entry.agentId);
     let resolvedAgentId = entry.agentId;
     setSession((s) => {
       const existing = canonicalRows(s.activeAgents?.lineup ?? []);
@@ -105,13 +119,36 @@ export function useActiveAgents(
       };
     });
     return resolvedAgentId;
-  }, [setSession]);
+  }, [setSession, session.id]);
 
   const setLineup = useCallback((rows: readonly ActiveAgentRow[]): void => {
     setSession((s) => ({
       ...s,
       activeAgents: { lineup: canonicalRows(rows), currentAgentId: null },
     }));
+  }, [setSession]);
+
+  const restoreLineup = useCallback((expectedSessionId: string, rows: readonly ActiveAgentRow[]): void => {
+    // Snapshot event-owned intent before the pure updater; no ref/storage writes
+    // inside an updater React may replay. Late work cannot hydrate another tab.
+    const removed = removedBeforeRestore.current.sessionId === expectedSessionId
+      ? new Set(removedBeforeRestore.current.ids) : new Set<string>();
+    const restored = canonicalRows(rows);
+    setSession((s) => {
+      if (s.id !== expectedSessionId) return s;
+      const existing = canonicalRows(s.activeAgents?.lineup ?? []);
+      const seen = new Set(existing.map((r) => r.agentId));
+      const additions = restored.filter((r) => {
+        if (seen.has(r.agentId) || removed.has(r.agentId) || r.agentId === DEFAULT_ASSISTANT_ID) return false;
+        seen.add(r.agentId);
+        return true;
+      });
+      if (additions.length === 0) return s;
+      return { ...s, activeAgents: {
+        lineup: [...existing, ...additions],
+        currentAgentId: s.activeAgents?.currentAgentId ?? null,
+      } };
+    });
   }, [setSession]);
 
   const switchTo = useCallback((rawAgentId: string): void => {
@@ -139,6 +176,10 @@ export function useActiveAgents(
   const remove = useCallback((rawAgentId: string): void => {
     const agentId = canonicalAgentId(rawAgentId);
     if (agentId === DEFAULT_ASSISTANT_ID) return; // default is sticky
+    if (removedBeforeRestore.current.sessionId !== session.id) {
+      removedBeforeRestore.current = { sessionId: session.id, ids: new Set<string>() };
+    }
+    removedBeforeRestore.current.ids.add(agentId);
     setSession((s) => {
       const existing = canonicalRows(s.activeAgents?.lineup ?? []);
       const filtered = existing.filter((it) => it.agentId !== agentId);
@@ -152,7 +193,7 @@ export function useActiveAgents(
         },
       };
     });
-  }, [setSession]);
+  }, [setSession, session.id]);
 
-  return { lineup, currentAgentId, activateAgent, setLineup, switchTo, remove };
+  return { lineup, currentAgentId, activateAgent, setLineup, restoreLineup, switchTo, remove };
 }

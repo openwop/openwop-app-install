@@ -12,7 +12,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import i18next from 'i18next';
-import { render, cleanup, screen, fireEvent, act } from '@testing-library/react';
+import { render, cleanup, screen, fireEvent, act, within } from '@testing-library/react';
 
 const h = vi.hoisted(() => ({ listDefinitions: vi.fn(), listReports: vi.fn(), createDefinition: vi.fn(), computeReport: vi.fn(), sendReportForReview: vi.fn() }));
 vi.mock('../reportsClient.js', async (orig) => ({ ...(await orig<Record<string, unknown>>()), ...h }));
@@ -112,6 +112,24 @@ describe('ClientReportsSection', () => {
     expect(await screen.findByText('Reports could not be loaded. Nothing has changed.')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     expect(await screen.findByText(/No reports yet/)).toBeTruthy();
+  });
+
+  it.each([0, 2])('labels source revenue-reporting count %s without confusing measured zero or leaking its internal key', async (count) => {
+    h.listDefinitions.mockResolvedValue([DEF]);
+    h.listReports.mockResolvedValue([{ ...REPORT, snapshot: { ...REPORT.snapshot, metrics: {
+      ...REPORT.snapshot.metrics,
+      'kpi.reportedRevenueRecordCount': { value: count, unit: 'count', previous: null, lineage },
+    } } }]);
+    render(<ClientReportsSection orgId="o1" />);
+    fireEvent.click(await screen.findByRole('button', { name: /^Computed/ }));
+    const table = await screen.findByRole('table', { name: 'Figures in Monthly results' });
+    const header = within(table).getByRole('rowheader', { name: `${label('reportsSource_kpi')}: ${label('reportsMetric_reportedRevenueRecordCount')}` });
+    const row = header.closest('tr');
+    if (!row) throw new Error('reported count row missing');
+    expect(within(row).getByRole('cell', { name: String(count) })).toBeTruthy();
+    expect(row.textContent).not.toContain('reportedRevenueRecordCount');
+    expect(row.textContent).not.toContain(label('reportsNotAvailable'));
+    expect(table.textContent).toContain('$200.50');
   });
 
   it('shows each figure with its source; a missing figure is "Not available"', async () => {

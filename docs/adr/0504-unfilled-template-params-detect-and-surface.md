@@ -72,6 +72,16 @@ node with a required value simply absent and fail mid-run naming an internal nod
 
 **Detect and surface. Do not refuse.**
 
+> **Correction (2026-11-05, Campaign Studio acceptance).** Whole-value token
+> findings now distinguish required parameters from intentionally omitted optional
+> inputs. Daily Ad-Metrics Sync's optional `syncScope` uses connector settings when
+> absent; recording it as unresolved caused the UI to predict failure even though
+> the observed run completed correctly with `no_dispatches`. Missing required
+> whole-value inputs (including nested fields) and undeclared references still
+> record findings. Defaults, deferred mode, embedded-context detection and run-start permissiveness are
+> unchanged. Existing saved findings are historical metadata and remain readable;
+> this corrects newly expanded templates without rewriting saved definitions.
+
 1. `expandChain` records every whole-value `{{params.NAME}}` token whose param has
    no value, as `metadata.unresolvedParams: Array<{nodeId, key, param}>`. Recursive
    through objects and arrays, so it has no blind spot of its own. Deferred mode is

@@ -54,6 +54,30 @@ color-alone), weighted-pipeline table, funnel bars, aging list linking to deal p
 and a snapshot trend as width-percent bars. Feature-local `crm-*` CSS classes; no
 chart library (bundle budget is at 177.8/178 kB gzip).
 
+#### Correction — org/pipeline report-read ownership (2026-11-07; CRM-REPORT-ORG-PIPELINE-1)
+
+The Reports tab's reset effect did not isolate its catalog from a new org render:
+normal Organization changes could issue the new org with the previous org's
+pipeline. The server correctly refused that pair (404). An unowned late rejection
+could then leave the failed-read card alongside the correct report's later 200.
+This was a frontend lifecycle defect, not a tenant-authorization exception.
+
+The feature-local report body now has an org-keyed lifetime. Catalog/report
+requests additionally own monotonic sequences, invalidated by cleanup and by
+selection/Retry before state updates. Only the current request may publish metrics
+or failure. The report waits for the current lifetime's resolved catalog; a
+successful empty catalog retains the existing default-report request semantics.
+Current success clears its own failure; current failure retains the announced
+shared card and ONE Retry rereads both catalog and report, preserving a still-valid
+selected pipeline. Org changes discard old metrics and selection immediately.
+StrictMode cleanup invalidates requests without disabling the following setup.
+
+Deferred actual-component regression cases cover mixed-scope admission, late
+success/failure, A–B–A, pipeline and Retry ordering, and StrictMode liveness. These
+new cases are authored, **NOT RUN** at the source-review checkpoint. Existing
+assertions remain intact. Backend authorization, endpoint/transport, contact
+rolodex scope, snapshot behavior, Deals and shared org selection are unchanged.
+
 ### 5. CSV export (C7-export)
 
 `GET /crm/orgs/:orgId/export?entityType=companies|deals|tasks|activities` and tenant

@@ -2,12 +2,12 @@
  * Destination-sync workflow surface (ADR 0266 / CDP-D) — `ctx.features['destination-sync']`.
  * Exposes the pure CDC+field-map `prepare` verb so a workflow can produce the
  * destination payloads and then EGRESS them through the existing SSRF-guarded
- * `core.openwop.http.fetch` node (ADR 0262 ruling #3 — no bespoke egress). Advances
- * the watermark as a side effect so a re-run sends only changed records.
+ * `core.openwop.http.fetch` node (ADR 0262 ruling #3 — no bespoke egress). It does NOT
+ * advance the watermark; `advance` does, after a successful egress.
  */
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import type { FeatureSurface } from '../../host/featureSurfaces.js';
-import { getDestinationSync, prepareSyncBatch, advanceCursor, buildOnwardEnvelopes, purposePropagationEnabled } from './destinationSyncService.js';
+import { getDestinationSync, prepareSyncBatch, advanceCursor, buildOnwardEnvelopes, purposePropagationEnabled, normalizePeerIngestUrl } from './destinationSyncService.js';
 import { warehouseLoad, warehouseLoadDeps } from './warehouseLoadService.js';
 
 export function buildDestinationSyncSurface(scope: BundleScope): FeatureSurface {
@@ -26,15 +26,24 @@ export function buildDestinationSyncSurface(scope: BundleScope): FeatureSurface 
       const records = Array.isArray(args.records) ? (args.records as Record<string, unknown>[]) : [];
       const sync = await getDestinationSync(tenantId, syncId);
       if (!sync) return { error: 'sync_not_found', payloads: [], count: 0 };
-      const batch = prepareSyncBatch(sync, records);
+      const batch = await prepareSyncBatch(sync, records);
+      // No `dropped` here (grade-code L2): this output is recorded on the run, readable at
+      // workspace:read beside the run's records, so a count that includes erased subjects
+      // would tell a reader which of them were erased.
       return { payloads: batch.payloads, count: batch.count, ...(batch.nextCursor !== undefined ? { nextCursor: batch.nextCursor } : {}) };
     },
     /**
      * ADR 0289 / RFC 0128 §3 — prepare the OpenWOP envelopes an `openwop-host` sync forwards
      * to a peer host's trigger-bridge ingest, each carrying the re-emitted `permittedPurposes`
      * (⊆ received, never-widening; `[]` fail-closed dropped). The workflow then egresses each
-     * envelope through the sanctioned `core.openwop.http.fetch` node to `peerIngestUrl`
-     * (auth via `connectionId`) — no bespoke egress (ADR 0262 ruling #3) — then calls `advance`.
+     * envelope through the sanctioned `core.openwop.http.fetch` node to `peerIngestUrl` — no
+     * bespoke egress (ADR 0262 ruling #3) — then calls `advance`. (`connectionId` is echoed,
+     * but nothing yet injects it into the peer POST: `CDP2WF-18`.)
+     *
+     * ADR 1024 D2.5 — the http node's URL is a run input (config cannot read an output
+     * port), so the caller passes the `peerIngestUrl` it will POST to and this verb refuses
+     * `destination_mismatch` unless it is the stored sync's URL. A run cannot point the
+     * egress anywhere the sync's owner did not configure.
      * Flag-gated: honest-off until RFC 0128 is witnessed (the advert/onward promise stays dark).
      */
     prepareOnward: async (args) => {
@@ -44,10 +53,13 @@ export function buildDestinationSyncSurface(scope: BundleScope): FeatureSurface 
       const dedupField = typeof args.dedupField === 'string' ? args.dedupField : undefined;
       const sync = await getDestinationSync(tenantId, syncId);
       if (!sync) return { error: 'sync_not_found', envelopes: [], count: 0 };
-      if (sync.destinationKind !== 'openwop-host' || !sync.peerIngestUrl) {
-        return { error: 'not_openwop_host', envelopes: [], count: 0 };
+      if (sync.destinationKind !== 'openwop-host') return { error: 'not_openwop_host', envelopes: [], count: 0 };
+      if (!sync.peerIngestUrl) return { error: 'not_configured', envelopes: [], count: 0 };
+      const requested = typeof args.peerIngestUrl === 'string' ? normalizePeerIngestUrl(args.peerIngestUrl) : null;
+      if (requested === null || requested !== normalizePeerIngestUrl(sync.peerIngestUrl)) {
+        return { error: 'destination_mismatch', envelopes: [], count: 0 };
       }
-      const batch = buildOnwardEnvelopes(sync, records, dedupField ? { dedupField } : undefined);
+      const batch = await buildOnwardEnvelopes(sync, records, dedupField ? { dedupField } : undefined);
       return {
         envelopes: batch.envelopes,
         peerIngestUrl: sync.peerIngestUrl,

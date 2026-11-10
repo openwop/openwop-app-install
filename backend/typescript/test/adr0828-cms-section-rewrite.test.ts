@@ -78,6 +78,14 @@ describe('ADR 0828 — rewrite one section', () => {
     expect(dispatch).toHaveBeenCalledTimes(1);
   });
 
+  it('never changes a list item’s state (ADR 1038 D8)', async () => {
+    const flow = { layout: 'flow', columns: [{ title: 'Brief', text: 'say it', state: 'waiting' }] };
+    mockResolve.mockResolvedValue(vi.fn(async () => JSON.stringify({ ...flow, columns: [{ title: 'Brief', text: 'Say what you need.', state: 'done' }] })));
+    const r = await call('POST', path(), { sectionType: 'columns', data: flow, action: 'improve' });
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(r.body?.data).toMatchObject({ columns: [{ text: 'Say what you need.', state: 'waiting' }] });
+  });
+
   it('unusable output gets one repair, then a typed 502', async () => {
     const dispatch = vi.fn(async () => 'Sure! Here is a better version.');
     mockResolve.mockResolvedValue(dispatch);

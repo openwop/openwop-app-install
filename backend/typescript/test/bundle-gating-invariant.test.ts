@@ -59,6 +59,7 @@ import { detectRequestSubjectSelfGate } from './helpers/detectSelfGate.js';
 import { join } from 'node:path';
 import { bundleForPrice } from '../src/features/billing/billingService.js';
 import { knownBundleIds } from '../src/host/featureBundles.js';
+import { declaredIdTable } from './helpers/featureRatchetTables.js';
 
 const REPO_ROOT = join(import.meta.dirname, '../../..');
 const FEATURES_DIR = join(import.meta.dirname, '../src/features');
@@ -182,7 +183,9 @@ describe('ADR 0419 — priced ⟹ gated (structural)', () => {
     // RBAC-gated feature. The request-subject check remains the entitlement-specific
     // guard; between the two, a feature that gates on RBAC but skips the choke is the
     // known residual, covered by the behavioural test, not this tripwire.
-    const GATE_HELPERS = /requireFeatureEnabled|authorizeOrgScope|requireEntitledFeature|requireOrgScope|requireTenantScope|requireKicktodoManage|resolveOne|resolveToggle/;
+    // ADR 1031 P2 — plus each feature package's own gate helpers (`ratchetTables.json`
+    // idTables `bundleGating.gateHelpers`, e.g. KickTodo's requireKicktodoManage).
+    const GATE_HELPERS = new RegExp(['requireFeatureEnabled', 'authorizeOrgScope', 'requireEntitledFeature', 'requireOrgScope', 'requireTenantScope', 'resolveOne', 'resolveToggle', ...Object.keys(declaredIdTable<string>('bundleGating.gateHelpers'))].join('|'));
     const GATE_FACTORIES = ['registerCanvasEditorRoutes'];
     // Matches `app.<verb>(` and the factory's `d.app.<verb>(`. A feature registering
     // on a passed-in sub-router (`router.get(`) would be missed — but no bundle

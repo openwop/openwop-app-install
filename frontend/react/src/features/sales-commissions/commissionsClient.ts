@@ -26,12 +26,18 @@ export type StatementStatus = 'draft' | 'approved' | 'paid';
 export interface CommissionAccelerator { attainmentGte: number; rate: number }
 export interface CommissionRule { basis: 'deal-won'; type: CommissionType; rate: number; accelerators?: CommissionAccelerator[]; cap?: number }
 export interface PlanAssignment { kind: AssignmentKind; ref: string }
-export interface CommissionPlan { planId: string; name: string; currency: string; assignment: PlanAssignment; rules: CommissionRule[]; effectiveFrom: string; effectiveTo?: string; updatedAt: string }
+/** `assignment` is absent after subject erasure cleared it (R2 COM2-M9): the plan pays nobody until re-assigned. */
+export interface CommissionPlan { planId: string; name: string; currency: string; assignment?: PlanAssignment; rules: CommissionRule[]; effectiveFrom: string; effectiveTo?: string; updatedAt: string }
 
 export interface StatementLine { dealId: string; dealAmount: number; rate: number; commission: number }
 export interface CommissionStatement {
   statementId: string; subjectId: string; period: string; planId: string; currency: string;
   lines: StatementLine[]; total: number; attainmentPct?: number; status: StatementStatus;
+  /** ADR 1034 D4 — won deals in the period that another statement of this plan already paid. */
+  excludedDeals?: Array<{ dealId: string; period: string }>;
+  /** ADR 1034 — the latest review card for this statement (list route only). `superseded`:
+   *  closed because some deals were already paid on another statement of the plan. */
+  review?: { status: string; superseded: boolean };
   approvedBy?: string; approvedAt?: string; updatedAt: string;
 }
 

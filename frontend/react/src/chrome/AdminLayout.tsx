@@ -1,4 +1,7 @@
 import { useEffect, useState } from 'react';
+// ADR 1031 P2 — the composed features' lazy declarations, nav copy for this rail
+// included, resolve (top-level await) before this chunk renders: no English flash.
+import '../features/featureExtensions.js';
 import { useTranslation } from 'react-i18next';
 import { Link, Outlet, matchPath, useLocation } from 'react-router-dom';
 import { setNavSource } from './navSource.js';

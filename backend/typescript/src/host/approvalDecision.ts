@@ -39,8 +39,6 @@ import {
   getAssistantActionApprovalHandler,
   getContentApprovalHandler,
   getEmailSendApprovalHandler, getFunnelPublishApprovalHandler,
-  getChallengePublishApprovalHandler,
-  getKicktodoSignoffApprovalHandler,
   getAnonSurfaceWriteApprovalHandler,
   getStrategyActivationApprovalHandler,
   getCampaignChangeSetApprovalHandler,
@@ -48,14 +46,14 @@ import {
   getStrategyCheckInApprovalHandler,
   getScenarioSelectApprovalHandler,
   getContactMergeApprovalHandler,
-  getPlanProposalApprovalHandler,
   getEnvironmentPromotionApprovalHandler,
   getDealerRegistrationApprovalHandler,
   getTerritoryTransitionApprovalHandler,
   getCommissionStatementApprovalHandler,
   getCommerceListingApprovalHandler,
   getComposedWorkflowApprovalHandler,
-  type PendingApproval, reopenApproval } from './approvalService.js';
+  type HostApprovalKind, type PendingApproval, reopenApproval } from './approvalService.js';
+import { featureApprovalKind } from './approvalKindRegistry.js';
 
 const log = createLogger('host.approvalDecision');
 
@@ -285,15 +283,16 @@ function announceReview(tenantId: string, result: ApprovalDecisionResult): Appro
 // guard). That shape is now ONE table keyed by `PendingApproval['kind']`: each
 // feature kind names its handler-getter, its "not composed" label, and functions
 // yielding its audit (action + resource + payload) and result echo. The
-// `satisfies Record<DecidableKind, …>` below makes a NEW approval kind that lacks
-// an entry a COMPILE error — the guard the if-chain never had.
+// `satisfies Record<DecidableKind, …>` below makes a NEW host approval kind that
+// lacks an entry a COMPILE error — the guard the if-chain never had. A FEATURE kind
+// brings its recipe through `registerFeatureApprovalKind` (ADR 1031 P2).
 
 /** The common shape every feature-registered decision handler satisfies: apply
  *  the governed effect (enforcing its own scope + IDOR) and report whether THIS
  *  call performed the pending→resolved transition. The superset `opts` carries
  *  `isSuperadmin` for the one host-global kind (commerce-listing-publish);
  *  tenant-scoped handlers ignore it (they are assignable to this wider type). */
-type FeatureApprovalHandler = (
+export type FeatureApprovalHandler = (
   tenantId: string,
   approvalId: string,
   outcome: 'approved' | 'rejected',
@@ -302,7 +301,7 @@ type FeatureApprovalHandler = (
 
 /** One feature kind's decision recipe — everything the shared dispatcher needs to
  *  run the claim OR reject of that kind identically. */
-interface FeatureKindDispatch {
+export interface FeatureKindDispatch {
   /** The core hook the owning feature registered its handler on. */
   getHandler: () => FeatureApprovalHandler | null;
   /** Label for the "…​ feature is not composed on this host." 409. */
@@ -319,8 +318,9 @@ interface FeatureKindDispatch {
   result?: (a: PendingApproval) => Partial<ApprovalDecisionResult>;
 }
 
-/** Every decidable approval kind (the `kind` union; absent ⇒ `run-proposal`). */
-type DecidableKind = NonNullable<PendingApproval['kind']>;
+/** Every decidable HOST approval kind (absent ⇒ `run-proposal`). Feature kinds
+ *  are looked up in `approvalKindRegistry` (`dispositionOf`). */
+type DecidableKind = HostApprovalKind;
 /** A kind either dispatches through a feature recipe, or keeps one of the three
  *  bespoke finalizers (run-proposal / campaign-spend / assistant-action). */
 type KindDisposition =
@@ -329,7 +329,8 @@ type KindDisposition =
   | 'campaign-spend'
   | 'assistant-action'
   | 'compensation-action'
-  | 'claude-code-permission';
+  | 'claude-code-permission'
+  | 'warehouse-load';
 
 /** The shared `{ approvalId, tenantId }` head every audit payload carries. */
 const baseAuditPayload = (a: PendingApproval): Record<string, unknown> => ({ approvalId: a.approvalId, tenantId: a.tenantId });
@@ -367,12 +368,6 @@ const KIND_DISPATCH = {
     audit: (a, o) => o === 'approved'
       ? { action: 'crm.contact.merged', resource: `crm-contact:${a.survivorContactId}`, payload: { ...baseAuditPayload(a), sourceContactId: a.sourceContactId } }
       : { action: 'crm.contact.merge_rejected', resource: `crm-contact:${a.survivorContactId}`, payload: baseAuditPayload(a) },
-  },
-  // ADR 0459 P2 — kicktodo-plan-proposal: the participant's accept/decline.
-  'kicktodo-plan-proposal': {
-    getHandler: getPlanProposalApprovalHandler,
-    notComposedLabel: 'KickTodo accountability',
-    audit: (a, o) => ({ action: o === 'approved' ? 'kicktodo.plan-proposal.approved' : 'kicktodo.plan-proposal.rejected', resource: `kicktodo-enrollment:${a.planProposal?.enrollmentId ?? a.approvalId}`, payload: baseAuditPayload(a) }),
   },
   // ADR 0387 / H2 — environment-promotion: the pointer move (approve) / rejected row.
   'environment-promotion': {
@@ -478,50 +473,16 @@ const KIND_DISPATCH = {
   // for `anon-surface-write`.) `campaign-spend` is the correct disposition: resolve +
   // audit, no dispatch — the feature re-checks the approval on its next attempt.
   'commerce-spend': 'campaign-spend',
-  // Decided on their own feature routes; if one ever reaches the core it falls
-  // through the run-proposal path exactly as the pre-refactor if-chain did.
-  'warehouse-load': 'run-proposal',
-  // ADR 0458 §2.2 (correction, 2026-09-15) — challenge-publish is a PUBLICATION
-  // SIGN-OFF, not a run: the kicktodo-creator handler completes the publication on
-  // approve (SoD + gates re-run inside `completePublication`) and resolves on
-  // reject. It used to fall through to the run-proposal finalizer, whose roster
-  // lookup 404'd on the factory's persona id (`host:kicktodo-factory` is not a
-  // roster row), so the inbox could reject but never approve — and the creator's
-  // own complete route had no client after ADR 0458 P4. Same trap as
-  // commerce-spend above; same cure: a registered handler.
-  'challenge-publish': {
-    getHandler: getChallengePublishApprovalHandler,
-    notComposedLabel: 'KickTodo Creator',
-    audit: (a, o) => ({ action: o === 'approved' ? 'kicktodo.challenge.published' : 'kicktodo.challenge.publish-rejected', resource: `kicktodo-candidate:${a.challengePublish?.candidateId ?? a.approvalId}`, payload: { ...baseAuditPayload(a), challengeId: a.challengePublish?.challengeId, challengeVersion: a.challengePublish?.challengeVersion } }),
-    result: (a) => ({ ...(a.challengePublish ? { candidateId: a.challengePublish.candidateId, challengeId: a.challengePublish.challengeId, challengeVersion: a.challengePublish.challengeVersion } : {}) }),
-  },
-  // KickTodo sign-offs (code-grade KTY-1, 2026-10-14) — these four used to fall
-  // through the run-proposal finalizer, whose roster lookup 404'd on their host
-  // personas (`host:kicktodo-community` / `host:kicktodo-commerce` are not roster
-  // rows): approve from the inbox never worked, and reject resolved the row without
-  // changing the profile or review it was about. Same trap as challenge-publish and
-  // commerce-spend; same cure: a registered handler from the owning feature, which
-  // CAS-resolves the approval and then applies the outcome to its own state.
-  'community-profile': {
-    getHandler: () => getKicktodoSignoffApprovalHandler('community-profile'),
-    notComposedLabel: 'KickTodo Community',
-    audit: (a, o) => ({ action: o === 'approved' ? 'kicktodo.community.profile-approved' : 'kicktodo.community.profile-rejected', resource: `kicktodo-profile:${a.approvalId}`, payload: baseAuditPayload(a) }),
-  },
-  'community-review': {
-    getHandler: () => getKicktodoSignoffApprovalHandler('community-review'),
-    notComposedLabel: 'KickTodo Community',
-    audit: (a, o) => ({ action: o === 'approved' ? 'kicktodo.community.review-removed' : 'kicktodo.community.review-restored', resource: `kicktodo-review-flag:${a.approvalId}`, payload: baseAuditPayload(a) }),
-  },
-  'metrics-verifier-sample': {
-    getHandler: () => getKicktodoSignoffApprovalHandler('metrics-verifier-sample'),
-    notComposedLabel: 'KickTodo Metrics',
-    audit: (a, o) => ({ action: o === 'approved' ? 'kicktodo.metrics.verifier-sample-agreed' : 'kicktodo.metrics.verifier-sample-disagreed', resource: `kicktodo-verifier-sample:${a.approvalId}`, payload: baseAuditPayload(a) }),
-  },
-  'connect-seller': {
-    getHandler: () => getKicktodoSignoffApprovalHandler('connect-seller'),
-    notComposedLabel: 'KickTodo Commerce',
-    audit: (a, o) => ({ action: o === 'approved' ? 'kicktodo.commerce.seller-onboarding-approved' : 'kicktodo.commerce.seller-onboarding-rejected', resource: `kicktodo-seller-request:${a.approvalId}`, payload: baseAuditPayload(a) }),
-  },
+  // ADR 1024 D3.3 (`CDP2WF-6`) — this said "decided on their own feature routes"
+  // and mapped to `run-proposal`. No such route exists, and the run-proposal
+  // finalizer looks up a roster entry the row never has (`rosterId:''`), so every
+  // inbox approve answered 404 "Proposing agent no longer exists" — the third kind
+  // to fall into this trap (commerce-spend and challenge-publish are the others).
+  // Its OWN disposition, not `campaign-spend`: that finalizer audits an ad budget
+  // and resumes waiters; a warehouse load has neither (the node returns
+  // `requires_approval` and never suspends). Who may decide is the destination-sync
+  // eligibility check (separation of duties).
+  'warehouse-load': 'warehouse-load',
   // ADR 0554 P2 / RFC 0151 §E — compensation-action: the decision IS the whole
   // act here. There is no handler to dispatch, because the unwind that raised
   // this card has already stopped at the paused obligation; resuming it is P3
@@ -538,6 +499,15 @@ const KIND_DISPATCH = {
   'claude-code-permission': 'claude-code-permission',
 } satisfies Record<DecidableKind, KindDisposition>;
 
+/** ADR 1031 P2 — the host table first, then a feature-registered kind's recipe.
+ *  A kind in neither has no disposition and reaches the run-proposal finalizer,
+ *  exactly as an unlisted kind always did. */
+function dispositionOf(kind: string | undefined): KindDisposition | undefined {
+  const k = kind ?? 'run-proposal';
+  if (Object.prototype.hasOwnProperty.call(KIND_DISPATCH, k)) return KIND_DISPATCH[k as DecidableKind];
+  return featureApprovalKind(k)?.decision;
+}
+
 /**
  * Run one feature kind's claim OR reject: fetch its handler, dispatch (with any
  * extra opts), map the not-composed / vanished / already-resolved cases to the
@@ -549,7 +519,7 @@ const KIND_DISPATCH = {
  *  A system actor (the SLA expire rung) must never raw-reject these — the
  *  approval row would flip while the feature state stays wedged. */
 export function kindHasRejectSideEffects(kind: string | undefined): boolean {
-  const disposition = KIND_DISPATCH[(kind ?? 'run-proposal') as keyof typeof KIND_DISPATCH];
+  const disposition = dispositionOf(kind);
   if (typeof disposition === 'object') return true;
   return disposition === 'campaign-spend' || disposition === 'assistant-action' || kind === 'composed-workflow';
 }
@@ -615,6 +585,7 @@ export async function claimApproval(
     isOperator: ctx.decidedByWildcardOperator === true,
     isPersonalOwner: ctx.decidedByPersonalOwner === true,
     ...(ctx.decidedBySpellings ? { spellings: ctx.decidedBySpellings } : {}),
+    outcome: 'approved',
   });
 
   // ADR 0070 — multi-approver gate: a claim is a VOTE. Until quorum is met the
@@ -628,7 +599,7 @@ export async function claimApproval(
   // APPR-1 — every feature kind (content-publish, contact-merge, the strategy /
   // PM / environments / commerce-listing / field-sales gates) resolves through
   // the ONE dispatch table: the claim IS that kind's approve.
-  const disposition = KIND_DISPATCH[approval.kind ?? 'run-proposal'];
+  const disposition = dispositionOf(approval.kind);
   if (typeof disposition === 'object') {
     return dispatchFeatureDecision(deps, ctx, approval, 'approved', disposition);
   }
@@ -666,6 +637,18 @@ export async function claimApproval(
       runId: approval.compensationAction?.runId,
       nodeId: approval.compensationAction?.nodeId,
       compensationNodeTypeId: approval.compensationAction?.compensationNodeTypeId,
+    });
+    return announceReview(tenantId, { approvalId: approval.approvalId, status: 'approved' });
+  }
+
+  // ADR 1024 D3.3 — a warehouse load: resolve + audit; the load re-checks the row
+  // (and its rows digest) on its next attempt.
+  if (disposition === 'warehouse-load') {
+    const lock = await resolveApproval(approval.approvalId, { status: 'approved', ...(decidedBy ? { decidedBy } : {}), ...(note !== undefined ? { note } : {}) });
+    if (!lock) throw new OpenwopError('not_found', 'Approval not found.', 404, { approvalId: approval.approvalId });
+    if (!lock.changed) throw new OpenwopError('conflict', `Approval already ${lock.approval.status}.`, 409, { status: lock.approval.status });
+    auditDecision(deps, ctx, 'cdp.warehouse-load.approved', `warehouse-load:${approval.approvalId}`, {
+      approvalId: approval.approvalId, tenantId, syncId: approval.syncId, dataset: approval.dataset, table: approval.table, rowCount: approval.rowCount,
     });
     return announceReview(tenantId, { approvalId: approval.approvalId, status: 'approved' });
   }
@@ -852,6 +835,7 @@ export async function rejectApproval(
     isOperator: ctx.decidedByWildcardOperator === true,
     isPersonalOwner: ctx.decidedByPersonalOwner === true,
     ...(ctx.decidedBySpellings ? { spellings: ctx.decidedBySpellings } : {}),
+    outcome: 'rejected',
   });
 
   // ADR 0070 — multi-approver gate: a reject is a VOTE; the gate only fails once
@@ -864,7 +848,7 @@ export async function rejectApproval(
   // APPR-1 — every feature kind resolves through the ONE dispatch table: the
   // reject IS that kind's decline (page unpublish, merge decline, strategy /
   // check-in / scenario / promotion / listing / field-sales decline).
-  const disposition = KIND_DISPATCH[approval.kind ?? 'run-proposal'];
+  const disposition = dispositionOf(approval.kind);
   if (typeof disposition === 'object') {
     return dispatchFeatureDecision(deps, ctx, approval, 'rejected', disposition);
   }
@@ -889,6 +873,16 @@ export async function rejectApproval(
       runId: approval.compensationAction?.runId,
       nodeId: approval.compensationAction?.nodeId,
       compensationNodeTypeId: approval.compensationAction?.compensationNodeTypeId,
+    });
+    return announceReview(tenantId, { approvalId: approval.approvalId, status: 'rejected' });
+  }
+
+  if (disposition === 'warehouse-load') {
+    const lock = await resolveApproval(approval.approvalId, { status: 'rejected', ...(decidedBy ? { decidedBy } : {}), ...(note !== undefined ? { note } : {}) });
+    if (!lock) throw new OpenwopError('not_found', 'Approval not found.', 404, { approvalId: approval.approvalId });
+    if (!lock.changed) throw new OpenwopError('conflict', `Approval already ${lock.approval.status}.`, 409, { status: lock.approval.status });
+    auditDecision(deps, ctx, 'cdp.warehouse-load.rejected', `warehouse-load:${approval.approvalId}`, {
+      approvalId: approval.approvalId, tenantId, syncId: approval.syncId, dataset: approval.dataset, table: approval.table, rowCount: approval.rowCount,
     });
     return announceReview(tenantId, { approvalId: approval.approvalId, status: 'rejected' });
   }

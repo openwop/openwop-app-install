@@ -10,8 +10,11 @@
  *  - the route is superadmin-only and carries the caps and the D5 posture in effect,
  *    with no key, digest, session or tenant in the body.
  *
- * The refusals are driven through the real middleware, seam and reserver, then read
- * back out of the real route, so a counter nobody increments cannot pass.
+ * The refusals are driven through the real middleware, seam and reserver, so a counter
+ * nobody increments cannot pass. The concurrency and plan counts are read from the
+ * tally (`admissionRefusalCounts`) that `buildAdmissionSummary` serves; the window
+ * refusal is read back out of the real route, which must show exactly that refusal
+ * and nothing else (`_resetRateLimitState` clears the tally first).
  *
  * Sabotage notes (each run red, 2026-10-31):
  *  - drop the `recordAdmissionRefusal('concurrency', …)` line in runInsert → red
@@ -22,7 +25,8 @@
  *  - remove `admission_key IS NOT NULL` from the holding count → red (an unkeyed run
  *    counts);
  *  - drop the LIMIT from the holding count → red ("bounded");
- *  - remove `requireSuperadmin` from the route → red ("refuses a non-superadmin").
+ *  - remove `requireSuperadmin` from the route → red ("refuses a non-superadmin");
+ *  - (w83) count `waiting-approval` as holding → red; pin the posture to `closed` → red.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import express from 'express';
@@ -38,7 +42,7 @@ import { registerPlanLimitsResolver } from '../src/host/planLimitsSeam.js';
 import { billingPlanLimitsResolver } from '../src/features/billing/feature.js';
 import { registerToggleDefault } from '../src/host/featureToggles/registry.js';
 import { admissionRefusalCounts, _resetAdmissionRefusals } from '../src/host/admissionRefusals.js';
-import { ADMISSION_HOLDING_COUNT_LIMIT, type AdmissionFamilySummary } from '../src/host/admissionSummary.js';
+import { ADMISSION_HOLDING_COUNT_LIMIT, type AdmissionFamilySummary, type AdmissionSummary } from '../src/host/admissionSummary.js';
 import { _resetRateLimitState, runQuotaMiddleware } from '../src/middleware/rateLimit.js';
 
 const run = (runId: string, status: RunRecord['status'] = 'running', tenantId = 't-p4'): RunRecord => {
@@ -115,16 +119,24 @@ describe('ADR 0987 D6 — the Operations route', () => {
     await new Promise<void>((res) => server.close(() => res()));
   });
 
-  async function login(tenantId: string): Promise<(path: string) => Promise<{ status: number; body: any }>> {
+  /** The route's body: the summary on success, the error envelope on a refusal. */
+  type SummaryBody = Partial<AdmissionSummary> & { fetchedAt?: string; error?: string; message?: string };
+  /** A summary (has `families`) or an error envelope (has a string `error`); anything else reads as `{}`. */
+  const isSummaryBody = (v: unknown): v is SummaryBody =>
+    typeof v === 'object' && v !== null
+    && (('families' in v && Array.isArray(v.families)) || ('error' in v && typeof v.error === 'string'));
+
+  async function login(tenantId: string): Promise<(path: string) => Promise<{ status: number; body: SummaryBody }>> {
     const r = await fetch(`${BASE}/host/openwop-app/test/login`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ email: `p4-${Date.now()}-${Math.random()}@acme.test`, tenantId }),
     });
     expect(r.status).toBe(201);
-    const cookie = (getSetCookies(r.headers) as string[]).map((c) => /(__session=[^;]+)/.exec(c)?.[1]).find(Boolean) ?? '';
+    const cookie = getSetCookies(r.headers).map((c) => /(__session=[^;]+)/.exec(c)?.[1]).find(Boolean) ?? '';
     return async (path) => {
       const res = await fetch(`${BASE}${path}`, { headers: { cookie } });
-      return { status: res.status, body: await res.json().catch(() => undefined) };
+      const raw: unknown = await res.json().catch(() => undefined);
+      return { status: res.status, body: isSummaryBody(raw) ? raw : {} };
     };
   }
 
@@ -151,6 +163,9 @@ describe('ADR 0987 D6 — the Operations route', () => {
     const get = await login('org:test-p4-member');
     const r = await get(`${OPS}/admission/summary`);
     expect(r.status).toBe(403);
+    // The superadmin refusal itself, not the MFA refusal that shares its status and code.
+    expect(r.body).toMatchObject({ error: 'forbidden', message: 'This administration surface requires a superadmin principal.' });
+    expect(r.body.families).toBeUndefined();
   });
 
   it('shows the caps, the posture, and the refusals the real middleware recorded', async () => {
@@ -158,13 +173,17 @@ describe('ADR 0987 D6 — the Operations route', () => {
     const get = await login(SUPER_TENANT);
     const r = await get(`${OPS}/admission/summary`);
     expect(r.status, JSON.stringify(r.body)).toBe(200);
-    const fam: Record<string, AdmissionFamilySummary> = Object.fromEntries((r.body.families as AdmissionFamilySummary[]).map((f) => [f.family, f]));
+    const fam: Record<string, AdmissionFamilySummary> = Object.fromEntries((r.body.families ?? []).map((f) => [f.family, f]));
     expect(Object.keys(fam)).toEqual([
       'concurrency.session', 'concurrency.key', 'runs.session.minute', 'runs.session.day', 'runs.key.day', 'runs.ip.day', 'plan.monthly',
     ]);
     expect(fam['concurrency.session']).toMatchObject({ cap: 3, posture: 'transactional', refusals: null });
     expect(fam['runs.session.minute']).toMatchObject({ cap: 1, windowS: 60, refusals: { session_runs_per_min: 1 } });
     expect(fam['plan.monthly']).toMatchObject({ cap: null });
+    expect(fam['plan.monthly'].refusals).toEqual({});
+    // Exactly the one window refusal: no concurrency, plan or unavailable count rode along.
+    expect(r.body.concurrencyRefusals).toEqual({});
+    expect(r.body.windowUnavailable).toBe(0);
     // The posture follows the deploy profile (D5): this test host is not `auth`.
     expect(r.body.profile).toBe('evaluation');
     expect(fam['runs.session.minute'].posture).toBe('open');

@@ -346,6 +346,9 @@ export const messages = {
   segStatusFailed: 'échouée',
   segStatusSuspended: 'suspendue',
   segStatusCut: 'arrêtée avec l’exécution',
+  segStatusIncomplete: "tentative précédente (incomplète)",
+  timelineObservedDuration: "{{duration}} observées",
+  timelineHistoryHint: "La chronologie suit les horodatages enregistrés, y compris l’historique hérité. La durée mesure l’exécution actuelle.",
   timelineDurationMs: '{{n}} ms',
   timelineDurationSeconds: '{{n}} s',
   timelineDurationMinutes: '{{m}} min {{s}} s',
@@ -432,7 +435,7 @@ export const messages = {
   flagRate: 'Taux de signalement',
   eventViewAria: 'Vue des événements',
   eventStreamHeading: 'Flux d’événements',
-  eventStreamConnError: 'Erreur de connexion du flux d’événements (reconnexion à venir)',
+  eventStreamConnError: 'Les mises à jour des événements en direct se sont arrêtées. Rechargez cette page pour vous reconnecter.',
   runRefreshFailed: 'Impossible d’actualiser l’exécution après sa dernière mise à jour — les détails ci-dessous peuvent être obsolètes.',
   streamModeLabel: 'mode',
   eventViewTimeline: 'Chronologie',
@@ -443,6 +446,10 @@ export const messages = {
   retentionPin: 'Épingler',
   retentionUnpin: 'Désépingler',
   retentionPinTitle: 'Conserver cette exécution indéfiniment (exemptée du nettoyage de rétention)',
+
+  // RFC 0257 (ADR 1027 P3) — a completed run that reached no terminal node.
+  statusCompletedNoFinalStep: 'Terminé : aucune étape finale n’a été exécutée',
+  noFinalStepRanNotice: 'Cette exécution s’est terminée sans exécuter d’étape finale. Leurs conditions ont ignoré toutes les étapes finales ({{steps}}) : elle n’a produit aucun livrable.',
 
   // ADR 0475 — boucle de débogage : puces de provenance + déboguer dans le builder + redrive en masse.
   summaryProvenance: 'Provenance',

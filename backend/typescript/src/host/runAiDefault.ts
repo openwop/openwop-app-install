@@ -12,27 +12,40 @@
  *      field, `runs.md` §configurable). Read from the run record at call time:
  *      it is fixed when the run is created, so reading it is replay-stable.
  *   2. the workspace's active AI binding (ADR 0517, the provider + model picked
- *      in chat or Keys), when it names a real BYOK provider. Managed and
- *      subscription bindings are chat-only and are skipped.
- *   3. the host catalog's recommended default (`providers.json`: the first
- *      selectable provider and its `recommended` model).
+ *      in chat or Keys), when it names a real BYOK provider. Subscription
+ *      bindings are chat-only and are skipped.
+ *   3. the free managed tier, when this host holds its key and the binding IS
+ *      the managed tier or the workspace holds no key for any selectable
+ *      provider (ADR 0903 correction,
+ *      2026-11-02). Until then a keyless workspace was frozen onto the catalog's
+ *      first provider and every AI step failed `byok_required` for a key nobody
+ *      chose, although chat and agent steps already ran on the free tier.
+ *   4. the host catalog's recommended default (`providers.json`: the first
+ *      selectable provider the workspace HOLDS a key for, else the first one,
+ *      with its `recommended` model).
  *
- * Rungs 2 and 3 can change between runs, so they are resolved ONCE at run
+ * Rungs 2 to 4 can change between runs, so they are resolved ONCE at run
  * creation by a run-start contributor and frozen into `run.metadata.aiDefault`
  * (ADR 0099). A `:fork` reads the source's frozen value verbatim and never
  * re-resolves it (ADR 0604), so replay sees the provider the source ran on.
  */
 import { getChatByokConfig } from './chatByokConfig.js';
 import { registerRunStartContributor, type RunStartContext } from './runStartContext.js';
-import { getDefaultModel, getProviderConfig, listSelectableProviderIds } from '../providers/catalog.js';
-import { isManagedRef } from '../aiProviders/credentialRefLadder.js';
+import { getDefaultModel, getProviderConfig, listManagedProviderIds, listSelectableProviderIds } from '../providers/catalog.js';
+import { isManagedRef, refNamedProvider } from '../aiProviders/credentialRefLadder.js';
+import { listSecretRefs } from '../byok/secretResolver.js';
+import { getManagedProviderStatuses } from '../providers/managedProvider.js';
+import { isAnonTenantId } from './requestSubject.js';
 
 export const RUN_AI_DEFAULT_KEY = 'aiDefault';
 
 export interface RunAiDefault {
   provider: string;
   model: string;
-  source: 'run' | 'workspace' | 'catalog';
+  source: 'run' | 'workspace' | 'managed' | 'catalog';
+  /** Only on `source: 'managed'`: the `managed:*` sentinel the call dispatches
+   *  on. A sentinel, never a stored key, so it is safe on run metadata. */
+  credentialRef?: string;
 }
 
 /** A BYOK provider this host's catalog knows and lets a person select. */
@@ -45,14 +58,45 @@ function modelFor(provider: string, model: unknown): string {
   return typeof model === 'string' && model.trim().length > 0 ? model.trim() : getDefaultModel(provider);
 }
 
-/** Rungs 2 then 3 — the default frozen into a new run. `null` only when the catalog lists no provider. */
+/** The free managed tier as a run default, or null when the catalog lists none
+ *  or this host holds no key for it. A host without a managed key keeps the
+ *  catalog answer, so its users still hear "add a key" rather than
+ *  `provider_unavailable` for a tier that cannot answer. */
+async function managedDefault(credentialRef?: string): Promise<RunAiDefault | null> {
+  const id = listManagedProviderIds()[0];
+  if (!id) return null;
+  const statuses = await getManagedProviderStatuses().catch(() => []);
+  if (!statuses.some((st) => st.providerId === id && st.ready)) return null;
+  const ref = credentialRef && isManagedRef(credentialRef) ? credentialRef : `managed:${id}`;
+  return { provider: id, model: getDefaultModel(id), source: 'managed', credentialRef: ref };
+}
+
+/** Rungs 2 to 4 — the default frozen into a new run. `null` only when the catalog lists no provider. */
 export async function resolveFrozenAiDefault(tenantId: string): Promise<RunAiDefault | null> {
   const binding = await getChatByokConfig(tenantId).catch(() => null);
   if (binding && !isManagedRef(binding.credentialRef) && !binding.credentialRef.startsWith('subscription:')
     && isSelectableProvider(binding.provider)) {
     return { provider: binding.provider, model: modelFor(binding.provider, binding.model), source: 'workspace' };
   }
-  const first = listSelectableProviderIds()[0];
+  const selectable = listSelectableProviderIds();
+  // An anonymous sandbox never reaches the managed tier (it needs a signed-in
+  // caller), so it keeps the old catalog answer and its old error.
+  if (!isAnonTenantId(tenantId)) {
+    if (binding && isManagedRef(binding.credentialRef)) {
+      const managed = await managedDefault(binding.credentialRef);
+      if (managed) return managed;
+    }
+    // `null` when the vault cannot be read: then we cannot tell whether the
+    // workspace has a key, and keep the catalog answer rather than guess.
+    const refs = await listSecretRefs({ tenantId }).catch(() => null);
+    if (refs) {
+      const held = selectable.find((p) => refs.some((r) => refNamedProvider(r, [p]) === p));
+      if (held) return { provider: held, model: getDefaultModel(held), source: 'catalog' };
+      const managed = await managedDefault();
+      if (managed) return managed;
+    }
+  }
+  const first = selectable[0];
   return first ? { provider: first, model: getDefaultModel(first), source: 'catalog' } : null;
 }
 
@@ -75,8 +119,12 @@ export function wireRunAiDefaultStamping(): void {
 function frozenOn(metadata: Record<string, unknown> | undefined): RunAiDefault | null {
   const v = metadata?.[RUN_AI_DEFAULT_KEY];
   if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
-  const { provider, model, source } = v as Record<string, unknown>;
+  const { provider, model, source, credentialRef } = v as Record<string, unknown>;
   if (typeof provider !== 'string' || provider.length === 0 || typeof model !== 'string' || model.length === 0) return null;
+  if (source === 'managed') {
+    // Only ever a `managed:*` sentinel; anything else is not a managed default.
+    return typeof credentialRef === 'string' && isManagedRef(credentialRef) ? { provider, model, source, credentialRef } : null;
+  }
   return { provider, model, source: source === 'workspace' || source === 'catalog' ? source : 'catalog' };
 }
 
@@ -104,7 +152,7 @@ export function runAiDefaultFor(
  * names a provider keeps it; its model, when missing, is that provider's own
  * default — the run default's model belongs to the run default's provider only.
  */
-export function withRunAiDefault<T extends { provider?: string; model?: string }>(req: T, def: RunAiDefault | null | undefined): T {
+export function withRunAiDefault<T extends { provider?: string; model?: string; credentialRef?: string }>(req: T, def: RunAiDefault | null | undefined): T {
   const named = typeof req.provider === 'string' && req.provider.length > 0;
   if (named) {
     if (typeof req.model === 'string' && req.model.length > 0) return req;
@@ -112,6 +160,13 @@ export function withRunAiDefault<T extends { provider?: string; model?: string }
     return { ...req, model };
   }
   if (!def) return req;
+  if (def.credentialRef) {
+    // The managed default fills provider, model AND its sentinel ref together.
+    // A call that already carries its own key keeps it and is left as it was:
+    // the managed provider must never be paired with a stored key.
+    if (typeof req.credentialRef === 'string' && req.credentialRef.length > 0) return req;
+    return { ...req, provider: def.provider, model: def.model, credentialRef: def.credentialRef };
+  }
   const model = typeof req.model === 'string' && req.model.length > 0 ? req.model : def.model;
   return { ...req, provider: def.provider, model };
 }

@@ -13,10 +13,10 @@ import type { BackendFeature } from '../types.js';
 import { registerPromotionsRoutes } from './routes.js';
 import { buildPromotionsSurface } from './surface.js';
 import { registerPromotionsAgentTools } from './agentTools.js';
-import { setOrderDiscountHook } from '../commerce/promotionSeam.js';
+import { setOrderDiscountHook, setOrderPromotionHoldHooks } from '../commerce/promotionSeam.js';
 import { onProductDeleted } from '../commerce/productLifecycleSeam.js';
 import { registerSubjectEraser } from '../../host/subjectErasure.js';
-import { applyPromotions, pruneProductRefs, erasePromotionSubject } from './promotionsService.js';
+import { applyPromotions, pruneProductRefs, erasePromotionSubject, commitBudgetHolds, releaseBudgetHolds } from './promotionsService.js';
 import { registerFeatureDataExporter } from '../../host/featureDataExport.js';
 import { exportPromotionsData } from './dataExport.js';
 
@@ -30,6 +30,8 @@ export const promotionsFeature: BackendFeature = {
     // Install the commerce order-discount hook (ADR 0274 ruling 2 — a delta AFTER
     // resolvePrice, never a second pricing path). No-op per-tenant when off.
     setOrderDiscountHook(applyPromotions);
+    // ADR 1025 D1 — and how commerce settles the budget holds that hook takes.
+    setOrderPromotionHoldHooks({ commit: commitBudgetHolds, release: releaseBudgetHolds });
     // RI-4 (grade-data) — drop the product from promotion scopes when it is
     // deleted; a scope that empties deactivates its promotion (disable-don't-
     // destroy). Keyed + idempotent; touches only this feature's own rows.

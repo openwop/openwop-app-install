@@ -59,11 +59,11 @@ afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
 });
 
-async function seed(body: unknown = {}): Promise<{ status: number; body: { healed?: { prunedLegacy: number } } }> {
+async function seed(body: { heal?: boolean } = {}): Promise<{ status: number; body: { healed?: { prunedLegacy: number } } }> {
   const res = await fetch(`${BASE}/host/openwop-app/example-data/seed`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ ...body, expectedTenantId: TENANT }),
   });
   return { status: res.status, body: (await res.json()) as { healed?: { prunedLegacy: number } } };
 }

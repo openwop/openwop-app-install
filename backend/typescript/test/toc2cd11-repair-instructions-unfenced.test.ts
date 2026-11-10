@@ -15,13 +15,16 @@
  *
  * Sabotage witnessed 2026-10-28: fencing a vouched error with extras whole (the first
  * cut's `vouchedShape`) reds every RENDER case with extras; changing any pinned
- * message reds its SOURCE case.
+ * message reds its SOURCE case. Also witnessed (w79): dropping `hostMessage` from `toolError`
+ * reds the RENDER cases; rewriting a site as a raw unvouched `{ content, isError }` with the
+ * same sentence reds its SOURCE case.
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { toModelToolResult, TOOL_FAILED_PREFIX } from '../src/host/toModelToolResult.js';
 import { registerFeatureAgentTool } from '../src/host/agentToolProvider.js';
+import { toolError } from '../src/host/agentToolKit.js';
 
 const UNTRUSTED = 'openwop:toc2cd11.repair-probe';
 registerFeatureAgentTool({
@@ -31,6 +34,9 @@ registerFeatureAgentTool({
 });
 
 const src = (rel: string): string => readFileSync(join(process.cwd(), 'src', rel), 'utf8');
+const reEsc = (s: string): string => s.replace(/[.*+?^${}()|[\]\\`]/g, '\\$&');
+/** The sentence as main wrote it in a single-quoted literal. */
+const quoted = (m: string): string => `'${m.replace(/'/g, "\\'")}'`;
 
 interface Pin { site: string; file: string; code: string; message: string; extras?: Record<string, unknown> }
 /** main's exact messages (origin/main 051429610). */
@@ -50,7 +56,14 @@ describe('SOURCE — each repair instruction is still main\'s sentence, on a vou
     it(p.site, () => {
       const text = src(p.file);
       // The literal sentence is present verbatim (single-quoted, as main wrote it).
-      expect(text).toContain(`'${p.message.replace(/'/g, "\\'")}'`);
+      expect(text).toContain(quoted(p.message));
+      // ...on the VOUCHED path: `toolError('<code>', '<message>'` (a raw `{ content, isError }`
+      // with the same sentence is unvouched and fenced whole). renderCore returns
+      // `{ ok: false, error, message }`, which the next case proves reaches `toolError`.
+      const call = p.file.endsWith('renderCore.ts')
+        ? `error: '${p.code}', message: ${reEsc(quoted(p.message))}`
+        : `toolError\\(\\s*'${p.code}',\\s*${reEsc(quoted(p.message))}`;
+      expect(text).toMatch(new RegExp(call));
       // ...and is not routed through the fenced-detail helper.
       expect(text).not.toMatch(new RegExp(`untrustedToolError\\([^)]*${p.message.slice(0, 24).replace(/[.*+?^${}()|[\]\\`]/g, '\\$&')}`));
     });
@@ -75,11 +88,12 @@ describe('SOURCE — each repair instruction is still main\'s sentence, on a vou
 describe('RENDER — the model reads the instruction outside the fence', () => {
   for (const p of PINS) {
     it(p.site, () => {
-      // The helper's payload: extras first, then error + message (review L1).
-      const content = JSON.stringify({ ...(p.extras ?? {}), error: p.code, message: p.message });
-      const out = toModelToolResult(UNTRUSTED, content, true, { hostVouched: true });
+      // The REAL helper's payload and its vouching flag (not a hand-built copy).
+      const r = toolError(p.code, p.message, p.extras);
+      expect(r.hostMessage).toBe(true);
+      const out = toModelToolResult(UNTRUSTED, r.content, true, { hostVouched: r.hostMessage === true });
       if (!p.extras) {
-        expect(out).toBe(content);
+        expect(out).toBe(r.content);
         return;
       }
       expect(out.startsWith(`${TOOL_FAILED_PREFIX} (${p.code}): ${p.message}\nBEGIN UNTRUSTED CONTENT`)).toBe(true);

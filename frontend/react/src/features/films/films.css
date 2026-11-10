@@ -1,0 +1,26 @@
+.film-stage { position: relative; container-type: inline-size; width: 100%; aspect-ratio: 16 / 9; overflow: hidden; background: var(--paper); color: var(--ink); border: 1px solid var(--rule); border-radius: var(--radius); }
+.film-element { position: absolute; transform-origin: center; white-space: pre-wrap; overflow: hidden; line-height: 1.2; overflow-wrap: anywhere; }
+.film-element--title { font-size: 5cqw; font-weight: var(--weight-head); }
+.film-element--body { font-size: 3cqw; }
+.film-element--caption { font-size: 2cqw; }
+.film-element--accent { color: var(--clay); }
+.film-element--shape { background: var(--clay); border-radius: var(--radius); }
+.film-element img { width: 100%; height: 100%; object-fit: contain; }
+.film-presenter { padding: var(--space-4); background: var(--paper); color: var(--ink); min-height: 100%; overflow: auto; }
+.film-toolbar { display: flex; gap: var(--space-3); align-items: center; flex-wrap: wrap; padding-block: var(--space-2); }
+.film-toolbar h1 { margin: 0; margin-inline-end: auto; font-size: var(--text-lg); }
+.film-presenter__main { display: grid; grid-template-columns: minmax(0, 3fr) minmax(15rem, 1fr); gap: var(--space-5); }
+.film-presenter__main > * { min-width: 0; }
+.film-notes { white-space: pre-wrap; max-height: 35vh; overflow: auto; }
+.film-timeline { display: flex; gap: var(--space-2); overflow: auto; padding-block: var(--space-4); }
+.film-timeline button { flex-shrink: 0; }
+.film-timeline [aria-current="step"] { outline: 2px solid var(--clay); outline-offset: 2px; }
+.film-audience { position: fixed; inset: 0; z-index: 1000; background: var(--paper); color: var(--ink); height: 100dvh; display: grid; align-content: center; padding: var(--space-4); }
+.film-audience .film-stage { max-height: 100dvh; max-width: calc(100dvh * 16 / 9); margin: auto; }
+.film-audience__fullscreen { position: fixed; right: 1rem; bottom: 1rem; }
+.film-audience:fullscreen { padding: 0; }
+.film-audience:fullscreen .film-audience__fullscreen { display: none; }
+.film-editor { padding: var(--space-4); overflow: auto; width: 100%; }
+.film-editor__fields { display: grid; gap: var(--space-3); padding-block: var(--space-4); }
+.film-editor__fields label { display: grid; gap: var(--space-1); }
+@media (max-width: 860px) { .film-presenter__main { grid-template-columns: minmax(0, 1fr); } }

@@ -9,7 +9,8 @@
  * Witnessed (row 57 sabotage, see the PR): dropping the personal-tenant check reds the shared and
  * anon cases; dropping either client check reds its case; accepting a bare `chatSessionId` stamp
  * reds `not-a-chat`; dropping the spelling check reds the operator-bearer case; dropping the
- * split-row arm reds the legacy case.
+ * split-row arm reds the legacy case; dropping its principal comparison reds the same-tenant
+ * stranger leg.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -36,7 +37,7 @@ describe('ADR 0982 D1 — resolveExtractionLane', () => {
   });
 
   it('a shared workspace, an anon sandbox or a deployment tenant is not-personal', async () => {
-    for (const tenantId of ['ws:team-9', 'anon:sess-9', 'default', 'host-kicktodo']) {
+    for (const tenantId of ['ws:team-9', 'anon:sess-9', 'default', 'host-acme']) {
       expect(await resolveExtractionLane({ tenantId, metadata: { actingUserId: 'user:x', chatSessionId: 'c' } }), tenantId)
         .toEqual({ ok: false, reason: 'not-personal' });
     }
@@ -84,6 +85,10 @@ describe('ADR 0982 D1 — resolveExtractionLane', () => {
     for (const acting of ['bearer:operator', 'oidc:someone-else', 'user:0123456789abcdef0123456789abcdef']) {
       expect(await resolveExtractionLane(await p.run({ acting })), acting).toEqual({ ok: false, reason: 'no-person' });
     }
+    // A REAL row in this tenant, of another identity: a member, not this person.
+    const stranger: User = { userId: 'user:ln-actor-other0000000000000000000', tenantId: p.home, principalId: 'oidc:ln-actor-other', groups: [], source: 'oidc', status: 'active', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' };
+    await new DurableCollection<User>('users:user', (u) => u.userId).put(stranger);
+    expect(await resolveExtractionLane(await p.run({ acting: stranger.userId })), 'a same-tenant stranger').toEqual({ ok: false, reason: 'no-person' });
   });
 
   it('a person with legacy split rows is still recognised, and keyed on the canonical row (architect A7)', async () => {
@@ -92,13 +97,14 @@ describe('ADR 0982 D1 — resolveExtractionLane', () => {
     // A randomUUID-era row for this identity, written as the legacy lane wrote it.
     const users = new DurableCollection<User>('users:user', (u) => u.userId);
     const legacyId = 'user:legacy0000000000000000000000000';
-    await users.put({ userId: legacyId, tenantId: home, principalId: principal, source: 'oidc', status: 'active', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' } as User);
+    const legacy: User = { userId: legacyId, tenantId: home, principalId: principal, groups: [], source: 'oidc', status: 'active', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' };
+    await users.put(legacy);
     const canonical = await resolveCanonicalUserForTenant({ homeTenant: home, principalId: principal, source: 'oidc' });
     expect(canonical.userId, 'precondition: the fold adopted the legacy row').toBe(legacyId);
     // The bind later mints the deterministic row, and the session acts as THAT row.
     // Written directly: `createUser` dedupes by principal, which is exactly why the split exists
     // only in rows written before that dedupe.
-    const bound = { userId: userIdFor(home, principal), tenantId: home, principalId: principal, source: 'oidc', status: 'active', createdAt: '2026-02-01T00:00:00.000Z', updatedAt: '2026-02-01T00:00:00.000Z' } as User;
+    const bound: User = { userId: userIdFor(home, principal), tenantId: home, principalId: principal, groups: [], source: 'oidc', status: 'active', createdAt: '2026-02-01T00:00:00.000Z', updatedAt: '2026-02-01T00:00:00.000Z' };
     await users.put(bound);
     expect(bound.userId).not.toBe(legacyId);
     await ensureConversationMeta(home, 'chat-split', { type: 'agent', ownerUserId: bound.userId });

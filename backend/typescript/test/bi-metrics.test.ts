@@ -73,47 +73,47 @@ afterEach(async () => { const d = biDefault(); if (d) await saveConfig(d, 'test'
 
 describe('closed-world validation (write time)', () => {
   it('rejects an unknown entity type', async () => {
-    await expect(createMetric(T1, 'u1', 'bad-type', { title: 'X', entityType: 'nope', aggregate: 'count' }))
+    await expect(createMetric(T1, 'org-1', 'u1', 'bad-type', { title: 'X', entityType: 'nope', aggregate: 'count' }))
       .rejects.toMatchObject({ code: 'validation_error', message: expect.stringContaining('Unknown entity type') });
   });
   it('rejects a non-allowlisted system type', async () => {
     // Minted, so the refusal is the allowlist's, not "unknown type".
     await mintSystemType({ tenantId: T1, name: 'crm.activity', displayName: 'Activity', fields: [{ key: 'subject', label: 'Subject', type: 'string', required: false }], actor: 'u1' });
-    await expect(createMetric(T1, 'u1', 'bad-sys', { title: 'X', entityType: 'crm.activity', aggregate: 'count' }))
+    await expect(createMetric(T1, 'org-1', 'u1', 'bad-sys', { title: 'X', entityType: 'crm.activity', aggregate: 'count' }))
       .rejects.toMatchObject({ code: 'validation_error', message: expect.stringContaining('is not metric-enabled') });
   });
   it('rejects sum over a non-number field and unknown fields/ops', async () => {
-    await expect(createMetric(T1, 'u1', 'bad-field', { title: 'X', entityType: 'ticket', aggregate: 'sum', field: 'subject' }))
+    await expect(createMetric(T1, 'org-1', 'u1', 'bad-field', { title: 'X', entityType: 'ticket', aggregate: 'sum', field: 'subject' }))
       .rejects.toMatchObject({ code: 'validation_error', message: expect.stringContaining('needs a number field') });
-    await expect(createMetric(T1, 'u1', 'bad-gb', { title: 'X', entityType: 'ticket', aggregate: 'count', groupBy: 'ghost' }))
+    await expect(createMetric(T1, 'org-1', 'u1', 'bad-gb', { title: 'X', entityType: 'ticket', aggregate: 'count', groupBy: 'ghost' }))
       .rejects.toMatchObject({ code: 'validation_error', message: expect.stringContaining('`ghost` does not exist') });
-    await expect(createMetric(T1, 'u1', 'bad-op', { title: 'X', entityType: 'ticket', aggregate: 'count', filters: [{ key: 'severity', op: 'like', value: 'x' }] }))
+    await expect(createMetric(T1, 'org-1', 'u1', 'bad-op', { title: 'X', entityType: 'ticket', aggregate: 'count', filters: [{ key: 'severity', op: 'like', value: 'x' }] }))
       .rejects.toMatchObject({ code: 'validation_error', message: expect.stringContaining('op must be one of') });
   });
 });
 
 describe('catalog CRUD + system metrics', () => {
   it('merges in-code system metrics into reads; they are read-only', async () => {
-    const all = await listMetrics(T1);
+    const all = await listMetrics(T1, 'org-1');
     expect(all.some((m) => m.metricId === 'sys-pipeline-value' && m.system)).toBe(true);
-    await expect(updateMetric(T1, 'sys-pipeline-value', { title: 'X', entityType: 'crm.deal', aggregate: 'count' }))
+    await expect(updateMetric(T1, 'org-1', 'sys-pipeline-value', { title: 'X', entityType: 'crm.deal', aggregate: 'count' }))
       .rejects.toMatchObject({ code: 'forbidden' });
-    await expect(deleteMetric(T1, 'sys-pipeline-value')).rejects.toMatchObject({ code: 'forbidden' });
+    await expect(deleteMetric(T1, 'org-1', 'sys-pipeline-value')).rejects.toMatchObject({ code: 'forbidden' });
   });
   it('creates, updates, and deletes a tenant metric; duplicate id conflicts', async () => {
-    const m = await createMetric(T1, 'u1', 'ticket-hours', {
+    const m = await createMetric(T1, 'org-1', 'u1', 'ticket-hours', {
       title: 'Ticket hours', entityType: 'ticket', aggregate: 'sum', field: 'hours',
       filters: [{ key: 'severity', op: 'eq', value: 'high' }], groupBy: 'severity',
     });
     expect(m.metricId).toBe('ticket-hours');
-    await expect(createMetric(T1, 'u1', 'ticket-hours', { title: 'Dup', entityType: 'ticket', aggregate: 'count' }))
+    await expect(createMetric(T1, 'org-1', 'u1', 'ticket-hours', { title: 'Dup', entityType: 'ticket', aggregate: 'count' }))
       .rejects.toMatchObject({ code: 'conflict' });
-    const upd = await updateMetric(T1, 'ticket-hours', { title: 'Hours (high)', entityType: 'ticket', aggregate: 'sum', field: 'hours' });
+    const upd = await updateMetric(T1, 'org-1', 'ticket-hours', { title: 'Hours (high)', entityType: 'ticket', aggregate: 'sum', field: 'hours' });
     expect(upd.title).toBe('Hours (high)');
     expect(upd.filters).toBeUndefined(); // update replaces the definition
-    expect(await getMetric(T1, 'ticket-hours')).toMatchObject({ title: 'Hours (high)' });
-    await deleteMetric(T1, 'ticket-hours');
-    expect(await getMetric(T1, 'ticket-hours')).toBeNull();
+    expect(await getMetric(T1, 'org-1', 'ticket-hours')).toMatchObject({ title: 'Hours (high)' });
+    await deleteMetric(T1, 'org-1', 'ticket-hours');
+    expect(await getMetric(T1, 'org-1', 'ticket-hours')).toBeNull();
   });
 });
 
@@ -137,8 +137,8 @@ describe('runMetric — evaluation', () => {
     const r = await runMetric(T1, 'sys-pipeline-value', { orgId: 'org-1', since: '2026-07-10' }, undefined);
     expect(r.points.reduce((s, p) => s + p.value, 0)).toBe(3000); // Beta only
   });
-  it('evaluates user-type metrics with stored filters + groupBy over queryEntities', async () => {
-    await createMetric(T1, 'u1', 'high-ticket-hours', {
+  it('evaluates user-type metrics with stored filters + groupBy over the live user-type read', async () => {
+    await createMetric(T1, 'org-1', 'u1', 'high-ticket-hours', {
       title: 'High ticket hours', entityType: 'ticket', aggregate: 'sum', field: 'hours',
       filters: [{ key: 'severity', op: 'eq', value: 'high' }], groupBy: 'severity',
     });

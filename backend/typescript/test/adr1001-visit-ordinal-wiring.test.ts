@@ -22,8 +22,15 @@
  * executor. Bounded loopback MUST fold ordinals on live runs too, or a source
  * would record every visit at base 0 while its fork keyed visit k at k·2^20.
  *
+ * Case 2's live half is a control: a live run passes visit 0 whatever `visitOf`
+ * says. Its replay-fork half (cut at the post-resume start, so the fork folds an
+ * OPEN execution) is the one that exercises the re-entry rule.
+ *
  * Sabotage: passing `ordinals.highest(nodeId)` (the execution count) instead
- * of `visitOf` reds the replay-fork retry case.
+ * of `visitOf` reds the replay-fork retry case; passing the attempt as the visit
+ * reds the live retry case and the replay-fork case; `visitOf` counting a retry
+ * as a revisit reds the replay-fork retry case; `visitOf` giving a re-entry of
+ * an open execution a new visit reds case 2's fork half.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -95,12 +102,29 @@ describe('ADR 1001 D3.3 / ADR 1002 — the executor passes the visit', () => {
 
   it('a suspend/resume re-entry is the same execution and lands on the same base', async () => {
     const runId = await start('adr1001.pauses');
-    await waitStatus(runId, (s) => s.startsWith('waiting'));
+    expect(await waitStatus(runId, (s) => s.startsWith('waiting'))).toMatch(/^waiting/);
     const list = (await api<{ interrupts: Array<{ token: string }> }>(`/host/openwop-app/runs/${bareRunId(runId)}/interrupts`)).body.interrupts;
     if (!list[0]?.token) throw new Error('no open interrupt with a token');
     expect((await api(`/interrupts/${list[0].token}`, { method: 'POST', body: JSON.stringify({ resumeValue: { answer: 'x' } }) })).status).toBeLessThan(300);
     expect(await waitStatus(runId, (s) => ['completed', 'failed'].includes(s))).toBe('completed');
     expect(seen.get(bareRunId(runId))).toEqual([0, 0]);
+
+    // The live source never folds ordinals, so the re-entry is witnessed on a
+    // replay fork cut at the post-resume start: the fork's folded log holds an
+    // OPEN execution (started, suspended, …), and its re-entry must keep visit 0.
+    const events = (await api<{ events: Array<{ type: string; nodeId?: string; sequence: number }> }>(`/runs/${runId}/events/poll?fromSeq=-1&limit=1000`)).body.events;
+    const starts = events.filter((e) => e.type === 'node.started' && e.nodeId === 'n');
+    expect(starts).toHaveLength(2);
+    const fork = await api<{ runId: string }>(`/runs/${runId}:fork`, { method: 'POST', body: JSON.stringify({ mode: 'replay', fromSeq: starts[1]!.sequence }) });
+    expect(fork.status, JSON.stringify(fork.body)).toBe(201);
+    // The fork's copied prefix ends inside the suspended execution, so it opens
+    // waiting on its own interrupt; answering it re-enters the OPEN execution.
+    expect(await waitStatus(fork.body.runId, (s) => ['completed', 'failed'].includes(s) || s.startsWith('waiting'))).toMatch(/^waiting/);
+    const forkAsks = (await api<{ interrupts: Array<{ token: string }> }>(`/host/openwop-app/runs/${bareRunId(fork.body.runId)}/interrupts`)).body.interrupts;
+    if (!forkAsks[0]?.token) throw new Error('the fork has no open interrupt with a token');
+    expect((await api(`/interrupts/${forkAsks[0].token}`, { method: 'POST', body: JSON.stringify({ resumeValue: { answer: 'x' } }) })).status).toBeLessThan(300);
+    expect(await waitStatus(fork.body.runId, (s) => ['completed', 'failed'].includes(s))).toBe('completed');
+    expect(seen.get(bareRunId(fork.body.runId))).toEqual([0]);
   });
 
   it('a replay fork that re-executes a retried node computes the same visit-0 base as the live source', async () => {

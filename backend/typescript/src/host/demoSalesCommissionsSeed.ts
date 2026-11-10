@@ -21,6 +21,7 @@ import { getUserByPrincipal } from '../features/users/usersService.js';
 import { listDeals } from '../features/crm/crmEntitiesService.js';
 import { createPlan, listPlans, deletePlan } from '../features/sales-commissions/entities/plan.js';
 import { computeStatement, listStatements, approveStatement, markStatementPaid } from '../features/sales-commissions/entities/statement.js';
+import { deletePlanClaims } from '../features/sales-commissions/entities/dealClaims.js';
 import { personPrincipal } from './seed-data/solsticeDemo.js';
 
 const log = createLogger('seed.demoSalesCommissions');
@@ -121,6 +122,9 @@ export async function clearDemoCommissions(tenantId: string): Promise<{ cleared:
   for (const s of (await statementStore.listForTenantIndexed(tenantId)).filter((x) => demoPlanIds.has(x.planId))) {
     await statementStore.delete(s.statementId); cleared += 1;
   }
+  // ADR 1034 D4 — the seeded paid statement claimed its deals; a reset that left the claims
+  // would make the re-seeded plan's statements refuse those deals as already paid.
+  for (const p of demoPlans) cleared += await deletePlanClaims(tenantId, orgId, p.planId);
   for (const p of demoPlans) { await deletePlan(tenantId, orgId, p.planId); cleared += 1; }
   log.info('demo_commissions_cleared', { tenantId, cleared });
   return { cleared };

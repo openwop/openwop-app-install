@@ -6,6 +6,7 @@
  * places, per locale:
  *   core   →  src/i18n/locales/<locale>/<ns>.ts
  *   feature→  src/features/<id>/i18n/<locale>.ts   (ns = <id>)
+ *   adopter→  src/adopter/features/<id>/i18n/<locale>.ts (ns = <id>; ADR 1031)
  *   area   →  src/<area>/i18n/<locale>.ts          (ns = <area>)
  * Each exports `export const messages = { key: 'value', … } as const;`. The
  * namespace is derived from the path, so adding a feature/locale auto-registers
@@ -97,8 +98,12 @@ const shellFeatureCatalogs: Record<string, unknown> = {
 
 /** Lazy loaders for every OTHER feature's `en` catalog, keyed by namespace. */
 const enFeatureLoaders: Record<string, () => Promise<unknown>> = {};
-for (const [path, loader] of Object.entries(import.meta.glob('/src/features/*/i18n/en.ts'))) {
+// ADR 1031 — an ADOPTER's catalogs (`src/adopter/features/<id>/i18n/`, a path
+// openwop-app never writes; empty here) are lazy feature catalogs like any other.
+// A namespace already taken would be silently shadowed, so it throws instead.
+for (const [path, loader] of Object.entries(import.meta.glob(['/src/features/*/i18n/en.ts', '/src/adopter/features/*/i18n/en.ts']))) {
   const ns = nsFromPath(path);
+  if (enFeatureLoaders[ns]) throw new Error(`[i18n] duplicate namespace '${ns}' (${path})`);
   if (!SHELL_FEATURE_NAMESPACES.has(ns)) enFeatureLoaders[ns] = loader;
 }
 
@@ -128,6 +133,9 @@ const en = build({
   ...shellFeatureCatalogs,
   ...import.meta.glob(['/src/*/i18n/en.ts', '!/src/featureToggles/i18n/en.ts', '!/src/assistantAction/i18n/en.ts', '!/src/workforces/i18n/en.ts', '!/src/settings/i18n/en.ts'], { eager: true }),
 });
+
+// ADR 1031 — nor may a lazy (adopter) namespace shadow an eager one.
+for (const ns of Object.keys(enFeatureLoaders)) if (en.resources[ns]) throw new Error(`[i18n] duplicate namespace '${ns}'`);
 
 /** Namespaces deferred out of the eager `en` bundle (feature pages own them). */
 export const LAZY_EN_NAMESPACES: readonly string[] = Object.keys(enFeatureLoaders).sort();
@@ -168,16 +176,19 @@ const lazyLocaleGlobs: Record<string, Record<string, () => Promise<unknown>>> = 
   'pt-BR': {
     ...import.meta.glob('/src/i18n/locales/pt-BR/*.ts'),
     ...import.meta.glob('/src/features/*/i18n/pt-BR.ts'),
+    ...import.meta.glob('/src/adopter/features/*/i18n/pt-BR.ts'),
     ...import.meta.glob('/src/*/i18n/pt-BR.ts'),
   },
   fr: {
     ...import.meta.glob('/src/i18n/locales/fr/*.ts'),
     ...import.meta.glob('/src/features/*/i18n/fr.ts'),
+    ...import.meta.glob('/src/adopter/features/*/i18n/fr.ts'),
     ...import.meta.glob('/src/*/i18n/fr.ts'),
   },
   es: {
     ...import.meta.glob('/src/i18n/locales/es/*.ts'),
     ...import.meta.glob('/src/features/*/i18n/es.ts'),
+    ...import.meta.glob('/src/adopter/features/*/i18n/es.ts'),
     ...import.meta.glob('/src/*/i18n/es.ts'),
   },
 };
@@ -209,7 +220,8 @@ function partitionLocaleGlobs(globs: Record<string, () => Promise<unknown>>): {
   const shell: Record<string, () => Promise<unknown>> = {};
   const features: Record<string, () => Promise<unknown>> = {};
   for (const [path, loader] of Object.entries(globs)) {
-    const isFeature = /\/src\/features\/[^/]+\/i18n\//.test(path);
+    // ADR 1031 — `src/adopter/features/<id>/` catalogs partition like first-party ones.
+    const isFeature = /\/src\/(?:adopter\/)?features\/[^/]+\/i18n\//.test(path);
     if (isFeature && !SHELL_FEATURE_NAMESPACES.has(nsFromPath(path))) features[nsFromPath(path)] = loader;
     else shell[path] = loader;
   }

@@ -1,6 +1,6 @@
 # ADR 0905 — Email: versioned templates, a version-pinned send approval, transactional templates, subscription topics
 
-**Status:** Accepted (2026-10-17); **P0–P2b implemented and deployed** (2026-10-19, see § Implementation record); P2c, P3, P4 and the 0922 follow-up in review. P5 waits on Open decision 3. Architect-reviewed (§ Architect review).
+**Status:** Accepted (2026-10-17); **P0–P2b implemented and deployed** (2026-10-19, see § Implementation record); P2c, P3, P4 and the 0922 follow-up **merged** (2026-10-25). P5 waits on Open decision 3. Architect-reviewed (§ Architect review).
 **Date:** 2026-10-17
 **Feature:** `email` (extends ADRs 0019, 0193, 0217, 0227, 0655, 0848, 0895). New toggle
 `email-approval-gate` (P2).
@@ -342,11 +342,11 @@ Every PR lands red-first (its first commit is the failing test) and had an
 | P2a self-check hoist | #4941 | `dc4ec1de2` | identity core in `host/approvalSelfCheck.ts`; CMS behaviour unchanged |
 | P2b approval kind + gate | #4928 | `9e4220fe3` | **Correction to D3:** a `sending` campaign that holds this generation's pin always continues under the gate, including one started before the gate was turned on (E4, slightly wider than the ADR sentence). The gate read is an allowlisted `resolveToggle` (ADR 0819 §1: OFF loosens a restriction) |
 | **Deployed** | — | `9e4220fe3` on rev `01015-cvf` (rollback `01014-g6j`) | 2026-10-19; `email-approval-gate` OFF (EM0905-1) |
-| P2c review UI + agent/node lane | #4929 | in review | `submit-for-review` node served on replay (real-executor witness); steward manifest + parity + safe-mode census updated |
-| P4 topics | #4933 | in review | **Correction to D7:** an `unsubscribed` suppression no longer blocks transactional mail (EMWF-18) — the D7 claim was not true in code before this |
-| P3 seam | #4932 | in review | registry in `host/transactionalEmail.ts`; transport registered by `email`; commerce → email import removed |
-| P3 senders | #4942 commerce · #4972 invitations · #4973 approval notices · #4974 e-sign · #4975 booking | in review | delivery unchanged per sender; e-sign legal notice stays verbatim English (counsel-owned). `billing/funnelWeeklySummary` and seller-payout-failed send no email on this host — nothing to migrate |
-| Follow-up for ADR 0922 | #5020 | in review | opt-in `refuseIfSent` → 409 `template_sent` (send hold CAS on the template row); approved sends re-check the approval's hash inside that CAS (409 `approval_stale`); `campaignsUsingTemplate()` |
+| P2c review UI + agent/node lane | #4929 | `ab103128c` (2026-10-25) | `submit-for-review` node served on replay (real-executor witness); steward manifest + parity + safe-mode census updated |
+| P4 topics | #4933 | `ab103128c` (2026-10-25) | **Correction to D7:** an `unsubscribed` suppression no longer blocks transactional mail (EMWF-18) — the D7 claim was not true in code before this |
+| P3 seam | #4932 | `56059df8b` (2026-10-25) | registry in `host/transactionalEmail.ts`; transport registered by `email`; commerce → email import removed |
+| P3 senders | #4942 commerce · #4972 invitations · #4973 approval notices · #4974 e-sign · #4975 booking | `a4798a3bd` · `fbff8f5ae` · `d6bd02482` · `89d56d3b1` · `0bbd6234d` (2026-10-25) | delivery unchanged per sender; e-sign legal notice stays verbatim English (counsel-owned). `billing/funnelWeeklySummary` and seller-payout-failed send no email on this host — nothing to migrate |
+| Follow-up for ADR 0922 | #5020 | `3edb20098` (2026-10-25) | opt-in `refuseIfSent` → 409 `template_sent` (send hold CAS on the template row); approved sends re-check the approval's hash inside that CAS (409 `approval_stale`); `campaignsUsingTemplate()` |
 | P5 platform list | — | not built | Open decision 3 |
 
 **Not expressible in code:** "ON in the MyndHyve distribution" (D4). There is no
@@ -404,6 +404,14 @@ existing `expectedContentHash` request field; rejection remains possible without
 it. Legacy rows require resubmission. Both the approval inbox and unified review
 card show the same pinned content and echo this digest. Recipient count remains
 an estimate; membership, consent and suppression still resolve at send time.
+
+> **CORRECTED 2026-11-02 (NYI-EMAIL-1):** "both" was short one surface. `/inbox`
+> (`NeedsYouInbox`) is a third deciding surface, and it showed neither the pinned
+> content nor the digest, so every approve there was refused as `stale_review`. It
+> now renders `EmailSendReviewContext`, echoes `reviewHash` from the row it renders,
+> and disables Approve on a row with no digest. The approver notification also
+> pointed at `/approvals`, which has no SPA route; it now opens `/inbox?approval=<id>`.
+> The server check did not change.
 
 Resolution CAS uses the exact approval snapshot whose pin, authority and digest
 were checked. Every creation and repin also receives a fresh opaque host ownership

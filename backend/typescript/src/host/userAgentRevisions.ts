@@ -66,6 +66,18 @@ async function readHead(tenant: string, agentId: string): Promise<HeadRow | null
   return h && h.tenantId === tenant && h.agentId === agentId ? h : null;
 }
 
+/** The newest revision whose content is `record`'s, or null when none is numbered.
+ *  For an edit that a newer edit superseded before it could number itself. */
+export async function revisionOfContent(record: UserAgentRecord): Promise<string | null> {
+  const key = revisionContentKey(record);
+  let best: number | null = null;
+  for (const row of await revisions.listByPrefix(`${record.tenantId}::${record.agentId}::`)) {
+    if (row.tenantId !== record.tenantId || row.agentId !== record.agentId || row.contentKey !== key) continue;
+    if (best === null || row.revision > best) best = row.revision;
+  }
+  return best === null ? null : String(best);
+}
+
 /** The record stored for one revision, or null. Revision `0` of a never-edited agent is its live record (the caller has it). */
 export async function getRevision(tenant: string, agentId: string, revision: string): Promise<UserAgentRecord | null> {
   if (!/^(0|[1-9]\d{0,8})$/.test(revision)) return null; // canonical only: `01` is not revision 1
@@ -73,8 +85,8 @@ export async function getRevision(tenant: string, agentId: string, revision: str
   return row && row.tenantId === tenant && row.agentId === agentId ? row.record : null;
 }
 
-async function putRevision(record: UserAgentRecord, revision: number, contentKey: string, authoredBy: string | undefined): Promise<void> {
-  await revisions.compareAndSwap(null, {
+async function putRevision(record: UserAgentRecord, revision: number, contentKey: string, authoredBy: string | undefined): Promise<boolean> {
+  return revisions.compareAndSwap(null, {
     tenantId: record.tenantId, agentId: record.agentId, revision, contentKey, record, createdAt: new Date().toISOString(),
     ...(authoredBy ? { authoredBy } : {}),
   });
@@ -93,22 +105,50 @@ async function putRevision(record: UserAgentRecord, revision: number, contentKey
  * `authoredBy` names who wrote this content; pass it only from the create or edit
  * that stored it, never from a catch-up, which cannot know.
  */
-export async function alignHead(record: UserAgentRecord, authoredBy?: string): Promise<string> {
-  const tenant = record.tenantId;
-  const key = revisionContentKey(record);
+export async function alignHead(
+  first: UserAgentRecord,
+  authoredBy?: string,
+  /** TST-FIB-GC1 — re-read the STORED record before each retry. A caller's record can
+   *  be stale by the time a retry runs (a newer edit committed meanwhile); numbering
+   *  it then names content that is no longer stored. Absent: number `first` only. */
+  reload?: () => Promise<UserAgentRecord | null>,
+): Promise<string> {
+  const tenant = first.tenantId;
+  const firstKey = revisionContentKey(first);
+  let record = first;
   for (let attempt = 0; attempt < 5; attempt += 1) {
+    if (attempt > 0 && reload) record = (await reload().catch(() => null)) ?? record;
+    const key = revisionContentKey(record);
+    // The author is credited only while the content is still the one they wrote.
+    const author = key === firstKey ? authoredBy : undefined;
     const head = await readHead(tenant, record.agentId);
     if (head && head.contentKey === key) return String(head.revision);
     const revision = head ? head.revision + 1 : 0;
-    await putRevision(record, revision, key, authoredBy);
-    if (!(await heads.compareAndSwap(head, { tenantId: tenant, agentId: record.agentId, revision, contentKey: key }))) continue;
-    if (revision > 0) {
-      await pruneRevisions(tenant, record.agentId, revision);
-      if (revisedHook) await revisedHook(tenant, record.agentId, String(revision)).catch(() => undefined);
+    if (!(await putRevision(record, revision, key, author))) {
+      // TST-FIB-GC1 — another aligner already wrote revision `revision` and has not
+      // moved the head yet. The head must never name a row holding other content (it
+      // used to: this aligner's head CAS could win and point `revision` at the other
+      // aligner's row). If that row is ours, take it; otherwise finish the other
+      // aligner's step (move the head onto ITS content) and number ours after it.
+      // The next pass returns when the head is on our content, or numbers ours next.
+      const existing = await revisions.get(`${tenant}::${record.agentId}::${revision}`);
+      if (existing && await heads.compareAndSwap(head, { tenantId: tenant, agentId: record.agentId, revision, contentKey: existing.contentKey })) {
+        await afterHeadMoved(tenant, record.agentId, revision);
+      }
+      continue;
     }
+    if (!(await heads.compareAndSwap(head, { tenantId: tenant, agentId: record.agentId, revision, contentKey: key }))) continue;
+    await afterHeadMoved(tenant, record.agentId, revision);
     return String(revision);
   }
   return currentRevision(tenant, record.agentId);
+}
+
+/** Retention and the draft hook run once per head move, whoever moved it. */
+async function afterHeadMoved(tenant: string, agentId: string, revision: number): Promise<void> {
+  if (revision === 0) return;
+  await pruneRevisions(tenant, agentId, revision);
+  if (revisedHook) await revisedHook(tenant, agentId, String(revision)).catch(() => undefined);
 }
 
 /**

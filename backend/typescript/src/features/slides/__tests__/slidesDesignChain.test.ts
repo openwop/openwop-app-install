@@ -29,7 +29,7 @@ type PackModule = {
 };
 
 async function pack(): Promise<PackModule> {
-  return (await import(packPath)) as unknown as PackModule;
+  return await import(packPath);
 }
 
 type Ctx = { inputs?: Record<string, unknown>; config?: Record<string, unknown>; callAI?: (req: { systemPrompt?: string; messages: { content: string }[] }) => Promise<{ content: string }> };
@@ -61,8 +61,8 @@ describe('slides.design chain shape (ADR 0328 P6)', () => {
     for (const nodeId of ['outline', 'draft', 'deepen', 'notes']) {
       const n = d.nodes.find((x) => bare(x.nodeId) === nodeId);
       const cfg = (n?.config ?? {}) as { provider?: string; model?: string };
-      expect(cfg.provider, nodeId).toBeTruthy();
-      expect(cfg.model, nodeId).toBeTruthy();
+      expect(cfg.provider, nodeId).toBe('anthropic');
+      expect(cfg.model, nodeId).toMatch(/^claude-/);
     }
   });
 
@@ -218,7 +218,7 @@ describe('notes node', () => {
         { layout: 'section', title: 'B' },
       ] } } },
       config: {},
-      callAI: ai(() => ({ notes: { '1': 'Say the section matters.' } })),
+      callAI: ai(() => ({ notes: { '0': 'OVERWRITE', '1': 'Say the section matters.' } })),
     };
     const res = await m.nodes['feature.slides.nodes.notes']!(ctx);
     const out = res.outputs as { artifact: { payload: { slides: { notes?: string }[] } }; notesAdded: number };
@@ -238,6 +238,8 @@ describe('audit node (deterministic, zero AI)', () => {
           { layout: 'section', title: 'Same', notes: 'n' },
           { layout: 'title-bullets', title: 'C', bullets: ['1', '2', '3', '4', '5', '6', '7', '8'] },
           { layout: 'blank' },
+          { layout: 'title', notes: 'n' },
+          { layout: 'blocks', title: 'Busy', notes: 'n', blocks: Array.from({ length: 9 }, () => ({ type: 'text', props: { text: 'x' } })) },
         ] } },
         deepenWarning: 'deepen improved nothing (429)',
       },
@@ -245,11 +247,9 @@ describe('audit node (deterministic, zero AI)', () => {
     const res = await m.nodes['feature.slides.nodes.audit']!(ctx);
     const out = res.outputs as { artifact: unknown; report: { score: number; findings: { code: string }[]; summary: string } };
     const codes = out.report.findings.map((f) => f.code);
-    expect(codes).toContain('duplicate_title');
-    expect(codes).toContain('bullet_overload');
-    expect(codes).toContain('missing_notes');
-    expect(codes).toContain('deepen_skipped');
-    expect(out.report.score).toBeLessThan(100);
+    expect([...codes].sort()).toEqual(['block_overload', 'bullet_overload', 'deepen_skipped', 'duplicate_title', 'empty_slide', 'missing_notes', 'missing_notes']);
+    // 100 - high 25 - medium 10 × 3 - low 3 × 3.
+    expect(out.report.score).toBe(36);
     expect(out.artifact).toBeTruthy(); // pass-through for the gate binding
     for (const [k, v] of Object.entries(res.outputs)) expect(typeof v, `string port '${k}'`).not.toBe('string');
   });

@@ -70,7 +70,7 @@ function deps(): { storage: Storage; hostSuite: HostAdapterSuite } {
 describe('agent autonomy — end-to-end smoke', () => {
   it('seeds, auto-heartbeats a real run, and shows it in the index-backed fleet feed', async () => {
     // 1. Seed demo agents (roster + boards + To Do cards + schedules).
-    expect((await post('/host/openwop-app/example-data/seed', {})).status).toBe(200);
+    expect((await post('/host/openwop-app/example-data/seed', { expectedTenantId: 'default' })).status).toBe(200);
     const roster = await listRoster('default');
     expect(roster.length).toBeGreaterThan(0);
 
@@ -97,7 +97,7 @@ describe('agent autonomy — end-to-end smoke', () => {
   });
 
   it('fires a due schedule through the real daemon', async () => {
-    await post('/host/openwop-app/example-data/seed', {});
+    await post('/host/openwop-app/example-data/seed', { expectedTenantId: 'default' });
     const agentEntry = (await listRoster('default'))[0]!;
     const workflowId = agentEntry.workflows[0]!;
     expect(workflowId).toBeTruthy();

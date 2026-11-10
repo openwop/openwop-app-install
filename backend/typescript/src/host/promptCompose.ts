@@ -40,7 +40,8 @@ import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { resolveSecret, type SecretScope } from '../byok/secretResolver.js';
+import { type SecretScope } from '../byok/secretResolver.js';
+import { resolveUserNamedSecret } from '../byok/userNamedSecret.js';
 import { defangAngleFence } from './untrustedContent.js';
 import { locateRepoDir } from './_repoPath.js';
 
@@ -193,7 +194,7 @@ async function resolveBinding(
     // is discarded — only the marker surfaces in the observability
     // payload per RFC 0027 §E + SECURITY/threat-model-secret-leakage.md
     // SR-1.
-    const resolved = await resolveSecret(credentialRef, scope);
+    const resolved = await resolveUserNamedSecret(credentialRef, scope);
     if (resolved === null) {
       throw new Error(
         `prompt_secret_unresolvable: credentialRef '${credentialRef}' not provisioned in BYOK store`,

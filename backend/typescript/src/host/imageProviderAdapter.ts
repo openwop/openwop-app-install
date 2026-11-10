@@ -45,7 +45,7 @@ function connectionProviderIdFor(provider?: string): string | undefined {
 async function resolveImageKey(provider: string | undefined, tenantId: string | undefined): Promise<{ secret?: string; provenance?: Provenance }> {
   const connProvider = tenantId ? connectionProviderIdFor(provider) : undefined;
   if (connProvider) {
-    const resolved = await resolveConnectionCredential({ tenantId: tenantId!, provider: connProvider }).catch(() => null);
+    const resolved = await resolveConnectionCredential({ egress: { fixedEndpoint: 'the image provider fixed API host' }, tenantId: tenantId!, provider: connProvider }).catch(() => null);
     // Broker Connection wins — carry its provenance so a successful call can be
     // stamped (ADR 0253). The env key (below) has no Connection to stamp.
     if (resolved?.secret) return { secret: resolved.secret, provenance: resolved.provenance };

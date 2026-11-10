@@ -1,47 +1,73 @@
 /**
- * XCH-ENV-5 / XCH-INFRA-1 (LLM-EXCHANGE-AUDIT Wave 5): `openwop:schema.lookup`
- * serves all three schema families (node types, canvas component catalogs,
- * artifact types), and schema-read tool outputs are never compacted.
+ * XCH-ENV-5 / XCH-INFRA-1 (LLM-EXCHANGE-AUDIT Wave 5; ADR 0604 TOCC-2):
+ * `openwop:schema.lookup` serves all three schema families (node types, canvas
+ * component catalogs, artifact types), and schema-read tool outputs are never
+ * compacted.
+ *
+ * THE FILENAME IS HISTORICAL. This file once also tested the RFC 0021 AI Envelope
+ * `schema.request` round trip; ADR 1007 deleted the envelope from the host
+ * (a99ecc8e1) and that half with it. The name is kept because ADRs 0604, 0999 and
+ * 1001 cite it.
+ *
+ * Sabotage-witnessed (wave 82): a node lookup that resolves nothing (the name
+ * lands in `notFound`) reds the node case; an empty component list reds the
+ * canvas case; a by-id fetch without `schema` reds the artifact case; dropping the
+ * exempt short-circuit in `applyToolResultTransform` reds the byte-exact case;
+ * breaking BOTH exemption lanes of `isSchemaReadExempt` (the literal array and the
+ * tool's `schemaCarrying` declaration — a double guard, so one lane alone stays
+ * green) reds the byte-exact and predicate cases; removing an ADR 0604 id from
+ * the array reds the exempt-set case.
  */
-import http from 'node:http';
-import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { createAgentToolProvider } from '../src/host/agentToolProvider.js';
 
-let server: http.Server;
+// Boot populates the node, canvas and artifact registries the lookup reads.
+// No HTTP is used, so no server is started.
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
-  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { void (server.address() as AddressInfo); res(); }); });
-});
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+  await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+}, 120_000);
+
+function field(value: unknown, ...path: Array<string | number>): unknown {
+  let cur: unknown = value;
+  for (const key of path) {
+    if (typeof cur !== 'object' || cur === null) return undefined;
+    cur = Reflect.get(cur, key);
+  }
+  return cur;
+}
+function list(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
 
 describe('openwop:schema.lookup serves all three families (XCH-ENV-5 / XCH-ENV-3)', () => {
   const run = (input: Record<string, unknown>) =>
     createAgentToolProvider({ tenantId: 'default' }).executeTool({ name: 'openwop:schema.lookup', input });
-  const parse = (r: { content: string }) => JSON.parse(r.content) as Record<string, unknown>;
+  const parse = (r: { content: string }): unknown => JSON.parse(r.content);
 
   it('node typeIds resolve from the live registry', async () => {
     const out = parse(await run({ kind: 'node', names: ['core.noop'] }));
-    expect(JSON.stringify(out)).toContain('core.noop');
+    // A miss echoes the name into `notFound`, so asserting the name appears
+    // anywhere could not fail (wave 82 probe): assert it RESOLVED.
+    expect(list(field(out, 'schemas')).map((s) => field(s, 'typeId'))).toEqual(['core.noop']);
+    expect(field(out, 'notFound')).toEqual([]);
   });
   it('canvas component catalogs resolve (canvas.slides)', async () => {
     const out = parse(await run({ kind: 'canvas-component', canvasTypeId: 'canvas.slides' }));
-    expect(Array.isArray(out.components)).toBe(true);
-    expect((out.components as unknown[]).length).toBeGreaterThan(5);
-    expect(String(out.promptSchema)).toContain('- heading');
+    expect(Array.isArray(field(out, 'components'))).toBe(true);
+    expect(list(field(out, 'components')).length).toBeGreaterThan(5);
+    expect(String(field(out, 'promptSchema'))).toContain('- heading');
   });
   it('artifact types list + fetch by id', async () => {
-    const list = parse(await run({ kind: 'artifact-type' }));
-    expect(Array.isArray(list.artifactTypes)).toBe(true);
-    expect((list.artifactTypes as unknown[]).length).toBeGreaterThan(0);
-    const first = (list.artifactTypes as Array<{ artifactTypeId: string }>)[0]!;
-    const byId = parse(await run({ kind: 'artifact-type', names: [first.artifactTypeId] }));
-    const found = (byId.artifactTypes as Array<{ artifactTypeId: string; schema?: unknown }>)[0]!;
-    expect(found.artifactTypeId).toBe(first.artifactTypeId);
-    expect(found.schema).toBeTruthy();
+    const all = parse(await run({ kind: 'artifact-type' }));
+    expect(list(field(all, 'artifactTypes')).length).toBeGreaterThan(0);
+    const firstId = field(all, 'artifactTypes', 0, 'artifactTypeId');
+    expect(typeof firstId).toBe('string');
+    const byId = parse(await run({ kind: 'artifact-type', names: [String(firstId)] }));
+    expect(field(byId, 'artifactTypes', 0, 'artifactTypeId')).toBe(firstId);
+    expect(field(byId, 'artifactTypes', 0, 'schema')).toBeTruthy();
   });
 });
 
@@ -110,11 +136,23 @@ describe('schema-read tool outputs are never compacted (XCH-INFRA-1)', () => {
   });
 
   it('every exempt id passes through byte-exact under the most aggressive decision', async () => {
-    const { applyToolResultTransform, SCHEMA_READ_EXEMPT_TOOLS } = await import('../src/host/toolResultTransform.js');
-    expect(SCHEMA_READ_EXEMPT_TOOLS.length).toBeGreaterThanOrEqual(18); // the loop below is vacuous without this
-    for (const toolName of SCHEMA_READ_EXEMPT_TOOLS) {
-      expect(applyToolResultTransform(schemaish, { decision: LOSSY, toolName }), `${toolName} must stay byte-exact`).toBe(schemaish);
-      expect(applyToolResultTransform(elidable, { decision: LOSSY, toolName }), `${toolName} must stay byte-exact`).toBe(elidable);
+    const { applyToolResultTransform, registerToolResultTransform, __resetToolResultTransform, SCHEMA_READ_EXEMPT_TOOLS } =
+      await import('../src/host/toolResultTransform.js');
+    const { compactToolOutput } = await import('../src/features/tool-output-compaction/compact.js');
+    // Its OWN live transform: the boot-registered one is reset by the negative
+    // control's `finally`, so under shuffle this loop could run against identity
+    // and never fail.
+    registerToolResultTransform((content, ctx) => (ctx.decision ? compactToolOutput(content, ctx.decision) : content));
+    try {
+      expect(SCHEMA_READ_EXEMPT_TOOLS.length).toBeGreaterThanOrEqual(18); // the loop below is vacuous without this
+      // Positive control: the same transform DOES compact a non-exempt tool.
+      expect(applyToolResultTransform(elidable, { decision: LOSSY, toolName: 'openwop:crm.definitely-not-a-schema-tool' })).not.toBe(elidable);
+      for (const toolName of SCHEMA_READ_EXEMPT_TOOLS) {
+        expect(applyToolResultTransform(schemaish, { decision: LOSSY, toolName }), `${toolName} must stay byte-exact`).toBe(schemaish);
+        expect(applyToolResultTransform(elidable, { decision: LOSSY, toolName }), `${toolName} must stay byte-exact`).toBe(elidable);
+      }
+    } finally {
+      __resetToolResultTransform();
     }
   });
 

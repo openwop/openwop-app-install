@@ -13,11 +13,14 @@
  * projection + gating as every builtin (allowlist → firewall → executeTool).
  *
  * Authority parity (brief hard rule 1): the HTTP routes gate on the shared
- * `destination-sync` toggle (`requireFeatureEnabled`, routes.ts:33) with NO
- * per-user predicate beyond tenant. Each tool re-resolves that toggle per-tenant
- * (fail-closed) AND additionally fails on a missing acting human — the READ tool
- * fails EMPTY, the preview/action tools fail TYPED (a system/agent turn with no
- * human never drives egress). The warehouse action keeps its own approval gate:
+ * `destination-sync` toggle plus `workspace:read` / `workspace:write` (ADR 1024 D1,
+ * routes.ts `requireRead`/`requireWrite`). Each tool runs the SAME predicate through
+ * `toolGate` — toggle, the ADR 0419 entitlement, an acting human, and the scope via
+ * the req-less `assertTenantScope` (the CRM `tenantGate` shape). Before ADR 1024 the
+ * tools checked only that an acting user existed, an empty predicate "shared" with
+ * routes that checked nothing either (`CDP2WF-5`). The READ tool fails EMPTY, the
+ * preview/action tools fail TYPED (a system/agent turn with no human never drives
+ * egress). The warehouse action keeps its own approval gate:
  * `warehouseLoad` runs `evaluateWarehouseGate` (warehouseLoadService.ts:85) whose
  * `actionPolicyOf('warehouse.load')` default is `approval-required`
  * (warehouseLoadService.ts:94) — the insert (warehouseLoadService.ts:210) only
@@ -30,6 +33,9 @@ import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { startWorkflowRun, type StartRunDeps } from '../../host/runStarter.js';
 import { claimIgnition, recordIgnitionRun, releaseIgnition, ignitionKey } from '../../host/ignitionGuard.js';
 import { resolveFeatureToggle, untrustedToolError } from '../../host/agentToolKit.js';
+import { assertTenantScope } from '../../host/accessControlService.js';
+import { checkTenantEntitlement } from '../../host/entitlementSeam.js';
+import { OpenwopError } from '../../types.js';
 import { createLogger } from '../../observability/logger.js';
 import { ONWARD_SYNC_WORKFLOW_ID } from './onwardSyncWorkflow.js';
 import { applyFieldMap, getDestinationSync, listDestinationSyncs } from './destinationSyncService.js';
@@ -54,6 +60,28 @@ function toolError(error: string, message: string, extra?: Record<string, unknow
  *  the tool's analog of the routes' `requireFeatureEnabled` (routes.ts:33). */
 async function destinationSyncEnabled(scope: BundleScope): Promise<boolean> {
   return resolveFeatureToggle(TOGGLE_ID, scope);
+}
+
+/** ADR 1024 D1 — the route predicate, req-less. Returns null when the caller may proceed,
+ *  else the typed refusal. `personalTenant` is what the request stamped on the run
+ *  (never re-derived; see the CRM `tenantGate` note on anon sandboxes). */
+async function toolGate(scope: BundleScope, needed: 'workspace:read' | 'workspace:write'): Promise<ToolResult | null> {
+  if (!scope.actingUserId) return toolError('acting_user_required', 'Destination syncs can only be used from a human-initiated turn.');
+  if (!(await destinationSyncEnabled(scope))) return toolError('feature_disabled', 'Destination Sync is not enabled for this workspace.');
+  try {
+    await checkTenantEntitlement(scope.tenantId, TOGGLE_ID);
+    await assertTenantScope(scope.tenantId, scope.actingUserId, needed, { ...(scope.personalTenant ? { personalTenant: scope.personalTenant } : {}) });
+  } catch (err) {
+    // Host sentences only (TOC2CD-11): the thrown message is not ours to forward.
+    if (err instanceof OpenwopError && err.code === 'forbidden_scope') {
+      return toolError('forbidden_scope', needed === 'workspace:write'
+        ? 'The user\'s role in this workspace cannot change or run destination syncs (it needs write access).'
+        : 'The user\'s role in this workspace cannot read destination syncs.', { requiredScope: needed });
+    }
+    if (err instanceof OpenwopError) return toolError(err.code, 'Destination Sync is not available to this user in this workspace.');
+    throw err;
+  }
+  return null;
 }
 
 /** A compact, model-facing sync projection — enough to choose one to run without
@@ -83,8 +111,7 @@ const recordsOf = (v: unknown): Record<string, unknown>[] =>
  * of the route's 404, never a leak.
  */
 export async function runListTool(_input: Record<string, unknown>, scope: BundleScope): Promise<ToolResult> {
-  if (!scope.actingUserId) return { content: JSON.stringify({ syncs: [] }) };
-  if (!(await destinationSyncEnabled(scope))) return { content: JSON.stringify({ syncs: [] }) };
+  if (await toolGate(scope, 'workspace:read')) return { content: JSON.stringify({ syncs: [] }) };
   const syncs = await listDestinationSyncs(scope.tenantId);
   return { content: JSON.stringify({ syncs: syncs.map(projectSync) }) };
 }
@@ -96,10 +123,8 @@ export async function runListTool(_input: Record<string, unknown>, scope: Bundle
  * success-with-empty, brief rule 2).
  */
 export async function runDryRunTool(input: Record<string, unknown>, scope: BundleScope): Promise<ToolResult> {
-  if (!scope.actingUserId) return toolError('acting_user_required', 'Sync previews can only be run from a human-initiated turn.');
-  if (!(await destinationSyncEnabled(scope))) {
-    return toolError('feature_disabled', 'Destination Sync is not enabled for this workspace.');
-  }
+  const refused = await toolGate(scope, 'workspace:read');
+  if (refused) return refused;
   const syncId = str(input.syncId);
   if (!syncId) return toolError('validation_error', '`syncId` is required (get one from `list`).');
   const sample = input.sample;
@@ -131,10 +156,9 @@ export async function runDryRunTool(input: Record<string, unknown>, scope: Bundl
  * closure-bound at registration; exposed as the first arg for direct testing.
  */
 export async function runRunTool(deps: StartRunDeps, input: Record<string, unknown>, scope: BundleScope): Promise<ToolResult> {
-  if (!scope.actingUserId) return toolError('acting_user_required', 'A sync can only be run from a human-initiated turn.');
-  if (!(await destinationSyncEnabled(scope))) {
-    return toolError('feature_disabled', 'Destination Sync is not enabled for this workspace.');
-  }
+  const refused = await toolGate(scope, 'workspace:write');
+  if (refused) return refused;
+  if (!scope.actingUserId) return toolError('acting_user_required', 'A sync can only be run from a human-initiated turn.'); // narrows the type; toolGate already refused
   const syncId = str(input.syncId);
   if (!syncId) return toolError('validation_error', '`syncId` is required (get one from `list`).');
   const sync = await getDestinationSync(scope.tenantId, syncId);
@@ -188,7 +212,7 @@ export async function runRunTool(deps: StartRunDeps, input: Record<string, unkno
     );
     log.info('destination_sync_warehouse_load', { tenantId: scope.tenantId, syncId, status: result.status });
     const note = result.status === 'requires_approval'
-      ? 'A warehouse-load approval is pending — tell the user a person must approve it before anything is written to BigQuery.'
+      ? 'A warehouse-load approval is pending: tell the user another member with write access must approve it (not the person who asked for the load) before anything is written to BigQuery.'
       : undefined;
     return { content: JSON.stringify({ syncId, destinationKind: sync.destinationKind, ...result, ...(note ? { note } : {}) }) };
   }

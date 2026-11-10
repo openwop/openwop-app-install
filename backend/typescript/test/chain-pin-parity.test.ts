@@ -39,7 +39,7 @@ beforeAll(async () => {
 describe('ADR 0766 P2 — in-tree chain pins match the installed node versions', () => {
   it('loaded the in-tree chains (a vacuous registry would pass everything)', () => {
     expect(loadErrors, 'an in-tree chain pack failed to load').toEqual([]);
-    expect(listChains().length).toBeGreaterThan(268); // measured 272 (2026-10-29)
+    expect(listChains().length).toBeGreaterThan(258); // measured 272 (2026-10-29); 261 after the KickTodo packs left (ADR 1031 P3)
   });
 
   it('no chain pins a version this host does not run', () => {

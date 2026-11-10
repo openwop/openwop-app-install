@@ -2,6 +2,16 @@
 
 Status: Accepted — Phase 1 + Phase 2 implemented 2026-08-15; Phase 3 implemented 2026-08-17
 
+> **CORRECTION (2026-11-03) — ADR 1048 adds a RUNTIME half of requirement 4.**
+> This ADR's floor is a build-time snapshot over upstream's `packs/`, and
+> `isSideEffectingNode` returned false for any pack node that snapshot never saw
+> (registry, break-glass and adopter packs re-executed on every replay fork).
+> ADR 1048 D5 classifies such a node from its own manifest when its pack loads,
+> failing CLOSED (served), never touching a typeId a build already classified;
+> adds an adopter build's served set as an arm; and makes the reach analysis
+> follow relative re-exports inside a pack. Upstream's committed snapshot is
+> byte-identical.
+
 ## Context
 
 Upstream `replay.md` requirement 4 makes a pack manifest's node

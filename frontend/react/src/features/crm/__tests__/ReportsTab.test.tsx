@@ -14,10 +14,12 @@
  * or never.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, waitFor, fireEvent, within } from '@testing-library/react';
+import { render, screen, cleanup, waitFor, fireEvent, within, act } from '@testing-library/react';
+import { StrictMode } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import type { PipelineReport } from '../crmReportsClient.js';
 import type * as OrgClient from '../crmOrgClient.js';
+import type * as ReportsClient from '../crmReportsClient.js';
 
 const listPipelines = vi.hoisted(() => vi.fn<typeof OrgClient.listPipelines>(async () => [
   { pipelineId: 'p1', name: 'Sales', stages: [{ stageId: 's1', name: 'New', probability: 10 }] },
@@ -26,7 +28,7 @@ vi.mock('../crmOrgClient.js', () => ({
   listPipelines,
 }));
 
-const getPipelineReport = vi.hoisted(() => vi.fn(async (): Promise<PipelineReport> => ({
+const getPipelineReport = vi.hoisted(() => vi.fn<typeof ReportsClient.getPipelineReport>(async (): Promise<PipelineReport> => ({
   funnel: [{ stage: 'New', count: 30 }, { stage: 'Qualified', count: 15 }],
   perStage: [
     { stageId: 's1', name: 'New', probability: 10, count: 30, sum: 5000, weightedSum: 500 },
@@ -198,3 +200,150 @@ describe('R2 CC-SP-3 — currency-grouped sums reach the table (review F2)', () 
   });
 });
 
+
+/** CRM-REPORT-ORG-PIPELINE-1: actual interleaved requests, not state-shape pins. */
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: Error) => void } {
+  let resolve: (value: T) => void = () => { throw new Error('uninitialized deferred'); };
+  let reject: (error: Error) => void = () => { throw new Error('uninitialized deferred'); };
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+const pipelineRows = (id: string): Awaited<ReturnType<typeof OrgClient.listPipelines>> => [
+  { pipelineId: id, name: id, stages: [{ stageId: 's1', name: 'New', probability: 10 }] },
+];
+const reportWithCount = (count: number): PipelineReport => ({
+  funnel: [], perStage: [], totals: { openCount: count, wonCount: 0, lostCount: 0, winRate: null },
+  aging: [], snapshots: [], conversions: [],
+});
+const reportTree = (org: string) => <MemoryRouter><ReportsTab orgId={org} /></MemoryRouter>;
+
+describe('CRM-REPORT-ORG-PIPELINE-1 request ownership', () => {
+  it('waits for the new org catalog without issuing a new-org/old-pipeline report', async () => {
+    const catalogB = deferred<Awaited<ReturnType<typeof OrgClient.listPipelines>>>();
+    listPipelines.mockImplementation(async (org) => org === 'A' ? pipelineRows('pa') : catalogB.promise);
+    getPipelineReport.mockResolvedValue(reportWithCount(101));
+    const view = render(reportTree('A'));
+    await screen.findByText('101');
+    view.rerender(reportTree('B'));
+    expect(screen.queryByText('101')).toBeNull();
+    expect(getPipelineReport.mock.calls).toEqual([['A', 'pa']]);
+    getPipelineReport.mockResolvedValue(reportWithCount(202));
+    await act(async () => { catalogB.resolve(pipelineRows('pb')); });
+    await screen.findByText('202');
+    expect(getPipelineReport.mock.calls).toEqual([['A', 'pa'], ['B', 'pb']]);
+  });
+
+  it.each(['success', 'failure'] as const)('ignores old-org report %s after current metrics render', async (settle) => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const old = deferred<PipelineReport>();
+    listPipelines.mockImplementation(async (org) => pipelineRows(org));
+    getPipelineReport.mockImplementation(async (org) => org === 'A' ? old.promise : reportWithCount(202));
+    const view = render(reportTree('A'));
+    await waitFor(() => expect(getPipelineReport).toHaveBeenCalledWith('A', 'A'));
+    view.rerender(reportTree('B'));
+    await screen.findByText('202');
+    await act(async () => {
+      if (settle === 'success') old.resolve(reportWithCount(101));
+      else old.reject(new Error('old org rejected'));
+    });
+    expect(screen.getByText('202')).toBeTruthy();
+    expect(screen.queryByText('101')).toBeNull();
+    expect(screen.queryByText('Could not load this')).toBeNull();
+  });
+
+  it.each(['success', 'failure'] as const)('ignores earlier A catalog %s after A to B to A', async (settle) => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const firstA = deferred<Awaited<ReturnType<typeof OrgClient.listPipelines>>>();
+    let aReads = 0;
+    listPipelines.mockImplementation(async (org) => org === 'A' && ++aReads === 1 ? firstA.promise : pipelineRows(org));
+    getPipelineReport.mockResolvedValue(reportWithCount(303));
+    const view = render(reportTree('A'));
+    await waitFor(() => expect(listPipelines).toHaveBeenCalledWith('A'));
+    view.rerender(reportTree('B'));
+    await screen.findByText('303');
+    view.rerender(reportTree('A'));
+    await waitFor(() => expect(getPipelineReport).toHaveBeenCalledWith('A', 'A'));
+    await act(async () => {
+      if (settle === 'success') firstA.resolve(pipelineRows('obsolete'));
+      else firstA.reject(new Error('obsolete catalog failed'));
+    });
+    expect(getPipelineReport).not.toHaveBeenCalledWith('A', 'obsolete');
+    expect(screen.getByText('303')).toBeTruthy();
+    expect(screen.queryByText('Could not load this')).toBeNull();
+  });
+
+  it.each(['success', 'failure'] as const)('keeps latest pipeline metrics after prior pipeline %s', async (settle) => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const old = deferred<PipelineReport>();
+    listPipelines.mockResolvedValue([...pipelineRows('p1'), ...pipelineRows('p2')]);
+    getPipelineReport.mockImplementation(async (_org, pipeline) => pipeline === 'p1' ? old.promise : reportWithCount(202));
+    renderTab();
+    await waitFor(() => expect(getPipelineReport).toHaveBeenCalledWith('o1', 'p1'));
+    fireEvent.change(screen.getByLabelText('Pipeline'), { target: { value: 'p2' } });
+    await screen.findByText('202');
+    await act(async () => {
+      if (settle === 'success') old.resolve(reportWithCount(101));
+      else old.reject(new Error('old pipeline rejected'));
+    });
+    expect(screen.getByText('202')).toBeTruthy();
+    expect(screen.queryByText('101')).toBeNull();
+    expect(screen.queryByText('Could not load this')).toBeNull();
+  });
+
+  it('Retry retains the selected pipeline and current failures recover through both reads', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const retryCatalog = deferred<Awaited<ReturnType<typeof OrgClient.listPipelines>>>();
+    const rows = [...pipelineRows('p1'), ...pipelineRows('p2')];
+    listPipelines.mockResolvedValueOnce(rows).mockReturnValueOnce(retryCatalog.promise);
+    getPipelineReport.mockImplementation(async (_org, pipeline) => {
+      if (pipeline === 'p2') throw new Error('current report failed');
+      return reportWithCount(101);
+    });
+    renderTab();
+    await screen.findByText('101');
+    fireEvent.change(screen.getByLabelText('Pipeline'), { target: { value: 'p2' } });
+    await screen.findByText('Could not load this');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(screen.queryByText('101')).toBeNull();
+    expect(screen.queryByText('Could not load this')).toBeNull();
+    expect(getPipelineReport).toHaveBeenCalledTimes(2);
+    getPipelineReport.mockResolvedValue(reportWithCount(202));
+    await act(async () => { retryCatalog.resolve(rows); });
+    await screen.findByText('202');
+    expect(listPipelines).toHaveBeenCalledTimes(2);
+    expect(getPipelineReport).toHaveBeenLastCalledWith('o1', 'p2');
+    expect(getPipelineReport).toHaveBeenCalledTimes(3);
+    expect(screen.queryByText('Could not load this')).toBeNull();
+  });
+
+  it('a pre-Retry report cannot overwrite the recovered selected pipeline', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const old = deferred<PipelineReport>();
+    listPipelines.mockResolvedValue([...pipelineRows('p1'), ...pipelineRows('p2')]);
+    getPipelineReport.mockReturnValueOnce(old.promise).mockRejectedValueOnce(new Error('current failed'));
+    renderTab();
+    await waitFor(() => expect(getPipelineReport).toHaveBeenCalledWith('o1', 'p1'));
+    fireEvent.change(screen.getByLabelText('Pipeline'), { target: { value: 'p2' } });
+    await screen.findByText('Could not load this');
+    getPipelineReport.mockResolvedValue(reportWithCount(202));
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await screen.findByText('202');
+    await act(async () => { old.resolve(reportWithCount(101)); });
+    expect(screen.getByText('202')).toBeTruthy();
+    expect(screen.queryByText('101')).toBeNull();
+    expect(screen.queryByText('Could not load this')).toBeNull();
+    expect(getPipelineReport).toHaveBeenLastCalledWith('o1', 'p2');
+    expect(listPipelines).toHaveBeenCalledTimes(2);
+  });
+
+  it('StrictMode cleanup ignores its first catalog but the current setup stays live', async () => {
+    const first = deferred<Awaited<ReturnType<typeof OrgClient.listPipelines>>>();
+    listPipelines.mockReturnValueOnce(first.promise).mockResolvedValue(pipelineRows('current'));
+    getPipelineReport.mockResolvedValue(reportWithCount(404));
+    render(<StrictMode>{reportTree('A')}</StrictMode>);
+    await screen.findByText('404');
+    await act(async () => { first.resolve(pipelineRows('obsolete')); });
+    expect(getPipelineReport.mock.calls).toEqual([['A', 'current']]);
+    expect(screen.getByText('404')).toBeTruthy();
+  });
+});

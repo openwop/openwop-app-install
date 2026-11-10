@@ -9,12 +9,20 @@
  *   the concurrency rows    must not show "no refusals": the store counts both
  *                           families together, so a per-row 0 was never measured
  *   the hub's Refresh       must reach this panel's read
+ *   a failed REFRESH        keeps the last reading and says it is stale, never
+ *                           a fresh-looking card and never the "unavailable" card
  *
  * Sabotage notes (each run red, 2026-10-31):
  *  - render `admissionHolding` for both branches → red ("at least");
  *  - treat `refusals: null` as `{}` → red (concurrency rows claim "no refusals");
  *  - fold this read into the hub's `allSettled` page error → red ("a failed read");
  *  - load once on mount, ignoring `refreshToken` → red ("Refresh re-reads").
+ * Re-measured w85: also red on a wrong refusal count, a posture word swapped, the
+ * stale Notice dropped, a 403 read as a failure, the card's Refresh not wired,
+ * `cap 0` not shown as off, and the mount reading twice (`refreshToken >= 0`).
+ * The concurrency total is a SUM over `concurrencyRefusals`; the store emits one
+ * reason today (`at_cap`, host/runInsert.ts), so sum and first-value are the same
+ * on production-shaped data and that mutant is equivalent, not an untested claim.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, waitFor, within, fireEvent } from '@testing-library/react';
@@ -104,7 +112,13 @@ describe('ADR 0987 D6 — run admission panel', () => {
     expect(panel().getByText('cap 10')).toBeTruthy();
     expect(panel().getByText(en.admissionCapOff)).toBeTruthy();
     expect(panel().getByText(en.admissionCapPerPlan)).toBeTruthy();
-    expect(panel().getByText('session_runs_per_min')).toBeTruthy();
+    // The refusal chip carries the COUNT it read, beside its reason code.
+    expect(panel().getByText('session_runs_per_min').closest('span')?.textContent).toBe('refused 3 · session_runs_per_min');
+    // Every posture is a word: three window/plan families fail closed (strict), the
+    // concurrency family is counted in the run insert.
+    expect(panel().getAllByText(en.admissionPostureClosed)).toHaveLength(3);
+    expect(panel().getAllByText(en.admissionPostureTransactional)).toHaveLength(1);
+    expect(panel().queryByText(en.admissionPostureOpen)).toBeNull();
     expect(panel().getByText('Concurrency refusals (sessions and keys together): 2')).toBeTruthy();
     // The concurrency row shows no per-row refusal chip: only the two window/plan
     // rows with `{}` say "no refusals".
@@ -150,5 +164,13 @@ describe('ADR 0987 D6 — run admission panel', () => {
     fireEvent.click(page().getByRole('button', { name: en.refresh }));
     expect(await panel().findByText(en.admissionProfileEvaluation)).toBeTruthy();
     expect(api.getAdmissionSummary).toHaveBeenCalledTimes(2);
+    expect(panel().queryByText(en.admissionStale)).toBeNull();
+    // A refresh that FAILS keeps the last reading and says it is stale.
+    api.getAdmissionSummary.mockRejectedValue(new Error('flaky'));
+    fireEvent.click(page().getByRole('button', { name: en.refresh }));
+    expect(await panel().findByText(en.admissionStale)).toBeTruthy();
+    expect(api.getAdmissionSummary).toHaveBeenCalledTimes(3);
+    expect(panel().getByText(en.admissionProfileEvaluation)).toBeTruthy();
+    expect(panel().queryByText(en.admissionUnavailableTitle)).toBeNull();
   });
 });

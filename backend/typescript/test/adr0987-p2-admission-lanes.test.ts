@@ -19,6 +19,12 @@
  *   3. An HTTP lane other than `POST /runs` (`:fork`) is refused at the session's
  *      concurrency cap by the store, and admitted once a held run finishes.
  *
+ * Out of reach here, held elsewhere: a lane that bypasses the seam with a bare
+ * `storage.insertRun(` is invisible to this ratchet (it scans `insertRunWithStartContext(`
+ * only). `test/run-metadata-copy-sites.test.ts` classifies every file that calls `.insertRun(`,
+ * so a new FILE with a bare insert is refused there (a second bare call inside an already
+ * classified file is not, by either test).
+ *
  * Sabotage-witnessed: red when a lane drops `admission:`, a lane's scope is dropped
  * (`chargedAdmission()` in place of `chargedAdmission(runAdmissionFor(req))`), the
  * seam stops charging, an exempt policy is charged, the release on a throw is
@@ -54,6 +60,7 @@ const SRC = join(import.meta.dirname, '..', 'src');
  */
 const LANES: Record<string, string[]> = {
   'executor/subWorkflowDispatcher.ts': ['charge'], // Q1: a child counts, inside its parent's slot
+  'features/channel-ingress/ingress.ts': ['charge'], // ADR 1042 D7: a channel message opens the owner's conversation run, charged like chat
   'features/creative-briefs/routes.ts': ['scope'],
   'features/workflow-author/routes.ts': ['scope'],
   'host/canvasSurface.ts': ['charge'], // Q1: a cross-canvas child
@@ -165,7 +172,10 @@ describe('ADR 0987 D3 — the seam charges the monthly plan', () => {
 
   it('an insert that throws gives its unit back: a duplicate id, and a full concurrency scope', async () => {
     await insertRunWithStartContext(storage, run('d1', 't-d'), { admission: chargedAdmission() });
-    await expect(insertRunWithStartContext(storage, run('d1', 't-d'), { admission: chargedAdmission() })).rejects.toThrow();
+    // The duplicate-row refusal itself (sqlite's primary key), not any error: a plan 429
+    // or a TypeError would also throw, and the release would then be untested.
+    await expect(insertRunWithStartContext(storage, run('d1', 't-d'), { admission: chargedAdmission() }))
+      .rejects.toThrow(/UNIQUE constraint failed: runs\.run_id/);
     expect(await planRunsThisMonth('t-d')).toBe(1);
 
     const scope = { key: 'scope-digest-d', cap: 1 };

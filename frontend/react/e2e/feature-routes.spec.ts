@@ -20,8 +20,34 @@
  * the page, not a deny card), and every toggle the catalog names exists.
  */
 import { test, expect, type BrowserContext } from '@playwright/test';
-import { SUITES } from '../src/features/manual-tests/suites.js';
+import { existsSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { SUITES as HOST_SUITES } from '../src/features/manual-tests/suites.js';
+import type { TestSuite } from '../src/features/manual-tests/manualTestTypes.js';
 import { API, enableToggle } from './support/session.js';
+
+/**
+ * ADR 1031 P2 — feature packages ship their own suites in `<feature>/manualTests.ts`,
+ * which `suites.ts` collects with `import.meta.glob` — a Vite-only call that is
+ * absent under Playwright. So the same files are read from disk here, from both
+ * feature roots, and merged by suite key (no duplicates if a context has both).
+ */
+async function featureSuites(): Promise<TestSuite[]> {
+  const out: TestSuite[] = [];
+  for (const root of ['src/features', 'src/adopter/features']) {
+    const dir = join(import.meta.dirname, '..', root);
+    if (!existsSync(dir)) continue;
+    for (const name of readdirSync(dir).sort()) {
+      const file = join(dir, name, 'manualTests.ts');
+      if (!existsSync(file)) continue;
+      const mod = (await import(pathToFileURL(file).href)) as { manualTestSuites?: TestSuite[] };
+      out.push(...(mod.manualTestSuites ?? []));
+    }
+  }
+  return out;
+}
+const SUITES = [...new Map([...HOST_SUITES, ...(await featureSuites())].map((s) => [s.key, s] as const)).values()];
 
 const ENABLED = process.env.OPENWOP_E2E_ROUTES === '1';
 

@@ -42,6 +42,11 @@ export const messages = {
   cornersSharp: 'Sharp',
   cornersMedium: 'Medium',
   cornersRound: 'Round',
+  // ADR 1029 D6
+  motionLabel: 'Public page motion',
+  motionCalm: 'Calm (default)',
+  motionLively: 'Lively (more travel)',
+  motionSubtle: 'Subtle (fade only)',
   defaultThemeLabel: 'Default theme',
   themeSystem: 'System',
   themeLight: 'Light',

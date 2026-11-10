@@ -23,6 +23,24 @@
  *   - `if (ctx.derivedFromRun) return {}` removed: "a goal-less run stays…";
  *   - the goalVersion equality check removed: "a goal that moved…";
  *   - `listCampaignRuns` swapped for a tenant prefix: "…without a tenant scan".
+ *
+ * Retirement and replay (ADR 0941 P0–P1, 2d359f56d "retire identities before
+ * cleanup and fence replay ignition"): deleting a campaign CAS-swaps its row for a
+ * retirement marker naming a random successor id, BEFORE cleanup, so cleanup only
+ * ever names the retired id. Claims and what reds them (probes w84g1-*, 2026-11-04):
+ *   - a successor ignited while the old deletion is parked keeps its versions and
+ *     project (`campaigns.putIfAbsent` → `put`; successor chain broken);
+ *   - a legacy UUID campaign's brief is reserved before retirement (the
+ *     `indexedCampaignId` reservation in `deleteCampaign` removed);
+ *   - a stale brief-index pointer follows the successor chain (`id = row.successorId`
+ *     → `break`);
+ *   - finalize with an expected retired id is a 404, never the successor
+ *     (`expectedCampaignId` resolved through ensureDraftCampaign);
+ *   - a corrupt self-cycle is a 409. Held by THREE equivalent mechanisms in
+ *     `briefCampaignSlot` (the `successorId === id` check, the `seen` set, the
+ *     64-depth bound), so no single-edit probe can red it;
+ *   - replay never ignites a campaign or a successor (`assertEffectAllowed('dispatch',
+ *     'campaign-orchestration ignition')` removed).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -168,12 +186,13 @@ describe('ADR 0941 P0 — the campaign is born at ignition', () => {
 
 describe('ADR 0941 P0 — the per-campaign run index', () => {
   it('the index lists the run and its :fork, keyed by the campaign', async () => {
-    const { campaign } = await ensureDraftCampaign(TENANT, await newBrief(), 'u-1');
+    const brief = await newBrief();
+    const { campaign } = await ensureDraftCampaign(TENANT, brief, 'u-1');
     const src = await insertTaggedRun(stampCampaignRun(campaign, { role: 'spine' }));
     const fork = await jf<{ runId: string }>(`/runs/${encodeURIComponent(`${TENANT}/${src.runId}`)}:fork`, { method: 'POST', body: JSON.stringify({ fromSeq: 0, mode: 'replay' }) });
     expect(fork.status, JSON.stringify(fork.body)).toBe(201);
-    // `:fork` copies the tag verbatim.
-    expect((await runMeta(fork.body.runId)).campaignOrchestration).toEqual(stampCampaignRun(campaign, { role: 'spine' }));
+    // `:fork` copies the tag verbatim (pinned literally, never rebuilt with the writer).
+    expect((await runMeta(fork.body.runId)).campaignOrchestration).toEqual({ campaignId: campaign.id, orgId, briefId: brief.id, goalVersion: 0, role: 'spine' });
     const rows = await listCampaignRuns(TENANT, campaign.id);
     expect(rows.find((r) => r.runId === src.runId)).toMatchObject({ role: 'spine', orgId, workflowId: fixtureWorkflowId });
     expect(rows.find((r) => r.runId === bareRunId(fork.body.runId))).toMatchObject({ forkOf: src.runId });
@@ -197,7 +216,8 @@ describe('ADR 0941 P0 — the per-campaign run index', () => {
     const runs = (await listCampaignRuns(TENANT, campaign.id)).map((r) => r.runId);
     expect(runs).not.toContain(wrongOrg.runId);
     expect(await listCampaignRuns(TENANT, 'cmp_nothing')).toEqual([]);
-    expect(dangling.runId).toBeTruthy();
+    // Positive control: the dangling run WAS inserted with its tag, so "not indexed" is the dangling check's answer.
+    expect(readCampaignRunTag(await runMeta(dangling.runId))).toMatchObject({ campaignId: 'cmp_nothing', orgId });
   });
 
   it('deleting the campaign clears its run index; re-ignition starts with a new identity', async () => {
@@ -305,7 +325,7 @@ describe('ADR 0941 P0 — finalize updates the ignition draft', () => {
 });
 
 
-describe('campaign retirement isolates a successor from old cleanup', () => {
+describe('ADR 0941 P0–P1 — campaign retirement isolates a successor from old cleanup', () => {
   it('a concurrently ignited successor keeps its versions and separate project after old deletion resumes', async () => {
     const brief = await newBrief();
     const old = await finalizeFromBrief(TENANT, brief, 'u-1');

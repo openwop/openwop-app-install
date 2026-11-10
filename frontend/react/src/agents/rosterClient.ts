@@ -6,13 +6,14 @@
  *   GET            /host/openwop-app/org-chart/{departmentId} — responsibility roll-up
  *
  * Tenant scoping is the backend's job (ownership from the caller's principal);
- * the client never sends a tenantId.
+ * the client never selects a tenantId. Legacy seed sends only a scope assertion.
  */
 
 import { authedHeaders, config, fetchOpts } from '../client/config.js';
 import { ApiError, apiErrorFrom } from '../client/errorEnvelope.js';
 import { cachedRead } from '../client/requestCache.js';
 import { client } from '../client/runsClient.js';
+import { withExampleDataScope } from '../client/exampleDataClient.js';
 
 export interface RosterAgentRef {
   agentId: string;
@@ -257,15 +258,20 @@ export interface SeedExampleAgentsResult {
  *  `sseBaseUrl` bypass `/run` already uses) and asks for NDJSON — keepalive
  *  lines, then one `result` (or `error`) line. */
 export async function seedExampleAgents(opts: { heal?: boolean } = {}): Promise<SeedExampleAgentsResult> {
-  const res = await fetch(`${config.sseBaseUrl}/host/openwop-app/example-data/seed`, fetchOpts({
-    method: 'POST',
-    headers: { ...jsonHeaders(), accept: 'application/x-ndjson' },
-    // heal:true = explicit restore (the "Load demo data" buttons); the silent
-    // auto-seed on page entry sends {} so it never resurrects deletions.
-    body: JSON.stringify(opts.heal ? { heal: true } : {}),
-  }));
-  if (!res.ok) throw await apiErrorFrom(res, `seedExampleAgents returned ${res.status}`);
-  return readSeedStream(res);
+  return withExampleDataScope(async (scope) => {
+    const res = await fetch(`${config.sseBaseUrl}/host/openwop-app/example-data/seed`, fetchOpts({
+      method: 'POST',
+      headers: { ...jsonHeaders(), accept: 'application/x-ndjson' },
+      // heal:true = explicit restore (the "Load demo data" buttons); the silent
+      // auto-seed omits heal, so it never resurrects deletions.
+      body: JSON.stringify({ ...(opts.heal ? { heal: true } : {}), expectedTenantId: scope.expectedTenantId }),
+      signal: scope.signal,
+    }));
+    if (!res.ok) throw await apiErrorFrom(res, `seedExampleAgents returned ${res.status}`);
+    const result = await readSeedStream(res);
+    scope.assertCurrent();
+    return result;
+  });
 }
 
 /** The terminal line of a streamed seed. A non-NDJSON 200 (a host without the

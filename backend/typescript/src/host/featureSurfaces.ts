@@ -61,9 +61,12 @@ export type FeatureSurfaceBuilder = (scope: BundleScope) => FeatureSurface;
 export interface FeatureSurfaceOrgPolicy {
   /** Ids that are tenant-level namespaces on THIS surface, not orgs: they have
    *  no org row and no members, so the floor passes them by name. Only `kb`
-   *  declares any (`_team`, `_kickbot`); on every other surface they are an
-   *  unknown org like any other. */
-  tenantScopedOrgs?: ReadonlySet<string>;
+   *  declares any (the host's `_team` plus feature-declared ones such as
+   *  KickTodo's `_kickbot`, ADR 1031 round 3); on every other surface they are an
+   *  unknown org like any other. Only `.has` is read, at call time, so a live
+   *  view (`kbService.TENANT_SCOPED_KB_ORGS`) sees namespaces recorded at
+   *  composition. */
+  tenantScopedOrgs?: Pick<ReadonlySet<string>, 'has'>;
   /** Methods whose HTTP door needs more than membership, by method name. The
    *  floor asks this scope instead of `workspace:read`. */
   methodScopes?: Readonly<Record<string, Scope>>;

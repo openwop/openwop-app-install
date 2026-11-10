@@ -68,8 +68,10 @@ describe('ADR 0547 — every tool inputSchema compiles', () => {
   it('registers the full tool surface — otherwise the walk below proves nothing', () => {
     // The vacuity floor. A bare import yields single digits; the real surface is
     // in the hundreds. If this ever drops, the ratchet has stopped ratcheting and
-    // must be fixed rather than re-baselined downward.
-    expect(ids.length, 'feature tools did not register — every assertion below is vacuous').toBeGreaterThanOrEqual(207);
+    // must be fixed rather than re-baselined downward. The one lowering on
+    // record, 207 → 201, is ADR 1031 P3: the 15 `openwop:kicktodo.*` tools left
+    // with the KickTodo packages (220 → 205 measured; inventory in PR #5512).
+    expect(ids.length, 'feature tools did not register — every assertion below is vacuous').toBeGreaterThanOrEqual(201);
   });
 
   it('has teeth — a known-bad schema is actually rejected by this check', () => {

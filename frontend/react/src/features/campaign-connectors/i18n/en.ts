@@ -24,6 +24,7 @@ export const messages = {
   kpiConversions: 'Conversions',
   kpiRevenue: 'Revenue',
   kpiRoas: 'ROAS',
+  notReported: 'Not reported',
   byPlatformTitle: 'By platform',
   colPlatform: 'Platform',
   dateRange: '{{count}} records · {{start}} → {{end}}',

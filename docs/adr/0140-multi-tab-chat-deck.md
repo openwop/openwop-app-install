@@ -317,6 +317,66 @@ G1–G6 parity pass (each with `/architect` + `/code-review` + `/ux-review`). Th
 preserves the deck's core invariant — **no single-active coupling**: every per-tab concept
 is driven by THAT tab's own `useChatSession`, never lifted to the deck.
 
+> **CORRECTION 2026-11-08 — G2 compact agent role context.**
+> The compact lineup kept only its slug-derived human name and dropped the role
+> already shown by the rail. For the Campaign Strategist, the catalog's generic
+> `RESEARCH` persona produces a collision-resolved mention such as `research-9`:
+> the selected chip said “Research 9” while the picker correctly identified it
+> as “Campaign Strategist.” That is a display-context omission, not evidence of
+> a different dispatch identity or a lost scope. Keep primary human names,
+> mention slugs and canonical agent IDs unchanged. In compact chips, show the
+> existing nonempty, nonredundant `row.persona` role/tagline beneath the primary
+> name and reference it from the switch/remove controls with `aria-describedby`.
+> The default Assistant needs no extra context. Use the existing width bound
+> with a two-line text column, retaining current/think/speak indicators. No pack,
+> dispatch, provider, session schema or persistence change is involved. New
+> component regressions cover the observed alias/role pair, real human names,
+> accessible descriptions and exact-ID callbacks; all checks remain NOT RUN at
+> source preparation. G3 hydration and its historical evidence below are separate.
+>
+> **CORRECTION 2026-11-06 — STRATEGIST-1, G3 agent-scoped hydration.**
+> The deep-link handoff above does not by itself preserve the scoped agent:
+> a catalog entry can activate it before the same tab's asynchronous message
+> history finishes, and the history replacement formerly erased that choice.
+> Keep the current session's `activeAgents` in the existing functional hydration
+> update only when its ID matches the requested session. This also preserves a
+> newer deliberate user switch; it does not repeatedly reassert the deep-link
+> agent or carry a lineup into another conversation. Server history remains
+> authoritative for messages, and existing participant derivation remains its
+> caller's responsibility. No storage side effects run inside the updater.
+> Actual original-hook reproduction: three expected reset failures and two
+> controls passed. Fixed focused verification: 61 cases across four real
+> session/default-agent hook files passed (including the five hydration cases).
+> Subsequent scoped lint, test types (zero errors/baseline zero) and canonical
+> frontend build passed. Full gate, deployment and live retest remain pending.
+
+> **CORRECTION 2026-11-08 — CHAT-LINEUP-RELOAD-1, initial participant/catalog restoration (source candidate).**
+> A normal reload retained the Campaign Creative Director in the saved session's
+> participant response, while the settled tab strip and Members pane showed only
+> Assistant even though the ordinary mention picker offered the director. This is
+> different from the earlier same-session history updater and from role-label
+> context: default Assistant routing is allowed, omitting available membership is not.
+> The tab's one-shot participant projection previously ran against the catalog's
+> loading `[]` and marked the session handled before its entries arrived. Wait for
+> a successfully settled existing catalog and this session's history before initial
+> restoration. Use the existing active-agent owner to merge restored membership
+> into current same-session state, preserving local additions and routing choice.
+> A pending local removal suppresses that member during the late initial restore;
+> a deliberate re-add clears that local intent. Keep the old wholesale `setLineup`
+> behavior unchanged for other callers. Do not continuously reconcile snapshots,
+> write participant records, add a second catalog, change dispatch or substitute
+> unresolved agent identities. Successful empty catalogs remain legitimately empty;
+> failed catalog reads do not consume successful initial restoration. Session-owned
+> guards prevent a late restore from applying to a different conversation.
+> Authored actual-TabSession deferred-load controls use real session/agent hooks,
+> lineup and Members pane with transport/unrelated UI boundaries replaced. They
+> cover both arrival orders, newer explicit choice, local removal, StrictMode,
+> session remount/ABA and empty/error catalogs. Separate real-owner controls cover
+> functional restore ownership and unchanged wholesale semantics. All are **NOTRUN**
+> at source preparation; controlled original/fixed causality, statics, full gate,
+> merge, deployment and live no-Send reload qualification remain owed. No new wire
+> shape, backend membership authority, provider/key behavior or RFC is introduced.
+
 | Gap | Closed by | How |
 |---|---|---|
 | Shared submit drift (3 copies) | **G1** `chat/lib/chatSubmit.ts` | One CORE `runCoreSubmit` (command → /workflow → caller interceptors → @agent → send); ChatSidebar/EmbeddedConversation/TabSession all compose it. Behavior provably identical. |

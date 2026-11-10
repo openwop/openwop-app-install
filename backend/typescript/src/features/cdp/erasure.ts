@@ -52,6 +52,7 @@ import { writeErasureTombstone, tombstoneId } from '../consent/consentService.js
 import { eraseCollectedEventsForIdentity } from './visitorEventIndex.js';
 import { collectedIdentityForms, foldCollectedIdentity } from './collectedEventIdentity.js';
 import { createLogger } from '../../observability/logger.js';
+import { eraseSegmentSnapshotSubject } from './segmentEntryDaemon.js';
 const log = createLogger('features.cdp.erasure');
 
 /** The shared barrier precedes both reservation and legacy-primary enumeration.
@@ -64,4 +65,9 @@ export async function eraseCdpCollectedEvents(tenantId: string, subjectKey: stri
   const deleted = await eraseCollectedEventsForIdentity(tenantId, subjectKey);
   if (deleted) log.info('cdp_collected_events_erased', { tenantId, deleted });
 }
-export function registerCdpErasure(): void { registerSubjectEraser(eraseCdpCollectedEvents); }
+export function registerCdpErasure(): void {
+  registerSubjectEraser(eraseCdpCollectedEvents);
+  // ADR 1024 D5.3 — the segment snapshots' member lists (module-level reference: the
+  // registry dedupes by reference).
+  registerSubjectEraser(eraseSegmentSnapshotSubject);
+}

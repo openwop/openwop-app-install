@@ -9,10 +9,23 @@
  * `ClarificationResume.answers` (`[]` = Skip); model text renders as text; and
  * the optimistic answer turn reads as the host persists it.
  *
- * Red when (sabotage-witnessed, recorded in the ADR 1001 P2 record): the
- * last-message guard is dropped (card on a stale ask); the `answered` guard is
- * dropped; the answers are not unwrapped from the resume value; the summary's
- * boolean or skip arm is changed.
+ * Red when (sabotage-witnessed, recorded in the ADR 1001 P2 record and
+ * re-measured in /grade-tests wave 80): the last-message guard is dropped (card
+ * on a stale ask); the `answered` guard is dropped; the handler guard is
+ * dropped; the answers are not unwrapped from the resume value; the ask id is
+ * swapped for the message id; the skipped turn keeps the host's English; the
+ * summary's boolean arm is flipped; the summary's final skip fallback is
+ * dropped (answers that match no question).
+ *
+ * Double guard: an EMPTY answer list returns the skip line from two places
+ * (the early `answers.length === 0` return and the final fallback), so
+ * removing either one alone stays green.
+ *
+ * The markup-as-text case is card behaviour, and duplicates
+ * `interrupts/__tests__/ClarificationDialog.agentAsk.test.tsx` "renders a
+ * choice carrying markup as plain text" (the same `ClarificationQuestions`
+ * renderer). It is kept because it is a security case; whether to dedupe is a
+ * human ask (wave 80).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';

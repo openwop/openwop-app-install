@@ -13,7 +13,9 @@
  * (canvasSurface.ts `getCanvasForCaller`); a created meta loses its owner
  * (conversationStore.ts); the route stops checking the existing meta's
  * visibility or the `kind` (chatSessions.ts); or the tool stops defaulting to
- * the bound canvas (conversationFocus.ts).
+ * the bound canvas (conversationFocus.ts). ADR 1040 D4: the helper now also
+ * re-authorizes per call, so a focus the caller cannot read resolves to nothing,
+ * and a model-supplied id is checked (case below; CAD re-checks it too).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -26,7 +28,7 @@ import { createCanvasForTenant } from '../src/host/canvasSurface.js';
 import { createMember } from '../src/host/accessControlService.js';
 import { getConversationMeta } from '../src/host/conversationStore.js';
 import { createAgentToolProvider } from '../src/host/agentToolProvider.js';
-import { CAD_GET_DESIGN_TOOL_ID } from '../src/features/cad/agentTools.js';
+import { CAD_GET_DESIGN_TOOL_ID, CAD_RENDER_TOOL_ID } from '../src/features/cad/agentTools.js';
 
 let server: http.Server;
 let BASE = '';
@@ -101,11 +103,11 @@ describe('focus route', () => {
     expect((await getConversationMeta(f.tenantId, 'embed-a-2'))?.focus?.id).toBe(f.canvasId);
   });
 
-  it('rejects any kind but canvas (a workflow binding is ADR 0773 pairing, not this)', async () => {
+  it('rejects an unregistered kind (a workflow binding is ADR 0773 pairing, not this)', async () => {
     const f = await fixture();
     const r = await f.a.put(FOCUS('embed-a-3'), { kind: 'workflow', id: 'x' });
     expect(r.status).toBe(400);
-    expect(r.body).toMatchObject({ error: 'validation_error', message: "focus MUST be { kind: 'canvas', id }." });
+    expect(r.body).toMatchObject({ error: 'validation_error', message: 'focus MUST be { kind, id } with a registered kind.' });
     expect(await getConversationMeta(f.tenantId, 'embed-a-3')).toBeNull();
   });
 });
@@ -120,13 +122,31 @@ describe('tools default to the focus, never widen with it', () => {
     expect(JSON.parse(out.content)).toMatchObject({ canvasId: f.canvasId });
   });
 
-  it('a focus the caller cannot read resolves to not_found (the predicate still applies)', async () => {
+  it('a focus the caller cannot read resolves to nothing (the per-call check, ADR 1040 D4)', async () => {
     const f = await fixture();
     await f.a.put(FOCUS('embed-a-5'), { kind: 'canvas', id: f.canvasId });
-    // B acting on A's conversation id (a stale/forged scope): the id resolves, the read is refused.
+    // B acting on A's conversation id (a stale/forged scope): the focus does not
+    // resolve for B at all, so the tool has no model to read — and says so
+    // without naming A's canvas.
     const out = await createAgentToolProvider({ tenantId: f.tenantId, actingUserId: f.b.userId, conversationId: 'embed-a-5' })
       .executeTool({ name: CAD_GET_DESIGN_TOOL_ID, input: { orgId: f.orgId } });
-    expect(JSON.parse(out.content)).toMatchObject({ error: 'not_found' });
+    const body = JSON.parse(out.content) as Record<string, unknown>;
+    expect(body).toMatchObject({ error: 'validation_error' });
+    expect(out.content).not.toContain(f.canvasId);
+  });
+
+  // ADR 1040 D4 (review B2) — `resolveFocusedId` returns a model-supplied id
+  // unchecked. Not a live bypass today: every tool that takes a canvas id
+  // re-applies THE canvas predicate to whatever id it resolved.
+  it('a model-supplied canvasId the caller cannot read is not_found on read AND on write, focus or not', async () => {
+    const f = await fixture();
+    for (const conversationId of [undefined, 'embed-b-6']) {
+      const tools = createAgentToolProvider({ tenantId: f.tenantId, actingUserId: f.b.userId, ...(conversationId ? { conversationId } : {}) });
+      const read = await tools.executeTool({ name: CAD_GET_DESIGN_TOOL_ID, input: { orgId: f.orgId, canvasId: f.canvasId } });
+      expect(JSON.parse(read.content), read.content).toMatchObject({ error: 'not_found' });
+      const write = await tools.executeTool({ name: CAD_RENDER_TOOL_ID, input: { orgId: f.orgId, canvasId: f.canvasId, baseVersion: 1, model: { name: 'Hijack', solids: [] } } });
+      expect(JSON.parse(write.content), write.content).toMatchObject({ error: expect.stringMatching(/^(not_found|forbidden_scope)$/) });
+    }
   });
 });
 

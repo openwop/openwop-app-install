@@ -23,6 +23,14 @@
  * - CX2-DOC: export-as-Document copied other people's words (channels, groups,
  *   project chats, a person DM) into an org-wide Document, and a client-bound
  *   conversation into another org.
+ *
+ * Re-witnessed by sabotage in grade-tests wave 78 (one per claim): envelope rendering,
+ * secret-key redaction and its `$` anchor, tombstones, the stored-role allowlist, words
+ * only, the future-date clamp, the idempotency digest, the replay owner check, the twin
+ * PK replay, crash resume, meta-before-session, the 10 MB parser, the importer author
+ * stamp, the eraser's doubled spelling, and each sole-owner refusal (channel, another
+ * person, project subject, owner-less, client org, a removed participant's messages)
+ * plus the storage-failure mapping and the slug's NFKD fold.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -39,24 +47,24 @@ import { exportFileName } from '../src/features/chat-export/routes.js';
 import { importConversation } from '../src/features/chat-export/importService.js';
 import { exportConversationAsDocument } from '../src/features/chat-export/asDocumentService.js';
 import { createOrg } from '../src/host/accessControlService.js';
-import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import type { ChatMessageRecord, ChatSessionRecord } from '../src/types.js';
+import { envKeyPrincipalId } from '../src/middleware/envKeyPrincipal.js';
 
 const TENANT = 'cx2-route';
 const OWNER_TOKEN = 'cx2-owner-token';
-const OWNER_PRINCIPAL = `bearer:${OWNER_TOKEN.slice(0, 8)}`;
+const OWNER_PRINCIPAL = envKeyPrincipalId(OWNER_TOKEN);
 const SECRET = 'tok_RESUME_0123456789abcdefSECRET';
 
 /** A message exactly as the SPA persists it (`encodeMessageForStore`). */
-function spaRow(i: number, role: string, body: Record<string, unknown>): ChatMessageRecord {
+function spaRow(i: number, role: ChatMessageRecord['role'], body: Record<string, unknown>): ChatMessageRecord {
   return {
     messageId: `m${i}`, sessionId: 's1', role,
     content: JSON.stringify({ role, ...body }),
     meta: null, authorSubject: 'user:user:abc', createdAt: `2026-10-27T10:00:0${i}.000Z`,
-  } as ChatMessageRecord;
+  };
 }
-const SESSION = { sessionId: 's1', tenantId: 't', title: 'Plan', createdAt: '2026-10-27T10:00:00.000Z', updatedAt: '2026-10-27T10:00:00.000Z', messageCount: 3 } as ChatSessionRecord;
+const SESSION: ChatSessionRecord = { sessionId: 's1', tenantId: 't', title: 'Plan', createdAt: '2026-10-27T10:00:00.000Z', updatedAt: '2026-10-27T10:00:00.000Z', messageCount: 3 };
 const ROWS = [
   spaRow(0, 'user', { content: 'Draft the launch plan' }),
   spaRow(1, 'assistant', {
@@ -182,6 +190,7 @@ describe('CX2-IMPORT-SHAPE — an import stores only text, in a closed envelope'
 
   it('an unparseable createdAt is replaced, never stored', async () => {
     const r = await post('/host/openwop-app/chat-export/import', importBody([{ role: 'user', content: 'x', createdAt: 'not a date' }]));
+    expect(r.status).toBe(201);
     const rows = await hostExtStorage().listChatSessionMessages(String(r.json.sessionId));
     expect(Number.isFinite(Date.parse(rows[0]!.createdAt))).toBe(true);
   });
@@ -191,6 +200,7 @@ describe('CX2-IMPORT-SHAPE — an import stores only text, in a closed envelope'
       { role: 'user', content: 'a', createdAt: '2020-01-01T00:00:00.000Z' },
       { role: 'assistant', content: 'b', createdAt: '9999-01-01T00:00:00.000Z' },
     ]));
+    expect(r.status).toBe(201);
     const rows = await hostExtStorage().listChatSessionMessages(String(r.json.sessionId));
     expect(rows.map((x) => (JSON.parse(x.content) as { content: string }).content)).toEqual(['a', 'b']);
     expect(Date.parse(rows[1]!.createdAt)).toBeLessThan(Date.parse('2100-01-01T00:00:00.000Z'));
@@ -327,8 +337,9 @@ describe('CX2-DOC — export-as-Document only copies a conversation that is the 
   let orgId = '';
   let otherOrgId = '';
   beforeAll(async () => {
-    const d = getToggleDefault('documents');
-    if (d) await saveConfig({ ...d, status: 'on' }, 'test');
+    // Documents is default-on; this file relies on that rather than flipping a global
+    // toggle it would then have to restore.
+    expect(getToggleDefault('documents')?.status).toBe('on');
     orgId = (await createOrg({ tenantId: T, createdBy: ACTOR, name: 'Acme', ownerSubject: ACTOR })).orgId;
     otherOrgId = (await createOrg({ tenantId: T, createdBy: ACTOR, name: 'Other', ownerSubject: ACTOR })).orgId;
   });
@@ -381,13 +392,18 @@ describe('CX2-DOC — export-as-Document only copies a conversation that is the 
   });
 
   it('a storage failure is not reported as "no such conversation" (grade-code CX2CD-5)', async () => {
+    // Its own conversation, so the case does not depend on another case's seed (shuffle).
+    await seed('own-sf', { type: 'agent', ownerUserId: ACTOR, participants: ['agent:iris'] });
     const spy = vi.spyOn(hostExtStorage(), 'getChatSession').mockRejectedValueOnce(new Error('db down'));
-    const r = await run('own');
+    const r = await run('own-sf');
     spy.mockRestore();
     // The tool executor turns a thrown error into a tool error; what matters is
     // that it is NOT the confident "no such conversation".
     expect(r.isError).toBe(true);
     expect(r.content).not.toContain('No such conversation');
+    expect(r.content).not.toContain('"not_found"');
+    // Control: with storage healthy the same conversation exports.
+    expect((await run('own-sf')).isError).toBeFalsy();
   });
 
   it('refuses a client-bound conversation into a different org', async () => {

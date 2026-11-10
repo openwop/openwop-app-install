@@ -26,6 +26,9 @@ const listBriefs = vi.fn();
 const validateBriefById = vi.fn();
 const updateBrief = vi.fn();
 
+// The collection selector reads the current client's KB through its own client.
+vi.mock('../../kb/kbClient.js', () => ({ listCollections: vi.fn(async () => []) }));
+
 vi.mock('../campaignBriefClient.js', async (orig) => {
   const actual = await orig<Record<string, unknown>>();
   return {

@@ -20,7 +20,14 @@ import {
 } from './scripts/gen-service-worker.mjs';
 import { BRAND_DEFAULTS, resolveBrandFromEnv, unknownBrandEnvVars } from './src/brand/defaults';
 import { DEV_FALLBACK_BASE_URL } from './src/client/baseUrlDefault';
+import { missingSignInFirebaseEnv, signInFirebaseEnvError } from './src/auth/firebaseEnvGuard';
 import { chunkFileName } from './scripts/chunkNames.mjs';
+// ADR 1031 P2 — `<feature>/styles.css` → the gitignored import list `styles/index.css`
+// pulls in right after global.css. At config load, so dev, build and vitest all see it.
+import { generateFeatureStyles } from './scripts/gen-feature-styles.mjs';
+import { hostOnlyPlugin } from './scripts/hostOnlyBuild.mjs';
+
+generateFeatureStyles();
 
 // Vite inlines `import.meta.env.VITE_*` at build time, NOT at runtime.
 // A production build with `VITE_OPENWOP_BASE_URL` unset bakes the dev
@@ -111,6 +118,11 @@ export default defineConfig(({ mode }) => {
           `override, or pass it on the command line.`,
       );
     }
+    // A sign-in-gated build without Firebase config ships a site nobody can sign
+    // in to (myndhyve.ai, 2026-11-07). Keyed off the resolved gate mode, so a
+    // gate-less adopter or demo build is untouched. See src/auth/firebaseEnvGuard.ts.
+    const missingAuth = missingSignInFirebaseEnv(env, resolveBrandFromEnv(env).appGate.mode);
+    if (missingAuth.length > 0) throw new Error(signInFirebaseEnvError(missingAuth));
   }
 
   const pwaStartUrl = loadEnv(mode, envDir, '').VITE_PWA_START_URL || '/';
@@ -179,7 +191,9 @@ export default defineConfig(({ mode }) => {
     // `createHmac` named export. A custom plugin short-circuits the load
     // step for any path ending in `webhook-helpers.js` and returns an
     // empty module — the frontend never executes the HMAC code path.
-    plugins: [...distributionPlugin, 
+    // ADR 1031 × ADR 0874 D4 — the adopter bundle's budgeted build holds host code
+    // only (`OPENWOP_BUDGET_HOST_ONLY=1`, set by scripts/ci.sh). Off: `[]`.
+    plugins: [...hostOnlyPlugin({ distribution: distributionName, root: __dirname }), ...distributionPlugin, 
       react(),
       (() => {
         // ADR 0873 — the ONE generated service worker. Emitted as `dist/sw.js`
@@ -405,7 +419,8 @@ export default defineConfig(({ mode }) => {
               // eager in `en` (they render in the chat feed, which is shell).
               // Keep in sync with SHELL_FEATURE_NAMESPACES in src/i18n/resources.ts
               // — namespaceSplit.test.ts pins the lists together.
-              const lazyFeature = n.match(/\/src\/features\/([^/]+)\/i18n\/(?:pt-BR|fr|es)\.ts$/);
+              // ADR 1031 — an adopter's `src/adopter/features/<id>/` catalogs split the same way.
+              const lazyFeature = n.match(/\/src\/(?:adopter\/)?features\/([^/]+)\/i18n\/(?:pt-BR|fr|es)\.ts$/);
               if (lazyFeature && !['comments', 'cad', 'campaign-studio'].includes(lazyFeature[1]!)) return undefined;
               const lazy = n.match(/\/i18n\/(?:locales\/)?(pt-BR|fr|es)(?:\/|\.ts$)/);
               if (lazy) return `i18n-${lazy[1]}`;
@@ -416,7 +431,7 @@ export default defineConfig(({ mode }) => {
             // catalogs (`src/<area>/i18n/en.ts`, `src/i18n/locales/en/*`) and the
             // three shell-rendered feature namespaces still belong to `i18n`.
             {
-              const enFeature = n.match(/\/src\/features\/([^/]+)\/i18n\/en\.ts$/);
+              const enFeature = n.match(/\/src\/(?:adopter\/)?features\/([^/]+)\/i18n\/en\.ts$/);
               // Keep in sync with SHELL_FEATURE_NAMESPACES in src/i18n/resources.ts
               // (namespaceSplit.test.ts pins the two lists together).
               if (enFeature && !['comments', 'cad', 'campaign-studio'].includes(enFeature[1]!)) return undefined;

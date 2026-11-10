@@ -50,6 +50,18 @@
  * default-ON and breaks nothing. That is what makes the deny path testable —
  * drop an unattested directory into the pack dir and dispatch must refuse.
  *
+ * ── ADR 1048: A FIFTH TIER, `adopter` ───────────────────────────────────────
+ *
+ *   adopter           `packs/.adopter-manifest.json` (an ADOPTER repo's file,
+ *                     never upstream's) is valid AS A WHOLE, keys this pack dir,
+ *                     the pack's own name equals that key, and its content digest
+ *                     matches. Evaluated only AFTER the steward check fails, and
+ *                     the manifest may not repeat a steward key — so no
+ *                     first-party verdict can change. Same evidence class as
+ *                     steward (attestation by repo: the adopter's repo is already
+ *                     its deployment's root of trust). See
+ *                     `host/adopterPackManifest.ts`.
+ *
  * The one escape hatch, `OPENWOP_PACK_TRUST_ALLOW_UNSIGNED`, does NOT
  * reclassify: the pack stays `untrusted` in every report, log, and read
  * surface, and only the dispatch decision relaxes. ADR 0555's rule — "no
@@ -66,17 +78,20 @@ import { packContentDigest, verifyInstallMarker } from '../packs/packContentDige
 import { isPackRevoked, onPackRevocationsChanged, revocationKey } from './packRevocations.js';
 import { loadPinnedKeyring } from './packSignature.js';
 import { createLogger } from '../observability/logger.js';
+import { adopterManifestState, __resetAdopterManifestForTests } from './adopterPackManifest.js';
 
 const log = createLogger('host.packTrust');
 
 const INSTALL_MARKER = '.openwop-installed.json';
 const STEWARD_MANIFEST = '.steward-manifest.json';
 
-export type PackTrustTier = 'steward' | 'operator-trusted' | 'untrusted' | 'revoked';
+export type PackTrustTier = 'steward' | 'adopter' | 'operator-trusted' | 'untrusted' | 'revoked';
 
 /** Why a pack landed in its tier. Stable strings — they reach logs and Operations. */
 export type PackTrustReason =
   | 'steward_manifest_digest_match'
+  | 'adopter_manifest_digest_match'
+  | 'adopter_manifest_rejected'
   | 'install_marker_verified'
   | 'revoked_by_operator'
   | 'manifest_unreadable'
@@ -202,6 +217,7 @@ export function __resetPackTrustCachesForTests(): void {
   manifestCache = undefined;
   keyringRevokedCache = undefined;
   verdictCache.clear();
+  __resetAdopterManifestForTests();
 }
 
 // ── policy ─────────────────────────────────────────────────────────────────
@@ -213,7 +229,7 @@ function breakGlassEnabled(): boolean {
 
 /** The tiers whose code this host will execute. */
 export function tierIsTrusted(tier: PackTrustTier): boolean {
-  return tier === 'steward' || tier === 'operator-trusted';
+  return tier === 'steward' || tier === 'adopter' || tier === 'operator-trusted';
 }
 
 // ── classification ─────────────────────────────────────────────────────────
@@ -334,7 +350,38 @@ function classifyUncached(packDir: string): PackTrustVerdict {
     return finish({ tier: 'steward', reason: 'steward_manifest_digest_match', packName: name, version });
   }
 
+  // ADR 1048 — the adopter tier, strictly AFTER the steward branch above (left
+  // exactly as it was): a pack can only reach here by NOT being steward.
+  const adopter = adopterVerdict(packDir, name, version);
+  if (adopter) return finish(adopter);
+
   return finish({ tier: 'untrusted', reason: 'no_attestation', packName: name, version });
+}
+
+/**
+ * ADR 1048 D2 — `adopter` iff the adopter manifest is valid as a whole, keys
+ * this directory, the pack's own `name` IS that key, and the digest matches.
+ * A rejected manifest makes every directory it claims `untrusted` with its own
+ * reason; a digest or name mismatch falls through to `no_attestation`, exactly
+ * as a steward mismatch does.
+ */
+function adopterVerdict(
+  packDir: string,
+  name: string,
+  version: string | null,
+): Omit<PackTrustVerdict, 'dispatchable' | 'allowedByBreakGlass'> | null {
+  const state = adopterManifestState();
+  const key = basenameOf(packDir);
+  if (state.status === 'rejected') {
+    return state.claimed.has(key)
+      ? { tier: 'untrusted', reason: 'adopter_manifest_rejected', packName: name, version, detail: state.violations.map((v) => v.code).join(',') }
+      : null;
+  }
+  if (state.status !== 'valid') return null;
+  const entry = state.manifest.packs[key];
+  if (!entry || name !== key) return null;
+  if (entry.digest !== packContentDigest(packDir)) return null;
+  return { tier: 'adopter', reason: 'adopter_manifest_digest_match', packName: name, version };
 }
 
 /** The manifest is keyed by pack DIRECTORY name, which is how both the mount
@@ -358,6 +405,8 @@ export function classifiedPackVerdicts(): readonly PackTrustVerdict[] {
 
 export interface PackTrustSummary {
   steward: number;
+  /** ADR 1048 — packs attested by the adopter manifest. */
+  adopter: number;
   operatorTrusted: number;
   untrusted: number;
   revoked: number;
@@ -365,19 +414,24 @@ export interface PackTrustSummary {
   breakGlassed: number;
   /** True when the steward manifest could not be read at all. */
   stewardManifestMissing: boolean;
+  /** ADR 1048 — true when an adopter manifest exists and was REJECTED as a whole. */
+  adopterManifestRejected: boolean;
 }
 
 export function packTrustSummary(): PackTrustSummary {
   const s: PackTrustSummary = {
     steward: 0,
+    adopter: 0,
     operatorTrusted: 0,
     untrusted: 0,
     revoked: 0,
     breakGlassed: 0,
     stewardManifestMissing: stewardManifest() === null,
+    adopterManifestRejected: adopterManifestState().status === 'rejected',
   };
   for (const v of verdictCache.values()) {
     if (v.tier === 'steward') s.steward += 1;
+    else if (v.tier === 'adopter') s.adopter += 1;
     else if (v.tier === 'operator-trusted') s.operatorTrusted += 1;
     else if (v.tier === 'revoked') s.revoked += 1;
     else s.untrusted += 1;

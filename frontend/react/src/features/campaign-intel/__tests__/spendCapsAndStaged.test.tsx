@@ -9,7 +9,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import type { SpendCapDto } from '../campaignIntelClient.js';
+import type { ReallocationPlanDto, SpendCapDto } from '../campaignIntelClient.js';
 
 const listSpendCaps = vi.fn();
 const createSpendCap = vi.fn();
@@ -65,6 +65,7 @@ describe('SpendCapsPanel (ADR 0952 D2)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Change limit' }));
     fireEvent.change(screen.getByLabelText('New limit (JPY)'), { target: { value: '200000' } });
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Save' })); });
+    expect(setSpendCapLimit).toHaveBeenCalledWith('org-1', 'cap-1', 200_000, 1);
     expect(screen.getByText('Only the organization owner can raise or remove a cap.')).toBeTruthy();
   });
 });
@@ -74,6 +75,7 @@ describe('StagedAlertAction (ADR 0952 D4)', () => {
     pauseCampaign.mockResolvedValue({ results: [{ platform: 'meta', campaignId: '1', outcome: 'updated' }, { platform: 'google', campaignId: '2', outcome: 'failed', error: 'x' }] });
     render(<StagedAlertAction action="pause" orgId="org-1" campaignId="c1" campaignName="Summer" onProposed={() => {}} />);
     expect(screen.getByText(/Pause every ad platform campaign of “Summer”/)).toBeTruthy();
+    expect(pauseCampaign).not.toHaveBeenCalled();
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Pause campaign' })); });
     expect(pauseCampaign).toHaveBeenCalledWith('org-1', 'c1');
     expect(screen.getByText('Paused 1 platform campaign; 1 failed.')).toBeTruthy();
@@ -81,7 +83,15 @@ describe('StagedAlertAction (ADR 0952 D4)', () => {
 
   it('reallocate: proposes a plan (nothing applied) and refreshes the plans list', async () => {
     const onProposed = vi.fn();
-    proposeReallocationPlan.mockResolvedValue({ outcome: 'proposed', plan: { ops: [{}, {}] } });
+    const plan: ReallocationPlanDto = {
+      planId: 'rp_1', source: { kind: 'optimizeBudget' }, status: 'proposed', dropped: [], results: [],
+      ops: [
+        { platform: 'meta', adAccountId: 'act_1', campaignId: '11', fromDailyMinor: 5000, toDailyMinor: 4000 },
+        { platform: 'google', adAccountId: '1', campaignId: '21', fromDailyMinor: 2000, toDailyMinor: 3000 },
+      ],
+      createdAt: '2026-10-15T12:00:00.000Z', expiresAt: '2026-10-22T12:00:00.000Z',
+    };
+    proposeReallocationPlan.mockResolvedValue({ outcome: 'proposed', plan });
     render(<StagedAlertAction action="reallocate" orgId="org-1" onProposed={onProposed} />);
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Propose a plan' })); });
     expect(screen.getByText('Plan proposed with 2 changes. Review it in the Inbox.')).toBeTruthy();

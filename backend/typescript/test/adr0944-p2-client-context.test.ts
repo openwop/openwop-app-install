@@ -10,11 +10,19 @@
  *
  * Sabotage-witnessed (P2): making the contributor stamp on a `derivedFromRun`
  * fork (dropping its first line) reds "a fork of a run that predates the block"
- * (a fork of a stamped run is held by the merge's never-overwrite rule); reading
- * the snapshot without `compareAndSwap(null, …)` (always rebuilding) reds the same
- * case; dropping `getCollection` from `setClientContextSources` reds test 6;
- * dropping the `client.orgId !== stamp.orgId` check reds "a stamp naming another
- * client is refused".
+ * (a fork of a stamped run is held by the merge's never-overwrite rule); dropping
+ * `getCollection` from `setClientContextSources` reds test 6; dropping the
+ * `client.orgId !== stamp.orgId` check reds "a stamp naming another client is refused".
+ *
+ * Corrected wave 80 (measured): replay identity is held TWICE in `snapshotFor`, by the
+ * existing-row read and by the CAS loser's re-read of the winner, so rebuilding past
+ * one of them is green. Breaking both reds case 1 ("identical across a replay fork"),
+ * not the predates-the-block case this note used to name. Also red: an unconfirmed CAS
+ * served anyway, a disabled source feature, a deleted / unreadable collection, project
+ * access + `canReadDocument` on frozen decisions (held together; broken together), the
+ * budget's cut order, and its never-slice rule. A revoked actor is held by
+ * `resolveRunMemoryClient`'s membership check and `getCollection`'s subject check (two
+ * modules). Each case that asserts a brand voice sets it first (`voiceA`).
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
@@ -73,6 +81,12 @@ async function decisionIn(project: Awaited<ReturnType<typeof createProject>>, ti
   await acceptDelta(project, delta.deltaId, person);
 }
 
+/** Set client A's brand voice to the marker a case asserts, so no case depends on
+ *  another case having changed it first (order-independent under shuffle). */
+async function voiceA(marker: string): Promise<void> {
+  await updateBrand(TENANT, brandA, { name: 'Acme', voiceProfile: { voice: `${marker}: warm and plain` } });
+}
+
 async function clientReader(): Promise<string> {
   const reader = (await upsertFromPrincipal({ tenantId: TENANT, principalId: `oidc:decision-reader-${randomBytes(4).toString('hex')}`, source: 'oidc' })).userId;
   await createMember({ tenantId: TENANT, orgId: orgA, subject: reader, displayName: 'Client reader', roles: ['viewer'] });
@@ -95,8 +109,8 @@ beforeAll(async () => {
     await createMember({ tenantId: TENANT, orgId: org, subject: person, displayName: 'Person', roles: ['editor'] });
     await createClient({ tenantId: TENANT, orgId: org, name: org === orgA ? 'Client A' : 'Client B', createdBy: 'seed' });
   }
-  brandA = (await createBrand(TENANT, orgA, 'seed', { name: 'Acme', voiceProfile: { voice: 'VOICE-ONE: warm and plain' } } as Parameters<typeof createBrand>[3])).id;
-  await createBrand(TENANT, orgB, 'seed', { name: 'Beta', voiceProfile: { voice: 'VOICE-BETA: loud' } } as Parameters<typeof createBrand>[3]);
+  brandA = (await createBrand(TENANT, orgA, 'seed', { name: 'Acme', voiceProfile: { voice: 'VOICE-ONE: warm and plain' } })).id;
+  await createBrand(TENANT, orgB, 'seed', { name: 'Beta', voiceProfile: { voice: 'VOICE-BETA: loud' } });
   kbA = (await createCollection(TENANT, orgA, 'seed', { name: 'KB-ALPHA playbook' })).collectionId;
   kbB = (await createCollection(TENANT, orgB, 'seed', { name: 'KB-BETA playbook' })).collectionId;
   await setClientContextSources(TENANT, orgA, [kbA], person);
@@ -106,6 +120,7 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 
 describe('ADR 0944 D5 — the client context block', () => {
   it('is identical across a replay fork after the client changed; a new run sees the change', async () => {
+    await voiceA('VOICE-ONE');
     const runA = await newRun({ [CAMPAIGN_OPS_RUN_STAMP]: { orgId: orgA }, actingUserId: person });
     const stamp = readClientContextStamp(await metadataOf(runA));
     expect(stamp?.orgId).toBe(orgA);
@@ -119,7 +134,7 @@ describe('ADR 0944 D5 — the client context block', () => {
     expect(JSON.stringify(await metadataOf(runA))).not.toContain('VOICE-ONE');
 
     // The client changes between the run and its fork.
-    await updateBrand(TENANT, brandA, { name: 'Acme', voiceProfile: { voice: 'VOICE-TWO: crisp' } } as Parameters<typeof updateBrand>[2]);
+    await voiceA('VOICE-TWO');
     await importCsv(TENANT, orgA, ['Platform,Campaign,Day,Cost,Impr.,Clicks,Conversions,Revenue', 'Meta,ALPHA-NEW,2026-01-02,500,5000,50,5,600'].join('\n'));
 
     // `:fork` copies the metadata verbatim and inserts with derivedFromRun.
@@ -187,6 +202,7 @@ describe('ADR 0944 D5 — the client context block', () => {
   });
 
   it('a previously frozen block cannot bypass a source feature disabled afterward', async () => {
+    await voiceA('VOICE-TWO');
     const runId = await newRun({ [CAMPAIGN_OPS_RUN_STAMP]: { orgId: orgA }, actingUserId: person });
     const first = await blockOf(runId);
     expect(first).toContain('VOICE-TWO');
@@ -207,6 +223,7 @@ describe('ADR 0944 D5 — the client context block', () => {
   it('revoking the actual run actor after freezing removes access to its block and collections', async () => {
     const user = (await upsertFromPrincipal({ tenantId: TENANT, principalId: `oidc:revoked-${randomBytes(4).toString('hex')}`, source: 'oidc' })).userId;
     const member = await createMember({ tenantId: TENANT, orgId: orgA, subject: user, displayName: 'Revoked person', roles: ['editor'] });
+    await voiceA('VOICE-TWO');
     const runId = await newRun({ [CAMPAIGN_OPS_RUN_STAMP]: { orgId: orgA }, actingUserId: user });
     expect(await blockOf(runId)).toContain('VOICE-TWO');
     await deleteMember(member.memberId);

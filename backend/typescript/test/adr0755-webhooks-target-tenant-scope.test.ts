@@ -11,7 +11,8 @@
  * scope in the ACTIVE tenant instead of the explicit one, drops the explicit-tenant
  * check, or stops admitting a member of the explicit workspace (the CONTROL).
  *
- * Fixture coupling, recorded: the members are keyed `bearer:<first 8 chars>` because
+ * Fixture coupling, recorded: the members are keyed on the env key's principal id
+ * (`envKeyPrincipalId`; `bearer:<first 8 chars>` until ADR 1045 TST-FUD-GC-1) because
  * this gate reads `callerSubject` (the env key's subject string), not
  * `credentialAuthority` as the content gate does. The split is a tracker row
  * (TST-BRA-5 product note); changing the keys here would hide it.
@@ -21,10 +22,11 @@ import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import { createMember, createOrg } from '../src/host/accessControlService.js';
+import { envKeyPrincipalId } from '../src/middleware/envKeyPrincipal.js';
 
 const HOME = 'home-0755';
 const WS = 'ws-0755-shared';
-// Env keys present `bearer:<first 8 chars>`.
+// Env keys present `envKeyPrincipalId(key)` (ADR 1045 TST-FUD-GC-1).
 const MIXED = 'mixd0755-admin-home-viewer-ws';
 const WSADMIN = 'wsad0755-admin-in-ws';
 const saved: Record<string, string | undefined> = {};
@@ -42,10 +44,10 @@ beforeAll(async () => {
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   await createOrg({ tenantId: HOME, orgId: HOME, name: 'Home', createdBy: 'test' });
   await createOrg({ tenantId: WS, orgId: WS, name: 'Shared', createdBy: 'test' });
-  await createMember({ tenantId: HOME, orgId: HOME, subject: 'bearer:mixd0755', displayName: 'Mixed', roles: ['admin'] });
-  await createMember({ tenantId: WS, orgId: WS, subject: 'bearer:mixd0755', displayName: 'Mixed', roles: ['viewer'] });
-  await createMember({ tenantId: HOME, orgId: HOME, subject: 'bearer:wsad0755', displayName: 'WS admin', roles: ['admin'] });
-  await createMember({ tenantId: WS, orgId: WS, subject: 'bearer:wsad0755', displayName: 'WS admin', roles: ['admin'] });
+  await createMember({ tenantId: HOME, orgId: HOME, subject: envKeyPrincipalId(MIXED), displayName: 'Mixed', roles: ['admin'] });
+  await createMember({ tenantId: WS, orgId: WS, subject: envKeyPrincipalId(MIXED), displayName: 'Mixed', roles: ['viewer'] });
+  await createMember({ tenantId: HOME, orgId: HOME, subject: envKeyPrincipalId(WSADMIN), displayName: 'WS admin', roles: ['admin'] });
+  await createMember({ tenantId: WS, orgId: WS, subject: envKeyPrincipalId(WSADMIN), displayName: 'WS admin', roles: ['admin'] });
 });
 
 afterAll(async () => {

@@ -11,6 +11,18 @@ contact audience), ADR 0014 (feature workflow surfaces), ADR 0020 (Consent — g
 
 ---
 
+## Correction (2026-11-06) — multiline template creation
+
+The create-template Body control was a single-line text input, which strips
+linebreaks before React receives the author's text. The existing detail editor
+already preserved paragraphs in a textarea; changing an existing template was
+therefore different from creating it. Creation now uses the shared TextareaField
+for plain text, Markdown and SMS bodies, retaining the existing SMS hint and
+subject rules. The API payload, body trimming, template versioning, preview and
+send/consent gates are unchanged. This is a host UI correction, not a provider,
+authorization or wire change. Regression coverage checks actual create payloads
+preserve internal newlines/placeholders; no email is sent.
+
 ## Context (boundaries audit first)
 
 The **engage** leg of the loop: act on the CRM contacts Forms (0017) captures by

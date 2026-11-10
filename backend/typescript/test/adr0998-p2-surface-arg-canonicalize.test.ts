@@ -19,7 +19,7 @@
  *  - alias wins over canonical: the precedence leg goes red;
  *  - `hits` built as a copy (`[...matches]`): the reference legs go red.
  */
-import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import { describe, expect, it, beforeAll, afterAll, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
@@ -65,12 +65,12 @@ async function runNode(typeId: string, config: Record<string, unknown>, inputs: 
   const create = await jsonFetch<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs }) });
   expect(create.status).toBe(201);
   const { runId } = create.body;
+  // Run-settle: no hook to await, so poll the real run status (bounded, 2 s / 25 ms).
   let status = 'pending';
-  for (let i = 0; i < 80; i++) {
-    await new Promise((r) => setTimeout(r, 25));
+  await vi.waitFor(async () => {
     status = (await jsonFetch<{ status: string }>(`/runs/${runId}`)).body.status;
-    if (['completed', 'failed', 'cancelled'].includes(status)) break;
-  }
+    expect(['completed', 'failed', 'cancelled'], `run ${runId} settled`).toContain(status);
+  }, { timeout: 2_000, interval: 25 });
   // A run id is `<tenant>/<uuid>` on this host.
   const tenantId = runId.includes('/') ? runId.slice(0, runId.indexOf('/')) : '';
   const bundle = await jsonFetch<{ events?: BundleEvent[] }>(`/runs/${runId}/debug-bundle`);
@@ -126,10 +126,10 @@ function recordingLanes(): { seen: Array<{ kind: string; verb: string; args: Sur
   const rec = (kind: string, verb: string, res: Record<string, unknown> = {}): SurfaceFn => async (args) => { seen.push({ kind, verb, args }); return res; };
   const matches = [{ id: 'x', score: 1 }];
   const raw = {
-    vector: { upsert: rec('vector', 'upsert'), query: rec('vector', 'query', { matches }), delete: rec('vector', 'delete') } as VectorSurface,
-    search: { index: rec('search', 'index'), query: rec('search', 'query', { hits: [] }), delete: rec('search', 'delete') } as SearchSurface,
-    nosql: { find: rec('nosql', 'find'), insert: rec('nosql', 'insert'), update: rec('nosql', 'update'), delete: rec('nosql', 'delete') } as NoSqlSurface,
-    blob: { put: rec('blob', 'put'), get: rec('blob', 'get'), delete: rec('blob', 'delete'), list: rec('blob', 'list'), presign: rec('blob', 'presign') } as BlobSurface,
+    vector: { upsert: rec('vector', 'upsert'), query: rec('vector', 'query', { matches }), delete: rec('vector', 'delete') } satisfies VectorSurface,
+    search: { index: rec('search', 'index'), query: rec('search', 'query', { hits: [] }), delete: rec('search', 'delete') } satisfies SearchSurface,
+    nosql: { find: rec('nosql', 'find'), insert: rec('nosql', 'insert'), update: rec('nosql', 'update'), delete: rec('nosql', 'delete') } satisfies NoSqlSurface,
+    blob: { put: rec('blob', 'put'), get: rec('blob', 'get'), delete: rec('blob', 'delete'), list: rec('blob', 'list'), presign: rec('blob', 'presign') } satisfies BlobSurface,
   };
   const lanes = hostLaneSurfaces(raw);
   const base = buildHostSurfaceBundle({ tenantId: 'adr0998-p2-rec' });

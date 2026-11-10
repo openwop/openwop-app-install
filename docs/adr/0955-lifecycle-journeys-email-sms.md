@@ -391,6 +391,17 @@ box: the operator sees why 10:00 Tuesday was chosen.
 
 ### D8 — Templates and the ADR 0942 gates
 
+> **Correction 2026-11-08 — template creation readiness (EMAIL-TEMPLATE-VALIDATION-1).**
+> The private template form's handler already required a selected organization,
+> trimmed name and body, plus a subject for text/Markdown, but its button checked
+> only name/busy. An enabled click could silently return without creating a
+> template or explaining missing content. Use the same readiness predicate for
+> the button and handler. SMS still has no subject; changing format rechecks the
+> requirement. Existing trimming, paragraph preservation, server validation and
+> all send/review/consent gates remain unchanged. This is create-form eligibility,
+> not permission to send. Source-authored component cases require separate
+> execution qualification.
+
 - Journey email nodes reference `{templateId, templateVersion}`, pinned when the
   journey is published (ADR 0267 §4 draft/publish). They never render the live
   template. SMS bodies are versioned in the same template store with
@@ -593,3 +604,21 @@ that identity and reason recorded; no hard disable lock or numeric slack is
 added. Native types and all 83 metadata/client-scope cases in seven suites
 passed. The separate 79-case boundary run is also green. Full canonical
 qualification and live Twilio remain pending.
+
+
+### Correction — client-bound welcome series (2026-11-05)
+
+Campaign Studio acceptance testing reproduced a missing migration in the legacy
+`campaign-journeys.welcome-series`: it had no `orgId` parameter and its enrollment
+and three channel checks did not carry a client. In a workspace with client
+accounts, a real expanded chain failed before approval with `client_required`;
+there is no ambient-org fallback in the journey surface. The pack is now 1.4.1
+and this chain 1.1.1. An optional `orgId` (default empty, preserving client-less
+workspace copies) is frozen into all four guards. Agency callers supply their
+actual client; the existing event-trigger resolver binds such instances to that
+client and refuses tenant-wide contact events without an org. No consent,
+approval, timer, or send boundary is weakened. Existing saved instances remain
+pinned to their old definitions until deliberately re-instantiated; publication
+or installation of the new pack and deployment verification belong to the
+release record, not this diagnostic. The regression runs the actual chain with
+empty run inputs and stops at sign-off with zero provider calls.

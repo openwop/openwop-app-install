@@ -32,7 +32,7 @@ const FULL: AgentDispatchProvenance = {
   parentSubject: 'user:parent-1',
   projectSubject: 'project:candidate-7',
   specialistVersion: '1.2.0',
-  workflowId: 'openwop-app.kicktodo.plan-generation',
+  workflowId: 'openwop-app.production.plan',
   workflowVersion: '1.0.0',
   nodeId: 'generate',
   nodeVersion: '1.0.0',
@@ -92,7 +92,7 @@ describe('runAgentDispatch echo', () => {
     const ok = runAgentDispatch({ agentId: AGENT, task: { goal: 'x' }, provenance: FULL });
     expect(ok.status).toBe('completed');
     expect(ok.provenance?.parentAgentId).toBe('host:kickbot');
-    expect(ok.provenance?.workflowId).toBe('openwop-app.kicktodo.plan-generation');
+    expect(ok.provenance?.workflowId).toBe('openwop-app.production.plan');
     expect(ok.provenance?.mergeDecision).toBe('pending');
     // Context refs are ids only — no content ever rides the record.
     expect(ok.provenance?.contextRefs).toEqual(['artifact:plan-draft-3']);

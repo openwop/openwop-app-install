@@ -223,4 +223,7 @@ export const messages = {
   ownerGroupsLockedNote: 'Groups that grant owner access can only be changed by an owner.',
   errorCreateOrgOwnerRequired: 'Only an owner can create an organization here. Ask an owner of an existing organization to make you an owner, then try again.',
   errorForbiddenScope: 'You don’t have permission to do that in this organization. Ask a workspace owner or admin.',
+  // ADR 1034 — OrgAccessNotice
+  accessReadFailed: 'We could not check what you can change here, so the manager controls are hidden for now.',
+  accessReadRetry: 'Check again',
 } as const;

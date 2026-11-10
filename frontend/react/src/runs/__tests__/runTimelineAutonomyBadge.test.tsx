@@ -6,17 +6,14 @@
  *
  * What turns it red: badging any node whose outputs merely carry `decision`
  * (the negative controls); reading the segment's LAST event instead of its
- * terminal one (the trailing-event case); dropping the failure codes.
+ * terminal one (the trailing-event case); dropping the failure codes; a badge label
+ * key that is not in the catalog (the copy here is the real catalog's, so a raw key
+ * shows).
  */
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { render, cleanup, screen } from '@testing-library/react';
 import type { RunEventDoc } from '@openwop/openwop';
-
-vi.mock('react-i18next', () => ({
-  useTranslation: () => ({ t: (k: string, o?: Record<string, unknown>) => (o ? `${k}:${JSON.stringify(o)}` : k) }),
-}));
-
-const { RunTimeline, autonomyBadgeOf } = await import('../RunTimeline.js');
+import { RunTimeline, autonomyBadgeOf } from '../RunTimeline.js';
 
 afterEach(cleanup);
 
@@ -63,9 +60,13 @@ describe('RunTimeline — the badge on the lane', () => {
       ev(3, 'memory.written', 'gate', { memoryRef: 'm1' }),
       ev(4, 'run.completed'),
     ]} />);
-    const chip = screen.getByText(/timelineAutonomyWithRule/);
-    expect(chip.className).toContain('chip--success');
-    expect(chip.textContent).toContain('ads.budget#esc0');
+    expect(screen.getByText('Auto · ads.budget#esc0').className).toContain('chip--success');
+
+    cleanup();
+    render(<RunTimeline readState="ready" events={[
+      ev(1, 'node.started', 'gate'), completed({ decision: 'notify-after', ruleId: 'social.post#default#preset' }),
+    ]} />);
+    expect(screen.getByText('Notified · social.post#default#preset')).toBeTruthy();
   });
 
   it('a blocked step shows Blocked; an ordinary node shows no badge', () => {
@@ -73,7 +74,7 @@ describe('RunTimeline — the badge on the lane', () => {
       ev(1, 'node.started', 'gate'), failed('autonomy_blocked'),
       ev(3, 'node.started', 'other'), ev(4, 'node.completed', 'other', { nodeId: 'other', outputs: { decision: 'auto' } }),
     ]} />);
-    expect(screen.getAllByText('timelineAutonomy_blocked')).toHaveLength(1);
-    expect(screen.queryByText(/timelineAutonomyWithRule/)).toBeNull();
+    expect(screen.getByText('Blocked')).toBeTruthy();
+    expect(document.querySelectorAll('.run-timeline-autonomy')).toHaveLength(1);
   });
 });

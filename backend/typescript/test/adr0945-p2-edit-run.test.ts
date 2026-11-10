@@ -1,21 +1,17 @@
 /**
  * ADR 0945 P2 — EDIT mode end to end through a REAL run (mock image provider,
- * scripted vision judge). The P1 header below describes the shared harness.
+ * scripted vision judge).
  *
- * ADR 0945 P1 — composite mode end to end through a REAL run, with the mock
- * image provider (no spend), and the replay-fork witness for the reclassified
- * generation nodes.
- *
- *  - `compose-product-shot` cuts out the catalog photo (recorded edit call),
- *    composes it on a scene, and the stored result is a `composite` asset whose
- *    product layer IS the cut-out's bytes and whose verdict is `pass`;
- *  - its outputs carry ids only — no serve token, no bytes;
- *  - a replay `:fork` serves the recorded output: no second render, no second
- *    asset, the SAME mediaAssetId (G5 — it used to re-dispatch and pay again);
- *  - the reclassified `render` node is served on a fork the same way;
- *  - with the sub-toggle OFF the node fails closed;
- *  - a cut-out that is NOT this product's photo is refused
- *    `product_depiction_ungrounded`.
+ *  - `edit-product-scene` edits around the product and records an `edit` asset
+ *    with a judged `pass`; its outputs carry ids only; a replay `:fork` serves the
+ *    recorded output, with no new asset and no judge call (G5);
+ *  - with no vision provider the edit is `needs_review`, never `pass`;
+ *  - a judge mismatch ends the node `fidelity_failed` after exactly ONE repair;
+ *  - a node's `productId` hint binds only when the CATALOG confirms the source
+ *    bytes are that product's photo.
+ * Breaks if the repair loop changes, the outputs leak a token, `combineOutcome`
+ * passes without a judge, or the hint skips the verifier. Fork serving is held by
+ * the pack's `side-effect` role AND the generated floor (a double guard).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -48,10 +44,10 @@ let server: http.Server;
 let BASE = '';
 let cookie = '';
 interface Ev { type: string; nodeId?: string; payload?: { outputs?: Record<string, unknown>; error?: { code?: string } } }
-interface Body { runId?: string; status?: string; error?: unknown; orgId?: string; assetId?: string; events?: Ev[] }
+interface Body { runId?: string; status?: string; error?: unknown; orgId?: string; assetId?: string; serveUrl?: string; events?: Ev[] }
 const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: Body }> => {
   const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-  for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
+  for (const c of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
   return { status: res.status, body: (await res.json().catch(() => ({}))) as Body };
 };
 const settle = async (runId: string): Promise<{ status: string; error: unknown }> => {
@@ -70,6 +66,7 @@ const TENANT = `org:g945p2-${Date.now()}`;
 let orgId = '';
 let productId = '';
 let mugB64 = '';
+let otherPhoto = { assetId: '', b64: '' };
 
 async function setToggle(id: string, status: 'on' | 'off'): Promise<void> {
   const d = getToggleDefault(id);
@@ -88,20 +85,33 @@ beforeAll(async () => {
   for (const id of ['commerce', 'creative-briefs', 'creative-briefs.product-grounded']) await setToggle(id, 'on');
   expect((await call('POST', '/host/openwop-app/test/login', { email: 'g945p2@acme.test', tenantId: TENANT })).status).toBe(201);
   const org = await call('POST', '/host/openwop-app/orgs', { name: 'Acme' });
-  orgId = org.body.orgId as string;
+  orgId = String(org.body.orgId);
   const up = async (b64: string, name: string): Promise<{ assetId: string; serveUrl: string }> => {
     const r = await call('POST', `/host/openwop-app/media/orgs/${encodeURIComponent(orgId)}/assets`, { contentBase64: b64, contentType: 'image/png', name });
     expect(r.status, JSON.stringify(r.body)).toBe(201);
-    return r.body as unknown as { assetId: string; serveUrl: string };
+    if (!r.body.assetId || !r.body.serveUrl) throw new Error(`upload returned ${JSON.stringify(r.body)}`);
+    return { assetId: r.body.assetId, serveUrl: r.body.serveUrl };
   };
   mugB64 = MUG;
   const mug = await up(MUG, 'mug.png');
+  // In this org's library, and not the product's photo.
+  const otherB64 = png('<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><rect width="20" height="20" fill="#0a7f3f"/></svg>');
+  otherPhoto = { assetId: (await up(otherB64, 'other.png')).assetId, b64: otherB64 };
   const tokenOf = (serveUrl: string): string => serveUrl.split('/').pop()!;
   await setGroundingSettings(TENANT, orgId, 'u', { editModeEnabled: true }); // ADR 0945 Q1 — edit mode is per-client opt-in
   productId = (await createProduct({ tenantId: TENANT, orgId, createdBy: 'u', type: 'physical', name: 'Mug', price: 12, imageAssetTokens: [tokenOf(mug.serveUrl)] })).productId;
-}, 60_000);
+}, 120_000);
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
+const runOf = async (workflowId: string): Promise<string> => {
+  const run = await call('POST', '/runs', { workflowId, inputs: {} });
+  expect(run.status, JSON.stringify(run.body)).toBe(201);
+  return String(run.body.runId);
+};
+const assetIdOf = (v: unknown): string => {
+  if (v && typeof v === 'object' && 'assetId' in v && typeof v.assetId === 'string') return v.assetId;
+  throw new Error(`no assetId in ${JSON.stringify(v)}`);
+};
 const allMatch = (): DescribedHeadlessDispatch => ({ provider: 'anthropic', model: 'scripted', route: 'byok-default', dispatch: async () => JSON.stringify({ results: FIDELITY_ATTRIBUTES.map((attribute) => ({ attribute, answer: 'match', evidence: 'same' })) }) });
 
 describe('edit-product-scene through a run', () => {
@@ -109,7 +119,7 @@ describe('edit-product-scene through a run', () => {
     judgeImpl = allMatch();
     const workflowId = `g945p2.edit.${Date.now()}`;
     registerWorkflow({ workflowId, nodes: [{ nodeId: 'e1', typeId: 'feature.creative-briefs.nodes.edit-product-scene', inputs: { orgId, productId, prompt: 'A sunny kitchen counter.', provider: 'mock' } }], edges: [] });
-    const runId = (await call('POST', '/runs', { workflowId, inputs: {} })).body.runId as string;
+    const runId = await runOf(workflowId);
     await completed(runId);
     const out = (await nodeDone(runId, 'e1'))?.payload?.outputs ?? {};
     expect(out.outcome).toBe('pass');
@@ -122,7 +132,9 @@ describe('edit-product-scene through a run', () => {
     expect(v?.checks.find((c) => c.id === 'aspect')?.status).toBe('pass');
 
     const before = (await listAssets(TENANT, orgId)).length;
-    const forkId = (await call('POST', `/runs/${runId}:fork`, { mode: 'replay' })).body.runId as string;
+    const fork = await call('POST', `/runs/${runId}:fork`, { mode: 'replay' });
+    expect(fork.status, JSON.stringify(fork.body)).toBe(201);
+    const forkId = String(fork.body.runId);
     judgeImpl = null; // a served fork must not consult the judge at all
     await completed(forkId);
     expect((await listAssets(TENANT, orgId)).length).toBe(before);
@@ -133,7 +145,7 @@ describe('edit-product-scene through a run', () => {
     judgeImpl = null;
     const workflowId = `g945p2.edit-nojudge.${Date.now()}`;
     registerWorkflow({ workflowId, nodes: [{ nodeId: 'e1', typeId: 'feature.creative-briefs.nodes.edit-product-scene', inputs: { orgId, productId, prompt: 'A beach at dusk.', provider: 'mock' } }], edges: [] });
-    const runId = (await call('POST', '/runs', { workflowId, inputs: {} })).body.runId as string;
+    const runId = await runOf(workflowId);
     await completed(runId);
     expect((await nodeDone(runId, 'e1'))?.payload?.outputs?.outcome).toBe('needs_review');
   }, 60_000);
@@ -143,7 +155,7 @@ describe('edit-product-scene through a run', () => {
     judgeImpl = { provider: 'anthropic', model: 'scripted', route: 'byok-default', dispatch: async () => { calls += 1; return JSON.stringify({ results: FIDELITY_ATTRIBUTES.map((attribute) => ({ attribute, answer: attribute === 'logo' ? 'mismatch' : 'match', evidence: 'x' })) }); } };
     const workflowId = `g945p2.edit-fail.${Date.now()}`;
     registerWorkflow({ workflowId, nodes: [{ nodeId: 'e1', typeId: 'feature.creative-briefs.nodes.edit-product-scene', inputs: { orgId, productId, prompt: 'A forest.', provider: 'mock' } }], edges: [] });
-    const runId = (await call('POST', '/runs', { workflowId, inputs: {} })).body.runId as string;
+    const runId = await runOf(workflowId);
     const s = await settle(runId);
     expect(s.status).toBe('failed');
     expect(JSON.stringify(s.error)).toMatch(/fidelity_failed/);
@@ -151,13 +163,17 @@ describe('edit-product-scene through a run', () => {
   }, 60_000);
 
   it('a node\'s productId hint binds only when the catalog confirms the source bytes are that product\'s photo', async () => {
-    const media = buildHostSurfaceBundle({ tenantId: TENANT, runId: 'run-hint' }).features.media as Record<string, (a: Record<string, unknown>) => Promise<Record<string, unknown>>>;
+    const media = buildHostSurfaceBundle({ tenantId: TENANT, runId: 'run-hint' }).features.media;
+    if (!media?.createAssetFromServeUrl) throw new Error('the media surface is not registered');
     const sha = (b64: string): string => createHash('sha256').update(Buffer.from(b64, 'base64')).digest('hex');
     const honest = await storeMediaAsset(TENANT, { contentBase64: png('<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><rect width="20" height="20" fill="#123456"/></svg>'), contentType: 'image/png', aiOrigin: { provider: 'mock', op: 'background-remove', runId: 'run-hint', nodeId: 'n', inputSha256: sha(mugB64) } });
-    const a = await media.createAssetFromServeUrl!({ orgId, url: honest.url, productId });
-    expect((await getAsset(TENANT, orgId, String(a.assetId)))?.lineage?.grounding?.productId).toBe(productId);
-    const forged = await storeMediaAsset(TENANT, { contentBase64: png('<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><rect width="20" height="20" fill="#654321"/></svg>'), contentType: 'image/png', aiOrigin: { provider: 'mock', op: 'background-remove', runId: 'run-hint', nodeId: 'n', inputSha256: 'f'.repeat(64) } });
-    const b = await media.createAssetFromServeUrl!({ orgId, url: forged.url, productId });
-    expect((await getAsset(TENANT, orgId, String(b.assetId)))?.lineage?.grounding?.productId, 'an unverified hint is not stamped').toBeUndefined();
+    const a = await media.createAssetFromServeUrl({ orgId, url: honest.url, productId });
+    expect((await getAsset(TENANT, orgId, assetIdOf(a)))?.lineage?.grounding?.productId).toBe(productId);
+    const forged = await storeMediaAsset(TENANT, { contentBase64: png('<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><rect width="20" height="20" fill="#654321"/></svg>'), contentType: 'image/png', aiOrigin: { provider: 'mock', op: 'background-remove', runId: 'run-hint', nodeId: 'n', inputSha256: sha(otherPhoto.b64) } });
+    const b = await media.createAssetFromServeUrl({ orgId, url: forged.url, productId });
+    const grounding = (await getAsset(TENANT, orgId, assetIdOf(b)))?.lineage?.grounding;
+    // The source IS in the library, so only the catalog's answer can refuse the hint.
+    expect(grounding?.sources).toEqual([{ assetId: otherPhoto.assetId, sha256: sha(otherPhoto.b64) }]);
+    expect(grounding?.productId, 'an unverified hint is not stamped').toBeUndefined();
   });
 });

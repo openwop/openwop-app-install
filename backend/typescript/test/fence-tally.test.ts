@@ -28,7 +28,10 @@ describe('XCH-F1-2 — per-tool fence tally', () => {
   it('accumulates across calls rather than overwriting', () => {
     toModelToolResult('openwop:x.unknown', 'a');
     toModelToolResult('openwop:x.unknown', 'b');
-    expect(fenceTally()['openwop:x.unknown']?.fenced).toBe(2);
+    // ...and a decision that PASSES unfenced (a vouched exact {error, message}) counts
+    // on the other side, so over-fencing is observable as well as under-fencing.
+    toModelToolResult('openwop:x.unknown', JSON.stringify({ error: 'org_required', message: 'Pass orgId.' }), true, { hostVouched: true });
+    expect(fenceTally()['openwop:x.unknown']).toEqual({ fenced: 2, passed: 1 });
   });
 
   // CORRECTED by TOC2CD-11 (ADR 1000): this used to pin "an ERROR is never fenced

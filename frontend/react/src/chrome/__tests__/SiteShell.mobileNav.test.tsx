@@ -27,10 +27,10 @@ const items = [
 ];
 
 vi.mock('../navConfig/NavConfigProvider.js', () => ({
-  useResolvedNav: () => ({ workspace: [], admin: [], site: [{ id: 'KickTodo', label: 'KickTodo', items }] }),
+  useResolvedNav: () => ({ workspace: [], admin: [], site: [{ id: 'Acme', label: 'Acme', items }] }),
 }));
 vi.mock('../../brand/BrandProvider.js', () => ({
-  useBrand: () => ({ productName: 'KickTodo', logoSrc: '/mark.svg', markSrcDark: '', footerText: '' }),
+  useBrand: () => ({ productName: 'Acme', logoSrc: '/mark.svg', markSrcDark: '', footerText: '' }),
 }));
 vi.mock('../../brand/BrandLogo.js', () => ({ BrandLogo: () => <svg aria-hidden="true" /> }));
 vi.mock('../../auth/SignInButton.js', () => ({ SignInButton: () => <button type="button">Sign in</button> }));

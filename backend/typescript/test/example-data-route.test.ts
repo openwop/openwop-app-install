@@ -48,7 +48,7 @@ describe('example-data routes (streaming + provision gate)', () => {
     const res = await fetch(`${BASE}${runPath}`, {
       method: 'POST',
       headers: { authorization: 'Bearer dev-token', 'content-type': 'application/json', accept: 'application/x-ndjson' },
-      body: JSON.stringify({ steps: ['demo-people'] }),
+      body: JSON.stringify({ steps: ['demo-people'], expectedTenantId: 'default' }),
     });
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toContain('application/x-ndjson');
@@ -65,7 +65,7 @@ describe('example-data routes (streaming + provision gate)', () => {
     const res = await fetch(`${BASE}${runPath}`, {
       method: 'POST',
       headers: { authorization: 'Bearer dev-token', 'content-type': 'application/json' },
-      body: JSON.stringify({ steps: ['demo-people'] }),
+      body: JSON.stringify({ steps: ['demo-people'], expectedTenantId: 'default' }),
     });
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toContain('application/json');

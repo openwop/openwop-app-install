@@ -13,6 +13,12 @@
  *
  * Sabotage-witnessed: restoring the body `subjectId` reddens the route leg;
  * dropping the `grantedBy === subjectId` filter reddens the lookup legs.
+ *
+ * Double guard, recorded (/grade-tests w81): the route leg is held by the 403
+ * refusal AND by the grant taking `subjectId` from the session, never the body.
+ * Dropping the refusal alone reds the status assertion; "nothing is stored" can
+ * fail only when both go (one probe breaks both). The list filter, the lookup's
+ * org filter and the session-sourced `grantedBy` are each witnessed too.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -20,6 +26,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { enableTenantOverride } from '../src/host/featureToggles/service.js';
 import { applyGrants, consultApplyGrant, createApplyGrant } from '../src/host/applyGrant.js';
+import { getSetCookies } from './headerCookies.js';
 
 let BASE: string;
 let server: http.Server;
@@ -48,11 +55,9 @@ function client() {
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
-    const h = res.headers as Headers & { getSetCookie?: () => string[] };
-    const single = res.headers.get('set-cookie');
-    for (const sc of (typeof h.getSetCookie === 'function' ? h.getSetCookie() : single ? [single] : [])) {
+    for (const sc of getSetCookies(res.headers)) {
       const m = /(__session=[^;]+)/.exec(sc);
-      if (m) cookie = m[1]!;
+      if (m?.[1]) cookie = m[1];
     }
     const parsed: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
     return { status: res.status, body: parsed as T | undefined };
@@ -110,8 +115,9 @@ describe('DG-SEC-1 — the route: a grant names only its own author', () => {
     const ownGrant = await t.mate.post<{ grant?: { subjectId?: string } }>(t.grants, grantBody(`camp-own-${n++}`));
     expect(ownGrant.status, `the colleague must genuinely hold workspace:write: ${JSON.stringify(ownGrant.body)}`).toBe(201);
 
-    const forged = await t.mate.post(t.grants, grantBody(`camp-victim-${n++}`, { subjectId: t.ownerId }));
+    const forged = await t.mate.post<{ error?: string; message?: string }>(t.grants, grantBody(`camp-victim-${n++}`, { subjectId: t.ownerId }));
     expect(forged.status, `a colleague consented for someone else: ${JSON.stringify(forged.body)}`).toBe(403);
+    expect(forged.body).toEqual({ error: 'forbidden', message: 'An apply grant authorises your own applications only.' });
 
     const stored = (await applyGrants.listByPrefix(`${t.wsId}:`)).filter((g) => g.subjectId === t.ownerId);
     expect(stored, 'a refused grant must not be written').toEqual([]);
@@ -129,12 +135,15 @@ describe('DG-SEC-1 — the route: a grant names only its own author', () => {
   it("the list shows a member their OWN grants, never a colleague's", async () => {
     const t = await team();
     const campaignId = `camp-private-${n++}`;
+    const mateCampaign = `camp-mate-${n++}`;
     expect((await t.owner.post(t.grants, grantBody(campaignId))).status).toBe(201);
+    expect((await t.mate.post(t.grants, grantBody(mateCampaign))).status).toBe(201);
     const seen = await t.mate.get<{ grants?: Array<{ campaignId: string }> }>(t.grants);
     expect(seen.status).toBe(200);
-    expect(seen.body?.grants?.map((g) => g.campaignId) ?? []).not.toContain(campaignId);
+    // Exactly the colleague's own grant: a missing body cannot pass as "nothing leaked".
+    expect(seen.body?.grants?.map((g) => g.campaignId)).toEqual([mateCampaign]);
     const mine = await t.owner.get<{ grants?: Array<{ campaignId: string }> }>(t.grants);
-    expect(mine.body?.grants?.map((g) => g.campaignId)).toContain(campaignId);
+    expect(mine.body?.grants?.map((g) => g.campaignId)).toEqual([campaignId]);
   }, 120_000);
 });
 

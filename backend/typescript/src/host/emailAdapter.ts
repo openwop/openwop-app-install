@@ -278,6 +278,7 @@ export async function resolveEmailProvider(input: {
 }): Promise<string | null> {
   for (const p of emailSendProviders(input.purpose)) {
     const resolved = await resolveConnectionCredential({
+      egress: { fixedEndpoint: 'the email provider fixed API host' },
       tenantId: input.tenantId,
       provider: p,
       ...(input.actingUserId ? { actingUserId: input.actingUserId } : {}),

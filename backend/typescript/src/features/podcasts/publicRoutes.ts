@@ -44,6 +44,7 @@ import { renderShowPrerender, renderEpisodePrerender } from './podcastPrerender.
 import { prerenderDisabled, prerenderTtlSeconds } from '../publishing/prerenderService.js';
 import { setPrerenderSecurityHeaders } from '../publishing/siteRuntime.js';
 import { vendorPublicBase } from '../featureRoute.js';
+import { boundSiteOrigin } from '../../host/boundSite.js';
 
 const log = createLogger('features.podcasts.public');
 
@@ -246,14 +247,14 @@ export function registerPublicPodcastRoutes(deps: RouteDeps): void {
     if (prerenderDisabled()) { notFound(res); return; }
     const ctx = await resolvePublicOrg(req.params.orgId);
     if (!ctx) { notFound(res); return; }
-    const out = await renderShowPrerender(ctx.tenantId, req.params.orgId, req.params.showSlug, publicBaseUrl(req));
+    const out = await renderShowPrerender(ctx.tenantId, req.params.orgId, req.params.showSlug, publicBaseUrl(req), boundSiteOrigin(res));
     sendPrerender(res, isHead, out?.html ?? null, out?.languageCode ?? 'en');
   };
   const episodePrerenderHandler = async (req: Request, res: Response, isHead: boolean): Promise<void> => {
     if (prerenderDisabled()) { notFound(res); return; }
     const ctx = await resolvePublicOrg(req.params.orgId);
     if (!ctx) { notFound(res); return; }
-    const out = await renderEpisodePrerender(ctx.tenantId, req.params.orgId, req.params.showSlug, req.params.episodeSlug, publicBaseUrl(req));
+    const out = await renderEpisodePrerender(ctx.tenantId, req.params.orgId, req.params.showSlug, req.params.episodeSlug, publicBaseUrl(req), boundSiteOrigin(res));
     sendPrerender(res, isHead, out?.html ?? null, out?.languageCode ?? 'en');
   };
 

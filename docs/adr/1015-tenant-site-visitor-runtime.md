@@ -223,3 +223,9 @@ carries the prerender CSP (Safari UA: none; Googlebot: the CSP).
 3. Should the funnel viewer get heat and replay too (ADR 0951 leaves this open)?
 
 No wire change: every route is a host extension under `/host/openwop-app/*`.
+
+> **CORRECTED 2026-11-03 (ADR 1046).** Two amendments. (1) The prerender CSP
+> becomes per site when a site has code injection (ADR 1046 D8); sites without it
+> keep `PRERENDER_CSP`. (2) Fence 4's never-record check must pierce open shadow
+> roots and re-run on each resnapshot, because components render in Shadow DOM
+> (ADR 1046 D10).

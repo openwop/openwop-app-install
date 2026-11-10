@@ -9,7 +9,7 @@
  *
  * Sabotage that turns these red: a pack regaining `|| 'anthropic'` or a pack-local
  * model constant (the ratchet); `withRunAiDefault` ignoring the default; the
- * contributor resolving on a fork; a managed binding being taken as the default;
+ * contributor resolving on a fork; a managed binding being taken as a BYOK default;
  * the campaign chains losing the provider/model bindings or the per-child inputs;
  * a child run dropping the parent's `configurable.ai` choice.
  */
@@ -23,9 +23,20 @@ vi.mock('../src/host/chatByokConfig.js', async (orig) => ({
   ...(await orig<object>()),
   getChatByokConfig: async () => binding.current,
 }));
+// The workspace's stored key NAMES (ADR 0903 correction 2026-11-02). `null` = the
+// vault read fails.
+vi.mock('../src/providers/managedProvider.js', async (orig) => ({
+  ...(await orig<object>()),
+  getManagedProviderStatuses: async () => [{ providerId: 'openwop-free', ready: true, detail: '' }],
+}));
+const vault = vi.hoisted(() => ({ refs: ['anthropic'] as string[] | null }));
+vi.mock('../src/byok/secretResolver.js', async (orig) => ({
+  ...(await orig<object>()),
+  listSecretRefs: async () => { if (vault.refs === null) throw new Error('vault down'); return vault.refs; },
+}));
 
 const { runAiDefaultContributor, runAiDefaultFor, withRunAiDefault, RUN_AI_DEFAULT_KEY } = await import('../src/host/runAiDefault.js');
-const { getDefaultModel, listSelectableProviderIds } = await import('../src/providers/catalog.js');
+const { getDefaultModel, listManagedProviderIds } = await import('../src/providers/catalog.js');
 const { expandChain } = await import('../src/host/workflowChainPackLoader.js');
 const { openStorage } = await import('../src/storage/index.js');
 const { __resetHostExtPersistence, initHostExtPersistence } = await import('../src/host/hostExtPersistence.js');
@@ -36,7 +47,7 @@ const { insertRunWithStartContext } = await import('../src/host/runInsert.js');
 const REPO = join(import.meta.dirname, '..', '..', '..');
 const now = '2026-10-17T00:00:00.000Z';
 
-beforeEach(() => { binding.current = null; });
+beforeEach(() => { binding.current = null; vault.refs = ['anthropic']; });
 
 describe('withRunAiDefault — fills only what the node left out', () => {
   const def = { provider: 'google', model: 'gemini-x', source: 'workspace' as const };
@@ -74,11 +85,13 @@ describe('run-start contributor — frozen once, never on a fork', () => {
     binding.current = { tenantId: 't', provider: 'google', model: 'gemini-z', credentialRef: 'google:testing', updatedAt: now };
     expect(await runAiDefaultContributor({ tenantId: 't' })).toEqual({ [RUN_AI_DEFAULT_KEY]: { provider: 'google', model: 'gemini-z', source: 'workspace' } });
   });
-  it('a managed (chat-only) binding is skipped for the catalog default', async () => {
+  it('a managed binding is never taken as a BYOK provider: the run goes to the managed tier', async () => {
     // A SELECTABLE provider on a managed ref — so only the managed check can refuse it.
+    // CORRECTED 2026-11-02: this used to fall through to the catalog, which sent a
+    // keyless workspace to Anthropic and failed `byok_required`.
     binding.current = { tenantId: 't', provider: 'google', model: 'm', credentialRef: 'managed:openwop-free', updatedAt: now };
-    const first = listSelectableProviderIds()[0]!;
-    expect(await runAiDefaultContributor({ tenantId: 't' })).toEqual({ [RUN_AI_DEFAULT_KEY]: { provider: first, model: getDefaultModel(first), source: 'catalog' } });
+    const managed = listManagedProviderIds()[0]!;
+    expect(await runAiDefaultContributor({ tenantId: 't' })).toEqual({ [RUN_AI_DEFAULT_KEY]: { provider: managed, model: getDefaultModel(managed), source: 'managed', credentialRef: 'managed:openwop-free' } });
   });
   it('no binding ⇒ the catalog default; a fork contributes nothing', async () => {
     expect(((await runAiDefaultContributor({ tenantId: 't' }))[RUN_AI_DEFAULT_KEY] as { source: string }).source).toBe('catalog');

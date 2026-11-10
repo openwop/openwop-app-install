@@ -14,8 +14,12 @@ const END = Buffer.from('END\n');
 const HEADER_MAX = 4096;
 const CHUNK = 64 * 1024;
 const MiB = 1024 * 1024;
+// A full gate's log measured ~247 MB on the remote VM (2026-11-02), and a longer
+// run outgrew 256 MiB: its log could not be served, and a green gate that long
+// could not have been fetched at all. 1 GiB leaves headroom; still bounded.
+const GATE_LOG_MAX = 1024 * MiB;
 export const REMOTE_GATE_RESULT_FILES = Object.freeze({
-  'result.json': MiB, 'evidence.json': MiB, 'gate.log': 256 * MiB, 'browser.tsv': 8 * MiB,
+  'result.json': MiB, 'evidence.json': MiB, 'gate.log.gz': GATE_LOG_MAX, 'browser.tsv': 8 * MiB,
 });
 const KINDS = Object.freeze({
   source: Object.freeze({ 'request.json': MiB, 'refs.manifest': 8 * MiB, 'source.bundle': 1024 * MiB }),
@@ -23,7 +27,7 @@ const KINDS = Object.freeze({
   control: Object.freeze({ 'request.json': MiB, 'operation.json': 4096 }),
   status: Object.freeze({ 'status.json': 4096 }),
   // A finished job's kept gate log, for diagnosing a red or interrupted gate.
-  log: Object.freeze({ 'gate.log': 256 * MiB }),
+  log: Object.freeze({ 'gate.log.gz': GATE_LOG_MAX }),
 });
 
 function schema(kind) {

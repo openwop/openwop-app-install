@@ -9,12 +9,17 @@
  * reverse, pinned here as RESIDUE (AKM2-R1): a run stamped `oidc:<sub>` before
  * the bind is no longer its creator's afterwards, in a shared workspace, while an
  * admin still reads it. When AKM2-R1 is decided, this leg flips on purpose.
+ *
+ * Red when (sabotage-witnessed): the ledger admits every row; the admin arm of
+ * `runPayloadAccess` is removed; the caller's own principal is not matched; the bound
+ * subject stops replacing `oidc:<sub>` in `middleware/auth.ts`.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createSign, generateKeyPairSync, type KeyObject } from 'node:crypto';
 import express from 'express';
+import { getSetCookies } from './headerCookies.js';
 import { createApp } from '../src/index.js';
 import { _resetOidcVerifier } from '../src/middleware/auth.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
@@ -59,7 +64,7 @@ beforeAll(async () => {
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   const def = getToggleDefault('users');
   if (def) await saveConfig({ ...def, status: 'on' }, 'test');
-});
+}, 120_000);
 
 afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
@@ -77,9 +82,7 @@ function client(token: string) {
       headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
-    const h = res.headers as Headers & { getSetCookie?: () => string[] };
-    const single = res.headers.get('set-cookie');
-    for (const sc of typeof h.getSetCookie === 'function' ? h.getSetCookie() : single ? [single] : []) {
+    for (const sc of getSetCookies(res.headers)) {
       if (/^__session=;/.test(sc)) { cookie = ''; continue; }
       const m = /(__session=[^;]+)/.exec(sc);
       if (m) cookie = m[1]!;

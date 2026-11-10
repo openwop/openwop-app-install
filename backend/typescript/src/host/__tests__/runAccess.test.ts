@@ -38,11 +38,12 @@ function makeRun(): RunRecord {
 
 /** Minimal Request stand-in — the gates only read query/principal/tenantId. */
 function req(opts: { tenantId?: string; wildcard?: boolean; streamToken?: string }): Request {
-  return {
+  const stub: Partial<Request> = {
     query: opts.streamToken ? { streamToken: opts.streamToken } : {},
     principal: { principalId: 'p', tenants: opts.wildcard ? ['*'] : [opts.tenantId ?? OWNER], token: '' },
     tenantId: opts.tenantId ?? OWNER,
-  } as unknown as Request;
+  };
+  return stub as Request;
 }
 
 async function expectNotFound(p: Promise<unknown>): Promise<void> {

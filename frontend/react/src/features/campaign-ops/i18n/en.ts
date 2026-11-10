@@ -4,6 +4,22 @@
  * engine vocabulary out of every string here and in the other three locales.
  */
 export const messages = {
+  registrationPending: "Adding the client. You can keep using Operations while this finishes.",
+  addClient: "Add a client",
+  registrationHelp: "Choose an existing organization. The client starts in preview with agency approval; nothing is sent or published.",
+  registrationOrg: "Organization",
+  registrationChooseOrg: "Choose an organization",
+  registrationName: "Client name",
+  registrationOrgsFailed: "Organizations could not be loaded. Try again.",
+  registrationNoOrgs: "No organizations available",
+  registrationNoOrgsHelp: "Create a client organization in Access first, then return here. Organizations already registered as clients are not shown.",
+  registrationUncertain: "The registration outcome could not be confirmed. Check the client list before trying again.",
+  registrationCheck: "Check client list",
+  registrationDenied: "Only a workspace administrator can add clients. Reload Operations to refresh your access.",
+  registrationNotFound: "No client is registered for this organization. You can try adding it again.",
+  registrationCheckFailed: "The client list could not be checked. Try checking again before adding this client.",
+  registrationRefreshFailed: "{{name}} was added, but the client list could not be refreshed. Try again to load it.",
+
   eyebrow: 'Campaign Studio',
   title: 'Operations',
   lede: 'Ask for a change to a client page, review exactly what will change, and approve it.',
@@ -212,6 +228,7 @@ export const messages = {
   reportsSource_email: "Email engagement",
   reportsMetric_spend: "Spend",
   reportsMetric_revenue: "Revenue",
+  reportsMetric_reportedRevenueRecordCount: "Records reporting revenue",
   reportsMetric_impressions: "Impressions",
   reportsMetric_clicks: "Clicks",
   reportsMetric_conversions: "Conversions",

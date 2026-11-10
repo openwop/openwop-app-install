@@ -76,10 +76,6 @@ function client() {
 }
 
 
-const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('IHDR-fixture-bytes-0001')]);
-const pngNo = (i: number): Buffer => Buffer.concat([PNG, Buffer.from(`-${i}-${Math.random()}`)]);
-const RIGHTS = { license: 'work-for-hire', modelReleases: true, credit: 'Dana Studio', attest: true };
-
 let n = 0;
 async function setup() {
   const tenantId = `ws:t-d2m-${n++}`;
@@ -92,17 +88,16 @@ async function setup() {
   const cBrief = await createCampaignBrief(tenantId, orgId, 'seed', { name: 'Spring roast launch', objective: 'Sell 500 bags' });
   const campaign = await finalizeFromBrief(tenantId, cBrief, 'seed');
   const C = `/host/openwop-app/campaign-ops/clients/${orgId}/collaborators`;
-  const A = `/host/openwop-app/campaign-ops/clients/${orgId}/intakes`;
   const invite = (email: string) => admin.post<{ collaborator: ExternalCollaborator; invite: { token: string } }>(C, { kind: 'vendor', email, displayName: 'Dana Studio' });
   const grantFor = async (collaboratorId: string): Promise<CollaboratorGrant> => {
     const r = await admin.post<{ grant: CollaboratorGrant }>(`${C}/${collaboratorId}/grants`, { resource: { kind: 'campaign', id: campaign.id }, actions: ['view', 'upload'] });
     expect(r.status, r.raw).toBe(201);
     return r.body.grant;
   };
-  return { tenantId, orgId, admin, C, A, invite, grantFor };
+  return { tenantId, orgId, admin, C, invite, grantFor };
 }
 
-/** A vendor who signed in and accepted, with a grant to upload. */
+/** A vendor who signed in and accepted, with a grant. */
 async function acceptedVendor(s: Awaited<ReturnType<typeof setup>>) {
   const vendor = client();
   const v = await vendor.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: `photographer-d2m-${n}@studio.test` });
@@ -112,16 +107,11 @@ async function acceptedVendor(s: Awaited<ReturnType<typeof setup>>) {
   expect(inv.status, inv.raw).toBe(201);
   expect((await vendor.post('/host/openwop-app/collab/invites/accept', { token: inv.body.invite.token })).status).toBe(200);
   const grant = await s.grantFor(inv.body.collaborator.collaboratorId);
-  const upload = (name: string, note?: string) => vendor.post<{ intake: { intakeId: string; files: Array<{ fileId: string }> } }>(
-    `/host/openwop-app/collab/grants/${grant.grantId}/intakes`,
-    { files: [{ name, contentType: 'image/png', contentBase64: pngNo(Math.random()).toString('base64') }], rights: RIGHTS, ...(note ? { note } : {}) },
-  );
-  return { vendor, userId, email, collaborator: inv.body.collaborator, grant, upload };
+  return { userId, collaborator: inv.body.collaborator, grant };
 }
 
-
-type Cas = (this: unknown, expected: unknown, next: unknown) => Promise<boolean>;
-const nameOf = (c: unknown): string => (c as { name: string }).name;
+/** The collection's private `name`, read without a cast: `extcollab:c` is the collaborator store. */
+const isCollaboratorStore = (c: object): boolean => Reflect.get(c, 'name') === 'extcollab:c';
 
 describe('ADR 0958 D2 MEDIUMs', () => {
   it('archiving a client suspends its signed-in collaborators; un-archiving restores nothing without a decision', async () => {
@@ -164,14 +154,15 @@ describe('ADR 0958 D2 MEDIUMs', () => {
     const s = await setup();
     const v = await acceptedVendor(s);
     const P = `/host/openwop-app/campaign-ops/clients/${s.orgId}`;
-    const original = DurableCollection.prototype.compareAndSwap as unknown as Cas;
-    const spy = vi.spyOn(DurableCollection.prototype, 'compareAndSwap').mockImplementation(async function (this: unknown, expected: unknown, next: unknown) {
-      if (nameOf(this) === 'extcollab:c' && (next as ExternalCollaborator | null)?.status === 'suspended') throw new Error('injected write error');
+    const original = DurableCollection.prototype.compareAndSwap;
+    const spy = vi.spyOn(DurableCollection.prototype, 'compareAndSwap').mockImplementation(async function (this: DurableCollection<ExternalCollaborator>, expected: ExternalCollaborator | null, next: ExternalCollaborator) {
+      if (isCollaboratorStore(this) && next.status === 'suspended') throw new Error('injected write error');
       return original.call(this, expected, next);
-    } as never);
+    });
     try {
-      const r = await s.admin.patch(P, { status: 'archived' });
-      expect(r.status).toBeGreaterThanOrEqual(500);
+      const r = await s.admin.patch<{ error: string }>(P, { status: 'archived' });
+      expect(r.status).toBe(500);
+      expect(r.body.error).toBe('internal_error');
       expect((await getCollaborator(s.tenantId, s.orgId, v.collaborator.collaboratorId))?.status).toBe('active');
     } finally { spy.mockRestore(); }
     expect((await s.admin.patch(P, { status: 'archived' })).status).toBe(200);
@@ -187,19 +178,18 @@ describe('ADR 0958 D2 MEDIUMs', () => {
     const g = await s.grantFor(cid);
     const u = client();
     const userId = (await u.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email })).body.user.userId;
-    const original = DurableCollection.prototype.compareAndSwap as unknown as Cas;
+    const original = DurableCollection.prototype.compareAndSwap;
     let raced = false;
-    const spy = vi.spyOn(DurableCollection.prototype, 'compareAndSwap').mockImplementation(async function (this: unknown, expected: unknown, next: unknown) {
-      const e = expected as ExternalCollaborator | null; const x = next as ExternalCollaborator;
-      if (!raced && nameOf(this) === 'extcollab:c' && e?.status === 'invited' && x.boundUserId === userId) {
+    const spy = vi.spyOn(DurableCollection.prototype, 'compareAndSwap').mockImplementation(async function (this: DurableCollection<ExternalCollaborator>, e: ExternalCollaborator | null, x: ExternalCollaborator) {
+      if (!raced && isCollaboratorStore(this) && e?.status === 'invited' && x.boundUserId === userId) {
         raced = true;
         // Between our read and our CAS: the same user's other accept wins, then an archive suspends it.
         expect(await original.call(this, e, x)).toBe(true);
         expect(await original.call(this, x, { ...x, status: 'suspended' })).toBe(true);
         return false;
       }
-      return original.call(this, expected, next);
-    } as never);
+      return original.call(this, e, x);
+    });
     try {
       await expect(bindCollaborator(s.tenantId, s.orgId, cid, userId)).rejects.toMatchObject({ httpStatus: 404 });
     } finally { spy.mockRestore(); }
@@ -218,18 +208,17 @@ describe('ADR 0958 D2 MEDIUMs', () => {
     const cid = inv.body.collaborator.collaboratorId;
     const u = client();
     const userId = (await u.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email })).body.user.userId;
-    const original = DurableCollection.prototype.compareAndSwap as unknown as Cas;
+    const original = DurableCollection.prototype.compareAndSwap;
     let losses = 0;
-    const spy = vi.spyOn(DurableCollection.prototype, 'compareAndSwap').mockImplementation(async function (this: unknown, expected: unknown, next: unknown) {
-      const e = expected as ExternalCollaborator | null; const x = next as ExternalCollaborator;
-      if (nameOf(this) === 'extcollab:c' && e?.status === 'invited' && x.boundUserId === userId) {
+    const spy = vi.spyOn(DurableCollection.prototype, 'compareAndSwap').mockImplementation(async function (this: DurableCollection<ExternalCollaborator>, e: ExternalCollaborator | null, x: ExternalCollaborator) {
+      if (isCollaboratorStore(this) && e?.status === 'invited' && x.boundUserId === userId) {
         losses += 1;
         // The third CAS loses to the same user's other accept.
         if (losses === 3) expect(await original.call(this, e, x)).toBe(true);
         return false;
       }
-      return original.call(this, expected, next);
-    } as never);
+      return original.call(this, e, x);
+    });
     try {
       await expect(bindCollaborator(s.tenantId, s.orgId, cid, userId)).rejects.toMatchObject({ httpStatus: 409 });
     } finally { spy.mockRestore(); }

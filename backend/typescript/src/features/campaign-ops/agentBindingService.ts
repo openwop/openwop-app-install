@@ -25,7 +25,8 @@ import { getAgentRegistry } from '../../executor/agentRegistry.js';
 import { effectiveToolAllowlist, resolveAgentToolAllowlistOverride } from '../../host/agentToolAllowlistService.js';
 import { listSelectableProviderIds } from '../../providers/catalog.js';
 import { isManagedRef } from '../../aiProviders/credentialRefLadder.js';
-import { listSecretRefs, resolveSecret } from '../../byok/secretResolver.js';
+import { listSecretRefs } from '../../byok/secretResolver.js';
+import { resolveUserNamedSecret } from '../../byok/userNamedSecret.js';
 import { registerCredentialRefConsumer } from '../../host/credentialRefRegistry.js';
 import { getClient } from './clientService.js';
 import type { ClientAgentBinding } from './types.js';
@@ -139,7 +140,7 @@ export async function upsertAgentBinding(input: {
       // resolvable secret. Managed sentinels name no stored row.
       if (!isManagedRef(m.credentialRef)) {
         const scope = { tenantId };
-        if (!(await listSecretRefs(scope)).includes(m.credentialRef) || !(await resolveSecret(m.credentialRef, scope))) {
+        if (!(await listSecretRefs(scope)).includes(m.credentialRef) || !(await resolveUserNamedSecret(m.credentialRef, scope))) {
           throw invalid('model.credentialRef is not a usable stored key of this workspace.', 'unknown_credential_ref', 'model.credentialRef');
         }
       }

@@ -6,8 +6,8 @@
  * nobody registers). It cannot catch the reverse: a tool the agent is given that
  * its prompt never explains, or a prompt sentence that stopped being true. This
  * pins both for this agent:
- *   - the allowlist is exactly the tools this feature registers, and the prompt
- *     names every one of them;
+ *   - the allowlist is exactly the tools this feature registers (read from the real
+ *     registration, so a fifth tool reds here), and the prompt names every one of them;
  *   - the prompt does not claim a gate always waits for a person (P2 made the
  *     kernel gate the autonomy gate, so whether it waits is the policy's call);
  *   - the place the prompt sends people to change a policy is the panel's real
@@ -17,7 +17,9 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
-import { CAMPAIGN_ORCH_GET_TOOL_ID, CAMPAIGN_ORCH_AUTONOMY_TOOL_ID, CAMPAIGN_ORCH_RUN_TOOL_ID, CAMPAIGN_ORCH_STATUS_TOOL_ID } from '../agentTools.js';
+import { builtinAgentToolIds } from '../../../host/agentToolProvider.js';
+import { openStorage } from '../../../storage/index.js';
+import { CAMPAIGN_ORCH_GET_TOOL_ID, CAMPAIGN_ORCH_AUTONOMY_TOOL_ID, CAMPAIGN_ORCH_RUN_TOOL_ID, CAMPAIGN_ORCH_STATUS_TOOL_ID, registerCampaignOrchestrationAgentTools } from '../agentTools.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(here, '../../../../../..');
@@ -27,7 +29,12 @@ const manifest = JSON.parse(readFileSync(join(PACK, 'pack.json'), 'utf8')) as { 
 const REGISTERED = [CAMPAIGN_ORCH_GET_TOOL_ID, CAMPAIGN_ORCH_STATUS_TOOL_ID, CAMPAIGN_ORCH_AUTONOMY_TOOL_ID, CAMPAIGN_ORCH_RUN_TOOL_ID];
 
 describe('campaign-strategist (orchestration) prompt parity — ADR 0942 P6', () => {
-  it('the allowlist is exactly the registered tools, and the prompt explains each one', () => {
+  it('the allowlist is exactly the registered tools, and the prompt explains each one', async () => {
+    registerCampaignOrchestrationAgentTools({
+      storage: await openStorage('memory://'),
+      hostSuite: { workflowCatalog: { getWorkflow: async () => null }, providerPolicyResolver: { resolveForRun: async () => [] } },
+    });
+    expect(builtinAgentToolIds().filter((id) => id.startsWith('openwop:campaign-orchestration.')).sort()).toEqual([...REGISTERED].sort());
     expect([...manifest.agents[0]!.toolAllowlist].sort()).toEqual([...REGISTERED].sort());
     for (const id of REGISTERED) expect(prompt, `prompt must explain ${id}`).toContain(`\`${id}\``);
     expect(prompt).toMatch(/You have four tools/);

@@ -21,6 +21,13 @@
  *   - the binding is visible to the ADR 0499 delete guard, so deleting the key the
  *     chat is using is refused rather than silently orphaning it.
  *
+ * Red when (sabotage-witnessed, w78): GET reports `anonymous: false`; `valid` stops
+ * consulting the secret; the own-ref check, or both own-ref guards, are dropped
+ * (IDOR); the provider list or the empty-model check is dropped; the MiniMax
+ * free-tier refusal is dropped; the managed wizard id is not resolved; the ADR 0499
+ * consumer stops seeing the binding; DELETE stops clearing; `refsForProvider` loses
+ * its colon boundary.
+ *
  * These use an ANON session deliberately: `setSecret` for a non-`user:`/`ws:` tenant
  * takes the local-AES path, which the harness supports, so unlike
  * `byok-ai-default-route.test.ts` the happy path IS reachable over HTTP here.
@@ -57,7 +64,10 @@ interface Body {
   valid?: boolean;
   anonymous?: boolean;
   credentialRefs?: string[];
+  stored?: boolean;
   error?: string;
+  message?: string;
+  details?: { field?: string; reason?: string };
   references?: string[];
 }
 interface Res { status: number; body: Body }
@@ -95,6 +105,7 @@ describe('/byok/active-config (ADR 0517)', () => {
     const r = await c.get(AC);
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     expect(r.body.config).toBeNull();
+    expect(r.body.stored).toBe(false);
     expect(r.body.valid).toBe(false);
   });
 
@@ -116,26 +127,60 @@ describe('/byok/active-config (ADR 0517)', () => {
     const put = await c.put(AC, { provider: 'google', model: 'gemini-3.8-flash', credentialRef: 'byok:google' });
     expect(put.status, JSON.stringify(put.body)).toBe(200);
 
-    // A DIFFERENT client object — i.e. a different "browser" — but the same
-    // session cookie is what a real returning user presents. The binding is on
-    // the server, so nothing about the client's local storage matters.
+    // A fresh request carrying only the session cookie, which is what a returning
+    // user presents: nothing client-local is read, the binding is on the server.
     const again = await c.get(AC);
     expect(again.body.config).toMatchObject({ provider: 'google', model: 'gemini-3.8-flash', credentialRef: 'byok:google' });
     expect(again.body.valid).toBe(true);
   });
 
+  it('round-trips a labeled Keys-page ref only inside its owning tenant', async () => {
+    const owner = client();
+    const other = client();
+    const ref = 'google:qa-label';
+    expect((await owner.post(SECRETS, { credentialRef: ref, value: 'local-test-only' })).status).toBe(201);
+    const listed = await owner.get(SECRETS);
+    const adopted = refsForProvider(listed.body.credentialRefs ?? [], 'google');
+    expect(adopted).toContain(ref);
+    const binding = { provider: 'google', model: 'gemini-3.8-flash', credentialRef: ref };
+    const denied = await other.put(AC, binding);
+    expect([denied.status, denied.body.message]).toEqual([400, 'credentialRef is not a stored BYOK secret for this workspace.']);
+    expect((await other.get(AC)).body.stored).toBe(false);
+    expect((await owner.put(AC, binding)).status).toBe(200);
+    const readback = await owner.get(AC);
+    expect(readback.body.config).toMatchObject(binding);
+    expect(readback.body.valid).toBe(true);
+  });
+
   it('refuses a binding whose ref is not one of the caller\'s own secrets (IDOR)', async () => {
-    const c = client();
-    const r = await c.put(AC, { provider: 'google', model: 'gemini-3.8-flash', credentialRef: 'byok:google:someone-elses' });
-    expect(r.status).toBe(400);
-    expect(String(r.body.error)).toMatch(/validation/i);
+    // The ref REALLY exists, in another session's tenant: refusing a ref nobody holds
+    // would prove "400 on a missing ref", not isolation. Two guards hold this
+    // (`setChatByokConfig`: the caller's own ref list, then `resolveSecret` in the
+    // caller's scope); the message pins the FIRST, a break of both turns this 200.
+    const alice = client();
+    expect((await alice.post(SECRETS, { credentialRef: 'byok:google:shared', value: 'AIza-alice-shared' })).status).toBe(201);
+    const bob = client();
+    const r = await bob.put(AC, { provider: 'google', model: 'gemini-3.8-flash', credentialRef: 'byok:google:shared' });
+    expect(r.status, JSON.stringify(r.body)).toBe(400);
+    expect(r.body.error).toBe('validation_error');
+    expect(r.body.message).toBe('credentialRef is not a stored BYOK secret for this workspace.');
+    expect((await bob.get(AC)).body.stored).toBe(false);
+    // Owner control: the same ref binds for the session that holds it.
+    expect((await alice.put(AC, { provider: 'google', model: 'gemini-3.8-flash', credentialRef: 'byok:google:shared' })).status).toBe(200);
   });
 
   it('validates provider and model rather than storing junk the chat would choke on', async () => {
     const c = client();
     await c.post(SECRETS, { credentialRef: 'byok:google', value: 'AIza-validate' });
-    expect((await c.put(AC, { provider: 'notaprovider', model: 'm', credentialRef: 'byok:google' })).status).toBe(400);
-    expect((await c.put(AC, { provider: 'google', model: '', credentialRef: 'byok:google' })).status).toBe(400);
+    // Each refusal by its own message: `notaprovider` would ALSO be refused by the
+    // ADR 0990 D6 selectable-provider check, so a status alone cannot tell them apart.
+    const badProvider = await c.put(AC, { provider: 'notaprovider', model: 'm', credentialRef: 'byok:google' });
+    expect([badProvider.status, badProvider.body.error, badProvider.body.details?.field]).toEqual([400, 'validation_error', 'provider']);
+    expect(String(badProvider.body.message)).toMatch(/^provider MUST be one of: /);
+    const noModel = await c.put(AC, { provider: 'google', model: '', credentialRef: 'byok:google' });
+    expect([noModel.status, noModel.body.error, noModel.body.details?.field]).toEqual([400, 'validation_error', 'model']);
+    expect(String(noModel.body.message)).toMatch(/^model MUST be a non-empty string/);
+    expect((await c.get(AC)).body.stored).toBe(false);
   });
 
   // ADR 0990 D6: MiniMax backs the free tier and is never a user's own key, even
@@ -194,8 +239,11 @@ describe('/byok/active-config (ADR 0517)', () => {
     const c = client();
     await c.post(SECRETS, { credentialRef: 'byok:google', value: 'AIza-clear' });
     await c.put(AC, { provider: 'google', model: 'gemini-3.8-flash', credentialRef: 'byok:google' });
+    expect((await c.get(AC)).body.stored).toBe(true);
     expect((await c.del(AC)).status).toBe(204);
-    expect((await c.get(AC)).body.config).toBeNull();
+    const after = await c.get(AC);
+    expect(after.body.config).toBeNull();
+    expect(after.body.stored).toBe(false);
   });
 
   it('one session\'s binding is invisible to another (tenant isolation)', async () => {
@@ -203,12 +251,21 @@ describe('/byok/active-config (ADR 0517)', () => {
     await alice.post(SECRETS, { credentialRef: 'byok:google', value: 'AIza-alice' });
     await alice.put(AC, { provider: 'google', model: 'gemini-3.8-flash', credentialRef: 'byok:google' });
 
+    // Owner control: alice reads her own binding back.
+    expect((await alice.get(AC)).body).toMatchObject({ stored: true, config: { credentialRef: 'byok:google' } });
     const bob = client();
-    expect((await bob.get(AC)).body.config).toBeNull();
+    const theirs = await bob.get(AC);
+    expect(theirs.body.config).toBeNull();
+    expect(theirs.body.stored).toBe(false);
   });
 });
 
 describe('refsForProvider (ADR 0517 adoption seam)', () => {
+  it('includes Keys page refs and retains exact provider boundaries', () => {
+    expect(refsForProvider(['google:team', 'google', 'byok:google', 'google-vertex', 'google-vertex:team', 'googlex:team'], 'google')).toEqual(['byok:google', 'google', 'google:team']);
+    expect(refsForProvider(['anthropic:team'], 'anthropic')).toEqual(['anthropic:team']);
+  });
+
   it('matches the deterministic ref AND the historical timestamped ones', () => {
     // The seven rows the reported workspace accumulated are exactly this shape;
     // adoption has to see them or the migration strands every existing user.

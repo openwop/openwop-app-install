@@ -28,6 +28,16 @@ export interface UseChatSessionOpts {
    *  the bound id (e.g. `reset()` mints a new chat in-place), so the tab container
    *  can re-key the tab to the new conversation id and not strand it. */
   onSessionIdChange?: (sessionId: string) => void;
+  /** ADR 1040 D1 — an EMBED that persists (`EmbeddedConversation` with
+   *  `persist`/`conversationId`). Persisted like any chat, but it is never the
+   *  singleton main chat: it neither reads nor writes the shared current-session
+   *  slot, is never reseeded from it when auth settles, and (because it is not
+   *  remounted by its own re-key the way a tab is) never eagerly creates an
+   *  empty row on reset or on a `not_found` load — the first send creates it. */
+  detached?: boolean;
+  /** ADR 1040 D2 — subjectRefs stamped on the conversation when this hook
+   *  creates its backend row (`agent:<id>` for an agent-scoped embed). */
+  participants?: readonly string[];
 }
 
 export function useChatSessionCore(opts: UseChatSessionOpts) {
@@ -44,10 +54,12 @@ export function useChatSessionCore(opts: UseChatSessionOpts) {
     ? opts.sessionId
     : null;
   const backendKeyed = backendKeyedSessionId !== null;
-  const useCurrentCache = persist && !backendKeyed;
+  const detached = persist && opts.detached === true;
+  const useCurrentCache = persist && !backendKeyed && !detached;
   const onSessionIdChange = opts.onSessionIdChange;
+  const participants = opts.participants;
   const [session, setSession] = useState<ChatSession>(() =>
-    backendKeyedSessionId ? freshSession(backendKeyedSessionId) : persist ? loadSession() : freshSession());
+    backendKeyedSessionId ? freshSession(backendKeyedSessionId) : useCurrentCache ? loadSession() : freshSession());
   const [isSending, setIsSending] = useState(false);
   // True until a backend-keyed tab's one-shot mount-load resolves (ADR 0140 P5/P6 — so
   // the view shows a loading state, not the new-chat welcome, for a restored thread).
@@ -169,12 +181,12 @@ export function useChatSessionCore(opts: UseChatSessionOpts) {
     // one comparison covers the boot window — no separate `status` dependency.
     if (subjectKey === 'pending') return;
     reseedGuard.current = subjectKey;
-    if (!persist || backendKeyed) return;
+    if (!useCurrentCache) return; // ephemeral, backend-keyed and detached (ADR 1040) never read the slot
     const current = sessionRef.current;
     if (current.messages.length > 0) return; // a real thread — never discard it
     if (isSendingRef.current) return;         // a turn is in flight
     setSession(loadSession());
-  }, [subjectKey, persist, backendKeyed]);
+  }, [subjectKey, useCurrentCache]);
 
   /** Close + remove a workflow_run's SSE subscription. Safe to call
    *  even if the entry is missing (no-op). Stable (ref-only) so dependent
@@ -200,7 +212,7 @@ export function useChatSessionCore(opts: UseChatSessionOpts) {
 
   return {
     // resolved options
-    persist, backendKeyedSessionId, backendKeyed, useCurrentCache, onSessionIdChange,
+    persist, backendKeyedSessionId, backendKeyed, useCurrentCache, onSessionIdChange, detached, participants,
     // state
     session, setSession, isSending, setIsSending, isHydrating, setIsHydrating,
     thinkingAgentIdState, setThinkingAgentIdState, error, setError,

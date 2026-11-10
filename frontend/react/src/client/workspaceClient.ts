@@ -49,13 +49,15 @@ async function asJson<T>(res: Response, ctx: string): Promise<T> {
 }
 
 /** The workspaces the caller can act in, plus the active + personal tenants. */
-export async function listMyWorkspaces(): Promise<MyWorkspaces> {
+export async function listMyWorkspaces(options: { rememberTenant?: boolean } = {}): Promise<MyWorkspaces> {
   const res = await fetch(`${base}/me/workspaces`, fetchOpts({ headers: headers() }));
   const out = await asJson<MyWorkspaces>(res, 'listMyWorkspaces');
   // The host's own statement of the active tenant: remember it, so `ensureWireTenant`
   // callers (the run-id binder, the chat deck's per-workspace working set — ADR 0978
   // D4) are warm whenever the shell's workspace switcher has loaded.
-  rememberWireTenant(out.active);
+  // Operation-local captures may outlive an auth change. They must not warm
+  // global ID binding before their caller can reject a stale response.
+  if (options.rememberTenant !== false) rememberWireTenant(out.active);
   return out;
 }
 

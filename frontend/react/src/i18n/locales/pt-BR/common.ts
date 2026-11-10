@@ -59,7 +59,12 @@ export const messages = {
     requiredPlaceholder: 'Obrigatório',
     optionalPlaceholder: 'Opcional',
     missingHint: 'Preencha as {{n}} entradas obrigatórias para executar.',
-    credentialDefault: 'Chave padrão do espaço de trabalho',
+    aiKey: "Chave de IA para esta execução",
+    aiKeyHelp: "Opcional. Esta chave se aplica apenas às etapas do seu provedor. Outros provedores precisam de suas próprias chaves declaradas. Sem substituição, nenhuma chave é adicionada e as credenciais existentes ou gerenciadas são mantidas.",
+    noKeyOverride: "Sem substituição de chave",
+    keyLoadFailed: "Não foi possível carregar as chaves salvas. Tente novamente antes de escolher uma.",
+    noSavedAiKeys: "Nenhuma chave de IA salva está disponível. Adicione uma em Configurações → Chaves ou continue sem substituição.",
+    credentialDefault: "Sem substituição de chave",
     credentialHelp: 'Qual chave de API salva as etapas de IA desta execução usam. As chaves ficam em Configurações → Chaves.',
   },
   // KTUX-10 — ONE localized transport-failure vocabulary. `classifyHttpError`

@@ -20,12 +20,16 @@ import { Skeleton } from '../../ui/Skeleton.js';
 import { TextField, SelectField } from '../../ui/Field.js';
 import { ConfirmDialog } from '../../ui/ConfirmDialog.js';
 import { toast } from '../../ui/toast.js';
+import { confirm } from '../../ui/confirm.js';
+import { formatDate } from '../../i18n/format.js';
+import { useOrgScopes } from '../../orgs/useOrgScopes.js';
+import { OrgAccessNotice } from '../../orgs/OrgAccessNotice.js';
 import { BuildingIcon } from '../../ui/icons/index.js';
 import {
   listOrgs, type Org, listCompanies, type Company,
   listDealers, createDealer, updateDealer, deleteDealer, type Dealer,
   listOutlets, createOutlet, deleteOutlet, type Outlet,
-  mintPortalToken, listRegistrations, type DealRegistration,
+  mintPortalToken, revokePortalToken, listRegistrations, type DealRegistration,
 } from './dealersClient.js';
 
 const dealerTone = (s: Dealer['status']): string => (s === 'active' ? 'active' : 'cancelled');
@@ -213,7 +217,11 @@ function DealerDetail({ orgId, dealer, busy, setBusy, onDealerChange }: { orgId:
   const { t } = useTranslation('dealers');
   const [outlets, setOutlets] = useState<Outlet[] | null>(null);
   const [regs, setRegs] = useState<DealRegistration[] | null>(null);
-  const [portalUrl, setPortalUrl] = useState<string | null>(null);
+  const [portal, setPortal] = useState<{ url: string; expiresAt?: string } | null>(null);
+  // ADR 1034 D9 — issuing and revoking a partner link are manager acts (`host:dealers:manage`);
+  // an editor used to see the button and could mint a credential an outsider uses.
+  const access = useOrgScopes(orgId);
+  const canManage = access.has('host:dealers:manage');
   const [outletsFailed, setOutletsFailed] = useState(false);
   const [regsFailed, setRegsFailed] = useState(false);
   const [oName, setOName] = useState('');
@@ -268,6 +276,12 @@ function DealerDetail({ orgId, dealer, busy, setBusy, onDealerChange }: { orgId:
     catch (e) { toast.error(e instanceof Error ? e.message : t('removeFailed')); } finally { setBusy(false); }
   };
   const setStatus = async (status: 'active' | 'suspended'): Promise<void> => {
+    // ADR 1034 D9 — suspending now kills the partner's link (uniform 404) until reactivation;
+    // say so before doing it.
+    if (status === 'suspended') {
+      const ok = await confirm({ title: t('suspendConfirmTitle', { name: dealer.name }), body: t('suspendConfirmBody'), danger: true, confirmLabel: t('suspendDealerButton') });
+      if (!ok) return;
+    }
     setBusy(true);
     try {
       await updateDealer(orgId, dealer.dealerId, { status });
@@ -277,8 +291,15 @@ function DealerDetail({ orgId, dealer, busy, setBusy, onDealerChange }: { orgId:
   };
   const issuePortal = async (): Promise<void> => {
     setBusy(true);
-    try { const { url } = await mintPortalToken(orgId, dealer.dealerId); setPortalUrl(url); toast.success(t('portalIssuedToast')); }
+    try { const { url, expiresAt } = await mintPortalToken(orgId, dealer.dealerId); setPortal({ url, ...(expiresAt ? { expiresAt } : {}) }); toast.success(t('portalIssuedToast')); }
     catch (e) { toast.error(e instanceof Error ? e.message : t('portalIssueFailed')); } finally { setBusy(false); }
+  };
+  const revokePortal = async (): Promise<void> => {
+    const ok = await confirm({ title: t('revokePortalTitle'), body: t('revokePortalBody'), danger: true, confirmLabel: t('revokePortalButton') });
+    if (!ok) return;
+    setBusy(true);
+    try { await revokePortalToken(orgId, dealer.dealerId); setPortal(null); toast.success(t('portalRevokedToast')); }
+    catch (e) { toast.error(e instanceof Error ? e.message : t('portalRevokeFailed')); } finally { setBusy(false); }
   };
 
   return (
@@ -296,12 +317,19 @@ function DealerDetail({ orgId, dealer, busy, setBusy, onDealerChange }: { orgId:
               control rendered. A dealer suspended by a mistaken CRM company delete was
               stuck that way, escapable only by Delete + recreate — which cascades its
               outlets, its registrations and its live partner link. */}
-          <Button variant="primary" disabled={busy} onClick={() => void setStatus(dealer.status === 'active' ? 'suspended' : 'active')}>
+          <Button variant="secondary" disabled={busy} onClick={() => void setStatus(dealer.status === 'active' ? 'suspended' : 'active')}>
             {dealer.status === 'active' ? t('suspendDealerButton') : t('reactivateDealerButton')}
           </Button>
-          <Button variant="primary" disabled={busy} onClick={() => void issuePortal()}>{t('issuePartnerLinkButton')}</Button>
+          {canManage ? <Button variant="secondary" disabled={busy} onClick={() => void issuePortal()}>{t('issuePartnerLinkButton')}</Button> : null}
+          {canManage ? <Button variant="danger" disabled={busy} onClick={() => void revokePortal()}>{t('revokePortalButton')}</Button> : null}
         </div>
-        {portalUrl ? <Notice variant="info">{t('portalLinkNotice')} <code className="u-break-all">{portalUrl}</code></Notice> : null}
+        <OrgAccessNotice access={access} />
+        {portal ? (
+          <Notice variant="info">
+            {t('portalLinkNotice')} <code className="u-break-all">{portal.url}</code>
+            {portal.expiresAt ? <> {t('portalExpiresNotice', { date: formatDate(portal.expiresAt) })}</> : null}
+          </Notice>
+        ) : null}
       </Panel>
 
       {/* Outlets — a LIST (the map view composes ADR 0282 when the maps feature is on) */}

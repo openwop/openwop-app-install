@@ -34,6 +34,13 @@ import { territoryMutated } from './emit.js';
 
 const log = createLogger('territories.modelTransitionApproval');
 
+/** The review card's proposal text — one spelling for the route and the workflow surface. */
+export function transitionProposalText(modelName: string, transition: 'activate' | 'archive'): string {
+  return transition === 'activate'
+    ? `Activate territory model “${modelName}” (org-wide record visibility change)`
+    : `Archive territory model “${modelName}”`;
+}
+
 async function decideTerritoryTransition(
   tenantId: string,
   approvalId: string,

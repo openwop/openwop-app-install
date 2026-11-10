@@ -47,6 +47,19 @@ function tenantOf(req: Request): string {
   return (req as { tenantId?: string }).tenantId ?? 'default';
 }
 
+/** ADR 0292/0321 correction: intent is an assertion, never tenant authority.
+ * A direct stream may authenticate a bearer in Personal instead of the active
+ * same-origin workspace. Refuse before locks, headers, or any seed side effect. */
+function requireExpectedSeedTenant(req: Request): void {
+  const expected = (req.body as { expectedTenantId?: unknown } | undefined)?.expectedTenantId;
+  if (typeof expected !== 'string' || expected.length === 0) {
+    throw new OpenwopError('invalid_request', 'Confirm the active workspace before loading or clearing example data.', 400, { reason: 'example_data_workspace_required' });
+  }
+  if (expected !== tenantOf(req)) {
+    throw new OpenwopError('conflict', 'The seed connection does not match the selected workspace. No example data was changed. Reload the workspace and try again.', 409, { reason: 'example_data_workspace_mismatch' });
+  }
+}
+
 function actorOf(req: Request): string {
   return (req as { userId?: string; principal?: { principalId?: string } }).userId
     ?? (req as { principal?: { principalId?: string } }).principal?.principalId
@@ -126,6 +139,7 @@ export function registerAgentOpsRoutes(app: Express, deps: Deps): void {
   app.post('/host/openwop-app/example-data/seed', async (req, res, next) => {
     try {
       await requireTenantWrite(req); // ADR 0775 D1
+      requireExpectedSeedTenant(req);
       // `heal: true` = the EXPLICIT "Load demo data" action — restores missing
       // boards/schedules/chart for existing personas. The silent auto-seed on
       // page entry omits it, so it can never resurrect deliberate deletions.
@@ -189,6 +203,7 @@ export function registerAgentOpsRoutes(app: Express, deps: Deps): void {
         res.status(200).json(await runExampleDataSeed(tenantId, deps.storage, { steps, dryRun: true }));
         return;
       }
+      requireExpectedSeedTenant(req);
       await withSeedLock(deps.storage, tenantId, async () => {
         // Stream when asked (default UI path) so the full reseed never trips the
         // 30s / ~60s timeouts; otherwise return the aggregate JSON in one shot
@@ -220,6 +235,7 @@ export function registerAgentOpsRoutes(app: Express, deps: Deps): void {
       // that an impatient re-click would otherwise launch a concurrent pass and
       // race the seeders' read-then-create guards, duplicating rows (SEED
       // concurrency fix). A concurrent provision now gets a clean 409.
+      requireExpectedSeedTenant(req);
       await withSeedLock(deps.storage, tenantId, async () => {
         const provision = await provisionDemoFeatures(tenantId, actorOf(req));
         if (wantsStream(req)) {
@@ -247,6 +263,7 @@ export function registerAgentOpsRoutes(app: Express, deps: Deps): void {
       // streamed when asked so it flushes headers first — dodging the Firebase
       // `/api` ~60s cap (the UI hits the direct *.run.app URL) and the request
       // timer, bounded only by Cloud Run's outer timeout (ADR 0292 / ADR 0321).
+      requireExpectedSeedTenant(req);
       await withSeedLock(deps.storage, tenantId, async () => {
         if (wantsStream(req)) {
           await streamSeed(res, (onStep) => runDemoClear(tenantId, deps.storage, { steps, onStep }));

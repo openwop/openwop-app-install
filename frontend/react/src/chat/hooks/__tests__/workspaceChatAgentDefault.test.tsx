@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
 import type { BYOKActiveConfig } from '../../../byok/lib/useBYOKConfig.js';
 import type { AgentMentionEntry } from '../../lib/agentMentions.js';
-import type { ConversationType } from '../../../client/chatSessionsClient.js';
+import type { ChatMessagePersisted, ConversationType } from '../../../client/chatSessionsClient.js';
 
 /**
  * ADR 0975 D12 — in a workspace that declares a chat agent (KickTodo: KickBot), a
@@ -16,33 +16,46 @@ import type { ConversationType } from '../../../client/chatSessionsClient.js';
  * submit pipeline (`runCoreSubmit`) → `openConversationSession` (`agentScope`) and
  * the turn (`to`). Only the network seams are stubbed.
  *
- * Red when (sabotage-witnessed in the PR): the hook does not activate; it ignores
+ * Red when (sabotage-witnessed, w93): the hook does not activate; it ignores
  * history (re-points an existing conversation); it runs while hydrating (a saved
- * empty conversation is then left on the assistant); it guards once per agent
- * instead of once per session (`/clear` loses it); an explicit scope or a typed
- * conversation does not win.
+ * conversation WITH history looks empty until it loads, and since e907b2fef the
+ * load keeps an activation made meanwhile, so it would be re-pointed); it guards
+ * once per agent instead of once per session (`/clear` loses it); it re-activates
+ * after the user chose the assistant (a catalog refresh re-runs the effect); an
+ * explicit scope or a typed conversation does not win; it reads a non-active
+ * workspace's declaration.
+ * Recorded double guard: with no declared agent, both `!agentId` and the entry
+ * lookup stop activation, so dropping either alone stays green (structural).
  */
 
 vi.mock('../../../client/streamsClient.js', () => ({ subscribeToRun: () => ({ close: () => undefined }) }));
+// The workflow-run lane is never reached here (no workflow mention, no
+// workflow_run message): its stubs THROW, so reaching it reds the case instead
+// of riding an untyped fake.
+type Runs = typeof import('../../../client/runsClient.js');
+type Interrupts = typeof import('../../../client/interruptsClient.js');
+const unreached = (what: string): never => { throw new Error(`${what} is not reached by a conversation turn`); };
 vi.mock('../../../client/runsClient.js', () => ({
-  createRun: vi.fn(() => Promise.resolve({ runId: 'run-1', status: 'running', eventsUrl: '/v1/runs/run-1/events' })),
-  cancelRun: vi.fn(() => Promise.resolve()),
-  getRun: vi.fn(() => Promise.resolve({ status: 'running' })),
-  pollEvents: vi.fn(() => Promise.resolve({ events: [], runId: 'run-1', lastSequence: 0, status: 'running', isTerminal: true })),
-  getSdkClient: vi.fn(),
+  createRun: vi.fn<Runs['createRun']>(async () => unreached('createRun')),
+  cancelRun: vi.fn<Runs['cancelRun']>(async () => unreached('cancelRun')),
+  getRun: vi.fn<Runs['getRun']>(async () => unreached('getRun')),
+  pollEvents: vi.fn<Runs['pollEvents']>(async () => unreached('pollEvents')),
+  getSdkClient: vi.fn<Runs['getSdkClient']>(() => unreached('getSdkClient')),
 }));
 vi.mock('../../../client/interruptsClient.js', () => ({
-  listOpenInterrupts: vi.fn(() => Promise.resolve([])),
-  resolveByRun: vi.fn(() => Promise.resolve()),
+  listOpenInterrupts: vi.fn<Interrupts['listOpenInterrupts']>(async () => unreached('listOpenInterrupts')),
+  resolveByRun: vi.fn<Interrupts['resolveByRun']>(async () => unreached('resolveByRun')),
 }));
+type ChatSessions = typeof import('../../../client/chatSessionsClient.js');
 vi.mock('../../../client/chatSessionsClient.js', () => ({
-  createChatSession: vi.fn(() => Promise.resolve()),
-  appendChatMessage: vi.fn(() => Promise.resolve()),
-  listChatSessionMessages: vi.fn(() => Promise.resolve([])),
-  listChatSessionMessagesPage: vi.fn(() => Promise.resolve({ messages: [], nextCursor: null })),
-  setConversationRun: vi.fn(() => Promise.resolve()),
-  updateChatMessage: vi.fn(() => Promise.resolve()),
-  getSessionFeedback: vi.fn(() => Promise.resolve({})),
+  // Typed against the real client, so a fixture cannot drift from its shape.
+  createChatSession: vi.fn<ChatSessions['createChatSession']>(async (opts) => ({ sessionId: opts?.sessionId ?? 's-new', tenantId: 't1', title: opts?.title ?? 'New chat', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', messageCount: 0 })),
+  appendChatMessage: vi.fn<ChatSessions['appendChatMessage']>(async (sessionId, msg) => ({ messageId: msg.messageId, sessionId, role: 'user', content: msg.content, meta: msg.meta ?? null, createdAt: '2026-01-01T00:00:00.000Z' })),
+  listChatSessionMessages: vi.fn<ChatSessions['listChatSessionMessages']>(async () => []),
+  listChatSessionMessagesPage: vi.fn<ChatSessions['listChatSessionMessagesPage']>(async () => ({ messages: [], nextCursor: null })),
+  setConversationRun: vi.fn<ChatSessions['setConversationRun']>(async () => undefined),
+  updateChatMessage: vi.fn<ChatSessions['updateChatMessage']>(async () => undefined),
+  getSessionFeedback: vi.fn<ChatSessions['getSessionFeedback']>(async () => ({})),
 }));
 type Transport = typeof import('../../conversationTransport.js');
 const { openMock, turnMock } = vi.hoisted(() => ({
@@ -63,18 +76,18 @@ import { runCoreSubmit } from '../../lib/chatSubmit.js';
 import { DEFAULT_ASSISTANT_ID } from '../../activeAgents/constants.js';
 
 const CONFIG: BYOKActiveConfig = { provider: 'openwop-free', model: 'openwop-free', credentialRef: 'managed:openwop-free' };
-const KICKBOT = 'user.kicktodo-guide';
+const KICKBOT = 'user.acme-guide';
 const entry = (agentId: string, slug: string, displayName: string): AgentMentionEntry => ({
   agentId, slug, displayName, persona: displayName, description: '', packName: 'p', packVersion: '1.0.0', modelClass: 'chat',
 });
 const ENTRIES = [entry(KICKBOT, 'kickbot', 'KickBot'), entry('vendor.openwop-app.example.agents.coach', 'coach', 'Coach')];
 
-interface Props { agentId: string | null; explicit?: string | null; type?: ConversationType; sessionId?: string }
-function useHarness({ agentId, explicit = null, type, sessionId }: Props) {
+interface Props { agentId: string | null; explicit?: string | null; type?: ConversationType; sessionId?: string; entries?: readonly AgentMentionEntry[] }
+function useHarness({ agentId, explicit = null, type, sessionId, entries = ENTRIES }: Props) {
   const cs = useChatSession(sessionId ? { sessionId } : undefined);
   useDefaultChatAgent({
     agentId, explicitScope: explicit, activateAgent: cs.activeAgents.activateAgent,
-    agentEntries: ENTRIES, session: cs.session, isHydrating: cs.isHydrating, ...(type ? { conversationType: type } : {}),
+    agentEntries: entries, session: cs.session, isHydrating: cs.isHydrating, ...(type ? { conversationType: type } : {}),
   });
   return cs;
 }
@@ -83,7 +96,7 @@ const submit = (cs: Harness, text: string) => runCoreSubmit(text, undefined, {
   config: CONFIG, send: cs.send, reset: cs.reset, cancel: cs.cancel, emitSystem: cs.emitSystem,
   runWorkflowMention: cs.runWorkflowMention, activeAgents: cs.activeAgents, agentEntries: ENTRIES,
 });
-const turnTo = (call: number): unknown => (JSON.stringify(turnMock.mock.calls[call]).match(/"to":"([^"]+)"/) ?? [])[1];
+const turnTo = (call: number): string | undefined => turnMock.mock.calls[call]?.[2].to;
 
 beforeEach(() => {
   localStorage.clear();
@@ -115,9 +128,13 @@ describe('ADR 0975 D12 — the workspace chat agent is the default for a new cha
   });
 
   it('switching still works: an @mention routes to the named agent, and choosing the assistant is not undone', async () => {
-    const { result } = renderHook(() => useHarness({ agentId: KICKBOT }));
+    const initialProps: Props = { agentId: KICKBOT };
+    const { result, rerender } = renderHook((p: Props) => useHarness(p), { initialProps });
     await waitFor(() => expect(result.current.activeAgents.currentAgentId).toBe(KICKBOT));
     act(() => { result.current.activeAgents.switchTo(DEFAULT_ASSISTANT_ID); });
+    // A catalog refresh re-runs the effect while the chat is still empty: only the
+    // once-per-session guard keeps the user's choice.
+    rerender({ agentId: KICKBOT, entries: [...ENTRIES] });
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     expect(result.current.activeAgents.currentAgentId, 'the user\'s choice stands').toBe(DEFAULT_ASSISTANT_ID);
     await act(async () => { await submit(result.current, '@coach plan my week'); });
@@ -143,9 +160,9 @@ describe('ADR 0975 D12 — the workspace chat agent is the default for a new cha
   });
 
   it('a restored tab waits for its history: an EMPTY saved conversation opens on KickBot once it has loaded', async () => {
-    // The tab is backend-keyed, so it hydrates first. Activating before the load
-    // lands is overwritten by the loaded session, and would leave the tab on the
-    // assistant for good (the once-per-session guard has already fired).
+    // The tab is backend-keyed, so it hydrates first; once the (empty) history
+    // lands, the default applies. Positive half of the hydration claim; the
+    // case below is the half the isHydrating guard alone holds.
     let release!: () => void;
     vi.mocked(listChatSessionMessagesPage).mockImplementationOnce(() => new Promise((r) => { release = () => r({ messages: [], nextCursor: null }); }));
     const { result } = renderHook(() => useHarness({ agentId: KICKBOT, sessionId: 's-saved' }));
@@ -153,6 +170,22 @@ describe('ADR 0975 D12 — the workspace chat agent is the default for a new cha
     expect(result.current.isHydrating).toBe(true);
     await act(async () => { release(); await new Promise((r) => setTimeout(r, 0)); });
     await waitFor(() => expect(result.current.activeAgents.currentAgentId).toBe(KICKBOT));
+  });
+
+  it('a restored tab WITH history is not re-pointed while it loads', async () => {
+    // While hydrating, the session looks empty. The load keeps an activation made
+    // meanwhile (e907b2fef, ADR 0140 G3), so only the isHydrating guard stops the
+    // default from re-pointing a conversation that already has history.
+    let release!: () => void;
+    const history: ChatMessagePersisted[] = [{ messageId: 'm-1', sessionId: 's-history', role: 'user', content: 'an earlier question', meta: null, createdAt: '2026-01-01T00:00:00.000Z' }];
+    vi.mocked(listChatSessionMessagesPage).mockImplementationOnce(() => new Promise((r) => { release = () => r({ messages: history, nextCursor: null }); }));
+    const { result } = renderHook(() => useHarness({ agentId: KICKBOT, sessionId: 's-history' }));
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    expect(result.current.isHydrating).toBe(true);
+    await act(async () => { release(); await new Promise((r) => setTimeout(r, 0)); });
+    await waitFor(() => expect(result.current.isHydrating).toBe(false));
+    expect(result.current.session.messages).toHaveLength(1); // the history landed
+    expect(result.current.activeAgents.currentAgentId).toBe(DEFAULT_ASSISTANT_ID);
   });
 
   it('/clear starts a fresh chat that opens on KickBot again (once per SESSION, not per agent)', async () => {
@@ -169,9 +202,9 @@ describe('ADR 0975 D12 — only the ACTIVE workspace\'s declaration counts', () 
   it('reads chatAgent from the active row, never another workspace\'s', () => {
     const workspaces = [
       { workspaceId: 'user:me', name: 'Me', slug: 'me', roles: ['owner'], kind: 'personal' as const, active: false },
-      { workspaceId: 'host-kicktodo', name: 'KickTodo', slug: 'kicktodo', roles: ['viewer'], kind: 'shared' as const, active: true, chatAgent: KICKBOT },
+      { workspaceId: 'host-acme', name: 'Acme', slug: 'acme', roles: ['viewer'], kind: 'shared' as const, active: true, chatAgent: KICKBOT },
     ];
-    expect(activeWorkspaceChatAgent({ workspaces, active: 'host-kicktodo' })).toBe(KICKBOT);
+    expect(activeWorkspaceChatAgent({ workspaces, active: 'host-acme' })).toBe(KICKBOT);
     expect(activeWorkspaceChatAgent({ workspaces, active: 'user:me' })).toBeNull();
   });
 });

@@ -16,6 +16,16 @@
  *  - the preview disagrees with the exchange's decision, ignores the provider
  *    constraint, or accepts a provider that is not routable (leg 4);
  *  - a model the catalog does not list is accepted (leg 5).
+ *
+ * Every leg after the first seeds its own enabled config (`seedEnabledConfig`),
+ * so no leg depends on another having run first (shuffle-safe).
+ *
+ * Sabotage-witnessed (wave 82): writing or enabling under another key reds legs
+ * 1/2/4; dropping `requireByokManage` from the write gate reds legs 2/3; a lying
+ * `canManage` either way reds leg 2; dropping the alias check (either direction)
+ * or running it before the authority gate reds leg 3; a preview that ignores the
+ * provider, accepts `compat`, or measures tokens differently reds leg 4; dropping
+ * the `isListedModel` write check reds leg 5.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Server } from 'node:http';
@@ -64,6 +74,14 @@ function field(value: unknown, ...path: string[]): unknown {
   return cur;
 }
 
+/** Legs 2–5 own their state: an admin saves `config` and enables it. */
+async function seedEnabledConfig(): Promise<void> {
+  const put = await call(CFG, admin, 'PUT', config);
+  expect(put.status, JSON.stringify(put.body)).toBe(200);
+  const on = await call(`${CFG}/enable`, admin, 'POST', { enabled: true });
+  expect(on.status, JSON.stringify(on.body)).toBe(200);
+}
+
 let admin = '';
 let editor = '';
 beforeAll(async () => {
@@ -100,6 +118,7 @@ describe('ADR 1016 — the workspace router config', () => {
   });
 
   it('leg 2: an editor reads (canManage:false) but cannot write; an admin has canManage:true', async () => {
+    await seedEnabledConfig();
     const read = await call(CFG, editor);
     expect(read.status, JSON.stringify(read.body)).toBe(200);
     expect(field(read.body, 'canManage')).toBe(false);
@@ -113,16 +132,21 @@ describe('ADR 1016 — the workspace router config', () => {
   });
 
   it('leg 3: the legacy per-org alias accepts only the workspace\'s own id', async () => {
+    await seedEnabledConfig();
     const ok = await call(`/host/openwop-app/model-router/orgs/${encodeURIComponent(WS)}/config/enable`, admin, 'POST', { enabled: true });
     expect(ok.status, JSON.stringify(ok.body)).toBe(200);
     const other = await call('/host/openwop-app/model-router/orgs/org-deadbeef/config', admin, 'PUT', config);
     expect(other.status, JSON.stringify(other.body)).toBe(409);
     expect(field(other.body, 'details', 'reason')).toBe('model_router_workspace_scoped');
     // The authority gate runs FIRST: an editor learns nothing from the alias.
-    expect((await call('/host/openwop-app/model-router/orgs/org-deadbeef/config', editor, 'PUT', config)).status).toBe(403);
+    const editorAlias = await call('/host/openwop-app/model-router/orgs/org-deadbeef/config', editor, 'PUT', config);
+    expect(editorAlias.status, JSON.stringify(editorAlias.body)).toBe(403);
+    expect(field(editorAlias.body, 'details', 'requiredScope')).toBe('host:byok:manage');
   });
 
   it('leg 4: preview runs the same decision, per provider, without writing', async () => {
+    await seedEnabledConfig();
+    const before = await call(CFG, admin);
     const long = await call(`${CFG}/preview`, editor, 'POST', { text: 'x'.repeat(8000), provider: 'anthropic' });
     expect(long.status, JSON.stringify(long.body)).toBe(200);
     expect(long.body).toMatchObject({ enabled: true, why: 'routed', decision: { reason: 'rule', ruleIndex: 0, target: { provider: 'anthropic', model: BIG } } });
@@ -134,11 +158,18 @@ describe('ADR 1016 — the workspace router config', () => {
     const bad = await call(`${CFG}/preview`, editor, 'POST', { text: 'x', provider: 'compat' });
     expect(bad.status).toBe(400);
     expect(field(bad.body, 'details', 'field')).toBe('provider');
+    // Without writing: the stored config is untouched by four previews.
+    const after = await call(CFG, admin);
+    expect(field(after.body, 'config', 'updatedAt')).toBe(field(before.body, 'config', 'updatedAt'));
+    expect(field(after.body, 'config', 'enabled')).toBe(true);
   });
 
   it('leg 5: a model the catalog does not list is refused at write', async () => {
+    await seedEnabledConfig();
     const res = await call(CFG, admin, 'PUT', { rules: [{ when: { kind: 'always' }, target: { provider: 'anthropic', model: 'claude-typo' } }] });
     expect(res.status).toBe(400);
     expect(field(res.body, 'details', 'field')).toBe('rules[0].target.model');
+    // The refused write left the stored rules as they were.
+    expect(field((await call(CFG, admin)).body, 'config', 'config', 'rules')).toEqual(config.rules);
   });
 });

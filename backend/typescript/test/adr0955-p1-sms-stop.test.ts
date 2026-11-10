@@ -13,11 +13,10 @@
  *  - the adapter guard removed                                     → "generic sms-send node"
  *  - the guard always passing `anySender: false`                   → "unbound sender"
  *  - the `MessageSid` dedup removed                                → "replayed STOP"
- *  - START lifting any reason (no actor/note check)                → "STOPALL survives START"
+ *  - START lifting any reason (no actor/note check)                → "STOPALL" + "operator hold"
  *  - `marketing.sms` dropped from STRICT_EXPLICIT_OPT_IN           → "strict"
  *  - the STOP scope ignoring the `To` binding                      → "client A's STOP"
  *  - the SMS observer acked fail-soft (no strict notify)           → "could not be written"
- *  - START lifting any reason (with the STOPALL + operator-hold cases) → both START cases
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -38,9 +37,8 @@ import { classifyKeyword } from '../src/features/consent/keywordLadder.js';
 
 type SmsSendNode = (ctx: Record<string, unknown>) => Promise<{ status: string; outputs: { sent: boolean; error?: string } }>;
 async function loadSmsSend(): Promise<SmsSendNode> {
-  // Same exception as email-send-fork-idempotency.test.ts: the pack is untyped ESM, imported for a node-level test.
-  // @ts-expect-error TS7016 — untyped ESM pack imported for a node-level unit test; vitest resolves it at runtime.
-  const mod = (await import('../../../packs/core.openwop.integration/index.mjs')) as { smsSend: SmsSendNode };
+  // The pack is untyped ESM, imported by URL for a node-level test.
+  const mod = (await import(new URL('../../../packs/core.openwop.integration/index.mjs', import.meta.url).href)) as { smsSend: SmsSendNode };
   return mod.smsSend;
 }
 
@@ -49,6 +47,7 @@ let BASE = '';
 let PUBLIC = '';
 let storage: Storage;
 let twilio: http.Server;
+let server: http.Server;
 let twilioReply: { status: number; json: unknown } = { status: 201, json: { sid: 'SM-out-1', status: 'queued' } };
 let posts = 0;
 let TENANT = '';
@@ -67,7 +66,7 @@ beforeAll(async () => {
   PUBLIC = 'https://app.example.test';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   storage = app.locals.storage;
-  const server = app.listen(0, '127.0.0.1');
+  server = app.listen(0, '127.0.0.1');
   await new Promise<void>((r) => server.once('listening', () => r()));
   BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   twilio = http.createServer((req, res) => {
@@ -88,16 +87,18 @@ beforeAll(async () => {
   await setInboundConfig({ tenantId: TENANT, connectionId, provider: 'twilio', signingSecret: AUTH_TOKEN });
   await setSmsSender({ tenantId: TENANT, number: NUM_A, orgId: orgA, connectionId, boundBy: 'admin' });
   await setSmsSender({ tenantId: TENANT, number: NUM_B, orgId: orgB, connectionId, boundBy: 'admin' });
-  await storage.insertRun({ runId: 'run-sms0955', workflowId: 'w', tenantId: TENANT, status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: 'x', updatedAt: 'x' });
-});
+  await storage.insertRun({ runId: 'run-sms0955', workflowId: 'w', tenantId: TENANT, status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z' });
+}, 120_000);
 afterAll(async () => {
   delete process.env.OPENWOP_TWILIO_API_BASE;
   delete process.env.OPENWOP_PUBLIC_BASE_URL;
   await new Promise<void>((r) => twilio.close(() => r()));
+  await new Promise<void>((r) => server.close(() => r()));
 });
 
 const sms = () => makeSmsAdapter({ storage, tenantId: TENANT, runId: 'run-sms0955', actingUserId: 'u1' });
-const fresh = () => `+1555020${String(Math.floor(Math.random() * 9000) + 1000)}`;
+let nextNumber = 1000; // a counter: a repeated random number would inherit an earlier case's STOP
+const fresh = () => `+1555020${String(nextNumber++)}`;
 
 function sign(url: string, params: Record<string, string>): string {
   const data = url + Object.keys(params).sort().map((k) => `${k}${params[k]}`).join('');

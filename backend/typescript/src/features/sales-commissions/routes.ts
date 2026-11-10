@@ -16,29 +16,13 @@ import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { resolveEffectiveAccess, type Scope } from '../../host/accessControlService.js';
 import { authorizeOrgScope } from '../featureRoute.js';
-import { createCommissionStatementApproval, findPendingCommissionStatementApproval, closePendingCommissionStatementApprovals, resolveApproval } from '../../host/approvalService.js';
+import { closePendingCommissionStatementApprovals, listApprovals } from '../../host/approvalService.js';
 
-/**
- * R2 review — COM2-B4's own remedy was inert. Both submit paths reused whatever pending
- * card `findPendingCommissionStatementApproval` returned and NEVER re-pinned it, so once
- * a statement was recomputed the card's frozen total was permanently stale: approve 409s
- * ("re-submit it"), re-submitting hands back the SAME card, and approve 409s again. The
- * only escape was reject — structurally the dead end COM2-M5 exists to close, one guard
- * over. A stale card is closed and a fresh one minted; a card that still matches is
- * reused unchanged (so an idempotent re-submit stays idempotent).
- */
-async function repinOrKeep(tenantId: string, statementId: string, total: number, currency: string): Promise<Awaited<ReturnType<typeof findPendingCommissionStatementApproval>>> {
-  const existing = await findPendingCommissionStatementApproval(tenantId, statementId);
-  if (!existing) return null;
-  const pin = existing.commissionStatement;
-  if (pin && pin.total === total && pin.currency === currency) return existing;
-  await resolveApproval(existing.approvalId, { status: 'rejected', note: 'Superseded: the statement was recomputed before it was approved.' });
-  return null;
-}
-import { createPlan, listPlans, getPlan, updatePlan, deletePlan } from './entities/plan.js';
-import { computeStatement, listStatements, getStatementRaw, recordStatementSubmitter, markStatementPaid, planNonDraftStatementCount, deleteDraftStatementsForPlan } from './entities/statement.js';
+import { createPlan, listPlans, getPlan, updatePlan, deletePlan, plansVisibleTo } from './entities/plan.js';
+import { computeStatement, listStatements, getStatementRaw, markStatementPaid, planNonDraftStatementCount, deleteDraftStatementsForPlan, sameSubject } from './entities/statement.js';
 import { commissionMutated } from './emit.js';
-import { commissionProposalText } from './proposalText.js';
+import { submitStatementForReview } from './pin.js';
+import { DEAL_CONFLICT_NOTE } from './statementApproval.js';
 
 const TOGGLE_ID = 'sales-commissions';
 const LABEL = 'Commissions';
@@ -50,6 +34,40 @@ async function callerCanSeeAll(tenantId: string, orgId: string, subject: string)
   const access = await resolveEffectiveAccess(tenantId, { subject, orgId });
   return access.scopes.includes('host:commissions:manage');
 }
+/**
+ * ADR 1034 (grade-ux H5) — each statement's LATEST review card, so the console can say
+ * "In review" (and not offer Submit again), and say when a review was closed as superseded
+ * because some deals were already paid (and offer Recompute instead of a Submit that would
+ * be superseded again). One tenant listing per request; the card's note is host text with no
+ * ids in it.
+ */
+async function withReviewState<T extends { statementId: string; computedAt: string }>(tenantId: string, orgId: string, rows: T[]): Promise<Array<T & { review?: { status: string; superseded: boolean } }>> {
+  const wanted = new Set(rows.map((r) => r.statementId));
+  const latest = new Map<string, { status: string; note?: string; createdAt: string; resolvedAt?: string }>();
+  // Only the two statuses the console reads (closing grade-code I5): approved cards pile up
+  // with the tenant's whole history and say nothing a statement's own status does not.
+  const cards = [...await listApprovals(tenantId, 'pending'), ...await listApprovals(tenantId, 'rejected')];
+  for (const a of cards) {
+    const id = a.commissionStatement?.statementId;
+    if (a.kind !== 'commission-statement' || a.orgId !== orgId || !id || !wanted.has(id)) continue;
+    const prev = latest.get(id);
+    if (!prev || a.createdAt > prev.createdAt) latest.set(id, { status: a.status, ...(a.note !== undefined ? { note: a.note } : {}), createdAt: a.createdAt, ...(a.resolvedAt !== undefined ? { resolvedAt: a.resolvedAt } : {}) });
+  }
+  return rows.map((r) => {
+    const card = latest.get(r.statementId);
+    if (!card) return r;
+    // A superseded card stops mattering once the statement is RECOMPUTED after it was
+    // closed (closing-pass Blocker: recompute mints no card, so this used to stay true and
+    // Submit never came back). Same for any rejection older than the current figures.
+    // A PENDING card older than the current figures is stale too: its decide will 409, and
+    // the console must offer Submit (which re-pins) rather than "In review" forever.
+    // (A same-millisecond tie reads as "recomputed after the close" for a rejection, and as
+    // "submitted after the compute" for a pending card — the likelier order in each case.)
+    if (card.status === 'pending' ? r.computedAt > card.createdAt : r.computedAt >= (card.resolvedAt ?? card.createdAt)) return r;
+    return { ...r, review: { status: card.status, superseded: card.status === 'rejected' && card.note === DEAL_CONFLICT_NOTE } };
+  });
+}
+
 const optStr = (v: unknown): string | undefined => (typeof v === 'string' && v.length > 0 ? v : undefined);
 
 export function registerCommissionRoutes(deps: RouteDeps): void {
@@ -59,8 +77,11 @@ export function registerCommissionRoutes(deps: RouteDeps): void {
   // ── Plans ──
   app.get(`${BASE}/plans`, async (req, res, next) => {
     try {
-      const { orgId, tenantId } = await authorize(req, 'workspace:read');
-      res.json({ plans: await listPlans(tenantId, orgId) });
+      const { user, orgId, tenantId } = await authorize(req, 'workspace:read');
+      // ADR 1034 D11 — a rep sees team plans and their own; `canManage` lets the console
+      // show manager controls only to the people the server lets use them.
+      const canManage = await callerCanSeeAll(tenantId, orgId, user.userId);
+      res.json({ plans: plansVisibleTo(await listPlans(tenantId, orgId), canManage, user.userId), canManage });
     } catch (err) {
       next(err);
     }
@@ -68,8 +89,13 @@ export function registerCommissionRoutes(deps: RouteDeps): void {
 
   app.get(`${BASE}/plans/:planId`, async (req, res, next) => {
     try {
-      const { orgId, tenantId } = await authorize(req, 'workspace:read');
-      res.json(await getPlan(tenantId, orgId, req.params.planId));
+      const { user, orgId, tenantId } = await authorize(req, 'workspace:read');
+      const plan = await getPlan(tenantId, orgId, req.params.planId);
+      // Same visibility as the list; a hidden plan is the same 404 as a missing one.
+      if (plansVisibleTo([plan], await callerCanSeeAll(tenantId, orgId, user.userId), user.userId).length === 0) {
+        throw new OpenwopError('not_found', 'Commission plan not found.', 404, { planId: req.params.planId });
+      }
+      res.json(plan);
     } catch (err) {
       next(err);
     }
@@ -151,7 +177,7 @@ export function registerCommissionRoutes(deps: RouteDeps): void {
         canSeeAll,
         user.userId,
       );
-      res.json({ statements: rows });
+      res.json({ statements: await withReviewState(tenantId, orgId, rows) });
     } catch (err) {
       next(err);
     }
@@ -163,7 +189,7 @@ export function registerCommissionRoutes(deps: RouteDeps): void {
       const statement = await getStatementRaw(tenantId, orgId, req.params.statementId);
       const canSeeAll = await callerCanSeeAll(tenantId, orgId, user.userId);
       // Fail-closed + no existence leak: a non-manager may see only their own.
-      if (!statement || (!canSeeAll && statement.subjectId !== user.userId)) throw new OpenwopError('not_found', 'Statement not found.', 404, { statementId: req.params.statementId });
+      if (!statement || (!canSeeAll && !sameSubject(statement.subjectId, user.userId))) throw new OpenwopError('not_found', 'Statement not found.', 404, { statementId: req.params.statementId });
       res.json(statement);
     } catch (err) {
       next(err);
@@ -189,13 +215,10 @@ export function registerCommissionRoutes(deps: RouteDeps): void {
       // Without it, one person could compute their own statement, submit it, approve it
       // and mark it paid: three clicks, a terminal payout record, and a code comment
       // telling the next reader that a second manager was involved.
-      await recordStatementSubmitter(tenantId, orgId, statementId, user.userId);
-      const existing = await repinOrKeep(tenantId, statementId, statement.total, statement.currency);
-      const review = existing ?? await createCommissionStatementApproval({
-        tenantId, orgId, statementId,
-        subjectId: statement.subjectId, period: statement.period, total: statement.total, currency: statement.currency,
-        proposal: await commissionProposalText({ tenantId, orgId, subjectId: statement.subjectId, period: statement.period, total: statement.total, currency: statement.currency }),
-      });
+      // ADR 1034 D5 — the ONE submit path (`pin.ts`), shared with the workflow surface: it
+      // stamps the submitter, closes a card whose pin no longer matches, and pins the new
+      // card to the total, the attainment and the lines.
+      const review = await submitStatementForReview(tenantId, orgId, statement, user.userId);
       res.status(202).json({ review: { approvalId: review.approvalId, status: review.status } });
     } catch (err) {
       next(err);

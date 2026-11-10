@@ -89,6 +89,22 @@ describe('AppearancePanel', () => {
     expect(sentIdentity()?.typography).toBeUndefined();
   });
 
+  it('saves the public-page motion preset, and "Calm (default)" removes it (ADR 1029 D6)', async () => {
+    getAppBrand.mockResolvedValue(brand({ theme: { motion: 'subtle' } }));
+    render(<AppearancePanel />);
+    await screen.findByRole('heading', { name: 'Appearance' });
+    const motion = screen.getByLabelText('Public page motion') as HTMLSelectElement;
+    expect(motion.value).toBe('subtle');
+    fireEvent.change(motion, { target: { value: 'lively' } });
+    fireEvent.click(screen.getByRole('button', { name: /Save/ }));
+    await waitFor(() => expect(putAppBrand).toHaveBeenCalledTimes(1));
+    expect(sentIdentity()?.theme?.motion).toBe('lively');
+    fireEvent.change(screen.getByLabelText('Public page motion'), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: /Save/ }));
+    await waitFor(() => expect(putAppBrand).toHaveBeenCalledTimes(2));
+    expect(putAppBrand.mock.calls[1]?.[0].identity?.theme?.motion).toBeUndefined();
+  });
+
   it('shows the read-only notice for a non-superadmin (403), with the editor withheld', async () => {
     getAppBrand.mockRejectedValue(new ApiError({ status: 403, statusText: 'forbidden', url: '/app-brand' }));
     render(<AppearancePanel />);

@@ -29,7 +29,7 @@ import { registerChainBackedWorkflow, getChainBackedWorkflow } from '../src/host
 import { isBuiltinWorkflowId } from '../src/host/workflowOwnership.js';
 import { persistAuthoredWorkflow } from '../src/features/workflow-author/workflowAuthorService.js';
 
-const DRAINED = ['openwop-app.scheduled-chat.turn', 'openwop-app.channel.turn', 'openwop-app.kicktodo.convene-turn'] as const;
+const DRAINED = ['openwop-app.scheduled-chat.turn', 'openwop-app.channel.turn'] as const;
 
 beforeAll(async () => {
   ensureNodesRegistered();

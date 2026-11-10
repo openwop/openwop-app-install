@@ -1,3 +1,15 @@
+// ADR 0181 Phase E / ADR 0182 Phase 4 — "owns what it starts": the desktop stops
+// only processes it spawned, and an already-running backend is adopted and left
+// alone on quit. Not in `npm run ci`: run `npm test` in clients/desktop.
+//
+// Sabotage that turns it red (each probed): spawning without the args, skipping
+// adoption, not recording ownership, the idempotence check, the signal, keeping
+// the entry after stop (Start would then be a no-op forever), stopping one of many.
+// Double guard, an equivalent mutant: an adopted entry stores `child: null` AND
+// `owned: false`, so `entry.owned` in stop() cannot be probed alone, and a hold on
+// `child` reds "ensure() adopts" by itself. The adopted half therefore witnesses
+// "spawned nothing, kept no entry".
+
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -16,7 +28,7 @@ test('ensure() spawns + owns when not already running', async () => {
   const r = await m.ensure('backend', 'openwop-app-backend', ['--port', '8000']);
   assert.deepEqual(r, { started: true, adopted: false });
   assert.equal(m.isOwned('backend'), true);
-  assert.equal(spawned.length, 1);
+  assert.deepEqual(spawned.map(({ cmd, args }) => [cmd, args]), [['openwop-app-backend', ['--port', '8000']]]);
 });
 
 test('ensure() adopts (does not spawn or own) when already running', async () => {
@@ -42,26 +54,38 @@ test('ensure() is idempotent for the same key', async () => {
 
 test('stop() kills an owned process but NOT an adopted one', async () => {
   const owned = fakeChild();
-  const m = new ManagedProcesses({ spawnFn: () => owned, isRunningFn: async () => false });
+  let spawns = 0;
+  const m = new ManagedProcesses({ spawnFn: () => { spawns++; return owned; }, isRunningFn: async () => false });
   await m.ensure('backend', 'x');
   m.stop('backend');
   assert.equal(owned.killed, true);
   assert.equal(owned.sig, 'SIGTERM');
+  assert.equal(m.isOwned('backend'), false);
+  // The menu's Stop then Start: the entry is gone, so Start spawns again.
+  assert.deepEqual(await m.ensure('backend', 'x'), { started: true, adopted: false });
+  assert.equal(spawns, 2);
 
-  const adoptedMgr = new ManagedProcesses({ spawnFn: () => fakeChild(), isRunningFn: async () => true });
+  let adoptedSpawns = 0;
+  const adoptedMgr = new ManagedProcesses({ spawnFn: () => { adoptedSpawns++; return fakeChild(); }, isRunningFn: async () => true });
   await adoptedMgr.ensure('shim', 'y');
   adoptedMgr.stop('shim'); // must not throw; nothing to kill
   assert.equal(adoptedMgr.isOwned('shim'), false);
+  assert.equal(adoptedSpawns, 0);
+  // No entry left either: a later ensure probes again and re-adopts.
+  assert.deepEqual(await adoptedMgr.ensure('shim', 'y'), { started: false, adopted: true });
 });
 
 test('stopAll() tears down every owned process', async () => {
   const a = fakeChild(); const b = fakeChild();
   const kids = [a, b];
   let i = 0;
-  const m = new ManagedProcesses({ spawnFn: () => kids[i++], isRunningFn: async () => false });
+  const m = new ManagedProcesses({ spawnFn: () => kids[i++], isRunningFn: async (key) => key === 'adopted' });
   await m.ensure('backend', 'x');
+  await m.ensure('adopted', 'z');
   await m.ensure('shim', 'y');
   m.stopAll();
   assert.equal(a.killed, true);
   assert.equal(b.killed, true);
+  assert.equal(i, 2); // the adopted key spawned nothing
+  assert.deepEqual([...m.owned.keys()], []);
 });

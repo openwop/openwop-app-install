@@ -11,6 +11,19 @@
  * revision survives); the eraser deletes a serving revision (the live agent
  * breaks); it reaches another subject's revisions; or a second run finds the
  * subject still named (the attribution was not redacted).
+ *
+ * Sabotage witnessed (wave 84): no `authoredBy` on the revision row, the subject-form match
+ * dropped, the redaction keeping the author, the pinned set ignored, or the pre-delete AND
+ * post-delete serving checks both dropped → case 1 (and case 2 where it applies); the
+ * post-delete put-back dropped → case 2 alone.
+ *
+ * Double guards, each witnessed only by a probe that breaks both halves in one edit:
+ *  - tenant: the `listForTenantIndexed(tenantId)` reader AND the row's own tenant check;
+ *  - serving: the pre-delete check AND the put-back after the delete (dropping only the
+ *    pre-check deletes the row and puts it straight back, text intact);
+ *  - the head: `servingRevisions` adds the head, AND with deployment rows on, each edit
+ *    mints a `draft` row naming its revision, so the head is pinned twice (dropping the
+ *    head term alone stays green, w84g3-ua-head).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -24,18 +37,20 @@ import { listDeployments, mintDraft } from '../src/features/agent-deployments/se
 let server: http.Server;
 let BASE = '';
 let seq = 0;
-interface Res { status: number; body: any }
+interface Res<T> { status: number; body: T }
+interface LoginBody { user: { userId: string } }
+interface AgentBody { agentId: string; packVersion: string }
 
 function client() {
   let cookie = '';
-  return async (method: string, path: string, body?: unknown): Promise<Res> => {
+  return async <T,>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
     const text = await res.text();
-    return { status: res.status, body: text ? JSON.parse(text) : undefined };
+    return { status: res.status, body: (text ? JSON.parse(text) : undefined) as T };
   };
 }
 
@@ -58,18 +73,18 @@ describe('ADR 1014 D8 — erasing a person reaches the agent text they wrote', (
   it('deletes their unserved revisions, keeps the served ones, and touches nobody else', async () => {
     const tenantId = `org:d8-${Date.now()}-${seq++}`;
     const call = client();
-    const login = await call('POST', '/host/openwop-app/test/login', { email: `d8-${Date.now()}-${seq++}@acme.test`, tenantId });
+    const login = await call<LoginBody>('POST', '/host/openwop-app/test/login', { email: `d8-${Date.now()}-${seq++}@acme.test`, tenantId });
     expect(login.status).toBe(201);
-    const userId = login.body.user.userId as string;
+    const userId = login.body.user.userId;
     expect((await call('POST', '/host/openwop-app/orgs', { name: 'D8' })).status).toBe(201);
-    const agent = await call('POST', '/host/openwop-app/agents', { persona: 'Eraser', modelClass: 'chat', systemPrompt: 'v1 call Ana on 555-0100' });
+    const agent = await call<AgentBody>('POST', '/host/openwop-app/agents', { persona: 'Eraser', modelClass: 'chat', systemPrompt: 'v1 call Ana on 555-0100' });
     expect(agent.status, JSON.stringify(agent.body)).toBe(201);
-    const agentId = agent.body.agentId as string;
+    const agentId = agent.body.agentId;
     const dep = `/agents/${encodeURIComponent(agentId)}/deployments`;
     const edit = async (systemPrompt: string) => {
-      const r = await call('PATCH', `/host/openwop-app/agents/${encodeURIComponent(agentId)}`, { systemPrompt });
+      const r = await call<AgentBody>('PATCH', `/host/openwop-app/agents/${encodeURIComponent(agentId)}`, { systemPrompt });
       expect(r.status, JSON.stringify(r.body)).toBe(200);
-      return r.body.packVersion as string;
+      return r.body.packVersion;
     };
     expect((await call('POST', dep, { version: '0', transition: 'pause' })).status).toBe(200); // a row names 0
     expect(await edit('v2 call Ana on 555-0100')).toBe('1');
@@ -89,13 +104,13 @@ describe('ADR 1014 D8 — erasing a person reaches the agent text they wrote', (
   it('puts back a revision a deployment pins while the eraser is deleting it', async () => {
     const tenantId = `org:d8-race-${Date.now()}-${seq++}`;
     const call = client();
-    const login = await call('POST', '/host/openwop-app/test/login', { email: `d8r-${Date.now()}-${seq++}@acme.test`, tenantId });
+    const login = await call<LoginBody>('POST', '/host/openwop-app/test/login', { email: `d8r-${Date.now()}-${seq++}@acme.test`, tenantId });
     expect(login.status).toBe(201);
-    const userId = login.body.user.userId as string;
+    const userId = login.body.user.userId;
     expect((await call('POST', '/host/openwop-app/orgs', { name: 'D8 race' })).status).toBe(201);
-    const agent = await call('POST', '/host/openwop-app/agents', { persona: 'Racer', modelClass: 'chat', systemPrompt: 'r0' });
+    const agent = await call<AgentBody>('POST', '/host/openwop-app/agents', { persona: 'Racer', modelClass: 'chat', systemPrompt: 'r0' });
     expect(agent.status, JSON.stringify(agent.body)).toBe(201);
-    const agentId = agent.body.agentId as string;
+    const agentId = agent.body.agentId;
     expect((await call('PATCH', `/host/openwop-app/agents/${encodeURIComponent(agentId)}`, { systemPrompt: 'r1' })).status).toBe(200); // head = 1, 0 unserved
 
     // A row naming 0 lands right after the eraser's first read of the serving set.

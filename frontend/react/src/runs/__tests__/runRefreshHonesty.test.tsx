@@ -6,7 +6,8 @@
  * (`.catch(() => undefined)`), so a completed run whose final refetch failed
  * kept rendering the pre-terminal snapshot with no sign anything was missing —
  * stale panels presented as current. Now a failed refresh raises a warning
- * Notice with a retry, and a later successful refresh clears it.
+ * Notice with a retry. Each resource clears only its own failed refresh after
+ * a successful read; an unrelated successful snapshot cannot certify the log.
  *
  * Each refetch is failed ON ITS OWN (w49): the first version failed both at
  * once, so either catch could be made silent again and the other still raised
@@ -14,6 +15,7 @@
  * backfill's catch silent; Retry that clears the flag without re-reading; a
  * successful refresh that raises the warning.
  */
+import { StrictMode } from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, fireEvent, act, waitFor } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
@@ -56,12 +58,11 @@ const SNAPSHOT: RunSnapshot = {
 };
 const COMPLETED: RunSnapshot = { ...SNAPSHOT, status: 'completed' };
 
-function view(): void {
-  render(
-    <MemoryRouter initialEntries={['/runs/r1']}>
-      <Routes><Route path="/runs/:runId" element={<RunDetailPage />} /></Routes>
-    </MemoryRouter>,
-  );
+function view(strict = false): void {
+  const page = <MemoryRouter initialEntries={['/runs/r1']}>
+    <Routes><Route path="/runs/:runId" element={<RunDetailPage />} /></Routes>
+  </MemoryRouter>;
+  render(strict ? <StrictMode>{page}</StrictMode> : page);
 }
 
 type OnEvent = (ev: RunEventDoc) => void;
@@ -97,6 +98,18 @@ async function eventArrivesWith(type: string, fail: { getRun?: boolean; pollEven
   });
 }
 
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: Error) => void } {
+  let resolve: (value: T) => void = () => { throw new Error('Deferred promise is not initialized'); };
+  let reject: (error: Error) => void = () => { throw new Error('Deferred promise is not initialized'); };
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+async function deliver(type: string, sequence: number): Promise<void> {
+  if (!sseHandler) throw new Error('Run stream did not subscribe');
+  const onEvent = sseHandler;
+  await act(async () => onEvent(sse(type, sequence)));
+}
+
 describe('run detail — post-event refresh honesty (UX_UPGRADE-runs P2)', () => {
   it.each([
     ['the snapshot refetch fails', 'run.completed', { getRun: true }],
@@ -108,15 +121,15 @@ describe('run detail — post-event refresh honesty (UX_UPGRADE-runs P2)', () =>
   });
 
   /**
-   * RUN-REFRESH-CLEAR-1 (BLOCKED-ON-PRODUCT, found w49) — the snapshot refetch's
+   * RUN-REFRESH-CLEAR-1 (confirmed and corrected 2026-11-07; found w49) — the snapshot refetch's
    * SUCCESS calls `setRefreshFailed(false)`, which also erases a warning the LOG
    * BACKFILL raised. If the backfill fails first and the snapshot lands after
    * (ordinary network ordering), the page shows a fresh-looking view over a
    * stale log — the exact lie this file exists to prevent. Pinned with the
-   * CORRECT expectation; `it.fails` goes red when the product stops clearing a
-   * flag it did not raise (fix-probe `w49g3-rr-clear-fix-r2`).
+   * CORRECT expectation, now ordinary after the real warning-null witness and
+   * owner-local repair. Historical fix-probe: `w49g3-rr-clear-fix-r2`.
    */
-  it.fails('RUN-REFRESH-CLEAR-1: a snapshot refetch that lands AFTER a failed backfill keeps the warning', async () => {
+  it('RUN-REFRESH-CLEAR-1: a snapshot refetch that lands AFTER a failed backfill keeps the warning', async () => {
     view();
     await badge('running');
     let landSnapshot: (s: RunSnapshot) => void = () => {};
@@ -153,4 +166,119 @@ describe('run detail — post-event refresh honesty (UX_UPGRADE-runs P2)', () =>
     await act(async () => { await Promise.resolve(); });
     expect(screen.queryByText(/may be out of date/i)).toBeNull();
   });
+
+  it('a successful late log read cannot erase a snapshot failure', async () => {
+    view();
+    await badge('running');
+    const log = deferred<{ events: RunEventDoc[] }>();
+    api.getRun.mockRejectedValue(new Error('snapshot unavailable'));
+    api.pollEvents.mockImplementation(() => log.promise);
+    await deliver('run.completed', 1);
+    await screen.findByText(/may be out of date/i);
+    await act(async () => log.resolve({ events: [] }));
+    expect(screen.queryByText(/may be out of date/i)).not.toBeNull();
+  });
+
+  it.each(['snapshot', 'log'] as const)('Retry retains the warning while pending and after only %s recovers', async (first) => {
+    await eventArrivesWith('run.completed', { getRun: true, pollEvents: true });
+    await screen.findByText(/may be out of date/i);
+    const snapshot = deferred<RunSnapshot>();
+    const log = deferred<{ events: RunEventDoc[] }>();
+    api.getRun.mockImplementation(() => snapshot.promise);
+    api.pollEvents.mockImplementation(() => log.promise);
+    fireEvent.click(screen.getByRole('button', { name: /retry/i }));
+    expect(screen.queryByText(/may be out of date/i)).not.toBeNull();
+    await act(async () => {
+      if (first === 'snapshot') snapshot.resolve(COMPLETED); else log.resolve({ events: [] });
+    });
+    expect(screen.queryByText(/may be out of date/i)).not.toBeNull();
+    await act(async () => {
+      if (first === 'snapshot') log.resolve({ events: [] }); else snapshot.resolve(COMPLETED);
+    });
+    await badge('completed');
+    await waitFor(() => expect(screen.queryByText(/may be out of date/i)).toBeNull());
+  });
+
+  it.each(['snapshot', 'log'] as const)('ignores an older %s success after the latest request failed', async (resource) => {
+    view();
+    await badge('running');
+    const snapshot = deferred<RunSnapshot>();
+    const log = deferred<{ events: RunEventDoc[] }>();
+    if (resource === 'snapshot') {
+      api.getRun.mockImplementationOnce(() => snapshot.promise).mockRejectedValueOnce(new Error('new snapshot failure'));
+    } else {
+      api.getRun.mockResolvedValue(COMPLETED);
+      api.pollEvents.mockImplementationOnce(() => log.promise).mockRejectedValueOnce(new Error('new log failure'));
+    }
+    const event = resource === 'snapshot' ? 'node.suspended' : 'run.completed';
+    await deliver(event, 1);
+    await deliver(event, 2);
+    await screen.findByText(/may be out of date/i);
+    await act(async () => {
+      if (resource === 'snapshot') snapshot.resolve(COMPLETED); else log.resolve({ events: [] });
+    });
+    expect(screen.queryByText(/may be out of date/i)).not.toBeNull();
+    if (resource === 'snapshot') expect(screen.queryByText('completed', { selector: '.status-badge' })).toBeNull();
+  });
+
+  it.each(['snapshot', 'log'] as const)('ignores an older %s failure after the latest request succeeded', async (resource) => {
+    view();
+    await badge('running');
+    const snapshot = deferred<RunSnapshot>();
+    const log = deferred<{ events: RunEventDoc[] }>();
+    if (resource === 'snapshot') {
+      api.getRun.mockImplementationOnce(() => snapshot.promise).mockResolvedValueOnce(COMPLETED);
+    } else {
+      api.getRun.mockResolvedValue(COMPLETED);
+      api.pollEvents.mockImplementationOnce(() => log.promise).mockResolvedValueOnce({ events: [] });
+    }
+    const event = resource === 'snapshot' ? 'node.suspended' : 'run.completed';
+    await deliver(event, 1);
+    await deliver(event, 2);
+    await badge('completed');
+    await act(async () => {
+      if (resource === 'snapshot') snapshot.reject(new Error('old snapshot failure')); else log.reject(new Error('old log failure'));
+    });
+    expect(screen.queryByText(/may be out of date/i)).toBeNull();
+  });
+
+  it('ignores a closed stream callback after mode resubscription while the new stream still refreshes', async () => {
+    view();
+    await badge('running');
+    if (!sseHandler) throw new Error('Original stream did not subscribe');
+    const oldCallback = sseHandler;
+    const subscriptions = api.subscribeToRun.mock.calls.length;
+    fireEvent.change(screen.getByRole('combobox', { name: 'mode' }), { target: { value: 'debug' } });
+    await waitFor(() => expect(api.subscribeToRun).toHaveBeenCalledTimes(subscriptions + 1));
+    const snapshots = api.getRun.mock.calls.length;
+    const logs = api.pollEvents.mock.calls.length;
+    await act(async () => oldCallback(sse('run.completed', 90)));
+    expect(api.getRun).toHaveBeenCalledTimes(snapshots);
+    expect(api.pollEvents).toHaveBeenCalledTimes(logs);
+    await deliver('node.suspended', 91);
+    expect(api.getRun).toHaveBeenCalledTimes(snapshots + 1);
+  });
+
+
+  it('deduplicates same-sequence SSE callbacks in StrictMode before issuing refresh requests', async () => {
+    view(true);
+    await badge('running');
+    const snapshot = deferred<RunSnapshot>();
+    const log = deferred<{ events: RunEventDoc[] }>();
+    api.getRun.mockImplementation(() => snapshot.promise);
+    api.pollEvents.mockImplementation(() => log.promise);
+    const snapshots = api.getRun.mock.calls.length;
+    const logs = api.pollEvents.mock.calls.length;
+    if (!sseHandler) throw new Error('Run stream did not subscribe');
+    const onEvent = sseHandler;
+    await act(async () => {
+      onEvent(sse('run.completed', 1));
+      onEvent(sse('run.completed', 1));
+    });
+    expect(api.getRun).toHaveBeenCalledTimes(snapshots + 1);
+    expect(api.pollEvents).toHaveBeenCalledTimes(logs + 1);
+    await act(async () => { snapshot.resolve(COMPLETED); log.resolve({ events: [sse('run.completed', 1)] }); });
+    await badge('completed');
+  });
+
 });

@@ -13,7 +13,7 @@
  *   - a stored choice ⇒ that choice;
  *   - else the posture the server reports for this request (`opt-out` ⇒ allowed,
  *     `opt-in` ⇒ denied — the region-aware default, ADR 0860 D2);
- *   - else `unknown` (posture not loaded, failed or 404): nothing is written AND
+ *   - else `unknown` (posture not loaded, failed, `regime: null` or 404): nothing is written AND
  *     an already-stored key is not sent.
  *
  * THE KEY is `owp:vk:<orgId>` (architect M2: one key per org, so a refusal on one

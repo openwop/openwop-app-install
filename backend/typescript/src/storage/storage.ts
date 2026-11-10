@@ -1499,6 +1499,20 @@ export interface Storage {
    *  connector deliverability probe — "is there a live device that can actually
    *  deliver outbound for this channel right now?". */
   listRelayDevices(tenantId: string): Promise<readonly RelayDeviceRecord[]>;
+  /**
+   * ADR 1043 M3 — column-only, CONDITIONAL writes for the device lifecycle, so a
+   * write made from a copy loaded earlier can never undo a concurrent one (a
+   * heartbeat after a revoke, a heartbeat over a fresh rotation). Each returns
+   * whether a row matched and changed.
+   */
+  /** Exchange the activation code for a token: only while still `registered` with that code. */
+  activateRelayDevice(relayId: string, activationCode: string, tokenHash: string, tokenExpiresAt: string): Promise<boolean>;
+  /** Record a heartbeat: only while `active` and still holding `tokenHash`. Touches no other column. */
+  touchRelayDeviceHeartbeat(relayId: string, tokenHash: string, at: string, reportedStatus?: string): Promise<boolean>;
+  /** Swap the token hash: only while `active` and still holding `expectedHash`. */
+  rotateRelayDeviceToken(relayId: string, expectedHash: string, nextHash: string, tokenExpiresAt: string): Promise<boolean>;
+  /** Revoke: status `revoked`, token hash and expiry cleared, whatever was loaded before. */
+  revokeRelayDevice(relayId: string): Promise<boolean>;
 
   // ── agent-attributed run activity index (RFC 0086) ──
   /** Record (append-only, idempotent on runId) that a run is attributed to a
@@ -1564,6 +1578,20 @@ export interface Storage {
     status?: string;
     limit?: number;
   }): Promise<readonly DeliveryLogRecord[]>;
+  /**
+   * ADR 1043 RELAY-LOG-RETENTION-1 — the delivery log's three delete paths (tenant
+   * teardown reaches it through `deleteAllTenantData`'s `tenant_id` introspection).
+   * Each returns the rows deleted.
+   *  - `pruneDeliveryLog`: rows with `at` before `cutoffIso`, skipping every tenant
+   *    in `exceptTenants` (the tenants under legal hold).
+   *  - `deleteDeliveryLogForConversation`: rows of one tenant whose
+   *    `conversation_id` EQUALS the given id (subject erasure; no prefix match).
+   *  - `deleteDeliveryLogForRelay`: rows of one tenant written for one relay device
+   *    (revoke, and erasure of the device's owner).
+   */
+  pruneDeliveryLog(cutoffIso: string, exceptTenants: readonly string[]): Promise<number>;
+  deleteDeliveryLogForConversation(tenantId: string, conversationId: string): Promise<number>;
+  deleteDeliveryLogForRelay(tenantId: string, relayId: string): Promise<number>;
   appendMessagingTurn(record: MessagingTurnRecord): Promise<void>;
   /**
    * Return the most-recent `limit` turns for a session, oldest → newest.

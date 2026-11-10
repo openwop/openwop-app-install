@@ -1114,15 +1114,21 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
   // ADR 0836 D3 — not on a SCHEDULED draft unless the caller is known to be an
   // admin: a non-admin save cancels the schedule, and that must be a decision
   // (the confirm in `save`), never a keystroke pause.
+  // CMS-HERO-AUTOSAVE-1: a newly inserted Hero is intentionally unfinished.
+  // Keep it dirty/local until its required heading is ready; explicit Save and
+  // every server validation/CAS rule remain authoritative. Shared refs have no
+  // local heading because their content belongs to the referenced section.
+  const incompleteHero = selected?.sections.some((section) => !section.ref && section.type === 'hero'
+    && (typeof section.data.heading !== 'string' || !section.data.heading.trim())) ?? false;
   const autosaveDraft = selected?.status === 'draft' && !translatorSurface && !(selected.scheduledPublishAt && canAdmin !== true);
   useEffect(() => {
-    if (!dirty || !autosaveDraft || busy || saveConflict || autosaveFailedOn.current === selected) return;
+    if (!dirty || !autosaveDraft || incompleteHero || busy || saveConflict || autosaveFailedOn.current === selected) return;
     const attempt = selected;
     const handle = setTimeout(() => {
       void save({ silent: true }).then((ok) => { autosaveFailedOn.current = ok ? null : attempt; });
     }, AUTOSAVE_MS);
     return () => clearTimeout(handle);
-  }, [dirty, autosaveDraft, busy, saveConflict, save, selected, seo]);
+  }, [dirty, autosaveDraft, incompleteHero, busy, saveConflict, save, selected, seo]);
   // ADR 0836 D6 — what a non-admin may not change (the server's live tier): a
   // live or scheduled page's search fields, and a shared section a live or
   // scheduled page renders. Shown read-only with the reason, not offered and 403'd.
@@ -1376,11 +1382,11 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
             org-scoped config — languages (ADR 0064) + shared sections
             (ADR 0204 C4) — so the page-level panels (History, Preview links)
             stay visually distinct from org configuration. */}
-        {!selected && !translatorSurface ? (
+        {orgId && !selected && !translatorSurface ? (
         <details className="surface-card u-gap-2 u-mb-2">
           <summary className="u-label-sm">{t('orgSettingsHeading')}{settings && settings.supportedLocales.length > 0 ? ` · ${t('orgSettingsLocaleCount', { count: settings.supportedLocales.length })}` : ''}{sharedSections.length > 0 ? ` · ${t('sharedHeading', { count: sharedSections.length })}` : ''}</summary>
           <div className="u-mt-2 u-grid u-gap-3">
-            <CmsLanguageSettings orgId={orgId} onChange={setSettings} />
+            <CmsLanguageSettings key={orgId} orgId={orgId} onChange={setSettings} />
             {/* CMS2-B5 — the fourth consequence of the one swallowed read: with
                 `sharedSections` at `[]` this whole section simply vanished, so
                 the org config screen quietly asserted there are no shared
@@ -1488,6 +1494,7 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
                   governed draft-patch + submit verbs apply; publishing stays human.
                   Seed the ONE chat with the page context, then deep-link the agent. */}
               <span className="u-label-sm cms-save-state" role="status" data-state={saveState}>{t(`saveState_${saveState}`)}</span>
+              {dirty && autosaveDraft && incompleteHero ? <span className="u-label-sm" role="status">{t('autosaveHeroHeadingNeeded')}</span> : null}
               {dirty || saveConflict ? (
                 // A draft saves itself, so Save is secondary there; on a live page
                 // it is the action that matters.

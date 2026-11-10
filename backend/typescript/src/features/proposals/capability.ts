@@ -20,8 +20,9 @@ export interface ProposalsFacet {
   readback?: ProposalKind[];
 }
 
-/** Kinds whose installer has a v2 read-back (RFC 0249 §D). Phase 1: templates only. */
-const READBACK_KINDS: readonly ProposalKind[] = ['prompt-template'];
+/** Kinds whose installer has a v2 read-back: templates (RFC 0249 §D) and, since
+ *  ADR 1033, both pack kinds through `getInstalledPack` (RFC 0253). */
+const READBACK_KINDS: readonly ProposalKind[] = ['prompt-template', 'workflow-chain-pack', 'agent-pack'];
 
 export function proposalsFacet(): ProposalsFacet | null {
   const kinds = installableProposalKinds();

@@ -18,9 +18,10 @@
  *    written with a space.
  *  - The node never reports success-with-nothing.
  *
- * Sabotage that turns it red: drop the version from the signature check; let a
- * refused item move the ledger; push unchanged items; skip removals; put the
- * cost in an item; send a variant id over 50 characters.
+ * Sabotage that turns it red: drop the version from the signature check or from
+ * the signed payload; let a refused item move the ledger; push unchanged items;
+ * skip removals; put the cost in an item; send a variant id over 50 characters;
+ * drop the verified-platform check before the nothing-to-send return.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import http from 'node:http';
@@ -178,6 +179,7 @@ describe('ADR 0952 P7 — the signed public URL', () => {
     const url2 = new URL((rot.body as { feedUrl: string }).feedUrl);
     expect(url2.search).not.toBe(url1.search);
     await notFound(path1); // the rotated-away URL is dead
+    await notFound(path1.replace(/v=\d+/, 'v=2')); // and the version is signed: its signature does not move to v2
     expect((await fetch(`${BASE}${url2.pathname}${url2.search}`)).status).toBe(200);
 
     const d = getToggleDefault('campaign-connectors');
@@ -216,8 +218,27 @@ describe('ADR 0952 P7 — the signed public URL', () => {
     expect((await c.put(FEED(orgId), { merchantAccountId: '42', merchantDataSource: 'accounts/42/dataSources/7' })).body).toMatchObject({ merchantAccountId: '42', merchantDataSource: 'accounts/42/dataSources/7' });
     const stranger = client();
     await stranger.post('/host/openwop-app/test/login', { email: `stranger-${Date.now()}@x.test` });
-    expect([403, 404]).toContain((await stranger.get(FEED(orgId))).status);
-    expect([403, 404]).toContain((await stranger.post(`${FEED(orgId)}/push`, { platform: 'meta' })).status);
+    const strangerRead = await stranger.get(FEED(orgId));
+    expect(strangerRead.status).toBe(404);
+    expect((strangerRead.body as { error?: string }).error).toBe('not_found');
+    expect((await stranger.post(`${FEED(orgId)}/push`, { platform: 'meta' })).status).toBe(404);
+    // A stranger stops at the org lookup. The scope gate needs a member of the same
+    // workspace who holds no role on this org, which only a shared workspace can have.
+    const owner = client();
+    expect((await owner.post('/host/openwop-app/test/login', { email: `feed-owner-${Date.now()}-${n++}@x.test` })).status).toBe(201);
+    const ws = (await owner.post('/host/openwop-app/workspaces', { name: `Feed ${n++}` })).body as { workspaceId: string };
+    expect((await owner.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws.workspaceId)}/switch`)).status).toBe(200);
+    const shared = ((await owner.post('/host/openwop-app/orgs', { name: 'Shared' })).body as { orgId: string }).orgId;
+    expect((await owner.get(FEED(shared))).status).toBe(200);
+    const insider = client();
+    const login = await insider.post('/host/openwop-app/test/login', { email: `feed-insider-${Date.now()}-${n++}@x.test` });
+    const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(ws.workspaceId)}/members`, { displayName: 'viewer', subject: (login.body as { user: { userId: string } }).user.userId, roles: ['viewer'] });
+    expect(add.status, add.text).toBe(201);
+    expect((await insider.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws.workspaceId)}/switch`)).status).toBe(200);
+    const insiderRead = await insider.get(FEED(shared));
+    expect(insiderRead.status, insiderRead.text).toBe(403);
+    expect((insiderRead.body as { error?: string }).error).toBe('forbidden_scope');
+    expect((await insider.post(`${FEED(shared)}/push`, { platform: 'meta' })).status).toBe(403);
   });
 });
 
@@ -237,8 +258,10 @@ describe('ADR 0952 P7 — API push (fixture-only)', () => {
     const { tenantId, orgId, deps } = await setup('u-a');
     expect(await pushCatalog(deps, tenantId, orgId, 'meta', 'https://shop.example')).toEqual({ outcome: 'disabled' });
     await saveFeedSettings(tenantId, orgId, { enabled: true, metaCatalogId: '777' });
-    await createProduct({ tenantId, orgId, createdBy: 'u1', type: 'digital', name: 'A', price: 3, currency: 'USD', imageAssetTokens: ['i'] });
     delete process.env.OPENWOP_ADS_VERIFIED_CATALOG_PUSH;
+    // Nothing to send yet: only `pushCatalog`'s own check stands between this and `pushed`.
+    expect(await pushCatalog(deps, tenantId, orgId, 'meta', 'https://shop.example')).toEqual({ outcome: 'unsupported' });
+    await createProduct({ tenantId, orgId, createdBy: 'u1', type: 'digital', name: 'A', price: 3, currency: 'USD', imageAssetTokens: ['i'] });
     expect(await pushCatalog(deps, tenantId, orgId, 'meta', 'https://shop.example')).toEqual({ outcome: 'unsupported' });
     expect(hits).toHaveLength(0);
     expect(await pushCatalog(deps, tenantId, orgId, 'google', 'https://shop.example')).toEqual({ outcome: 'unsupported' });

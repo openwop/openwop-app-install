@@ -10,16 +10,24 @@
  *   - an index row whose run no longer carries this campaign's tag is dropped;
  *   - the toggle gates the route; sections whose owner is absent say so.
  *
- * Sabotage witnesses (each reds the named case; run 2026-10-20):
- *   - `loadCampaignScoped(req, 'workspace:read')` swapped for a bare
- *     `getCampaign`: "a client-B operator…";
+ * Sabotage witnesses (each reds the named case; run 2026-10-20, re-measured
+ * by probes w80g3-cs-* on 2026-11-03):
+ *   - the org predicate in `loadCampaignScoped` dropped: "a client-B operator…"
+ *     and "returns the definition…";
+ *   - the route's toggle check removed: "a client-B operator…";
  *   - the explicit gate fields replaced by `{ ...i, ageMs }`: "…no interrupt token…";
- *   - the stored-tag re-check removed: "an index row whose run…".
+ *   - `node.suspended` no longer folded: "…its live node…";
+ *   - the stored-tag re-check removed: "an index row whose run…";
+ *   - the caller-metadata strip of `campaignOrchestration` removed: "a spoofed…".
+ *   - DOUBLE GUARD in `campaignRunOf` (index membership AND the stored tag, one
+ *     file): dropping either alone stays green for "another campaign's id";
+ *     dropping both reds "returns the definition…".
+ * 404s assert the exact refusal, and waits are `vi.waitFor` on the real state.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { randomBytes } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import type { HostAdapterSuite } from '../src/host/index.js';
@@ -77,14 +85,18 @@ async function campaignIn(orgId: string): Promise<MarketingCampaign> {
   return (await ensureDraftCampaign(TENANT, brief, memberA)).campaign;
 }
 
-async function until<T>(read: () => Promise<T>, ok: (v: T) => boolean, ms = 10_000): Promise<T> {
-  const end = Date.now() + ms;
-  for (;;) {
-    const v = await read();
-    if (ok(v) || Date.now() > end) return v;
-    await new Promise((r) => setTimeout(r, 50));
-  }
+/** Poll `read` until `ok` holds; throws (with the last value) after 10 s. */
+async function until<T>(read: () => Promise<T>, ok: (v: T) => boolean): Promise<T> {
+  let last = await read();
+  await vi.waitFor(async () => {
+    last = await read();
+    expect(ok(last), JSON.stringify(last)).toBe(true);
+  }, { timeout: 10_000, interval: 50 });
+  return last;
 }
+interface Refusal { error?: string; message?: string }
+const CAMPAIGN_404 = { error: 'not_found', message: 'Campaign not found.' };
+const RUN_404 = { error: 'not_found', message: 'Run not found.' };
 
 interface Snapshot {
   campaign: { id: string; orgId: string };
@@ -130,11 +142,21 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 describe('ADR 0960 P0 — the command snapshot', () => {
   it('a client-B operator gets 404 on client A\'s campaign; the toggle gates the route', async () => {
     const c = await campaignIn(orgA);
-    expect((await commandOf(cookieA, c.id)).status).toBe(200);
-    expect((await commandOf(cookieB, c.id)).status).toBe(404);
-    expect((await commandOf(cookieB, 'cmp_nothing')).status).toBe(404);
+    const own = await commandOf(cookieA, c.id);
+    expect(own.status).toBe(200);
+    expect(own.body.command.campaign).toMatchObject({ id: c.id, orgId: orgA });
+    // Uniform: another client's campaign is refused exactly like a missing one.
+    for (const id of [c.id, 'cmp_nothing']) {
+      const r = await call<Refusal>(cookieB, 'GET', `/host/openwop-app/campaign-orchestration/campaigns/${encodeURIComponent(id)}/command`);
+      expect(r.status).toBe(404);
+      expect(r.body).toMatchObject(CAMPAIGN_404);
+    }
     await setToggle('campaign-orchestration', false);
-    try { expect((await commandOf(cookieA, c.id)).status).toBe(404); } finally { await setToggle('campaign-orchestration', true); }
+    try {
+      const off = await call<Refusal>(cookieA, 'GET', `/host/openwop-app/campaign-orchestration/campaigns/${encodeURIComponent(c.id)}/command`);
+      expect(off.status).toBe(404);
+      expect(off.body).toMatchObject({ error: 'not_found', message: 'Campaign Studio is not enabled for this tenant.' });
+    } finally { await setToggle('campaign-orchestration', true); }
   });
 
   it('a campaign run waiting on a gate shows as a run, its live node and one gate — and no interrupt token appears', async () => {
@@ -143,18 +165,22 @@ describe('ADR 0960 P0 — the command snapshot', () => {
       tenantId: TENANT, workflowId: GATED, inputs: {},
       metadata: { actingUserId: memberA, [CAMPAIGN_RUN_TAG_KEY]: stampCampaignRun(c, { role: 'stage' }) },
     });
-    expect(runId).toBeTruthy();
-    const id = bareRunId(runId as string);
+    if (typeof runId !== 'string') throw new Error('the gated run did not start');
+    const id = bareRunId(runId);
     await until(() => storage.getRun(id), (r) => !!r && r.status.startsWith('waiting'));
     const open = await storage.listOpenInterrupts(id);
     expect(open).toHaveLength(1);
+    const [gate] = open;
+    if (!gate) throw new Error('no open gate');
+    // Positive control: there IS a bearer token that could leak.
+    expect(gate.token).toMatch(/\S{16,}/);
     const res = await until(() => commandOf(cookieA, c.id), (r) => (r.body?.command?.gates ?? []).length > 0);
     const snap = res.body.command;
     expect(snap.runs).toEqual([expect.objectContaining({ runId: id, role: 'stage' })]);
     expect(snap.runs[0]?.status).toMatch(/^waiting/);
     expect(snap.nodes).toEqual([expect.objectContaining({ runId: id, status: 'suspended' })]);
-    expect(snap.gates).toEqual([expect.objectContaining({ runId: id, interruptId: open[0]?.interruptId, kind: 'approval' })]);
-    expect(res.raw).not.toContain(open[0]?.token as string);
+    expect(snap.gates).toEqual([expect.objectContaining({ runId: id, interruptId: gate.interruptId, kind: 'approval' })]);
+    expect(res.raw).not.toContain(gate.token);
     expect(res.raw).not.toContain('"token"');
     expect(snap.unavailable).toMatchObject({ autonomy: 'campaign-orchestration.autonomy', playbook: 'campaign-playbooks' });
   });
@@ -187,10 +213,12 @@ describe('ADR 0960 P1 — the run definition for the read-only graph', () => {
   it('returns the definition a campaign run executed, only for a run of that campaign and only to its client', async () => {
     const c = await campaignIn(orgA);
     const other = await campaignIn(orgA);
-    const runId = bareRunId((await startWorkflowRun({ storage, hostSuite }, {
+    const started = await startWorkflowRun({ storage, hostSuite }, {
       tenantId: TENANT, workflowId: GATED, inputs: {},
       metadata: { actingUserId: memberA, [CAMPAIGN_RUN_TAG_KEY]: stampCampaignRun(c, { role: 'stage' }) },
-    })) as string);
+    });
+    if (typeof started !== 'string') throw new Error('the gated run did not start');
+    const runId = bareRunId(started);
     await until(() => storage.getRun(runId), (r) => !!r && r.status !== 'pending');
     const path = (cid: string, rid: string) => `/host/openwop-app/campaign-orchestration/campaigns/${encodeURIComponent(cid)}/command/runs/${encodeURIComponent(rid)}/definition`;
     const ok = await call<{ workflowId: string; definition: { nodes: Array<{ nodeId: string }> } }>(cookieA, 'GET', path(c.id, runId));
@@ -198,8 +226,15 @@ describe('ADR 0960 P1 — the run definition for the read-only graph', () => {
     expect(ok.body.workflowId).toBe(GATED);
     expect(ok.body.definition.nodes.map((n) => n.nodeId)).toEqual(['gate']);
     // Another campaign's id, another client, an unknown run: all a uniform 404.
-    expect((await call(cookieA, 'GET', path(other.id, runId))).status).toBe(404);
-    expect((await call(cookieB, 'GET', path(c.id, runId))).status).toBe(404);
-    expect((await call(cookieA, 'GET', path(c.id, 'r-nothing'))).status).toBe(404);
+    const refusals: Array<[string, string, Refusal]> = [
+      [cookieA, path(other.id, runId), RUN_404],
+      [cookieB, path(c.id, runId), CAMPAIGN_404],
+      [cookieA, path(c.id, 'r-nothing'), RUN_404],
+    ];
+    for (const [cookie, p, want] of refusals) {
+      const r = await call<Refusal>(cookie, 'GET', p);
+      expect(r.status, p).toBe(404);
+      expect(r.body, p).toMatchObject(want);
+    }
   });
 });

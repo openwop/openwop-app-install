@@ -25,13 +25,14 @@ import { createLogger } from '../observability/logger.js';
 import { isInstalledPack, verifyInstalledPack } from './registryInstaller.js';
 import { classifyPackDir, type PackTrustVerdict } from '../host/packTrust.js';
 import { packNodeEligibility } from '../host/packIsolationPolicy.js';
+import { classifyUnbuiltPackNode, recordRuntimeFloorDecision } from '../executor/sideEffects.js';
 
 const log = createLogger('packs.tarballLoader');
 
 interface PackManifest {
   name: string;
   version: string;
-  nodes?: Array<{ typeId: string; version: string; 'x-dataFields'?: unknown }>;
+  nodes?: Array<{ typeId: string; version: string; role?: unknown; capabilities?: unknown; 'x-dataFields'?: unknown }>;
   runtime?: { format?: string; entry?: string };
   /** RFC 0072 §C capability declarations. ADR 0555 P1 reads this to decide
    *  isolation eligibility (`secrets.resolveInPack` ⇒ ineligible). */
@@ -143,11 +144,22 @@ export async function loadPackFromManifest(packDir: string): Promise<NodeModule 
   const first: NodeModule | null = null;
   let firstReturned: NodeModule | null = first;
   const registry = getNodeRegistry();
+  const servedByRuntimeFloor: string[] = [];
   for (const [typeId, fn] of Object.entries(loaded.nodes)) {
     if (typeof fn !== 'function') continue;
+    // ADR 1048 D5 — the runtime manifest floor. A node no build classified is
+    // classified from this pack's own manifest entry, failing CLOSED (served on
+    // replay) on a side-effect declaration or a missing/unknown role. A typeId a
+    // build already decided is left exactly as that build decided it.
+    const floor = classifyUnbuiltPackNode(typeId, manifest.nodes?.find((n) => n.typeId === typeId));
+    if (floor) {
+      recordRuntimeFloorDecision(typeId, manifest.name, floor);
+      if (floor.served) servedByRuntimeFloor.push(typeId);
+    }
     const module: NodeModule = {
       typeId,
       version: manifest.version,
+      ...(floor?.served ? { sideEffecting: true } : {}),
       // ADR 0555 P1 — provenance + isolation eligibility travel WITH the
       // registered module. The executor cannot re-derive either at dispatch
       // time (it holds a typeId and a function, not a pack dir), and a second
@@ -219,6 +231,14 @@ export async function loadPackFromManifest(packDir: string): Promise<NodeModule 
     registry.register(module);
     if (!firstReturned) firstReturned = module;
   }
+  if (servedByRuntimeFloor.length > 0) {
+    log.warn('pack nodes no build classified are SERVED on replay by the runtime manifest floor (ADR 1048 D5)', {
+      pack: manifest.name,
+      version: manifest.version,
+      tier: trust.tier,
+      typeIds: servedByRuntimeFloor,
+    });
+  }
   return firstReturned;
 }
 
@@ -240,8 +260,8 @@ function registerRefusalStubs(
     trust.tier === 'revoked'
       ? `Pack '${trust.packName}'${trust.version ? `@${trust.version}` : ''} is REVOKED and will not execute (ADR 0555).`
       : `Pack '${trust.packName}'${trust.version ? `@${trust.version}` : ''} is untrusted (${trust.reason})`
-        + ` and will not execute. It is neither steward-attested in packs/.steward-manifest.json`
-        + ` nor verified by an install marker.`;
+        + ` and will not execute. It is not steward-attested in packs/.steward-manifest.json,`
+        + ` not adopter-attested in packs/.adopter-manifest.json (ADR 1048), and not verified by an install marker.`;
 
   const registry = getNodeRegistry();
   let firstReturned: NodeModule | null = null;

@@ -46,6 +46,7 @@ import { loadWorkflowChainPacks, listChains, expandChain, _resetChainRegistryFor
 import { buildGraph, freshSnapshot, inspectDisposition, markCompleted, markFailed, popReady, releaseDownstream } from '../src/executor/scheduler.js';
 import { APPROVAL_GATE_TYPE_IDS } from '../src/host/approvalGateTypeIds.js';
 import type { WorkflowDefinition } from '../src/executor/types.js';
+import { declaredIdTable } from './helpers/featureRatchetTables.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const IN_TREE_ROOT = join(__dirname, '..', '..', '..', 'examples', 'workflow-chain-packs');
@@ -186,10 +187,10 @@ describe('WF-FAIL-2 — a failed node never silently skips an approval gate', ()
     for (const key of Object.keys(GUARDED_IN_NODE)) expect(all, `stale GUARDED_IN_NODE entry: ${key}`).toContain(key);
   });
 
-  // The replan chain is the WF-FAIL-2 finding this ratchet was written for:
-  // a failed `enrich` used to skip the participant's approval gate and `apply`
-  // still changed their plan. Named here so a regression reads as what it is.
-  it('kicktodo.replan: a failed enrich never applies an unapproved revision', () => {
-    expect(violations().filter((v) => v.startsWith('openwop-app.kicktodo.replan '))).toEqual([]);
+  // Named witnesses, so a regression reads as what it is. ADR 1031 P2: declared by the
+  // owning package (`ratchetTables.json` idTables `chainFailure.namedWitnesses`, chain id →
+  // the finding). KickTodo's replan chain is the WF-FAIL-2 finding this ratchet was written for.
+  it.each(Object.entries(declaredIdTable<string>('chainFailure.namedWitnesses')))('%s: %s', (chainId) => {
+    expect(violations().filter((v) => v.startsWith(`${chainId} `))).toEqual([]);
   });
 });

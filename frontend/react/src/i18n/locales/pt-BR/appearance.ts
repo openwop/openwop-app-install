@@ -40,6 +40,11 @@ export const messages = {
   cornersSharp: 'Retos',
   cornersMedium: 'Médios',
   cornersRound: 'Arredondados',
+  // ADR 1029 D6
+  motionLabel: 'Movimento das páginas públicas',
+  motionCalm: 'Calmo (padrão)',
+  motionLively: 'Vivo (mais deslocamento)',
+  motionSubtle: 'Sutil (só esmaecer)',
   defaultThemeLabel: 'Tema padrão',
   themeSystem: 'Sistema',
   themeLight: 'Claro',

@@ -42,7 +42,7 @@ import { claimExchange, commitExchange, releaseExchange } from './conversationEx
 import { checkDeepInvestigationBudget } from './runBudgetService.js';
 import { getAgentProfile } from './agentProfileService.js';
 import { createLogger } from '../observability/logger.js';
-import { runConversationAgentToolTurn, conversationToolTurnEligible, applyGroupRoomScaffoldNotice } from './conversationToolLoop.js';
+import { runConversationAgentToolTurn, conversationToolTurnEligible, applyGroupRoomScaffoldNotice, isNarrowChannelRun } from './conversationToolLoop.js';
 import type { AgentEvent } from './agentDispatch.js';
 import type { ContentPart } from '../providers/dispatch.js';
 import type { ProviderPolicyResolver } from './index.js';
@@ -60,6 +60,7 @@ import { applyCouncilTurn, councilTurnOf, gateRosterOf } from './exchange/counci
 import { dispatchReply, turnsToMessages, resolveModelProvenance, type ByokBudgetNotice, type DeepRunBudgetNotice, type ExchangeNotice } from './exchange/dispatchTurn.js';
 import { recordTurnAttribution, type ServedModel } from './turnAttribution.js';
 import { persistExchangedPair, mirrorTurnToChannel, autotitleAfterExchange, maybeExtractMemoryOnClose } from './exchange/persistExchange.js';
+import { notifyExchangeSettled } from './exchange/settledObservers.js';
 import { buildRunDispatchTurns, appendRunTurnDirect, type TurnRunDispatch } from './turnRunDispatch.js';
 
 // ── Public surface (preserved across the ADR 0327 P1 split) ────────────────
@@ -93,6 +94,8 @@ export interface ConversationResolveResult {
  *  narration. Absent ⇒ the legacy single-completion path (no regression). */
 export interface ConversationHostDeps {
   policyResolver?: ProviderPolicyResolver;
+  /** ADR 1042 D9 — a narrow channel turn's tool scope (host-only; never from the request). */
+  toolScope?: import('./conversationToolLoop.js').ChannelToolScope;
   /** CS-BE-1 (conversation-stack audit) — the AUTHENTICATED HTTP caller of the
    *  resolve route (undefined for anonymous/unresolvable callers). Every
    *  exchange/close is gated on this caller's conversation visibility below;
@@ -347,6 +350,9 @@ export async function handleConversationResolve(
     // retried exchange (a failed attempt persists no turns), so a genuine
     // retry still collapses to one row.
     dispatchId: `turn:${nextIndex}`,
+    // ADR 1042 D9 — a narrow channel turn loads no agent memory or twin recall.
+    // Review N1 — and every turn of a narrow channel conversation, in-app ones included.
+    ...(hostDeps?.toolScope?.mode === 'narrow' || isNarrowChannelRun(run) ? { suppressRecall: true } : {}),
   });
   // H1 / ADR 0588 D5 — the LIKENESS GATE on the turn path. The two lanes that
   // carried it before were both room-CREATION lanes, so a boardroom opened while
@@ -739,6 +745,7 @@ export async function handleConversationResolve(
           ...(exchangeModelOverride ? { modelOverride: exchangeModelOverride } : {}),
           route: turnRoute,
           tier: modelTier,
+          ...(hostDeps.toolScope ? { toolScope: hostDeps.toolScope } : {}),
         });
         if (toolTurn) {
           if (toolTurn.error) {
@@ -884,6 +891,16 @@ export async function handleConversationResolve(
     // Commit the idempotency claim now that both turns are durable: a later retry
     // of this key short-circuits to the appended turns instead of dispatching again.
     if (exchangeKey) await commitExchange(run.tenantId, conversationId, exchangeKey, nextIndex, agentIndex, Date.now());
+
+    // ADR 1042 D7 — both turns are durable and the claim is committed: announce the
+    // settled exchange (sync AND async path; the deep-investigation path above
+    // answers with a run bubble, not text, and announces nothing) so a feature can act on the reply —
+    // the channel-ingress transport sends it back to the chat it came from.
+    // Fail-soft inside; awaited so the send has CPU (ADR 0699 D1's reasoning).
+    await notifyExchangeSettled({
+      tenantId: run.tenantId, runId: interrupt.runId, conversationId, chatSessionId, exchangeKey,
+      userText, replyText: asText(agentContent), noContribution,
+    });
 
     // ADR 0151 — first-exchange auto-titling (fire-and-forget + fail-closed in
     // the binding; emits `openwop-app.conversation.titled` so the FE rail/tab updates live).

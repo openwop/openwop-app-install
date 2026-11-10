@@ -24,6 +24,18 @@
  *
  * Hence: no new edges were declared. What IS enforced here are the invariants that
  * caught real bugs, plus a ratchet so the gap cannot silently widen.
+ *
+ * CORRECTED 2026-11-07 (grade-tests wave 92, TST-GUB-1): "184 edges, 19 declared" is
+ * the ADR 0439 snapshot. Measured on 5161aec5e: 129 features, 16 declared edges, 0
+ * phantom locks, 4 declared always-on deps, and 115 undeclared→toggleable edges against
+ * the ratchet's `<= 122`. The ratchet therefore carries 7 edges of SLACK (the KickTodo
+ * exit, ADR 1031, removed edges and the bound was not lowered), so up to 7 new
+ * undeclared edges pass unnoticed today. Lowering it is a human decision (TST-GUB-H1);
+ * so is skipping `import type` edges (TST-GUB-H2).
+ *
+ * Sabotage-witnessed (wave 92): an undeclared-import dep in csm reds the phantom-lock
+ * case; `crm dependsOn email` reds the cycle case; a dangling id reds the dangling and
+ * phantom cases. One new undeclared edge does NOT red the ratchet (the slack above).
  */
 
 import { describe, expect, it } from 'vitest';
@@ -32,6 +44,12 @@ import { join, resolve, dirname, relative, sep } from 'node:path';
 import { BACKEND_FEATURES } from '../src/features/index.js';
 
 const FEATURES_DIR = join(import.meta.dirname, '../src/features');
+/** ADR 1031: an adopter's feature packages live here (empty in this repo, populated
+ *  downstream). Without it every adopter `dependsOn` reads as a phantom lock,
+ *  because the walk finds no source for the feature at all. */
+const ADOPTER_FEATURES_DIR = join(import.meta.dirname, '../src/adopter/features');
+const ROOTS = [FEATURES_DIR, ADOPTER_FEATURES_DIR];
+const isAdopter = (id: string): boolean => existsSync(join(ADOPTER_FEATURES_DIR, id));
 
 const featureIds = new Set(BACKEND_FEATURES.map((f) => f.id));
 const declared = new Map<string, string[]>(BACKEND_FEATURES.map((f) => [f.id, [...(f.dependsOn ?? [])]]));
@@ -39,8 +57,8 @@ const isAlwaysOn = (id: string): boolean => !BACKEND_FEATURES.find((f) => f.id =
 
 /** Every non-test .ts under a feature dir. */
 function sources(featureId: string): string[] {
-  const root = join(FEATURES_DIR, featureId);
-  if (!existsSync(root)) return [];
+  const root = ROOTS.map((r) => join(r, featureId)).find((p) => existsSync(p));
+  if (!root) return [];
   const out: string[] = [];
   const walk = (dir: string): void => {
     for (const e of readdirSync(dir)) {
@@ -73,8 +91,11 @@ function importEdges(): Map<string, Set<string>> {
       // which is a false all-clear on exactly the coupling this test polices.
       for (const m of src.matchAll(/(?:from\s*|import\s*\(\s*)['"](\.[^'"]*)['"]/g)) {
         const resolved = resolve(dirname(file), m[1]!);
-        const rel = relative(FEATURES_DIR, resolved);
-        if (rel.startsWith('..')) continue; // outside features/ — host, storage, …
+        // Owner = the first path segment under whichever feature root holds the
+        // target. An adopter feature reaches first-party ones as
+        // `../../../features/<b>/…` and its siblings as `../<b>/…`.
+        const rel = ROOTS.map((r) => relative(r, resolved)).find((x) => !x.startsWith('..'));
+        if (rel === undefined) continue; // outside both roots — host, storage, …
         const b = rel.split(sep)[0];
         // Only sibling FEATURE dirs; shared seams live directly in features/
         // (types.js, featureRoute.js, index.js, …) and are not feature coupling.
@@ -109,9 +130,11 @@ describe('ADR 0439 — feature dependency graph integrity', () => {
     // blocks"). That rule was WRONG for this codebase, and the disagreement is worth
     // keeping visible rather than silently resolving:
     //
-    //   `kicktodo-core` declares `goals` — always-on, core tier — with an explicit
+    //   `kicktodo-core` declared `goals` — always-on, core tier — with an explicit
     //   rationale ("the dependency is real: the enrollment saga creates one ADR 0412
     //   goal per enrollment. Declaring it is free... and records the relationship").
+    //   (CORRECTED 2026-11-07: kicktodo-core left with ADR 1031; the same reasoning
+    //   holds for the 4 always-on declared deps measured on 5161aec5e.)
     //
     // That reasoning holds: `goals` is core, so it is in every distribution and the
     // composer closure cost is exactly zero, while the declaration documents a real
@@ -123,9 +146,16 @@ describe('ADR 0439 — feature dependency graph integrity', () => {
     const alwaysOnDeps = [...declared].flatMap(([a, deps]) =>
       deps.filter((b) => featureIds.has(b) && isAlwaysOn(b)).map((b) => `${a} → ${b}`),
     );
-    // Informational: these are allowed. The assertion is only that they stay
-    // import-backed, which the first case already guarantees.
-    expect(Array.isArray(alwaysOnDeps)).toBe(true);
+    // The allowance must actually be exercised by the real catalog (a classifier that
+    // never saw an always-on dep would make this case, and the ratchet's exclusion of
+    // substrate edges, silently mean nothing), and every allowed dep must still be
+    // import-backed. The second half overlaps case 1 (TST-GUB-H3, kept by ruling).
+    expect(alwaysOnDeps.length, 'the allowance is exercised by the real catalog (4 measured on 5161aec5e)').toBeGreaterThan(0);
+    const unbacked = alwaysOnDeps.filter((e) => {
+      const [a, b] = e.split(' → ');
+      return !edges.get(a!)?.has(b!);
+    });
+    expect(unbacked, 'an allowed always-on dep must still be import-backed').toEqual([]);
   });
 
   it('the DECLARED graph is acyclic', () => {
@@ -159,10 +189,17 @@ describe('ADR 0439 — feature dependency graph integrity', () => {
     // would deadlock the CRM/commerce group. Rather than an allowlist of 165 lines
     // nobody reads, ratchet the COUNT: new coupling is allowed, but it must be
     // NOTICED. The bound is the exact current value — slack would let drift
-    // accumulate silently, which is the failure this whole ADR is about. If a
+    // accumulate silently, which is the failure this whole ADR is about.
+    // (CORRECTED 2026-11-07: measured 115 on 5161aec5e, so the bound below is NOT the
+    // exact value today; it has 7 of slack. Lowering it is TST-GUB-H1.) If a
     // legitimate new import trips this, raise the number IN THE SAME COMMIT and say
     // why; if you remove coupling, lower it so the ratchet keeps holding.
-    const undeclaredOntoToggleable = [...edges].flatMap(([a, targets]) =>
+    // FIRST-PARTY edges only. This number is measured in openwop-app, where the
+    // adopter root is empty; an adopter's own undeclared edges are its debt, not
+    // growth in this repo's graph, and counting them here would turn every adopter
+    // tree red on a number it cannot change. The integrity cases above DO cover
+    // adopter features (phantom locks, cycles, dangling ids).
+    const undeclaredOntoToggleable = [...edges].filter(([a]) => !isAdopter(a)).flatMap(([a, targets]) =>
       [...targets].filter((b) => !isAlwaysOn(b) && !(declared.get(a) ?? []).includes(b)).map((b) => `${a}→${b}`),
     );
     // 84 → 85 (ADR 0488 P1, 2026-07-25): `tutorials → entities`. The tutorials
@@ -414,6 +451,15 @@ describe('ADR 0439 — feature dependency graph integrity', () => {
     //    attendance activity. Absent either, the outcome is `undefined` and routing
     //    stays sequential (navigation, not authorization).
     // All three UNDECLARED for the standing reason: `dependsOn` is a disable-LOCK.
-    ).toBeLessThanOrEqual(121);
+    // 121 → 122 (ADR 1024 D2.4, row 73, measured on fl2-73-cdp off main fc536023f):
+    //  - `destination-sync → consent`: every egress path checks the subject-erasure
+    //    barrier (`isErasureTombstoned`) before a record leaves. A tombstone is written by
+    //    erasure, not by the consent FEATURE, and is honoured with the consent toggle off
+    //    (the consent module's own precedence puts the tombstone before the toggle), so
+    //    the read never depends on consent being on. Off-leg (consent off, subject erased
+    //    → still dropped) pinned by adr1024-destination-sync-egress.test.ts D2, which runs
+    //    with consent at its default. UNDECLARED for the standing reason: `dependsOn` is a
+    //    disable-LOCK, and destination-sync already `recommends` consent.
+    ).toBeLessThanOrEqual(122);
   });
 });

@@ -11,6 +11,12 @@
  * agent with no deployment rows starts being recorded (it runs its head, as with
  * the flag off); a deployment that serves a version this host cannot load runs
  * anything; or the flag off records anything.
+ *
+ * Flag off is a double guard: `pinServedAgent` and `servingVersion` both check
+ * `agentVersionsServed()`, so only an edit to that shared predicate reds the
+ * flag-off case. Sabotage-witnessed (grade-tests w83): reuse of this run's
+ * record, the parent's record on a fork, the no-rows head, the null and the
+ * unloadable refusals, the flag predicate, and voice's draw key.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';

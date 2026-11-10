@@ -9,6 +9,30 @@ ADR 0770 (builder integrity), ADR 0596 (workflow-author honesty), ADR 0481
 (builder multiplayer), ADR 0582 (approval gates), ADR 0150 (permission mode),
 DESIGN.md §7 (canvas canon).
 
+## Correction (2026-11-07) — Pair preserves canonical source binding (BUILDER-PORT-1)
+
+Midpoint insertion and suggested-edge application must preserve an omitted
+sourceOutput independently of the handle drawn on the sheet. Omitted proposal
+edges retain canonical null and the literal `out` compatibility placeholder,
+not a first-catalog-field inference. The first split
+leg copies the canonical omission/exact name, while the inserted node's outgoing
+leg uses its deliberately selected named output. Ghost edges on real nodes use
+the same collision-safe Default output/unresolved projection as kept edges;
+virtual IDs never enter suggestion ops or canonical workflow definitions.
+
+The builder schema helper owns binding/type/label/equality rules (ADR 0440
+correction). Unknown default payload shape uses existing `any` compatibility;
+it is not a first-port scalar type guarantee. The inspector's small read-only
+binding description and named connection controls stay on the existing surfaces;
+no second port editor, chat, authoring protocol or authority is introduced.
+The inherited CR-7 test's unknown-source fallback oracle is corrected: its
+unknown-node and missing-endpoint refusal results remain false, the legitimate
+edge remains applied, but its exact named output is now preserved and visibly
+unresolved instead of rewritten. Existing target fallback is explicitly retained;
+new known-name/omitted controls prove the canonical distinction. No assertion is
+suppressed and no case is removed. New cases remain authored **NOT RUN** until
+an explicitly scheduled diagnostic.
+
 ## Context
 
 The builder has one AI entry point: "Create with AI", a slide drawer under the
@@ -793,8 +817,62 @@ itself is in the Inspector.
 - [ ] **OQ3:** widening `pushHistory` to workflow-level fields (it is BLD-7-adjacent,
   ADR 0770 P4) would unlock `setInputSchema` ops. Out of scope here. Revisit after
   ADR 0770 P4.
-- [ ] **OQ4:** should `APPROVAL_GATE_TYPE_IDS` move into the node catalog as
-  `role: "gate"` for host nodes (`nodeRoleMap` gap), instead of a host constant?
-  The constant is chosen for P2 because it is testable today.
+- [x] **OQ4 (resolved 2026-11-03, adopter seams round 3; see the addendum below):**
+  neither replaced nor moved. The gate set is the host constant UNION the pack
+  manifests' `role:"gate"` nodes. Original question: should `APPROVAL_GATE_TYPE_IDS`
+  move into the node catalog as `role: "gate"` for host nodes (`nodeRoleMap` gap),
+  instead of a host constant? The constant is chosen for P2 because it is testable
+  today.
 - [ ] **OQ5:** where the drawer (`aiOpen`) state and ADR 0137 hand-off seeds
   (`workGraphSeed`) land in P5: proposed to seed the empty-sheet composer.
+
+## Addendum — OQ4 answered: the gate set is the host list ∪ manifest `role:"gate"` (2026-11-03)
+
+**Found by** the architect review of adopter packs (2026-11-03, finding 7) and
+the "adopter seams round 3" line of work (the adopter feature seam of PR #5495,
+not yet merged). **Measured on `9a05b6cb8`:** `APPROVAL_GATE_TYPE_IDS` was the only gate
+predicate, and it named nine typeIds. Seven `role:"gate"` nodes that first-party
+packs ship were missing from it:
+
+- `coordination.vote` and `coordination.consensus`;
+- `brand.theme.review` and `brand.persona.review`;
+- `core.chat.phaseInputGate` and `core.chat.clarificationGate`;
+- `core.workflow.assetDecisionGate`.
+
+Every gate that an adopter pack (PR #5495) or a registry-installed pack declares
+was missing too. An AI edit of any of them was `gateSensitive: false`, so it
+could be auto-kept. That is the ADR 0582 invariant this ADR's D4 rests on. The MCP
+campaign lane (`campaignRunGuard.isApprovalGate`, ADR 0962) had the same false
+negative.
+
+**Decision.** `isApprovalGateTypeId(typeId)` (`host/approvalGateTypeIds.ts`) is now
+the one predicate, and both consumers call it. It answers true when either holds:
+
+- the bare typeId (with any `@version` removed) is in the host constant;
+- the pack manifest declares the node `role:"gate"` (`nodeRoleMap()`).
+
+It does not REPLACE the constant. Host-registered gates (`core.approvalGate`,
+`core.interrupt`, `core.hitl.*`) have no manifest, so `nodeRoleMap` cannot see
+them. That was the gap OQ4 named.
+
+- **Add-only.** A manifest can make a node a gate, never stop a host gate being
+  one. A pack that declares `core.approvalGate` with `role:"pure"` changes nothing.
+- **Fail-closed.** If the pack directory cannot be read, the answer is "gate".
+- **No-growth.** A pack node is a gate through its own manifest. The constant is
+  pinned at nine entries and must not grow for pack nodes.
+
+**No RFC.** `role` is an existing pack-manifest field. The host already reads it
+(ADR 0473), and this change adds no manifest field. Gate membership is a
+host-internal policy input to two host-local decisions. It changes no run event,
+endpoint, capability advert or schema. Classifying more nodes as gates only makes
+both decisions stricter.
+
+**Evidence.** `test/adr0773-gate-set-from-manifests.test.ts` is the witness. It
+was committed red on the base, with 4 of 7 cases failing:
+
+- an adopter stub gate gave `[false, false, false]`;
+- `brand.theme.review`, read from its real manifest, gave false;
+- the MCP lane gave false;
+- the census missed seven gates.
+
+It is now green. The sabotage record is in the PR body.

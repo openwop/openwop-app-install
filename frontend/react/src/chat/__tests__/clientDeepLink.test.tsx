@@ -1,12 +1,14 @@
 /**
  * ADR 0944 D2 — `/chat?client=<orgId>` opens a NEW conversation bound to that
  * client, then hands over to `?conversation=` (keeping `?agent=`). A refused
- * binding strips the link and reports the failure; it never opens an unbound
- * chat in its place. The chip names the bound client.
+ * binding strips the link and reports the failure as `state: 'failed'` (ChatTab
+ * renders the notice from that); it never opens an unbound chat in its place. The
+ * chip names the bound client.
  *
- * Break it by dropping `clientOrgId` from the create call (first case), by
- * setting `conversation` in the catch (second case), or by rendering the chip
- * without the client's name (third case).
+ * Break it by dropping `clientOrgId` from the create call, by setting
+ * `conversation` in the catch, by keeping `?client=` after a refusal, by removing
+ * the `enabled` wait, by minting a second request on the StrictMode replay, or by
+ * rendering the chip without the client's name.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { StrictMode } from 'react';
@@ -28,25 +30,24 @@ function Probe({ enabled = true }: { enabled?: boolean }): JSX.Element {
   return <div><span data-testid="state">{state}</span><span data-testid="search">{loc.search}</span></div>;
 }
 
+const created = (sessionId: string): ChatSessionHeader => ({ sessionId, tenantId: 't', title: 'New chat', createdAt: '2026-10-20T00:00:00.000Z', updatedAt: '2026-10-20T00:00:00.000Z', messageCount: 0 });
+
 afterEach(() => { cleanup(); createChatSession.mockReset(); });
 
 describe('ADR 0944 — the ?client= chat link', () => {
   it('waits for session/config readiness before creating the bound conversation', async () => {
-    createChatSession.mockResolvedValue({ sessionId: 'ready-conv', tenantId: 't', title: 'New chat', createdAt: 'x', updatedAt: 'x', messageCount: 0 });
+    createChatSession.mockResolvedValue(created('ready-conv'));
     const { rerender } = render(<MemoryRouter initialEntries={['/chat?client=org-a']}><Probe enabled={false} /></MemoryRouter>);
     expect(createChatSession).not.toHaveBeenCalled();
     rerender(<MemoryRouter initialEntries={['/chat?client=org-a']}><Probe enabled /></MemoryRouter>);
-    await waitFor(() => expect(screen.getByTestId('search').textContent).toContain('conversation=ready-conv'));
+    await waitFor(() => expect(screen.getByTestId('search').textContent).toBe('?conversation=ready-conv'));
     expect(createChatSession).toHaveBeenCalledTimes(1);
   });
   it('creates a client-bound conversation and hands over to ?conversation=, keeping ?agent=', async () => {
-    createChatSession.mockResolvedValue({ sessionId: 'new-conv', tenantId: 't', title: 'New chat', createdAt: 'x', updatedAt: 'x', messageCount: 0 });
+    createChatSession.mockResolvedValue(created('new-conv'));
     render(<MemoryRouter initialEntries={['/chat?client=org-a&agent=strategist']}><Probe /></MemoryRouter>);
-    await waitFor(() => expect(screen.getByTestId('search').textContent).toContain('conversation=new-conv'));
+    await waitFor(() => expect(screen.getByTestId('search').textContent).toBe('?agent=strategist&conversation=new-conv'));
     expect(createChatSession).toHaveBeenCalledWith(expect.objectContaining({ clientOrgId: 'org-a' }));
-    const search = screen.getByTestId('search').textContent ?? '';
-    expect(search).toContain('agent=strategist');
-    expect(search).not.toContain('client=');
     expect(screen.getByTestId('state').textContent).toBe('idle');
   });
 
@@ -54,15 +55,14 @@ describe('ADR 0944 — the ?client= chat link', () => {
     createChatSession.mockRejectedValue(new Error('forbidden_scope'));
     render(<MemoryRouter initialEntries={['/chat?client=org-b']}><Probe /></MemoryRouter>);
     await waitFor(() => expect(screen.getByTestId('state').textContent).toBe('failed'));
-    const search = screen.getByTestId('search').textContent ?? '';
-    expect(search).not.toContain('client=');
-    expect(search).not.toContain('conversation=');
+    expect(screen.getByTestId('search').textContent).toBe('');
+    expect(createChatSession).toHaveBeenCalledTimes(1);
   });
 
   it('StrictMode effect replay opens exactly one client chat and completes navigation', async () => {
-    createChatSession.mockResolvedValue({ sessionId: 'strict-conv', tenantId: 't', title: 'New chat', createdAt: 'x', updatedAt: 'x', messageCount: 0 });
+    createChatSession.mockResolvedValue(created('strict-conv'));
     render(<StrictMode><MemoryRouter initialEntries={['/chat?client=org-a&agent=strategist']}><Probe /></MemoryRouter></StrictMode>);
-    await waitFor(() => expect(screen.getByTestId('search').textContent).toContain('conversation=strict-conv'));
+    await waitFor(() => expect(screen.getByTestId('search').textContent).toBe('?agent=strategist&conversation=strict-conv'));
     expect(createChatSession).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId('state').textContent).toBe('idle');
   });

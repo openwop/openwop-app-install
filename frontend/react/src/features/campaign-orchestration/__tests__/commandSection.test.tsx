@@ -4,7 +4,8 @@
  *   - runs and gates render as labeled chips, with the run page one link away;
  *   - "Show graph" reads the run's executed definition and mounts the graph;
  *   - a failed snapshot read is said; a later failed poll keeps what was shown;
- *   - a failed definition read is said, never an empty graph.
+ *   - a failed definition read is said, never an empty graph;
+ *   - a late answer for an earlier pick cannot replace the run picked last.
  *
  * Sabotage (run 2026-10-20): dropping the `prev.kind === 'ready'` keep reds "…keeps
  * what was shown"; clearing the pick on a definition failure (instead of saying
@@ -21,8 +22,9 @@ vi.mock('../../../runs/RunGraphView.js', () => ({
 }));
 
 import { CommandSection } from '../CommandSection.js';
+import type { CommandSnapshot } from '../campaignStudioClient.js';
 
-const SNAP = {
+const SNAP: CommandSnapshot = {
   campaign: { id: 'c1', orgId: 'o1', name: 'C', status: 'draft' },
   runs: [{ runId: 'r1', workflowId: 'campaign-studio.campaign-orchestration', role: 'stage', status: 'waiting-approval', startedAt: '2026-10-20T10:00:00Z' }],
   runsTruncated: false,
@@ -35,7 +37,7 @@ const SNAP = {
 };
 
 beforeEach(() => { h.getCommand.mockReset(); h.getDef.mockReset(); h.graph.mockReset(); vi.useRealTimers(); });
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.useRealTimers(); });
 
 const mount = () => render(<MemoryRouter><CommandSection campaignId="c1" /></MemoryRouter>);
 

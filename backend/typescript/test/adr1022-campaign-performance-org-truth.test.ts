@@ -29,6 +29,23 @@
  * - CP71CD-13: drop the attempt note before the conflict → no failed attempt.
  * - D5a: drop the other-org skip in `coverage()` → org A's increase throws
  *   on org B's broken cap.
+ *
+ * w83 re-grade (each sabotage-witnessed): drop the `orgVerified` conjunct
+ * (CP71CD-2); drop the `orgId !== observed.orgId` conjunct → org B's VERIFIED
+ * target is skipped (the case now sends one); drop `noteSyncAttempt` / the
+ * failure reason / the org filter or `allowed` check in the re-plan; each D4
+ * scope lowered to read; the tenant floor gone (audience); per-recipient emits
+ * collapsed to a broadcast, the org scope check, the `orgId` stamp; the
+ * absent-column null; the tombstone and ledger checks in `orgOwnsAdCampaign`;
+ * each account-exclusivity arm; a misspelt policy key.
+ *
+ * Refusals are matched by code AND message: several paths share each code.
+ *
+ * Not covered here: the root-admin arm of `emitToOrg` (CP71CD-5). It runs only
+ * for a shared `ws:` workspace (`materialiseRecipients` returns null otherwise),
+ * and this tenant is `org:…`, so the owner is told as org A's owner MEMBER.
+ * Removing the admin arm stays green (w83 probe ot-d8-admins); filed as gap row
+ * TST-FJ-GC-3.
  */
 
 import http from 'node:http';
@@ -68,10 +85,10 @@ beforeAll(async () => {
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   for (const id of ['users', 'campaign-connectors', 'campaign-intel', 'email']) { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); }
-});
+}, 120_000);
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Body { user?: { userId: string }; orgId?: string }
+interface Body { user?: { userId: string }; orgId?: string; error?: string; message?: string; outcome?: string }
 function client(): { post: (p: string, b?: unknown) => Promise<{ status: number; body: Body }> } {
   let cookie = '';
   return {
@@ -115,6 +132,14 @@ async function campaignIn(tenantId: string, orgId: string, name: string, budgetM
   return { id: c.id, briefId: brief.id };
 }
 
+const SCOPE_WRITE = { code: 'forbidden_scope', message: 'Missing required scope: workspace:write' };
+const ORG_REQUIRED = { code: 'validation_error', message: '`orgId` is required: performance records belong to one organization.' };
+const ACCOUNT_TAKEN = { code: 'conflict', message: 'That ad account belongs to another client organization in this workspace.' };
+const CAP_UNRESOLVED = { code: 'conflict', message: 'Spend-cap coverage could not be resolved.' };
+// A dry run of an owned campaign: the exact write, no call (adsAdapter `updateBudget`).
+const DRY_RUN_OUTCOME = 'preview';
+const NOT_IN_ORG = { error: 'not_found', message: 'No such campaign in this organization.' };
+
 const perfRow = (campaignName: string, spend: number) => {
   const base = { spend, impressions: 100, clicks: 10, conversions: 1, revenue: 5 };
   return { platform: 'meta' as const, campaignName, adSet: 'a', date: '2026-07-01', ...base, ...computeDerived(base) };
@@ -146,7 +171,7 @@ describe('ADR 1022 D7 — a failed attempt never reads as fresh', () => {
     const f = await fixture();
     const cc = surfaces({ tenantId: f.tenantId, runId: 'r1', actingUserId: f.ownerId })['campaign-connectors']!;
     // No dispatches and no settings: the host's re-plan is `no_dispatches`.
-    await expect(cc.recordAccountRows!({ orgId: f.orgA, platform: 'meta', batches: [{ adAccountId: 'act_x', rows: [] }], failures: [] })).rejects.toMatchObject({ code: 'conflict' });
+    await expect(cc.recordAccountRows!({ orgId: f.orgA, platform: 'meta', batches: [{ adAccountId: 'act_x', rows: [] }], failures: [] })).rejects.toMatchObject({ code: 'conflict', message: 'The sync plan changed while the accounts were read (no_dispatches); nothing was recorded.' });
     expect((await getSyncStatus(f.tenantId, f.orgA))[0]).toMatchObject({ lastAttempt: { outcome: 'failed', reason: 'plan_changed' } });
   });
 
@@ -169,9 +194,9 @@ describe('ADR 1022 D3/D4 — the run surfaces ask what the routes ask', () => {
     const f = await fixture();
     const csv = 'date,campaign,spend,impressions,clicks,conversions,revenue\n2026-07-01,Promo,10,100,5,1,20\n';
     const asViewer = surfaces({ tenantId: f.tenantId, runId: 'r1', actingUserId: f.viewerId });
-    await expect(asViewer['campaign-connectors']!.importCsv!({ orgId: f.orgA, csv })).rejects.toMatchObject({ code: 'forbidden_scope' });
-    await expect(asViewer['campaign-connectors']!.claimSync!({ orgId: f.orgA, platform: 'meta' })).rejects.toMatchObject({ code: 'forbidden_scope' });
-    await expect(asViewer['campaign-intel']!.pacingCheck!({ orgId: f.orgA })).rejects.toMatchObject({ code: 'forbidden_scope' });
+    await expect(asViewer['campaign-connectors']!.importCsv!({ orgId: f.orgA, csv })).rejects.toMatchObject(SCOPE_WRITE);
+    await expect(asViewer['campaign-connectors']!.claimSync!({ orgId: f.orgA, platform: 'meta' })).rejects.toMatchObject(SCOPE_WRITE);
+    await expect(asViewer['campaign-intel']!.pacingCheck!({ orgId: f.orgA })).rejects.toMatchObject(SCOPE_WRITE);
     // A viewer may still READ its org.
     await expect(asViewer['campaign-connectors']!.kpiSummary!({ orgId: f.orgA })).resolves.toMatchObject({ recordCount: 0 });
     // Positive control: the owner's import lands.
@@ -179,16 +204,16 @@ describe('ADR 1022 D3/D4 — the run surfaces ask what the routes ask', () => {
     await expect(asOwner['campaign-connectors']!.importCsv!({ orgId: f.orgA, csv })).resolves.toMatchObject({ imported: 1 });
     // D3 — an empty org named nobody; it used to mean "every org".
     await persistRecords(f.tenantId, f.orgB, [perfRow('B only', 50)], 'csv');
-    await expect(asOwner['campaign-connectors']!.kpiSummary!({})).rejects.toMatchObject({ code: 'validation_error' });
-    await expect(asOwner['campaign-intel']!.planBudget!({ orgId: '', totalBudgetMinor: 1000, targetConversions: 10 })).rejects.toMatchObject({ code: 'validation_error' });
-    await expect(asOwner['campaign-intel']!.anomalies!({})).rejects.toMatchObject({ code: 'validation_error' });
-    await expect(listRecords(f.tenantId, '')).rejects.toMatchObject({ code: 'validation_error' });
+    await expect(asOwner['campaign-connectors']!.kpiSummary!({})).rejects.toMatchObject(ORG_REQUIRED);
+    await expect(asOwner['campaign-intel']!.planBudget!({ orgId: '', totalBudgetMinor: 1000, targetConversions: 10 })).rejects.toMatchObject(ORG_REQUIRED);
+    await expect(asOwner['campaign-intel']!.anomalies!({})).rejects.toMatchObject(ORG_REQUIRED);
+    await expect(listRecords(f.tenantId, '')).rejects.toMatchObject(ORG_REQUIRED);
   });
 
   it('the audience build (tenant-wide contacts) refuses a viewer', async () => {
     const f = await fixture();
     const asViewer = surfaces({ tenantId: f.tenantId, runId: 'r1', actingUserId: f.viewerId });
-    await expect(asViewer['campaign-connectors']!.buildAudienceUpload!({ segmentId: 'seg-1' })).rejects.toMatchObject({ code: 'forbidden_scope' });
+    await expect(asViewer['campaign-connectors']!.buildAudienceUpload!({ segmentId: 'seg-1' })).rejects.toMatchObject(SCOPE_WRITE);
   });
 });
 
@@ -202,7 +227,7 @@ describe('ADR 1022 D2 — attribution reports only the org\'s email campaigns', 
     await createEmailCampaign({ tenantId: f.tenantId, orgId: f.orgB, templateId: 'tmpl-b', createdBy: 'test', campaignId: 'em-b' });
     for (const id of ['em-a', 'em-b']) await recordOpen(await mintToken({ tenantId: f.tenantId, campaignId: id, contactId: `ct-${id}`, kind: 'open' }));
     const report = await buildAttribution(f.tenantId, f.orgA);
-    expect(report.email.map((e) => e.emailCampaignId)).toEqual(['em-a']);
+    expect(report.email).toEqual([expect.objectContaining({ emailCampaignId: 'em-a', opens: 1, uniqueOpens: 1 })]);
   });
 });
 
@@ -220,7 +245,7 @@ describe('ADR 1022 D8 — a client\'s pacing alert reaches that client\'s people
     expect(got.every((r) => typeof r.recipientUserId === 'string'), 'no tenant broadcast').toBe(true);
     const told = new Set(got.map((r) => r.recipientUserId));
     expect(told.has(f.editorId)).toBe(true);
-    expect(told.has(f.ownerId), 'the org\'s owner is told too (CP71CD-5)').toBe(true);
+    expect(told.has(f.ownerId), 'the org\'s owner (an owner member of org A) is told too').toBe(true);
     expect(told.has(f.viewerId)).toBe(false);
     expect(got.every((r) => r.metadata?.orgId === f.orgA)).toBe(true);
   });
@@ -248,9 +273,10 @@ describe('ADR 1022 D5a — one client\'s broken cap does not freeze another clie
     await expect(capBlocksIncrease(f.tenantId, { platform: 'meta', adAccountId: 'act_a', campaignId: 'pa', orgId: f.orgA, orgVerified: true }, 100)).resolves.toBeNull();
     // CP71CD-2 — an org the caller only ASSUMED (the adapter's own, not a stamped
     // ledger row) never earns the skip: still fail-closed.
-    await expect(capBlocksIncrease(f.tenantId, { platform: 'meta', adAccountId: 'act_a', campaignId: 'pa', orgId: f.orgA }, 100)).rejects.toMatchObject({ code: 'conflict' });
-    // Org B's own target stays fail-closed.
-    await expect(capBlocksIncrease(f.tenantId, { platform: 'meta', adAccountId: 'act_b', campaignId: 'pb', orgId: f.orgB }, 100)).rejects.toMatchObject({ code: 'conflict' });
+    await expect(capBlocksIncrease(f.tenantId, { platform: 'meta', adAccountId: 'act_a', campaignId: 'pa', orgId: f.orgA }, 100)).rejects.toMatchObject(CAP_UNRESOLVED);
+    // Org B's own target stays fail-closed, verified or not: the skip is for OTHER orgs only.
+    await expect(capBlocksIncrease(f.tenantId, { platform: 'meta', adAccountId: 'act_b', campaignId: 'pb', orgId: f.orgB }, 100)).rejects.toMatchObject(CAP_UNRESOLVED);
+    await expect(capBlocksIncrease(f.tenantId, { platform: 'meta', adAccountId: 'act_b', campaignId: 'pb', orgId: f.orgB, orgVerified: true }, 100)).rejects.toMatchObject(CAP_UNRESOLVED);
   });
 });
 
@@ -274,14 +300,20 @@ describe('ADR 1022 (CP71CD-1) — a budget door touches only the org\'s own camp
     await __putDispatchRecordForTests({ tenantId: f.tenantId, platform: 'meta', platformCampaignId: 'pb-1', platformAdId: 'xb1', ...stamp, campaignId: 'mc-b', orgId: f.orgB, adAccountId: 'act_b' });
     await __putDispatchRecordForTests({ tenantId: f.tenantId, platform: 'meta', platformCampaignId: 'pa-1', platformAdId: 'xa1', ...stamp, campaignId: 'mc-a', orgId: f.orgA, adAccountId: 'act_a' });
     const apply = (campaignId: string, adAccountId: string) => f.editor.post(`${H}/campaign-intel/recommendations/apply`, { orgId: f.orgA, platform: 'meta', adAccountId, campaignId, dailyBudgetMinor: 100, dryRun: true });
-    expect((await apply('pb-1', 'act_b')).status).toBe(404);
-    // Positive control: org A's own campaign passes the ownership check (what
-    // the adapter answers after that is not this test's concern).
-    expect((await apply('pa-1', 'act_a')).status).not.toBe(404);
+    const theirs = await apply('pb-1', 'act_b');
+    expect(theirs.status).toBe(404);
+    expect(theirs.body).toMatchObject(NOT_IN_ORG);
+    // Positive control: org A's own campaign passes the ownership check and
+    // reaches the adapter's dry run.
+    const mine = await apply('pa-1', 'act_a');
+    expect(mine.status, JSON.stringify(mine.body)).toBe(200);
+    expect(mine.body.outcome).toBe(DRY_RUN_OUTCOME);
     // CP71CD-14 — a tombstoned row (account id lost) cannot vouch for whatever
     // account the caller names.
     await __putDispatchRecordForTests({ tenantId: f.tenantId, platform: 'meta', platformCampaignId: 'pa-tomb', platformAdId: 'xat', ...stamp, campaignId: 'mc-a2', orgId: f.orgA });
-    expect((await apply('pa-tomb', 'act_anything')).status).toBe(404);
+    const tomb = await apply('pa-tomb', 'act_anything');
+    expect(tomb.status).toBe(404);
+    expect(tomb.body).toMatchObject(NOT_IN_ORG);
   });
 
   it('CP71CD-11 — org A\'s account-scope settings never override the ledger saying a campaign is org B\'s', async () => {
@@ -290,9 +322,13 @@ describe('ADR 1022 (CP71CD-1) — a budget door touches only the org\'s own camp
     // Client B then launches on that account (a launch does not consult A's settings).
     await __putDispatchRecordForTests({ tenantId: f.tenantId, platform: 'meta', platformCampaignId: 'pb-7', platformAdSetId: 's', platformAdId: 'xb7', createdAt: '2026-07-01T00:00:00Z', campaignId: 'mc-b7', orgId: f.orgB, adAccountId: 'act_777' });
     const apply = (campaignId: string) => f.editor.post(`${H}/campaign-intel/recommendations/apply`, { orgId: f.orgA, platform: 'meta', adAccountId: 'act_777', campaignId, dailyBudgetMinor: 100, dryRun: true });
-    expect((await apply('pb-7')).status).toBe(404);
+    const theirs = await apply('pb-7');
+    expect(theirs.status).toBe(404);
+    expect(theirs.body).toMatchObject(NOT_IN_ORG);
     // A campaign the ledger does not know, on A's own configured account, is A's.
-    expect((await apply('p-unlaunched')).status).not.toBe(404);
+    const mine = await apply('p-unlaunched');
+    expect(mine.status, JSON.stringify(mine.body)).toBe(200);
+    expect(mine.body.outcome).toBe(DRY_RUN_OUTCOME);
   });
 });
 
@@ -300,13 +336,13 @@ describe('ADR 1022 (CP71CD-4) — an ad account belongs to one client org', () =
   it('org A cannot name an account org B launched on or already syncs', async () => {
     const f = await fixture();
     await __putDispatchRecordForTests({ tenantId: f.tenantId, platform: 'meta', platformCampaignId: 'pb-2', platformAdSetId: 's', platformAdId: 'xb2', createdAt: '2026-07-01T00:00:00Z', campaignId: 'mc-b2', orgId: f.orgB, adAccountId: 'act_222' });
-    await expect(saveConnectorSettings(f.tenantId, f.orgA, 'meta', { syncScope: 'account', adAccountIds: ['act_222'] })).rejects.toMatchObject({ code: 'conflict' });
+    await expect(saveConnectorSettings(f.tenantId, f.orgA, 'meta', { syncScope: 'account', adAccountIds: ['act_222'] })).rejects.toMatchObject(ACCOUNT_TAKEN);
     await saveConnectorSettings(f.tenantId, f.orgB, 'meta', { syncScope: 'account', adAccountIds: ['act_333'] });
-    await expect(saveConnectorSettings(f.tenantId, f.orgA, 'meta', { syncScope: 'account', adAccountIds: ['333'] })).rejects.toMatchObject({ code: 'conflict' });
+    await expect(saveConnectorSettings(f.tenantId, f.orgA, 'meta', { syncScope: 'account', adAccountIds: ['333'] })).rejects.toMatchObject(ACCOUNT_TAKEN);
     // CP71CD-12 — a LEGACY row (no org stamp) is resolved through its brief.
     const legacyB = await campaignIn(f.tenantId, f.orgB, 'Legacy B');
     await __putDispatchRecordForTests({ tenantId: f.tenantId, platform: 'meta', platformCampaignId: 'pb-l', platformAdSetId: 's', platformAdId: 'xbl', createdAt: '2026-07-01T00:00:00Z', briefId: legacyB.briefId, adAccountId: 'act_555' });
-    await expect(saveConnectorSettings(f.tenantId, f.orgA, 'meta', { syncScope: 'account', adAccountIds: ['act_555'] })).rejects.toMatchObject({ code: 'conflict' });
+    await expect(saveConnectorSettings(f.tenantId, f.orgA, 'meta', { syncScope: 'account', adAccountIds: ['act_555'] })).rejects.toMatchObject(ACCOUNT_TAKEN);
     // Positive control: an account nobody else holds is fine.
     await expect(saveConnectorSettings(f.tenantId, f.orgA, 'meta', { syncScope: 'account', adAccountIds: ['act_444'] })).resolves.toMatchObject({ adAccountIds: ['act_444'] });
   });

@@ -23,6 +23,12 @@ test('width: never above the default or the gate\'s own cap', () => {
   assert.equal(widthFor({ def: 7, cap: 4, d: decision(), workerMB: 1000, min: 2 }).width, 4);
 });
 
+test('width: an explicit one-worker cap remains binding below the adaptive floor', () => {
+  for (const d of [decision(), decision({ cpu: 1, memMB: 0, pressure: 'critical' })]) {
+    assert.equal(widthFor({ def: 7, cap: 1, d, workerMB: 1000, min: 2 }).width, 1);
+  }
+});
+
 test('width: busy cores that are not ours narrow it', () => {
   assert.equal(widthFor({ def: 7, cap: null, d: decision({ cpu: 3 }), workerMB: 1000, min: 2 }).width, 3);
 });
@@ -152,6 +158,7 @@ test('ci.sh: shadow leaves the width alone, on sets it, off skips, a broken tool
   assert.match(sh(good, { OPENWOP_CI_ADAPTIVE: undefined }).stdout, new RegExp(`WIDTH=${Math.min(2, DEF)}`), 'unset = on (P2)');
   assert.match(sh(good, { OPENWOP_CI_ADAPTIVE: 'on' }).stdout, new RegExp(`WIDTH=${Math.min(2, DEF)}`));
   assert.match(sh(good, { OPENWOP_CI_ADAPTIVE: 'on' }, 'VITEST_MAX_WORKERS=4').stdout, new RegExp(`WIDTH=${Math.min(2, DEF)}\\b`), 'on: the adaptive width wins over the cap');
+  assert.match(sh(good, { OPENWOP_CI_ADAPTIVE: 'on' }, 'VITEST_MAX_WORKERS=1').stdout, /WIDTH=1\b/, 'on: ci.sh passes the binding one-worker cap to the lane');
   const off = sh(good, { OPENWOP_CI_ADAPTIVE: 'off' });
   assert.match(off.stdout, /WIDTH=default/); assert.doesNotMatch(off.stderr, /adaptive width/);
   // `default` (unset), never `WIDTH=` (set but empty): an empty width is not "no width".

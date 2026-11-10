@@ -21,6 +21,7 @@ import http from 'node:http';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createApp } from '../src/index.js';
+import { derivedA2aTaskId } from '../src/host/a2aServer.js';
 import { toWireRunId } from '../src/host/v2Ids.js';
 import { loadAgentsFromManifest } from '../src/packs/agentLoader.js';
 import { getAgentRegistry } from '../src/executor/agentRegistry.js';
@@ -32,6 +33,9 @@ let A2A_URL: string;
 // `..`, which resolved outside the repo, so the load below was a silent no-op.)
 const REPO_ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..');
 const SUPERVISOR = 'core.openwop.agents.supervisor.default';
+// ADR 1045 D4 — the 0.3 derived task id is per tenant; `dev-token` is the
+// wildcard operator key, which acts in `default`.
+const DERIVED_ID = derivedA2aTaskId(SUPERVISOR, 'default');
 
 let server: http.Server;
 
@@ -130,7 +134,7 @@ describe('ADR 0035 / RFC 0100 — durable A2A server over HTTP', () => {
     };
     expect(sendBody.result?.kind).toBe('task');
     const taskId = sendBody.result?.id as string;
-    expect(taskId).toBe(`a2a:${SUPERVISOR}`);
+    expect(taskId).toBe(DERIVED_ID);
 
     // "Disconnect" then query later — durable tasks/get returns the live state.
     const getBody = await (await rpc('tasks/get', { id: taskId })).json() as {
@@ -143,10 +147,10 @@ describe('ADR 0035 / RFC 0100 — durable A2A server over HTTP', () => {
 
   it('tasks/resubscribe re-attaches a status-update event', async () => {
     await rpc('message/send', { agentId: SUPERVISOR, message: { parts: [{ kind: 'text', text: 'begin' }] } });
-    const body = await (await rpc('tasks/resubscribe', { id: `a2a:${SUPERVISOR}` })).json() as {
+    const body = await (await rpc('tasks/resubscribe', { id: DERIVED_ID })).json() as {
       result?: { kind?: string; taskId?: string };
     };
     expect(body.result?.kind).toBe('status-update');
-    expect(body.result?.taskId).toBe(`a2a:${SUPERVISOR}`);
+    expect(body.result?.taskId).toBe(DERIVED_ID);
   });
 });

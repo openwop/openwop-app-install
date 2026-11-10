@@ -21,6 +21,9 @@
  *  - abandoned-signup's last send bound from `recheck` instead of `gate2`   → "an unsubscribe … stops it"
  *  - post-webinar's second one-day wait removed                            → "two one-day waits"
  *  - `stopOnSuppressed` turning EVERY ineligible reason into a clean stop   → "only an unsubscribe"
+ *    (ADR 1024 D6 superseded that case: the chains now set `stopOnIneligible`, whose closed set
+ *    is witnessed in `adr1024-journeys-normal-stops.test.ts`; the case below now pins that a
+ *    withdrawn consent ENDS the journey and sends nothing more)
  *  - the stopped branch's condition never matching                          → "an unsubscribe … stops it"
  *
  * Probes (wave 73): w73g3-p5bp-stop-any, -resumekey, -wait-bare, -stopped-value, -second-wait,
@@ -289,7 +292,11 @@ async function sweepAfter(ctx: Awaited<ReturnType<typeof emailOnlyClient>>, ms: 
 }
 
 describe('ADR 0955 P5 — post-webinar and abandoned-signup end to end (J955WF-10)', () => {
-  it('only an unsubscribe stops cleanly: a withdrawn consent still fails the run (J955WF-12)', async () => {
+  // ADR 1024 D6 (`CDP2WF-9`) — J955WF-12 made only an unsubscribe a clean end; a withdrawn
+  // consent FAILED the run, and so did every ineligible contact at enroll. A person's own
+  // state is a correct end of their journey, so this case flipped from 'failed' to
+  // 'completed', and it still asserts the part that never changes: nothing more is sent.
+  it('a withdrawn consent ends the journey cleanly and sends nothing more (ADR 1024 D6, was J955WF-12)', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     try {
       vi.setSystemTime(new Date('2026-10-20T09:00:00Z'));
@@ -303,7 +310,7 @@ describe('ADR 0955 P5 — post-webinar and abandoned-signup end to end (J955WF-1
       const mid = await status();
       expect(mid, 'after the first day').toMatch(/^waiting/);
       expect(await sweepAfter(ctx, 86_401_000, runId)).toBe(1);
-      expect(await status(), 'consent withdrawn is not a clean stop').toBe('failed');
+      expect(await status(), 'consent withdrawn is a clean stop, not a failed run').toBe('completed');
       expect(emails.length - before).toBe(1);
     } finally { vi.useRealTimers(); }
   });

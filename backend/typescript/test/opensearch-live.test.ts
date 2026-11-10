@@ -1,11 +1,19 @@
 /**
- * Live OpenSearch integration test — exercises the `opensearch` search adapter
- * against a REAL OpenSearch instance (testcontainers), validating what the mock
- * test can't: real `_bulk` indexing, BM25 relevance ranking, and refresh
- * semantics.
+ * ADR 0867 (durable storage tier: the `opensearch` search engine) — the adapter
+ * (`host/search/openSearchSearch.ts`) against a REAL OpenSearch (testcontainers),
+ * for what the mock contract test (`opensearch-search.test.ts`) cannot show: real
+ * `_bulk` indexing, BM25 relevance ranking, `refresh=wait_for` visibility, a real
+ * 404 on a never-created index, and per-tenant physical indices on a real engine.
  *
- * Gated on Docker; OPENWOP_OPENSEARCH_LIVE=1 (set by the dedicated CI job)
- * hard-requires the run so a green job means validated, never a silent skip.
+ * Red when: the higher-frequency doc does not rank first; a deleted doc is still
+ * returned; a never-created index throws instead of reading empty; one tenant's
+ * query finds another tenant's doc (each case has an own-tenant positive control,
+ * so an index or refresh failure cannot pass as isolation).
+ *
+ * NOT run by `npm run ci`: it sets OPENWOP_SKIP_TESTCONTAINERS=1, so every case skips,
+ * and the hosted CI job that set OPENWOP_OPENSEARCH_LIVE=1 is disabled. Run it with
+ * Docker up: `OPENWOP_OPENSEARCH_LIVE=1 node node_modules/vitest/vitest.mjs run
+ * test/opensearch-live.test.ts` (the flag hard-requires the run, never a silent skip).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { GenericContainer, Wait, type StartedTestContainer } from 'testcontainers';
@@ -72,6 +80,8 @@ describe('OpenSearch live integration', () => {
     expect(res.hits[0].score).toBeGreaterThan(0);
     expect(res.hits[0].fields).toEqual({ title: 'quick quick rabbit' });
     expect(await s.delete({ index: 'docs', ids: ['2'] })).toEqual({ deleted: 1 });
+    const after = await s.query({ index: 'docs', q: 'quick' }) as { hits: Array<{ id: string }> };
+    expect(after.hits.map((h) => h.id)).toEqual(['1']); // the deleted doc is gone
   });
 
   it.skipIf(!dockerAvailable)('query on a never-created index returns no hits (404 handled)', async () => {
@@ -80,7 +90,11 @@ describe('OpenSearch live integration', () => {
 
   it.skipIf(!dockerAvailable)('isolates tenants via distinct physical indices', async () => {
     await searchFor('tenant-a').index({ index: 'docs', docs: [{ id: '1', fields: { t: 'secret-a' } }] });
-    // tenant-b's physical index (owp-test-tenant-b-docs) is separate + empty.
+    // Positive control: the owner finds it, so an empty answer below is isolation,
+    // not a failed index or refresh.
+    const own = await searchFor('tenant-a').query({ index: 'docs', q: 'secret-a' }) as { hits: Array<{ id: string }> };
+    expect(own.hits.map((h) => h.id)).toEqual(['1']);
+    // tenant-b's physical index (`owp-test-v2.<b32(tenant-b)>.<b32(docs)>`) is separate and empty.
     expect(await searchFor('tenant-b').query({ index: 'docs', q: 'secret-a' })).toEqual({ hits: [] });
   });
 });

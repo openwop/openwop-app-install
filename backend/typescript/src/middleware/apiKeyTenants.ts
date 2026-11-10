@@ -47,9 +47,17 @@ export function configuredTenantViolation(tenant: string): string | null {
   return null;
 }
 
+/**
+ * The raw string {@link readKeyTenants} parses: `OPENWOP_API_KEYS`, else
+ * `OPENWOP_API_KEY`, else the `dev-token:*` fallback of an unenforced posture.
+ * Exported so a derived index (`envKeyPrincipal.ts`) can cache on the exact
+ * input instead of re-deriving per request (the parse itself is not cached).
+ */
+export function keyConfigSource(): string {
+  return process.env.OPENWOP_API_KEYS ?? process.env.OPENWOP_API_KEY ?? (authIsEnforced() ? '' : 'dev-token:*');
+}
+
 export function readKeyTenants(): ReadonlyMap<string, readonly string[]> {
-  const multi = process.env.OPENWOP_API_KEYS;
-  const single = process.env.OPENWOP_API_KEY;
   // Fail closed under enforced auth: do NOT honor the built-in `dev-token`
   // (which maps to a wildcard-tenant admin principal) when no real key is
   // configured. The OIDC/cookie bearer paths still work; only the guessable
@@ -68,7 +76,7 @@ export function readKeyTenants(): ReadonlyMap<string, readonly string[]> {
   // of narrowing a DEV default; the security change is narrowing the CONFIGURED
   // ones, which cost 2 conformance assertions. Writing `OPENWOP_API_KEYS=dev-token`
   // explicitly gets you the scoped principal like any other configured key.
-  const raw = multi ?? single ?? (authIsEnforced() ? '' : 'dev-token:*');
+  const raw = keyConfigSource();
   const out = new Map<string, readonly string[]>();
   for (const entry of raw.split(',')) {
     const trimmed = entry.trim();

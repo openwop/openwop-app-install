@@ -33,9 +33,9 @@ vi.mock('../../client/useEffectiveAccess.js', async (importOriginal) => ({
 }));
 vi.mock('../../brand/BrandProvider.js', () => ({
   useBrand: () => ({
-    productName: 'KickTodo',
-    instanceName: 'KickTodo',
-    markSrc: '/kicktodo-mark.svg',
+    productName: 'Acme',
+    instanceName: 'Acme',
+    markSrc: '/acme-mark.svg',
     markSrcDark: '',
   }),
 }));

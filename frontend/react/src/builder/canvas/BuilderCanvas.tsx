@@ -12,6 +12,7 @@
  *   BaseNode paints execution state.
  */
 
+import { projectSourceOutput, virtualSourceOutputs, type SourceBinding } from '../schema/sourceOutput.js';
 import { Button } from '../../ui/Button.js';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -69,7 +70,7 @@ export function BuilderCanvas({ pairEnabled = false }: { pairEnabled?: boolean }
 }
 
 function BuilderCanvasInner({ pairEnabled }: { pairEnabled: boolean }) {
-  const { t } = useTranslation('builder');
+  const { t, i18n } = useTranslation('builder');
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const { screenToFlowPosition } = useReactFlow();
 
@@ -281,6 +282,20 @@ function BuilderCanvasInner({ pairEnabled }: { pairEnabled: boolean }) {
     return map;
   }, [collabPeers]);
 
+  const nodeKindById = useMemo(() => new Map(builderNodes.map(n => [n.id, n.kind])), [builderNodes]);
+  // Registry resolution includes dynamic and palette-hidden entries. Resolve
+  // both source projections on render so catalog subscriptions refresh them
+  // without an unused palette-array dependency.
+  const virtualPortsByNode = (() => {
+    const grouped = new Map<string, SourceBinding[]>();
+    for (const edge of [...builderEdges, ...(ghosts?.ghostEdges ?? []), ...peerGhosts.flatMap(p => p.proj.ghostEdges)]) {
+      const group = grouped.get(edge.source) ?? [];
+      group.push(edge);
+      grouped.set(edge.source, group);
+    }
+    return new Map([...grouped].map(([id, edges]) => [id, virtualSourceOutputs(edges, catalogEntry(nodeKindById.get(id) ?? '')?.outputs ?? [], i18n.resolvedLanguage)]));
+  })();
+
   const rfNodes: Node[] = useMemo(
     () =>
       builderNodes.map((n) => ({
@@ -289,6 +304,7 @@ function BuilderCanvasInner({ pairEnabled }: { pairEnabled: boolean }) {
         position: n.position,
         data: {
           kind: n.kind,
+          virtualSourceOutputs: virtualPortsByNode.get(n.id) ?? [],
           name: n.name,
           runStatus: overlay?.nodeStatus[n.id],
           // ADR 0475 — the debug-pin badge (a pinned node is visibly pinned).
@@ -340,17 +356,16 @@ function BuilderCanvasInner({ pairEnabled }: { pairEnabled: boolean }) {
         deletable: false,
         connectable: false,
       })))),
-    [builderNodes, selectedSet, overlay, debugSession, failureHeat, failureHeatMode, peersByNode, nodeDims, connectFrom, compatiblePair, connectTo, ghosts, focusedOp, pairEnabled, selectedNodeIds.length, landing, peerGhosts],
+    [virtualPortsByNode, builderNodes, selectedSet, overlay, debugSession, failureHeat, failureHeatMode, peersByNode, nodeDims, connectFrom, compatiblePair, connectTo, ghosts, focusedOp, pairEnabled, selectedNodeIds.length, landing, peerGhosts],
   );
 
   const ghostNodeIds = useMemo(() => new Set((ghosts?.ghostNodes ?? []).map((n) => n.id)), [ghosts]);
-  const rfEdges: Edge[] = useMemo(
-    () =>
+  const rfEdges: Edge[] =
       builderEdges.map((e) => ({
         id: e.id,
         source: e.source,
         target: e.target,
-        sourceHandle: e.sourcePort,
+        sourceHandle: projectSourceOutput(e, catalogEntry(nodeKindById.get(e.source) ?? '')?.outputs ?? []).handleId,
         targetHandle: e.targetPort,
         // Liveness: an edge whose target node is currently running carries the
         // marching-dash "data in flight" treatment (CSS .edge-running, §6).
@@ -358,7 +373,7 @@ function BuilderCanvasInner({ pairEnabled }: { pairEnabled: boolean }) {
         ...(ghosts?.removedEdgeIds.has(e.id) ? { className: 'edge-suggest-remove' } : {}),
         ...(ghosts?.changedEdgeIds.has(e.id) ? { className: 'edge-suggest-change', label: `${(ghosts.changedEdgeIds.get(e.id) ?? 0) + 1}` } : {}),
         // G-02e — the "+" edge (midpoint insert) when pairing is on.
-        ...(pairEnabled ? { type: 'pair', data: { showPlus: hoveredEdgeId === e.id || selectedEdgeId === e.id, sourcePort: e.sourcePort, targetPort: e.targetPort } } : {}),
+        ...(pairEnabled ? { type: 'pair', data: { showPlus: hoveredEdgeId === e.id || selectedEdgeId === e.id, sourcePort: e.sourcePort, canonicalSourceOutput: e.canonicalSourceOutput, targetPort: e.targetPort } } : {}),
       } as Edge)).concat((ghosts?.ghostEdges ?? []).map((g) => ({
         id: g.id,
         source: g.source,
@@ -382,9 +397,7 @@ function BuilderCanvasInner({ pairEnabled }: { pairEnabled: boolean }) {
         selectable: false,
         deletable: false,
         focusable: false,
-      })))),
-    [builderEdges, overlay, ghosts, ghostNodeIds, focusedOp, pairEnabled, hoveredEdgeId, selectedEdgeId, peerGhosts],
-  );
+      }))));
 
   const onNodesChange = useCallback(
     (changes: NodeChange[]) => {

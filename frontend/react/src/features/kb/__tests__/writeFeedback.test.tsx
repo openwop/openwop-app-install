@@ -112,8 +112,10 @@ describe('KBX-4 — a failed write is a sentence, not an HTTP diagnostic', () =>
     api.deleteDocument.mockRejectedValue(REINDEX_409());
     await view();
 
-    await act(async () => { fireEvent.click(screen.getAllByRole('button', { name: /Delete document/ })[0]!); });
+    const deleteButton = await screen.findByRole('button', { name: /Delete document/ });
+    await act(async () => { fireEvent.click(deleteButton); });
     await waitFor(() => expect(toasts.error).toHaveBeenCalled());
+    expect(api.deleteDocument).toHaveBeenCalledWith('o1', 'c1', 'd1');
 
     expect(lastError()).toMatch(/paused while it is being reindexed/);
     // Both halves. The first would pass for a mapper that PREPENDS its sentence

@@ -725,7 +725,12 @@ if [ "$MODE" = wait ]; then
     # The caller that would run the suite is gone (a killed gate): nobody is
     # waiting for our answer, so stop, rather than poll on and later claim the
     # machine for a dead pid.
-    if ! kill -0 "$CLAIMANT_PID" 2>/dev/null; then
+    # PID 1 is never a caller: we were reparented to init because the caller died
+    # before this shell read $PPID (a startup race, reproduced under load
+    # 2026-11-02). Waiting on it would poll for good and could claim the machine
+    # for a pid that never exits. A reparent to a subreaper is not detectable this
+    # way; in normal use the caller waits for us in the foreground.
+    if [ "$CLAIMANT_PID" = 1 ] || ! kill -0 "$CLAIMANT_PID" 2>/dev/null; then
       printf '  → the caller (pid %s) has exited; stopping the wait\n\n' "$CLAIMANT_PID"; exit 1
     fi
     if report_once; then

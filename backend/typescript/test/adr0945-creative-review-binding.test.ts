@@ -13,10 +13,12 @@
  *
  * What turns it red: the check reading anything but an approved row for exactly the
  * hash; the eligibility check missing (the requester approves their own); the
- * verdict precondition dropped; a fresh row per request.
+ * verdict precondition dropped; a fresh row per request or per retry.
+ * TRIPLE GUARD on "a new verdict": the hash, the binding fields and the row fields
+ * each name the verdict, so one alone stays green; an asset-only check reds it.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import type { HostAdapterSuite } from '../src/host/index.js';
@@ -24,15 +26,13 @@ import { assertCreativePublishable, registerCreativeReviewApproval } from '../sr
 import { recordVerdict, FIDELITY_RULESET_VERSION, type FidelityVerdict } from '../src/host/creativeFidelity/index.js';
 import { createAsset, type MediaAsset } from '../src/features/media/mediaService.js';
 import * as mediaStorage from '../src/features/media/mediaStorage.js';
-import { createMember, createOrg } from '../src/host/accessControlService.js';
+import { createMember, createOrg, createWorkspace } from '../src/host/accessControlService.js';
 import { claimApproval, rejectApproval } from '../src/host/approvalDecision.js';
 import { getApproval } from '../src/host/approvalService.js';
 import { hostExtStorage } from '../src/host/hostExtPersistence.js';
 import { isCreativeReviewApproved, requestCreativeReview } from '../src/features/campaign-orchestration/creativeReview.js';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { randomBytes } from 'node:crypto';
-import { createWorkspace } from '../src/host/accessControlService.js';
 import { upsertFromPrincipal } from '../src/features/users/usersService.js';
 import { signSession, COOKIE_TTL_SECONDS } from '../src/middleware/cookieSession.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
@@ -104,6 +104,24 @@ describe('ADR 0945 × 0942 — creative-review binding', () => {
     expect(recovered.approvalId).toBe(expectedId);
     expect(await getApproval(expectedId)).toMatchObject({ submitters: ['u-requester'], status: 'pending' });
     await expect(decide(expectedId, 'u-requester')).rejects.toMatchObject({ httpStatus: 403 });
+
+    // The binding write itself lost (the row exists, nothing indexes it): a retry
+    // by someone else lands on the SAME deterministic row, with its first requester.
+    const unbound = await withVerdict('needs_review');
+    let lostId = '';
+    const lostWrite = vi.spyOn(storage, 'kvCompareAndSwap').mockImplementation(async (...args) => {
+      if (!lostId && args[0].startsWith('hostext:autonomy:creative-review:')) {
+        lostId = (JSON.parse(String(args[2])) as { approvalIds: string[] }).approvalIds[0]!;
+        throw new Error('binding write lost');
+      }
+      return actual(...args);
+    });
+    try {
+      await expect(requestCreativeReview({ tenantId: T, assetId: unbound.a.assetId, verdictId: unbound.verdictId, requestedBy: 'u-requester' })).rejects.toThrow('binding write lost');
+    } finally { lostWrite.mockRestore(); }
+    const retried = await requestCreativeReview({ tenantId: T, assetId: unbound.a.assetId, verdictId: unbound.verdictId, requestedBy: 'u-admin-2' });
+    expect(retried.approvalId).toBe(lostId);
+    expect(await getApproval(lostId)).toMatchObject({ submitters: ['u-requester'], status: 'pending' });
   });
 
   it('a racing second requester cannot create another cycle while the first binding publication is still returning', async () => {
@@ -148,7 +166,8 @@ describe('ADR 0945 × 0942 — creative-review binding', () => {
     expect(await assertCreativePublishable({ tenantId: T, mediaRef: a.assetId, destination: 'ads:meta' })).toMatchObject({ ok: false, code: 'fidelity_needs_review' });
     const { approvalId } = await requestCreativeReview({ tenantId: T, assetId: a.assetId, verdictId, requestedBy: 'u-requester' });
     await expect(decide(approvalId, 'u-requester')).rejects.toMatchObject({ httpStatus: 403, details: { reason: 'autonomy_self_approval_refused' } });
-    await expect(decide(approvalId, 'u-editor')).rejects.toMatchObject({ httpStatus: 403 });
+    await expect(decide(approvalId, 'u-editor')).rejects.toMatchObject({ httpStatus: 403, code: 'forbidden_scope' });
+    expect(await getApproval(approvalId)).toMatchObject({ status: 'pending' });
     await decide(approvalId, 'u-admin-2');
     expect(await isCreativeReviewApproved({ tenantId: T, orgId: ORG, assetId: a.assetId, verdictId })).toBe(true);
     expect(await assertCreativePublishable({ tenantId: T, mediaRef: a.assetId, destination: 'ads:meta' })).toMatchObject({ ok: true });
@@ -158,17 +177,19 @@ describe('ADR 0945 × 0942 — creative-review binding', () => {
     const { a, verdictId } = await withVerdict('needs_review');
     const { approvalId } = await requestCreativeReview({ tenantId: T, assetId: a.assetId, verdictId, requestedBy: 'u-requester' });
     await decide(approvalId, 'u-admin-2');
+    expect(await isCreativeReviewApproved({ tenantId: T, orgId: ORG, assetId: a.assetId, verdictId })).toBe(true);
     const second = await withVerdict('needs_review', ORG, a);
     expect(await isCreativeReviewApproved({ tenantId: T, orgId: ORG, assetId: a.assetId, verdictId: second.verdictId })).toBe(false);
   });
 
   it('a fail verdict, an unknown verdict, and another org\'s asset are the same not-found', async () => {
+    const sameNotFound = { httpStatus: 404, code: 'not_found', message: 'Review not found.' };
     const failed = await withVerdict('fail');
-    await expect(requestCreativeReview({ tenantId: T, assetId: failed.a.assetId, verdictId: failed.verdictId, requestedBy: 'u-requester' })).rejects.toMatchObject({ httpStatus: 404 });
+    await expect(requestCreativeReview({ tenantId: T, assetId: failed.a.assetId, verdictId: failed.verdictId, requestedBy: 'u-requester' })).rejects.toMatchObject(sameNotFound);
     const ok = await withVerdict('needs_review');
-    await expect(requestCreativeReview({ tenantId: T, assetId: ok.a.assetId, verdictId: 'fvd:nope', requestedBy: 'u-requester' })).rejects.toMatchObject({ httpStatus: 404 });
+    await expect(requestCreativeReview({ tenantId: T, assetId: ok.a.assetId, verdictId: 'fvd:nope', requestedBy: 'u-requester' })).rejects.toMatchObject(sameNotFound);
     const foreign = await withVerdict('needs_review', OTHER_ORG);
-    await expect(requestCreativeReview({ tenantId: T, assetId: foreign.a.assetId, verdictId: ok.verdictId, requestedBy: 'u-requester' })).rejects.toMatchObject({ httpStatus: 404 });
+    await expect(requestCreativeReview({ tenantId: T, assetId: foreign.a.assetId, verdictId: ok.verdictId, requestedBy: 'u-requester' })).rejects.toMatchObject(sameNotFound);
   });
 
   it('a rejected review keeps the gate shut; a re-request opens a new cycle', async () => {
@@ -247,6 +268,7 @@ describe('ADR 0945 × 0942 — the request route', () => {
     const unknown = await post(users.writer!, { assetId: 'masset:nope', verdictId });
     for (const r of [reader, stranger, unknown]) expect(r.status, r.text).toBe(404);
     expect(reader.text).toBe(stranger.text);
+    expect(unknown.text).toBe(reader.text);
     const ok = await post(users.writer!, { assetId: a.assetId, verdictId });
     expect(ok.status, ok.text).toBe(201);
     expect(JSON.parse(ok.text)).toMatchObject({ status: 'pending' });

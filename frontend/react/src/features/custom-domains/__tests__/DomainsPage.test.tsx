@@ -22,17 +22,19 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent, within } from '@testing-library/react';
 
-const { listOrgs, listDomainPage, retryDomain, forceRemoveDomain, useFeatureAccess } = vi.hoisted(() => ({
+const { listOrgs, listDomainPage, retryDomain, forceRemoveDomain, getSiteBrand, setSiteBrand, useFeatureAccess } = vi.hoisted(() => ({
   listOrgs: vi.fn<typeof import('../domainsClient.js').listOrgs>(),
   listDomainPage: vi.fn<typeof import('../domainsClient.js').listDomainPage>(),
   retryDomain: vi.fn<typeof import('../domainsClient.js').retryDomain>(),
   forceRemoveDomain: vi.fn<typeof import('../domainsClient.js').forceRemoveDomain>(),
+  getSiteBrand: vi.fn<typeof import('../domainsClient.js').getSiteBrand>(async () => ({ brandId: null, choices: [] })),
+  setSiteBrand: vi.fn<typeof import('../domainsClient.js').setSiteBrand>(async (_o, id) => id),
   useFeatureAccess: vi.fn(() => makeFeatureAccess({ enabled: true, loading: false })),
 }));
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../domainsClient.js', async (orig) => ({
   ...(await orig<typeof import('../domainsClient.js')>()),
-  listOrgs, listDomainPage, retryDomain, forceRemoveDomain,
+  listOrgs, listDomainPage, retryDomain, forceRemoveDomain, getSiteBrand, setSiteBrand,
 }));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', async (orig) => ({
   ...(await orig<typeof import('../../../featureToggles/FeatureAccessContext.js')>()),
@@ -168,5 +170,37 @@ describe('DomainsPage — HTTPS axis', () => {
     expect(d.getAllByRole('button', { name: /^Copy the / })).toHaveLength(4); // 3 records + the A alternative
     // awaiting_dns is retryable: the records were just shown, so Check again is offered.
     expect(screen.getByRole('button', { name: 'Check HTTPS again for shop.example.com' })).toBeTruthy();
+  });
+});
+
+describe('DomainsPage — the site brand (ADR 1030 P2)', () => {
+  it('offers the workspace brands with an app identity, and saves the choice', async () => {
+    getSiteBrand.mockResolvedValue({ brandId: null, choices: [{ id: 'brand:green', name: 'Green' }] });
+    await mount([], null);
+    const select = screen.getByLabelText('Site brand') as HTMLSelectElement;
+    expect([...select.options].map((o) => o.textContent)).toEqual(['The default look', 'Green']);
+    await act(async () => { fireEvent.change(select, { target: { value: 'brand:green' } }); });
+    expect(setSiteBrand).toHaveBeenCalledWith('o1', 'brand:green');
+    expect(select.value).toBe('brand:green');
+    await act(async () => { fireEvent.change(select, { target: { value: '' } }); });
+    expect(setSiteBrand).toHaveBeenLastCalledWith('o1', null);
+  });
+
+  it('says how to get a brand when the workspace has none with an identity', async () => {
+    getSiteBrand.mockResolvedValue({ brandId: null, choices: [] });
+    await mount([], null);
+    expect(screen.getByText(/No brand in this workspace has an app identity yet/)).toBeTruthy();
+  });
+});
+
+describe('DomainsPage — a failed site-brand read', () => {
+  it('is announced with a way to try again, and the retry reads again', async () => {
+    getSiteBrand.mockRejectedValueOnce(new Error('down'));
+    await mount([], null);
+    expect(screen.getByText('The site brand could not be read')).toBeTruthy();
+    getSiteBrand.mockResolvedValueOnce({ brandId: null, choices: [] });
+    const retries = screen.getAllByRole('button', { name: 'Try again' });
+    await act(async () => { fireEvent.click(retries[retries.length - 1]!); });
+    expect(screen.getByLabelText('Site brand')).toBeTruthy();
   });
 });

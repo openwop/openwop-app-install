@@ -26,16 +26,18 @@ import { createApp } from '../src/index.js';
 import { builtinAgentToolIds, builtinAgentTool } from '../src/host/agentToolProvider.js';
 import { SENSITIVE_APPROVAL_TOOLS } from '../src/features/capability-firewall/firewallHook.js';
 import { safeModeBaseline } from '../src/host/laneFirewall.js';
+import { declaredIdTable } from './helpers/featureRatchetTables.js';
 
 /** Held in `safe` mode. Exact set. */
-const ASKS: ReadonlyArray<readonly [string, string]> = [
+const HOST_ASKS: ReadonlyArray<readonly [string, string]> = [
   ['openwop:feature.code-exec.nodes.run', 'runs model-written code (name set, ADR 0150)'],
   ['openwop:core.openwop.http.fetch', 'sends a model-chosen request off-host (name set, ADR 0150)'],
-  ['openwop:kicktodo.log-checkin', 'commits the participant\'s own non-reversible check-in (name set, ADR 0442)'],
   ['openwop:workflows.compose-and-run', 'runs a model-written workflow unreviewed — http/email nodes included (declared, ADR 0834)'],
   ['openwop:destination-sync.run', 'forwards model-supplied records to a peer host (declared, ADR 0834)'],
   ['openwop:agent-evals.run', 'spends model calls on every task × trial of an eval suite (declared, ADR 0889)'],
 ];
+/** ADR 1031 P2 — plus each feature package's rows (`ratchetTables.json` idTables `safeMode.asks`). */
+const ASKS: ReadonlyArray<readonly [string, string]> = [...HOST_ASKS, ...Object.entries(declaredIdTable<string>('safeMode.asks'))];
 
 const OWN_GATE = 'reaches a human approval through its own mechanism (approvals inbox / reviews / editorial queue) — nothing leaves without it';
 const DRAFT = 'writes a DRAFT or a canvas/artifact inside this workspace, scoped to the acting user; nothing leaves the host';
@@ -44,7 +46,7 @@ const FIXED_RUN = 'starts a FIXED, code-reviewed feature workflow the user asked
 const SELF = 'addressed only to the acting user (their inbox / their own board / their own later turn, which re-enters the always-safe run lane)';
 
 /** Writes that are NOT held in safe mode, with the reason. */
-const NO_ASK_WRITES: ReadonlyArray<readonly [string, string]> = [
+const HOST_NO_ASK_WRITES: ReadonlyArray<readonly [string, string]> = [
   ['openwop:campaign-intel.propose-reallocation', `${OWN_GATE}. It reads the campaigns' live daily budgets through the acting user's own ad connections (ids out, budgets in) and opens ONE campaign-spend approval; it changes no budget (ADR 0952 D8)`],
   ['openwop:app-builder.render', DRAFT],
   ['openwop:assistant.enqueue-action', OWN_GATE],
@@ -86,9 +88,6 @@ const NO_ASK_WRITES: ReadonlyArray<readonly [string, string]> = [
   ['openwop:intent-ledger.draft-contract', 'a draft mission contract the user approves'],
   ['openwop:interactive-artifacts.render', DRAFT],
   ['openwop:kanban.add-todo', SELF],
-  ['openwop:kicktodo.convene', 'dispatches a specialist bounded to a read-only allowlist (ADR 0104 override)'],
-  ['openwop:kicktodo.factory.run', FIXED_RUN],
-  ['openwop:kicktodo.replan', FIXED_RUN],
   ['openwop:notebooks.write-transformation', FIXED_RUN],
   ['openwop:notifications.notify-me', SELF],
   ['openwop:podcasts.produce', FIXED_RUN],
@@ -108,6 +107,8 @@ const NO_ASK_WRITES: ReadonlyArray<readonly [string, string]> = [
   ['openwop:walkthroughs.register-draft', DRAFT],
   ['openwop:workflows.propose', OWN_GATE],
 ];
+/** ADR 1031 P2 — plus each feature package's rows (`ratchetTables.json` idTables `safeMode.noAskWrites`). */
+const NO_ASK_WRITES: ReadonlyArray<readonly [string, string]> = [...HOST_NO_ASK_WRITES, ...Object.entries(declaredIdTable<string>('safeMode.noAskWrites'))];
 
 /** Reads that DO reach off-host, adjudicated individually. */
 const NO_ASK_READ_EGRESS: ReadonlyArray<readonly [string, string]> = [
@@ -116,7 +117,7 @@ const NO_ASK_READ_EGRESS: ReadonlyArray<readonly [string, string]> = [
 
 /** Reads with no off-host send and no durable change. Reviewed as a set; a new read that
  *  egresses belongs in NO_ASK_READ_EGRESS (or ASKS), never here. */
-const READS: readonly string[] = [
+const HOST_READS: readonly string[] = [
   'openwop:accessibility.alt-text.generate',
   'openwop:accessibility.check',
   'openwop:agent-evals.get-summary',
@@ -217,17 +218,6 @@ const READS: readonly string[] = [
   'openwop:interactive-artifacts.get',
   'openwop:job-search.applications.read',
   'openwop:job-search.listings.read',
-  'openwop:kicktodo.candidates',
-  'openwop:kicktodo.challenge-performance',
-  'openwop:kicktodo.circles',
-  'openwop:kicktodo.community-reviews',
-  'openwop:kicktodo.engagement-summary',
-  'openwop:kicktodo.integrations-status',
-  'openwop:kicktodo.journal',
-  'openwop:kicktodo.plan',
-  'openwop:kicktodo.progress',
-  'openwop:kicktodo.proposals',
-  'openwop:kicktodo.today',
   'openwop:knowledge.search',
   'openwop:marketplace.search',
   'openwop:media.list',
@@ -269,6 +259,8 @@ const READS: readonly string[] = [
   'openwop:tutorials.get',
   'openwop:work-selection.preview',
 ];
+/** ADR 1031 P2 — plus each feature package's read tools (`ratchetTables.json` idTables `safeMode.reads`). */
+const READS: readonly string[] = [...HOST_READS, ...Object.keys(declaredIdTable<string>('safeMode.reads'))];
 
 let server: http.Server | undefined;
 beforeAll(async () => {

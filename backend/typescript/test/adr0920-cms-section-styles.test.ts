@@ -68,6 +68,10 @@ describe('ADR 0920 — round-trip of every new field', () => {
     const col = { title: 'Learning', text: 't', eyebrow: 'Week 2', progress: 0.5, badge: 'New', future: true, art: 'feed', items: [{ label: 'Intro', meta: '4 min' }, { label: 'Deep dive' }] };
     expect(data('columns', { layout: 'list', columns: [col], note: 'Lengths are typical.', numbers: 'circle', tone: 'muted', head: 'split' }))
       .toEqual({ layout: 'list', columns: [col], note: 'Lengths are typical.', numbers: 'circle', tone: 'muted', head: 'split' });
+    // `partial` survives the whitelist, a non-true value is dropped, and `future` wins over it.
+    expect(data('columns', { layout: 'list', columns: [{ title: 'Partly', text: 't', partial: true }] }).columns).toEqual([{ title: 'Partly', text: 't', partial: true }]);
+    expect(data('columns', { layout: 'list', columns: [{ title: 'P', text: 't', partial: 'yes' }] }).columns).toEqual([{ title: 'P', text: 't' }]);
+    expect(data('columns', { layout: 'list', columns: [{ title: 'B', text: 't', partial: true, future: true }] }).columns).toEqual([{ title: 'B', text: 't', future: true }]);
   });
 
   it('richText: visual "chat" + chat, tone, head', () => {
@@ -143,7 +147,7 @@ describe('ADR 0920 — caps', () => {
     expect(plan.chips).toEqual(['a', 'b', 'c', 'd']); // sliced to 5, then the empty one filtered
   });
 
-  it('hero note ≤ 200; section note ≤ 280; badge ≤ 40; item eyebrow ≤ 80; items ≤ 8, label ≤ 120, meta ≤ 40', () => {
+  it('hero note ≤ 200; section note ≤ 280; badge ≤ 40; item eyebrow ≤ 80; items ≤ 8, label ≤ 120, meta ≤ 80 (ADR 1032 widened it for the inset card detail line)', () => {
     expect((data('hero', { heading: 'H', note: 'n '.repeat(250) }).note as string)).toHaveLength(200);
     const cols = data('columns', {
       layout: 'list',
@@ -161,7 +165,7 @@ describe('ADR 0920 — caps', () => {
     expect(c.eyebrow).toHaveLength(80);
     expect(c.items).toHaveLength(8);
     expect(c.items[0]!.label).toHaveLength(120);
-    expect(c.items[0]!.meta).toHaveLength(40);
+    expect(c.items[0]!.meta).toHaveLength(80);
   });
 
   it('chat: messages ≤ 6 with text ≤ 400; every other chat string (incl. proposal) ≤ 120', () => {
@@ -310,7 +314,7 @@ describe('ADR 0920 D7 — crawler = human text', () => {
   });
 
   it('the markdown export carries the same text', () => {
-    const hero = sectionMarkdown(sec('hero', { heading: 'H', note: 'Free.', plan: PLAN }), BASE)!;
+    const hero = sectionMarkdown(sec('hero', { heading: 'H', note: 'Free.', visual: 'plan', plan: PLAN }), BASE)!;
     for (const t of ['Free.', '**Run a 10k by June**', '- **Why** Builds the base without strain.', 'Morning · 30 min', 'Nice, three in a row']) expect(hero).toContain(t);
     const chat = sectionMarkdown(sec('richText', { text: 'Copy.', chat: CHAT }), BASE)!;
     for (const t of ['**Your guide**', '> I missed Tuesday.', '**Proposal** Run Thursday at 7am', 'Accept · Not now']) expect(chat).toContain(t);

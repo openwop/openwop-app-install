@@ -4,6 +4,14 @@
  * use i18next `_one`/`_other` suffixes (Intl.PluralRules) with `{{count}}`.
  */
 export const messages = {
+  errCanonicalSourceOutput: "The saved source output binding is invalid. Reload the workflow before saving.",
+  defaultSourceOutput: "Default output",
+  missingSourceOutput: "Missing output: {{name}}",
+  defaultSourceOutputHelp: "Uses the output property when present; otherwise passes the source output map.",
+  sourceOutputDescription: "Source output: {{name}} ({{type}})",
+
+  runOptions: "Run options",
+  runOptionsChanged: "The workflow changed while run options were open. Review it and run again.",
   unpublishedChanges: 'Unpublished changes',
   unpublishedChangesTitle: 'The published version runs in production; this workflow has newer edits. Publish (Save) again or restore from History.',
   historyMenu: 'History',
@@ -100,6 +108,7 @@ export const messages = {
   collabAnnFailed: 'Live session failed to connect',
 
   // ── Validate / run results ──────────────────────────────────────────────
+  defaultInputsMetadataConflict: "Existing workflow editor metadata has an incompatible format. Your local draft is retained; correct the imported metadata before saving.",
   defaultInputsInvalidJson: 'Default inputs is not valid JSON.',
   validNode_one: '{{count}} node',
   validNode_other: '{{count}} nodes',
@@ -483,7 +492,10 @@ export const messages = {
   preflightFeatureDisabled: 'Not enabled',
   preflightFeatureEnableCta: 'Enable',
   preflightFeaturesNotice: 'This template needs {{features}} enabled for your workspace. Enable it first — otherwise the steps that use it fail when the workflow runs.',
-  preflightZeroConfig: 'Runs with zero connections — ready to go.',
+  preflightZeroConfig: 'No connected accounts needed',
+  preflightAccountUsage: 'This workflow uses connected accounts. Review your account setup before running.',
+  preflightAccountUnknown: 'Account setup may be needed. Check the workflow before running.',
+  preflightReviewConnections: 'Review connections',
   preflightInputsTitle: 'Inputs',
   preflightInputsBlurb: 'Fill these in now — they are frozen into the workflow when you copy it, and you can edit them in the builder afterwards.',
   preflightConfirm: 'Add to my workflows',
@@ -494,9 +506,9 @@ export const messages = {
   templateAsksQuestions_other: 'Asks {{count}} questions',
   aliasHint: 'Includes generic steps that work with {{brand}} through a connection.',
   startHereTitle: 'Start here',
-  startHereHint: 'These run with zero connections — try one now.',
+  startHereHint: 'These templates do not need connected accounts. Review their inputs and setup before running.',
   allTemplatesTitle: 'All templates',
-  zeroConnectionsChip: 'Zero connections',
+  zeroConnectionsChip: 'No connected accounts needed',
   templateCategoryAll: 'All categories',
   templateCategoryFilterLabel: 'Filter templates by category',
   preRunConnsHeading_one: '{{count}} connection to set up.',

@@ -1,0 +1,7 @@
+{
+  "comment": "ADR 0863 D9 P5: the ONE pinned renderer for the -pinned visual baselines. The image is pinned by its amd64 digest; browserVersion is what the guard requires of the connected browser (browser.version()). Change all fields together, then regenerate with scripts/e2e-pinned-baselines.sh and review.",
+  "image": "mcr.microsoft.com/playwright:v1.60.0-noble",
+  "digest": "sha256:83192064c7510f7ee73dd63dc5f22a5e01a92c81a2e6a9c715d9e3fe55471fd9",
+  "playwright": "1.60.0",
+  "browserVersion": "148.0.7778.96"
+}

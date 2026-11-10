@@ -13,6 +13,22 @@
  *  - ignore `allowDelegation` in `resolveEligibleApprovers` → red (the delegate votes on a delegation-off gate);
  *  - emit the notify-after notice BEFORE the platform write → red (a failed write still notifies);
  *  - make `deliverAutonomyDigest` keep a delivered day's items → red (a second delivery repeats the digest).
+ * Re-probed 2026-11-04 (w84g1-*): the per-row expiry status, the escalateTo branch,
+ * the delegation-off join in `resolveEligibleApprovers` and the notify-after
+ * placement each red their case.
+ *
+ * Double guard (recorded): on the interrupt lane's first pass two concurrent sweeps
+ * are held by `interruptSla.putIfAbsent` AND by `fireOnce`'s CAS (approvalSla.ts),
+ * so a CAS-only edit cannot red "a gate reminds once"; it is witnessed as a held
+ * pair (w84g1-held-sla-gate-cas). The per-row lane has only the CAS.
+ *
+ * One world for every case: u-admin-2's active delegation to u-delegate is created
+ * in `beforeAll` (it used to be created inside the delegation case, which made the
+ * file pass only in source order). Recipients are therefore asserted exactly, never
+ * as a count that could hold for another reason: on the gate lane and the
+ * notify-after notices, the admin plus their delegate (ADR 0198 fan-out); on the
+ * per-row spend ladder, ONE admin-role operator notice, because `campaign-spend`
+ * is a tenant-scoped kind (approvalAudience.ts).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -24,7 +40,7 @@ import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createMember, createOrg } from '../src/host/accessControlService.js';
 import { createDelegation } from '../src/host/approvalDelegations.js';
-import { makeAdsAdapter } from '../src/host/adsAdapter.js';
+import { __putDispatchRecordForTests, makeAdsAdapter } from '../src/host/adsAdapter.js';
 import { getApproval } from '../src/host/approvalService.js';
 import { sweepApprovalSla } from '../src/host/approvalSla.js';
 import { sweepExpiredApprovalGates } from '../src/executor/approvalGateTimeout.js';
@@ -46,7 +62,7 @@ import {
   deliverAutonomyDigest, digestJobId, getBinding, presetRules, savePolicy, type ActionRule, type ApproverSpec, type Decision,
 } from '../src/host/autonomyPolicy/index.js';
 import type { WorkflowDefinition } from '../src/executor/types.js';
-import type { RunRecord } from '../src/types.js';
+import type { NotificationRecord, RunRecord } from '../src/types.js';
 import { nodes as orchestrationNodes } from '../../../packs/feature.campaign-orchestration.nodes/index.mjs';
 import { emitAutonomyNotice } from '../src/host/autonomyPolicy/index.js';
 
@@ -83,8 +99,14 @@ async function campaignRun(workflowId = 'wf.p4'): Promise<RunRecord> {
   return (await storage.getRun(run.runId)) ?? run;
 }
 
-const notices = async (type: string): Promise<Array<{ recipientUserId?: string; recipientRole?: string; notificationId: string }>> =>
-  (await storage.listNotifications({ tenantId: T, includeArchived: true } as never)).filter((r) => r.type === type) as never;
+const notices = async (type: string): Promise<NotificationRecord[]> =>
+  (await storage.listNotifications({ tenantId: T, includeArchived: true })).filter((r) => r.type === type);
+/** The rows of `type` written since `before` (by id: the list is newest-first, so never slice by count). */
+const freshSince = async (type: string, before: readonly NotificationRecord[]): Promise<NotificationRecord[]> => {
+  const seen = new Set(before.map((r) => r.notificationId));
+  return (await notices(type)).filter((r) => !seen.has(r.notificationId));
+};
+const recipients = (rows: readonly NotificationRecord[]): string[] => rows.map((r) => r.recipientUserId ?? '(none)').sort();
 const ads = (runId: string) => makeAdsAdapter({ storage, tenantId: T, runId, actingUserId: 'u1', orgId: T });
 
 beforeAll(async () => {
@@ -118,9 +140,16 @@ beforeAll(async () => {
   for (const [subject, role] of [['u1', 'editor'], ['u-admin-2', 'admin'], ['u-delegate', 'editor']] as const) {
     await createMember({ tenantId: T, orgId, subject, displayName: subject, roles: [role] });
   }
+  // ADR 0198 — u-admin-2 (the only admin approver) has an active delegate for the whole file,
+  // including the digest-chain case's item emitted under a clock set back one day.
+  const now = Date.now();
+  await createDelegation({ tenantId: T, fromSubject: 'u-admin-2', toSubject: 'u-delegate', startsAt: new Date(now - 48 * 60 * MIN).toISOString(), endsAt: new Date(now + 48 * 60 * MIN).toISOString(), createdBy: 'u-admin-2' });
   await bindClientPresetIfAbsent(T, orgId, 'guarded@1', 'u-owner');
   const brief = await createBrief(T, orgId, 'u-owner', { name: 'SLA launch', channels: [{ type: 'email_sequence', enabled: true, config: {} }] });
   campaign = (await ensureDraftCampaign(T, brief, 'u-owner')).campaign;
+  // The budget node refuses a campaign its run's org does not own: seed the
+  // dispatch row the launch of platform campaign 9 would have written.
+  await __putDispatchRecordForTests({ tenantId: T, platform: 'google', platformCampaignId: '9', platformAdSetId: 'as-9', platformAdId: 'ad-9', adAccountId: '1234567890', createdAt: new Date().toISOString(), campaignId: campaign.id, orgId });
 });
 afterAll(async () => {
   delete process.env.OPENWOP_GOOGLE_ADS_API_BASE;
@@ -131,11 +160,11 @@ afterAll(async () => {
 describe('ADR 0942 D7 — a per-row SLA ladder on a spend row', () => {
   it('remind and escalate fire once each under concurrent sweeps; expiry rejects and resumes the waiting run', async () => {
     await setRule('ads.budget', { outcome: 'approve', approver: approver({ sla: { remindAfterMs: MIN, escalateAfterMs: 2 * MIN, expireAfterMs: 3 * MIN }, escalateTo: { roleRefs: ['owner'] } }) });
-    const def = {
-      workflowId: 'wf.p4.budget', name: 'wf.p4.budget', version: '1.0.0',
+    const def: WorkflowDefinition = {
+      workflowId: 'wf.p4.budget',
       nodes: [{ nodeId: 'budget', typeId: 'core.openwop.connectors.ad-budget-update', config: { platform: 'google', adAccountId: '1234567890', campaignId: '9', dailyBudgetMinor: 52_000, dryRun: false } }],
       edges: [],
-    } as unknown as WorkflowDefinition;
+    };
     registerHostWorkflow(def);
     const run = await campaignRun('wf.p4.budget');
     expect((await executeRun(storage, run, def)).status).toBe('waiting-external');
@@ -147,10 +176,13 @@ describe('ADR 0942 D7 — a per-row SLA ladder on a spend row', () => {
     const created = Date.parse(row?.createdAt ?? '');
     const at = (ms: number) => new Date(created + ms);
 
-    const before = (await notices('approval.sla-reminder')).length;
+    const before = await notices('approval.sla-reminder');
     await Promise.all([sweepApprovalSla(at(MIN + 1_000)), sweepApprovalSla(at(MIN + 1_000))]);
-    const reminders = (await notices('approval.sla-reminder')).length - before;
-    expect(reminders).toBe(1); // one admin approver, reminded once
+    // A `campaign-spend` row is a tenant-scoped kind (approvalAudience.ts: `'campaign-spend': null`),
+    // so its reminder is ONE operator notice to the admin role, never a per-user fan-out. Reminded
+    // ONCE: a double fire makes two rows.
+    const reminders = await freshSince('approval.sla-reminder', before);
+    expect(reminders.map((r) => ({ recipientUserId: r.recipientUserId, recipientRole: r.recipientRole }))).toEqual([{ recipientUserId: undefined, recipientRole: 'admin' }]);
     await Promise.all([sweepApprovalSla(at(2 * MIN + 1_000)), sweepApprovalSla(at(2 * MIN + 1_000))]);
     const escalated = (await notices('approval.sla-escalated')).filter((r) => r.recipientUserId === 'u-owner');
     expect(escalated).toHaveLength(1);
@@ -163,10 +195,10 @@ describe('ADR 0942 D7 — a per-row SLA ladder on a spend row', () => {
 
 describe('ADR 0942 D7 — the interrupt lane', () => {
   const gateDef = (id: string): WorkflowDefinition => ({
-    workflowId: id, name: id, version: '1.0.0',
+    workflowId: id,
     nodes: [{ nodeId: 'gate', typeId: GATE, config: { actionClass: 'plan.approve', prompt: 'Approve the plan?' } }, { nodeId: 'after', typeId: 'core.noop', config: {} }],
     edges: [{ edgeId: 'e1', sourceNodeId: 'gate', targetNodeId: 'after', triggerRule: 'all_success' }],
-  } as unknown as WorkflowDefinition);
+  });
 
   it('a gate reminds once under concurrent sweeps, and expires as a rejection', async () => {
     await setRule('plan.approve', { outcome: 'approve', approver: approver({ sla: { remindAfterMs: MIN, expireAfterMs: 2 * MIN } }) });
@@ -177,9 +209,9 @@ describe('ADR 0942 D7 — the interrupt lane', () => {
     if (!open) throw new Error('expected a gate');
     expect(open.data).toMatchObject({ timeoutMs: 2 * MIN, autonomy: { sla: { remindAfterMs: MIN } } });
     const created = Date.parse(open.createdAt);
-    const before = (await notices('approval.sla-reminder')).length;
+    const before = await notices('approval.sla-reminder');
     await Promise.all([sweepApprovalSla(new Date(created + MIN + 1_000)), sweepApprovalSla(new Date(created + MIN + 1_000))]);
-    expect((await notices('approval.sla-reminder')).length - before).toBe(1);
+    expect(recipients(await freshSince('approval.sla-reminder', before))).toEqual(['u-admin-2', 'u-delegate']);
     // Expiry: the existing gate-timeout sweep rejects it (RFC 0093: expiry is a rejection).
     await sweepExpiredApprovalGates(storage, created + 2 * MIN + 1_000);
     await __awaitRunResumeChainForTests(run.runId);
@@ -188,8 +220,7 @@ describe('ADR 0942 D7 — the interrupt lane', () => {
   });
 
   it('delegation:"none" — an active delegate of the approver may not vote; with delegation allowed they may', async () => {
-    const now = Date.now();
-    await createDelegation({ tenantId: T, fromSubject: 'u-admin-2', toSubject: 'u-delegate', startsAt: new Date(now - MIN).toISOString(), endsAt: new Date(now + 60 * MIN).toISOString(), createdBy: 'u-admin-2' });
+    // The delegation u-admin-2 → u-delegate is active (beforeAll).
     await setRule('plan.approve', { outcome: 'approve', approver: approver({ delegation: 'none' }) });
     registerHostWorkflow(gateDef('wf.p4.gate2'));
     const run = await campaignRun('wf.p4.gate2');
@@ -197,7 +228,10 @@ describe('ADR 0942 D7 — the interrupt lane', () => {
     const [open] = await storage.listOpenInterrupts(run.runId);
     if (!open) throw new Error('expected a gate');
     expect(open.data).toMatchObject({ allowDelegation: false });
-    await expect(resolveAndResume(storage, hostSuite, open.interruptId, { action: 'approve' }, { subjectRef: 'u-delegate' })).rejects.toMatchObject({ httpStatus: 403 });
+    const refused = await resolveAndResume(storage, hostSuite, open.interruptId, { action: 'approve' }, { subjectRef: 'u-delegate' }).then(() => null, (e: unknown) => e);
+    expect(refused).toMatchObject({ httpStatus: 403, code: 'forbidden', message: 'You are not an eligible approver for this gate.' });
+    // The gate is still open: the refusal recorded nothing.
+    expect((await storage.getInterrupt(open.interruptId))?.resolvedAt).toBeFalsy();
 
     await setRule('plan.approve', { outcome: 'approve', approver: approver() });
     registerHostWorkflow(gateDef('wf.p4.gate3'));
@@ -217,16 +251,16 @@ describe('ADR 0942 D7 — notify-after', () => {
   it('an immediate notice goes to the named role AFTER the change lands, never on a failed write', async () => {
     await setRule('ads.budget', notify('immediate'));
     const run = await campaignRun();
-    const before = (await notices(AUTONOMY_NOTICE_TYPE)).length;
+    const before = await notices(AUTONOMY_NOTICE_TYPE);
     platformFails = true;
-    expect((await ads(run.runId).updateBudget({ platform: 'google', adAccountId: '1234567890', campaignId: '9', dailyBudgetMinor: 1_200 })).outcome).toBe('failed');
-    expect((await notices(AUTONOMY_NOTICE_TYPE)).length).toBe(before);
-    platformFails = false;
+    try {
+      expect((await ads(run.runId).updateBudget({ platform: 'google', adAccountId: '1234567890', campaignId: '9', dailyBudgetMinor: 1_200 })).outcome).toBe('failed');
+    } finally { platformFails = false; }
+    expect(await freshSince(AUTONOMY_NOTICE_TYPE, before)).toEqual([]);
     expect((await ads(run.runId).updateBudget({ platform: 'google', adAccountId: '1234567890', campaignId: '9', dailyBudgetMinor: 1_300 })).outcome).toBe('updated');
-    const fresh = (await notices(AUTONOMY_NOTICE_TYPE)).slice(before);
     // The admin role on the client org, plus that admin's active delegate (ADR 0198: notification fan-out
-    // inherits delegates — set up by the delegation test above); never the editor who caused it, never a broadcast.
-    expect(fresh.map((r) => r.recipientUserId).sort()).toEqual(['u-admin-2', 'u-delegate']);
+    // inherits delegates; the delegation is set up in beforeAll); never the editor who caused it, never a broadcast.
+    expect(recipients(await freshSince(AUTONOMY_NOTICE_TYPE, before))).toEqual(['u-admin-2', 'u-delegate']);
   });
 
   it('a daily digest batches the day into one notice per person, once, and the save schedules the digest chain', async () => {
@@ -241,7 +275,7 @@ describe('ADR 0942 D7 — notify-after', () => {
     expect(await deliverAutonomyDigest(T, tomorrow)).toEqual({ recipients: 2, items: 4 });
     expect(await deliverAutonomyDigest(T, tomorrow)).toEqual({ recipients: 0, items: 0 });
     const digests = await notices(AUTONOMY_DIGEST_TYPE);
-    expect(digests.map((r) => r.recipientUserId).sort()).toEqual(['u-admin-2', 'u-delegate']);
+    expect(recipients(digests.filter((r) => r.message.includes('Daily budget set to 1400')))).toEqual(['u-admin-2', 'u-delegate']);
   });
 });
 
@@ -269,10 +303,12 @@ describe('ADR 0942 D7 — the digest chain runs as the scheduler runs it (actorl
     // Exactly the scheduler's shape for a host-owned job: no acting user.
     const run: RunRecord = { runId: `r-p4-digest-${n++}`, workflowId: DIGEST_CHAIN_ID, tenantId: T, status: 'pending', inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now };
     await insertRunWithStartContext(storage, run, { admission: { plan: 'exempt:test-fixture' } });
-    const before = (await notices(AUTONOMY_DIGEST_TYPE)).length;
+    const before = await notices(AUTONOMY_DIGEST_TYPE);
     const result = await executeRun(storage, (await storage.getRun(run.runId)) ?? run, def);
     const row = await storage.getRun(run.runId);
     expect(result.status, JSON.stringify(row?.error ?? null)).toBe('completed');
-    expect((await notices(AUTONOMY_DIGEST_TYPE)).length).toBeGreaterThan(before);
+    // Yesterday's queued item reached the admin and their delegate, as one digest each.
+    const delivered = (await freshSince(AUTONOMY_DIGEST_TYPE, before)).filter((r) => r.message.includes('Yesterday\'s budget move'));
+    expect(recipients(delivered)).toEqual(['u-admin-2', 'u-delegate']);
   });
 });

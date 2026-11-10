@@ -7,7 +7,7 @@
  * the operator's job and the page says so. Gated by the `custom-domains` toggle.
  */
 import { Button } from '../../ui/Button.js';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { PageHeader } from '../../ui/PageHeader.js';
 import { Notice } from '../../ui/Notice.js';
@@ -23,7 +23,8 @@ import { GlobeIcon } from '../../ui/icons/index.js';
 import { copyToClipboard } from '../../ui/copyToClipboard.js';
 import {
   listOrgs, listDomainPage, addDomain, verifyDomain, removeDomain, retryDomain, forceRemoveDomain, dnsRecordsFor,
-  type CustomDomain, type DnsRecord, type EdgeSummary, type EdgeTlsState, type Org,
+  getSiteBrand, setSiteBrand,
+  type CustomDomain, type DnsRecord, type EdgeSummary, type EdgeTlsState, type Org, type SiteBrand,
 } from './domainsClient.js';
 
 const statusChip = (status: CustomDomain['status']): string =>
@@ -277,7 +278,54 @@ export function DomainsPage(): JSX.Element {
           )}
         </>
       )}
+      {orgId ? <SiteBrandCard orgId={orgId} /> : null}
       </OrgSelectionState>
     </section>
+  );
+}
+
+/** ADR 1030 P2 — which of the workspace's brands styles its custom-domain site.
+ *  It takes effect where "Designed pages on custom domains" is on; the page says
+ *  so rather than hiding the choice when the toggle is off. */
+function SiteBrandCard({ orgId }: { orgId: string }): JSX.Element {
+  const { t } = useTranslation('custom-domains');
+  const hintId = useId();
+  const [state, setState] = useState<SiteBrand | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    let live = true;
+    setState(null); setFailed(false);
+    getSiteBrand(orgId).then((s) => { if (live) setState(s); }, () => { if (live) setFailed(true); });
+    return () => { live = false; };
+  }, [orgId, attempt]);
+  const choose = async (brandId: string): Promise<void> => {
+    setSaving(true);
+    try {
+      const saved = await setSiteBrand(orgId, brandId || null);
+      setState((s) => (s ? { ...s, brandId: saved } : s));
+      toast.success(t('siteBrandSaved'));
+    } catch (e) { toast.error(e instanceof Error ? e.message : t('siteBrandSaveFailed')); }
+    finally { setSaving(false); }
+  };
+  if (failed) {
+    return (
+      <StateCard announce title={t('siteBrandLoadFailedTitle')} body={t('siteBrandLoadFailed')}
+        action={<Button variant="secondary" size="sm" onClick={() => setAttempt((a) => a + 1)}>{t('retry')}</Button>} />
+    );
+  }
+  if (state === null) return <SkeletonRows rows={1} columns={['40%', '60%']} />;
+  return (
+    <div className="surface-card u-p-4 u-grid u-gap-2">
+      <label className="u-grid u-gap-1">
+        <span className="u-label-sm">{t('siteBrandLabel')}</span>
+        <select value={state.brandId ?? ''} disabled={saving} aria-describedby={hintId} onChange={(e) => { void choose(e.target.value); }}>
+          <option value="">{t('siteBrandDefault')}</option>
+          {state.choices.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+        </select>
+      </label>
+      <p id={hintId} className="u-label-sm muted u-m-0">{state.choices.length === 0 ? t('siteBrandNone') : t('siteBrandHint')}</p>
+    </div>
   );
 }

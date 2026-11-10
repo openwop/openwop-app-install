@@ -32,7 +32,7 @@ vi.mock('../src/features/media/mediaService.js', async (orig) => {
 
 import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
-import { makeAdsAdapter } from '../src/host/adsAdapter.js';
+import { makeAdsAdapter, type PublishAdArgs } from '../src/host/adsAdapter.js';
 import { assertCreativePublishable, registerCreativeReviewApproval } from '../src/host/creativePublishGate.js';
 import { recordVerdict, verdictIdFor, FIDELITY_RULESET_VERSION, type FidelityVerdict } from '../src/host/creativeFidelity/index.js';
 import { storeMediaAsset } from '../src/host/inMemorySurfaces.js';
@@ -53,7 +53,7 @@ beforeAll(async () => {
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   storage = app.locals.storage as Storage;
   await storage.insertRun({ runId: 'run-p3', workflowId: 'w', tenantId: T, status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: 'x', updatedAt: 'x' });
-});
+}, 120_000);
 afterEach(() => { verdictStoreDown = false; mediaStoreDown = false; registerCreativeReviewApproval(null); });
 afterAll(() => { registerCreativeReviewApproval(null); });
 
@@ -88,13 +88,17 @@ describe('assertCreativePublishable', () => {
   it('non-AI assets pass untouched, everywhere', async () => {
     const a = await asset({ marketing: { productId: 'prod:mug' } });
     for (const d of ['ads:meta', 'ads:tiktok', 'ads:google', 'ads:linkedin', 'openwop.cms.page'] as const) {
-      expect((await gate(a.assetId, d)).ok, d).toBe(true);
+      expect(await gate(a.assetId, d), d).toMatchObject({ ok: true, assetId: a.assetId });
     }
   });
 
   it('AI imagery bound to a product with no grounding sources ⇒ product_depiction_ungrounded', async () => {
     const a = await asset({ lineage: { generatedBy: 'ai' }, marketing: { productId: 'prod:mug' } });
     expect(await gate(a.assetId)).toMatchObject({ ok: false, code: 'product_depiction_ungrounded' });
+    // A stamp that names the product but pins no source photo is just as ungrounded.
+    const sourceless = await asset({ lineage: { generatedBy: 'ai' }, grounding: { ...grounded(), sources: [] } });
+    expect(sourceless.lineage?.grounding).toMatchObject({ productId: 'prod:mug', sources: [] });
+    expect(await gate(sourceless.assetId)).toMatchObject({ ok: false, code: 'product_depiction_ungrounded' });
   });
 
   it('grounded but never checked, or checked and failed ⇒ fidelity_unverified', async () => {
@@ -116,7 +120,7 @@ describe('assertCreativePublishable', () => {
 
   it('a passing product image publishes (and resolves from a bare serve token or URL too)', async () => {
     const a = await withVerdict('pass');
-    expect((await gate(a.assetId)).ok).toBe(true);
+    expect(await gate(a.assetId)).toMatchObject({ ok: true, assetId: a.assetId });
     expect(await gate(a.serveToken)).toMatchObject({ ok: true, assetId: a.assetId });
     expect(await gate(mediaStorage.serveUrl(a.serveToken))).toMatchObject({ ok: true, assetId: a.assetId });
   });
@@ -134,7 +138,7 @@ describe('assertCreativePublishable', () => {
     expect((await gate(a.assetId)).ok).toBe(true);
     await updateAsset(T, ORG, a.assetId, { marketing: { productId: 'prod:different' } });
     expect(await gate(a.assetId)).toMatchObject({ ok: false, code: 'product_depiction_ungrounded' });
-    const staleEvidence: Partial<FidelityVerdict>[] = [{ assetSha256: '0'.repeat(64) }, { productId: 'prod:other' }, { sources: [] }, { rulesetVersion: 'obsolete-rules' }];
+    const staleEvidence: Partial<FidelityVerdict>[] = [{ assetSha256: '0'.repeat(64) }, { productId: 'prod:other' }, { mode: 'edit' }, { sources: [] }, { rulesetVersion: 'obsolete-rules' }];
     for (const override of staleEvidence) {
       const stale = await withVerdict('pass', 'pass', override);
       expect(await gate(stale.assetId)).toMatchObject({ ok: false, code: 'fidelity_unverified' });
@@ -167,7 +171,7 @@ describe('assertCreativePublishable', () => {
     const ai = await storeMediaAsset(T, { contentBase64: PNG, contentType: 'image/png', aiOrigin: { provider: 'mock', op: 'generate' } });
     expect(await gate(ai.token)).toMatchObject({ ok: false, code: 'fidelity_unverified' });
     const plain = await storeMediaAsset(T, { contentBase64: PNG, contentType: 'image/png' });
-    expect((await gate(plain.token)).ok).toBe(true);
+    expect(await gate(plain.token)).toMatchObject({ ok: true });
   });
 
   it('disclosure: a platform AI flag no adapter can set refuses (TikTok; political Meta); elsewhere AI non-product creative passes', async () => {
@@ -175,20 +179,20 @@ describe('assertCreativePublishable', () => {
     expect(await gate(scene.assetId, 'ads:tiktok')).toMatchObject({ ok: false, code: 'disclosure_unsupported' });
     expect(await gate(scene.assetId, 'ads:meta', true)).toMatchObject({ ok: false, code: 'disclosure_unsupported' });
     expect(await gate(scene.assetId, 'ads:meta')).toMatchObject({ ok: true, disclosure: { required: false } });
-    expect((await gate(scene.assetId, 'ads:linkedin')).ok).toBe(true);
-    expect((await gate(scene.assetId, 'openwop.cms.page')).ok).toBe(true);
+    expect(await gate(scene.assetId, 'ads:linkedin')).toMatchObject({ ok: true, assetId: scene.assetId });
+    expect(await gate(scene.assetId, 'openwop.cms.page')).toMatchObject({ ok: true, assetId: scene.assetId });
   });
 });
 
 describe('the chokepoints', () => {
   const ads = () => makeAdsAdapter({ storage, tenantId: T, runId: 'run-p3', actingUserId: 'u1', orgId: T });
-  const args = (mediaAssetId: string) => ({ platform: 'meta' as const, briefId: `brief-${++n}`, adAccountId: 'act_1', campaignName: 'C', copy: { headline: 'H', primaryText: 'P' }, pageId: 'page_1', mediaAssetId, dryRun: true });
+  const args = (mediaAssetId: string): PublishAdArgs => ({ platform: 'meta', briefId: `brief-${++n}`, adAccountId: 'act_1', campaignName: 'C', copy: { headline: 'H', bodyText: 'P' }, pageId: 'page_1', mediaAssetId, dryRun: true });
 
   it('publishAd refuses before any preview; a non-AI asset previews', async () => {
     const bad = await asset({ lineage: { generatedBy: 'ai' }, marketing: { productId: 'prod:mug' } });
-    expect(await ads().publishAd(args(bad.assetId) as never)).toEqual({ outcome: 'failed', error: 'product_depiction_ungrounded' });
+    expect(await ads().publishAd(args(bad.assetId))).toEqual({ outcome: 'failed', error: 'product_depiction_ungrounded' });
     const ok = await asset();
-    expect((await ads().publishAd(args(ok.assetId) as never)).outcome).toBe('preview');
+    expect((await ads().publishAd(args(ok.assetId))).outcome).toBe('preview');
   });
 
   it('a CMS page edit that swaps an image to unverified AI creative is refused creative_blocked (preview and write)', async () => {
@@ -199,14 +203,14 @@ describe('the chokepoints', () => {
     const target = { orgId: ORG, locator: { pageId: page.pageId }, editableFields: [field] };
     const bad = await asset({ lineage: { generatedBy: 'ai' }, grounding: grounded() });
     const edits = [{ field, before: before.serveToken, after: bad.serveToken }];
-    expect(await cmsPageAdapter.preview(target as never, edits, { tenantId: T })).toMatchObject({ refused: 'creative_blocked' });
-    expect(await cmsPageAdapter.write(target as never, edits, { expectedVersion: page.version }, { tenantId: T, actingUserId: 'u1' })).toMatchObject({ kind: 'refused', reason: 'creative_blocked' });
+    expect(await cmsPageAdapter.preview(target, edits, { tenantId: T })).toMatchObject({ refused: 'creative_blocked' });
+    expect(await cmsPageAdapter.write(target, edits, { expectedVersion: page.version }, { tenantId: T, actingUserId: 'u1' })).toMatchObject({ kind: 'refused', reason: 'creative_blocked' });
     // A hero's image lives under `imageToken` — the same gate applies.
     const hero = await createPage({ tenantId: T, orgId: ORG, title: 'Hero', createdBy: 'u1', sections: [{ type: 'hero', data: { heading: 'Mugs', imageToken: before.serveToken } }] });
     const heroField = `sections[${hero.sections[0].sectionId}].data.imageToken`;
-    expect(await cmsPageAdapter.preview({ orgId: ORG, locator: { pageId: hero.pageId }, editableFields: [heroField] } as never, [{ field: heroField, before: before.serveToken, after: bad.serveToken }], { tenantId: T })).toMatchObject({ refused: 'creative_blocked' });
+    expect(await cmsPageAdapter.preview({ orgId: ORG, locator: { pageId: hero.pageId }, editableFields: [heroField] }, [{ field: heroField, before: before.serveToken, after: bad.serveToken }], { tenantId: T })).toMatchObject({ refused: 'creative_blocked' });
     const fine = await asset();
-    const ok = await cmsPageAdapter.preview(target as never, [{ field, before: before.serveToken, after: fine.serveToken }], { tenantId: T });
+    const ok = await cmsPageAdapter.preview(target, [{ field, before: before.serveToken, after: fine.serveToken }], { tenantId: T });
     expect('refused' in ok).toBe(false);
   });
 });

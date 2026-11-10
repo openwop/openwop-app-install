@@ -7,6 +7,13 @@ non-goals: they violate Meta's terms and get numbers banned. (The demo
 `messaging` relay gateway is a separate self-hosted device lane and gains no
 WhatsApp coupling.)
 
+> **CORRECTED 2026-11-03 (ADR 1041 D2):** this guide still covers business WhatsApp,
+> and that stays official-only. "Permanent non-goal" no longer holds for a user's
+> own personal account: the user approved an opt-in device lane that links the
+> user's own WhatsApp through Baileys in openwop-cli, on the user's machine, with
+> the ban risk shown at setup (ADR 1043). It never runs on an operator's number or
+> on the business channel this guide configures.
+
 ## Compliance model (read this first)
 
 Meta does **not** pre-approve your business or use case. Compliance is

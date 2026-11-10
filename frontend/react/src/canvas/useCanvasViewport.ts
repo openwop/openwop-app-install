@@ -91,11 +91,21 @@ const SPACE_ACTIVATED_ROLES = new Set([
  *  down/Space headed for chrome. Exported so canvas consumers gate their own
  *  background handlers on the SAME predicate (the GraphSurface deselect). */
 export const isInteractiveTarget = (t: EventTarget | null): boolean => {
-  if (!(t instanceof HTMLElement)) return false;
-  const tag = t.tagName;
-  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || tag === 'BUTTON' || tag === 'A' || t.isContentEditable) return true;
-  const role = t.getAttribute('role');
-  return Boolean(role && SPACE_ACTIVATED_ROLES.has(role));
+  if (!(t instanceof Element)) return false;
+  // Pointer targets can be SVG paths or nested labels, not the owning control.
+  if (t.closest('input, textarea, select, button, a')) return true;
+  for (let el: Element | null = t; el; el = el.parentElement) {
+    const role = el.getAttribute('role');
+    if (role && SPACE_ACTIVATED_ROLES.has(role)) return true;
+  }
+  // Resolve inherited editing explicitly, including SVG descendants. The nearest
+  // valid false creates a noneditable island; invalid values inherit as in HTML.
+  for (let el: Element | null = t; el; el = el.parentElement) {
+    const editable = el.getAttribute('contenteditable')?.toLowerCase();
+    if (editable === 'false') return false;
+    if (editable === '' || editable === 'true' || editable === 'plaintext-only') return true;
+  }
+  return t instanceof HTMLElement && t.isContentEditable === true;
 };
 
 /** Whether a pointer-down should arm a BACKGROUND pan (ADR 0337 Phase 2c): the

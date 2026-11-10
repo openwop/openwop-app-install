@@ -23,6 +23,7 @@ import { agentsCapability, stripSupported } from '../routes/discovery.js';
 import { storageFamilyFacets, v2AdvertisedStorageFamilies } from '../host/storageFamilyAdvert.js';
 import type { Storage } from '../storage/storage.js';
 import { getRevision } from '../host/userAgentRevisions.js';
+import { hydrateInstalledPackAgent } from '../host/tenantInstalledPacks.js';
 
 const log = createLogger('bootstrap.agentPackResolver');
 const PACK_DIR = resolveDefaultPackDir();
@@ -123,6 +124,8 @@ export function ensureAgentPackResolverInstalled(storage: Storage): void {
     // ADR 0379 P2: the tenant rides the resolve call, so the hydrate read is
     // tenant-scoped whenever a tenant is known.
     if (await hydrateUserAgentIntoRegistry(storage, agentId, tenant)) return null;
+    // ADR 1033 P2 — an agent from a pack this tenant installed by applying a proposal.
+    if (await hydrateInstalledPackAgent(agentId, tenant)) return null;
     if (!existsSync(PACK_DIR)) return null;
     for (const entry of readdirSync(PACK_DIR)) {
       if (isParkedPackDirName(entry)) continue;

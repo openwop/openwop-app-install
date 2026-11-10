@@ -65,10 +65,15 @@ async function orderedPublishedDocs(orgId: string): Promise<{ tenantId: string; 
 }
 
 /** The published docs nav tree for a public org, ordered by `docsNav` then slug.
- *  Published-only (the Publishing gate) + docs-collection-only. */
+ *  Published-only (the Publishing gate) + docs-collection-only.
+ *
+ *  An unknown org, the `docs` toggle OFF and a lapsed public lane all answer the
+ *  SAME empty list, so the nav still reveals nothing about which orgs exist. It is
+ *  not a 404: the public shell probes this on every page load to decide whether
+ *  to show a Docs link, and "no docs here" is an answer, not an error. */
 export async function listPublishedDocs(orgId: string): Promise<DocsNavItem[]> {
   const resolved = await orderedPublishedDocs(orgId);
-  if (!resolved) throw new OpenwopError('not_found', 'No documentation site here.', 404, { orgId });
+  if (!resolved) return [];
   return resolved.pages.map((p) => ({ slug: p.slug, title: p.title, order: orderKeyOf(p), updatedAt: p.updatedAt }));
 }
 

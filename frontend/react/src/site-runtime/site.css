@@ -1,0 +1,128 @@
+/* ADR 1030 — the designed look for a workspace's pages on its own custom domain.
+
+   Those pages are the SEMANTIC prerender (features/publishing/sectionHtml.ts):
+   headings, paragraphs, lists, figures and tables, with no classes. This sheet
+   styles that markup through the stable hooks the prerender stamps on each
+   section (`data-owp-section`, `-layout`, `-visual`, `-motion`), so there is ONE
+   renderer of markup and no second copy of the SPA's design to drift.
+
+   Served from the ADR 1015 `_rt` door only when the workspace turns on
+   `custom-domains.designed-pages`; the prerender then marks `<body data-owp-site>`
+   and every rule here is scoped to it. Tokens and the distribution's brand are
+   the SPA's own files, imported, never copied. No JavaScript. */
+@import '../styles/foundations/tokens.css';
+@import '../brand/brand.css';
+
+body[data-owp-site] {
+  /* ADR 1030 P2 — tokens.css derives the glow from --clay on :root, BEFORE a site
+     brand's --clay (set on this element) applies; re-derive it here, with the
+     same expression, so the glow follows the site's own accent. */
+  --clay-glow: oklch(from var(--clay) l c h / 0.50);
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: var(--text-body);
+  line-height: var(--leading-prose);
+  -webkit-font-smoothing: antialiased;
+}
+[data-owp-site] main { display: block; }
+[data-owp-site] [data-owp-section] {
+  box-sizing: border-box;
+  margin: 0;
+  padding: calc(var(--space-6) * 1.5) max(var(--space-4), calc((100% - 1120px) / 2));
+}
+[data-owp-site] [data-owp-section] + [data-owp-section] { border-top: 1px solid var(--rule); }
+
+/* Type */
+[data-owp-site] h1, [data-owp-site] h2, [data-owp-site] h3 { margin: 0 0 var(--space-3); font-family: var(--serif); font-weight: var(--weight-display); line-height: var(--leading-tight); color: var(--ink); }
+[data-owp-site] h1 { font-size: clamp(calc(var(--text-display) * 1.4), 5.6vw, calc(var(--text-display) * 2.6)); max-width: 20ch; }
+[data-owp-site] h2 { font-size: calc(var(--text-display) * 1.15); max-width: 28ch; }
+[data-owp-site] h3 { font-family: var(--sans); font-size: var(--text-subtitle); font-weight: var(--weight-head); }
+[data-owp-site] p { margin: 0 0 var(--space-3); color: var(--ink-2); max-width: 70ch; }
+[data-owp-site] small { font-size: var(--text-sm); color: var(--ink-3); }
+[data-owp-site] a { color: var(--clay-text); text-underline-offset: 3px; }
+[data-owp-site] a:focus-visible { outline: 2px solid var(--clay-text); outline-offset: 2px; border-radius: 2px; }
+[data-owp-site] img { max-width: 100%; height: auto; border-radius: var(--radius-lg); }
+
+/* Hero: the header section. Its CTA paragraph's links read as buttons. */
+[data-owp-site] [data-owp-section="hero"] { padding-block: calc(var(--space-6) * 2.5); }
+[data-owp-site] [data-owp-section="hero"] > p:first-child,
+[data-owp-site] [data-owp-section] > p:first-child:has(+ h2) { font-family: var(--mono); font-size: var(--text-eyebrow); font-weight: var(--weight-head); letter-spacing: 0.06em; text-transform: uppercase; color: var(--clay-text); }
+[data-owp-site] [data-owp-section="hero"] p:has(> a) { display: flex; flex-wrap: wrap; gap: var(--space-3); margin-top: var(--space-5); }
+[data-owp-site] [data-owp-section="hero"] p > a,
+[data-owp-site] [data-owp-section="cta"] p > a { display: inline-block; padding: var(--space-3) var(--space-5); border-radius: var(--radius); background: var(--clay-strong); color: var(--color-on-scrim); font-weight: var(--weight-head); text-decoration: none; }
+[data-owp-site] [data-owp-section="hero"] p > a + a { background: transparent; color: var(--ink); box-shadow: inset 0 0 0 1px var(--rule-2); }
+
+/* Figures inside the hero (the plan and activity cards) and quotes. */
+[data-owp-site] figure { margin: var(--space-5) 0 0; }
+[data-owp-site] [data-owp-section="hero"] figure { max-width: 34rem; padding: var(--space-5); border: 1px solid var(--rule); border-radius: var(--radius-lg); background: var(--paper); box-shadow: 0 30px 60px -40px var(--clay-glow); }
+[data-owp-site] [data-owp-section="hero"] figure ol { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-2); }
+[data-owp-site] [data-owp-section="hero"] figure ol > li { padding: var(--space-3); border: 1px solid var(--rule); border-radius: var(--radius); color: var(--ink-2); }
+
+/* Card lists: columns in every layout but steps/stats/timeline, and entity lists. */
+[data-owp-site] [data-owp-section] > ul { list-style: none; margin: var(--space-5) 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: var(--space-4); }
+[data-owp-site] [data-owp-section] > ul > li { padding: var(--space-5); border: 1px solid var(--rule); border-radius: var(--radius-lg); background: var(--paper); }
+[data-owp-site] [data-owp-section] > ul > li > p:last-child { margin-bottom: 0; }
+[data-owp-site] [data-owp-layout="marquee"] > ul { grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr)); }
+[data-owp-site] [data-owp-layout="marquee"] > ul > li { padding: var(--space-3) var(--space-4); text-align: center; font-weight: var(--weight-head); }
+
+/* Ordered sequences: steps and timeline. */
+[data-owp-site] [data-owp-section] > ol { margin: var(--space-5) 0 0; padding-inline-start: var(--space-6); display: grid; gap: var(--space-4); }
+[data-owp-site] [data-owp-layout="timeline"] > ol { list-style: none; position: relative; }
+[data-owp-site] [data-owp-layout="timeline"] > ol::before { content: ""; position: absolute; inset-block: var(--space-2); inset-inline-start: 7px; inline-size: 2px; background: var(--clay-strong); border-radius: var(--radius-pill); }
+
+/* Stats, FAQ, comparison. */
+[data-owp-site] [data-owp-section] dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); gap: var(--space-4); margin: var(--space-5) 0 0; }
+[data-owp-site] [data-owp-section] dt { font-family: var(--serif); font-size: calc(var(--text-display) * 1.15); font-weight: var(--weight-display); color: var(--ink); }
+[data-owp-site] [data-owp-section] dd { margin: 0; color: var(--ink-2); }
+[data-owp-site] details { border-bottom: 1px solid var(--rule); padding: var(--space-3) 0; }
+[data-owp-site] summary { cursor: pointer; font-weight: var(--weight-head); color: var(--ink); }
+[data-owp-site] table { width: 100%; border-collapse: collapse; margin-top: var(--space-5); font-size: var(--text-sm); }
+[data-owp-site] th, [data-owp-site] td { padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--rule); text-align: start; }
+[data-owp-site] blockquote { margin: 0; padding-inline-start: var(--space-4); border-inline-start: 3px solid var(--clay); font-family: var(--serif); font-size: var(--text-lg); color: var(--ink); }
+
+/* ADR 1029 motion, keyed on the hook: the same guards as the SPA (screen only,
+   scroll timelines only, nobody asked for less motion; the range ends at
+   entry 100%, so a fully visible section is never left faded). */
+@keyframes owp-site-reveal { from { opacity: 0; transform: translateY(var(--owp-travel)); } to { opacity: 1; transform: none; } }
+@keyframes owp-site-slide { from { opacity: 0; transform: translateX(calc(var(--owp-slide) * var(--owp-dir, 1))); } to { opacity: 1; transform: none; } }
+@keyframes owp-site-zoom { from { opacity: 0; transform: scale(var(--zoom-from)); } to { opacity: 1; transform: none; } }
+[data-owp-site] { overflow-x: clip; }
+/* RTL follows a `dir` on the document. The custom-domain prerender does not set
+   one yet (its pages are LTR throughout), so this matches nothing today; it is
+   here so a `slide-start` flips the day an RTL site is served (ADR 1038 D6 gap). */
+[dir="rtl"] [data-owp-site], [data-owp-site][dir="rtl"] { --owp-dir: -1; }
+@supports (animation-timeline: view()) {
+  @media screen and (prefers-reduced-motion: no-preference) {
+    [data-owp-site] [data-owp-motion="reveal"],
+    [data-owp-site] [data-owp-motion="rise"],
+    [data-owp-site] [data-owp-motion="stagger"] > ul > li,
+    [data-owp-site] [data-owp-motion="stagger"] > ol > li {
+      --owp-travel: var(--reveal-distance);
+      animation-name: owp-site-reveal;
+      animation-duration: auto;
+      animation-timing-function: var(--ease-reveal);
+      animation-fill-mode: both;
+      animation-timeline: view();
+      animation-range: entry 0% entry 100%;
+    }
+    [data-owp-site] [data-owp-motion="rise"] { --owp-travel: var(--rise-distance); }
+    [data-owp-site] :is([data-owp-motion="slide-start"], [data-owp-motion="slide-end"], [data-owp-motion="zoom"]) {
+      --owp-slide: calc(var(--slide-distance) * -1);
+      animation-name: owp-site-slide;
+      animation-duration: auto;
+      animation-timing-function: var(--ease-reveal);
+      animation-fill-mode: both;
+      animation-timeline: view();
+      animation-range: entry 0% entry 100%;
+    }
+    [data-owp-site] [data-owp-motion="slide-end"] { --owp-slide: var(--slide-distance); }
+    [data-owp-site] [data-owp-motion="zoom"] { animation-name: owp-site-zoom; }
+  }
+}
+
+@media (max-width: 599px) {
+  [data-owp-site] [data-owp-section] { padding-block: calc(var(--space-6) * 1.1); }
+  [data-owp-site] [data-owp-section="hero"] { padding-block: calc(var(--space-6) * 1.6); }
+}

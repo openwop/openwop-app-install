@@ -122,3 +122,21 @@ describe('cms.localize-and-submit — end-to-end execution', () => {
     expect(wasUpdated(sys)).toBe(true);
   });
 });
+
+describe('ADR 1038 D8 — a list item’s state follows the base on the agent surface lane', () => {
+  it('matches states by position before the cleaner drops an unlabelled item', async () => {
+    const { owner, orgId, tenantId } = await ownerOrg();
+    await owner.put(u(orgId, '/language-settings'), { supportedLocales: ['es'] });
+    const activity = { title: 'Launch', items: [{ action: 'set up billing', state: 'waiting' }, { action: 'approved the brand', state: 'done' }] };
+    const created = await owner.post<{ pageId: string; sections: Array<{ sectionId: string }> }>(u(orgId, '/pages'), { title: 'States', sections: [{ type: 'hero', data: { heading: 'H', visual: 'activity', activity } }] });
+    expect(created.status).toBe(201);
+    const { pageId } = created.body;
+    const sectionId = created.body.sections[0]!.sectionId;
+    const cms = buildFeatureSurfaces({ tenantId, runId: 'run:system' }).cms!;
+    // A drafted translation that blanked row 1 and translated row 2's state.
+    const out = await cms.updateSectionDraft!({ orgId, pageId, sectionId, locale: 'es', data: { activity: { title: 'Lanzamiento', items: [{ action: '', state: 'en espera' }, { action: 'aprobó la marca', state: 'hecho' }] } } });
+    expect(wasUpdated(out)).toBe(true);
+    const overlay = (await getPage(tenantId, orgId, pageId))?.sections[0]?.localizations?.es as { activity: { items: Array<{ action: string; state?: string }> } };
+    expect(overlay.activity.items).toEqual([{ action: 'aprobó la marca', state: 'done' }]);
+  });
+});

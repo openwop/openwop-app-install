@@ -29,6 +29,9 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { explicitRefNamesOtherProvider } from '../../aiProviders/credentialRefLadder.js';
+import { CREDENTIAL_PROVIDERS } from '../../aiProviders/aiProvidersHost.js';
+import { EMBEDDINGS_PROVIDERS } from '../../providers/dispatch.js';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import type { Subject } from '../../host/subject.js';
 import { subjectReadAllowed, PREAUTHORIZED_CALLER, type SubjectCaller } from '../../host/subjectAccess.js';
@@ -68,6 +71,7 @@ import { connectionRerank, RERANK_PROVIDER } from './externalReranker.js';
 import { vertexRerank, vertexRerankEnabled } from './vertexReranker.js';
 import type { KnowledgeRetrieveArgs, KnowledgeResult } from '../../host/knowledgeSurface.js';
 import { registerCredentialRefConsumer } from '../../host/credentialRefRegistry.js';
+import { featureKbManagedSourceOwner, featureKbTenantNamespaces, reserveHostValues } from '../../host/featureContributions.js';
 // ADR 0643 D1b — the scheduler-driven drain. INLINE here rather than in a sibling
 // module, for the reason `knowledgeSyncService` gives for the identical shape: a
 // `kbReindexWorkflow.ts` would have to import `startReindex` while this file
@@ -140,17 +144,51 @@ const TEXT_MIME = /^(text\/|application\/(json|xml|x-ndjson|markdown)$)/i;
 
 /**
  * ADR 0830 D1 — the KB "org" ids that are not orgs: tenant-level namespaces a
- * managed indexer files its collection under (the Team Portfolio, `_team`; the
- * KickBot corpus, `_kickbot`). No org row exists, so the org-scope predicate would
- * answer "not found" and recall would silently lose them; they are readable by
- * whoever is in the tenant, as they always were. A new tenant-level namespace is
- * added HERE (pinned by `adr0830-kb-ratchets.test.ts`), never by naming a
- * synthetic org somewhere else.
+ * managed indexer files its collection under. The host's own is the Team
+ * Portfolio, `_team`. No org row exists, so the org-scope predicate would answer
+ * "not found" and recall would silently lose them; they are readable by whoever
+ * is in the tenant, as they always were.
+ *
+ * ADR 1031 round 3 — a FEATURE adds its own namespace by declaration
+ * (`hostContributions.kbTenantNamespaces`; KickTodo's `_kickbot` is declared by
+ * kicktodo-core), never by editing this set or naming a synthetic org somewhere
+ * else. A declaration is add-only: a feature that redeclares `_team` is a boot
+ * error. `adr0830-kb-ratchets.test.ts` checks that every synthetic org a feature
+ * files under is listed here or declared.
  */
-export const TENANT_SCOPED_KB_ORGS: ReadonlySet<string> = new Set(['_team', '_kickbot']);
+export const HOST_TENANT_SCOPED_KB_ORGS: ReadonlySet<string> = new Set(['_team']);
+reserveHostValues('kb tenant namespace', [...HOST_TENANT_SCOPED_KB_ORGS]);
 
-/** The features that own an ADR 0100 auto-managed collection. */
-export type ManagedSource = 'strategy' | 'priority-matrix' | 'production' | 'docs' | 'kickbot';
+/** Is `orgId` a tenant-level KB namespace: the host's, or one a composed feature declared? */
+export function isTenantScopedKbOrg(orgId: string): boolean {
+  return HOST_TENANT_SCOPED_KB_ORGS.has(orgId) || featureKbTenantNamespaces().includes(orgId);
+}
+
+/**
+ * The live view every consumer reads, the host set ∪ the declared namespaces.
+ * Only `.has` is offered, because that is all the org floor and recall need.
+ * Read it at call time: features record at composition, after this module loads.
+ */
+export const TENANT_SCOPED_KB_ORGS: Pick<ReadonlySet<string>, 'has'> = Object.freeze({ has: isTenantScopedKbOrg });
+
+/** The HOST features that own an ADR 0100 auto-managed collection. */
+export type HostManagedSource = 'strategy' | 'priority-matrix' | 'production' | 'docs';
+
+/**
+ * ADR 1031 round 3 — managed sources a FEATURE owns, by module augmentation:
+ *
+ *   declare module '…/features/kb/kbService.js' {
+ *     interface FeatureManagedSources { kickbot: true }
+ *   }
+ *
+ * The augmentation is the TYPE. The runtime half, the owner toggle, is the
+ * feature's `hostContributions.kbManagedSources` declaration. A source with a
+ * type and no declaration fails CLOSED at the plan gate (`managedCollectionOwner`).
+ */
+export interface FeatureManagedSources {}
+
+/** Every managed source: the host's plus the ones composed features declared. */
+export type ManagedSource = HostManagedSource | Extract<keyof FeatureManagedSources, string>;
 
 /**
  * G8 (ADR 0820 §8.1) — the toggle id each managed collection's CONTENT is sold under.
@@ -163,20 +201,29 @@ export type ManagedSource = 'strategy' | 'priority-matrix' | 'production' | 'doc
  * plan entitlement, ADR 0819), so every bundle whose content is KB-indexed is covered by
  * ONE mechanism rather than a per-feature special case.
  *
- * A `Record` over `ManagedSource` is deliberate: adding a managed source without naming
- * its owner is a type error. `null` = not plan-gated here, with the reason inline.
+ * A `Record` over `HostManagedSource` is deliberate: adding a HOST managed source
+ * without naming its owner is a type error. A feature's source names its owner in
+ * its `hostContributions.kbManagedSources` declaration (ADR 1031 round 3). `null`
+ * means the source is not plan-gated, with the reason inline.
  */
-export const MANAGED_COLLECTION_OWNER: Readonly<Record<ManagedSource, string | null>> = {
+export const MANAGED_COLLECTION_OWNER: Readonly<Record<HostManagedSource, string | null>> = {
   strategy: 'strategy',
   'priority-matrix': 'priority-matrix',
   production: 'production', // also the Team Portfolio collection (`profilesKnowledgeService`, same consumer)
   docs: 'docs',
-  // The KickBot corpus is the published challenge guidance of the KickTodo distribution.
-  // Its indexer has no toggle gate, `kicktodo-core` is user-bucketed (a system-run read
-  // has no user to bucket), and it sits in no sellable bundle — gating it here would
-  // only make KickBot's own recall flaky. Revisit if kicktodo-core is ever priced.
-  kickbot: null,
 };
+reserveHostValues('kb managed source', Object.keys(MANAGED_COLLECTION_OWNER));
+
+/**
+ * G8 — the owner toggle of a managed source, from the host table or a feature's
+ * declaration. Host entries come first and cannot be overridden: a redeclaration
+ * is a boot error. `undefined` means the source is unknown, and the plan gate hides
+ * that row (fail-closed).
+ */
+export function managedCollectionOwner(source: string): string | null | undefined {
+  if (Object.prototype.hasOwnProperty.call(MANAGED_COLLECTION_OWNER, source)) return MANAGED_COLLECTION_OWNER[source as HostManagedSource];
+  return featureKbManagedSourceOwner(source);
+}
 
 /**
  * G8 — the in-process MAINTENANCE caller: the owning feature removing its own rows
@@ -211,8 +258,8 @@ async function managedPlanAllows(
 ): Promise<boolean> {
   if (!col.managed || caller === KB_MAINTENANCE_CALLER) return true;
   if (!content && caller?.preAuthorized) return true;
-  if (!Object.prototype.hasOwnProperty.call(MANAGED_COLLECTION_OWNER, col.managed)) return false;
-  const owner = MANAGED_COLLECTION_OWNER[col.managed];
+  const owner = managedCollectionOwner(col.managed);
+  if (owner === undefined) return false;
   if (owner === null) return true;
   const resolve = async (): Promise<boolean> => {
     try {
@@ -3346,6 +3393,10 @@ export async function startReindex(tenantId: string, orgId: string, collectionId
   const col = await mustGetCollection(tenantId, orgId, collectionId, caller);
   if (col.managed) throw new OpenwopError('validation_error', `This collection is managed (synced from ${col.managed}); its embedding is not reindexable here.`, 400, { collectionId });
   const spec = validateEmbeddingSpec(specInput);
+  // KB-BYOK-1: explicit known-vendor keys must not leave for a different
+  // embeddings provider. Opaque legacy aliases retain their existing authority.
+  const otherProvider = explicitRefNamesOtherProvider(spec.provider, spec.credentialRef, [...new Set([...CREDENTIAL_PROVIDERS, ...EMBEDDINGS_PROVIDERS])]);
+  if (otherProvider) throw new OpenwopError('validation_error', 'The selected key belongs to a different provider.', 400, { field: 'credentialRef', reason: 'credential_provider_mismatch', provider: spec.provider, refProvider: otherProvider });
   const dims = effectiveEmbedDims();
   const enr = await resolveEnrichment(tenantId, col);
   const enrich = enr.token; // ADR 0904 D7 — baked into the job; the drain must build the same

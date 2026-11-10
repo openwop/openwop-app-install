@@ -48,10 +48,12 @@
  * @see plans/openwop-app-deployment-plan.md (P0.2)
  */
 
+import { isFeaturePublicRoute, setHostPublicPrefixes } from './featurePublicRoutes.js';
 import type { Request as ExpressRequest, RequestHandler } from 'express';
 import { isProtocolClient, isProtocolRequest, vendorPath } from './protocolVersion.js';
 import { SIGNED_INGEST_ROOT } from '../host/signedIngestRoot.js';
 import { readKeyTenants } from './apiKeyTenants.js';
+import { envKeyPrincipalId, isConfiguredEnvKeyIssuer } from './envKeyPrincipal.js';
 import { createHash } from 'node:crypto';
 import type { Principal } from '../types.js';
 import { createLogger } from '../observability/logger.js';
@@ -217,15 +219,6 @@ export const PUBLIC_PATH_PREFIXES = [
   // only a hashed device code, is operator-gated (404 when off), rate-limited per
   // IP, and expires in ten minutes. Nothing else under /claude-code is public.
   vendorPath('/claude-code/pair/device'),
-  // ADR 0421 P1 — the tokenized KickTodo calendar feed: the token IS the
-  // capability (hashed at rest, revocable); the route 404s uniformly and
-  // exposes titles+day numbers only. Auth-bypassed like the other public
-  // resource-derived surfaces.
-  '/public/kicktodo/feed',
-  // ADR 0462 P2 — the tokenized KickTodo wearable provider webhook: the token IS the
-  // (tenant,provider) capability; the push signature is verified before any work;
-  // uniform 401/404. Auth-bypassed like the feed (the provider has no session).
-  '/public/kicktodo/wearable-webhook',
   // ADR 0260 — the reference UCP-over-MCP DEMO merchant endpoint. The caller is
   // the app's own UCP buyer acting as an EXTERNAL MCP client (loopback in tests):
   // it presents the seeded demo bearer, not a session — without this bypass the
@@ -539,18 +532,15 @@ export { sessionSecretConfigError, issueUserSession, clearSessionCookie };
  *  middleware uses to bypass. Exported so the CSRF guard exempts the exact same
  *  set (the public embed/webhook POST surfaces are cross-origin BY DESIGN). */
 // ADR 0795 D6 — an operator-issued delegation is the tenant's own only while
-// the env key that issued it is still configured (`bearer:<first 8 chars>`).
-// ADR 0822 (WFAC-17) — with a `tenantId`, the key must ALSO be configured for
-// that tenant (or `*`): a run actor carries no delegation row to bind it.
-registerOperatorIssuerCheck((issuer, tenantId) => {
-  const prefix = issuer.slice('bearer:'.length);
-  if (prefix.length === 0) return false;
-  for (const [key, tenants] of readKeyTenants()) {
-    if (key.slice(0, 8) !== prefix) continue;
-    if (tenantId === undefined || tenants.includes(tenantId) || tenants.includes('*')) return true;
-  }
-  return false;
-});
+// the env key that issued it is still configured. ADR 0822 (WFAC-17) — with a
+// `tenantId`, the key must ALSO be configured for that tenant (or `*`): a run
+// actor carries no delegation row to bind it.
+// CORRECTED 2026-11-05 (ADR 1045, TST-FUD-GC-1): the subject was
+// `bearer:<first 8 chars>` and this check matched ANY configured key with that
+// prefix, so a surviving key B vouched for a removed key A's delegations. The
+// subject is now `bearer:<sha256(key) 16 hex>`; a legacy 8-char issuer matches
+// only when exactly one configured key has that prefix (`envKeyPrincipal.ts`).
+registerOperatorIssuerCheck(isConfiguredEnvKeyIssuer);
 
 /**
  * ADR 0795 D6 — cached for a minute per key: the answer is a membership read
@@ -614,6 +604,10 @@ export function carriesRunStreamToken(req: ExpressRequest): boolean {
 export function isPublicPath(path: string): boolean {
   // The `p !== '/'` guard keeps a `/` prefix from matching every path via `'//'`.
   if (PUBLIC_PATH_PREFIXES.some((p) => path === p || (p !== '/' && path.startsWith(p + '/')))) return true;
+  // ADR 1031 P2 — a composed feature's registered public routes, matched EXACTLY as
+  // the host list above is (segment-boundary prefix), so a route that moved off the
+  // host list behaves byte-identically.
+  if (isFeaturePublicRoute(path)) return true;
   // ADR 0915 — a feature path is public only on a CANONICAL path: no dot
   // segment and no percent-escape anywhere. `startsWith` on an un-normalized
   // path would let `<prefix>/..%2F..%2Fother` count as public, and the /api
@@ -678,6 +672,7 @@ export function resetFeaturePublicPathsForTests(): void { FEATURE_PUBLIC_PATHS.c
 export function isCredentialOptionalRead(method: string, path: string): boolean {
   return (method === 'GET' || method === 'HEAD') && /^\/content\/pages\/[^/]+$/.test(path);
 }
+
 
 /**
  * Refuse a request whose principal is ANONYMOUS — i.e. one this host minted
@@ -1206,11 +1201,14 @@ export function authMiddleware(): RequestHandler {
         // now written in the config rather than granted to every key by
         // default.
         req.principal = {
-          principalId: `bearer:${bearerToken.slice(0, 8)}`,
+          // ADR 1045 (TST-FUD-GC-1) — a digest of the FULL key, never its
+          // first 8 chars: two keys sharing a prefix were one principal.
+          principalId: envKeyPrincipalId(bearerToken),
           tenants: keyTenants,
           token: bearerToken,
-          // ADR 0601 — record the PROVENANCE, not just the id. `bearer:<first 8
-          // chars of the key>` is not an RBAC subject and is not meant to match a
+          // ADR 0601 — record the PROVENANCE, not just the id. `bearer:<16 hex
+          // of sha256(key)>` (was `bearer:<first 8 chars>` before ADR 1045
+          // TST-FUD-GC-1) is not an RBAC subject and is not meant to match a
           // member row (and it changes when the key rotates). CORRECTED (ADR 0910
           // D0): it COULD — `POST /orgs` as an env key seeds the new org's owner
           // row as this id; D0 makes that row grant nothing tenant-wide in a
@@ -1753,3 +1751,7 @@ export function authMiddleware(): RequestHandler {
     void inner(req, res, next).catch(next);
   };
 }
+
+// ADR 1031 P2 — hand the host public prefixes to the feature-route leaf, which checks
+// every registered route against them (whichever of the two loaded first).
+setHostPublicPrefixes(PUBLIC_PATH_PREFIXES);

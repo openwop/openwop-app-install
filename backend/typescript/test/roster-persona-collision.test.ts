@@ -53,32 +53,32 @@ const AGENT = { kind: 'manifest', agentId: 'core.openwop.agents.react' } as cons
 describe('persona rename collision (ADR 0414 M3-2)', () => {
   it('renaming onto another agent\'s persona is refused, case-insensitively', async () => {
     await createRosterEntry({ tenantId: TENANT, persona: 'Iris', agentRef: AGENT });
-    const bot = await createRosterEntry({ tenantId: TENANT, persona: 'KickBot', agentRef: AGENT, roleKey: 'kicktodo-guide' });
+    const bot = await createRosterEntry({ tenantId: TENANT, persona: 'GuideBot', agentRef: AGENT, roleKey: 'acme-guide' });
 
     await expect(updateRosterEntry(TENANT, bot.rosterId, { persona: 'Iris' })).rejects.toBeInstanceOf(PersonaCollisionError);
     await expect(updateRosterEntry(TENANT, bot.rosterId, { persona: '  iris ' })).rejects.toBeInstanceOf(PersonaCollisionError);
 
     // The refused rename left the entry untouched.
-    expect((await getRosterEntry(TENANT, bot.rosterId))?.persona).toBe('KickBot');
+    expect((await getRosterEntry(TENANT, bot.rosterId))?.persona).toBe('GuideBot');
   });
 
   it('self-rename (case tweak) and unique renames are allowed; identity fields survive', async () => {
-    const bot = await createRosterEntry({ tenantId: TENANT, persona: 'KickBot', agentRef: AGENT, roleKey: 'kicktodo-guide' });
+    const bot = await createRosterEntry({ tenantId: TENANT, persona: 'GuideBot', agentRef: AGENT, roleKey: 'acme-guide' });
 
-    const caseTweak = await updateRosterEntry(TENANT, bot.rosterId, { persona: 'kickbot' });
-    expect(caseTweak?.persona).toBe('kickbot');
+    const caseTweak = await updateRosterEntry(TENANT, bot.rosterId, { persona: 'guidebot' });
+    expect(caseTweak?.persona).toBe('guidebot');
 
     const renamed = await updateRosterEntry(TENANT, bot.rosterId, { persona: 'Coach Ada', label: 'Coach Ada' });
     expect(renamed?.persona).toBe('Coach Ada');
     // Rename continuity is structural: stable identity fields never change.
     expect(renamed?.rosterId).toBe(bot.rosterId);
-    expect(renamed?.roleKey).toBe('kicktodo-guide');
+    expect(renamed?.roleKey).toBe('acme-guide');
     expect(renamed?.agentRef).toEqual(bot.agentRef);
   });
 
   it('the same persona in a DIFFERENT tenant does not collide', async () => {
     await createRosterEntry({ tenantId: 'tenant-other', persona: 'Iris', agentRef: AGENT });
-    const bot = await createRosterEntry({ tenantId: TENANT, persona: 'KickBot', agentRef: AGENT });
+    const bot = await createRosterEntry({ tenantId: TENANT, persona: 'GuideBot', agentRef: AGENT });
     const renamed = await updateRosterEntry(TENANT, bot.rosterId, { persona: 'Iris' });
     expect(renamed?.persona).toBe('Iris');
   });

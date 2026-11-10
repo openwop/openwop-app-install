@@ -18,7 +18,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 type ManagedToolsRound = typeof import('../src/providers/managedProvider.js')['dispatchManagedToolsRound'];
 const managedRound = vi.fn<ManagedToolsRound>(async () => ({
   text: 'Here is your nudge.',
-  toolUses: [{ id: 'tu-1', name: 'openwop:kicktodo.today', input: { day: 1 } }],
+  toolUses: [{ id: 'tu-1', name: 'openwop:tasks.today', input: { day: 1 } }],
   inputTokens: 12,
   outputTokens: 5,
 }));
@@ -52,7 +52,7 @@ afterAll(async () => {
 });
 
 describe('callAIWithTools on a managed credential (workflow runs)', () => {
-  const tool = { name: 'openwop:kicktodo.today', description: "Read the participant's Today", inputSchema: { type: 'object', properties: {} } };
+  const tool = { name: 'openwop:tasks.today', description: "Read the participant's Today", inputSchema: { type: 'object', properties: {} } };
 
   it('dispatches through the managed tier instead of refusing the managed tile id', async () => {
     const out = await adapter.callAIWithTools({
@@ -64,14 +64,14 @@ describe('callAIWithTools on a managed credential (workflow runs)', () => {
       tools: [tool],
     });
     expect(out.content).toBe('Here is your nudge.');
-    expect(out.toolCalls).toEqual([{ id: 'tu-1', name: 'openwop:kicktodo.today', input: { day: 1 } }]);
+    expect(out.toolCalls).toEqual([{ id: 'tu-1', name: 'openwop:tasks.today', input: { day: 1 } }]);
     expect(managedRound).toHaveBeenCalledTimes(1);
     const req = managedRound.mock.calls[0]![0];
     expect(req.userFacingProvider).toBe('openwop-free');
     expect(req.tenantId).toBe('host-shared');
     // ADR 0693: the acting participant is metered, not the whole shared workspace.
     expect(req.actingSubject).toBe('user:participant-a');
-    expect(req.tools.map((t) => t.name)).toEqual(['openwop:kicktodo.today']);
+    expect(req.tools.map((t) => t.name)).toEqual(['openwop:tasks.today']);
   });
 
   // ADR 1011 — the tool loop reads both; this adapter used to return neither.

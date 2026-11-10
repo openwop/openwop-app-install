@@ -89,10 +89,10 @@ beforeEach(() => {
   docsApi.listCanvasSources.mockReset().mockResolvedValue({ canvases: [], total: 0 });
 });
 
-function mount(onCreated = vi.fn(), onClose = vi.fn()): { onCreated: ReturnType<typeof vi.fn>; onClose: ReturnType<typeof vi.fn> } {
+function mount(onCreated = vi.fn(), onClose = vi.fn(), orgId = 'org1'): { onCreated: ReturnType<typeof vi.fn>; onClose: ReturnType<typeof vi.fn> } {
   render(
     <MemoryRouter>
-      <NewDocumentModal orgId="org1" onClose={onClose} onCreated={onCreated} />
+      <NewDocumentModal orgId={orgId} onClose={onClose} onCreated={onCreated} />
     </MemoryRouter>,
   );
   return { onCreated, onClose };
@@ -135,6 +135,19 @@ describe('creation gallery (choose step)', () => {
 });
 
 describe('creating a canvas', () => {
+  it('carries the same explicit client used to create a campaign plan into its returned editor URL', async () => {
+    access.enabled = new Set(['documents', 'campaign-studio']);
+    canvasApi.createCanvas.mockResolvedValue({ canvasId: 'canvas-created', canvasTypeId: 'canvas.campaign', state: {}, version: 1 });
+    const { onClose } = mount(undefined, undefined, 'org:qa-kicktodo');
+    fireEvent.click(await screen.findByRole('button', { name: /Campaign plan/ }));
+    fireEvent.change(screen.getByPlaceholderText(/Q3 launch pitch/), { target: { value: 'QA campaign plan' } });
+    fireEvent.click(screen.getByRole('button', { name: /Create and open/ }));
+    await waitFor(() => expect(canvasApi.createCanvas).toHaveBeenCalledWith('org:qa-kicktodo', { name: 'QA campaign plan' }));
+    expect(canvasApi.basePaths).toContain('/host/openwop-app/campaign-studio');
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(navSpy).toHaveBeenCalledWith('/campaign-studio/plans/canvas-created?org=org%3Aqa-kicktodo');
+  });
+
   it('names it, creates against the type base path, and opens its editor', async () => {
     access.enabled = new Set(['documents', 'slides']);
     const { onClose } = mount();
@@ -143,7 +156,7 @@ describe('creating a canvas', () => {
     fireEvent.click(screen.getByRole('button', { name: /Create and open/ }));
     await waitFor(() => expect(canvasApi.createCanvas).toHaveBeenCalledWith('org1', { name: 'Board pitch' }));
     expect(canvasApi.basePaths).toContain('/host/openwop-app/slides');
-    expect(navSpy).toHaveBeenCalledWith('/slides/c-1');
+    expect(navSpy).toHaveBeenCalledWith('/slides/c-1?org=org1');
     expect(onClose).toHaveBeenCalled();
   });
 
@@ -156,7 +169,7 @@ describe('creating a canvas', () => {
     fireEvent.change(select, { target: { value: 'proj-1' } });
     fireEvent.click(screen.getByRole('button', { name: /Create and open/ }));
     await waitFor(() => expect(canvasApi.createCanvas).toHaveBeenCalledWith('org1', { name: 'Bracket', projectId: 'proj-1' }));
-    expect(navSpy).toHaveBeenCalledWith('/cad/c-1');
+    expect(navSpy).toHaveBeenCalledWith('/cad/c-1?org=org1');
   });
 });
 

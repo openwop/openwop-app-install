@@ -141,7 +141,7 @@ describe('RFC 0236 host-event types — the SSOT', () => {
     expect(computed.size).toBeGreaterThanOrEqual(12);
     // `openwop-app.<feature>.<x>` literals in an emitter file that are NOT host
     // events (workflow ids, run-event types) — recorded so the exclusion is visible.
-    const NOT_HOST_EVENTS = /^openwop-app\.(agents|workflow|kicktodo|insights|authored|evals|conversation|ai|chat|channel|scheduled-chat|node|web|production|host|cdp|kanban)\./;
+    const NOT_HOST_EVENTS = /^openwop-app\.(agents|workflow|insights|authored|evals|conversation|ai|chat|channel|scheduled-chat|node|web|production|host|cdp|kanban)\./;
     const missing = [...literals].filter((n) => !NOT_HOST_EVENTS.test(n) && hostEventEntryForEmitted(n) === undefined);
     expect(missing, 'an emitted host-event name is missing from host/hostEventTypes.ts').toEqual([]);
     const emitted = hostEventTypeEntries().map((e) => e.emitted);

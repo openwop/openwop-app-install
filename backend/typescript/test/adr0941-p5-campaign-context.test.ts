@@ -20,6 +20,15 @@
  *   - the `hasOrgScope` check in `runGetCampaignTool` removed: "get-campaign fails EMPTY…";
  *   - dropping get-campaign from the pack allowlist: "parity";
  *   - finalize back to role "action" + regenerated floor: "finalize is served".
+ * Also probe-measured (wave 80): the `not_a_campaign_run` / `wrong_client` codes; the
+ * node's typed failure; `attachAssets`' own-campaign check ("a live tag cannot mutate…");
+ * `mutateCampaign`'s CAS result ignored ("…retirement wins…"); the get-campaign toggle
+ * check and its `!scope.actingUserId` return.
+ *
+ * Held three times (a single-copy probe is green by design): "nor finalize another
+ * client's brief" is refused by the surface's org check, its `own.briefId !== brief.id`
+ * check, and `campaignService.finalizeFromBrief`'s `expectedCampaignId` check (two
+ * files; recorded as a ceiling).
  */
 import { readFileSync } from 'node:fs';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';

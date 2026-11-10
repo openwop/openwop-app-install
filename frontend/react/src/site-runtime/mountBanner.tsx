@@ -53,6 +53,7 @@ export async function mountBanner(target: RuntimeTarget): Promise<() => void> {
   await i18n.use(initReactI18next).init({
     lng, fallbackLng: 'en', ns: ['site'], defaultNS: 'site', resources,
     interpolation: { escapeValue: false }, returnNull: false,
+    showSupportNotice: false, // no vendor console notice on a tenant's site
   });
 
   const host = document.createElement('div');

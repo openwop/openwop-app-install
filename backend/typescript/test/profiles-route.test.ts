@@ -142,7 +142,9 @@ async function sameTenantPair(): Promise<{ tenantId: string; alice: Client; alic
 
 /** Seed the caller's tenant roster and return its first agent. */
 async function firstSeededAgent(c: Client): Promise<{ rosterId: string }> {
-  const seeded = await c.post<unknown>('/host/openwop-app/example-data/seed', {});
+  const scope = await c.get<{ active: string }>('/host/openwop-app/me/workspaces');
+  expect(scope.status).toBe(200);
+  const seeded = await c.post<unknown>('/host/openwop-app/example-data/seed', { expectedTenantId: scope.body.active });
   expect(seeded.status).toBe(200);
   const roster = await c.get<RosterBody>('/host/openwop-app/roster');
   const agent = roster.body.roster[0];
@@ -226,7 +228,9 @@ describe('profiles — agent pinning (ADR 0023)', () => {
     expect((await c.get<OwnProfileView>('/host/openwop-app/profiles/me')).body.pinnedAgentIds).toContain(agent.rosterId);
 
     // Clearing the agents step deletes the roster members AND cascades the unpin.
-    const cleared = await c.post<unknown>('/host/openwop-app/example-data/clear', { steps: ['agents'] });
+    const scope = await c.get<{ active: string }>('/host/openwop-app/me/workspaces');
+    expect(scope.status).toBe(200);
+    const cleared = await c.post<unknown>('/host/openwop-app/example-data/clear', { steps: ['agents'], expectedTenantId: scope.body.active });
     expect(cleared.status).toBe(200);
     const me = await c.get<OwnProfileView>('/host/openwop-app/profiles/me');
     expect(me.body.pinnedAgentIds).not.toContain(agent.rosterId);

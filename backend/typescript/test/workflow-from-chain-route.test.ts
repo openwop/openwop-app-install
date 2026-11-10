@@ -119,40 +119,6 @@ describe('workflow-chain templates (ADR 0163 Phase 2)', () => {
   });
 });
 
-describe('internal chains (RFC 0135) — omitted from the gallery, everything else unchanged', () => {
-  const INTERNAL_CHILD = 'openwop-app.kicktodo.lesson-batch';
-  const PARENT = 'openwop-app.kicktodo.challenge-factory';
-
-  it('GET /workflow-chains omits the internal composition-only child but lists its parent', async () => {
-    const c = await cookie();
-    const body = (await (await fetch(url('/workflow-chains'), { headers: { cookie: c } })).json()) as { chains: { chainId: string }[] };
-    const ids = body.chains.map((x) => x.chainId);
-    expect(ids, 'the RFC 0133 child is composition-only — MUST NOT list').not.toContain(INTERNAL_CHILD);
-    expect(ids, 'its parent is a real template — MUST list').toContain(PARENT);
-  });
-
-  it('the internal chain stays loaded + resolvable by id (presentational only, never authz)', async () => {
-    const { getChain } = await import('../src/host/workflowChainPackLoader.js');
-    const entry = getChain(INTERNAL_CHILD);
-    expect(entry).toBeTruthy();
-    expect(entry!.chain.internal).toBe(true);
-  });
-
-  it('a DELIBERATE from-chain instantiation of an internal chain still succeeds (RFC 0135 §UQ2)', async () => {
-    const c = await cookie();
-    const r = await fetch(url('/workflows/from-chain'), {
-      method: 'POST', headers: { 'content-type': 'application/json', cookie: c },
-      body: JSON.stringify({ chainId: INTERNAL_CHILD, params: { candidateId: 'cand-1', authorSubject: 'user:author', days: '[]' } }),
-    });
-    expect(r.status).toBe(201);
-    const body = (await r.json()) as { workflowId: string };
-    expect(body.workflowId).toMatch(/^wf\.copy\.openwop-app-kicktodo-lesson-batch\.[0-9a-f]{16}$/);
-    // "succeeds" = a real OWNED copy: it is in the caller's tenant-scoped list.
-    const list = (await (await fetch(url('/workflows'), { headers: { cookie: c } })).json()) as { workflows: { workflowId: string }[] };
-    expect(list.workflows.map((w) => w.workflowId)).toContain(body.workflowId);
-  });
-});
-
 /**
  * §Correction (code-review HIGH #1) — WIRING, not mechanism.
  *

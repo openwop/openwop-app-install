@@ -35,8 +35,10 @@ export const SYSTEM_SITE_SLUG = 'home';
 const SYSTEM_SITE_PAGE_ID = 'page:host-site-home';
 const SYSTEM_ACTOR = 'system';
 /** Bump when DEFAULT_SECTIONS changes — a redeploy then refreshes the live page
- *  IF it has never been human-edited (see `doEnsure`). */
-const SEED_VERSION = 9;
+ *  IF it has never been human-edited (see `doEnsure`). `seed-content-version-
+ *  ratchet.test.ts` reds a content change without a bump. 10: the evidence
+ *  stats band counts up (ADR 1038 D3). */
+export const SEED_VERSION = 10;
 
 /**
  * The built-in default home page (ADR 0027) — a real, brand-aware marketing page
@@ -390,6 +392,8 @@ export const DEFAULT_SECTIONS: Section[] = [
       heading: 'This app is checked against the protocol it runs on.',
       lede: 'Figures from the app’s own signed conformance bundle (suite 2.42.2), self-measured by the project’s steward on the production image. No independent organization has measured a host yet.',
       layout: 'stats',
+      // ADR 1038 D3 — the figures count up as they arrive.
+      count: true,
       columns: [
         {
           title: '296',

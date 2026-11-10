@@ -2,6 +2,8 @@
  * ADR 0941 P3 — the campaign detail page's new sections.
  *
  *   - a missing campaign says "not found" (the route's uniform 404), not "failed";
+ *   - a failed organization-name read is said and retried without reloading the page;
+ *   - a late response from the previous route cannot paint the current campaign;
  *   - Products: commerce off says so; a failed links read is a failure, never
  *     "no products"; the picker reads the CAMPAIGN org's catalog, refuses two
  *     primaries before any write, and saves the refs it shows;
@@ -21,7 +23,8 @@ vi.mock('../autonomy/AutonomyPolicyPanel.js', () => ({ default: () => null })); 
 vi.mock('../autonomy/VetoWindowsSection.js', () => ({ default: () => null })); // own tests: vetoWindowsSection.test.tsx
 import { act, render, screen, cleanup, fireEvent, within, waitFor } from '@testing-library/react';
 import { Link, MemoryRouter, Route, Routes } from 'react-router-dom';
-import type { CampaignLinks, MarketingCampaign } from '../campaignStudioClient.js';
+import type { CampaignLinks, CommandSnapshot, MarketingCampaign } from '../campaignStudioClient.js';
+import type { Product } from '../../commerce/commerceClient.js';
 
 const h = vi.hoisted(() => ({
   getCampaign: vi.fn(),
@@ -54,6 +57,9 @@ const LINKS: CampaignLinks = {
   products: OK, project: OK, assets: OK, runs: OK, emailSends: OK, adDispatches: OK, plans: OK, opsAssets: OK, assetTotal: 0,
 };
 
+const product = (productId: string, name: string): Product => ({ productId, name, type: 'digital', price: 49.5, currency: 'USD', variants: [], active: true, updatedAt: '2026-10-01T08:00:00.000Z' });
+const snapshot = (id: string): CommandSnapshot => ({ campaign: { id, orgId: 'org-a', name: 'Spring push', status: 'draft' }, runs: [], nodes: [], gates: [], runsTruncated: false, nodesTruncated: false, gatesTruncated: false, unavailable: {}, generatedAt: '2026-10-20T00:00:00Z' });
+
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => { resolve = done; });
@@ -74,11 +80,11 @@ beforeEach(() => {
   h.getCampaign.mockResolvedValue(CAMPAIGN);
   h.getCampaignLinks.mockResolvedValue(LINKS);
   h.updateCampaign.mockImplementation(async (_id: string, patch: Partial<MarketingCampaign>) => ({ ...CAMPAIGN, ...patch, attention: patch.attention ? undefined : CAMPAIGN.attention }));
-  h.listProducts.mockResolvedValue([{ productId: 'p1', name: 'Course' }, { productId: 'p2', name: 'Workbook' }]);
+  h.listProducts.mockResolvedValue([product('p1', 'Course'), product('p2', 'Workbook')]);
   h.listOrgs.mockResolvedValue([{ orgId: 'org-a', name: 'Acme' }]);
   // The detail now mounts the real command section. Its own suite exercises
   // run/gate behavior; this page fixture still supplies its actual read boundary.
-  h.getCommand.mockImplementation(async (id: string) => ({ campaign: { id, orgId: 'org-a', name: 'Spring push', status: 'draft' }, runs: [], nodes: [], gates: [], runsTruncated: false, nodesTruncated: false, gatesTruncated: false, unavailable: {}, generatedAt: '2026-10-20T00:00:00Z' }));
+  h.getCommand.mockImplementation(async (id: string) => snapshot(id));
 });
 afterEach(cleanup);
 

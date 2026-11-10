@@ -10,6 +10,8 @@
  *  - EV2-1  a rating on a real chat turn never reached the board. The join read
  *           `meta.model` off `chat_messages`, which the conversation transport
  *           never writes (prod 2026-10-26: 0 of 62 assistant rows carry a model).
+ *  - EV2-1b a turn that produced nothing is not a reply to rank.
+ *  - EV2CD-11 the attribution is written before the turn becomes visible.
  *  - EV2-2  attribution was client-authored: an appended assistant row with a
  *           forged `meta.model` ranked first.
  *  - EV2-3  the thumbs "Elo" depended on storage key order, not on the votes.
@@ -18,7 +20,13 @@
  *  - EV2-6  a verdict could name models other than the ones that answered.
  *  - EV2-7  the same pair of runs could be voted twice.
  *  - EV2-8  another member's runs could be voted on.
- *  - EV2-9  DSAR erasure left the rater's subject on every arena match.
+ *  - EV2-9  DSAR erasure left the rater's subject on every arena match. The verdict
+ *           itself is workspace data and stays, tombstoned.
+ *
+ * A repeat verdict is held twice: the `prior` read and the create's CAS fallback answer
+ * the same replay, so the sabotage that shows EV2-7 breaks the pair id both read.
+ * Measured (wave 77, each red): no attribution, late attribution, forged attribution,
+ * order-dependent score, swapped models, a per-call pair id, no owner check, both erasers.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -60,7 +68,6 @@ let BASE: string;
 let server: http.Server;
 let wsTenant: string;
 let adminCookie: string;
-let adminUserId: string;
 let editorCookie: string;
 
 const craftCookie = (userId: string, activeTenant: string, personalTenant: string): string => {
@@ -86,12 +93,11 @@ async function call<T>(method: string, path: string, cookie: string, body?: unkn
 interface Turn { messageId: string; role: string }
 interface Ev { type?: string; payload?: { turn?: Turn } }
 async function waitSuspended(runId: string, cookie: string): Promise<void> {
-  for (let i = 0; i < 100; i++) {
+  // A run has no suspend hook to await: poll its status.
+  await vi.waitFor(async () => {
     const s = (await call<{ status: string }>('GET', `/runs/${runId}`, cookie)).body.status;
-    if (s.startsWith('waiting')) return;
-    await new Promise((r) => setTimeout(r, 20));
-  }
-  throw new Error(`run ${runId} never suspended`);
+    expect(s, `run ${runId} never suspended`).toMatch(/^waiting/);
+  }, { timeout: 10_000, interval: 20 });
 }
 async function agentTurnIds(runId: string, cookie: string): Promise<string[]> {
   const events = (await call<{ events?: Ev[] }>('GET', `/runs/${runId}/debug-bundle`, cookie)).body.events ?? [];
@@ -149,15 +155,15 @@ beforeAll(async () => {
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   const d = getToggleDefault('evals');
-  if (d) await saveConfig({ ...d, status: 'on' }, 'test');
+  if (!d) throw new Error('the evals toggle is not registered');
+  await saveConfig({ ...d, status: 'on' }, 'test');
   const ws = await createWorkspace({ name: 'Evals probe', ownerSubject: 'oidc:ev2-owner' });
   wsTenant = ws.tenantId;
   persistProbe.tenant = wsTenant;
   const admin = await seat('oidc:ev2-admin', ['admin']);
   adminCookie = admin.cookie;
-  adminUserId = admin.userId;
   editorCookie = (await seat('oidc:ev2-editor', ['editor'])).cookie;
-});
+}, 120_000);
 afterAll(async () => {
   delete process.env.OPENWOP_TEST_SEAM_ENABLED;
   await new Promise<void>((res) => server.close(() => res()));
@@ -187,6 +193,7 @@ describe('ADR 0986 — the leaderboard ranks what really answered', () => {
 
   it('EV2-2: a client-written model name never reaches the board', async () => {
     const sessionId = await newChatSession(adminCookie);
+    const before = (await board()).coverage?.unattributed ?? 0;
     for (let i = 0; i < 3; i++) {
       const messageId = `forged${i}`;
       const app = await call('POST', `/host/openwop-app/chat/sessions/${sessionId}/messages`, adminCookie, {
@@ -196,8 +203,8 @@ describe('ADR 0986 — the leaderboard ranks what really answered', () => {
       expect((await rate(adminCookie, sessionId, messageId, 'up')).status).toBe(200);
     }
     const b = await board();
-    expect(b.leaderboard?.some((r) => r.model === 'forged-model')).toBe(false);
-    expect(b.coverage?.unattributed).toBeGreaterThanOrEqual(3);
+    expect(b.leaderboard!.map((r) => r.model)).not.toContain('forged-model');
+    expect(b.coverage?.unattributed).toBe(before + 3);
   });
 
   it('EV2-3: the ranking is a function of the votes, not of the order they are stored in', () => {
@@ -212,7 +219,7 @@ describe('ADR 0986 — the leaderboard ranks what really answered', () => {
 
 describe('ADR 0986 — an arena verdict is bound to two real runs', () => {
   const match = (cookie: string, body: Record<string, unknown>) =>
-    call<{ match?: { modelA: string; modelB: string } }>('POST', `/host/openwop-app/evals/orgs/${wsTenant}/arena/match`, cookie, body);
+    call<{ error?: string; match?: { matchId: string; modelA: string; modelB: string } }>('POST', `/host/openwop-app/evals/orgs/${wsTenant}/arena/match`, cookie, body);
 
   it('EV2-4: a verdict that names no runs is refused', async () => {
     const r = await match(adminCookie, { modelA: 'alpha', modelB: 'beta', winner: 'A' });
@@ -242,22 +249,31 @@ describe('ADR 0986 — an arena verdict is bound to two real runs', () => {
     const b = await chatTurn(adminCookie, { model: 'mock-own-b', prompt: 'Name a colour.', reply: 'Ochre.' });
     const r = await match(editorCookie, { runIdA: a.runId, runIdB: b.runId, winner: 'B' });
     expect(r.status).toBe(404);
+    expect(r.body.error).toBe('run_not_found');
+    // Positive control: the same pair is votable by the member who ran it.
+    expect((await match(adminCookie, { runIdA: a.runId, runIdB: b.runId, winner: 'B' })).status).toBe(201);
   });
 
   it('EV2-9: DSAR erasure removes the rater from every arena match', async () => {
-    const a = await chatTurn(adminCookie, { model: 'mock-dsar-a', prompt: 'Pick a number.', reply: 'Seven.' });
-    const b = await chatTurn(adminCookie, { model: 'mock-dsar-b', prompt: 'Pick a number.', reply: 'Three.' });
-    // Recorded through whichever lane the build has: the bound body, or the legacy strings.
-    const r = await match(adminCookie, { runIdA: a.runId, runIdB: b.runId, modelA: 'mock-dsar-a', modelB: 'mock-dsar-b', winner: 'tie' });
+    // Their own person: erasure takes every rating and verdict of whoever it names, so
+    // this case cannot share the admin the other cases act as.
+    const dsar = await seat('oidc:ev2-dsar', ['admin']);
+    const sessionId = await newChatSession(dsar.cookie);
+    const a = await chatTurn(dsar.cookie, { model: 'mock-dsar-a', prompt: 'Pick a number.', reply: 'Seven.', chatSessionId: sessionId });
+    const b = await chatTurn(dsar.cookie, { model: 'mock-dsar-b', prompt: 'Pick a number.', reply: 'Three.' });
+    expect((await rate(dsar.cookie, sessionId, conversationMessageId(a.agentMessageId), 'up')).status).toBe(200);
+    const r = await match(dsar.cookie, { runIdA: a.runId, runIdB: b.runId, winner: 'tie' });
     expect(r.status, JSON.stringify(r.body)).toBe(201);
-    const ledger = new DurableCollection<{ tenantId: string; raterSubject: string }>('evals:arena-match', (m) => JSON.stringify(m));
-    const mine = async () => (await ledger.listByPrefix('')).filter((m) => m.tenantId === wsTenant && m.raterSubject.includes(adminUserId));
+    const ledger = new DurableCollection<{ matchId: string; tenantId: string; raterSubject: string }>('evals:arena-match', (m) => JSON.stringify(m));
+    const mine = async () => (await ledger.listByPrefix('')).filter((m) => m.tenantId === wsTenant && m.raterSubject.includes(dsar.userId));
     expect((await mine()).length, 'precondition: the verdict names its rater').toBeGreaterThan(0);
     const feedback = new DurableCollection<{ tenantId: string; subjectRef: string }>('chat:message-feedback', (f) => JSON.stringify(f));
-    const myRatings = async () => (await feedback.listByPrefix(`${wsTenant}:`)).filter((f) => f.subjectRef.includes(adminUserId));
-    expect((await myRatings()).length, 'precondition: the admin rated turns above').toBeGreaterThan(0);
-    await eraseSubject(wsTenant, adminUserId);
+    const myRatings = async () => (await feedback.listByPrefix(`${wsTenant}:`)).filter((f) => f.subjectRef.includes(dsar.userId));
+    expect((await myRatings()).length, 'precondition: this person rated a turn').toBeGreaterThan(0);
+    await eraseSubject(wsTenant, dsar.userId);
     expect(await mine()).toEqual([]);
+    // The verdict stays, with no person on it.
+    expect((await ledger.listByPrefix('')).find((m) => m.matchId === r.body.match?.matchId)?.raterSubject).toBe('erased');
     expect(await myRatings(), 'the ratings that feed the board go too').toEqual([]);
   });
 });

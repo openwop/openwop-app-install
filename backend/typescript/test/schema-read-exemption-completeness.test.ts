@@ -32,6 +32,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { builtinAgentToolIds, builtinAgentTool } from '../src/host/agentToolProvider.js';
 import { SCHEMA_READ_EXEMPT_TOOLS, isSchemaReadExempt } from '../src/host/toolResultTransform.js';
+import { collectFeatureRatchetDeclarations } from './helpers/featureRatchetDeclarations.js';
 
 /**
  * The TOTAL classification of every tool this host can offer a model, derived on
@@ -39,7 +40,7 @@ import { SCHEMA_READ_EXEMPT_TOOLS, isSchemaReadExempt } from '../src/host/toolRe
  * source. `true` ⇒ the output IS a schema / enum / closed catalog / design body
  * whose element list is the contract, so `lossy` compaction must never touch it.
  */
-const CLASSIFICATION: ReadonlyArray<readonly [string, boolean]> = [
+const HOST_CLASSIFICATION: ReadonlyArray<readonly [string, boolean]> = [
   ['openwop:accessibility.alt-text.generate', false],
   ['openwop:accessibility.check', false],
   ['openwop:ai.research.web', false],
@@ -187,21 +188,6 @@ const CLASSIFICATION: ReadonlyArray<readonly [string, boolean]> = [
   ['openwop:job-search.applications.read', false],
   ['openwop:job-search.listings.read', false],
   ['openwop:kanban.add-todo', false],
-  ['openwop:kicktodo.candidates', false],
-  ['openwop:kicktodo.challenge-performance', false],
-  ['openwop:kicktodo.circles', false],
-  ['openwop:kicktodo.community-reviews', false],
-  ['openwop:kicktodo.convene', false],
-  ['openwop:kicktodo.engagement-summary', false],
-  ['openwop:kicktodo.factory.run', false],
-  ['openwop:kicktodo.integrations-status', false],
-  ['openwop:kicktodo.journal', false],
-  ['openwop:kicktodo.log-checkin', false],
-  ['openwop:kicktodo.plan', false],
-  ['openwop:kicktodo.progress', false],
-  ['openwop:kicktodo.proposals', false],
-  ['openwop:kicktodo.replan', false],
-  ['openwop:kicktodo.today', false],
   ['openwop:knowledge.search', false],
   ['openwop:marketplace.search', false],
   ['openwop:media.list', false],
@@ -319,7 +305,7 @@ const CLASSIFICATION: ReadonlyArray<readonly [string, boolean]> = [
  * is a real forcing function; it just costs ~14 more written judgments than
  * this review's scope, and filler rows would be worse than none.
  */
-const ADJUDICATED: Record<string, { schemaCarrying: boolean; why: string }> = {
+const HOST_ADJUDICATED: Record<string, { schemaCarrying: boolean; why: string }> = {
   // ── FLIPPED to true (was a silent `false`) ────────────────────────────────
   'openwop:bi.list-metrics': {
     schemaCarrying: true,
@@ -433,13 +419,6 @@ const ADJUDICATED: Record<string, { schemaCarrying: boolean; why: string }> = {
       + '— the closed world reaches the model through the schema, not through this payload. `placementId` '
       + 'is an OUTPUT of resolve, never an input.',
   },
-  'openwop:kicktodo.today': {
-    schemaCarrying: false,
-    why:
-      "A coaching read of the caller's own day. No id in it is required byte-exact by any sibling; the "
-      + 'write tools (log-checkin / replan) key off activity ids the same call already carries in context. '
-      + 'Ordinary app state.',
-  },
   'openwop:cad.get-design': {
     schemaCarrying: true,
     why: '(c) read-before-write design body. Already exempt before this review; adjudicated here because TOCC-2a listed the get-design family as leads.',
@@ -454,8 +433,27 @@ const ADJUDICATED: Record<string, { schemaCarrying: boolean; why: string }> = {
   },
 };
 
+/**
+ * ADR 1031 P2 — the classification and adjudications a FEATURE package declares
+ * for its own tools (`agentToolSchemaClassification` / `agentToolSchemaAdjudications`
+ * in `<feature>/ratchetDeclarations.ts`), merged with the host tables above so
+ * every assertion below runs over the union exactly as it ran over one table.
+ * Each floor is HOST FLOOR + DECLARED COUNT: unchanged in total today, and it
+ * moves with the declarations when a feature package moves (ADR 1031 P3).
+ */
+let CLASSIFICATION: ReadonlyArray<readonly [string, boolean]> = HOST_CLASSIFICATION;
+let ADJUDICATED: Record<string, { schemaCarrying: boolean; why: string }> = HOST_ADJUDICATED;
+let DECLARED_ROWS: ReadonlyArray<readonly [string, boolean]> = [];
+
 let server: http.Server;
 beforeAll(async () => {
+  const declared = await collectFeatureRatchetDeclarations();
+  DECLARED_ROWS = declared.flatMap((d) => [...(d.declarations.agentToolSchemaClassification ?? [])]);
+  const hostIds = new Set(HOST_CLASSIFICATION.map(([id]) => id));
+  const doubled = DECLARED_ROWS.filter(([id]) => hostIds.has(id)).map(([id]) => id);
+  if (doubled.length) throw new Error(`classified in BOTH the host table and a feature declaration: ${doubled.join(', ')}`);
+  CLASSIFICATION = [...HOST_CLASSIFICATION, ...DECLARED_ROWS];
+  ADJUDICATED = { ...HOST_ADJUDICATED, ...Object.assign({}, ...declared.map((d) => d.declarations.agentToolSchemaAdjudications ?? {})) };
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
@@ -470,7 +468,8 @@ describe('schema-read exemption completeness (ADR 0604 / TOCC-2)', () => {
     // MEASURED count: 211 registered ids on 2404797bf (2026-10-22; was 201 at
     // authoring, 2026-08-23). Cases 2 and 3 pin the exact set, so this floor only
     // has to equal the truth, never lag it.
-    expect(builtinAgentToolIds().length).toBeGreaterThanOrEqual(211);
+    // ADR 1031 P2 — 196 host-declared + the feature-declared rows (15 KickTodo today: 211).
+    expect(builtinAgentToolIds().length).toBeGreaterThanOrEqual(196 + DECLARED_ROWS.length);
     expect(builtinAgentToolIds()).toContain('openwop:schema.lookup');
     expect(builtinAgentToolIds()).toContain('openwop:feature.crm.nodes.segment-vocabulary'); // a PROJECTED id
   });
@@ -499,7 +498,7 @@ describe('schema-read exemption completeness (ADR 0604 / TOCC-2)', () => {
     // Floor: the loop is vacuous empty. Raised 18 → 23 by the five review-H4
     // flips, then 23 → 25 to the measured `true` rows on 2404797bf (2026-10-22);
     // a floor that lags the population lets a deletion pass unseen.
-    expect(shouldBeExempt.length).toBeGreaterThanOrEqual(27); // ADR 0999 D3.1: +2
+    expect(shouldBeExempt.length).toBeGreaterThanOrEqual(27 + DECLARED_ROWS.filter(([, x]) => x).length); // ADR 0999 D3.1: +2; ADR 1031 P2: + declared
     for (const id of shouldBeExempt) {
       expect(isSchemaReadExempt(id), `${id} is schema-carrying but NOT exempt`).toBe(true);
       expect(builtinAgentTool(id)?.schemaCarrying, `${id} must DECLARE it, not only be listed`).toBe(true);
@@ -524,9 +523,12 @@ describe('schema-read exemption completeness (ADR 0604 / TOCC-2)', () => {
       'openwop:cms.get-draft-page', 'openwop:brand.resolve-voice', 'openwop:tutorials.catalog',
       'openwop:campaign-channels.channels', 'openwop:intent-ledger.get',
       'openwop:discovery.list-collections', 'openwop:discovery.list-rules',
-      'openwop:recommendations.list-placements', 'openwop:kicktodo.today',
+      'openwop:recommendations.list-placements',
       'openwop:cad.get-design', 'openwop:drawings.get-design',
       'openwop:campaign-studio.get-design', 'openwop:interactive-artifacts.get',
+      // ADR 1031 P2 — a feature-owned lead (KickTodo's `today`) is recorded with its
+      // adjudication in the feature's own declarations.
+      ...Object.keys(ADJUDICATED).filter((id) => !(id in HOST_ADJUDICATED)),
     ];
     const missing = LEADS.filter((id) => !(id in ADJUDICATED));
     expect(missing, 'a TOCC-2a lead was left without a recorded judgment').toEqual([]);
@@ -548,7 +550,8 @@ describe('schema-read exemption completeness (ADR 0604 / TOCC-2)', () => {
   it('NEGATIVE CONTROL — a classified-false tool is NOT exempt', () => {
     const plainData = CLASSIFICATION.filter(([, s]) => !s).map(([id]) => id);
     // Floor = the measured `false` rows on 2404797bf (2026-10-22): 186.
-    expect(plainData.length).toBeGreaterThanOrEqual(184); // ADR 0999 D3.1: −2
+    // ADR 1031 P2 — 169 host + the feature-declared `false` rows (15 KickTodo today: 184).
+    expect(plainData.length).toBeGreaterThanOrEqual(169 + DECLARED_ROWS.filter(([, x]) => !x).length); // ADR 0999 D3.1: −2
     for (const id of plainData) {
       expect(isSchemaReadExempt(id), `${id} is classified plain data but is exempt`).toBe(false);
     }

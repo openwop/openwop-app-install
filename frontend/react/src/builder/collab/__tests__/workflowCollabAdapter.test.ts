@@ -16,6 +16,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as Y from 'yjs';
 import { createCollabDocBinding, type CollabDocBinding } from '../../../canvas/collabDocBinding.js';
+import { getSavedWorkflow } from '../../persistence/localStore.js';
+import { fromCanonicalDefinition } from '../../schema/deserialize.js';
 import { WORKFLOW_COLLAB_SHAPE } from '../workflowCollabShape.js';
 import { attachWorkflowCollabAdapter, type WorkflowCollabAdapter } from '../workflowCollabAdapter.js';
 import { useBuilderStore } from '../../store/builderStore.js';
@@ -257,6 +259,55 @@ describe('autosave suspension (ADR 0481 §4)', () => {
 });
 
 describe('the definition root scalar (ADR 0481 §3)', () => {
+  it('carries raw defaults and unknown metadata in the actual room-derived definition', () => {
+    loadFixture();
+    useBuilderStore.setState({ defaultInputs: '{"partial":', metadata: { customProperties: { other: 'keep', 'openwop-app.builder': { sibling: true } }, walkthrough: true } });
+    binding = createCollabDocBinding<Dict>(new Y.Doc(), WORKFLOW_COLLAB_SHAPE);
+    adapter = attachWorkflowCollabAdapter(binding, { seed: true });
+    const activeAdapter = adapter;
+    if (!activeAdapter) throw new Error('Seeded workflow must attach its collaboration adapter');
+    const raw = binding.current()['definition'];
+    if (typeof raw !== 'string') throw new Error('Room must carry a definition');
+    expect(JSON.parse(raw).metadata).toMatchObject({ customProperties: { other: 'keep', 'openwop-app.builder': { sibling: true, defaultInputs: '{"partial":' } }, walkthrough: true });
+    useBuilderStore.getState().setDefaultInputs('');
+    vi.advanceTimersByTime(2_000);
+    const cleared = binding.current()['definition'];
+    if (typeof cleared !== 'string') throw new Error('Room must retain definition');
+    expect(JSON.parse(cleared).metadata.customProperties['openwop-app.builder'].defaultInputs).toBe('');
+    expect(fromCanonicalDefinition(JSON.parse(cleared)).defaultInputs).toBe('');
+    activeAdapter.undo();
+    const undone = binding.current()['definition'];
+    if (typeof undone !== 'string') throw new Error('Undo must retain definition');
+    expect(useBuilderStore.getState().defaultInputs).toBe('{"partial":');
+    expect(fromCanonicalDefinition(JSON.parse(undone)).defaultInputs).toBe('{"partial":');
+    activeAdapter.redo();
+    expect(useBuilderStore.getState().defaultInputs).toBe('');
+  });
+
+  it('keeps malformed metadata usable during passive load/pristine comparison', () => {
+    loadFixture();
+    const saved = useBuilderStore.getState().snapshot();
+    const malformed = { customProperties: { 'openwop-app.builder': 'opaque' } };
+    expect(() => useBuilderStore.getState().loadFromSaved({ ...saved, metadata: malformed })).not.toThrow();
+    expect(useBuilderStore.getState().snapshot().metadata).toEqual(malformed);
+  });
+
+  it('surfaces a refused metadata write while retaining the old definition and local text', () => {
+    loadFixture();
+    binding = createCollabDocBinding<Dict>(new Y.Doc(), WORKFLOW_COLLAB_SHAPE);
+    adapter = attachWorkflowCollabAdapter(binding, { seed: true });
+    const before = binding.current()['definition'];
+    const opaque = { customProperties: { 'openwop-app.builder': 'opaque' } };
+    useBuilderStore.setState({ metadata: opaque });
+    useBuilderStore.getState().setDefaultInputs('{"local":true}');
+    vi.advanceTimersByTime(2_000);
+    expect(binding.current()['definition']).toBe(before);
+    expect(useBuilderStore.getState().syncState).toBe('failed');
+    expect(useBuilderStore.getState().syncFailureReason).toBe('builder_editor_metadata_conflict');
+    expect(getSavedWorkflow('wf_adapter_test')?.defaultInputs).toBe('{"local":true}');
+    expect(useBuilderStore.getState().metadata).toEqual(opaque);
+  });
+
   it('seed writes valid definition JSON carrying the workflowId', () => {
     const ydoc = new Y.Doc();
     loadFixture();

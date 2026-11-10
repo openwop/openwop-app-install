@@ -20,7 +20,7 @@ import { isProviderRateLimited, isTransientProviderFailure, providerFailureField
 import { recordUsage } from '../../features/usage-analytics/usageRollupService.js';
 import { dispatchManagedChat, isManagedCredentialRef, managedProviderIdFromRef } from '../../providers/managedProvider.js';
 import { OpenwopError, type RunRecord } from '../../types.js';
-import { resolveSecret } from '../../byok/secretResolver.js';
+import { resolveUserNamedSecret } from '../../byok/userNamedSecret.js';
 import { explicitRefNamesOtherProvider } from '../../aiProviders/credentialRefLadder.js';
 import { CREDENTIAL_PROVIDERS } from '../../aiProviders/aiProvidersHost.js';
 import { resolveCompatDispatch } from '../compatEndpoints.js';
@@ -356,7 +356,7 @@ export async function dispatchReply(run: RunRecord, messages: ChatMessage[], onD
       { reason: 'explicit_ref_wrong_provider', provider, refProvider, credentialRef },
     );
   }
-  const apiKey = await resolveSecret(credentialRef, { tenantId: run.tenantId });
+  const apiKey = await resolveUserNamedSecret(credentialRef, { tenantId: run.tenantId });
   if (!apiKey) {
     throw new OpenwopError(
       'credential_unavailable',

@@ -87,6 +87,7 @@ import { Sidebar } from './chrome/Sidebar.js';
 import { AppGate } from './chrome/AppGate.js';
 import { SiteShell } from './chrome/SiteShell.js';
 import { siteWrapsAppGate, tierIsSessionBearing } from './chrome/tierShell.js';
+import { useSignedOutPageRedirect } from './chrome/useSignedOutPageRedirect.js';
 // Anonymous-route navigation belongs to the public shell; workspace visits
 // load their own chrome without downloading that shell or its public probes.
 const PublicShell = lazy(() => import('./chrome/PublicShell.js').then((m) => ({ default: m.PublicShell })));
@@ -141,7 +142,7 @@ import { Skeleton } from './ui/Skeleton.js';
 import { useBrand } from './brand/BrandProvider.js';
 import { FeatureAccessProvider } from './featureToggles/FeatureAccessContext.js';
 import { NavConfigProvider } from './chrome/navConfig/NavConfigProvider.js';
-import { shouldShowFrontPage, hasLegacyChatParams } from './chrome/rootRoute.js';
+import { shouldShowFrontPage, hasLegacyChatParams, rootSplashPending } from './chrome/rootRoute.js';
 import { reportRouteView } from './platform/telemetry.js';
 import { useAuth } from './auth/useAuth.js';
 import { resolveFrontPage, type FrontPagePointer } from './features/site/siteConfigClient.js';
@@ -198,6 +199,15 @@ function useFrontPage(active: boolean): { loading: boolean; pointer: FrontPagePo
 /** The reserved host-global system-site org (ADR 0027; see backend host/systemSite.ts).
  *  Its published CMS pages render publicly at `/p/:slug` (e.g. the seeded Features page). */
 const SYSTEM_SITE_ORG = 'host-site';
+
+/** Whether the system site publishes `slug` (the signed-out bare-path redirect
+ *  forwards only to a page that exists). */
+function systemSitePageExists(slug: string): Promise<boolean> {
+  // Loaded on demand: only a signed-out visitor on one of those paths needs it.
+  return import('./features/site/siteClient.js')
+    .then(({ fetchPublicPageResult }) => fetchPublicPageResult(SYSTEM_SITE_ORG, slug))
+    .then((r) => r.status === 'ok');
+}
 
 export function App() {
   const { t } = useTranslation('chrome');
@@ -289,6 +299,15 @@ export function App() {
   // element renders we are already inside whichever shell was chosen, which is
   // the same structural reason `chromeFor()` could not express this tier.
   const siteRoute = FEATURES.find((f) => f.tier === 'site' && matchPath({ path: f.path, end: true }, location.pathname) !== null);
+  // Signed-out bare-path redirects (`/features` → `/p/features`, …): only behind
+  // the sign-in gate, only once auth resolved with no user, only when the page
+  // is published. A signed-in visitor still gets the app route. See
+  // `chrome/signedOutPageRedirect.ts`.
+  const signedOutRedirect = useSignedOutPageRedirect({
+    pathname: location.pathname, search: location.search, hash: location.hash,
+    gateMode: brand.appGate.mode, hasUser: user !== null, authLoading: loading,
+    pageExists: systemSitePageExists,
+  });
   // Session/SSE bootstrap keys on whether the route is SESSION-BEARING, not on
   // `showPublic`. That boolean conflated two questions — "is this the bare
   // marketing shell" and "should we open a session" — which is exactly why a
@@ -372,6 +391,9 @@ export function App() {
   // so an `auth: 'required'` participant surface would render chrome-less AND
   // ungated. Matching first makes the tier authoritative over any later
   // path-shaped guess.
+  if (signedOutRedirect.kind === 'redirect') return <Navigate replace to={signedOutRedirect.to} />;
+  if (signedOutRedirect.kind === 'pending') return <RouteLoading />;
+
   if (siteRoute !== undefined) {
     // The element renders THROUGH a <Route> whose pattern is the manifest path,
     // not as a bare child: `useParams()` only resolves inside a route match
@@ -454,7 +476,7 @@ export function App() {
           ? <Suspense fallback={<div className="u-p-4"><Skeleton /></div>}><DocsPublicPage orgId={SYSTEM_SITE_ORG} slug={docsSlug} /></Suspense>
           : publicPageSlug
           ? <Suspense fallback={<div className="u-p-4"><Skeleton /></div>}><FrontPage orgId={SYSTEM_SITE_ORG} slug={publicPageSlug} surface="slug" /></Suspense>
-          : loading || fpLoading
+          : rootSplashPending({ authLoading: loading, frontPageLoading: fpLoading, frontPageEnabled: pointer?.enabled ?? false })
             ? <div className="u-p-4"><Skeleton /></div>
             : <Suspense fallback={<div className="u-p-4"><Skeleton /></div>}><FrontPage orgId={pointer?.orgId ?? ''} slug={pointer?.slug ?? 'home'} surface="root" /></Suspense>}
       </PublicShell>

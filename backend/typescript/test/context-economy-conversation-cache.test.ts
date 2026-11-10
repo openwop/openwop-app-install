@@ -26,6 +26,9 @@
  * "first round" cases; dropping the lever check reds "lever off"; marking the
  * FIRST message instead of the last reds the placement case; mutating the
  * caller's message reds the non-mutation case.
+ * Re-witnessed 2026-11-03 (w81): marking every block of the last message, ignoring
+ * `enabled`, marking an empty final message, and the node loop marking round 1 or
+ * never marking round 2 each red their case.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { withAnthropicMessageCache } from '../src/providers/promptCaching.js';
@@ -112,6 +115,10 @@ describe('dispatchAnthropicToolsRound — the conversation breakpoint', () => {
     expect(bps).toContain('$.messages[2].content[0]'); // the last non-system message
     expect(bps.filter((p) => p.startsWith('$.messages'))).toEqual(['$.messages[2].content[0]']);
     expect(bps.length).toBeLessThanOrEqual(4);
+    // Exactly where they are: the A2 tools + system breakpoints, plus D3's one.
+    expect(bps).toEqual(['$.tools[0]', '$.system[0]', '$.messages[2].content[0]']);
+    const marked = (bodies[0].messages as Array<{ content: Array<{ text?: string }> }>)[2].content[0];
+    expect(marked.text).toBe('TOOL RESULT: 42');
   });
 
   it('lever on, FIRST round (no hint) → no message breakpoint', async () => {

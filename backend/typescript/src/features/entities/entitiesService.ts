@@ -948,6 +948,19 @@ export async function listSystemEntities(tenantId: string, typeName: string): Pr
   return records.listByPrefix(`${type.typeId}|`);
 }
 
+/** ADR 1052 D5 — every row of one ROOT-namespace USER type, through the schema-live
+ *  projection (ADR 0847 D3), in ONE read. For an aggregate reader (BI) that needs the
+ *  whole type: paging `queryEntities` re-listed and re-sorted the type for every
+ *  200-row page. Drafts are included, as in the authed `queryEntities` read; only the
+ *  public read excludes them. A system type is refused: its rows come from
+ *  `listSystemEntities`, which the owning feature's row filter must follow. */
+export async function listLiveEntities(tenantId: string, typeName: string): Promise<EntityRecord[]> {
+  const type = await getEntityType(tenantId, undefined, typeName);
+  if (!type) throw new OpenwopError('not_found', 'Entity type not found.', 404, { typeName });
+  if (type.system) throw new OpenwopError('validation_error', `\`${typeName}\` is a system type — read it through its owner.`, 400, { typeName });
+  return (await records.listByPrefix(`${type.typeId}|`)).map(liveProjector(type));
+}
+
 /** Point read of one SYSTEM row. */
 export async function getSystemEntity(tenantId: string, typeName: string, entityId: string): Promise<EntityRecord | null> {
   const type = await getEntityType(tenantId, undefined, typeName);

@@ -5,6 +5,8 @@
  * edge fires based on the source's output.
  */
 
+import { projectSourceOutput } from '../schema/sourceOutput.js';
+import { catalogEntry } from '../palette/catalogRegistry.js';
 import { Button } from '../../ui/Button.js';
 import { useTranslation } from 'react-i18next';
 import { useBuilderStore } from '../store/builderStore.js';
@@ -23,6 +25,8 @@ export function EdgeInspector({ edge }: { edge: BuilderEdge }) {
   const conditionMeta = CONDITION_OPS.find((o) => o.value === conditionOp)!;
   const allNodes = useBuilderStore((s) => s.nodes);
   const nodeName = (id: string): string => allNodes.find((n) => n.id === id)?.name ?? id;
+  const sourceKind = allNodes.find(n => n.id === edge.source)?.kind;
+  const sourceBinding = projectSourceOutput(edge, catalogEntry(sourceKind ?? '')?.outputs ?? []);
   return (
     <aside className="builder-inspector">
       <h3 className="builder-inspector-title">{t('edge')}</h3>
@@ -40,6 +44,9 @@ export function EdgeInspector({ edge }: { edge: BuilderEdge }) {
         </code>
       </div>
 
+      <p className="muted builder-inspector-help">
+        {t('sourceOutputDescription', { name: sourceBinding.label, type: sourceBinding.type })}
+      </p>
       <TextField
         label={t('edgeLabel')}
         value={edge.label ?? ''}

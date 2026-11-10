@@ -33,8 +33,21 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { stripComments } from './helpers/stripComments.js';
+import { collectFeatureRatchetDeclarations } from './helpers/featureRatchetDeclarations.js';
+import { featureSourceRoots } from './helpers/featureSourceRoots.js';
 
 const FEATURES_ROOT = join(__dirname, '..', 'src', 'features');
+/** ADR 1031 P3 — every feature root: first-party `src/features/` and, in an adopter's
+ *  tree, `src/adopter/features/`. The store census walks both, so a store in an
+ *  adopted package is classified exactly as it was when the package lived upstream. */
+const FEATURE_WALK_ROOTS = featureSourceRoots();
+const walkFeatures = (): string[] => FEATURE_WALK_ROOTS.flatMap((r) => walk(r));
+/** The file's path under its own feature root (`<feature dir>/...`). */
+const featureRel = (file: string): string => {
+  const root = FEATURE_WALK_ROOTS.find((r) => file.startsWith(r + '/') || file.startsWith(r + '\\'))!;
+  return file.slice(root.length + 1).split('\\').join('/');
+};
+const SRC_ROOT = join(__dirname, '..', 'src');
 
 /** Same matcher as the host gate (quoted-literal namespaces only). */
 const STORE_RE = /new DurableCollection(?:<([\s\S]*?)>)?\s*\(\s*['"]([^'"]+)['"]/g;
@@ -396,6 +409,14 @@ const EXPECTED_COVERED = new Set([
   // are only ever used by grant, never as the subject) in the DSAR's tenant. Rows
   // in OTHER shared workspaces are not reached — `CONNWF-16`.
   'connections:connection',
+  // ADR 1024 D5.4 (`CDP2WF-8`, row 73) — moved out of RECORDED_DEBT:
+  // `eraseJourneyEnrollmentSubject` deletes the person's journey rows (every key shape);
+  // `copyEnrollmentsOnMerge` / `removeMergeCopiedEnrollments` carry the arbitration state
+  // across a merge and back, which is what the old debt note said the cure needed. The
+  // old note's worry (deleting lets a NEW enrollment win an exclusive group it lost) is
+  // bounded by the consent tombstone erasure writes: the eligibility check refuses an
+  // erased person before any group arbitration matters.
+  'campaign-journeys:enrollment',
 ]);
 
 /**
@@ -409,7 +430,6 @@ const RECORDED_DEBT = new Map<string, string>([
   // ── FOUND BY the CRM-2 contactId/email widening. Each was read individually; none
   //    is a coverage claim. They are recorded rather than covered because each needs
   //    a decision from its owning feature that this CRM change is not the place to make.
-  ['campaign-journeys:enrollment', 'FOUND BY the CRM-2 contactId widening: an enrollment row keys `${tenantId}::${journeyId}::${contactId}` and is the ADR 0299 exclusivity-arbitration state. Deleting it on erasure would let a NEW enrollment of the same person into an exclusive group win arbitration it already lost; keeping it leaves the contactId. The right cure is to re-point on erasure the way it now re-points on merge, which needs the journeys owner. Reclaimed today only by tenant teardown.'],
   ['podcasts:show', 'FOUND BY the CRM-2 email widening: `ownerName`/`ownerEmail` are the RSS-required podcast owner contact, which is published in the feed itself. Erasure semantics are genuinely unclear (removing them breaks the feed the directories validate), so this needs the podcasts owner rather than a guess made here.'],
   ['production:vendor', 'FOUND BY the CRM-2 email widening: `contactEmail` is an EXTERNAL person\'s address on a vendor row (already declared PII by PROD2-M6). A vendor is an org business record like a CRM contact, so the cure is the same anonymize-do-not-delete shape crm/erasure.ts now uses — it just needs the production owner to confirm which fields are relationship vs person.'],
   // ── FOUND BY the COS-1 userId-suffix widening (see USER_ID_FIELD above).
@@ -498,7 +518,6 @@ const ACTOR_ATTRIBUTED_DEBT = new Map<string, string>([
   //    the honest erasure is RE-ATTRIBUTE, and re-attribution needs a target the
   //    owning feature has to choose.
   ['advisory:board', 'FOUND BY the CONS-7 cross-file widening. `AdvisoryBoard.createdBy` (advisory-board/types.ts). The board is a tenant\'s simulation configuration — personas, turn policy, a `livingPersonaAck` right-of-publicity acknowledgement. Deleting it on erasure would destroy the org\'s configured board; the acknowledgement in particular is a COMPLIANCE record about a decision, which argues for re-attribute rather than delete. Needs the advisory-board owner. Reclaimed today only by tenant teardown.'],
-  ['bi:metric', 'FOUND BY the CONS-7 cross-file widening. `MetricDef.createdBy` (bi/metricTypes.ts). A metric DEFINITION is org analytics config that dashboards and scheduled reports resolve by id; deleting it on erasure would break every consumer. Re-attribute, which needs the bi owner to choose a target.'],
   ['campaign-brief:brief', 'FOUND BY the CONS-7 cross-file widening. `CampaignBrief.createdBy` (campaign-brief/types.ts). Org marketing collateral — the same shape as the `campaign-brief:*` artifacts already on this list, which is itself the tell that the family was only PARTLY visible before.'],
   ['campaign-brief:persona', 'FOUND BY the CONS-7 cross-file widening. `Persona.createdBy` (campaign-brief/types.ts). An audience persona is org marketing config, not a person\'s own data (the persona DESCRIBES a market segment). Re-attribute.'],
   ['creative-briefs:brief', 'FOUND BY the CONS-7 cross-file widening. `CreativeBrief.createdBy` (creative-briefs/types.ts). Same shape as campaign-brief: org creative collateral authored by a member.'],
@@ -620,8 +639,14 @@ const ACTOR_ATTRIBUTED_DEBT = new Map<string, string>([
  *  `features/prompts/feature.ts`) deletes the subject's private entries with their
  *  body versions and share links, and tombstones `createdBy`/`updatedBy` on the
  *  rest. `test/adr0993-prompt-library-probes.test.ts` D6 witnesses both arms and
- *  the doubled `user:user:` spelling. Ledger 18, ceiling 18. */
-const ACTOR_DEBT_CEILING = 18;
+ *  the doubled `user:user:` spelling. Ledger 18, ceiling 18.
+ *
+ *  ADR 1052 D13 (2026-11-03, feature loop row 84): `bi:metric` leaves this ledger
+ *  because `features/bi/erasure.ts` registers `eraseSubjectBiMetrics`, which
+ *  re-attributes `createdBy` to the `ERASED` sentinel and keeps the definition (org
+ *  config resolved by id). `test/adr1052-bi-honest-metrics.test.ts` D13 witnesses it.
+ *  Ledger 17, ceiling 17. */
+const ACTOR_DEBT_CEILING = 17;
 
 /** NO-GROWTH: debt may only shrink. Raising this is a deliberate, reviewable act.
  *  RAISED 4→5 (2026-08-15, the R3 subjectId widening): the WIDENED matcher found
@@ -696,7 +721,11 @@ const ACTOR_DEBT_CEILING = 18;
  *  `applyContext.subjectId`, drop every free-text field) is argued in that
  *  module's header and asserted by `adr0894-computer-use-session-authority`.
  */
-const DEBT_CEILING = 7;
+/*  ADR 1024 D5.4 (2026-11-02, feature loop row 73) — 7 -> 6: `campaign-journeys:enrollment`
+ *  leaves the ledger because the work landed (`eraseJourneyEnrollmentSubject` +
+ *  the merge copy/unmerge pair in `features/campaign-journeys/journeyService.ts`).
+ */
+const DEBT_CEILING = 6;
 
 /**
  * ADR 0584 §Correction (FORM-ERASE-1) — PARTIAL COVERAGE: a store that DOES
@@ -888,7 +917,7 @@ function expandNestedTypes(src: string, body: string): string {
  */
 const CROSS_FILE_TYPE_INDEX: ReadonlyMap<string, string> = (() => {
   const out = new Map<string, string>();
-  for (const file of walk(FEATURES_ROOT)) {
+  for (const file of walkFeatures()) {
     const src = readFileSync(file, 'utf8');
     for (const m of src.matchAll(/\b(?:interface|type)\s+([A-Za-z_]\w*)/g)) {
       const body = typeBodyIn(src, m[1]!);
@@ -965,7 +994,7 @@ interface FeatureStore { ns: string; file: string; hasEraser: boolean; signal: '
  *  stronger claim is the one that must be answered. */
 function enumerateSubjectBearingFeatureStores(): Map<string, FeatureStore> {
   const found = new Map<string, FeatureStore>();
-  for (const file of walk(FEATURES_ROOT)) {
+  for (const file of walkFeatures()) {
     const src = readFileSync(file, 'utf8');
     for (const m of src.matchAll(STORE_RE)) {
       const ns = m[2]!;
@@ -977,7 +1006,7 @@ function enumerateSubjectBearingFeatureStores(): Map<string, FeatureStore> {
       if (found.has(ns)) continue;
       found.set(ns, {
         ns,
-        file: file.slice(FEATURES_ROOT.length + 1).split('\\').join('/'),
+        file: featureRel(file),
         // Self-policing: the owning MODULE must register the eraser. R3 — the
         // check is now MODULE-level (any file in the same feature directory),
         // not same-file: entity/service splits (territories/entities/quota.ts
@@ -996,15 +1025,15 @@ function enumerateSubjectBearingFeatureStores(): Map<string, FeatureStore> {
 /** Feature dirs (first segment under src/features) with ANY registerSubjectEraser call. */
 const ERASING_FEATURES: Set<string> = (() => {
   const out = new Set<string>();
-  for (const file of walk(FEATURES_ROOT)) {
+  for (const file of walkFeatures()) {
     if (/registerSubjectEraser\s*\(/.test(stripComments(readFileSync(file, 'utf8')))) {
-      out.add(file.slice(FEATURES_ROOT.length + 1).split('/')[0]!.split('\\')[0]!);
+      out.add(featureRel(file).split('/')[0]!);
     }
   }
   return out;
 })();
 function featureRegistersEraser(file: string): boolean {
-  return ERASING_FEATURES.has(file.slice(FEATURES_ROOT.length + 1).split('/')[0]!.split('\\')[0]!);
+  return ERASING_FEATURES.has(featureRel(file).split('/')[0]!);
 }
 
 const stores = enumerateSubjectBearingFeatureStores();
@@ -1580,7 +1609,7 @@ describe('ADR 0464 — feature-owned subject-bearing stores', () => {
     expect(/'eraseAssistantSubject'/.test(manifest), 'and the expected-eraser manifest must know its name').toBe(true);
   });
 
-  it('COS-1: the three stores the userId-suffix widening ALSO exposed are each really covered, not directory-inferred', () => {
+  it('COS-1: the three stores the userId-suffix widening ALSO exposed are each really covered, not directory-inferred', async () => {
     // EM-4b's lesson applied to this widening: a store that becomes visible
     // inside an already-erasing feature reads COVERED for free. Assert the
     // actual reach for the two that are not this change's own, so the widening
@@ -1589,9 +1618,15 @@ describe('ADR 0464 — feature-owned subject-bearing stores', () => {
     const strat = stripComments(readFileSync(join(FEATURES_ROOT, 'strategy', 'strategyService.ts'), 'utf8'));
     expect(/eraseCadenceSubject\(/.test(strat), 'eraseSubjectStrategy must actually call the cadence eraser').toBe(true);
 
-    expect(stores.get('kicktodo-wearable-link')?.hasEraser).toBe(true);
-    const wear = stripComments(readFileSync(join(FEATURES_ROOT, 'kicktodo-integrations', 'wearableLinkService.ts'), 'utf8'));
-    expect(/registerSubjectEraser\(\s*eraseWearableLinksForSubject\s*\)/.test(wear)).toBe(true);
+    // ADR 1031 P2 — feature-owned witnesses (`subjectErasureWitnesses` in a
+    // package's ratchetDeclarations.ts; KickTodo's wearable-link store today).
+    for (const d of await collectFeatureRatchetDeclarations()) {
+      for (const w of d.declarations.subjectErasureWitnesses ?? []) {
+        expect(stores.get(w.store)?.hasEraser, `${w.store} must read COVERED`).toBe(true);
+        const src = stripComments(readFileSync(join(SRC_ROOT, d.srcRel, w.file), 'utf8'));
+        expect(w.registration.test(src), `${d.srcRel}/${w.file} must register ${w.store}'s eraser`).toBe(true);
+      }
+    }
 
     // …and the one that is NOT covered is recorded rather than rounded to covered.
     expect(RECORDED_DEBT.has('insights:config')).toBe(true);
@@ -1695,3 +1730,200 @@ describe('ADR 1018 — anonymous free-text stores carry a default-on TTL instead
   }
 });
 
+
+/**
+ * The FULL first-party denominator (CHAN-F6; ADR 0464 correction, 2026-11-07).
+ *
+ * Every census above starts from a SIGNAL: a row type with `userId`, `email`,
+ * `subjectKey`, `createdBy`… A feature store whose row type carries none of them
+ * entered no list at all. It was not covered, not debt and not exempt: it was
+ * invisible. MEASURED at 68509a7f2: `src/features/**` declares 417 literal
+ * namespaces; the signal census sees 162 of them, ADR 1018 lists 2 anonymous ones,
+ * and one (`media:asset`) is declared in `src/host` (governed by
+ * `subject-erasure-coverage.test.ts`). The other 252
+ * were classified by nobody, so a new feature store that names its subject
+ * `ownerRef`, `actor` or `recipient` passed every gate on the day it landed.
+ *
+ * This block closes the DENOMINATOR, not the audit. Every first-party feature
+ * namespace must be governed by one of:
+ *  - the signal census above (`stores`), or the host gate (declared in src/host);
+ *  - ANONYMOUS_FREE_TEXT_STORES (ADR 1018);
+ *  - SIGNAL_FREE_REVIEWED below: audited, holds no subject data, with its reason;
+ *  - the UNREVIEWED baseline (fixtures/subject-erasure-signal-free-baseline.json):
+ *    the stores present when this gate landed, pinned and SHRINK-ONLY. A store
+ *    leaves it by being reviewed (moved to SIGNAL_FREE_REVIEWED) or by gaining a
+ *    signal field (then the census above classifies it). Never add to it: a new
+ *    store is classified on the day it is written, which is the point.
+ *
+ * First-party only (`src/features`, not `src/adopter/features`), so the same
+ * pinned baseline holds in openwop-app AND in an adopter's tree (ADR 1031 P3,
+ * the adr0987 census precedent). An adopter's own packages are still walked by
+ * the signal census above.
+ *
+ * Quoted literals only, same STORE_RE as every gate here. MEASURED: 0
+ * template-literal (`new DurableCollection(\`…\`)`) sites under src/features.
+ */
+const HOST_ROOT = join(SRC_ROOT, 'host');
+/** A host demo seeder RE-OPENS a feature namespace; the host gate skips them too. */
+const isHostSeeder = (file: string): boolean => /(^|[\\/])demo.*Seed\.ts$/.test(file);
+
+function literalNamespacesUnder(root: string, skip: (file: string) => boolean = () => false): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const file of walk(root)) {
+    if (skip(file)) continue;
+    const rel = file.slice(root.length + 1).split('\\').join('/');
+    for (const m of readFileSync(file, 'utf8').matchAll(STORE_RE)) {
+      if (!out.has(m[2]!)) out.set(m[2]!, rel);
+    }
+  }
+  return out;
+}
+
+const SIGNAL_FREE_BASELINE_FILE = join(__dirname, 'fixtures', 'subject-erasure-signal-free-baseline.json');
+const SIGNAL_FREE_BASELINE: readonly string[] =
+  (JSON.parse(readFileSync(SIGNAL_FREE_BASELINE_FILE, 'utf8')) as { namespaces: string[] }).namespaces;
+/** The baseline size. It may only go DOWN; never raise it.
+ *  252 when the gate landed (P1, #5647). Wave 1 (P2, 2026-11-09): 31 reviewed → 221. */
+const SIGNAL_FREE_BASELINE_CEILING = 221;
+
+/** Reviewed signal-free feature stores: each holds no subject data, and says why.
+ *  Each was read at its declaration: the row type with its nested types, AND the
+ *  key function (a key built from a user id or an email is subject data even when
+ *  no field is). Free text an operator authors as configuration (a label, a slug,
+ *  a JSON schema) is not subject data.
+ *
+ *  Wave 1 FOUND what "signal-free" does not mean: at least 73 of the 252 carry a
+ *  field the census signals do not bind but that names a person (`updatedBy`, `attestedBy`,
+ *  `approverId`, `voterId`, `viewer`, `subjectRef`, a sender address…). Those are
+ *  NOT reviewable here; they stay in the baseline until an eraser covers them or
+ *  the actor signal is widened (measure first, the KB-3 rule). The guard test below
+ *  refuses a reviewed entry whose row carries such a field, so this list cannot
+ *  absorb them. */
+const SIGNAL_FREE_REVIEWED = new Map<string, string>([
+  ['analytics:retention-watermark', 'one row per tenant: the purge cutoff timestamp'],
+  ['campaign-orchestration:brief-index', 'index row: tenant, brief id and campaign id only'],
+  ['campaign-orchestration:project-link', 'link row: tenant, campaign id, project id and a timestamp'],
+  ['campaign-studio:plan-by-campaign', 'index row: tenant, campaign id and canvas id only'],
+  ['cdp:event-schema', 'an operator-authored JSON schema per event type and version'],
+  ['cdp:purpose-vocab', 'per-tenant consent purpose codes added and removed, plus a strict flag'],
+  ['cdp:retention-watermark', 'one row per tenant: the purge cutoff timestamp'],
+  ['cms:redirect', 'an operator-authored slug-to-slug redirect'],
+  ['cms:scheduled', 'a publish marker: tenant, org, page id and due time'],
+  ['cms:scheduled-unpublish', 'an unpublish marker: tenant, org, page id and due time'],
+  ['commerce-connect:fee-config', 'the platform application-fee percentage'],
+  ['commerce:product-fielddef', 'an operator-defined custom product field (key, label, type, options)'],
+  ['consent:policy', 'per-tenant regulated regions and the default consent mode'],
+  ['crm:fielddef', 'an operator-defined custom CRM field (key, label, type, options)'],
+  ['crm:pipeline', 'a pipeline definition: name and stages (name, probability)'],
+  ['crm:territory-type', 'a territory type: name and priority'],
+  ['email:webhook-config', 'a bounce-webhook registration: provider and enabled flag; the secret lives in BYOK'],
+  ['entity:count', 'a per-entity-type record count'],
+  ['entity:relationship', 'an entity-type relationship definition: from, to, cardinality, onDelete'],
+  ['entity:taxonomy', 'a taxonomy definition: name and display name'],
+  ['entity:term', 'a taxonomy term: slug, label, order and parent'],
+  ['env:settings', 'per-tenant flag: whether promotion needs approval'],
+  ['forms:subcount', 'per-form submission, flagged and dropped counts'],
+  ['funnels:stat', 'per-funnel daily aggregates: distinct-visitor counts, revenue, orders'],
+  ['kb:docaiusage', 'per-tenant daily Document AI page count, keyed tenant:date'],
+  ['kb:embedusage', 'per-tenant daily embedding token count, keyed tenant:date'],
+  ['kb:vertexrerankusage', 'per-tenant daily rerank query count, keyed tenant:date'],
+  ['media:token-idx', 'index row keyed by a sha256 of the share token: tenant and asset id'],
+  ['usage:rollup', 'per-tenant token and call totals by provider and model'],
+  ['voice:realtime-config', 'per-tenant realtime provider and model; the credential is a BYOK ref'],
+  ['webinars:sync-state', 'last sync time per tenant, org and webinar event'],
+]);
+
+/** A field that names a person under a name the census signals do not bind. A
+ *  reviewed signal-free store must carry none of these (wave 1's finding above). */
+const PERSON_FIELD = new RegExp(
+  `${FIELD_START}\\w*(?:By|ById|Subject|subject|Viewer|viewer|Voter|voter|Approver|approver|Owner|owner|Actor|actor|Recipient|recipient|Sender|sender|Email|email|Phone|phone|User|user|Member|member|Person|person|Contact|contact|Visitor|visitor)\\w*\\??:`,
+  'm',
+);
+
+describe('ADR 0464 — EVERY first-party feature store is governed (the full denominator)', () => {
+  const firstParty = literalNamespacesUnder(FEATURES_ROOT);
+  const hostNs = new Set(literalNamespacesUnder(HOST_ROOT, isHostSeeder).keys());
+  const baseline = new Set(SIGNAL_FREE_BASELINE);
+  const governedBy = (ns: string): string | null =>
+    stores.has(ns) ? 'signal census' : hostNs.has(ns) ? 'host gate' : ANONYMOUS_FREE_TEXT_STORES.has(ns) ? 'ADR 1018 anonymous'
+      : SIGNAL_FREE_REVIEWED.has(ns) ? 'reviewed signal-free' : null;
+
+  it('the walk is NON-VACUOUS (a broken walk would govern nothing)', () => {
+    // MEASURED at 68509a7f2: 417 first-party namespaces. A walk that lost files cannot pass.
+    expect(firstParty.size).toBeGreaterThanOrEqual(417);
+    expect(firstParty.has('walkthrough-progress'), 'a signal-bearing store').toBe(true);
+    expect(stores.has('walkthrough-progress'), '...which the signal census governs').toBe(true);
+    // The ONE first-party namespace also declared in a non-seeder host file (the host gate exempts it).
+    expect(hostNs.has('media:asset'), 'a store the host gate governs').toBe(true);
+    // 37 more are re-opened by host demo seeders. Those stay FEATURE-governed: a seeder is not an owner.
+    expect(firstParty.has('commerce:order') && !hostNs.has('commerce:order'), 'a seeder re-open is not host ownership').toBe(true);
+  });
+
+  it('every first-party feature namespace is governed, or in the pinned unreviewed baseline — a new store fails here', () => {
+    const ungoverned: string[] = [];
+    for (const [ns, file] of firstParty) {
+      if (governedBy(ns) || baseline.has(ns)) continue;
+      ungoverned.push(`${ns} (features/${file})`);
+    }
+    expect(
+      ungoverned,
+      'Feature store(s) no erasure gate classifies. If the row names a person under any field, register a '
+        + 'SubjectEraser (ADR 0464 §2.1) and add a signal the census above can see; if it holds no subject data, '
+        + 'add it to SIGNAL_FREE_REVIEWED with the reason. Never add it to the unreviewed baseline.',
+    ).toEqual([]);
+  });
+
+  it('the unreviewed baseline is shrink-only, sorted and duplicate-free', () => {
+    expect(SIGNAL_FREE_BASELINE.length, `the baseline may only shrink (ceiling ${SIGNAL_FREE_BASELINE_CEILING}); classify, never append`)
+      .toBeLessThanOrEqual(SIGNAL_FREE_BASELINE_CEILING);
+    expect(baseline.size, 'duplicate baseline entry').toBe(SIGNAL_FREE_BASELINE.length);
+    expect([...SIGNAL_FREE_BASELINE], 'keep the baseline sorted so a diff shows exactly what left it')
+      .toEqual([...SIGNAL_FREE_BASELINE].sort());
+  });
+
+  it('every baseline entry is still declared and still ungoverned (remove it once it is classified)', () => {
+    const stale: string[] = [];
+    for (const ns of SIGNAL_FREE_BASELINE) {
+      if (!firstParty.has(ns)) stale.push(`${ns}: no longer declared under src/features`);
+      else {
+        const by = governedBy(ns);
+        if (by) stale.push(`${ns}: now governed by the ${by}`);
+      }
+    }
+    expect(stale, 'Remove these from the baseline and lower SIGNAL_FREE_BASELINE_CEILING to match.').toEqual([]);
+  });
+
+  it('a reviewed signal-free store is live, carries a reason, and has not gained a subject field', () => {
+    const bad: string[] = [];
+    for (const [ns, why] of SIGNAL_FREE_REVIEWED) {
+      if (!firstParty.has(ns)) bad.push(`${ns}: not declared under src/features`);
+      if (why.trim().length < 20) bad.push(`${ns}: the reason must say what the row holds`);
+      if (stores.has(ns) || hostNs.has(ns)) bad.push(`${ns}: governed elsewhere, so the review entry is a second claim`);
+      if (baseline.has(ns)) bad.push(`${ns}: reviewed AND still in the unreviewed baseline`);
+    }
+    expect(bad).toEqual([]);
+  });
+
+  it('a reviewed signal-free store carries no person-naming field (updatedBy, approverId, viewer…)', () => {
+    const bodies = new Map<string, string>();
+    for (const file of walk(FEATURES_ROOT)) {
+      const src = readFileSync(file, 'utf8');
+      for (const m of src.matchAll(STORE_RE)) {
+        if (SIGNAL_FREE_REVIEWED.has(m[2]!) && !bodies.has(m[2]!)) {
+          bodies.set(m[2]!, expandNestedTypes(src, resolveTypeBody(src, m[1] ?? '')));
+        }
+      }
+    }
+    const bad: string[] = [];
+    for (const ns of SIGNAL_FREE_REVIEWED.keys()) {
+      const body = bodies.get(ns);
+      if (!body || !body.includes(':')) bad.push(`${ns}: row type did not resolve, so it was not checked`);
+      else if (PERSON_FIELD.test(body)) bad.push(`${ns}: ${body.match(PERSON_FIELD)![0].trim()} names a person`);
+    }
+    // Non-vacuous: the same matcher sees the person field on a store wave 1 left in the baseline.
+    expect(baseline.has('capability-firewall:rules')).toBe(true);
+    const witness = readFileSync(join(FEATURES_ROOT, 'capability-firewall', 'ruleStore.ts'), 'utf8');
+    expect(witness).toMatch(PERSON_FIELD);
+    expect(bad, 'Move these back to the baseline, or cover them with a SubjectEraser.').toEqual([]);
+  });
+});

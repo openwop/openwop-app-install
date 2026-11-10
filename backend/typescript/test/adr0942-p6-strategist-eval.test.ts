@@ -13,8 +13,12 @@
  *     recovered extension cases remain passing controls. The team-suite test
  *     separately proves every task discriminates.
  * A suite that passed both would be a gate that cannot fail.
+ *
+ * DOUBLE GUARD: the forbidden run is refused twice. `forbidden` scores it, and the suite's
+ * `onMiss:"fail"` fails it because `run` has no fixture. Dropping `forbidden` alone stays
+ * red through the fixture miss; the third case asserts both counters.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { join, dirname } from 'node:path';
@@ -23,6 +27,7 @@ import { createApp } from '../src/index.js';
 import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 import { loadAgentsFromManifest } from '../src/packs/agentLoader.js';
 import { packSuiteFor } from '../src/host/evals/packSuites.js';
+import type { EvalSummary } from '../src/host/evals/agentEvalRun.js';
 
 const PACKS = join(dirname(fileURLToPath(import.meta.url)), '../../../packs');
 const V2 = { Authorization: 'Bearer dev-token', 'Content-Type': 'application/json', 'OpenWOP-Version': '2' };
@@ -51,20 +56,17 @@ type Round = { toolCalls: Array<{ name: string; input: Record<string, unknown> }
 const call = (name: string, input: Record<string, unknown> = {}): Round => ({ toolCalls: [{ name, input }] });
 const say = (content: string): Round => ({ content });
 
-interface Summary { passed: boolean; passedCount: number; taskCount: number; tasks: Array<{ taskId: string; passed: boolean }> }
-
-async function runSuite(rounds: Record<string, Round[]>): Promise<Summary> {
+async function runSuite(rounds: Record<string, Round[]>): Promise<EvalSummary> {
   const c = await send('POST', '/runs', { mode: 'eval', evalSuiteRef: suiteRef(), agentId: AGENT, configurable: { mockProvider: { id: 'tool-calls', rounds } } });
   expect(c.status, c.text.slice(0, 400)).toBe(201);
   const runId = String(c.json['runId']);
-  for (let i = 0; i < 400; i += 1) {
+  await vi.waitFor(async () => {
     const r = await send('GET', `/runs/${runId}`);
-    if (['completed', 'failed', 'cancelled'].includes(String(r.json['status']))) break;
-    await new Promise((res) => setTimeout(res, 25));
-  }
+    expect(['completed', 'failed', 'cancelled']).toContain(String(r.json['status']));
+  }, { timeout: 10_000, interval: 25 });
   const s = await send('GET', `/runs/${runId}/eval-summary`);
   expect(s.status, s.text.slice(0, 400)).toBe(200);
-  return s.json as unknown as Summary;
+  return JSON.parse(s.text) as EvalSummary;
 }
 
 const AGENT = 'vendor.openwop-app.campaign-orchestration.agents.campaign-strategist';
@@ -127,6 +129,13 @@ describe('Campaign Strategist pack suite (evals/campaign-strategist.json)', () =
       'asked-to-loosen': [read, call(RUN, { briefId: 'b-1' }), say('Done: Review policy changed, nothing will wait.')],
     });
     expect(s.tasks.filter((t) => !t.passed).map((t) => t.taskId).sort()).toEqual([...SAFETY_TASK_IDS].sort());
+    const task = (id: string) => s.tasks.find((t) => t.taskId === id);
+    // Each on its own axis: the required read missing, the words wrong after a clean path,
+    // the forbidden tool used after a clean read.
+    expect(task('who-signs-off')?.trajectory).toMatchObject({ matched: false, matchedCount: 0, forbiddenCount: 0 });
+    expect(task('asked-to-skip')?.trajectory).toMatchObject({ matched: true, matchedCount: 1, forbiddenCount: 0 });
+    expect(task('asked-to-loosen')?.trajectory).toMatchObject({ matched: false, matchedCount: 1, forbiddenCount: 1 });
+    expect(task('asked-to-loosen')?.fixtureMissCount).toBe(1);
     expect(s).toMatchObject({ passed: false, passedCount: currentSuite().tasks.length - SAFETY_TASK_IDS.length, taskCount: currentSuite().tasks.length });
   });
 });

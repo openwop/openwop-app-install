@@ -30,11 +30,14 @@ export interface PodcastPrerenderResult {
 
 // ── absolute URL helpers (mirror publicRoutes — human page + feed + audio) ─────
 const enc = encodeURIComponent;
-function showPageUrl(baseUrl: string, orgId: string, showSlug: string): string {
-  return `${baseUrl}/pod/${enc(orgId)}/${enc(showSlug)}`;
+// On a verified custom domain (`siteOrigin`, from `boundSiteOrigin`) the human
+// pages live at `/pod/:show[/:episode]` with no org segment (the custom-domain
+// guard's document paths); on the platform origin they carry the org.
+function showPageUrl(baseUrl: string, orgId: string, showSlug: string, siteOrigin?: string | null): string {
+  return siteOrigin ? `${siteOrigin}/pod/${enc(showSlug)}` : `${baseUrl}/pod/${enc(orgId)}/${enc(showSlug)}`;
 }
-function episodePageUrl(baseUrl: string, orgId: string, showSlug: string, episodeSlug: string): string {
-  return `${baseUrl}/pod/${enc(orgId)}/${enc(showSlug)}/${enc(episodeSlug)}`;
+function episodePageUrl(baseUrl: string, orgId: string, showSlug: string, episodeSlug: string, siteOrigin?: string | null): string {
+  return `${showPageUrl(baseUrl, orgId, showSlug, siteOrigin)}/${enc(episodeSlug)}`;
 }
 function feedUrl(baseUrl: string, orgId: string, showSlug: string): string {
   return `${vendorPublicBase(baseUrl)}/public/${enc(orgId)}/podcasts/${enc(showSlug)}/feed.xml`;
@@ -64,15 +67,16 @@ export async function renderShowPrerender(
   orgId: string,
   showSlug: string,
   baseUrl: string,
+  siteOrigin?: string | null,
 ): Promise<PodcastPrerenderResult | null> {
   const show = await getPublishedShowBySlug(tenantId, orgId, showSlug);
   if (!show) return null;
   const episodes = await listPublishedEpisodes(tenantId, show.id);
-  const canonical = showPageUrl(baseUrl, orgId, show.slug);
+  const canonical = showPageUrl(baseUrl, orgId, show.slug, siteOrigin);
 
   const itemsHtml = episodes.map((e) => {
     const slug = episodeSlugOf(e);
-    const link = episodePageUrl(baseUrl, orgId, show.slug, slug);
+    const link = episodePageUrl(baseUrl, orgId, show.slug, slug, siteOrigin);
     const desc = episodeDescription(e);
     return `<li><article>`
       + `<h3><a href="${escapeHtml(link)}">${escapeHtml(e.title)}</a></h3>`
@@ -121,13 +125,14 @@ export async function renderEpisodePrerender(
   showSlug: string,
   episodeSlug: string,
   baseUrl: string,
+  siteOrigin?: string | null,
 ): Promise<PodcastPrerenderResult | null> {
   const hit = await getPublishedEpisode(tenantId, orgId, showSlug, episodeSlug);
   if (!hit) return null;
   const { show, episode } = hit;
   const slug = episodeSlugOf(episode);
-  const canonical = episodePageUrl(baseUrl, orgId, show.slug, slug);
-  const showUrl = showPageUrl(baseUrl, orgId, show.slug);
+  const canonical = episodePageUrl(baseUrl, orgId, show.slug, slug, siteOrigin);
+  const showUrl = showPageUrl(baseUrl, orgId, show.slug, siteOrigin);
   const audio = audioUrl(baseUrl, orgId, episode.id);
   const desc = episodeDescription(episode);
 

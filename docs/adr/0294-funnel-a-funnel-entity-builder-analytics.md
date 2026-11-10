@@ -112,3 +112,24 @@ heavy noun is owned elsewhere:
 > 0079/0058 routing-correction wave): shareable, reload-stable, and cleared
 > automatically when an org switch or delete invalidates it. The stacked
 > list + editor layout is unchanged.
+
+
+## Correction — decode the existing detail envelope (FUNNEL1, 2026-11-06)
+
+The standalone detail client added with ADR0522 treated the existing GET response
+as a bare Funnel. The authenticated route actually returns `{ funnel, publicUrl }`.
+Creating a legitimate new funnel with no steps then opening/reloading its detail
+passed that envelope to the editor, where `funnel.steps.find` crashed. The stored
+entity and empty steps array were valid. The client now unwraps only the existing
+`funnel` property, matching create/update/lifecycle clients; the editor's entity
+contract and the backend envelope remain unchanged. No optional-steps fallback
+or synthesized empty entity masks malformed/scoped failures.
+
+The only getFunnel consumer is the detail page. Its existing viewer/machine URL
+helpers remain the link owners; the extra backend publicUrl is not reinterpreted
+as entity state. Exact org/id URL encoding and server errors are preserved.
+No backend authorization, tenant lookup, API request/response shape, schema or
+wire capability changes; no RFC is required. Actual client transport and real
+detail-route regression cover an empty new entity, public links and foreign-org
+refusal. Root owns canonical composition gate and deployed persisted-funnel
+acceptance; focused diagnostics alone do not establish deployment.

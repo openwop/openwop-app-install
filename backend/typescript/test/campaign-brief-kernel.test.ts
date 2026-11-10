@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { createPersona, __clearPersonas } from '../src/features/campaign-brief/personaService.js';
-import { createBrief, updateBrief, setKernel, getBrief, __clearBriefs } from '../src/features/campaign-brief/briefService.js';
+import { createBrief, updateBrief, setKernel, getBrief, listBriefVersions, __clearBriefs } from '../src/features/campaign-brief/briefService.js';
 import { assembleBriefContextText } from '../src/features/campaign-brief/briefContext.js';
 import { buildCampaignBriefSurface } from '../src/features/campaign-brief/surface.js';
 import { loadAgentsFromManifest } from '../src/packs/agentLoader.js';
@@ -218,6 +218,47 @@ describe('protected-field re-approval (BRIEF-1) — order-insensitive diff', () 
     const updated = await updateBrief(TENANT, brief.id, { name: 'Renamed' }, 'u1');
     expect(updated!.status).toBe('draft'); // demoted — re-approval required
     expect(updated!.kernelStale).toBe(true);
+  });
+
+  it.each([
+    { groundingPolicy: 'strict' },
+    { competitors: ['A new competitor'] },
+  ])('requires fresh approval and refuses an in-flight old-context kernel after %j changes', async (patch) => {
+    // These inputs change the generator's evidence/differentiation context.
+    // An already-approved kernel and a kernel waiting on review must both expire.
+    const brief = await createBrief(TENANT, 'o1', 'u1', {
+      name: 'Camp', productName: 'FlashPick', personaIds: ['p1'],
+      messaging: { primaryValueProp: 'Faster' },
+      channels: [{ type: 'landing_page', enabled: true, config: {} }],
+    });
+    await setKernel(TENANT, brief.id, KERNEL);
+    const confirmed = await updateBrief(TENANT, brief.id, { status: 'confirmed' }, 'u1');
+    if (!confirmed) throw new Error('Expected confirmed brief');
+    const version = confirmed.version ?? 1;
+    const updated = await updateBrief(TENANT, brief.id, patch, 'u1');
+    expect(updated).toMatchObject({ status: 'draft', kernelStale: true, version: version + 1 });
+    expect(await getBrief(TENANT, brief.id)).toMatchObject({ status: 'draft', kernelStale: true, version: version + 1 });
+    await expect(setKernel(TENANT, brief.id, { ...KERNEL, headline: 'Generated before the edit' }, 'u1', {
+      expectedVersion: version, expectedPriorKernelAt: KERNEL.generatedAt,
+    })).rejects.toMatchObject({ httpStatus: 409, details: { reason: 'brief_changed' } });
+    expect((await getBrief(TENANT, brief.id))?.kernel?.headline).toBe(KERNEL.headline);
+
+    // Re-sending the same normalized value is not another content edit.
+    const unchanged = await updateBrief(TENANT, brief.id, { ...patch, status: 'confirmed' }, 'u1');
+    expect(unchanged).toMatchObject({ status: 'confirmed', version: version + 1 });
+  });
+
+  it('retains the reviewed evidence policy, KB binding and competitors in immutable revision history', async () => {
+    const brief = await createBrief(TENANT, 'o1', 'u1', {
+      name: 'Evidence-bound brief', kbCollectionId: 'approved-kb', groundingPolicy: 'strict', competitors: ['Original competitor'],
+    });
+    await updateBrief(TENANT, brief.id, { status: 'confirmed' });
+    await updateBrief(TENANT, brief.id, { groundingPolicy: 'off', competitors: ['Different competitor'], kbCollectionId: 'new-kb' });
+    const [original] = await listBriefVersions(TENANT, brief.id);
+    expect(original?.snapshot).toMatchObject({
+      kbCollectionId: 'approved-kb', groundingPolicy: 'strict', competitors: ['Original competitor'],
+    });
+    expect((await getBrief(TENANT, brief.id))?.groundingPolicy).toBe('off');
   });
 });
 

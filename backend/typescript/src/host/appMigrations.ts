@@ -25,6 +25,7 @@
  */
 
 import type { Storage } from '../storage/storage.js';
+import type { BackendFeature } from '../features/types.js';
 import { createLogger } from '../observability/logger.js';
 import { backfillProfileReadPermissions } from './agentProfileService.js';
 import { backfillCompanySizeFromEmployees } from '../features/crm/entities/companies.js';
@@ -702,7 +703,8 @@ export const APP_MIGRATIONS: readonly AppMigration[] = [
       }
       const hasContacts = await hasAnyKey(storage, 'hostext:crm:contact:');
       let enabledDependent: string | null = null;
-      for (const id of CRM_DEPENDENT_TOGGLES) {
+      const { BACKEND_FEATURES } = await import('../features/index.js');
+      for (const id of crmDependentToggles(BACKEND_FEATURES)) {
         if (await storedToggleEnables(storage, id)) { enabledDependent = id; break; }
       }
       if (!hasContacts && enabledDependent === null) {
@@ -764,14 +766,55 @@ export const APP_MIGRATIONS: readonly AppMigration[] = [
       }
     },
   },
+  {
+    // ADR 1034 D9 — partner-portal tokens were stored in PLAINTEXT as the row key, so a
+    // database or backup read yielded working partner links, and they never expired.
+    // Re-key every legacy row to `ptokh:<sha256>` with an expiry (createdAt + 180 d, else
+    // now + 180 d). Existing links keep working: the link carries the raw token and the
+    // lookup hashes it. Idempotent + concurrency-safe (putIfAbsent, then compareAndDelete
+    // of the exact legacy row).
+    version: 25,
+    name: 'rekey-partner-tokens-hashed',
+    async run(): Promise<void> {
+      const { rekeyLegacyPartnerTokens } = await import('../features/dealers/entities/registration.js');
+      log.info('app_migration_partner_tokens_hashed', { rekeyed: await rekeyLegacyPartnerTokens() });
+    },
+  },
+  {
+    // ADR 1034 D11 — the geocode cache key was `${tenantId}:${orgId}:${address}`, ambiguous
+    // because tenant ids contain `:`. Move every row to the length-prefixed key. Same
+    // idempotent, concurrency-safe shape as entry 25.
+    version: 26,
+    name: 'rekey-geocode-cache',
+    async run(): Promise<void> {
+      const { rekeyLegacyGeocodes } = await import('../features/sales-maps/entities/geocode.js');
+      log.info('app_migration_geocode_rekeyed', { rekeyed: await rekeyLegacyGeocodes() });
+    },
+  },
 ];
 
-/** ADR 0892 — every toggle whose `dependsOn` closure reaches `crm` (pinned by
- *  `app-migration-crm-grandfather.test.ts` against the live registry). */
-export const CRM_DEPENDENT_TOGGLES: readonly string[] = [
-  'csm', 'email', 'commerce', 'job-search', 'territories',
-  'discovery', 'promotions', 'recommendations', 'kicktodo-commerce',
-];
+/**
+ * ADR 0892 — every toggle whose `dependsOn` closure reaches `crm`.
+ *
+ * ADR 1031 P2: DERIVED from the feature registry instead of a hand-kept list.
+ * The list it replaces was pinned equal to exactly this closure by
+ * `app-migration-crm-grandfather.test.ts`, so the set is unchanged; deriving it
+ * means a feature's own `dependsOn` is what enrolls it (`kicktodo-commerce`,
+ * via `commerce`), and an adopter feature that depends on CRM counts without an
+ * edit here. Iteration order is registry order; it only decides which enabled
+ * dependent the migration's log line names when several are enabled.
+ */
+export function crmDependentToggles(features: readonly Pick<BackendFeature, 'id' | 'toggleDefault' | 'dependsOn'>[]): string[] {
+  const deps = new Map(features.map((f) => [f.toggleDefault?.id ?? f.id, f.dependsOn ?? []] as const));
+  const reaches = (id: string, seen: Set<string>): boolean => {
+    for (const d of deps.get(id) ?? []) {
+      if (d === 'crm') return true;
+      if (!seen.has(d)) { seen.add(d); if (reaches(d, seen)) return true; }
+    }
+    return false;
+  };
+  return [...deps.keys()].filter((id) => id !== 'crm' && reaches(id, new Set()));
+}
 
 async function hasAnyKey(storage: Storage, prefix: string): Promise<boolean> {
   if (storage.kvListPage) return (await storage.kvListPage(prefix, { limit: 1 })).length > 0;

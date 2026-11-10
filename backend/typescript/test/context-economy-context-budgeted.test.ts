@@ -22,8 +22,13 @@
  * removing the D2 round-up, or putting the kept count back into the marker,
  * reds the stable-system case; narrowing the vendor grammar to two segments
  * reds the round-trip case.
+ * Re-witnessed 2026-11-03 (w81): a wrong or capped count, a string count, the
+ * user's text in an allowed key, and a sliding window each red their case. The
+ * "names no id" check used to compare against the v2 WIRE run id
+ * (`<tenant>/<id>`), which the prompt can never contain, so writing the run id
+ * into the marker stayed green; it now checks the bare id.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
@@ -45,7 +50,7 @@ beforeAll(async () => {
   Object.assign(process.env, ENV);
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-});
+}, 120_000);
 afterAll(async () => {
   delete process.env.OPENWOP_TEST_SEAM_ENABLED;
   for (const k of Object.keys(ENV)) delete process.env[k];
@@ -58,14 +63,19 @@ async function api<T = unknown>(path: string, init: RequestInit = {}): Promise<{
   return { status: res.status, body: (text ? JSON.parse(text) : {}) as T };
 }
 interface Ev { type?: string; payload?: Record<string, unknown> }
+/** The run parks at the gate after each exchange; no product hook to await, so
+ *  poll the real status with an explicit bound that names the run. */
 async function waitSuspended(runId: string): Promise<void> {
-  for (let i = 0; i < 100; i++) {
+  await vi.waitFor(async () => {
     const s = (await api<{ status: string }>(`/runs/${runId}`)).body.status;
-    if (s.startsWith('waiting')) return;
-    await new Promise((r) => setTimeout(r, 20));
-  }
-  throw new Error(`run ${runId} never suspended`);
+    expect(s, `run ${runId} never suspended`).toMatch(/^waiting/);
+  }, { timeout: 5_000, interval: 20 });
 }
+/** The count a `[Context budget: N earlier turn(s) omitted…]` marker carries, or null. */
+const markerCount = (s: string): number | null => {
+  const m = /\[Context budget: (\d+) earlier turn/.exec(s);
+  return m ? Number(m[1]) : null;
+};
 const events = async (runId: string): Promise<Ev[]> => (await api<{ events?: Ev[] }>(`/runs/${runId}/debug-bundle`)).body.events ?? [];
 
 describe('context-budgeted disclosure + stepped window (ADR 1003 D2/D5)', () => {
@@ -95,13 +105,17 @@ describe('context-budgeted disclosure + stepped window (ADR 1003 D2/D5)', () => 
 
   it('emits openwop-app.conversation.context-budgeted once the window drops turns, readable under major 2', async () => {
     const budgeted = (await events(runId)).filter((e) => e.type === 'openwop-app.conversation.context-budgeted');
-    expect(budgeted.length).toBeGreaterThan(0);
     for (const e of budgeted) expect(typeof e.payload?.omittedTurns).toBe('number');
-    expect(Math.max(...budgeted.map((e) => Number(e.payload?.omittedTurns)))).toBeGreaterThanOrEqual(4);
+    // By hand: the gate's opening prompt is turn 0, so exchange i sees 2i−1 prior
+    // turns; keep 4, then round the first kept index UP to a multiple of 4.
+    // Exchanges 1–2 omit nothing; 3..8 omit 4, 4, 8, 8, 12, 12. (A window sliding
+    // by one would read 1, 3, 5, 7, 9, 11.)
+    expect(budgeted.map((e) => e.payload?.omittedTurns)).toEqual([4, 4, 8, 8, 12, 12]);
   });
 
   it('the payload is counts only: no turn ids and no message text', async () => {
     const budgeted = (await events(runId)).filter((e) => e.type === 'openwop-app.conversation.context-budgeted');
+    expect(budgeted).toHaveLength(6); // else the loop below checks nothing
     for (const e of budgeted) {
       expect(Object.keys(e.payload ?? {}).sort()).toEqual(expect.arrayContaining(['conversationId', 'omittedTurns']));
       for (const k of Object.keys(e.payload ?? {})) expect(['conversationId', 'omittedTurns', 'speakerId']).toContain(k);
@@ -111,13 +125,18 @@ describe('context-budgeted disclosure + stepped window (ADR 1003 D2/D5)', () => 
 
   it('between steps the model\'s system message is byte-identical, and names no id', () => {
     expect(systems.length).toBe(8);
+    // The marker moves only when the window steps (the same hand count as above).
+    expect(systems.map(markerCount)).toEqual([null, null, 4, 4, 8, 8, 12, 12]);
     const elided = systems.filter((s) => s.includes('[Context budget:'));
-    expect(elided.length).toBeGreaterThan(1);
     // With step 4 the elision count moves at most every second exchange, so at
     // least one consecutive pair of elided system messages is identical.
     const pairs = elided.slice(1).filter((s, i) => s === elided[i]);
     expect(pairs.length).toBeGreaterThan(0);
-    for (const s of systems) expect(s.includes(runId)).toBe(false);
+    // The v2 wire spells a run id `<tenant>/<id>`; the host (and so the prompt)
+    // knows only the bare `<id>`. Check the spelling the model could actually see.
+    const bareRunId = runId.slice(runId.lastIndexOf('/') + 1);
+    expect(bareRunId.length).toBeGreaterThan(8);
+    for (const s of systems) expect(s.includes(bareRunId)).toBe(false);
   });
 
   // The vocabulary round trip itself: written under era 2, read under either

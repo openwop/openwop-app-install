@@ -12,7 +12,8 @@
  *  - the ΔE2000 implementation matches a published reference pair.
  * Breaks if the mask stops following the source alpha, the candidate crop
  * drifts from the slot the renderer drew into, or a threshold is loosened
- * without a ruleset bump.
+ * without a ruleset bump. The missing-part claim is the OR of two hashes: pHash
+ * catches this fixture, so loosening dHash alone stays green.
  */
 import { describe, expect, it } from 'vitest';
 import { Resvg } from '@resvg/resvg-js';
@@ -72,7 +73,7 @@ describe('stage A over a real composite (ruleset ' + FIDELITY_RULESET_VERSION + 
   it('SABOTAGE: a recoloured product fails ΔE2000 even though its shape is identical', () => {
     const c = byId(judge(RED_MUG, compose(BLUE_MUG)));
     expect(c.colour_delta_e.status).toBe('fail');
-    expect(c.colour_delta_e.value!).toBeGreaterThan(STAGE_A_RULES.deltaEMax * 3);
+    expect(c.colour_delta_e.value!).toBeGreaterThan(24);
   });
 
   it('SABOTAGE: a product with a missing part fails the perceptual hashes', () => {
@@ -83,7 +84,7 @@ describe('stage A over a real composite (ruleset ' + FIDELITY_RULESET_VERSION + 
   it('an empty silhouette is never a pass', () => {
     const empty = cutout('');
     const checks = judge(empty, compose(RED_MUG));
-    expect(checks.every((c) => c.status === 'fail')).toBe(true);
+    expect(checks).toEqual([expect.objectContaining({ id: 'dhash', status: 'fail', value: 0, threshold: 16 })]);
   });
 
   it('CIEDE2000 matches the Sharma/Wu/Dalal reference pair 1 (2.0425)', () => {

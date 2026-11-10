@@ -17,7 +17,7 @@
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { surfaceStr as str, surfaceOptStr as optStr, type FeatureSurface } from '../../host/featureSurfaces.js';
 import { OpenwopError } from '../../types.js';
-import { getContentLanguageSettings, getLocaleGrant, getPage as getStoredPage, getPublishedBySlug, listPages, createPage, localizePage, pageTranslationStatus, sanitizeSectionOverlay, transitionPage, updatePage, type SectionType, SECTION_TYPES } from './cmsService.js';
+import { getContentLanguageSettings, getLocaleGrant, getPage as getStoredPage, getPublishedBySlug, listPages, createPage, localizePage, pageTranslationStatus, restoreItemStates, sanitizeSectionOverlay, transitionPage, updatePage, type SectionType, SECTION_TYPES } from './cmsService.js';
 import { queueContentApproval } from './contentApproval.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
 import { runOrgScopeSubject } from '../../host/accessControlService.js';
@@ -140,7 +140,9 @@ export function buildCmsSurface(scope: BundleScope): FeatureSurface {
           throw new OpenwopError('conflict', 'This section inherits a shared section; detach it in the editor before writing its content.', 409, { sectionId, sharedSectionId: section.ref.sharedSectionId });
         }
         const raw = (typeof args.data === 'object' && args.data !== null ? args.data : {}) as Record<string, unknown>;
-        const cleaned = sanitizeSectionOverlay(section.type, raw);
+        // ADR 1038 D8 — a locale overlay's list-item states come from the base
+        // (a drafted translation turns "waiting" into prose, which the cleaner drops).
+        const cleaned = sanitizeSectionOverlay(section.type, locale ? restoreItemStates(section.data, raw) : raw);
         if (Object.keys(cleaned).length === 0) return { updated: false, reason: 'empty' };
         const settings = await getContentLanguageSettings(tenantId, orgId);
         const sections = page.sections.map((s) => {

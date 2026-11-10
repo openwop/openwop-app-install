@@ -14,48 +14,70 @@
  *   - an archived client: a warning, no invite form, and no give-access or
  *     reactivate.
  *
- * Sabotage notes (2026-10-28), each red when applied alone:
+ * The two reads are typed module mocks; every ACTION is stubbed at the FETCH
+ * level, so each case asserts the exact route, method and body, and each
+ * refusal is the server's own body through the real `asJson`.
+ *
+ * Sabotage (witnessed 2026-10-28 and wave 78), each red when applied alone:
  *   - map a failed read to an empty list → the failed case red;
+ *   - drop the 403 branch of `hidden()` → that it.each row red;
  *   - drop the link-only filter → the approver appears (red);
- *   - show every grant regardless of expiry → the expired grant appears (red);
- *   - call remove without the confirm → the cancel case calls the route (red);
- *   - leave the invite form up for an archived client → the archived case red;
- *   - offer every action for every kind → the brief's "send files" box appears (red).
+ *   - show every grant regardless of expiry or revocation → a dead grant appears (red);
+ *   - call remove without the confirm, or a non-danger confirm → the remove case red;
+ *   - leave the invite form up, or give-access enabled, for an archived client → the archived case red;
+ *   - offer every action for every kind → the brief's "send files" box appears (red);
+ *   - a generic message instead of the server's → every refusal case red;
+ *   - send a different expiry, method or path → the request assertion of that case red.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, fireEvent, waitFor, within } from '@testing-library/react';
+import { config } from '../../../client/config.js';
+import type { Collaborator, CollaboratorGrant, CollaboratorStatus, GrantableKind } from '../collaboratorsClient.js';
 
+type Client = typeof import('../collaboratorsClient.js');
 const h = vi.hoisted(() => ({
-  listCollaborators: vi.fn(), listGrantable: vi.fn(), inviteCollaborator: vi.fn(), grantCollaborator: vi.fn(),
-  revokeCollaboratorGrant: vi.fn(), setCollaboratorStatus: vi.fn(),
+  listCollaborators: vi.fn<Client['listCollaborators']>(), listGrantable: vi.fn<Client['listGrantable']>(),
 }));
-const c = vi.hoisted(() => ({ confirm: vi.fn(), copyToClipboard: vi.fn() }));
-vi.mock('../collaboratorsClient.js', async (orig) => ({ ...(await orig<Record<string, unknown>>()), ...h }));
+const c = vi.hoisted(() => ({ confirm: vi.fn<(opts: { title: string; danger?: boolean }) => Promise<boolean>>(), copyToClipboard: vi.fn() }));
+vi.mock('../collaboratorsClient.js', async (orig) => ({ ...(await orig<Client>()), ...h }));
 vi.mock('../../../ui/confirm.js', () => ({ confirm: c.confirm }));
 vi.mock('../../../ui/copyToClipboard.js', () => ({ copyToClipboard: c.copyToClipboard }));
 
 import { ClientCollaboratorsPanel } from '../ClientCollaboratorsPanel.js';
 import { CampaignOpsError } from '../campaignOpsClient.js';
 
+const B = `${config.baseUrl}/host/openwop-app/campaign-ops/clients/o1/collaborators`;
+const json = (status: number, body: unknown): Response =>
+  new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+const refusal = (status: number, message: string): Response => json(status, { error: 'refused', message });
+const fetchMock = vi.fn<(url: string, init?: RequestInit) => Promise<Response>>();
+/** The last action request, as `[url, method, parsed body]`. */
+const lastRequest = (): [string, string | undefined, unknown] => {
+  const [url, init] = fetchMock.mock.calls.at(-1)!;
+  return [url, init?.method, init?.body ? JSON.parse(String(init.body)) : undefined];
+};
+
 const FUTURE = '2099-01-01T00:00:00Z';
 const PAST = '2020-01-01T00:00:00Z';
-const person = (id: string, status: string, extra: Record<string, unknown> = {}) => ({
+const person = (id: string, status: CollaboratorStatus, extra: Partial<Collaborator> = {}): Collaborator => ({
   collaboratorId: id, orgId: 'o1', kind: 'vendor', email: `${id}@studio.test`, displayName: `Person ${id}`,
   status, mode: 'signed-in', accepted: status !== 'invited', createdAt: '2026-10-01T00:00:00Z', updatedAt: '2026-10-01T00:00:00Z', grants: [], ...extra,
 });
-const grant = (id: string, extra: Record<string, unknown> = {}) => ({
+const grant = (id: string, extra: Partial<CollaboratorGrant> = {}): CollaboratorGrant => ({
   grantId: id, collaboratorId: 'a', resource: { kind: 'campaign', id: 'c1' }, actions: ['view', 'upload'], expiresAt: FUTURE, status: 'active', createdAt: '2026-10-01T00:00:00Z', ...extra,
 });
-const GRANTABLE = [
+const GRANTABLE: GrantableKind[] = [
   { kind: 'campaign', actions: ['view', 'upload'], items: [{ id: 'c1', title: 'Spring roast launch' }] },
   { kind: 'creative-brief', actions: ['view'], items: [{ id: 'b1', title: 'Hero shot brief' }] },
 ];
 
 beforeEach(() => {
-  for (const f of [...Object.values(h), ...Object.values(c)]) f.mockReset();
+  h.listCollaborators.mockReset(); h.listGrantable.mockReset(); c.confirm.mockReset(); c.copyToClipboard.mockReset();
   h.listGrantable.mockResolvedValue(GRANTABLE);
+  fetchMock.mockReset();
+  vi.stubGlobal('fetch', fetchMock);
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 const mount = (clientStatus: 'active' | 'archived' = 'active') => render(<ClientCollaboratorsPanel orgId="o1" clientStatus={clientStatus} />);
 const rowOf = (name: string): HTMLElement => screen.getByText(name).closest('li') as HTMLElement;
@@ -111,16 +133,17 @@ describe('ClientCollaboratorsPanel — actions', () => {
     await screen.findByText(/No collaborators yet/);
     fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Dana Studio' } });
     fireEvent.change(screen.getByLabelText(/^Email/), { target: { value: 'dana@studio.test' } });
-    h.inviteCollaborator.mockRejectedValueOnce(new CampaignOpsError('This person is already a collaborator for this client.', 409));
+    fetchMock.mockResolvedValueOnce(refusal(409, 'This person is already a collaborator for this client.'));
     fireEvent.click(screen.getByRole('button', { name: 'Create invite' }));
     expect(await screen.findByText('This person is already a collaborator for this client.')).toBeTruthy();
     expect(screen.queryByLabelText(/Invite link for/)).toBeNull();
 
-    h.inviteCollaborator.mockResolvedValueOnce({ collaborator: person('n', 'invited'), invite: { token: 'tok-123', expiresAt: FUTURE } });
+    fetchMock.mockResolvedValueOnce(json(201, { collaborator: person('n', 'invited'), invite: { token: 'tok-123', expiresAt: FUTURE } }));
     fireEvent.click(screen.getByRole('button', { name: 'Create invite' }));
     const link = await screen.findByLabelText('Invite link for Dana Studio');
     expect((link as HTMLInputElement).value).toBe(`${window.location.origin}/collab/accept/tok-123`);
-    expect(h.inviteCollaborator).toHaveBeenLastCalledWith('o1', { kind: 'vendor', displayName: 'Dana Studio', email: 'dana@studio.test' });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(lastRequest()).toEqual([B, 'POST', { kind: 'vendor', displayName: 'Dana Studio', email: 'dana@studio.test' }]);
     fireEvent.click(screen.getByRole('button', { name: 'Copy link' }));
     expect(c.copyToClipboard).toHaveBeenCalledWith(`${window.location.origin}/collab/accept/tok-123`, 'Invite link copied');
   });
@@ -136,14 +159,14 @@ describe('ClientCollaboratorsPanel — actions', () => {
     fireEvent.change(within(form).getByLabelText('To'), { target: { value: 'campaign:c1' } });
     fireEvent.click(within(form).getByLabelText('send files'));
     fireEvent.change(within(form).getByLabelText('For'), { target: { value: '7' } });
-    h.grantCollaborator.mockRejectedValueOnce(new CampaignOpsError('Not found.', 404));
+    fetchMock.mockResolvedValueOnce(refusal(404, 'Not found.'));
     fireEvent.click(within(form).getByRole('button', { name: 'Give access' }));
     expect(await screen.findByText('Not found.')).toBeTruthy();
     expect(screen.getByRole('form', { name: 'Give access' })).toBeTruthy();
-    h.grantCollaborator.mockResolvedValueOnce(grant('g1'));
+    fetchMock.mockResolvedValueOnce(json(201, { grant: grant('g1') }));
     fireEvent.click(within(screen.getByRole('form', { name: 'Give access' })).getByRole('button', { name: 'Give access' }));
     expect(await screen.findByText('Person a has access.')).toBeTruthy();
-    expect(h.grantCollaborator).toHaveBeenLastCalledWith('o1', 'a', { resource: { kind: 'campaign', id: 'c1' }, actions: ['view', 'upload'], expiresInDays: 7 });
+    expect(lastRequest()).toEqual([`${B}/a/grants`, 'POST', { resource: { kind: 'campaign', id: 'c1' }, actions: ['view', 'upload'], expiresInDays: 7 }]);
     expect(screen.queryByRole('form', { name: 'Give access' })).toBeNull();
   });
 
@@ -151,29 +174,29 @@ describe('ClientCollaboratorsPanel — actions', () => {
     h.listCollaborators.mockResolvedValue([person('a', 'active', { grants: [grant('g1')] })]);
     mount();
     const take = await screen.findByRole('button', { name: 'Take back access to Spring roast launch from Person a' });
-    h.revokeCollaboratorGrant.mockRejectedValueOnce(new CampaignOpsError('The grant changed. Reload and try again.', 409));
+    fetchMock.mockResolvedValueOnce(refusal(409, 'The grant changed. Reload and try again.'));
     fireEvent.click(take);
     expect(await screen.findByText('The grant changed. Reload and try again.')).toBeTruthy();
-    h.revokeCollaboratorGrant.mockResolvedValueOnce(undefined);
+    fetchMock.mockResolvedValueOnce(json(200, { ok: true }));
     fireEvent.click(screen.getByRole('button', { name: 'Take back access to Spring roast launch from Person a' }));
     expect(await screen.findByText('Access taken back.')).toBeTruthy();
-    expect(h.revokeCollaboratorGrant).toHaveBeenLastCalledWith('o1', 'a', 'g1');
+    expect(lastRequest()).toEqual([`${B}/a/grants/g1`, 'DELETE', undefined]);
   });
 
   it('suspends and reactivates; a refusal is shown', async () => {
     h.listCollaborators.mockResolvedValue([person('a', 'active'), person('c', 'suspended')]);
     mount();
     await screen.findByText('Person a');
-    h.setCollaboratorStatus.mockRejectedValueOnce(new CampaignOpsError('Keep at least one client approver.', 409));
+    fetchMock.mockResolvedValueOnce(refusal(409, 'Keep at least one client approver.'));
     fireEvent.click(within(rowOf('Person a')).getByRole('button', { name: 'Suspend' }));
     expect(await screen.findByText('Keep at least one client approver.')).toBeTruthy();
-    h.setCollaboratorStatus.mockResolvedValue(undefined);
+    fetchMock.mockResolvedValueOnce(json(200, { ok: true })).mockResolvedValueOnce(json(200, { ok: true }));
     fireEvent.click(within(rowOf('Person a')).getByRole('button', { name: 'Suspend' }));
     expect(await screen.findByText('Person a is suspended.')).toBeTruthy();
-    expect(h.setCollaboratorStatus).toHaveBeenLastCalledWith('o1', 'a', 'suspended');
+    expect(lastRequest()).toEqual([`${B}/a/status`, 'POST', { status: 'suspended' }]);
     fireEvent.click(within(rowOf('Person c')).getByRole('button', { name: 'Reactivate' }));
     expect(await screen.findByText('Person c is active again.')).toBeTruthy();
-    expect(h.setCollaboratorStatus).toHaveBeenLastCalledWith('o1', 'c', 'active');
+    expect(lastRequest()).toEqual([`${B}/c/status`, 'POST', { status: 'active' }]);
   });
 
   it('removes only after a danger confirm; cancelling calls nothing', async () => {
@@ -184,12 +207,13 @@ describe('ClientCollaboratorsPanel — actions', () => {
     fireEvent.click(within(rowOf('Person a')).getByRole('button', { name: 'Remove' }));
     await waitFor(() => expect(c.confirm).toHaveBeenCalledTimes(1));
     expect(c.confirm.mock.calls[0]![0]).toMatchObject({ danger: true, title: 'Remove Person a?' });
-    expect(h.setCollaboratorStatus).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
     c.confirm.mockResolvedValueOnce(true);
-    h.setCollaboratorStatus.mockResolvedValueOnce(undefined);
+    fetchMock.mockResolvedValueOnce(json(200, { ok: true }));
     fireEvent.click(within(rowOf('Person a')).getByRole('button', { name: 'Remove' }));
     expect(await screen.findByText('Person a was removed.')).toBeTruthy();
-    expect(h.setCollaboratorStatus).toHaveBeenCalledWith('o1', 'a', 'revoked');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(lastRequest()).toEqual([`${B}/a/status`, 'POST', { status: 'revoked' }]);
   });
 
   it('an archived client: a warning, no invite form, no give-access or reactivate', async () => {

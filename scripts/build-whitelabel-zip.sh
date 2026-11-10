@@ -67,6 +67,23 @@ PREFIX="openwop-demo-app/"
 
 mkdir -p "$OUT_DIR"
 
+# ADR 1031 — the adopter seam's directories belong to ADOPTERS. openwop-app must
+# never write them: a downstream (KickTodo, Book AI) keeps its own feature
+# packages there and merges every sync of this bundle on top, so an upstream file
+# at one of these paths would collide with, or silently overwrite, adopter code.
+# Nothing to strip — upstream has none — so this is a guard, not a filter.
+# ADR 1048 — `packs/.adopter-manifest.json` is the adopter's pack attestation. An
+# upstream copy would be merged into every adopter on sync and could attest
+# packs on the adopter's behalf, so upstream may never track one.
+ADOPTER_PATHS=(frontend/react/src/adopter backend/typescript/src/adopter backend/typescript/test/adopter packs/.adopter-manifest.json)
+ADOPTER_TRACKED="$(git -C "$ROOT" ls-tree -r --name-only HEAD -- "${ADOPTER_PATHS[@]}")"
+if [[ -n "$ADOPTER_TRACKED" ]]; then
+  echo "[whitelabel-zip] FAIL: openwop-app tracks files under an adopter-owned path (ADR 1031):" >&2
+  printf '  %s\n' $ADOPTER_TRACKED >&2
+  echo "  Adopter code lives only in a downstream repo; move these into a src/features/ package or delete them." >&2
+  exit 1
+fi
+
 # Tracked files only, the whole repo, under a clean top-level dir.
 echo "[whitelabel-zip] archiving HEAD @ $(git -C "$ROOT" rev-parse --short HEAD) → $ZIP"
 git -C "$ROOT" archive --format=zip --prefix="$PREFIX" -o "$ZIP" HEAD
@@ -232,6 +249,20 @@ for path in 'providers\.json' 'packs/' 'schemas/' 'conformance-fixtures/'; do
     exit 1
   fi
 done
+
+# Guard: the frontend's dependency patches MUST ship. `frontend/react`'s postinstall
+# runs `patch-package --error-on-fail`, and `patches/y-prosemirror+1.3.7.patch` is
+# the COLLAB-UNDO-1 cursor-aware diff: without it an adopter's collaborative editor
+# lets one user's undo delete another user's text. A missing dir would install clean
+# and ship the defect, so assert every tracked patch is in the zip.
+echo "[whitelabel-zip] verifying frontend dependency patches are present"
+while IFS= read -r p; do
+  [[ -z "$p" ]] && continue
+  if ! grep -qxF "${PREFIX}${p}" <<<"$ZIP_LISTING"; then
+    echo "[whitelabel-zip] FATAL: ${p} missing from the zip (frontend postinstall applies it)." >&2
+    exit 1
+  fi
+done < <(git -C "$ROOT" ls-files 'frontend/react/patches/*.patch')
 
 # Guard: the native shells are part of the white-label deliverable (ADR 0291 —
 # adopters rebrand them via clients/desktop/branding.json + clients/ios/project.yml),

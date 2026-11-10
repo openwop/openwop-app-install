@@ -8,6 +8,23 @@
  *
  *   node scripts/gen-steward-manifest.mjs            # regenerate
  *   node scripts/gen-steward-manifest.mjs --check    # CI gate, exit 1 on drift
+ *   node scripts/gen-steward-manifest.mjs --adopter  # ADR 1048: an ADOPTER tree's
+ *                                                    # packs/.adopter-manifest.json
+ *
+ * ── ADR 1048: TWO MANIFESTS, ONE PARTITION ────────────────────────────────
+ *
+ * In an adopter tree (a white-label downstream with `backend/typescript/src/adopter/`)
+ * the adopter's own packs are attested by `packs/.adopter-manifest.json`, which
+ * `--adopter` writes — never by this file, which stays upstream's. So:
+ *
+ *   - the plain run skips every directory the adopter manifest claims. Upstream
+ *     has no adopter manifest, so its output is byte-identical to before;
+ *   - `--adopter` claims every directory NOT in the committed steward manifest,
+ *     and refuses outright when `src/adopter/` is absent (inert upstream);
+ *   - `--check` checks both, and that every pack directory is keyed in exactly
+ *     one of them. The adopter manifest's validation rules (no steward key, no
+ *     protocol namespace, name = directory, keys and versions = ADOPTER_PACK_PINS)
+ *     live in `scripts/lib/adopter-pack-manifest.mjs`.
  *
  * ── WHY A COMMITTED DIGEST AND NOT "IT IS IN THE PACKS DIR" ───────────────
  *
@@ -47,6 +64,15 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isEntryModule } from './lib/entry-module.mjs';
 import { listPackEntries, packContentDigest } from './lib/pack-content-digest.mjs';
+import {
+  ADOPTER_SRC_REL,
+  adopterCensus,
+  adopterClaimedDirs,
+  buildAdopterManifest,
+  checkCommittedAdopterManifest,
+  readAdopterManifest,
+  serialiseManifest,
+} from './lib/adopter-pack-manifest.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const PACKS_DIR = join(ROOT, 'packs');
@@ -70,8 +96,11 @@ function readPackVersion(packDir) {
 export function buildManifest() {
   const packs = {};
   if (!existsSync(PACKS_DIR)) return { version: 1, packs };
+  // ADR 1048 — an adopter-claimed directory is attested by the adopter manifest.
+  const claimed = adopterClaimedDirs(ROOT);
   for (const name of readdirSync(PACKS_DIR).sort()) {
     if (name.startsWith('.')) continue;
+    if (claimed.has(name)) continue;
     if (isParkedPackDirName(name)) continue;
     const packDir = join(PACKS_DIR, name);
     let st;
@@ -106,7 +135,71 @@ function serialise(manifest) {
   return `${JSON.stringify(manifest, null, 2)}\n`;
 }
 
+const ADOPTER_MANIFEST_PATH = join(PACKS_DIR, '.adopter-manifest.json');
+
+/** ADR 1048 — write `packs/.adopter-manifest.json` (never touches the steward file). */
+function writeAdopter() {
+  let built;
+  try {
+    built = buildAdopterManifest(ROOT);
+  } catch (err) {
+    console.error(`\n✗ gen-steward-manifest --adopter: ${err.message}\n`);
+    return 1;
+  }
+  writeFileSync(ADOPTER_MANIFEST_PATH, serialiseManifest(built));
+  console.log(`✓ gen-steward-manifest --adopter: wrote ${Object.keys(built.packs).length} adopter pack digests to packs/.adopter-manifest.json`);
+  for (const line of adopterCensus(built)) console.log(`    ${line}`);
+  return 0;
+}
+
+/** ADR 1048 — `--check` for the adopter half. Returns the number of failures. */
+function checkAdopter() {
+  let committed;
+  try {
+    committed = readAdopterManifest(ROOT);
+  } catch (err) {
+    console.error(`\n✗ gen-steward-manifest --check: ${err.message}`);
+    console.error('  The runtime REJECTS an unparseable adopter manifest: no adopter pack would dispatch.\n');
+    return 1;
+  }
+  if (committed === null) return 0;
+  const violations = checkCommittedAdopterManifest(ROOT, committed);
+  if (violations.length) {
+    console.error('\n✗ gen-steward-manifest --check: packs/.adopter-manifest.json would be REJECTED at boot (ADR 1048 D3):\n');
+    for (const x of violations) console.error(`    [${x.code}] ${x.detail}`);
+    console.error('\n  Any violation rejects the WHOLE file and no adopter pack dispatches. Fix the cause, then:');
+    console.error('\n      node scripts/gen-steward-manifest.mjs --adopter\n');
+    return 1;
+  }
+  let built;
+  try {
+    built = buildAdopterManifest(ROOT);
+  } catch (err) {
+    console.error(`\n✗ gen-steward-manifest --check: ${err.message}\n`);
+    return 1;
+  }
+  if (serialiseManifest(built) !== serialiseManifest(committed)) {
+    console.error('\n✗ gen-steward-manifest --check: packs/.adopter-manifest.json is stale.\n');
+    const names = new Set([...Object.keys(built.packs), ...Object.keys(committed.packs ?? {})]);
+    for (const name of [...names].sort()) {
+      const a = committed.packs?.[name];
+      const b = built.packs[name];
+      if (!a) console.error(`    + ${name} — adopter pack not attested (would be UNTRUSTED, cannot dispatch)`);
+      else if (!b) console.error(`    - ${name} — attested but no longer an adopter pack directory`);
+      else if (a.digest !== b.digest) console.error(`    ~ ${name} — content changed (${a.version} → ${b.version})`);
+      else if (JSON.stringify(a) !== JSON.stringify(b)) console.error(`    ~ ${name} — floor half changed (a node moved between served and held, or was added)`);
+    }
+    console.error('\n  The adopter manifest IS the census: every added pack or node, and every move between');
+    console.error('  served and held, lands as a reviewed diff. Regenerate and commit:');
+    console.error('\n      node scripts/gen-steward-manifest.mjs --adopter\n');
+    return 1;
+  }
+  console.log(`✓ gen-steward-manifest: ${Object.keys(built.packs).length} adopter packs, all digests and floor halves current`);
+  return 0;
+}
+
 function main() {
+  if (process.argv.includes('--adopter')) return writeAdopter();
   const check = process.argv.includes('--check');
   const built = buildManifest();
   const packCount = Object.keys(built.packs).length;
@@ -137,7 +230,10 @@ function main() {
     if (!built.packs[name]) removed.push(name);
   }
 
+  // ADR 1048 — every pack directory is keyed in exactly one manifest.
+  const adopterFailures = checkAdopter();
   if (added.length === 0 && removed.length === 0 && changed.length === 0) {
+    if (adopterFailures) return 1;
     console.log(`✓ gen-steward-manifest: ${packCount} vendored packs, all digests current`);
     return 0;
   }
@@ -154,6 +250,11 @@ function main() {
   console.error('\n  ADR 0555 P0 fails CLOSED: an unattested pack does not dispatch. If these');
   console.error('  changes are intended, regenerate and commit the manifest:');
   console.error('\n      node scripts/gen-steward-manifest.mjs\n');
+  if (added.length && existsSync(join(ROOT, ADOPTER_SRC_REL))) {
+    console.error('  This is an ADOPTER tree. If the `+` packs are the adopter\'s own, attest them in');
+    console.error('  packs/.adopter-manifest.json instead (ADR 1048) — never edit the steward manifest:');
+    console.error('\n      node scripts/gen-steward-manifest.mjs --adopter\n');
+  }
   return 1;
 }
 

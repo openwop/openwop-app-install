@@ -35,6 +35,9 @@ export interface BrandConfig {
   tagline: string;
   /** Footer disclaimer line. */
   footerText: string;
+  /** ADR 1062 D5 — the grouped footer's copyright line (the brand's
+   *  `chromePolicy.customCopyright`); absent = the generated "© year name". */
+  customCopyright?: string;
   /** Name the in-app AI assistant refers to itself / the product by. */
   assistantName: string;
   /** Square icon mark used in the sidebar header and PWA manifest. */

@@ -8,7 +8,6 @@
  * `t(key, { defaultValue: englishFallback })`.
  */
 export const messages = {
-  siteNavLabel: 'KickTodo',
   siteNavMore: 'Más',
   siteNavMoreLabel: 'Más destinos',
   siteNavCurrent: 'Página {{label}}',
@@ -152,10 +151,6 @@ export const messages = {
   csmHint: 'Cuentas de éxito del cliente',
   entitiesLabel: 'Entidades',
   entitiesHint: 'Tipos de contenido definidos por el usuario',
-  kicktodoTrustLabel: 'Confianza KickTodo',
-  kicktodoTrustHint: 'Consola de confianza y operaciones de KickTodo',
-  kicktodoSafetyLabel: 'Seguridad KickTodo',
-  kicktodoSafetyHint: 'Cola de seguridad y aprobaciones de KickTodo',
   environmentsLabel: 'Entornos',
   environmentsHint: 'Promoción y reversión de configuración',
   documentsLabel: 'Documentos',

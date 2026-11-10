@@ -35,6 +35,9 @@ import { assertEgressSchemeAllowed, EgressUrlRejectedError, webhookEgressDispatc
 import { sweepExpiredApprovalGates } from '../executor/approvalGateTimeout.js';
 import { sweepExpiredEmailSent } from './emailSentLedger.js';
 import { sweepExpiredEgressSent } from './egressSentLedger.js';
+import { sweepRelayInboundClaims } from '../messaging/inboundClaims.js';
+import { sweepRelayPresence } from '../messaging/relayLifecycle.js';
+import { randomUUID } from 'node:crypto';
 import { sweepExpiredCanvasIdem } from './canvasSurface.js';
 import { APP_VERSION } from '../version.js';
 
@@ -612,6 +615,16 @@ export function startWebhookDeliveryWorker(storage: Storage, workerId: string): 
       // ADR 0619 — retention sweep for the egress:sent (SMS/push) idempotency ledger,
       // same quiescent-safe cadence. Bounded + fail-contained internally.
       await sweepExpiredEgressSent();
+      // ADR 1042 (security review L7) — expired relay inbound dedup claims. Bounded.
+      await sweepRelayInboundClaims();
+      // ADR 1043 D3 — mark relay devices that stopped heartbeating offline, once each. Bounded.
+      await sweepRelayPresence(async (row) => {
+        await storage.appendDeliveryLog({
+          logId: `dlv_${randomUUID()}`, tenantId: row.tenantId, relayId: row.relayId, channel: row.channel,
+          direction: 'inbound', conversationId: '', status: 'offline', detail: `no heartbeat since ${row.lastHeartbeatAt}`,
+          at: row.offlineSince ?? new Date().toISOString(),
+        });
+      });
       // DATA-D7 — retention sweep for the canvas create/write idempotency rows
       // (the un-cascadable ephemeral ct:/c:/w: ones; from-artifact is exempt).
       // Same cadence; bounded + fail-contained internally.

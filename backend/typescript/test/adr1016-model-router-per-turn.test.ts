@@ -16,6 +16,15 @@
  *    or the persisted turn's `agent.model` names the routed model that failed;
  *  - a managed conversation resolves a route at all;
  *  - a 404 with NO route is retried on another model (control: nothing chose it).
+ *
+ * Sabotage-witnessed (wave 82): dropping `turnRoute` from the exchange's
+ * `dispatchReply` call reds the per-turn and MR66CD-1 cases; a route that ignores
+ * the turn's text reds the per-turn case; ignoring `enabled` reds OFF; defaulting a
+ * ref-less run to a BYOK ref reds the managed case; provenance that ignores
+ * `served` reds MR66CD-1; no degrade target, or `served` naming the failed model,
+ * reds the D4b case and MR66CD-1; a "fallback" with no route reds the CONTROL.
+ * The `metadata.modelRoute` absence check has no write path left to sabotage: it
+ * guards against re-introducing the stamp.
  */
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -65,8 +74,19 @@ const BIG = 'claude-opus-5-5';
 const LONG = 'Explain this in depth. '.repeat(200); // ~1150 tokens, over the 1000 threshold
 const BYOK = { provider: 'anthropic', model: OWN, credentialRef: 'byok:anthropic' };
 
+function field(value: unknown, ...path: string[]): unknown {
+  let cur: unknown = value;
+  for (const key of path) {
+    if (typeof cur !== 'object' || cur === null) return undefined;
+    cur = Reflect.get(cur, key);
+  }
+  return cur;
+}
+
 beforeAll(async () => {
-  registerToggleDefault(modelRouterFeature.toggleDefault!);
+  const toggle = modelRouterFeature.toggleDefault;
+  if (!toggle) throw new Error('model-router toggle default is not declared');
+  registerToggleDefault(toggle);
   await setRouterConfig(TENANT, 'u1', {
     rules: [{ when: { kind: 'tokensOver', threshold: 1000 }, target: { provider: 'anthropic', model: BIG } }],
   });
@@ -145,9 +165,10 @@ describe('ADR 1016 D3 — the route is decided on EVERY exchange of the real cha
     const events = await storage.listEvents('r-adr1016-prov');
     const agentTurn = events
       .filter((e) => e.type === 'conversation.exchanged')
-      .map((e) => (e.payload as { turn?: { role?: string; agent?: { model?: { model?: string } } } }).turn)
-      .find((t) => t?.role === 'agent');
-    expect(agentTurn?.agent?.model?.model, 'provenance names what ANSWERED').toBe(OWN);
+      .map((e) => field(e.payload, 'turn'))
+      .find((t) => field(t, 'role') === 'agent');
+    expect(agentTurn, 'the agent turn was persisted').toBeDefined();
+    expect(field(agentTurn, 'agent', 'model', 'model'), 'provenance names what ANSWERED').toBe(OWN);
   });
 });
 

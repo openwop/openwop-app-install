@@ -11,9 +11,19 @@
  * answers AUTH with 535, so the code table is checked against the library rather
  * than against itself.
  *
- * Red when (sabotage-witnessed): EAUTH maps to anything but `auth`; the send-catch
- * stops logging `failure`/`reasonCode`; the pre-dial catch stops logging; the line
- * carries the password, the SMTP user or the server's reply text.
+ * Red when (sabotage-witnessed, re-measured in /grade-tests wave 80): EAUTH maps to
+ * anything but `auth`, or ETIMEDOUT to anything but `timeout`; the 535 / 4xx reply-code
+ * fallback changes; an inherited key (`toString`) is read as a class; the send-catch
+ * stops logging `failure`/`reasonCode`, or writes a constant `reasonCode`; a timeout
+ * line carries a `responseCode`; the pre-dial catch stops logging; the line carries the
+ * password, the SMTP user (send or dial line) or the server's reply text.
+ *
+ * The SMTP user is an SES-style access-key id, not an email address: the logger hashes
+ * email-shaped values anywhere on a line, so an email-shaped user would hide a leak of
+ * it (wave 80 measured both leak probes vacuous with `mailer@x.com`). The property that
+ * `reasonCode` is written past the PII mask by construction belongs to the logger's own
+ * tests; the last case only shows that the class survives in `reasonCode` when
+ * `failure` itself is masked, and it restores the PII registry after itself.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
@@ -35,11 +45,12 @@ import { createApp } from '../src/index.js';
 import { classifySmtpFailure, sendViaSmtp } from '../src/host/smtpSend.js';
 import type { SmtpTransportFactory } from '../src/host/smtpSend.js';
 import { __resetConnectionsStore, createSecretConnection } from '../src/features/connections/connectionsService.js';
-import { declarePiiFields } from '../src/host/dataClassification.js';
+import { __resetPiiRegistry, declarePiiFields, isKnownPiiFieldName, piiFieldRegistry } from '../src/host/dataClassification.js';
 import type { Storage } from '../src/storage/storage.js';
 
 const PASS = 's3cret-pw';
-const USER = 'mailer@x.com';
+/** SES SMTP credentials are an IAM access-key id + a derived password (AWS's documented example id). */
+const USER = 'AKIAIOSFODNN7EXAMPLE';
 
 /** The shape nodemailer's `_formatError` builds for a 535 on AUTH. */
 function eauthError(): Error {
@@ -129,7 +140,7 @@ describe('sendViaSmtp failure logging (ADR 0994)', () => {
       tenantId: 'tsmtpfc', provider: 'smtp', kind: 'basic', scope: 'user', userId: 'u1',
       secret: JSON.stringify({ host: 'email-smtp.us-east-1.amazonaws.com', port: 587, secure: false, user: USER, pass: PASS }),
     });
-  });
+  }, 120_000);
   afterEach(() => { dialThrows = undefined; vi.restoreAllMocks(); });
   afterAll(() => { dialThrows = undefined; });
 
@@ -166,14 +177,27 @@ describe('sendViaSmtp failure logging (ADR 0994)', () => {
     expect(cap.raw()).not.toContain(USER);
   });
 
-  // Last: declarations are process-global. If `failure` is ever declared PII, the
-  // class is still readable through `reasonCode`, which the logger writes verbatim.
+  // If `failure` is ever declared PII, the class is still readable through
+  // `reasonCode`, which the logger writes verbatim. Declarations are process-global,
+  // so the registry is snapshotted and restored exactly (entities, fields and the
+  // global field-name set): the other cases assert `failure` in the clear.
   it('with `failure` declared PII, reasonCode still carries the class', async () => {
-    declarePiiFields('smtp.failure.probe', ['failure']);
-    const cap = captureLines('connections.email.smtp');
-    await sendViaSmtp(deps(), args, 'tsmtpfc:k-pii', throwing(eauthError()));
-    const [line] = cap.lines();
-    expect(String(line!.failure)).toMatch(/^pii_[0-9a-f]{10}$/);
-    expect(line!.reasonCode).toBe('smtp_auth');
+    const snap = [...piiFieldRegistry()].map(([entity, fields]) => [entity, [...fields]] as const);
+    const globals = new Set(snap.flatMap(([, fields]) => fields).filter(isKnownPiiFieldName));
+    expect(isKnownPiiFieldName('failure')).toBe(false);
+    try {
+      declarePiiFields('smtp.failure.probe', ['failure']);
+      const cap = captureLines('connections.email.smtp');
+      await sendViaSmtp(deps(), args, 'tsmtpfc:k-pii', throwing(eauthError()));
+      const [line] = cap.lines();
+      expect(String(line!.failure)).toMatch(/^pii_[0-9a-f]{10}$/);
+      expect(line!.reasonCode).toBe('smtp_auth');
+    } finally {
+      __resetPiiRegistry();
+      for (const [entity, fields] of snap) {
+        for (const f of fields) declarePiiFields(entity, [f], { maskGloballyByFieldName: globals.has(f) });
+      }
+    }
+    expect(isKnownPiiFieldName('failure')).toBe(false);
   });
 });

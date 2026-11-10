@@ -22,6 +22,12 @@
  * round trip resolves), any one predicate arm, a renamed metadata key, a new open
  * gate or a non-`campaign-` chain id in a campaign pack, `a2aExposed:false` left off
  * a campaign agent, or the card and router reading different lists.
+ *
+ * Not claimed here (/grade-tests w81): `isApprovalGate`'s gate-TYPE arm. Every
+ * gate this file drives suspends with `kind: 'approval'` (core.chat.approvalGate
+ * too: `ctx.suspend({reason:'approval'})`), so the kind arm answers first. The
+ * MCP campaign probe stays non-vacuous because the two refusals differ in text:
+ * without this guard ADR 1009's "can only be decided in the app" answers.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -42,6 +48,8 @@ import { CAMPAIGN_OPS_RUN_STAMP } from '../src/features/campaign-ops/surface.js'
 import { buildA2aCard03, isA2aDispatchable } from '../src/host/a2aCard.js';
 import { handleA2aRequest } from '../src/host/a2aServer.js';
 import { getAgentRegistry } from '../src/executor/agentRegistry.js';
+import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { openStorage } from '../src/storage/index.js';
 import type { RunRecord } from '../src/types.js';
 import type { WorkflowDefinition } from '../src/executor/types.js';
 
@@ -126,8 +134,9 @@ describe('ADR 0962 D4.1 — isCampaignRun', () => {
     const r: RunRecord = { runId, workflowId, tenantId: 't', status: 'waiting-approval', inputs: {}, configurable: {}, createdAt: now, updatedAt: now, metadata, ...(parentRunId ? { parentRunId } : {}) };
     runs.set(runId, r);
   };
-  const def = (workflowId: string, chainId?: string): void => {
-    defs.set(workflowId, { workflowId, nodes: [], edges: [], ...(chainId ? { metadata: { chainId } } : {}) } as WorkflowDefinition);
+  const def = (workflowId: string, chainId?: string, nodes: WorkflowDefinition['nodes'] = []): void => {
+    const d: WorkflowDefinition = { workflowId, nodes, edges: [], ...(chainId ? { metadata: { chainId } } : {}) };
+    defs.set(workflowId, d);
   };
   const storage = { getRun: async (id: string) => runs.get(id) ?? null };
   const suite = { workflowCatalog: { getWorkflow: async (id: string) => (defs.has(id) ? { workflowId: id, definition: defs.get(id)! } : null) } };
@@ -135,6 +144,8 @@ describe('ADR 0962 D4.1 — isCampaignRun', () => {
 
   beforeAll(() => {
     def('plain'); def('chained', 'campaign-studio.channel.landing-page'); def('other-chain', 'notebooks.digest');
+    // A wait node that is NOT a gate type, so only the approval-wait key can make its interrupt a gate.
+    def('waiting', undefined, [{ nodeId: 'publish', typeId: 'core.flow.noop' }]);
     run('plain', 'plain');
     run('tagged', 'plain', { [CAMPAIGN_RUN_TAG_METADATA_KEY]: { campaignId: 'c', orgId: 'o' } });
     run('stamped', 'plain', { [CAMPAIGN_CLIENT_STAMP_METADATA_KEY]: { orgId: 'o' } });
@@ -142,6 +153,7 @@ describe('ADR 0962 D4.1 — isCampaignRun', () => {
     run('non-campaign-chain', 'other-chain');
     run('child', 'plain', {}, 'tagged');
     run('orphan', 'plain', {}, 'gone');
+    run('waits', 'waiting');
   });
 
   it.each(['tagged', 'stamped', 'provenance', 'child'])('%s is a campaign run', async (id) => {
@@ -161,7 +173,9 @@ describe('ADR 0962 D4.1 — isCampaignRun', () => {
   });
 
   it('an external-event wait for an actual spend approval is a gate too', async () => {
-    expect(await isApprovalGate(storage, suite, { runId: 'tagged', nodeId: 'publish', kind: 'external-event', data: { key: 'approval:real-approval-id' } })).toBe(true);
+    // Control: the same node waiting on any other event is not a gate (its type is not one).
+    expect(await isApprovalGate(storage, suite, { runId: 'waits', nodeId: 'publish', kind: 'external-event', data: { key: 'webhook:order-shipped' } })).toBe(false);
+    expect(await isApprovalGate(storage, suite, { runId: 'waits', nodeId: 'publish', kind: 'external-event', data: { key: 'approval:real-approval-id' } })).toBe(true);
   });
 
   it('a missing ancestor fails closed', async () => {
@@ -282,7 +296,7 @@ describe('ADR 0962 D8 — campaign agents are off the A2A surface', () => {
   it('every agent in a campaign agent pack declares a2aExposed:false (a new team agent cannot forget)', () => {
     const agents = campaignAgentIds();
     expect(agents.length).toBeGreaterThanOrEqual(5);
-    for (const a of agents as Array<{ agentId: string; a2aExposed?: unknown }>) expect(a.a2aExposed, a.agentId).toBe(false);
+    for (const a of agents) expect(a.a2aExposed, a.agentId).toBe(false);
   });
 
   describe('with the packs loaded', () => {
@@ -290,9 +304,13 @@ describe('ADR 0962 D8 — campaign agents are off the A2A surface', () => {
     let listedOther: string | undefined;
     beforeAll(async () => {
       process.env.OPENWOP_STORAGE_DSN = 'memory://';
+      // The durable A2A lane keeps its task in host-ext persistence. Initialise it
+      // here, not by relying on the MCP block's app boot having run first (it red
+      // under --sequence.shuffle seed 222, /grade-tests w81).
+      initHostExtPersistence(await openStorage('memory://'));
       const { loadAgentsFromManifest } = await import('../src/packs/agentLoader.js');
       for (const d of readdirSync(join(REPO, 'packs')).filter((x) => x.endsWith('.agents'))) loadAgentsFromManifest(join(REPO, 'packs', d));
-      campaign = (campaignAgentIds() as Array<{ agentId: string }>).map((a) => a.agentId);
+      campaign = campaignAgentIds().map((a) => a.agentId);
       listedOther = getAgentRegistry().list().find((a) => !a.ownerTenant && a.a2aExposed !== false && !campaign.includes(a.agentId))?.agentId;
     });
 
@@ -310,10 +328,14 @@ describe('ADR 0962 D8 — campaign agents are off the A2A surface', () => {
         { jsonrpc: '2.0', id: 1, method: 'message/send', params: { agentId, message: { parts: [{ kind: 'text', text: 'hi' }] } } },
         { agentCard: {}, durableTasks: durable },
       );
-      const hidden = await send(campaign[0]!);
+      const hiddenId = campaign[0]!;
+      const hidden = await send(hiddenId);
       const unknown = await send('no.such.agent');
-      expect((hidden as { error?: { code: number } }).error?.code).toBe(-32001);
-      expect((hidden as { error?: { code: number } }).error?.code).toBe((unknown as { error?: { code: number } }).error?.code);
+      expect(hidden.result, JSON.stringify(hidden)).toBeUndefined();
+      expect(hidden.error?.code).toBe(-32001);
+      expect(hidden.error?.code).toBe(unknown.error?.code);
+      // Same refusal text, the id aside: a hidden id is not probeable.
+      expect(hidden.error?.message.replace(hiddenId, '<id>')).toBe(unknown.error?.message.replace('no.such.agent', '<id>'));
     });
   });
 });

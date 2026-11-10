@@ -13,7 +13,7 @@ import { canonicalAgentId } from '../../../executor/agentIdAliases.js';
 import type { Request } from 'express';
 import type { RouteDeps } from '../../../routes/registerAllRoutes.js';
 import { OpenwopError } from '../../../types.js';
-import { resolveSecret } from '../../../byok/secretResolver.js';
+import { resolveUserNamedSecret } from '../../../byok/userNamedSecret.js';
 import { tenantOf, requireFeatureEnabled, optionalString } from '../../featureRoute.js';
 import { requireSuperadmin } from '../../../host/superadmin.js';
 import { personalTenantOf } from '../../../host/requestSubject.js';
@@ -197,7 +197,7 @@ export function registerRealtimeRoutes(deps: RouteDeps): void {
       if (!config.credentialRef) {
         throw new OpenwopError('credential_required', 'No BYOK key is set for the realtime voice provider.', 400, { provider: config.provider });
       }
-      const apiKey = await resolveSecret(config.credentialRef, { tenantId });
+      const apiKey = await resolveUserNamedSecret(config.credentialRef, { tenantId });
       if (!apiKey) {
         throw new OpenwopError('credential_unavailable', 'The realtime voice provider key could not be resolved.', 400, { provider: config.provider });
       }
@@ -294,7 +294,7 @@ export function registerRealtimeRoutes(deps: RouteDeps): void {
         throw new OpenwopError('invalid_request', 'OpenAI Realtime is not the configured provider for this tenant.', 400, { provider: config.provider });
       }
       if (!config.credentialRef) throw new OpenwopError('credential_required', 'No BYOK key is set for OpenAI Realtime.', 400, {});
-      const apiKey = await resolveSecret(config.credentialRef, { tenantId });
+      const apiKey = await resolveUserNamedSecret(config.credentialRef, { tenantId });
       if (!apiKey) throw new OpenwopError('credential_unavailable', 'The OpenAI Realtime key could not be resolved.', 400, {});
 
       const body = (req.body ?? {}) as { sdp?: unknown; agentId?: unknown; conversationId?: unknown };

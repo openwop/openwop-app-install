@@ -8,14 +8,16 @@
  * one keys ArtifactProjection previews; this one keys the small `ReviewAsset` the approval
  * card / reviews rail render. Kept separate so a review renderer never has to satisfy the
  * heavier workbench contract.
+ *
+ * ADR 1031 P2 — the host registers no type of its own: every typed renderer is a
+ * feature's (`FrontendFeature.reviewArtifactRenderers`). KickTodo's three
+ * (`kicktodo.plan-revision`, `kicktodo.challenge-lesson-batch`,
+ * `kicktodo.challenge-plan`) moved to the kicktodo / kicktodo-studio packages.
  */
 
 import type { ComponentType } from 'react';
-import { useMemo } from 'react';
-import { useTranslation } from 'react-i18next';
 import type { ReviewAsset } from './reviewClient.js';
-import { LessonBatchReview, parseLessonBatch } from './LessonBatchReview.js';
-import { ChallengePlanReview, parseChallengePlan } from './ChallengePlanReview.js';
+import { featureReviewArtifactRenderers } from '../../features/featureExtensions.js';
 
 export interface ReviewArtifactRendererProps {
   asset: ReviewAsset;
@@ -35,7 +37,25 @@ export function registerReviewArtifactRenderer(
   if (opts?.matches) matchers.set(artifactTypeId, opts.matches);
 }
 
+/**
+ * ADR 1031 — renderers a feature declares on `FrontendFeature.reviewArtifactRenderers`
+ * or its lazy `extensions` (first-party or an adopter's; read through
+ * `features/featureExtensions.ts`), registered on the FIRST lookup rather than at
+ * load: this module is not in the entry chunk and should not pull the registry
+ * into its evaluation order, and by the first lookup every module has loaded. A
+ * distribution that excludes the feature drops its renderers with it.
+ */
+let featureRenderersRegistered = false;
+function registerFeatureRenderers(): void {
+  if (featureRenderersRegistered) return;
+  featureRenderersRegistered = true;
+  for (const r of featureReviewArtifactRenderers()) {
+    registerReviewArtifactRenderer(r.artifactTypeId, r.component, r.matches ? { matches: r.matches } : undefined);
+  }
+}
+
 export function getReviewArtifactRenderer(artifactTypeId: string | undefined): ComponentType<ReviewArtifactRendererProps> | null {
+  registerFeatureRenderers();
   if (!artifactTypeId) return null;
   return registry.get(artifactTypeId) ?? null;
 }
@@ -43,77 +63,7 @@ export function getReviewArtifactRenderer(artifactTypeId: string | undefined): C
 /** The renderer for untyped `content` that claims `artifactTypeId`, or null when
  *  the type has no matcher or the content does not have its shape. */
 export function getReviewArtifactMatch(artifactTypeId: string, content: string): ComponentType<ReviewArtifactRendererProps> | null {
+  registerFeatureRenderers();
   const matches = matchers.get(artifactTypeId);
   return matches && matches(content) ? registry.get(artifactTypeId) ?? null : null;
 }
-
-// ── kicktodo.plan-revision ─────────────────────────────────────────────────
-
-interface PlanRevisionArtifact {
-  commands?: unknown[];
-  rationale?: unknown;
-  display?: { summary?: unknown; lines?: unknown };
-}
-
-/** Client-side fallback humanization when the server `display` is absent (a degraded
- *  enrich). Lane-only, so it NEVER emits an opaque id — the same guarantee the server
- *  keeps. Used only as a safety net; the enriched path supplies real, title-resolved lines. */
-function laneOnlyLine(raw: unknown, t: (k: string) => string): string {
-  const c = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
-  switch (c.lane) {
-    case 'schedule': return t('planRevisionLaneSchedule');
-    case 'substitute': return t('planRevisionLaneSubstitute');
-    case 'recovery': return t('planRevisionLaneRecovery');
-    default: return t('planRevisionLaneOther');
-  }
-}
-
-/** The typed replan approval card body: the coach/composer rationale as prose, the
- *  humanized change list (server-resolved titles, no ids), and the raw command list
- *  tucked behind a collapsed disclosure for the curious. */
-function PlanRevisionReview({ asset }: ReviewArtifactRendererProps): JSX.Element {
-  const { t } = useTranslation('chat');
-  const parsed = useMemo<PlanRevisionArtifact>(() => {
-    try { return JSON.parse(asset.content ?? '{}') as PlanRevisionArtifact; } catch { return {}; }
-  }, [asset.content]);
-  const rationale = typeof parsed.rationale === 'string' ? parsed.rationale : '';
-  const commands = Array.isArray(parsed.commands) ? parsed.commands : [];
-  const serverLines = Array.isArray(parsed.display?.lines)
-    ? parsed.display!.lines!.filter((l): l is string => typeof l === 'string')
-    : [];
-  const lines = serverLines.length > 0 ? serverLines : commands.map((c) => laneOnlyLine(c, t));
-
-  return (
-    <div className="assetpreview-planrevision u-flex u-flex-col u-gap-1-5">
-      {rationale ? <p className="u-fs-13 u-m-0">{rationale}</p> : null}
-      {lines.length > 0 ? (
-        <>
-          <p className="u-fs-11 u-text-muted u-m-0">{t('planRevisionChangesHeading')}</p>
-          <ul className="u-m-0">
-            {lines.map((line, i) => <li key={i} className="u-fs-13">{line}</li>)}
-          </ul>
-        </>
-      ) : (
-        <p className="u-fs-12 u-text-muted u-m-0">{t('planRevisionNoChanges')}</p>
-      )}
-      {commands.length > 0 ? (
-        <details className="u-fs-12">
-          <summary className="u-text-muted">{t('planRevisionRawSummary')}</summary>
-          <pre className="u-fs-11 u-m-0">{JSON.stringify(commands, null, 2)}</pre>
-        </details>
-      ) : null}
-    </div>
-  );
-}
-
-registerReviewArtifactRenderer('kicktodo.plan-revision', PlanRevisionReview);
-
-// XCH-GATE-1 / XCH-LB-3 — the Challenge Factory lesson checkpoint.
-registerReviewArtifactRenderer('kicktodo.challenge-lesson-batch', LessonBatchReview, {
-  matches: (c) => (parseLessonBatch(c)?.length ?? 0) > 0,
-});
-
-// XCH-GATE-1 (outline half) — the Challenge Factory outline approval.
-registerReviewArtifactRenderer('kicktodo.challenge-plan', ChallengePlanReview, {
-  matches: (c) => { const p = parseChallengePlan(c); return p !== null && p.title.length > 0 && p.days.length > 0; },
-});

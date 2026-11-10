@@ -50,7 +50,7 @@ describe('the /builder gallery fixture pins the node versions this repo ships', 
   it('every pinned pack node in the fixture matches its installed version', () => {
     const { versions: installed, unparseable } = installedNodeVersions();
     expect(unparseable, 'every packs/*/pack.json must parse').toEqual([]);
-    expect(installed.size, 'the packs/ walk found node manifests (824 measured 2026-10-29)').toBeGreaterThanOrEqual(780);
+    expect(installed.size, 'the packs/ walk found node manifests (824 measured 2026-10-29; 760 after the KickTodo packs left, ADR 1031 P3)').toBeGreaterThanOrEqual(740);
     const packs = readdirSync(FIXTURE_ROOT).filter((d) => existsSync(join(FIXTURE_ROOT, d, 'pack.json')));
     expect(packs.length, 'the fixture walk found chain packs').toBeGreaterThan(0);
 

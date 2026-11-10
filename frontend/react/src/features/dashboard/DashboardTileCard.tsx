@@ -13,6 +13,7 @@
 import { Button } from '../../ui/Button.js';
 import { Suspense, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { tileNamespace } from './tileTypes.js';
 import { ErrorBoundary } from '../../ui/ErrorBoundary.js';
 import { SkeletonRows } from '../../ui/Skeleton.js';
 import { ArrowUpIcon, ArrowDownIcon, ArrowUpToLineIcon, ArrowDownToLineIcon, XIcon, ColumnsIcon, SquareIcon, RotateCwIcon, GripVerticalIcon } from '../../ui/icons/index.js';
@@ -42,7 +43,9 @@ export function DashboardTileCard({ tile, customizing, isFirst, isLast, onMove, 
   const { t } = useTranslation('dashboard');
   const { def, size } = tile;
   const Icon = def.icon;
-  const label = t(def.labelKey, { defaultValue: def.label });
+  // ADR 1031 — a feature tile's label lives in its own namespace, which
+  // DashboardPage has already loaded.
+  const label = t(def.labelKey, { ns: tileNamespace(def), defaultValue: def.label });
   const compact = size === 'half';
 
   // Refresh = remount the body (tiles fetch on mount), stamped for the age label.

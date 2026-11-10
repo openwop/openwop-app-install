@@ -19,7 +19,7 @@ import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { SCOPES_SUPPORTED } from '../src/host/protocolAuthorization.js';
-import { MINTABLE_KEY_SCOPES } from '../src/features/developer-keys/keyPolicy.js';
+import { mintableKeyScopes } from '../src/features/developer-keys/keyPolicy.js';
 import { issueApiKey } from '../src/features/developer-keys/apiKeyService.js';
 import { toWireRunId } from '../src/host/v2Ids.js';
 
@@ -44,7 +44,7 @@ describe('ADR 0800 D2 — the SPA key presets are pinned to the scopes this host
 
   it('every preset scope is one the server will mint (ADR 0795 D3) — a typo here is a 400 for every user', () => {
     for (const [name, scopes] of Object.entries(P)) {
-      for (const s of scopes) expect(MINTABLE_KEY_SCOPES, `${name}: ${s}`).toContain(s);
+      for (const s of scopes) expect(mintableKeyScopes(), `${name}: ${s}`).toContain(s);
     }
   });
 

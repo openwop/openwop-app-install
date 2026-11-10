@@ -464,6 +464,8 @@ step "root docs: only adopter deliverables at the repo root (steward reports liv
 node "$ROOT/scripts/check-root-docs.mjs"
 step "default page drift: the ADR 0027 default home page exists TWICE and must agree"
 node "$ROOT/scripts/check-default-page-drift.mjs"
+step "pinned visual baselines: every -pinned image was rendered beside its -darwin twin (ADR 0863 D9)"
+node "$ROOT/scripts/check-pinned-baselines.mjs"
 
 step "chain packs: content changed ⇒ version bumped (the registry copy WINS — ADR 0370)"
 node "$ROOT/scripts/check-pack-version-bump.mjs"
@@ -532,6 +534,7 @@ run_selftests() {
   echo "▶ Tracegate: the predictor reuses only what it may, and runs what it must (ADR 0880)"
   node "$ROOT/scripts/test-tracegate.mjs"
   node --test --test-concurrency=1 "$ROOT/scripts/test-tracegate-report.mjs"
+  bash "$ROOT/scripts/test-tracegate-package-shadow.sh"
   echo
   echo "▶ payload ratchet: a subset run never judges an admission stale (ADR 0702 × ADR 0880)"
   node --test "$ROOT/scripts/test-audit-event-payloads.mjs"
@@ -589,7 +592,7 @@ step "frontend: lint + build + unit-test types — BACKGROUND, joined before bac
 # None writes what another reads (no tsc pass is incremental; lint writes
 # nothing), so the lane takes roughly the build's ~80 s.
 run_frontend_static() ( # a subshell: the serial fallback must not leave ci.sh in frontend/react
-  local dir envd rc=0 n p p1 p2 p3
+  local dir envd hostonly rc=0 n p p1 p2 p3
   dir="$(mktemp -d "${TMPDIR:-/tmp}/owp-ci-fe-static.XXXXXX")"
   # Issue #5006: in an adopter bundle the budgeted build reads only a copy of
   # `.env.production.example`, so the adopter's brand strings cannot red the
@@ -613,8 +616,14 @@ run_frontend_static() ( # a subshell: the serial fallback must not leave ci.sh i
   # otherwise overlap with eslint even when the outer lane runs in line.
   if [ "${OPENWOP_CI_SERIAL_LANES:-0}" = 1 ]; then fe_static_wait 1 "$p1"; fi
   if [ -n "$envd" ]; then
-    echo "frontend build: adopter bundle — budgeting the default build on .env.production.example, not this tree's .env.production (#5006)"
-    OPENWOP_VITE_ENV_DIR="$envd" fe_static_one "$dir/2" "build (tsc + token/CSS checks + vite + bundle budget; host-only env)" run build & p2=$!
+    # ADR 1031 × ADR 0874 D4 — and on HOST CODE ONLY: the adopter's own
+    # src/adopter/features/ are left out of this build (frontend/react/scripts/
+    # hostOnlyBuild.mjs), so they cannot red the host ceiling either. A named
+    # distribution is a shipped build and keeps them; its deploy budgets it.
+    hostonly=""
+    if [ "${OPENWOP_DISTRIBUTION:-default}" = default ]; then hostonly=1; fi
+    echo "frontend build: adopter bundle — budgeting the default build on .env.production.example, not this tree's .env.production (#5006)${hostonly:+, host code only (src/adopter/ left out)}"
+    OPENWOP_BUDGET_HOST_ONLY="$hostonly" OPENWOP_VITE_ENV_DIR="$envd" fe_static_one "$dir/2" "build (tsc + token/CSS checks + vite + bundle budget; host-only env${hostonly:+ + code})" run build & p2=$!
   else
     fe_static_one "$dir/2" "build (tsc + token/CSS checks + vite + bundle budget)" run build & p2=$!
   fi
@@ -955,6 +964,11 @@ step "frontend: vitest"
 # appends one line per allowed call; the checker aggregates after.
 LIVE_FETCH_AUDIT="$(mktemp "${TMPDIR:-/tmp}/owp-live-fetch-audit.XXXXXX")"
 tg_begin frontend
+# ADR 1028 P1b — the tracegate-ci PACKAGE selects beside the fork, read-only, into its own
+# ledger, and logs how the two selections compare. It never fails the gate (it always
+# exits 0, and `|| true` covers a missing script) and is killed after 60 s
+# (TRACEGATE_PACKAGE_TIMEOUT_S). scripts/test-tracegate-package-shadow.sh witnesses both.
+[ -n "$TG_RUN" ] && { bash "$ROOT/scripts/tracegate-package.sh" shadow-compare frontend "$TG_RUN" || true; }
 FE_TG_MODE="$TG_MODE"
 FE_TG_ARGS=(${TG_ARGS[@]+"${TG_ARGS[@]}"}) # the date-bomb sweep re-runs this selection (ADR 0918)
 fe_rc=0
@@ -1059,11 +1073,14 @@ fi
 e2e_explicit=0; [ "${OPENWOP_CI_E2E:-0}" = "1" ] && e2e_explicit=1
 e2e_run=$e2e_explicit
 e2e_blocked=""
-# Browser presence = the Playwright cache exists (macOS or Linux path). An earlier
-# cut wrote `command -v npx && [ -d mac ] || [ -d linux ]`, which parses as
-# `(npx && mac) || linux` — so the npx check applied on macOS and silently did not
-# on Linux. Asymmetric and confusing in a merge gate; the cache dir IS the signal.
-if [ -d "$HOME/Library/Caches/ms-playwright" ] || [ -d "$HOME/.cache/ms-playwright" ]; then
+# Browser presence = the Playwright cache exists where Playwright looks for it
+# (scripts/lib/playwright-browsers.sh: PLAYWRIGHT_BROWSERS_PATH, else the macOS or
+# Linux default). An earlier cut wrote `command -v npx && [ -d mac ] || [ -d linux ]`,
+# which parses as `(npx && mac) || linux` — so the npx check applied on macOS and
+# silently did not on Linux. Asymmetric and confusing in a merge gate; the cache dir
+# IS the signal.
+. "$ROOT/scripts/lib/playwright-browsers.sh"
+if playwright_browsers_present; then
   e2e_have_browser=1
 else
   e2e_have_browser=0
@@ -1189,55 +1206,10 @@ if [ "$e2e_run" = "1" ]; then
   # The fixture is small on purpose — three packs, ~12 KB — so the recorded PNGs
   # stay small and a real regression is visible in the diff rather than lost in a
   # 17 000px page.
-  E2E_PACK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/owp-e2e-packs.XXXXXX")"
-  e2e_packs_mounted=0
-  for p in "$ROOT"/packs/*/; do
-    p="${p%/}"
-    [ -f "$p/pack.json" ] || continue
-    ln -s "$p" "$E2E_PACK_DIR/$(basename "$p")" 2>/dev/null && e2e_packs_mounted=$((e2e_packs_mounted + 1))
-  done
-  # Report the COUNT: zero means every pack-node path is about to fail for an
-  # environmental reason, and that must be legible here, not inferred from red.
-  echo "  packs: mounted $e2e_packs_mounted vendored pack(s) into $E2E_PACK_DIR (deterministic; not ~/.openwop-packs)"
-  if [ "$e2e_packs_mounted" -eq 0 ]; then
-    echo "error: no vendored packs under $ROOT/packs — the e2e backend would boot without node packs" >&2
-    exit 1
-  fi
-  (
-    cd "$ROOT/backend/typescript"
-    OPENWOP_TEST_AUTH_ENABLED=true \
-    OPENWOP_FEATURE_TOGGLES_DEV_OPEN=true \
-    OPENWOP_DEMO_MODE=true \
-    OPENWOP_STORAGE_DSN=memory:// \
-    OPENWOP_MOUNT_LOCAL_PACKS=false \
-    OPENWOP_PACK_DIR="$E2E_PACK_DIR" \
-    OPENWOP_WORKFLOW_CHAIN_PACKS_DIR="$ROOT/frontend/react/e2e/fixtures/chain-packs" \
-    OPENWOP_WORKFLOW_CHAIN_EXAMPLES=0 \
-    OPENWOP_CORS_ORIGINS=http://localhost:"$E2E_PORT_FE" \
-    OPENWOP_SESSION_SECRET=local-ci-session-secret-at-least-32-characters-long \
-    PORT="$E2E_PORT_BE" node lib/index.js > /tmp/openwop-ci-e2e-backend.log 2>&1 &
-    echo $! > /tmp/openwop-ci-e2e-backend.pid
-  )
-  E2E_BE_PID="$(cat /tmp/openwop-ci-e2e-backend.pid 2>/dev/null || true)"
-  e2e_ready=0
-  for _ in $(seq 1 45); do
-    # If our own process died, stop waiting — otherwise we would keep probing and
-    # could be answered by something else that appeared on the port meanwhile.
-    if [ -n "$E2E_BE_PID" ] && ! kill -0 "$E2E_BE_PID" 2>/dev/null; then break; fi
-    code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
-      http://127.0.0.1:"$E2E_PORT_BE"/host/openwop-app/test/login \
-      -H 'content-type: application/json' \
-      -d '{"email":"ready@ci.local","tenantId":"ci-readiness"}' || true)
-    if [ "$code" = "201" ]; then e2e_ready=1; break; fi
-    sleep 2
-  done
-  if [ "$e2e_ready" != "1" ]; then
-    echo "error: e2e backend never became ready on :$E2E_PORT_BE (last code: ${code:-none})" >&2
-    tail -60 /tmp/openwop-ci-e2e-backend.log >&2 || true
-    [ -n "$E2E_BE_PID" ] && kill "$E2E_BE_PID" 2>/dev/null || true
-    rm -rf "$E2E_PACK_DIR"
-    exit 1
-  fi
+  # Pack dir + backend boot + login-201 readiness: scripts/lib/e2e-backend.sh (shared with
+  # the pinned-baseline generator, so both record and check against one backend).
+  . "$ROOT/scripts/lib/e2e-backend.sh"
+  e2e_backend_start || exit 1
   e2e_rc=0
   # TWO PASSES (ADR 0509 Phase 2). The required pass excludes @serial/@advisory;
   # the separate pass runs those at --workers=1 and records its own outcome.
@@ -1290,12 +1262,7 @@ if [ "$e2e_run" = "1" ]; then
     printf '    npm run ci:e2e-report\n'
   fi
   # ONLY our own PID. The previous port sweep is what made this unsafe to promote.
-  if [ -n "$E2E_BE_PID" ]; then
-    kill "$E2E_BE_PID" 2>/dev/null || true
-    for _ in 1 2 3 4 5; do kill -0 "$E2E_BE_PID" 2>/dev/null || break; sleep 1; done
-    kill -0 "$E2E_BE_PID" 2>/dev/null && kill -9 "$E2E_BE_PID" 2>/dev/null || true
-  fi
-  rm -rf "$E2E_PACK_DIR"
+  e2e_backend_stop
   # PROCESS EXIT IS NOT PORT RELEASE. `kill` returns before the socket is freed,
   # and Playwright's webServer is a separate child besides. The next stage starts
   # immediately, so wait for the ports themselves to go quiet — this is the exact

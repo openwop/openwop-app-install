@@ -22,8 +22,10 @@ import {
   CalendarIcon,
 } from '../../ui/icons/index.js';
 import type { DashboardTileDef } from './tileTypes.js';
+import { featureDashboardTiles } from '../featureExtensions.js';
 
-export const ALL_DASHBOARD_TILES: DashboardTileDef[] = [
+/** The host's own tiles. `ALL_DASHBOARD_TILES` below adds the features'. */
+export const HOST_DASHBOARD_TILES: DashboardTileDef[] = [
   // ── ADR 0844: the home hierarchy — ask, what needs you, how it is running ──
   {
     id: 'ask',
@@ -852,37 +854,26 @@ export const ALL_DASHBOARD_TILES: DashboardTileDef[] = [
     resizable: true,
     component: lazy(() => import('./tiles/MentionsInboxTile.js')),
   },
-  {
-    id: 'kicktodo-today',
-    label: 'KickTodo · Today',
-    labelKey: 'tileKicktodoToday',
-    descriptionKey: 'tileKicktodoTodayDesc',
-    icon: CheckSquareIcon,
-    category: 'Work',
-    requiredTier: 'workspace',
-    owningFeatureToggle: 'kicktodo-core',
-    defaultEnabled: false,
-    defaultOrder: 42,
-    defaultSize: 'half',
-    resizable: false,
-    component: lazy(() => import('./tiles/KickTodoTodayTile.js')),
-  },
-  {
-    id: 'kicktodo-progress',
-    label: 'KickTodo · Progress',
-    labelKey: 'tileKicktodoProgress',
-    descriptionKey: 'tileKicktodoProgressDesc',
-    icon: BarChartIcon,
-    category: 'Work',
-    requiredTier: 'workspace',
-    owningFeatureToggle: 'kicktodo-core',
-    defaultEnabled: false,
-    defaultOrder: 43,
-    defaultSize: 'half',
-    resizable: false,
-    component: lazy(() => import('./tiles/KickTodoProgressTile.js')),
-  },
 ];
+
+/**
+ * ADR 1031 — the registry: the host tiles, then every tile a composed feature
+ * declares on `FrontendFeature.dashboardTiles` (an adopter's feature cannot edit
+ * the list above). A feature tile reusing an id throws — the id is the persisted
+ * layout key, so two tiles under one id would share (and corrupt) one saved slot.
+ * KickTodo's two home tiles (`kicktodo-today`, `kicktodo-progress`) are declared
+ * by the `kicktodo` feature (ADR 1031 P2).
+ */
+export const ALL_DASHBOARD_TILES: DashboardTileDef[] = composeDashboardTiles(HOST_DASHBOARD_TILES, featureDashboardTiles());
+
+export function composeDashboardTiles(host: readonly DashboardTileDef[], contributed: readonly DashboardTileDef[]): DashboardTileDef[] {
+  const ids = new Set(host.map((t) => t.id));
+  for (const t of contributed) {
+    if (ids.has(t.id)) throw new Error(`duplicate dashboard tile id '${t.id}' contributed by a feature (ADR 1031) — tile ids are persisted layout keys`);
+    ids.add(t.id);
+  }
+  return [...host, ...contributed];
+}
 
 /** The default layout derived from the registry — the zero-write first-paint
  *  layout when the user has none saved. */

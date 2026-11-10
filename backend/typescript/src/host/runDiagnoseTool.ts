@@ -23,6 +23,7 @@ import { registerFeatureAgentTool } from './agentToolProvider.js';
 import { toolEmpty, toolOk } from './agentToolKit.js';
 import { getRegisteredWorkflowAsync } from './workflowsRegistry.js';
 import { sanitizeFreeTextDeep } from '../byok/textRedaction.js';
+import { isChannelIngressRun } from './channelConversationGuard.js';
 
 export const RUN_DIAGNOSE_TOOL_ID = 'openwop:runs.diagnose';
 
@@ -67,7 +68,10 @@ export function registerRunDiagnoseTool(deps: { storage: Storage }): void {
 
       const run = await deps.storage.getRun(runId);
       // The loadReadableRun posture: absent OR foreign tenant ⇒ indistinguishable empty.
-      if (!run || run.tenantId !== scope.tenantId) {
+      // ADR 1042 (review round 3) — a channel conversation's run holds outsiders' words
+      // in its events; its failure context is not a grounding source for any turn.
+      // Same indistinguishable empty as an invisible run.
+      if (!run || run.tenantId !== scope.tenantId || isChannelIngressRun(run)) {
         return toolEmpty({ note: 'No such run is visible to you.' });
       }
       if (run.status !== 'failed') {

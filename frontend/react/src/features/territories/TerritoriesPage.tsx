@@ -23,6 +23,8 @@ import { Skeleton } from '../../ui/Skeleton.js';
 import { TextField, SelectField } from '../../ui/Field.js';
 import { ConfirmDialog } from '../../ui/ConfirmDialog.js';
 import { toast } from '../../ui/toast.js';
+import { useOrgScopes } from '../../orgs/useOrgScopes.js';
+import { OrgAccessNotice } from '../../orgs/OrgAccessNotice.js';
 import { useLiveRegion } from '../../ui/announce.js';
 import { GlobeIcon } from '../../ui/icons/index.js';
 import { formatNumber } from '../../i18n/format.js';
@@ -250,6 +252,8 @@ function ModelDetail({ orgId, model, isActive, busy, onActivate, onArchive, onDe
   const [saving, setSaving] = useState(false);
   const [confirm, setConfirm] = useState<null | 'activate' | 'archive' | 'delete'>(null);
   const editable = model.state === 'planning' && !isActive;
+  const access = useOrgScopes(orgId);
+  const canManage = access.has('host:territories:manage');
 
   const load = useCallback(() => {
     setTerritories(LOADING); setPreview(LOADING); setAttainment(LOADING);
@@ -301,12 +305,18 @@ function ModelDetail({ orgId, model, isActive, busy, onActivate, onArchive, onDe
             <h2 className="u-mb-0">{model.name}</h2>
             <StatusBadge status={badge.status} label={badge.label} />
           </div>
-          <div className="action-bar">
-            {!isActive && model.state !== 'archived' ? <Button variant="primary" disabled={busy} onClick={() => setConfirm('activate')}>{t('submitActivate')}</Button> : null}
-            {model.state !== 'archived' ? <Button variant="primary" disabled={busy} onClick={() => setConfirm('archive')}>{t('submitArchive')}</Button> : null}
-            {model.state === 'archived' ? <Button variant="primary" className="u-text-danger" disabled={busy} onClick={() => setConfirm('delete')}>{t('common:delete')}</Button> : null}
-          </div>
+          {/* ADR 1034 D11 — activate, archive and purge are `host:territories:manage` on the
+              server; an editor used to see all three and get a 403 from each. */}
+          {canManage ? (
+            <div className="action-bar">
+              {!isActive && model.state !== 'archived' ? <Button variant="primary" disabled={busy} onClick={() => setConfirm('activate')}>{t('submitActivate')}</Button> : null}
+              {model.state !== 'archived' ? <Button variant="primary" disabled={busy} onClick={() => setConfirm('archive')}>{t('submitArchive')}</Button> : null}
+              {model.state === 'archived' ? <Button variant="danger" disabled={busy} onClick={() => setConfirm('delete')}>{t('common:delete')}</Button> : null}
+            </div>
+          ) : null}
         </Toolbar>
+        <OrgAccessNotice access={access} />
+        {access.resolved && !canManage && model.state !== 'archived' ? <p className="u-text-muted u-text-sm u-mb-0">{t('managerOnlyLifecycle')}</p> : null}
         {isActive ? <Notice variant="info">{t('liveNotice')}</Notice> : null}
       </Panel>
 

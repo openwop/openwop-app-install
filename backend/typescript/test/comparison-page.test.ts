@@ -54,7 +54,7 @@ describe('comparison page — seeded host-global + publicly delivered', () => {
     const steps = (await status.json() as { steps: { id: string }[] }).steps;
     expect(steps.some((s) => s.id === 'comparison-page')).toBe(true);
 
-    const run = await admin('POST', '/host/openwop-app/example-data/run', { steps: ['comparison-page'] });
+    const run = await admin('POST', '/host/openwop-app/example-data/run', { steps: ['comparison-page'], expectedTenantId: 'default' });
     expect(run.status).toBe(200);
     const body = await run.json() as RunResult;
     // The step ran and succeeded; boot already seeded the page, so it reports `skipped`.
@@ -81,7 +81,7 @@ describe('comparison page — seeded host-global + publicly delivered', () => {
 
   it('re-seeding is idempotent (no duplicate comparison page)', async () => {
     for (let i = 0; i < 2; i++) {
-      const run = await admin('POST', '/host/openwop-app/example-data/run', { steps: ['comparison-page'] });
+      const run = await admin('POST', '/host/openwop-app/example-data/run', { steps: ['comparison-page'], expectedTenantId: 'default' });
       expect(run.status).toBe(200);
       expect((await run.json() as RunResult).results.find((r) => r.step === 'comparison-page')?.action).toBe('skipped');
     }

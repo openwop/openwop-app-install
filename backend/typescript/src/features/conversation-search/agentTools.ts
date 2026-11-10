@@ -10,6 +10,7 @@
  */
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
 import { searchVisibleConversations } from './searchEngine.js';
+import { isChannelIngressConversation } from '../../host/channelConversationGuard.js';
 import type { Storage } from '../../storage/storage.js';
 import type { ConversationType } from '../../host/conversationStore.js';
 
@@ -45,10 +46,15 @@ export function registerConversationSearchAgentTools(storage: Storage): void {
       }
       const type = typeof input.type === 'string' && VALID_TYPES.has(input.type) ? (input.type as ConversationType) : undefined;
       const limit = typeof input.limit === 'number' && input.limit > 0 ? Math.min(input.limit, 50) : 10;
-      const { hits, truncated } = await searchVisibleConversations(storage, scope.tenantId, scope.actingUserId, String(input.query ?? ''), {
+      const found = await searchVisibleConversations(storage, scope.tenantId, scope.actingUserId, String(input.query ?? ''), {
         ...(type ? { type } : {}),
         limit,
       });
+      // ADR 1042 (review round 3) — a channel-ingress conversation holds outsiders'
+      // words; its snippets must never reach a model turn (a full-tools one above all).
+      const keep = await Promise.all(found.hits.map(async (h) => !(await isChannelIngressConversation(scope.tenantId, h.conversationId))));
+      const hits = found.hits.filter((_, i) => keep[i]);
+      const truncated = found.truncated;
       // ADR 0685 D1 — project EXPLICITLY. This used to be `JSON.stringify({ hits })`, i.e. the
       // engine's `SearchHit` shape WAS the model-facing contract: any field added to the engine
       // for internal or UI reasons reached a model automatically, with no decision and no schema

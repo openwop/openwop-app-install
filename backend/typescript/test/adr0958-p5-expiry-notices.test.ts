@@ -19,6 +19,10 @@
  *   - drop the collaborator-status check → the suspended case red;
  *   - put `displayName` in the title → the no-PII assertion red;
  *   - skip the `collaborationOn` check → the toggle-off case red.
+ * Re-measured w78: also the revoked/expired filters and the recipient. The
+ * "no check passed" half is a double guard (the early return, and calling the
+ * absent check throws inside the per-grant try, counted as failed): removing
+ * the early return alone stays green, by design.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -31,6 +35,7 @@ import { createBrief as createCampaignBrief } from '../src/features/campaign-bri
 import { finalizeFromBrief } from '../src/features/campaign-orchestration/campaignService.js';
 import { notifyExpiringGrants, revokeGrant, setCollaboratorStatus, type CollaboratorGrant, type ExternalCollaborator } from '../src/host/externalCollaborators.js';
 import { getNotificationEmitter } from '../src/notifications/emitter.js';
+import type { NotificationRecord } from '../src/types.js';
 import { createMember } from '../src/host/accessControlService.js';
 import { collabEnabledFor } from '../src/features/campaign-ops/collaboration/routes.js';
 
@@ -69,10 +74,7 @@ function client() {
   return { get: <T>(p: string) => call<T>('GET', p), post: <T>(p: string, b?: unknown) => call<T>('POST', p, b), put: <T>(p: string, b?: unknown) => call<T>('PUT', p, b), patch: <T>(p: string, b?: unknown) => call<T>('PATCH', p, b), del: <T>(p: string) => call<T>('DELETE', p) };
 }
 
-
-const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('IHDR-fixture-bytes-0001')]);
-const pngNo = (i: number): Buffer => Buffer.concat([PNG, Buffer.from(`-${i}-${Math.random()}`)]);
-const RIGHTS = { license: 'work-for-hire', modelReleases: true, credit: 'Dana Studio', attest: true };
+let seq = 0; // unique, deterministic emails
 
 let n = 0;
 async function setup() {
@@ -87,39 +89,33 @@ async function setup() {
   const cBrief = await createCampaignBrief(tenantId, orgId, 'seed', { name: 'Spring roast launch', objective: 'Sell 500 bags' });
   const campaign = await finalizeFromBrief(tenantId, cBrief, 'seed');
   const C = `/host/openwop-app/campaign-ops/clients/${orgId}/collaborators`;
-  const A = `/host/openwop-app/campaign-ops/clients/${orgId}/intakes`;
   const invite = (email: string) => admin.post<{ collaborator: ExternalCollaborator; invite: { token: string } }>(C, { kind: 'vendor', email, displayName: 'Dana Studio' });
   const grantFor = async (collaboratorId: string, expiresInDays?: number): Promise<CollaboratorGrant> => {
     const r = await admin.post<{ grant: CollaboratorGrant }>(`${C}/${collaboratorId}/grants`, { resource: { kind: 'campaign', id: campaign.id }, actions: ['view', 'upload'], ...(expiresInDays ? { expiresInDays } : {}) });
     expect(r.status, r.raw).toBe(201);
     return r.body.grant;
   };
-  return { tenantId, orgId, admin, adminUserId, C, A, invite, grantFor };
+  return { tenantId, orgId, admin, adminUserId, C, invite, grantFor };
 }
 
-/** A vendor who signed in and accepted, with a grant to upload. */
+/** A vendor who signed in and accepted, with a 5-day grant. */
 async function acceptedVendor(s: Awaited<ReturnType<typeof setup>>) {
   const vendor = client();
-  const v = await vendor.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: `photographer-x-${n}-${Math.random().toString(36).slice(2)}@studio.test` });
+  const v = await vendor.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: `photographer-x-${n}-${seq++}@studio.test` });
   const userId = v.body.user.userId;
   const email = (await getUser(userId))?.email ?? '';
   const inv = await s.invite(email);
   expect(inv.status, inv.raw).toBe(201);
   expect((await vendor.post('/host/openwop-app/collab/invites/accept', { token: inv.body.invite.token })).status).toBe(200);
   const grant = await s.grantFor(inv.body.collaborator.collaboratorId, 5);
-  const upload = (name: string, note?: string) => vendor.post<{ intake: { intakeId: string; files: Array<{ fileId: string }> } }>(
-    `/host/openwop-app/collab/grants/${grant.grantId}/intakes`,
-    { files: [{ name, contentType: 'image/png', contentBase64: pngNo(Math.random()).toString('base64') }], rights: RIGHTS, ...(note ? { note } : {}) },
-  );
-  return { vendor, userId, email, collaborator: inv.body.collaborator, grant, upload };
+  return { userId, collaborator: inv.body.collaborator, grant };
 }
 
-
-type Seen = { recipientUserId?: string; tenantId: string; title: string; message: string; metadata?: Record<string, unknown> };
+/** `emit()` inserts and fans out to subscribers before it resolves, so a record is
+ *  here by the time an awaited `notifyExpiringGrants` returns (no wait needed). */
 function capture(tenantId: string) {
-  const seen: Seen[] = [];
-  const unsub = getNotificationEmitter().subscribe((x) => {
-    const r = x as unknown as Seen & { type: string };
+  const seen: NotificationRecord[] = [];
+  const unsub = getNotificationEmitter().subscribe((r) => {
     if (r.type === 'collab.grant-expiring' && r.tenantId === tenantId) seen.push(r);
   });
   return { seen, unsub };
@@ -133,14 +129,12 @@ describe('ADR 0958 P5 — expiry notices', () => {
     const cap = capture(s.tenantId);
     try {
       await notifyExpiringGrants(new Date(), collabEnabledFor);
-      await new Promise((r) => setTimeout(r, 50));
       expect(cap.seen).toHaveLength(1);
       const n0 = cap.seen[0]!;
       expect(n0.recipientUserId).toBe(s.adminUserId);
       expect(n0.metadata).toMatchObject({ grantId: v.grant.grantId, collaboratorId: v.collaborator.collaboratorId, orgId: s.orgId });
       expect(JSON.stringify(n0)).not.toMatch(/Dana|@studio\.test/);
       await notifyExpiringGrants(new Date(Date.now() + DAY), collabEnabledFor);
-      await new Promise((r) => setTimeout(r, 50));
       expect(cap.seen).toHaveLength(1);
     } finally { cap.unsub(); }
   });
@@ -153,10 +147,8 @@ describe('ADR 0958 P5 — expiry notices', () => {
     const cap = capture(s.tenantId);
     try {
       await notifyExpiringGrants(new Date(), collabEnabledFor);
-      await new Promise((r) => setTimeout(r, 50));
       expect(cap.seen).toHaveLength(0);
       await notifyExpiringGrants(new Date(Date.parse(g30.expiresAt) - 6 * DAY), collabEnabledFor);
-      await new Promise((r) => setTimeout(r, 50));
       expect(cap.seen.map((x) => x.metadata?.grantId)).toEqual([g30.grantId]);
     } finally { cap.unsub(); }
   });
@@ -172,11 +164,9 @@ describe('ADR 0958 P5 — expiry notices', () => {
     try {
       // Past `expired`'s end: nothing to announce for any of them.
       await notifyExpiringGrants(new Date(Date.parse(expired.grant.expiresAt) + 1000), collabEnabledFor);
-      await new Promise((r) => setTimeout(r, 50));
       expect(cap.seen).toHaveLength(0);
       // Now, before anything ended: only the live one is announced.
       await notifyExpiringGrants(new Date(), collabEnabledFor);
-      await new Promise((r) => setTimeout(r, 50));
       expect(cap.seen.map((x) => x.metadata?.grantId)).toEqual([expired.grant.grantId]);
     } finally { cap.unsub(); }
   });
@@ -187,14 +177,11 @@ describe('ADR 0958 P5 — expiry notices', () => {
     const cap = capture(s.tenantId);
     try {
       await notifyExpiringGrants(new Date(), async (t) => t !== s.tenantId && collabEnabledFor(t));
-      await new Promise((r) => setTimeout(r, 50));
       expect(cap.seen).toHaveLength(0);
       await notifyExpiringGrants(new Date());
-      await new Promise((r) => setTimeout(r, 50));
       expect(cap.seen).toHaveLength(0);
       // Back on: the grant was never claimed while off, so it is announced now.
       await notifyExpiringGrants(new Date(), collabEnabledFor);
-      await new Promise((r) => setTimeout(r, 50));
       expect(cap.seen.map((x) => x.metadata?.grantId)).toEqual([v.grant.grantId]);
     } finally { cap.unsub(); }
   });
@@ -212,7 +199,8 @@ describe('ADR 0958 P5 — expiry notices', () => {
     const other = client();
     expect((await other.post('/host/openwop-app/test/login', { email: `member-x-${n}@agency.test`, tenantId: s.tenantId })).status).toBe(201);
     const theirs = await other.get<{ notifications: Array<{ type: string }> }>('/host/openwop-app/notifications');
-    expect(theirs.body.notifications?.filter((x) => x.type === 'collab.grant-expiring') ?? []).toEqual([]);
+    expect(theirs.status, theirs.raw).toBe(200);
+    expect(theirs.body.notifications.filter((x) => x.type === 'collab.grant-expiring')).toEqual([]);
   });
 
   it('a member who arrived the production way (personal login, member row, switch) reads it in the workspace', async () => {
@@ -225,7 +213,7 @@ describe('ADR 0958 P5 — expiry notices', () => {
     const v = await acceptedVendor(s);
     const m = client();
     const login = await m.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { subject: `oidc-granter-${n}`, displayName: 'Granter' });
-    expect(login.status).toBeLessThan(300);
+    expect(login.status).toBe(201);
     const homeUserId = login.body.user.userId;
     await createMember({ orgId: s.tenantId, tenantId: s.tenantId, displayName: 'Granter', subject: homeUserId, roles: ['owner'] });
     const sw = await m.post(`/host/openwop-app/workspaces/${encodeURIComponent(s.tenantId)}/switch`);

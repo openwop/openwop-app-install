@@ -8,6 +8,8 @@
 #   openwop-ci-install-sha  its sha256 (the startup script refuses a mismatch)
 #   openwop-ci-client-key   the gate client's ed25519 PUBLIC key
 #   openwop-ci-policy-sha   the runner policy digest the Macs pin
+#   openwop-ci-pinned-image / openwop-ci-pinned-playwright
+#                           the e2e renderer, from frontend/react/e2e/pinned-browser.json
 # Output: guest attribute openwop-ci/host-key = this VM's ed25519 PUBLIC host key,
 # read by the operator over the authenticated GCE API and pinned on the Macs.
 # The VM's service account has no roles and no scopes; it holds no credentials.
@@ -20,15 +22,22 @@ PLAYWRIGHT_VERSION=1.59.1
 CI_HOME=/home/ci
 LIBEXEC=/usr/local/libexec
 INSTALL=$LIBEXEC/openwop-ci
-# Bump to re-run provisioning on the next boot (every step below is idempotent).
-PROVISION_VERSION=6
+# Provisioning re-runs on the next boot when this version OR the worker payload's
+# sha256 changes, so a new payload needs only a metadata update and a restart
+# (every step below is idempotent).
+PROVISION_VERSION=11
+PROVISION_KEY="$PROVISION_VERSION:$(md openwop-ci-install-sha)"
 
-if [ "$(cat /var/lib/openwop-ci/provisioned-version 2>/dev/null)" != "$PROVISION_VERSION" ]; then
+if [ "$(cat /var/lib/openwop-ci/provisioned-version 2>/dev/null)" != "$PROVISION_KEY" ]; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -q
   apt-get install -yq --no-install-recommends git python3 curl ca-certificates xz-utils \
     openssh-server unattended-upgrades apt-listchanges dbus-user-session \
-    lsof procps zip unzip   # the gate's port-collision guard needs lsof (shadow run 2026-11-01)
+    lsof procps zip unzip rsync jq bsdextrautils docker.io   # tools the gate's scripts call that the Macs ship
+    # with: lsof (port guard, shadow 2026-11-01); rsync (Tracegate ledger sync, shadow 3, 2026-11-02);
+    # jq, column (bsdextrautils) (gate scripts)
+  # A local git identity is in the gate env below: every Mac that gates has one, and the
+  # merge-train self-test's local merges fail without it (shadow 4, 2026-11-02).
   # Security updates daily, no automatic reboot: the VM powers off when idle and
   # boots onto the new kernel at its next gate.
   printf 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "1";\n' > /etc/apt/apt.conf.d/20auto-upgrades
@@ -58,12 +67,38 @@ if [ "$(cat /var/lib/openwop-ci/provisioned-version 2>/dev/null)" != "$PROVISION
   printf '#!/bin/sh\nexec /usr/local/bin/node %s/remote-gate-worker.mjs\n' $INSTALL > $LIBEXEC/openwop-ci-worker
   chmod 755 $LIBEXEC/openwop-ci-worker
 
+  # ADR 0863 D9 P5: the PINNED renderer for the e2e lane. The image (by digest) and
+  # its Playwright version come from metadata, copied from the candidate's
+  # frontend/react/e2e/pinned-browser.json. Root runs it; `ci` is NOT in the docker
+  # group (that is root-equivalent): the gate only connects to 127.0.0.1:3000.
+  PIN_IMAGE="$(md openwop-ci-pinned-image)"; PIN_PW="$(md openwop-ci-pinned-playwright)"
+  docker pull -q "$PIN_IMAGE"
+  cat > /etc/systemd/system/openwop-ci-pwserver.service <<UNIT
+[Unit]
+Description=ADR 0863 D9 P5: pinned Playwright browser server for the e2e lane
+After=docker.service network-online.target
+Requires=docker.service
+[Service]
+ExecStartPre=-/usr/bin/docker rm -f owci-pwserver
+ExecStart=/usr/bin/docker run --rm --name owci-pwserver --init -p 127.0.0.1:3000:3000 -v owci-pw-npm:/root/.npm $PIN_IMAGE /bin/sh -c 'cd /tmp && npx -y playwright@$PIN_PW run-server --port 3000 --host 0.0.0.0'
+ExecStop=/usr/bin/docker stop owci-pwserver
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable --now openwop-ci-pwserver.service
+
   install -d -m 755 /etc/openwop-ci
   cat > /etc/openwop-ci/worker.json <<EOF
 {"root":"$CI_HOME/gate/jobs","spoolRoot":"$CI_HOME/gate/spool","runnerRoot":"$CI_HOME/gate/runner","logRoot":"$CI_HOME/gate/logs",
  "trust":{"runnerId":"openwop-ci-gate","policySha256":"$(md openwop-ci-policy-sha)"},
  "node":"/usr/local/bin/node","installDir":"$INSTALL","launcher":"systemd-run","timing":{"maxMs":7200000},
  "env":{"PATH":"/usr/local/bin:/usr/bin:/bin","npm_config_cache":"$CI_HOME/.npm","PLAYWRIGHT_BROWSERS_PATH":"$CI_HOME/.cache/ms-playwright",
+        "GIT_AUTHOR_NAME":"openwop-ci-gate","GIT_AUTHOR_EMAIL":"ci@openwop-ci-gate.invalid",
+        "GIT_COMMITTER_NAME":"openwop-ci-gate","GIT_COMMITTER_EMAIL":"ci@openwop-ci-gate.invalid",
+        "OPENWOP_E2E_PINNED_WS":"ws://127.0.0.1:3000/",
         "GIT_CONFIG_GLOBAL":"/dev/null","GIT_CONFIG_NOSYSTEM":"1","LANG":"C.UTF-8"}}
 EOF
   chmod 644 /etc/openwop-ci/worker.json
@@ -101,7 +136,7 @@ EOF
   systemctl daemon-reload
   systemctl enable openwop-ci-recover.service openwop-ci-idle.timer
 
-  install -d -m 700 /var/lib/openwop-ci && echo "$PROVISION_VERSION" > /var/lib/openwop-ci/provisioned-version
+  install -d -m 700 /var/lib/openwop-ci && echo "$PROVISION_KEY" > /var/lib/openwop-ci/provisioned-version
 fi
 
 # Every boot: sshd accepts exactly one key, for one forced command, from IAP only.

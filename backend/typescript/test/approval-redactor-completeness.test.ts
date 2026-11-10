@@ -7,26 +7,31 @@
  * would silently leave that kind's rows un-erasable — the exact class of gap this
  * test guards. Every `APPROVAL_KINDS` entry MUST have a registered redactor:
  * built-ins register at `approvalService` module load; a feature-owned kind
- * (kicktodo-plan-proposal) registers at that feature's boot.
+ * registers at that feature's module load or boot.
+ *
+ * ADR 1031 P2 — feature-owned kinds (`featureApprovalKinds()`) are covered too,
+ * and the test now boots the real app instead of calling two named features'
+ * registrars, so it holds for any feature (first-party or adopter) without
+ * naming one.
  *
  * TST-BZB-5 (grade-tests w66). Red when a built-in kind's redactor registration is removed
  * (`funnel-publish`) or a feature-owned kind registers under a different id (claude-code).
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll } from 'vitest';
 import { APPROVAL_KINDS, getRegisteredApprovalRedactorKinds } from '../src/host/approvalService.js';
-import { registerKicktodoAccountabilityCompliance } from '../src/features/kicktodo-accountability/compliance.js';
-import { registerClaudeCodeApprovalPolicy } from '../src/features/claude-code/approvalPolicy.js';
+import { featureApprovalKinds } from '../src/host/approvalKindRegistry.js';
+import { createApp } from '../src/index.js';
+
+beforeAll(async () => {
+  // A real boot registers every feature's compliance + approval policy exactly as
+  // production does (registerBackendFeatures).
+  await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'appr5', serviceVersion: '0.0.1', enableConsoleTracer: false });
+});
 
 describe('approval redactor completeness (APPR-5)', () => {
   it('every PendingApproval kind has a registered subject redactor', () => {
-    // kicktodo-accountability OWNS its kind's redactor (registered at feature
-    // boot, not at approvalService module load) — register it as production does.
-    // Idempotent: the handlers are module-level constants that dedupe by reference.
-    registerKicktodoAccountabilityCompliance();
-    registerClaudeCodeApprovalPolicy(); // ADR 0785 P4 — feature-owned, like kicktodo's
-
     const registered = new Set(getRegisteredApprovalRedactorKinds());
-    const missing = APPROVAL_KINDS.filter((kind) => !registered.has(kind));
+    const missing = [...APPROVAL_KINDS, ...featureApprovalKinds()].filter((kind) => !registered.has(kind));
     expect(missing).toEqual([]);
   });
 });

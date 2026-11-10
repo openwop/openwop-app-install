@@ -46,6 +46,35 @@ catalog**. Replay must stay deterministic.
 3. the catalog's recommended default: the first selectable provider in
    `providers.json` and its `recommended` model.
 
+> **CORRECTED 2026-11-02 (David, in openwop-app-d3's session) — "managed bindings
+> are chat-only and are skipped" stranded every keyless workspace.** Measured on
+> myndhyve.ai prod: the "Request Sign-off" template, badged "Zero connections",
+> failed in 125 ms with `byok_required: This step needs a anthropic API key and
+> this workspace has none`. A keyless workspace fell to rung 3, the catalog's
+> first provider (Anthropic), although chat and agent steps (`preferManaged`)
+> already ran on the free tier and the site copy promises "without a key, drafts
+> run on our built-in model". The ladder is now:
+>
+> 2. the workspace's BYOK binding (unchanged; subscription bindings still skipped);
+> 3. **the managed tier**, frozen as `{provider, model, source: 'managed',
+>    credentialRef: 'managed:<id>'}`, when this host holds the managed key
+>    (`getManagedProviderStatuses` ready) and the binding IS managed or the
+>    workspace's vault holds no key that names a selectable provider;
+> 4. the catalog default, now the first selectable provider the workspace holds
+>    a key for, else the first one.
+>
+> An anonymous sandbox (no managed access), an unreadable vault and a host with
+> no managed key keep the old catalog answer, so those users still hear "add a
+> key" rather than `provider_unavailable`. `withRunAiDefault` fills the sentinel together with provider
+> and model, and leaves a call that carries its own `credentialRef` alone. The
+> sentinel is frozen on `run.metadata.aiDefault` like the rest (D2), so a fork
+> replays on the managed tier; `frozenOn` refuses a `managed` source with any
+> non-`managed:*` ref. The managed caps (daily per-tenant and per-user, ADR 0721)
+> apply to these calls. Known limit: `callAIManaged` refuses `responseSchema`
+> and embeddings, so a structured-output step on a keyless workspace now fails
+> with an honest `host_capability_missing` instead of `byok_required`. Tests:
+> `test/adr0903-managed-run-default.test.ts`, `test/adr0903-run-ai-default.test.ts`.
+
 **D2 — Rungs 2 and 3 are frozen at run creation.** A run-start contributor
 (ADR 0099, `runAiDefaultContributor`) stamps `run.metadata.aiDefault =
 {provider, model, source}` once. A derived (`:fork`) run contributes nothing and

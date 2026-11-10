@@ -25,8 +25,8 @@
  * hoped against.
  */
 
-import { readFileSync, readdirSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, readdirSync, existsSync, realpathSync, statSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
 /**
  * Capabilities whose reach means the node MUST NOT be fast-pathed, because it
@@ -141,11 +141,14 @@ export function buildImplIndex(root) {
     const index = join(packs, dir, 'index.mjs');
     if (!existsSync(index)) continue;
     const src = readFileSync(index, 'utf8');
-    for (const m of src.matchAll(/['"]([\w.-]+)['"]\s*:\s*([A-Za-z_$][\w$]*)\s*[,}]/g)) impl.set(m[1], { pack: dir, src, fn: m[2] });
-    for (const m of src.matchAll(/nodes\[\s*['"]([\w.-]+)['"]\s*\]\s*=\s*([A-Za-z_$][\w$]*)/g)) impl.set(m[1], { pack: dir, src, fn: m[2] });
+    // ADR 1048 — `file` + `packDir` let the reach walk follow a node function
+    // that index.mjs only IMPORTS (or re-exports) from a sibling module.
+    const at = { pack: dir, src, file: index, packDir: join(packs, dir) };
+    for (const m of src.matchAll(/['"]([\w.-]+)['"]\s*:\s*([A-Za-z_$][\w$]*)\s*[,}]/g)) impl.set(m[1], { ...at, fn: m[2] });
+    for (const m of src.matchAll(/nodes\[\s*['"]([\w.-]+)['"]\s*\]\s*=\s*([A-Za-z_$][\w$]*)/g)) impl.set(m[1], { ...at, fn: m[2] });
     // `'core.db.nosql-find': delegate('nosql', 'find'),` — an inline factory
     // CALL, not an identifier. Omitting this shape left ~59 nodes "unmapped".
-    for (const m of src.matchAll(/['"]([\w.-]+)['"]\s*:\s*([A-Za-z_$][\w$]*)\s*\(/g)) if (!impl.has(m[1])) impl.set(m[1], { pack: dir, src, fn: m[2] });
+    for (const m of src.matchAll(/['"]([\w.-]+)['"]\s*:\s*([A-Za-z_$][\w$]*)\s*\(/g)) if (!impl.has(m[1])) impl.set(m[1], { ...at, fn: m[2] });
   }
   if (impl.size === 0) throw new Error('the impl index is EMPTY — every node would read as unresolvable');
   return impl;
@@ -206,6 +209,52 @@ export function bodyOf(src, name, depth = 2) {
 }
 
 /**
+ * ADR 1048 — where does `name` come from, when `src` (the module at `file`)
+ * only IMPORTS it? Follows `import { a as b } from './x.mjs'` and
+ * `export { a as b } from './x.mjs'` to the sibling module that declares it.
+ *
+ * Book AI's pack is the measured case: `index.mjs` does
+ * `import { ask } from './ask.mjs'; export { ask } from './ask.mjs';`, so the
+ * single-file read found no body for `ask` and reported all 16 of its
+ * side-effect nodes `unresolved` ("fn ask not resolvable").
+ *
+ * BOUNDED IN THE SAFE DIRECTION. Only a RELATIVE specifier (`./`, `../`) is
+ * followed, and only to a file that resolves (symlinks included) INSIDE
+ * `packDir`. A bare specifier (`node:fs`, `some-lib`), an escaping path, a
+ * namespace or default import, or a missing file returns null — the node stays
+ * `unresolved` and therefore held, never silently "no AI reach".
+ */
+const NAMED_IMPORT = /\b(import|export)\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]/g;
+
+export function resolveImportedBinding(file, src, name, packDir) {
+  if (!file || !packDir) return null;
+  for (const m of src.matchAll(NAMED_IMPORT)) {
+    for (const spec of m[2].split(',')) {
+      const parts = spec.trim().split(/\s+as\s+/);
+      const imported = parts[0]?.trim();
+      const local = (parts[1] ?? parts[0])?.trim();
+      if (!imported || local !== name) continue;
+      const from = m[3];
+      if (!from.startsWith('./') && !from.startsWith('../')) return null; // bare specifier: never followed
+      const target = resolve(dirname(file), from);
+      let real;
+      let realRoot;
+      try {
+        if (!statSync(target).isFile()) return null;
+        real = realpathSync(target);
+        realRoot = realpathSync(packDir);
+      } catch {
+        return null;
+      }
+      const rel = relative(realRoot, real);
+      if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) return null; // escapes the pack dir
+      return { file: real, src: readFileSync(real, 'utf8'), name: imported };
+    }
+  }
+  return null;
+}
+
+/**
  * The TRANSITIVE body text reachable from `name` inside one pack source.
  *
  * P2 read ONE body. A node whose export is a two-line wrapper around a local
@@ -213,21 +262,41 @@ export function bodyOf(src, name, depth = 2) {
  * the arm where under-detection is dangerous. Measured on this tree: the
  * transitive walk moves `core.rag.{retriever-basic,vector-query,vector-upsert}`
  * into arm 2, which the single-body read missed.
+ *
+ * ADR 1048 — with `at = { file, packDir }` the walk also crosses into sibling
+ * modules through relative named imports (`resolveImportedBinding`), for the
+ * root AND for every helper it calls. Without `at` it is the single-file read
+ * it always was.
  */
-export function reachableText(src, rootFn, maxDepth = 5) {
-  const rootBody = bodyOf(src, rootFn);
-  if (rootBody === null) return { text: '', resolvable: false };
+export function reachableText(src, rootFn, maxDepth = 5, at = null) {
+  const locate = (name, fromSrc, fromFile) => {
+    let curSrc = fromSrc;
+    let curFile = fromFile;
+    let curName = name;
+    // A re-export chain (`index → a → b`) is followed a few hops, no further.
+    for (let hop = 0; hop < 4; hop++) {
+      const body = bodyOf(curSrc, curName);
+      if (body !== null) return { body, src: curSrc, file: curFile };
+      const next = at ? resolveImportedBinding(curFile, curSrc, curName, at.packDir) : null;
+      if (!next) return null;
+      ({ src: curSrc, file: curFile, name: curName } = next);
+    }
+    return null;
+  };
+  if (locate(rootFn, src, at?.file ?? null) === null) return { text: '', resolvable: false };
   const seen = new Set();
   let text = '';
-  const walk = (name, depth) => {
-    if (depth > maxDepth || seen.has(name)) return;
-    seen.add(name);
-    const body = bodyOf(src, name);
-    if (body === null) return;
-    text += body;
-    for (const call of body.matchAll(/\b([A-Za-z_$][\w$]{2,})\s*\(/g)) walk(call[1], depth + 1);
+  const walk = (name, fromSrc, fromFile, depth) => {
+    if (depth > maxDepth) return;
+    const key = `${fromFile ?? ''}#${name}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    const hit = locate(name, fromSrc, fromFile);
+    if (hit === null) return;
+    text += hit.body;
+    for (const call of hit.body.matchAll(/\b([A-Za-z_$][\w$]{2,})\s*\(/g)) walk(call[1], hit.src, hit.file, depth + 1);
   };
-  walk(rootFn, 0);
+  walk(rootFn, src, at?.file ?? null, 0);
   return { text, resolvable: true };
 }
 
@@ -252,7 +321,7 @@ export function reachableText(src, rootFn, maxDepth = 5) {
 export function classifyNodeReach(typeId, impl) {
   const info = impl.get(typeId);
   if (!info) return { kind: 'unresolved', why: 'no index.mjs mapping' };
-  const { text, resolvable } = reachableText(info.src, info.fn);
+  const { text, resolvable } = reachableText(info.src, info.fn, 5, info.file ? { file: info.file, packDir: info.packDir } : null);
   if (!resolvable) return { kind: 'unresolved', why: `fn ${info.fn} not resolvable` };
   if (INVOCATION_LOGGED.test(text)) return { kind: 'invocation-log' };
   const caps = OPAQUE_HOST_AI_CAPABILITIES.filter((c) => reaches(text, c));

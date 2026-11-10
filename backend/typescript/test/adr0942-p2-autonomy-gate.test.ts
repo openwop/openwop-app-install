@@ -13,6 +13,19 @@
  *  - make `compileApproverSpec` emit no approverRoleRefs → red (MCP consumes the gate; a non-admin's vote counts);
  *  - drop the `legacy` branch in `decideGate` → red (toggle OFF no longer yields today's open gate);
  *  - read the live overlay on a replay (drop the `replaying` check in the surface) → red (the replayed verdict is blocked).
+ * Re-measured wave 80 (each red): self-approval is checked TWICE in `resolveAndResume`
+ * (before and after eligibility), so dropping one copy is green by design; nulling
+ * `autonomyApproval` breaks both and reds every self-vote case. Also red: the reject
+ * carve-out, `approverRoleRefs` / `requiredApprovals` in `compileApproverSpec`, both
+ * legacy arms of `decideGate`, its stamp-present clause, the proceed branch, the
+ * paused overlay, the config-approver refusal, actor-before-cause, and the
+ * unresolved-voter fail-closed.
+ *
+ * The MCP refusal on a campaign gate is held FOUR times (`needsNamedApprover`,
+ * `isCampaignRun`, the token-lane trust check, `resolveAndResume`), so no single probe
+ * reds it: a recorded ceiling. The cases assert the refusal TEXT so a different
+ * failure cannot stand in. Each case that edits a policy or a campaign status uses a
+ * campaign of its own (`freshCampaign`), so the file is order-independent.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -42,7 +55,7 @@ import { issueApiKey } from '../src/features/developer-keys/apiKeyService.js';
 import { opaquePrincipal } from '../src/host/runOwner.js';
 import { isAutonomyRequester } from '../src/host/autonomyPolicy/selfApproval.js';
 import {
-  AUTONOMY_TOGGLE, bindClientPresetIfAbsent, decideGate, getBinding, presetRules, savePolicy, type ActionRule,
+  AUTONOMY_TOGGLE, bindClientPresetIfAbsent, decideGate, getBinding, presetRules, savePolicy, type ActionRule, type PolicyInput,
 } from '../src/host/autonomyPolicy/index.js';
 import type { WorkflowDefinition } from '../src/executor/types.js';
 import type { Principal, RunRecord } from '../src/types.js';
@@ -85,6 +98,16 @@ async function gateRun(opts: { tagged?: boolean; actingUserId?: string; extra?: 
 }
 
 const statusOf = async (runId: string): Promise<string | undefined> => (await storage.getRun(runId))?.status;
+const MCP_REFUSAL = 'this approval needs a named approver — decide it in the inbox';
+
+/** A campaign of the case's own on the Guarded client, optionally with its own policy,
+ *  so no case's policy edit reaches another (order-independent under shuffle). */
+async function freshCampaign(policy?: PolicyInput): Promise<MarketingCampaign> {
+  const brief = await createBrief(TENANT, orgId, 'u-owner', { name: `Case ${n++}`, channels: [{ type: 'email_sequence', enabled: true, config: {} }] });
+  const c = (await ensureDraftCampaign(TENANT, brief, 'u-owner')).campaign;
+  if (policy) await savePolicy({ tenantId: TENANT, orgId, campaignId: c.id, input: policy, actor: 'u-owner', expected: await getBinding(TENANT, orgId, c.id) });
+  return c;
+}
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -103,14 +126,14 @@ beforeAll(async () => {
       return { status: 'failure', error: { code: r.error?.code ?? 'pack_node_error', message: r.error?.message ?? 'Pack node returned non-success outcome' } };
     },
   });
-  const def = {
-    workflowId: WF, name: WF, version: '1.0.0',
+  const def: WorkflowDefinition = {
+    workflowId: WF,
     nodes: [
       { nodeId: 'kernel-approve', typeId: GATE, config: { actionClass: 'plan.approve', prompt: 'Approve the messaging kernel?' } },
       { nodeId: 'after', typeId: 'core.noop', config: {} },
     ],
     edges: [{ edgeId: 'e1', sourceNodeId: 'kernel-approve', targetNodeId: 'after', triggerRule: 'all_success' }],
-  } as unknown as WorkflowDefinition;
+  };
   registerHostWorkflow(def);
   await setToggle('campaign-orchestration', true);
   await setToggle(AUTONOMY_TOGGLE, true);
@@ -157,9 +180,9 @@ describe('ADR 0942 D5 — the gate suspends as an approval decided by the policy
   it('an MCP resumeInterrupt on the gate is refused and the gate stays open', async () => {
     const { run, interruptId } = await gateRun();
     if (!interruptId) throw new Error('expected an open gate');
-    const deps = { storage, hostSuite, principal: { principalId: 'mcp:peer', tenants: [TENANT] } as unknown as Principal };
-    const out = await resumeInterrupt(deps, interruptId, { action: 'approve' });
-    expect(out.kind).toBe('failed');
+    const principal: Principal = { principalId: 'mcp:peer', tenants: [TENANT], token: '' };
+    const out = await resumeInterrupt({ storage, hostSuite, principal }, interruptId, { action: 'approve' });
+    expect(out).toMatchObject({ kind: 'failed', text: MCP_REFUSAL });
     expect((await storage.getInterrupt(interruptId))?.resolvedAt).toBeUndefined();
     expect(await statusOf(run.runId)).toBe('waiting-approval');
   });
@@ -168,8 +191,8 @@ describe('ADR 0942 D5 — the gate suspends as an approval decided by the policy
     const rules: ActionRule[] = presetRules('guarded@1').map((r) => (r.actionClass === 'plan.approve'
       ? { actionClass: 'plan.approve', default: { outcome: 'approve', approver: { roleRefs: ['owner', 'admin'], requiredApprovals: 2, delegation: 'allowed' } } }
       : r));
-    await savePolicy({ tenantId: TENANT, orgId, campaignId: campaign.id, input: { kind: 'custom', name: 'Two sign-offs', basePreset: 'guarded@1', rules }, actor: 'u-owner', expected: null });
-    const { run, interruptId } = await gateRun();
+    const own = await freshCampaign({ kind: 'custom', name: 'Two sign-offs', basePreset: 'guarded@1', rules });
+    const { run, interruptId } = await gateRun({ campaign: own });
     if (!interruptId) throw new Error('expected an open gate');
     expect((await storage.getInterrupt(interruptId))?.data).toMatchObject({ requiredApprovals: 2 });
     for (const action of ['approve', 'accept']) {
@@ -211,11 +234,11 @@ describe('ADR 0942 recovery — requester aliases deny without granting authorit
   });
 
   it.each(['subworkflow', 'canvas'] as const)('%s retains frozen policy and refuses the causing admin and their key', async (method) => {
-    await savePolicy({ tenantId: TENANT, orgId, campaignId: campaign.id, input: { kind: 'preset', preset: 'guarded@1' }, actor: 'u-owner', expected: await getBinding(TENANT, orgId, campaign.id) });
-    const { run: parent } = await gateRun();
+    const own = await freshCampaign({ kind: 'preset', preset: 'guarded@1' });
+    const { run: parent } = await gateRun({ campaign: own });
     const frozen = parent.metadata?.campaignAutonomy;
     // A live edit cannot relax the already-started parent's child.
-    await savePolicy({ tenantId: TENANT, orgId, campaignId: campaign.id, input: { kind: 'preset', preset: 'autopilot@1' }, actor: 'u-owner', expected: await getBinding(TENANT, orgId, campaign.id) });
+    await savePolicy({ tenantId: TENANT, orgId, campaignId: own.id, input: { kind: 'preset', preset: 'autopilot@1' }, actor: 'u-owner', expected: await getBinding(TENANT, orgId, own.id) });
     const childWorkflowId = `${WF}.child-${n++}`;
     const original = (await hostSuite.workflowCatalog.getWorkflow(WF))!.definition;
     const childDefinition: WorkflowDefinition = { ...original, workflowId: childWorkflowId };
@@ -236,7 +259,7 @@ describe('ADR 0942 recovery — requester aliases deny without granting authorit
     expect(child.metadata?.owner).toBeUndefined();
     expect(child.metadata?.orgScopeSubject).toBe('u-requester');
     expect(child.metadata?.campaignAutonomy).toEqual(frozen);
-    expect((await gateRun()).interruptId).toBeUndefined(); // fresh parent gets the live edit
+    expect((await gateRun({ campaign: own })).interruptId).toBeUndefined(); // fresh parent gets the live edit
     const [gate] = await storage.listOpenInterrupts(child.runId);
     if (!gate) throw new Error('expected inherited Guarded gate');
     const { key } = await issueApiKey({ tenantId: TENANT, name: `${method} requester`, createdBy: 'u-requester' });
@@ -254,21 +277,25 @@ describe('ADR 0942 recovery — requester aliases deny without granting authorit
 
 describe('ADR 0942 D5 — proceed, blocked and legacy', () => {
   it('Autopilot plan.approve proceeds with the decision recorded, no interrupt', async () => {
-    await savePolicy({
-      tenantId: TENANT, orgId, campaignId: campaign.id, input: { kind: 'preset', preset: 'autopilot@1' }, actor: 'u-owner',
-      expected: await getBinding(TENANT, orgId, campaign.id),
-    });
-    const { run, interruptId, status } = await gateRun();
+    const own = await freshCampaign({ kind: 'preset', preset: 'autopilot@1' });
+    const { run, interruptId, status } = await gateRun({ campaign: own });
     expect(interruptId).toBeUndefined();
     expect(status).toBe('completed');
-    void run;
+    // The decision is recorded on the gate's own output.
+    const done = (await storage.listEvents(run.runId)).find((e) => e.type === 'node.completed' && e.nodeId === 'kernel-approve')?.payload;
+    expect(done).toMatchObject({ outputs: { decision: 'notify-after', ruleId: 'plan.approve#default' } });
   });
 
   it('a paused campaign blocks the gate live (tighten-only overlay)', async () => {
-    await updateCampaignStatus(TENANT, campaign.id, 'paused', 'u-owner');
-    const blocked = decideGate({ run: (await gateRun({}).then((r) => r.run)), actionClass: 'social.post', facts: {}, toggleOn: true, live: { campaignStatus: 'paused' } });
-    expect(blocked).toMatchObject({ mode: 'blocked', reason: 'campaign_paused' });
-    await updateCampaignStatus(TENANT, campaign.id, 'draft', 'u-owner');
+    const own = await freshCampaign();
+    const { run } = await gateRun({ campaign: own });
+    await updateCampaignStatus(TENANT, own.id, 'paused', 'u-owner');
+    try {
+      const blocked = decideGate({ run, actionClass: 'social.post', facts: {}, toggleOn: true, live: { campaignStatus: 'paused' } });
+      expect(blocked).toMatchObject({ mode: 'blocked', reason: 'campaign_paused' });
+    } finally {
+      await updateCampaignStatus(TENANT, own.id, 'draft', 'u-owner');
+    }
   });
 
   it('toggle OFF and an unstamped run: exactly today\'s open gate (no approvers, no autonomy block)', async () => {
@@ -299,22 +326,23 @@ describe('ADR 0942 D5 — proceed, blocked and legacy', () => {
 
 describe('ADR 0942 D4 — a replay re-derives nothing from the live overlay', () => {
   it('the surface blocks a paused campaign live, but not while replaying', async () => {
-    const run = (await gateRun()).run; // a stamped Autopilot run (the policy set above)
+    const own = await freshCampaign({ kind: 'preset', preset: 'autopilot@1' });
+    const run = (await gateRun({ campaign: own })).run; // a stamped Autopilot run of its own
     const surface = buildCampaignStudioSurface({ tenantId: TENANT, runId: run.runId });
     const facts = { spendMinor: 0, audienceSize: 1, regulatedCategory: false, findingsHigh: 0, firstForDestination: false };
-    await updateCampaignStatus(TENANT, campaign.id, 'paused', 'u-owner');
+    await updateCampaignStatus(TENANT, own.id, 'paused', 'u-owner');
     try {
       const live = await surface.autonomyResolve({ actionClass: 'social.post', facts });
       expect(live).toMatchObject({ mode: 'blocked', reason: 'campaign_paused' });
       const replayed = await runWithEffectContext({ runId: run.runId, replaying: true }, () => surface.autonomyResolve({ actionClass: 'social.post', facts }));
       expect(replayed).toMatchObject({ mode: 'proceed', outcome: 'notify-after' });
     } finally {
-      await updateCampaignStatus(TENANT, campaign.id, 'draft', 'u-owner');
+      await updateCampaignStatus(TENANT, own.id, 'draft', 'u-owner');
     }
   });
 
   it('a stamped run\'s verdict does not depend on the toggle (replay never reads toggles)', async () => {
-    const run = (await gateRun()).run;
+    const run = (await gateRun({ campaign: await freshCampaign({ kind: 'preset', preset: 'autopilot@1' }) })).run;
     const facts = { spendMinor: 0, audienceSize: 1, regulatedCategory: false, findingsHigh: 0, firstForDestination: false };
     expect(decideGate({ run, actionClass: 'social.post', facts, toggleOn: true })).toEqual(decideGate({ run, actionClass: 'social.post', facts, toggleOn: false }));
   });
@@ -329,7 +357,8 @@ describe('ADR 0962 D4 — an external agent cannot satisfy a campaign gate', () 
     const brief = await createBrief(TENANT, orgId, 'u-owner', { name: 'MCP request', channels: [{ type: 'email_sequence', enabled: true, config: {} }] });
     guardedCampaign = (await ensureDraftCampaign(TENANT, brief, 'u-owner')).campaign;
   });
-  const mcpDeps = () => ({ storage, hostSuite, principal: { principalId: 'u-requester', tenants: [TENANT] } as unknown as Principal });
+  const mcpPrincipal: Principal = { principalId: 'u-requester', tenants: [TENANT], token: '' };
+  const mcpDeps = () => ({ storage, hostSuite, principal: mcpPrincipal });
 
   it('D4.2: the person whose key the agent holds cannot approve what their agent requested; another admin can', async () => {
     const { run, interruptId } = await gateRun({ extra: MCP_RUN, campaign: guardedCampaign });
@@ -337,7 +366,7 @@ describe('ADR 0962 D4 — an external agent cannot satisfy a campaign gate', () 
     await expect(resolveAndResume(storage, hostSuite, interruptId, { action: 'approve' }, { subjectRef: 'u-requester' }))
       .rejects.toMatchObject({ httpStatus: 403, details: { reason: 'autonomy_self_approval_refused' } });
     // Nor through the agent's own MCP retry.
-    expect((await resumeInterrupt(mcpDeps(), interruptId, { action: 'approve' })).kind).toBe('failed');
+    expect(await resumeInterrupt(mcpDeps(), interruptId, { action: 'approve' })).toMatchObject({ kind: 'failed', text: MCP_REFUSAL });
     expect((await storage.getInterrupt(interruptId))?.resolvedAt).toBeUndefined();
     await resolveAndResume(storage, hostSuite, interruptId, { action: 'approve' }, { subjectRef: 'u-admin-2' });
     await __awaitRunResumeChainForTests(run.runId);
@@ -352,7 +381,7 @@ describe('ADR 0962 D4 — an external agent cannot satisfy a campaign gate', () 
       const it = await storage.getInterrupt(interruptId);
       expect(it?.data).not.toHaveProperty('approverRoleRefs'); // the legacy, ACL-less shape
       const out = await resumeInterrupt(mcpDeps(), interruptId, { action: 'approve' });
-      expect(out.kind).toBe('failed');
+      expect(out).toMatchObject({ kind: 'failed', text: MCP_REFUSAL });
       expect((await storage.getInterrupt(interruptId))?.resolvedAt).toBeUndefined();
       expect(await statusOf(run.runId)).toBe('waiting-approval');
     } finally {

@@ -8,7 +8,9 @@
  * resumed a `core.flow.wait` through the sweep; the ADR 0778 C1 witness uses a clarify gate.
  *
  * Sabotage witnessed: `waitNode` returning `ctx.suspend(...)` bare (the pre-fix code) reds
- * "completes" with `pack_node_error` on the wait node.
+ * "completes" with `pack_node_error` on the wait node. So do the sweep not resuming, a
+ * deadline in the wrong unit, and the continuation carrying another value. A config
+ * timestamp beating a wired one, and an invalid wired deadline, red the first block.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -23,6 +25,11 @@ import { sweepDueTimers } from '../src/executor/timerResume.js';
 import { timerResumeContinuation } from '../src/routes/interrupts.js';
 import { bareRunId } from './support/bareRunId.js';
 import type { WorkflowDefinition } from '../src/executor/types.js';
+
+interface FlowPack {
+  waitNode: (context: { inputs: { timestamp?: unknown }; config: { mode: string; timestamp?: string }; suspend: (data: unknown) => Promise<unknown> }) => Promise<unknown>;
+}
+const pack = await import(new URL('../../../packs/core.openwop.flow/index.mjs', import.meta.url).href) as FlowPack;
 
 let BASE = '';
 let server: http.Server;
@@ -48,13 +55,11 @@ describe('core.flow.wait — recorded timestamp input', () => {
     { name: 'wired input takes precedence', inputs: { timestamp: deadline }, config: { mode: 'until', timestamp: fallback }, expected: deadline },
     { name: 'legacy config fallback', inputs: {}, config: { mode: 'until', timestamp: fallback }, expected: fallback },
   ])('$name', async ({ inputs, config, expected }) => {
-    const pack = await import(new URL('../../../packs/core.openwop.flow/index.mjs', import.meta.url).href) as { waitNode: (context: { inputs: { timestamp?: string }; config: { mode: string; timestamp?: string }; suspend: (data: unknown) => Promise<unknown> }) => Promise<unknown> };
     const suspend = vi.fn().mockResolvedValue({ elapsed: true });
     expect(await pack.waitNode({ inputs, config, suspend })).toEqual({ status: 'success', outputs: { resumed: true, payload: { elapsed: true } } });
     expect(suspend).toHaveBeenCalledExactlyOnceWith({ kind: 'until', timestamp: expected });
   });
   it.each(['not-a-timestamp', '2026', '', null])('rejects invalid wired deadline %j before creating an interrupt', async (timestamp) => {
-    const pack = await import(new URL('../../../packs/core.openwop.flow/index.mjs', import.meta.url).href) as { waitNode: (context: { inputs: { timestamp: unknown }; config: { mode: string }; suspend: (data: unknown) => Promise<unknown> }) => Promise<unknown> };
     const suspend = vi.fn().mockResolvedValue({ elapsed: true });
     await expect(pack.waitNode({ inputs: { timestamp }, config: { mode: 'until' }, suspend })).rejects.toMatchObject({ code: 'CONFIG_INVALID' });
     expect(suspend).not.toHaveBeenCalled();
@@ -65,7 +70,7 @@ function client(): (method: string, path: string, body?: unknown) => Promise<{ s
   let cookie = '';
   return async (method, path, body) => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]!; }
+    for (const c of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]!; }
     return { status: res.status, body: (await res.json().catch(() => ({}))) as Record<string, unknown> };
   };
 }
@@ -75,13 +80,12 @@ describe('core.flow.wait — a timed wait resumes and the run goes on', () => {
     const workflowId = `wf.flow-wait.${randomBytes(3).toString('hex')}`;
     const def: WorkflowDefinition = {
       workflowId,
-      name: 'wait then finish',
       nodes: [
         { nodeId: 'wait', typeId: 'core.flow.wait', config: { mode: 'duration', seconds: 60 } },
         { nodeId: 'after', typeId: 'core.flow.noop' },
       ],
-      edges: [{ from: 'wait', to: 'after' }],
-    } as unknown as WorkflowDefinition;
+      edges: [{ edgeId: 'wait-after', sourceNodeId: 'wait', targetNodeId: 'after' }],
+    };
     registerWorkflow(def);
     const call = client();
     expect((await call('POST', '/host/openwop-app/test/login', { email: `fw-${randomBytes(3).toString('hex')}@acme.test`, tenantId: `org:fw-${randomBytes(3).toString('hex')}` })).status).toBe(201);
@@ -105,12 +109,21 @@ describe('core.flow.wait — a timed wait resumes and the run goes on', () => {
       vi.setSystemTime(later);
       expect(await sweepDueTimers(storage, timerResumeContinuation(storage, hostSuite), later)).toBe(1);
     } finally { vi.useRealTimers(); }
-    const end = await settle();
+    const terminal = async (): Promise<Record<string, unknown>> => {
+      for (let i = 0; i < 200; i++) {
+        const b = (await call('GET', `/runs/${runId}`)).body;
+        if (['completed', 'failed', 'cancelled'].includes(String(b.status))) return b;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      return { status: 'timeout' };
+    };
+    const end = await terminal();
     expect(end.status, JSON.stringify(end)).toBe('completed');
 
     const bundle = (await call('GET', `/host/openwop-app/runs/${bareRunId(runId)}/debug-bundle`)).body;
-    const waited = ((bundle.events ?? []) as Array<{ type?: string; nodeId?: string; payload?: { outputs?: unknown } }>)
-      .find((e) => e.type === 'node.completed' && e.nodeId === 'wait');
-    expect(waited?.payload?.outputs).toEqual({ resumed: true, payload: { elapsed: true, reason: 'timer' } });
+    const completed = ((bundle.events ?? []) as Array<{ type?: string; nodeId?: string; payload?: { outputs?: unknown } }>)
+      .filter((e) => e.type === 'node.completed');
+    expect(completed.map((e) => e.nodeId), 'the run goes on: `after` ran, and after the wait').toEqual(['wait', 'after']);
+    expect(completed[0]?.payload?.outputs).toEqual({ resumed: true, payload: { elapsed: true, reason: 'timer' } });
   });
 });

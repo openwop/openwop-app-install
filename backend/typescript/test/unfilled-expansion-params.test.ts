@@ -35,6 +35,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { expandChain, findUnfilledExpansionParams, type WorkflowChain } from '../src/host/workflowChainPackLoader.js';
 import type { WorkflowDefinition } from '../src/executor/types.js';
 
@@ -62,6 +63,33 @@ const chain: WorkflowChain = {
 const expand = (params: Record<string, unknown>): WorkflowDefinition => expandChain(chain, { params });
 
 describe('an unfrozen param is recorded at expansion', () => {
+  it('does not claim the actual daily-metrics optional settings override is a missing input', () => {
+    const pack = JSON.parse(readFileSync(new URL('../../../examples/workflow-chain-packs/campaign-sync/pack.json', import.meta.url), 'utf8')) as { chains: WorkflowChain[] };
+    const syncChain = pack.chains.find((c) => c.chainId === 'campaign-sync.daily-metrics');
+    if (!syncChain) throw new Error('The real daily metrics chain must exist');
+    const omitted = expandChain(syncChain, { params: { orgId: 'client', platform: 'google' } });
+    expect(findUnfilledExpansionParams(omitted)).toEqual([]);
+    const sync = omitted.nodes.find((n) => n.typeId.includes('campaign-connectors.nodes.sync'));
+    expect(JSON.parse(JSON.stringify(sync?.inputs ?? {}))).not.toHaveProperty('syncScope'); // persistence omits it; runtime uses connector settings
+    const explicit = expandChain(syncChain, { params: { orgId: 'client', platform: 'google', syncScope: 'account' } });
+    expect(explicit.nodes.find((n) => n.typeId.includes('campaign-connectors.nodes.sync'))?.inputs).toMatchObject({ syncScope: 'account' });
+    expect(findUnfilledExpansionParams(expandChain(syncChain, { params: { platform: 'google' } })).map((f) => f.param)).toEqual(['orgId']);
+  });
+
+  it('preserves nested required and undeclared findings while allowing optional inputs and defaults', () => {
+    const nested: WorkflowChain = {
+      ...chain,
+      parameters: { ...chain.parameters, properties: { topic: { type: 'string' }, note: { type: 'string' }, fallback: { type: 'string', default: 'default value' } } },
+      dag: { nodes: [{ id: 'search', typeId: 'core.web.search', config: { nested: { required: '{{params.topic}}', optional: '{{params.note}}', fallback: '{{params.fallback}}', typo: '{{params.topci}}' } } }] },
+    };
+    const def = expandChain(nested, { params: {} });
+    expect(findUnfilledExpansionParams(def)).toEqual([
+      expect.objectContaining({ key: 'nested.required', param: 'topic' }),
+      expect.objectContaining({ key: 'nested.typo', param: 'topci' }),
+    ]);
+    expect(def.nodes[0]?.config).toMatchObject({ nested: { fallback: 'default value' } });
+  });
+
   it('records the param when it is absent — the minted value is undefined, and persistence then drops the key', () => {
     const def = expand({});
     const search = def.nodes.find((n) => n.typeId === 'core.web.search')!;

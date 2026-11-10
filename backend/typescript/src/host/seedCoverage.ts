@@ -39,19 +39,7 @@ export const ACKNOWLEDGED_UNSEEDED: Readonly<Record<string, string>> = {
     'ranked work selection (ADR 0534) — the feature PERSISTS NOTHING. The ranking is recomputed per heartbeat pass from live card fields (priority, dueAt, age, blockerNote); there is no store, no table and no KV namespace to seed. What a demo needs is richer KANBAN cards, which the kanban seeders own — see DATA-ASSESSMENT-work-loop-0534-0535.md SEED-WL-1.',
   'agent-author':
     'describe-to-create authoring (ADR 0514) — the feature PRODUCES agents; its data is whatever a user authors by using it, and an authored agent lands DISABLED pending human review. Seeding fake authored agents would fabricate the artifact the feature exists to demonstrate, and they would sit disabled anyway. The demo roster is already populated by the base agent seeders.',
-  'kicktodo-engagement':
-    'engagement (ADR 0425) — opt-in rows encode REAL user consent to visibility; awards/stats derive from real check-ins. Seeding either would fabricate both.',
-  'kicktodo-metrics':
-    'metrics (ADR 0432) — every number is COMPUTED ON READ from real enrollments/check-ins/candidates; there is nothing to seed, and seeded outcomes would fabricate evidence that the product works.',
-  'kicktodo-organizations':
-    'org programs (ADR 0428) — libraries/cohort links are REAL org-admin curation over accessControl orgs; reports derive from real cohort outcomes. Seeding would fabricate governance decisions.',
-  'kicktodo-community':
-    'community (ADR 0426) — profiles need REAL approval decisions; reviews need REAL purchase/completion proof. Seeding either would fabricate social trust signals.',
-  'kicktodo-integrations': 'integration consents (ADR 0421) — consent rows encode REAL user decisions over live Connections; seeded fake consents would fabricate consent. Lanes activate through real usage.',
-  'kicktodo-accountability': 'accountability circles/grants (ADR 0419) — grants encode REAL consent between real subjects; seeded fake grants would fabricate consent. Demo circles ride real usage.',
-  'kicktodo-commerce': 'money adapter (ADR 0420) — entitlements derive from REAL paid orders via the fulfilment observers; seeding fake entitlements would fabricate money truth. Demo commerce data rides the commerce feature seeds.',
-  'kicktodo-creator': 'Challenge Factory (ADR 0415) — candidates are produced by governed research with REAL provider evidence (stub retrieval fails closed); a seeded fake candidate would carry fabricated provenance. Content ops (D5) seeds the first real catalog.',
-  'kicktodo-core': 'KickTodo consumer spine (ADR 0414) — challenge content is produced by the governed Challenge Factory (ADR 0415) with provenance/evidence bundles; a fabricated demo challenge would violate the PRD content-provenance rule. Seeded content lands with the D-stream factory MVP.',
+  'channel-ingress': 'channels into chat (ADR 1042) — every conversation is created by a VERIFIED message from a live Telegram/Slack/Discord/WhatsApp connection or a registered relay device, from a sender the owner approved; a demo seed would fabricate outsiders\' messages and approvals the tenant never had',
   whatsapp: 'official BSP messaging channel (ADR 0394) — sends require a live Twilio connection + a bound WhatsApp number + recipient opt-in; no tenant demo entity to seed',
   webinars: 'Zoom webinar connector (ADR 0404) — marketing-events + attendance activities are INGESTED from a live Zoom OAuth connection (registration/attend/no-show webhooks + report sync); a demo seed would fabricate webinar events + fake registrant attendance the tenant never ran',
   'creative-video': 'AI avatar video provider (ADR 0404) — generations require a live HeyGen-class connection + count against the metered (default-OFF) video budget; produced assets land in the (seeded) media library from real jobs, so there is no standalone demo entity to seed',
@@ -137,16 +125,23 @@ export interface SeedCoverageRow {
 
 /** One row per toggled feature, sorted by toggle id. */
 export function buildSeedCoverage(): SeedCoverageRow[] {
+  // ADR 1031 — a feature may declare its own coverage on `BackendFeature.demo`
+  // (an adopter's feature cannot edit the two lists above). Declared-on-feature
+  // counts exactly like listed-here.
+  const seeded = new Set([...SEEDED, ...BACKEND_FEATURES.flatMap((f) => [...(f.demo?.enableToggles ?? [])])]);
   return BACKEND_FEATURES.filter((f) => f.toggleDefault)
     .map((f) => {
       const toggleId = f.toggleDefault!.id;
-      const acknowledged = Object.prototype.hasOwnProperty.call(ACKNOWLEDGED_UNSEEDED, toggleId);
+      const reason = Object.prototype.hasOwnProperty.call(ACKNOWLEDGED_UNSEEDED, toggleId)
+        ? ACKNOWLEDGED_UNSEEDED[toggleId]
+        : f.demo?.unseededReason;
+      const acknowledged = reason !== undefined;
       return {
         featureId: f.id,
         toggleId,
-        seeded: SEEDED.has(toggleId),
+        seeded: seeded.has(toggleId),
         acknowledged,
-        ...(acknowledged ? { reason: ACKNOWLEDGED_UNSEEDED[toggleId] } : {}),
+        ...(acknowledged ? { reason } : {}),
       };
     })
     .sort((a, b) => a.toggleId.localeCompare(b.toggleId));

@@ -13,8 +13,11 @@
  * account, a failed read stops being a typed failure, `platform_unsupported` is
  * dropped, or ad-metrics reads without an account — each sabotage-witnessed (w65).
  */
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ensureNodesRegistered } from '../src/bootstrap/nodes.js';
+import { openStorage } from '../src/storage/index.js';
+import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { setAdsCampaignOwnershipChecker } from '../src/host/adsAdapter.js';
 import { getNodeRegistry } from '../src/executor/nodeRegistry.js';
 import type { NodeContext } from '../src/executor/types.js';
 
@@ -39,7 +42,18 @@ function adsDouble(over: AdsSurface['getMetrics'] | Pick<Partial<AdsSurface>, 'g
 }
 
 describe('ADR 0186 slice 4a/4b — ad-metrics + ad-budget-update nodes', () => {
-  beforeAll(() => ensureNodesRegistered());
+  beforeAll(async () => {
+    ensureNodesRegistered();
+    // A live change resolves the run's org and asks who owns the campaign before
+    // the adapter call (its own witnesses: adr1022-ad-budget-node-org). Here: an
+    // unstamped, actorless run (its org is its workspace), and a campaign it owns.
+    const storage = await openStorage('memory://');
+    initHostExtPersistence(storage);
+    const now = new Date().toISOString();
+    await storage.insertRun({ runId: 'run_1', workflowId: 'wf.ads-budget', tenantId: 'demo', status: 'running', inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now });
+    setAdsCampaignOwnershipChecker(async () => true);
+  });
+  afterAll(() => setAdsCampaignOwnershipChecker(null));
   const metricsNode = () => getNodeRegistry().get('core.openwop.connectors.ad-metrics')!;
   const budgetNode = () => getNodeRegistry().get('core.openwop.connectors.ad-budget-update')!;
 

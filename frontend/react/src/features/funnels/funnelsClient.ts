@@ -84,7 +84,8 @@ export interface FunnelDraft { name: string; slug?: string; steps?: Array<Pick<F
  *  this workspace" answer the page renders. */
 export async function getFunnel(orgId: string, funnelId: string): Promise<Funnel> {
   const res = await fetch(`${orgBase(orgId)}/${encodeURIComponent(funnelId)}`, { headers: authedHeaders(), ...fetchOpts });
-  return parse<Funnel>(res);
+  // The existing GET response wraps the entity beside its public URL.
+  return (await parse<{ funnel: Funnel; publicUrl: string }>(res)).funnel;
 }
 
 export async function createFunnel(orgId: string, draft: FunnelDraft): Promise<Funnel> {

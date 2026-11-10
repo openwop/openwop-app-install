@@ -34,6 +34,7 @@ import { exportConversationAsDocument } from './asDocumentService.js';
 import { authorizeConversationRead, refuseUnlessSoleAuthor, refuseUnlessSoleOwner } from './access.js';
 import { hostExtStorage } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
+import { isChannelIngressConversation } from '../../host/channelConversationGuard.js';
 
 /** CX2CD-1 — the stored messages decide too: a removed participant's words stay. */
 async function soleAuthorRefusal(sessionId: string, actor: string): Promise<ReturnType<typeof refuseUnlessSoleAuthor>> {
@@ -96,6 +97,12 @@ export function registerChatExportAgentTools(): void {
         throw err;
       }
       const { session, meta } = read;
+      // ADR 1042 (review round 4) — a channel-ingress conversation holds outsiders'
+      // words (authorSubject null, so the sole-author check below would pass) and is
+      // erased with its thread; a Document copy would escape that erasure.
+      if (await isChannelIngressConversation(scope.tenantId, sessionId)) {
+        return toolError('channel_ingress_conversation', 'This conversation came from an external chat channel, so it cannot be saved as a Document.');
+      }
       // Org resolution + the SAME write RBAC the documents write path enforces.
       const orgs = await listOrgs(scope.tenantId);
       const orgId = optStr(input.orgId) ?? (orgs.length === 1 ? orgs[0]!.orgId : undefined);

@@ -33,7 +33,7 @@ describe('deterministic cardId create (ADR 0311 / GC-0311-1)', () => {
     await storage.close();
   });
 
-  const DET_ID = 'kicktodo:enr-1:2026-07-18:act-1:rev1';
+  const DET_ID = 'acme:enr-1:2026-07-18:act-1:rev1';
 
   it('same-board re-create with the same cardId returns the EXISTING card untouched', async () => {
     const board = await createBoard({ tenantId: 't-det', name: 'Participant actions' });
@@ -51,7 +51,7 @@ describe('deterministic cardId create (ADR 0311 / GC-0311-1)', () => {
 
   it('a cardId existing on a DIFFERENT board fails closed (no silent overwrite)', async () => {
     // Own source card — this case must not depend on the case above (shuffle).
-    const COLLIDE_ID = 'kicktodo:enr-2:2026-07-18:act-1:rev1';
+    const COLLIDE_ID = 'acme:enr-2:2026-07-18:act-1:rev1';
     const source = await createBoard({ tenantId: 't-det', name: 'Source board' });
     await createCard({ boardId: source.id, columnId: source.columns[0].id, title: 'Owned action', cardId: COLLIDE_ID });
     const other = await createBoard({ tenantId: 't-det', name: 'Another board' });

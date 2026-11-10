@@ -12,6 +12,85 @@
 the `NotificationRecord.actionUrl` field (`backend/typescript/src/types.ts`), the
 Funnels/Forms query-param deep-link precedent, and the CRM/Projects/Runs detail-route precedent.
 
+## Correction — KB organization and read ownership (2026-11-07)
+
+The URL spine alone did not give the KB page coherent resource ownership.
+Changing Organization cleared `collection` but retained `doc`; the org hook and
+URL could settle separately while the retained collection array still validated
+an old ID. Document-list reads accepted that raw tuple, and unguarded collection
+and document callbacks could overwrite the new scope with an old failure or
+success. The backend correctly refused mismatched org/collection/document reads;
+this correction does not change its authorization or not-found behavior.
+
+Keep the existing shared org selector and host routes. Page-local org, selection
+and resource identities now own collection/document/detail reads and their
+rendered state. Organization changes remove both child query keys, and valid
+history/deep links reconcile through the existing org owner before dependent
+reads. The existing shared org-selector fetcher confirms the auth epoch and
+latest catalog issuance; old catalog rows cannot authorize dependent reads or
+new controls while a workspace refresh is loading or failed. Focus requests
+carry their resource owner, so a current same-org deletion can still focus the
+rail after its delayed refresh, while an old-scope request cannot steal focus.
+Only a collection confirmed by its current org list can start document
+reads; only a current listed document can start a detail read. Latest-issued
+same-resource reads own their outcomes; obsolete successes, failures and loading
+settlements cannot repaint a new scope. A current failed read remains a retryable
+failure and an actual empty success remains an empty state.
+
+Search, quality and media reads use that same feature-local ownership boundary.
+Parent create/ingest/config/delete continuations check the captured selection
+before UI refresh, form clearing, feedback and busy settlement, including after
+confirmation/file conversion before issuing a write. Already-issued server writes
+are neither cancelled nor rolled back; stale completions are only prevented from
+changing another scope's UI. ReindexPanel's existing BYOK/confirmation authority
+and the backend remain unchanged. This is a host frontend lifecycle correction,
+not a new wire field, authorization model or RFC.
+
+Validation (2026-11-07): the original page with the new 21-case harness produced
+14 failures and 7 passes. After the lifecycle correction and two reviewed
+existing-test adaptations, all six selected whole KB files passed: 94 cases,
+zero failures or skips. Scoped strict ESLint passed. The full frontend test-type
+check was stopped by the resource guard after sustained swap growth; it has no
+terminal TypeScript verdict. The canonical frontend build, full gate, deployment
+and live regression have NOT RUN for this change. These focused diagnostics do
+not establish merge or release qualification; the original failures and all
+intermediate diagnostic results remain preserved.
+
+
+### Correction — the shared hook remains the catalog owner (2026-11-07)
+
+The first KB lifecycle candidate wrapped `listOrgs` with a feature-local
+catalog/sequence state and passed that wrapper into the shared hook. Its scoped
+94-case checks and later remote frontend type/build diagnostics passed, but the
+actual canonical gate rejected this second read owner: the unchanged
+`orgSelectionEdgeRatchet` reported KB as a new hand-rolled reader and counted
+31 instead of 30. Those two ordinary failures are preserved; neither the
+ratchet nor its count is changed.
+
+Extend the existing `useOrgSelection` owner with an optional opaque `scopeKey`.
+KB passes the actual module-level `listOrgs` directly and consumes the hook's
+returned catalog/failure/selection states by reference. The generic hook imports
+no auth runtime: KB still owns synchronous auth-event invalidation of its
+resource/action refs and advances its monotonic epoch. A changed opted-in scope
+masks unconfirmed prior rows and selection before effects; accepted reads belong
+to the current owner and latest request. Retry invalidates an earlier request
+before its effect, and effect cleanup guards unmount/StrictMode. No requests,
+subscriptions or ref mutation occur during render. Three-argument callers retain
+the original display semantics, including existing retry behavior.
+
+An old `?org` excluded by the current catalog cannot authorize children under a
+fallback org: existing route matching keeps the scope unready and exposes the
+stale-link notice. Normal clear/selection removes child keys before proceeding.
+A keyed page subtree was a feasible alternative but would reset wider editor
+state and still need immediate pre-commit callback authority; extending the one
+read owner preserves the current page and its established guards.
+
+This shared-owner correction and its new deferred hook/membership controls are
+currently authored only: checks, exact revised full gate, merge, deployment and
+live acceptance are pending. Historical earlier diagnostics do not qualify the
+new source. No backend, BYOK, wire, selector-ratchet or other adopter migration is
+part of this correction.
+
 ## Context
 
 A user report: "Any list or grid item across the app needs to resolve to its own

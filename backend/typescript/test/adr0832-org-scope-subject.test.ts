@@ -37,6 +37,7 @@ import type { Storage } from '../src/storage/storage.js';
 import type { RunRecord } from '../src/types.js';
 import type { WorkflowDefinition } from '../src/executor/types.js';
 import { createHostAdapterSuite, type HostAdapterSuite } from '../src/host/index.js';
+import { declaredPathList } from './helpers/featureRatchetTables.js';
 
 const TENANT = 'adr0832-subject';
 let storage: Storage;
@@ -181,10 +182,6 @@ describe('never a grant', () => {
       'features/service-desk/surface.ts', // ADR 0878 D1: NARROWS only — getTicket/notifyTicketTeam floor the ticket's own org via assertRunScopeOrg
       'features/assistant/surface.ts', // ADR 0878 D6: NARROWS only — an org's pending action is listed only to a person who may decide it; the personal-owner exit is the ACTOR's only
       'features/computer-use/feature.ts', // ADR 0894 D2: NARROWS only — decide/status floor the SESSION's own org via assertRunScopeOrg (404 when refused); decide additionally requires actingUserId === the opener, so a cause never decides
-      // ADR 0901 D1/D2: NARROWS only — the cause lane binds the run's surfaces to the member who
-      // caused it (tenant trust before); every authority predicate still runs for THAT person,
-      // the personal-owner exit is the ACTOR's only, and OFF (shadow) leaves the call unchanged
-      'features/kicktodo-core/surfaceBinding.ts',
       // ADR 0921 D3 / ADR 0924 D2: NARROWS only — bindRunToClient checks the run's person
       // (actingUserId ?? orgScopeSubject) on the EXACT client org via assertRunOrgScope
       // ({cause}); absent ⇒ refused (no tenant trust). The recorded cause only REFUSES a
@@ -237,6 +234,8 @@ describe('never a grant', () => {
       'routes/interrupts.ts', // forwards the speaker into startWorkflowRun's explicit parameter
       'features/campaign-ops/clientContext.ts', // ADR 0944 D5: reads the stamped cause to re-check the run's client (narrows)
     ]);
+    // ADR 1031 P2 — plus each feature package's rows (`ratchetTables.json`, `adr0832.orgScopeSubjectReaders`).
+    for (const f of declaredPathList('adr0832.orgScopeSubjectReaders')) READERS.add(f);
     const src = join(import.meta.dirname, '../src');
     const found: string[] = [];
     const walk = (d: string): void => {

@@ -22,6 +22,7 @@ import { ConfirmDialog } from '../../ui/ConfirmDialog.js';
 import { TextField, TextareaField, SelectField, CheckboxField } from '../../ui/Field.js';
 import { Tabs, TabPanel, useUrlTab } from '../../ui/Tabs.js';
 import { IntelWorkspace } from './IntelWorkspace.js';
+import { BriefKnowledgeField } from './BriefKnowledgeField.js';
 import { toast } from '../../ui/toast.js';
 import { MegaphoneIcon, PlusIcon, TrashIcon, SparklesIcon, CheckIcon, AlertIcon, ArrowLeftIcon, XIcon, PencilIcon } from '../../ui/icons/index.js';
 import {
@@ -32,9 +33,27 @@ import {
   type GroundingPolicy,
 } from './campaignBriefClient.js';
 import { minorToMajorString, majorToMinor, isIsoCurrency } from './budgetUnits.js';
-import { formatDateTime } from '../../i18n/format.js';
+import { formatCurrencyMinor, formatDateTime } from '../../i18n/format.js';
 
 type TFn = ReturnType<typeof useTranslation>['t'];
+
+/** Brand generation is client-bound (ADR 0891 D7). Keep an unavailable saved
+ * binding visible until the user explicitly replaces or removes it. */
+function ClientBrandSelect({ t, brands, orgId, brandId, onChange }: {
+  t: TFn; brands: BrandRef[]; orgId: string; brandId: string; onChange: (id: string) => void;
+}): JSX.Element {
+  const choices = brands.filter((b) => b.orgId === orgId);
+  const unavailable = brandId !== '' && !choices.some((b) => b.id === brandId);
+  return <>
+    <SelectField label={t('fieldBrand')} value={brandId} onChange={(e) => onChange(e.target.value)}>
+      <option value="">{t('brandNone')}</option>
+      {unavailable ? <option value={brandId} disabled>{t('brandUnavailableOption')}</option> : null}
+      {choices.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+    </SelectField>
+    {unavailable ? <Notice variant="warning" announce={t('brandUnavailableWarning')}>{t('brandUnavailableWarning')}</Notice> : null}
+  </>;
+}
+
 const splitLines = (s: string): string[] => s.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
 const joinLines = (a: string[]): string => a.join('\n');
 
@@ -309,6 +328,7 @@ function BriefDetail({ t, brief, brands, brandsFailed, personas, personasReadFai
   const [productDescription, setProductDescription] = useState(brief.productDescription);
   const [industryVertical, setIndustryVertical] = useState(brief.industryVertical);
   const [brandId, setBrandId] = useState(brief.brandId ?? '');
+  const [kbCollectionId, setKbCollectionId] = useState(brief.kbCollectionId ?? '');
   const [groundingPolicy, setGroundingPolicy] = useState(brief.groundingPolicy ?? 'best-effort');
   const [competitors, setCompetitors] = useState((brief.competitors ?? []).join(', '));
   const [personaIds, setPersonaIds] = useState<string[]>(brief.personaIds);
@@ -349,6 +369,7 @@ function BriefDetail({ t, brief, brands, brandsFailed, personas, personasReadFai
   // ADR 0403 P4 — the Intel view rides the URL (?view=intel) beside the editor.
   const [view, setView] = useUrlTab<'editor' | 'intel'>('view', ['editor', 'intel'], 'editor');
 
+  const brandAvailable = brands.some((b) => b.id === brandId && b.orgId === brief.orgId);
   const orgPersonas = useMemo(() => personas.filter((p) => p.orgId === brief.orgId), [personas, brief.orgId]);
   const togglePersona = (id: string): void => setPersonaIds((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]);
   const toggleChannel = (type: CampaignChannel): void => setChannels((prev) => prev.map((c) => c.type === type ? { ...c, enabled: !c.enabled } : c));
@@ -406,8 +427,9 @@ function BriefDetail({ t, brief, brands, brandsFailed, personas, personasReadFai
       await updateBrief(brief.id, {
         objective, productName, productDescription, industryVertical,
         groundingPolicy,
+        kbCollectionId,
         competitors: competitors.split(',').map((c) => c.trim()).filter(Boolean),
-        ...(brandId ? { brandId } : {}),
+        brandId,
         personaIds, channels,
         messaging: { primaryValueProp: valueProp, proofPoints: splitLines(proofPoints), ctaStrategy, ...(toneOverride.trim() ? { toneOverride: toneOverride.trim() } : {}) },
         budget,
@@ -466,6 +488,7 @@ function BriefDetail({ t, brief, brands, brandsFailed, personas, personasReadFai
     || productDescription !== (brief.productDescription ?? '')
     || industryVertical !== (brief.industryVertical ?? '')
     || groundingPolicy !== (brief.groundingPolicy ?? 'best-effort')
+    || kbCollectionId !== (brief.kbCollectionId ?? '')
     || brandId !== (brief.brandId ?? '')
     || competitors !== (brief.competitors ?? []).join(', ')
     || valueProp !== brief.messaging.primaryValueProp
@@ -480,7 +503,7 @@ function BriefDetail({ t, brief, brands, brandsFailed, personas, personasReadFai
     || utmSource !== (brief.utm?.source ?? '') || utmMedium !== (brief.utm?.medium ?? '') || utmCampaign !== (brief.utm?.campaign ?? '')
     || utmTerm !== (brief.utm?.term ?? '') || utmContent !== (brief.utm?.content ?? '')
     || toneOverride !== (brief.messaging.toneOverride ?? '')
-  ), [objective, productName, productDescription, industryVertical, groundingPolicy, brandId, competitors, valueProp, proofPoints, ctaStrategy, personaIds, channels, budgetTotal, currency, utmSource, utmMedium, utmCampaign, utmTerm, utmContent, toneOverride, brief]);
+  ), [objective, productName, productDescription, industryVertical, groundingPolicy, kbCollectionId, brandId, competitors, valueProp, proofPoints, ctaStrategy, personaIds, channels, budgetTotal, currency, utmSource, utmMedium, utmCampaign, utmTerm, utmContent, toneOverride, brief]);
 
   const validate = async (): Promise<void> => {
     if (validating || busy) return;
@@ -615,12 +638,10 @@ function BriefDetail({ t, brief, brands, brandsFailed, personas, personasReadFai
         <TextField label={t('fieldProductName')} value={productName} onChange={(e) => setProductName(e.target.value)} />
         <TextareaField label={t('fieldProductDescription')} value={productDescription} rows={2} onChange={(e) => setProductDescription(e.target.value)} />
         <TextField label={t('fieldIndustry')} value={industryVertical} onChange={(e) => setIndustryVertical(e.target.value)} />
-        <SelectField label={t('fieldBrand')} value={brandId} onChange={(e) => setBrandId(e.target.value)}>
-          <option value="">{t('brandNone')}</option>
-          {brands.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
-        </SelectField>
+        <ClientBrandSelect t={t} brands={brands} orgId={brief.orgId} brandId={brandId} onChange={setBrandId} />
         {/* ADR 0351 P2 — grounding policy: strict makes generation FAIL rather
             than draft ungrounded when the KB has no coverage. */}
+        <BriefKnowledgeField key={brief.orgId} orgId={brief.orgId} value={kbCollectionId} onChange={setKbCollectionId} />
         <SelectField label={t('fieldGroundingPolicy')} value={groundingPolicy} onChange={(e) => setGroundingPolicy(e.target.value as GroundingPolicy)}>
           <option value="best-effort">{t('groundingBestEffort')}</option>
           <option value="strict">{t('groundingStrict')}</option>
@@ -669,7 +690,7 @@ function BriefDetail({ t, brief, brands, brandsFailed, personas, personasReadFai
           // R2 CB-SP-4/11 — per-channel allocations were invisible AND wiped by
           // a save that blanked the total; read-only until an editor exists.
           <p className="u-fs-13 muted">{t('budgetPerChannel', {
-            lines: Object.entries(brief.budget.perChannel).map(([ch, m]) => `${t(`channel_${ch}`, { defaultValue: ch })}: ${m}`).join(' · '),
+            lines: Object.entries(brief.budget.perChannel).map(([ch, m]) => `${t(`channel_${ch}`, { defaultValue: ch })}: ${brief.budget?.currency ? formatCurrencyMinor(m, brief.budget.currency) : minorToMajorString(m, undefined)}`).join(' · '),
           })}</p>
         ) : null}
         <TextField label={t('fieldUtmSource')} value={utmSource} onChange={(e) => setUtmSource(e.target.value)} />
@@ -686,7 +707,7 @@ function BriefDetail({ t, brief, brands, brandsFailed, personas, personasReadFai
         <h3 className="u-mt-0">{t('secReview')}</h3>
         <div className="u-flex u-gap-2 u-wrap">
           {/* R2 CB-SP-6 — a failed brands read must not chip "No brand" as fact. */}
-          <span className={`chip ${brandId ? 'chip--success' : 'chip--muted'}`}>{brandId ? t('reviewBrandBound') : brandsFailed ? t('reviewBrandUnknown') : t('reviewBrandMissing')}</span>
+          <span className={`chip ${brandAvailable ? 'chip--success' : 'chip--muted'}`}>{brandsFailed ? t('reviewBrandUnknown') : brandId ? brandAvailable ? t('reviewBrandBound') : t('reviewBrandUnavailable') : t('reviewBrandMissing')}</span>
           <span className={`chip ${personaIds.length > 0 ? 'chip--success' : 'chip--muted'}`}>{personaIds.length > 0 ? t('reviewPersonas', { count: personaIds.length }) : t('reviewPersonasMissing')}</span>
           <span className={`chip ${brief.kbCollectionId ? 'chip--success' : 'chip--muted'}`}>{brief.kbCollectionId ? t('reviewKbBound') : t('reviewKbMissing')}</span>
           {/* CS-UX-4: the policy enum maps to its localized label — never raw. */}
@@ -827,7 +848,7 @@ function PersonaEditor({ t, persona, orgs, brands, onClose, onSaved, onError }: 
 
   const save = async (): Promise<void> => {
     setBusy(true);
-    const payload = { name, role, buyerStage, painPoints: splitLines(painPoints), objections: splitLines(objections), goals: splitLines(goals), demographics, ...(brandId ? { brandId } : {}) };
+    const payload = { name, role, buyerStage, painPoints: splitLines(painPoints), objections: splitLines(objections), goals: splitLines(goals), demographics, brandId };
     try {
       if (persona) await updatePersona(persona.id, payload);
       else await createPersona({ ...payload, orgId });
@@ -835,7 +856,9 @@ function PersonaEditor({ t, persona, orgs, brands, onClose, onSaved, onError }: 
     } catch (e) { onError(e instanceof Error ? e.message : t('actionFailed')); setBusy(false); }
   };
 
-  const canSave = name.trim().length > 0 && (persona !== null || orgId.length > 0);
+  // A new persona has no saved legacy binding to preserve after a client switch.
+  const canSave = name.trim().length > 0 && (persona !== null || orgId.length > 0)
+    && (persona !== null || !brandId || brands.some((b) => b.id === brandId && b.orgId === orgId));
   return (
     <Modal label={persona ? t('editPersona') : t('newPersona')} onClose={onClose} showClose>
       <h2 className="u-mt-0">{persona ? t('editPersona') : t('newPersona')}</h2>
@@ -854,10 +877,7 @@ function PersonaEditor({ t, persona, orgs, brands, onClose, onSaved, onError }: 
         <TextareaField label={t('fieldObjections')} help={t('linePerItem')} value={objections} rows={3} onChange={(e) => setObjections(e.target.value)} />
         <TextareaField label={t('fieldGoals')} help={t('linePerItem')} value={goals} rows={2} onChange={(e) => setGoals(e.target.value)} />
         <TextareaField label={t('fieldDemographics')} value={demographics} rows={2} onChange={(e) => setDemographics(e.target.value)} />
-        <SelectField label={t('fieldBrand')} value={brandId} onChange={(e) => setBrandId(e.target.value)}>
-          <option value="">{t('brandNone')}</option>
-          {brands.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
-        </SelectField>
+        <ClientBrandSelect t={t} brands={brands} orgId={orgId} brandId={brandId} onChange={setBrandId} />
         <div className="action-bar u-flex u-gap-2 u-justify-end">
           <Button variant="secondary" size="sm" onClick={onClose}>{t('common:cancel')}</Button>
           <Button type="submit" variant="primary" size="sm" disabled={!canSave || busy}>{t('common:save')}</Button>

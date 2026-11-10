@@ -79,6 +79,7 @@ const idents = new DurableCollection<{ key: string; tenantId: string; type: stri
 const mergeEvents = new DurableCollection<{
   mergeEventId: string; tenantId: string; survivorId: string; sourceId: string;
   filledFields: Record<string, string>; absorbedIdentifiers: ContactIdentifier[];
+  unmergedAt?: string;
 }>('crm:merge-event', (e) => e.mergeEventId, undefined, (e) => e.tenantId);
 const bookings = new DurableCollection<Booking>('crm:booking', (b) => b.bookingId, undefined, (b) => b.tenantId);
 const signRequests = new DurableCollection<SignRequest>('crm:sign-request', (r) => r.signRequestId, undefined, (r) => r.tenantId);
@@ -105,6 +106,10 @@ async function tombstonesMergedInto(tenantId: string, contactId: string): Promis
   const sourcesOf = new Map<string, string[]>();
   for (const ev of await mergeEvents.listForTenantIndexed(tenantId)) {
     if (ev.tenantId !== tenantId) continue;
+    // ADR 1024 D5.1 — an UNMERGED event names a source that is a person in their own
+    // right again; it is not this subject's tombstone. (The row check below could not
+    // tell: a source unmerged and then merged into SOMEONE ELSE has `mergedInto` set.)
+    if (ev.unmergedAt) continue;
     const arr = sourcesOf.get(ev.survivorId);
     if (arr) arr.push(ev.sourceId); else sourcesOf.set(ev.survivorId, [ev.sourceId]);
   }
@@ -118,7 +123,9 @@ async function tombstonesMergedInto(tenantId: string, contactId: string): Promis
         if (seen.has(sourceId)) continue; // cycle / diamond ⇒ visit once
         seen.add(sourceId);
         const row = await contacts.get(sourceId);
-        if (!row || row.tenantId !== tenantId || !row.mergedInto) continue; // gone / foreign / un-merged
+        // ADR 1024 D5.1 — the tombstone must point at THIS survivor: a row merged
+        // elsewhere since is another person's data (pre-fix over-erasure).
+        if (!row || row.tenantId !== tenantId || row.mergedInto !== survivor) continue; // gone / foreign / un-merged / merged elsewhere
         out.push(row);
         next.push(sourceId);
       }
@@ -406,9 +413,24 @@ export async function resolveCrmSubjectKeys(tenantId: string, subjectKey: string
   if (!tenantId || !subjectKey) return [];
   const out: string[] = [];
   const type = subjectKey.includes('@') ? 'email' : subjectKey.startsWith('+') ? 'phone' : null;
-  if (!type) return out;
-  const contactId = await resolveContactIdByIdentifier(tenantId, type, subjectKey);
-  if (contactId) out.push(contactId);
+  let contactId: string | null = null;
+  if (type) {
+    contactId = await resolveContactIdByIdentifier(tenantId, type, subjectKey);
+    if (contactId) out.push(contactId);
+  } else {
+    // A contact-id key: expand it only when it IS a live contact of this tenant (a
+    // userId, session key or any other shape matches nothing and adds nothing).
+    const row = await contacts.get(subjectKey);
+    if (row && row.tenantId === tenantId && !row.mergedInto) contactId = subjectKey;
+  }
+  // ADR 1024 D5.2 (`CDP2WF-7`) — and every contact merged INTO it. A merge re-points
+  // the source's identifiers at the survivor, so a DSAR by email lands on the survivor
+  // alone; the merged-away contact's own id never reached the other erasers. The
+  // analytics sessions linked to it, the CDP events and the journey enrollments keyed
+  // on it all survived an erasure that reported clean (prod: 2 real merges,
+  // 2026-11-02). Returned here, the seam's hop 2 then expands each of them too.
+  // The walk is CRM's own (`tombstonesMergedInto`, unmerge- and re-merge-aware).
+  if (contactId) for (const t of await tombstonesMergedInto(tenantId, contactId)) out.push(t.contactId);
   return out;
 }
 

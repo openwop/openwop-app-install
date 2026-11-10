@@ -29,6 +29,9 @@ export interface PublicFormField {
   /** ADR 0808 — conditional visibility: the workflow edge-condition grammar over
    *  `fields.<key>` of an earlier field (the server validates it at authoring). */
   when?: FieldWhen;
+  /** ADR 0951 D2 — stamped on the control as `data-owx-sensitivity`, so session
+   *  recording never records the page (`replayCapture.NEVER_RECORD_SELECTOR`). */
+  sensitivity?: 'payment' | 'health' | 'credential';
 }
 
 /** ADR 0808 — the edge-condition operators this host evaluates (it refuses

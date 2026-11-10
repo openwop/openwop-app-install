@@ -26,7 +26,7 @@
  * The OAuth redirect path in `SignInButton` and the email/password path in
  * `AuthCard` both call this — one handshake, no duplication.
  */
-import { getCurrentIdToken } from './firebase.js';
+import { getCurrentIdToken, getCurrentUser } from './firebase.js';
 import { setCurrentIdToken } from '../client/config.js';
 import { migrateAnonToUser } from './migrateTenant.js';
 import { bindOidc, getMe, type User } from '../features/users/usersClient.js';
@@ -34,7 +34,42 @@ import { bindOidc, getMe, type User } from '../features/users/usersClient.js';
 /** `ok: false` = `/me` was unreadable — NOT evidence that no durable user exists. */
 export type FinalizeResult = { readonly ok: true; readonly user: User | null } | { readonly ok: false };
 
-export async function finalizeFirebaseSession(): Promise<FinalizeResult> {
+/**
+ * KT-AUTH-2 — one handshake per sign-in, not one per caller.
+ *
+ * Two callers used to run it at the same moment on one page load: the OAuth redirect
+ * arm in `SignInButton` and `reconcileRestoredSession` (fired by the SDK's user
+ * emission), and on an MFA sign-in `AuthCard` and `reconcileRestoredSession`. So the
+ * page sent `/migrate-tenant` twice while the anon cookie was still present, and the
+ * backend ran two full adoptions at once. MEASURED in production: both heap OOMs
+ * (2026-11-02 08:13Z, 2026-11-03 13:29Z) had exactly that pair in flight. That link is
+ * a suspicion, not a proof (four other pairs did not crash), but the pair was never
+ * wanted.
+ *
+ * A call made while a run for the same user is IN FLIGHT shares it. A finished run is
+ * reused only when the caller says so (`reuseCompleted`): the redirect arm and the
+ * restored-session reconcile want "has this page load done it", while an explicit
+ * sign-in (`AuthCard`) needs a fresh run, because a sign-in after a hard sign-out
+ * must bind again.
+ */
+let current: { uid: string | null; done: boolean; promise: Promise<FinalizeResult> } | null = null;
+
+export function finalizeFirebaseSession(opts: { reuseCompleted?: boolean } = {}): Promise<FinalizeResult> {
+  const uid = getCurrentUser()?.uid ?? null;
+  if (current && current.uid === uid && (!current.done || opts.reuseCompleted)) return current.promise;
+  const run = { uid, done: false, promise: runHandshake() };
+  run.promise = run.promise.finally(() => { run.done = true; });
+  current = run;
+  return run.promise;
+}
+
+/** For tests: forget the page-load state. Not for production paths. */
+export function __resetFinalizeForTest(): void {
+  current = null;
+  reconciled = false;
+}
+
+async function runHandshake(): Promise<FinalizeResult> {
   const token = await getCurrentIdToken();
   if (token) setCurrentIdToken(token);
 
@@ -74,7 +109,8 @@ export async function reconcileRestoredSession(): Promise<void> {
   if (reconciled) return;
   reconciled = true;
   try {
-    await finalizeFirebaseSession();
+    // KT-AUTH-2 — the redirect arm may already be running (or have run) it.
+    await finalizeFirebaseSession({ reuseCompleted: true });
   } catch {
     /* never block app boot on reconciliation */
   }

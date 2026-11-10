@@ -7,12 +7,13 @@
  * degradation notice when speaking in it), plus the route-level RBAC of the note
  * and proposal routes, through `createApp` + `app.listen` + a session cookie.
  *
- * Sabotage-witnessed (P1): dropping `assertOrgScope` from `assertClientBindable`
- * reds "refuses a client the creator cannot read"; dropping the client from the
- * branch's init reds "a branch keeps its parent's client"; returning
- * `{orgId: clientOrgId}` unchecked from `resolveConversationMemoryClient` reds
- * "a speaker without the client recalls nothing"; removing the CAS in
- * `decideClientNoteProposal` reds "a proposal is decided once".
+ * Sabotage-witnessed (wave 75): dropping `assertOrgScope` from `assertClientBindable`
+ * reds "test 3: refuses a client"; dropping the client from the branch's init reds
+ * "a branch keeps its parent client"; returning `{orgId: clientOrgId}` unchecked
+ * from `resolveConversationMemoryClient` reds "recalls A in an A conversation";
+ * a blind write instead of the claim CAS in `decideClientNoteProposal` reds "a
+ * proposal is untrusted until" through its forced race (one-shot hold on the
+ * proposal read until both deciders arrive).
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
@@ -25,7 +26,7 @@ import { signSession, COOKIE_TTL_SECONDS } from '../src/middleware/cookieSession
 import { createMember, createOrg, createWorkspace } from '../src/host/accessControlService.js';
 import { upsertFromPrincipal } from '../src/features/users/usersService.js';
 import { hostExtStorage } from '../src/host/hostExtPersistence.js';
-import { getAgentRegistry, type ResolvedAgentManifest } from '../src/executor/agentRegistry.js';
+import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 import { upsertAgentProfile } from '../src/host/agentProfileService.js';
 import { composeChatContext } from '../src/host/chatContext.js';
 import { getConversationMeta } from '../src/host/conversationStore.js';
@@ -35,7 +36,6 @@ import { eraseSubjectMemory, listSubjectNotes } from '../src/host/subjectMemory.
 import { orgSubject } from '../src/host/subject.js';
 import { ERASED_USER_REF } from '../src/host/subjectErasureRedaction.js';
 import { decideClientNoteProposal, getClientNoteProposal, proposeClientNote } from '../src/features/campaign-ops/clientMemory.js';
-import type { BundleScope } from '../src/host/inMemorySurfaces.js';
 
 const AGENT = 'test.adr0944-p1-strategist';
 
@@ -93,7 +93,7 @@ beforeAll(async () => {
   expect((await call('admin', 'POST', '/campaign-ops/clients', { name: 'Client A', orgId: orgA })).status).toBe(201);
   expect((await call('admin', 'POST', '/campaign-ops/clients', { name: 'Client B', orgId: orgB })).status).toBe(201);
   await upsertAgentProfile(TENANT, AGENT, { roleKey: 'strategist', autonomy: { specLevel: 'recommend' }, memoryScope: 'per-org', capabilities: ['knowledge'] });
-});
+}, 120_000);
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 beforeEach(() => {
@@ -102,8 +102,16 @@ beforeEach(() => {
   registry.register({
     agentId: AGENT, persona: 'Strategist', modelClass: 'chat', systemPrompt: 'You plan campaigns.',
     packName: 'test', packVersion: '0', toolAllowlist: [], memoryShape: { longTerm: true },
-  } as ResolvedAgentManifest);
+  });
 });
+
+interface Refusal { error: string; message: string }
+/** The surface answers `unknown`; the id is the one field these cases need from it. */
+const proposalIdOf = (v: unknown): string => {
+  if (v && typeof v === 'object' && 'proposalId' in v && typeof v.proposalId === 'string') return v.proposalId;
+  throw new Error(`no proposalId in ${JSON.stringify(v)}`);
+};
+const bindRefused = (who: string, clientOrgId: unknown) => call<Refusal>(who, 'POST', '/chat/sessions', { clientOrgId });
 
 const newSession = (who: string, clientOrgId?: string) =>
   call<{ sessionId: string; client?: { orgId: string; name: string } }>(who, 'POST', '/chat/sessions', {
@@ -119,10 +127,10 @@ describe('ADR 0944 D2 — binding a conversation to a client (route level)', () 
   });
 
   it('test 3: refuses a client the creator cannot read, the workspace root, and an unknown org', async () => {
-    expect((await newSession('onlyA', orgB)).status).toBe(403);
-    expect((await newSession('both', TENANT)).status).toBe(404);
-    expect((await newSession('both', 'org-that-does-not-exist')).status).toBe(404);
-    expect((await call('both', 'POST', '/chat/sessions', { clientOrgId: 42 })).status).toBe(400);
+    expect(await bindRefused('onlyA', orgB)).toMatchObject({ status: 403, body: { error: 'forbidden_scope' } });
+    expect(await bindRefused('both', TENANT)).toMatchObject({ status: 404, body: { error: 'not_found', message: 'Client not found.' } });
+    expect(await bindRefused('both', 'org-that-does-not-exist')).toMatchObject({ status: 404, body: { error: 'not_found', message: 'Client not found.' } });
+    expect(await bindRefused('both', 42)).toMatchObject({ status: 400, body: { error: 'validation_error', message: 'clientOrgId MUST be a non-empty string when present.' } });
   });
 
   it('a branch keeps its parent client', async () => {
@@ -237,30 +245,32 @@ describe('ADR 0944 D4 — client notes and agent proposals', () => {
 
   it('notes: read on workspace:read, write on workspace:write, invisible to non-members', async () => {
     expect((await call('viewerA', 'GET', `/campaign-ops/clients/${orgA}/memory/notes`)).status).toBe(200);
-    expect((await call('viewerA', 'POST', `/campaign-ops/clients/${orgA}/memory/notes`, { content: 'x' })).status).toBe(403);
-    expect((await call('onlyA', 'GET', `/campaign-ops/clients/${orgB}/memory/notes`)).status).toBe(404);
+    expect(await call<Refusal>('viewerA', 'POST', `/campaign-ops/clients/${orgA}/memory/notes`, { content: 'x' })).toMatchObject({ status: 403, body: { error: 'forbidden_scope' } });
+    expect(await call<Refusal>('onlyA', 'GET', `/campaign-ops/clients/${orgB}/memory/notes`)).toMatchObject({ status: 404, body: { error: 'not_found', message: 'Client not found.' } });
     const created = await call<{ noteId: string }>('onlyA', 'POST', `/campaign-ops/clients/${orgA}/memory/notes`, { content: 'NOTE-DELETE-ME' });
     expect(created.status).toBe(201);
     const listed = await call<{ notes: Array<{ id: string; contentTrust: string; authoredBy?: string }> }>('viewerA', 'GET', `/campaign-ops/clients/${orgA}/memory/notes`);
     const note = listed.body.notes.find((n) => n.id === created.body.noteId);
     expect(note).toMatchObject({ contentTrust: 'trusted', authoredBy: onlyA });
-    expect((await call('viewerA', 'DELETE', `/campaign-ops/clients/${orgA}/memory/notes/${created.body.noteId}`)).status).toBe(403);
+    expect(await call<Refusal>('viewerA', 'DELETE', `/campaign-ops/clients/${orgA}/memory/notes/${created.body.noteId}`)).toMatchObject({ status: 403, body: { error: 'forbidden_scope' } });
     expect((await call('onlyA', 'DELETE', `/campaign-ops/clients/${orgA}/memory/notes/${created.body.noteId}`)).status).toBe(204);
-    expect((await call('onlyA', 'DELETE', `/campaign-ops/clients/${orgA}/memory/notes/${created.body.noteId}`)).status).toBe(404);
+    expect(await call<Refusal>('onlyA', 'DELETE', `/campaign-ops/clients/${orgA}/memory/notes/${created.body.noteId}`)).toMatchObject({ status: 404, body: { error: 'not_found', message: 'Note not found.' } });
   });
 
   it('test 2: a run stamped A whose arguments name B is refused before anything is read', async () => {
+    expect((await call('both', 'POST', `/campaign-ops/clients/${orgA}/memory/notes`, { content: 'NOTE-T2-A: only client A' })).status).toBe(201);
+    expect((await call('both', 'POST', `/campaign-ops/clients/${orgB}/memory/notes`, { content: 'NOTE-T2-B: only client B' })).status).toBe(201);
     const runId = `run-p1-${randomBytes(4).toString('hex')}`;
     await hostExtStorage().insertRun({
       runId, workflowId: 'w', tenantId: TENANT, status: 'running', inputs: null,
       metadata: { [CAMPAIGN_OPS_RUN_STAMP]: { orgId: orgA } }, configurable: {}, createdAt: 'x', updatedAt: 'x',
     });
-    const surface = buildCampaignOpsSurface({ tenantId: TENANT, runId, actingUserId: both } as BundleScope);
+    const surface = buildCampaignOpsSurface({ tenantId: TENANT, runId, actingUserId: both });
     await expect(surface.listClientNotes!({ orgId: orgB })).rejects.toMatchObject({ details: { reason: 'wrong_client' } });
     await expect(surface.proposeClientNote!({ orgId: orgB, content: 'leak' })).rejects.toMatchObject({ details: { reason: 'wrong_client' } });
-    const notesA = await surface.listClientNotes!({ orgId: orgA }) as { notes: Array<{ content: string }> };
-    expect(notesA.notes.map((n) => n.content).join('\n')).toContain('NOTE-ALPHA');
-    expect(notesA.notes.map((n) => n.content).join('\n')).not.toContain('NOTE-BETA');
+    const notesA = JSON.stringify(await surface.listClientNotes!({ orgId: orgA }));
+    expect(notesA).toContain('NOTE-T2-A');
+    expect(notesA).not.toContain('NOTE-T2-B');
   });
 
   it('a proposal is untrusted until a person with write approves it, and is decided once', async () => {
@@ -269,23 +279,55 @@ describe('ADR 0944 D4 — client notes and agent proposals', () => {
       runId, workflowId: 'w', tenantId: TENANT, status: 'running', inputs: null,
       metadata: { [CAMPAIGN_OPS_RUN_STAMP]: { orgId: orgA } }, configurable: {}, createdAt: 'x', updatedAt: 'x',
     });
-    const surface = buildCampaignOpsSurface({ tenantId: TENANT, runId, actingUserId: both } as BundleScope);
-    const first = await surface.proposeClientNote!({ orgId: orgA, content: 'PROPOSED-GAMMA: Q4 launches on Tuesdays', nodeId: 'n1' }) as { proposalId: string; status: string; created: boolean };
-    expect(first).toMatchObject({ status: 'pending', created: true });
-    const again = await surface.proposeClientNote!({ orgId: orgA, content: 'PROPOSED-GAMMA: Q4 launches on Tuesdays', nodeId: 'n1' }) as { proposalId: string; created: boolean };
+    const surface = buildCampaignOpsSurface({ tenantId: TENANT, runId, actingUserId: both });
+    const proposed = await surface.proposeClientNote!({ orgId: orgA, content: 'PROPOSED-GAMMA: Q4 launches on Tuesdays', nodeId: 'n1' });
+    expect(proposed).toMatchObject({ status: 'pending', created: true });
+    const first = { proposalId: proposalIdOf(proposed) };
+    const again = await surface.proposeClientNote!({ orgId: orgA, content: 'PROPOSED-GAMMA: Q4 launches on Tuesdays', nodeId: 'n1' });
     expect(again).toMatchObject({ proposalId: first.proposalId, created: false }); // a re-execution adds nothing
     expect((await listSubjectNotes(TENANT, orgSubject(orgA))).map((n) => n.content).join('\n')).not.toContain('PROPOSED-GAMMA');
 
     const pending = await call<{ proposals: Array<{ proposalId: string }> }>('viewerA', 'GET', `/campaign-ops/clients/${orgA}/memory/proposals?status=pending`);
     expect(pending.body.proposals.map((p) => p.proposalId)).toContain(first.proposalId);
-    expect((await call('viewerA', 'POST', `/campaign-ops/clients/${orgA}/memory/proposals/${first.proposalId}/approve`)).status).toBe(403);
-    expect((await call('both', 'POST', `/campaign-ops/clients/${orgB}/memory/proposals/${first.proposalId}/approve`)).status).toBe(404);
+    expect(await call<Refusal>('viewerA', 'POST', `/campaign-ops/clients/${orgA}/memory/proposals/${first.proposalId}/approve`)).toMatchObject({ status: 403, body: { error: 'forbidden_scope' } });
+    expect(await call<Refusal>('both', 'POST', `/campaign-ops/clients/${orgB}/memory/proposals/${first.proposalId}/approve`)).toMatchObject({ status: 404, body: { error: 'not_found', message: 'Proposal not found.' } });
     const approved = await call<{ proposal: { status: string; noteId?: string; decidedBy?: string } }>('onlyA', 'POST', `/campaign-ops/clients/${orgA}/memory/proposals/${first.proposalId}/approve`);
     expect(approved.status, approved.raw).toBe(200);
     expect(approved.body.proposal).toMatchObject({ status: 'approved', decidedBy: onlyA });
     const notes = await listSubjectNotes(TENANT, orgSubject(orgA));
     expect(notes.find((n) => n.id === approved.body.proposal.noteId)).toMatchObject({ contentTrust: 'trusted', authoredBy: onlyA });
-    expect((await call('both', 'POST', `/campaign-ops/clients/${orgA}/memory/proposals/${first.proposalId}/reject`)).status).toBe(409);
+    expect(await call<Refusal>('both', 'POST', `/campaign-ops/clients/${orgA}/memory/proposals/${first.proposalId}/reject`)).toMatchObject({ status: 409, body: { error: 'conflict', message: 'This proposal was already decided.' } });
+
+    // Decided once under a real race: hold both deciders on the pending read, so each
+    // reaches the claim holding the same row, and only the CAS can pick one.
+    const raced = proposalIdOf(await surface.proposeClientNote!({ orgId: orgA, content: 'PROPOSED-RACE: two reviewers at once', nodeId: 'n2' }));
+    const storage = hostExtStorage();
+    const read = storage.kvGet.bind(storage);
+    let arrivals = 0;
+    let release!: () => void;
+    const bothHere = new Promise<void>((resolve) => { release = resolve; });
+    const fallback = setTimeout(release, 2000);
+    const hold = vi.spyOn(storage, 'kvGet').mockImplementation(async (key) => {
+      const row = await read(key);
+      if (key.includes(raced) && arrivals < 2) {
+        arrivals += 1;
+        if (arrivals === 2) release();
+        await bothHere;
+      }
+      return row;
+    });
+    try {
+      const outcomes = await Promise.allSettled([
+        decideClientNoteProposal(TENANT, orgA, raced, 'approve', onlyA),
+        decideClientNoteProposal(TENANT, orgA, raced, 'reject', both),
+      ]);
+      expect(arrivals).toBe(2);
+      const won = outcomes.flatMap((o) => (o.status === 'fulfilled' ? [o.value] : []));
+      expect(won).toHaveLength(1);
+      const lost = outcomes.find((o) => o.status === 'rejected');
+      expect(lost).toMatchObject({ reason: { httpStatus: 409, details: { reason: 'already_decided' } } });
+      expect((await getClientNoteProposal(TENANT, orgA, raced))?.status).toBe(won[0]?.status);
+    } finally { clearTimeout(fallback); hold.mockRestore(); }
   });
 
   it('DSAR: the author of a client note is tombstoned; the client keeps the note', async () => {

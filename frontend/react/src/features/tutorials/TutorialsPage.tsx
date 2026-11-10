@@ -9,6 +9,8 @@ import { Button } from '../../ui/Button.js';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { requestWalkthroughLaunch } from '../../walkthroughs/walkthroughBus.js';
+import { getWorkflowDefinitionRaw } from '../../client/workflowsClient.js';
+import { onAuthChange } from '../../client/config.js';
 import { useFeatureAccess } from '../../featureToggles/FeatureAccessContext.js';
 import { Link, useParams } from 'react-router-dom';
 import { PageHeader } from '../../ui/PageHeader.js';
@@ -20,6 +22,57 @@ import { fetchTutorial, fetchTutorials, fetchTutorialProgress, saveTutorialProgr
 import type { TutorialData, TutorialStepContent } from './tutorialTypes.js';
 
 const storageKey = (tutorialId: string): string => `openwop-app.tutorials.${tutorialId}`;
+
+const CAMPAIGN_SAMPLE = 'walkthrough.campaign-studio.first-brief';
+/** ADR 0435 / 0488: a shipped tutorial is readable before its optional sample
+ * exists. Check only on explicit launch; never seed or replace an edited tour. */
+function TutorialLaunchButton({ walkthroughId, phase = false }: { walkthroughId: string; phase?: boolean }): JSX.Element {
+  const { t } = useTranslation('tutorials');
+  const [state, setState] = useState<'idle' | 'checking' | 'missing' | 'failed'>('idle');
+  const generation = useRef(0);
+  const mounted = useRef(false);
+  const busy = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    const invalidate = () => { generation.current += 1; busy.current = false; setState('idle'); };
+    const off = onAuthChange(invalidate);
+    return () => { mounted.current = false; generation.current += 1; off(); };
+  }, []);
+  const launch = async (): Promise<void> => {
+    if (busy.current) return;
+    if (walkthroughId !== CAMPAIGN_SAMPLE) { requestWalkthroughLaunch(walkthroughId); return; }
+    busy.current = true;
+    const epoch = generation.current;
+    const current = () => mounted.current && generation.current === epoch;
+    setState('checking');
+    try {
+      // The raw reader preserves transport/403 failures; the player's best-effort
+      // step reader intentionally swallows them and is unsuitable for readiness.
+      const definition = await getWorkflowDefinitionRaw(walkthroughId);
+      if (!current()) return;
+      if (!definition) { setState('missing'); return; }
+      setState('idle');
+      requestWalkthroughLaunch(walkthroughId);
+    } catch {
+      if (current()) setState('failed');
+    } finally {
+      if (current()) busy.current = false;
+    }
+  };
+  const notice = state === 'missing' ? t('sampleUnavailable') : state === 'failed' ? t('sampleCheckFailed') : null;
+  return <>
+    <Button variant={phase ? 'secondary' : 'accent'} size="sm" className={phase ? undefined : 'u-ml-auto'}
+      disabled={state === 'checking'} onClick={() => { void launch(); }}
+      title={t(phase ? 'showMePhaseTitle' : 'showMeTitle')}>
+      {state === 'checking' ? t('common:loading') : t(phase ? 'showMePhase' : 'showMe')}
+    </Button>
+    {notice ? <Notice variant={state === 'missing' ? 'info' : 'error'} announce={notice}>
+      {notice}{' '}
+      {state === 'missing' ? <Link to="/walkthroughs">{t('sampleSetup')}</Link> : null}
+      <Button variant="link" size="sm" onClick={() => { void launch(); }}>{t('common:retry')}</Button>
+    </Notice> : null}
+  </>;
+}
 
 /** Where the learner's progress actually lives, so the UI can say so honestly. */
 // 'checking' is the pre-resolution arm (grade-ux `I2`): the state used to start
@@ -361,15 +414,9 @@ function TutorialDetail({ tutorial }: { tutorial: TutorialData }): JSX.Element {
                 has no chainId and correctly shows no button; the whole-tutorial
                 parent chain is composed from these, not the other way round. */}
             {phase.chainId && walkthroughsEnabled ? (
-              <p className="u-m-0">
-                <Button
-                  variant="secondary" size="sm"
-                  onClick={() => requestWalkthroughLaunch(phase.chainId!)}
-                  title={t('showMePhaseTitle')}
-                >
-                  {t('showMePhase')}
-                </Button>
-              </p>
+              <div className="u-m-0">
+                <TutorialLaunchButton key={phase.chainId} walkthroughId={phase.chainId} phase />
+              </div>
             ) : null}
           </header>
           {phase.goal ? (
@@ -404,13 +451,8 @@ function TutorialDetail({ tutorial }: { tutorial: TutorialData }): JSX.Element {
                       legacy whole-walkthrough link so pre-0488 tutorials keep
                       their "Show me". Both launch the same player. */}
                   {(step.run?.chainId ?? step.walkthroughId) && walkthroughsEnabled ? (
-                    <Button
-                      variant="accent" size="sm" className="u-ml-auto"
-                      onClick={() => requestWalkthroughLaunch((step.run?.chainId ?? step.walkthroughId)!)}
-                      title={t('showMeTitle')}
-                    >
-                      {t('showMe')}
-                    </Button>
+                    <TutorialLaunchButton key={step.run?.chainId ?? step.walkthroughId}
+                      walkthroughId={(step.run?.chainId ?? step.walkthroughId)!} />
                   ) : null}
                 </header>
                 {step.content.map((block, i) => <ContentBlock key={i} block={block} />)}

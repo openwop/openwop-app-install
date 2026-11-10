@@ -2,8 +2,8 @@
  * XCH-SLIDES-1 (LLM-EXCHANGE-AUDIT Wave 3) — the app-builder ADR 0358 pattern
  * ported to slides. Pins, in both directions:
  *  1. the surface catalog projection == the SSoT (blockCatalog/validateSlidesDoc);
- *  2. the pack's pinned fallback == the generated list (covered by
- *     slidesDesignChain.test.ts; re-asserted here via the projection);
+ *  2. the pack's pinned fallback == the generated list: slidesDesignChain.test.ts
+ *     asserts that one, not this file;
  *  3. the Slide Designer prompt teaches the catalog TOOL and no longer
  *     hand-carries the block-type list (inverted tripwire, sentinel types);
  *  4. the prompt's remaining hand-carried vocabularies (layouts / variants /
@@ -61,7 +61,8 @@ describe('slide-designer prompt ↔ catalog INDEPENDENCE (inverted tripwire)', (
 });
 
 describe('pack draft prompt props menu ↔ SLIDE_BLOCKS (prop-level pin)', () => {
-  const menu = packSource.slice(packSource.indexOf('Props by type:'));
+  const start = packSource.indexOf('Props by type:');
+  const menu = packSource.slice(start, packSource.indexOf('\n', start));
   it('found the hand-written props menu', () => {
     expect(menu.length).toBeGreaterThan(100);
   });
@@ -73,7 +74,7 @@ describe('pack draft prompt props menu ↔ SLIDE_BLOCKS (prop-level pin)', () =>
         expect(seg![1], `menu for '${b.type}' must name prop '${p.name}'`).toContain(p.name);
         if (p.type === 'enum') {
           for (const opt of p.options ?? []) {
-            expect(seg![1], `menu for '${b.type}.${p.name}' must carry enum '${opt}'`).toContain(opt);
+            expect(seg![1], `menu for '${b.type}.${p.name}' must carry enum '${opt}'`).toContain(`"${opt}"`);
           }
         }
       }

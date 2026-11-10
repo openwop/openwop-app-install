@@ -4,7 +4,13 @@
  * The regex it replaced ran from a `/*` in a line comment or a string to the next
  * star-slash, even one in a string, and took the code between. That left a ratchet
  * blind to 1,283 lines of `routes/testSeam.ts`. Red under: restoring either regex
- * order in the helper, or dropping the regex or template handling.
+ * order in the helper, dropping the regex rescan, making a `/` after an expression
+ * open a regex (`a / b; // c / d` would keep its comment), dropping the template-hole
+ * tracking, or dropping a block comment's newlines (line numbers move).
+ *
+ * The template fixture must not self-heal: in `${ … `n${y}` … }b /* kept *\/`` an
+ * untracked hole re-pairs its backticks and copies the same text, so it cannot tell
+ * the two scanners apart (w83 probe). `${x}/* kept *\/` then a line comment can.
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -22,16 +28,21 @@ function testFiles(dir: string, out: string[] = []): string[] {
 
 describe('stripComments', () => {
   it('a /* in a line comment or a string opens nothing', () => {
-    expect(stripComments("// a /v1/x/* path\nconst a = 1;\nconst b = '*/';\n")).toContain('const a = 1;');
+    expect(stripComments("// a /v1/x/* path\nconst a = 1;\nconst b = '*/';\n")).toBe(" \nconst a = 1;\nconst b = '*/';\n");
     expect(stripComments("const g = '/*'; const h = 1; /* c */ const i = '*/';")).toBe("const g = '/*'; const h = 1;   const i = '*/';");
   });
 
   it('removes comments in code and in template holes, and copies the literals', () => {
     expect(stripComments('const a = /\\/\\//.test(s); // tail\n')).toBe('const a = /\\/\\//.test(s);  \n');
     expect(stripComments('const q = a / b / c; // tail\n')).toBe('const q = a / b / c;  \n');
+    // A `/` after an expression divides; read as a regex, `/ b; /` would swallow the `//`.
+    expect(stripComments('const r = a / b; // c / d\n')).toBe('const r = a / b;  \n');
     const t = stripComments('const t = `a${ /* in */ x ? `n${y}` : "z" }b /* kept */`;');
     expect(t).not.toContain('in */');
     expect(t).toContain('b /* kept */`');
+    // A hole's closing brace resumes the template, so its tail is copied, and the
+    // line comment after the template is code again.
+    expect(stripComments('const u = `${x}/* kept */`; // gone\n')).toBe('const u = `${x}/* kept */`;  \n');
   });
 
   it('keeps line numbers', () => {

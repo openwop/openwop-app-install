@@ -101,6 +101,10 @@ export interface BuilderEdge {
   id: string;
   source: string;
   sourcePort: string;
+  /** Host-local lossless wire binding (ADR 0440): null = omitted/default,
+   * string = exact named output, absent = legacy cached sourcePort rules.
+   * sourcePort is a compatibility fallback, never default-edge geometry. */
+  canonicalSourceOutput?: string | null;
   target: string;
   targetPort: string;
   /** Fan-in semantics for the target node. Default `all_success`. */

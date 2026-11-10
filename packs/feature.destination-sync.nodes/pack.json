@@ -1,8 +1,8 @@
 {
   "name": "feature.destination-sync.nodes",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "kind": "node",
-  "description": "Destination Sync (CDP-D) — the `prepare` verb over ctx.features['destination-sync']: CDC-filter a record set against the sync's watermark and field-map each into destination payloads (advancing the cursor), so a downstream core.openwop.http.fetch (fanned out per payload) does the SSRF-guarded egress. No bespoke sender — egress rides the existing http node (ruling #3).",
+  "description": "Destination Sync (CDP-D) — the `prepare` verb over ctx.features['destination-sync']: CDC-filter a record set against the sync's watermark and field-map each into destination payloads (the workflow advances the cursor after egress), so a downstream core.openwop.http.fetch (fanned out per payload) does the SSRF-guarded egress. No bespoke sender — egress rides the existing http node (ruling #3).",
   "author": "openwop",
   "license": "Apache-2.0",
   "engines": {
@@ -15,15 +15,15 @@
       "version": "1.0.0",
       "role": "read",
       "label": "Destination Sync Prepare",
-      "description": "CDC-filter + field-map a record set for a configured destination sync; outputs { payloads, count, nextCursor? } for a downstream core.openwop.http.fetch (per-payload fan-out) to egress. Advances the sync watermark so a re-run sends only changed records. Inputs: { syncId, records }."
+      "description": "CDC-filter + field-map a record set for a configured destination sync; outputs { payloads, count, nextCursor? } for a downstream core.openwop.http.fetch (per-payload fan-out) to egress. Drops records labelled for no onward use, with a malformed label, or whose subject is erased (counted in dropped). Does NOT advance the watermark. Inputs: { syncId, records }."
     },
     {
       "typeId": "feature.destination-sync.nodes.prepare-onward",
       "category": "data",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "role": "read",
       "label": "Destination Sync Prepare Onward (OpenWOP host)",
-      "description": "ADR 0289 / RFC 0128 G4 — for an 'openwop-host' sync, build the onward OpenWOP envelopes carrying the re-emitted permittedPurposes label (⊆ received, never-widen, []-drop) and flatten envelopes[0] onto { onwardBody, peerIngestUrl } so a single downstream core.openwop.http.fetch POSTs it to the peer's trigger-bridge ingest. Outputs { envelopes, onwardBody, peerIngestUrl, count, dropped, nextCursor?, connectionId? }. Flag-gated: honest-off when purpose propagation is disabled. Inputs: { syncId, records }."
+      "description": "ADR 0289 / RFC 0128 G4 — for an 'openwop-host' sync, build the onward OpenWOP envelopes carrying the re-emitted permittedPurposes label (⊆ received, never-widen, []-drop) and flatten envelopes[0] onto { onwardBody, peerIngestUrl } so a single downstream core.openwop.http.fetch POSTs it to the peer's trigger-bridge ingest. Outputs { envelopes, onwardBody, peerIngestUrl, count, dropped, nextCursor?, connectionId? }. Fails destination_mismatch unless peerIngestUrl is the sync's configured URL (ADR 1024 D2.5). Flag-gated: honest-off when purpose propagation is disabled. Inputs: { syncId, records, peerIngestUrl }."
     },
     {
       "typeId": "feature.destination-sync.nodes.warehouse-load",

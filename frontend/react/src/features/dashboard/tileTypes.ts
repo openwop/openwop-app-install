@@ -47,4 +47,16 @@ export interface DashboardTileDef {
   refreshable?: boolean;
   /** Lazy component — registered eagerly (metadata), rendered lazily. */
   component: LazyExoticComponent<ComponentType<DashboardTileProps>>;
+  /**
+   * ADR 1031 — the i18n namespace `labelKey`/`descriptionKey` resolve in.
+   * Absent ⇒ `dashboard` (every host tile). A feature-contributed tile
+   * (`FrontendFeature.dashboardTiles`) names its own catalog here, because a
+   * feature outside this repo cannot add keys to the `dashboard` one.
+   */
+  i18nNamespace?: string;
+}
+
+/** ADR 1031 — the namespace a tile's label + description translate in. */
+export function tileNamespace(def: Pick<DashboardTileDef, 'i18nNamespace'>): string {
+  return def.i18nNamespace ?? 'dashboard';
 }

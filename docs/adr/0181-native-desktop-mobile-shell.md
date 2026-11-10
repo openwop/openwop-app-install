@@ -167,3 +167,29 @@ and, later, distribution decisions:
 - Phase A: `nativeBridge` no-op path unit-tested (browser → `false`/no-op, no throw); FE build gate green (tsc + token/CSS + i18n parity).
 - Phase B/C: Electron main-process logic unit-tested (`node --test`): setup-URL parsing, badge counting, notification suppression for the focused conversation, host-origin loading. Manual light/dark + multi-window verification.
 - No backend tests change (the shell adds no host code) — a `grep` gate asserts the shell imports nothing from `backend/`.
+
+### Self-test IPC correction — 2026-10-28
+
+The earlier self-test claimed to verify `setup:save-host` IPC but called
+`writeSettings` and `win.loadURL` directly from the main process. This bypassed
+the renderer bridge and handler. The corrected test invokes the actual preload
+bridge, awaits bounded navigation, checks persisted host plus resulting origin,
+and then verifies the remote page cannot repoint the shell through that same
+bridge. It records the actual Electron/Chromium/Node versions. Production IPC
+handlers and their authority rules are unchanged.
+
+Measured against the rebased PR #5183 lockfile: Electron45.0.0, Chromium156.0.8078.48,
+Node24.22.0, real npm10.9.8 install, 26 pure desktop tests pass, npm install audit
+283 packages/0 vulnerabilities. The real Electron self-test passes on an isolated
+loopback HTTP fixture and fresh userData: setup bridges/branding, actual save,
+remote bridge and remote repoint denial all pass. Setup screenshot was inspected.
+The unsigned macOS notification remains an explicitly recorded non-gating failure
+(`UNErrorDomain error 1`); no signed-app notification claim is made.
+
+Negative control: making the real `setup:save-host` handler refuse every request
+leaves the old test GREEN (hostSaved=true), while the corrected test exits1 with
+hostSaved=false and its bounded navigation timeout. Source restored byte-for-byte
+after the experiment. Logs/reports: coordinator state `desktop5183-selftest-r0`
+and `desktop5183-{old,new}-selftest-broken-ipc`; evidence
+`desktop5183-negative-verification.json`. This establishes the runtime/IPC checks,
+not production SPA behavior, Windows/Linux packaging, signing or the full app gate.

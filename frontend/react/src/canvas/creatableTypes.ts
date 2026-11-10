@@ -29,6 +29,7 @@ export interface CreatableCanvasType {
 }
 
 export const CREATABLE_CANVAS_TYPES: readonly CreatableCanvasType[] = [
+  { canvasTypeId: 'canvas.film', toggleId: 'films', basePath: '/host/openwop-app/films', editorPath: '/films', nameKey: 'type_film', hintKey: 'typeHint_film' },
   { canvasTypeId: 'canvas.slides', toggleId: 'slides', basePath: '/host/openwop-app/slides', editorPath: '/slides', nameKey: 'type_slides', hintKey: 'typeHint_slides' },
   { canvasTypeId: 'canvas.drawing', toggleId: 'drawings', basePath: '/host/openwop-app/drawings', editorPath: '/drawings', nameKey: 'type_drawing', hintKey: 'typeHint_drawing' },
   { canvasTypeId: 'canvas.cad', toggleId: 'cad', basePath: '/host/openwop-app/cad', editorPath: '/cad', nameKey: 'type_cad', hintKey: 'typeHint_cad' },

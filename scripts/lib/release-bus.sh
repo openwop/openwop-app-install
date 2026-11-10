@@ -4,7 +4,8 @@
 # stderr, so a caller's stdout stays its own.
 #
 #   release_bus <command> [args…]          run scripts/lib/release-bus.mjs
-#   release_bus_hold <id> <kind> [args…]   claim, and release + publish the end on EXIT
+#   release_bus_hold <id> <kind> [args…]   claim, renew it while we run (heartbeat), and
+#                                          release + publish the end on EXIT
 #   release_bus_acquire_hold <id> <kind> [args…]
 #                                          the same, but `acquire`: queue behind a live
 #                                          lease on the same --targets first (ADR 0991 D9)
@@ -67,10 +68,38 @@ _release_bus_hold() {
   # shellcheck disable=SC2064 # expand the previous trap now; it is fixed text
   trap "_release_bus_rc=\$?; ${_RELEASE_BUS_PREV_EXIT:+$_RELEASE_BUS_PREV_EXIT; }_release_bus_on_exit \"\$_release_bus_rc\"" EXIT
   release_bus "$verb" --id "$_RELEASE_BUS_ID" --kind "$kind" "$@"
+  _release_bus_heartbeat
+}
+
+# THE HEARTBEAT. A claim's lease is about twice the typical run, but a train that
+# rebuilds after main moves, or bisects, runs several gates under ONE claim: train
+# 201 (2026-11-03) read STALE from 14:21Z while it was still gating, and a peer
+# took that as "no live gate" and started a ci:quick. So renew every
+# OPENWOP_RELEASE_BUS_RENEW_S (default 600; 0 = off) while the caller lives. The
+# loop checks the caller after each sleep, so a SIGKILLed caller stops renewing
+# within one interval and its lease then lapses as before. Its stdio is /dev/null:
+# a caller piped into `tee` must not wait on it.
+_release_bus_heartbeat() {
+  [ "${OPENWOP_RELEASE_BUS:-on}" = "off" ] && return 0
+  local every="${OPENWOP_RELEASE_BUS_RENEW_S:-600}" owner="$$" id="$_RELEASE_BUS_ID"
+  [ "$every" = "0" ] && return 0
+  ( trap - EXIT INT TERM
+    while sleep "$every" && kill -0 "$owner" 2>/dev/null; do release_bus renew --id "$id"; done
+  ) </dev/null >/dev/null 2>&1 &
+  _RELEASE_BUS_HEARTBEAT_PID=$!
+}
+
+_release_bus_heartbeat_stop() {
+  local hb="${_RELEASE_BUS_HEARTBEAT_PID:-}"
+  [ -n "$hb" ] || return 0
+  pkill -P "$hb" 2>/dev/null || true   # its sleep, so nothing outlives us by an interval
+  kill "$hb" 2>/dev/null || true
+  _RELEASE_BUS_HEARTBEAT_PID=""
 }
 
 _release_bus_on_exit() {
   local rc="$1" ev=""
+  _release_bus_heartbeat_stop
   if [ -n "${_RELEASE_BUS_END_FN:-}" ]; then ev="$("$_RELEASE_BUS_END_FN" "$rc" 2>/dev/null || true)"; fi
   [ -n "$ev" ] && release_bus publish "$ev"
   [ -n "${_RELEASE_BUS_ID:-}" ] && release_bus release --id "$_RELEASE_BUS_ID"

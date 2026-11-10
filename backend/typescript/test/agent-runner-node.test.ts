@@ -145,7 +145,7 @@ describe('agent-runner node — ADR 0458 P2 sim confinement + structured result'
     expect(outputs.text).toBe(JSON.stringify(verdict));
   });
 
-  it('ADR 0277 — a ROSTER id dispatches the agent it wraps (the KickBot coach-turn defect, kicktodo.com 2026-09-16)', async () => {
+  it('ADR 0277 — a ROSTER id dispatches the agent it wraps (a coach-turn defect on an adopter deployment, 2026-09-16)', async () => {
     // A roster persona over a registered agent: the shape KickBot's reminder coach
     // turn hands this node (`configurable.agentId = host:kickbot`). Before the fix
     // the node resolved the identity and then dispatched the RAW roster id, so the

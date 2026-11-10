@@ -74,14 +74,14 @@ const run = (status: 'running' | 'pending' = 'running') => {
   return { runId: randomUUID(), workflowId: 'adr0987.q3', tenantId, status, inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now };
 };
 const holding = async (key: string): Promise<number> =>
-  Number((await db().query(`SELECT count(*)::int AS n FROM runs WHERE admission_key = $1 AND status IN ('pending','running')`, [key])).rows[0].n);
+  Number((await db().query<{ n: number }>(`SELECT count(*)::int AS n FROM runs WHERE admission_key = $1 AND status IN ('pending','running')`, [key])).rows[0]?.n);
 
 describe.skipIf(!available)('ADR 0987 Q3 — one statement after the admission lock', () => {
   it('an admitted run carries admission_key, and its outbox row carries the ISO stamps', async () => {
     const key = `q3-${randomUUID()}`;
     const r = run('pending');
     await s().insertRun(r, { admission: { key, cap: 5 }, dispatchOutbox: { nextAttemptAt: 1234 } });
-    const row = (await db().query(`SELECT admission_key, status FROM runs WHERE run_id = $1`, [r.runId])).rows[0];
+    const row = (await db().query<{ admission_key: string | null; status: string }>(`SELECT admission_key, status FROM runs WHERE run_id = $1`, [r.runId])).rows[0];
     expect(row).toEqual({ admission_key: key, status: 'pending' });
     const ob = (await db().query(`SELECT tenant_id, workflow_id, status, attempts, next_attempt_at, created_at, updated_at FROM dispatch_outbox WHERE run_id = $1`, [r.runId])).rows[0];
     expect(ob).toEqual({ tenant_id: tenantId, workflow_id: 'adr0987.q3', status: 'pending', attempts: 0, next_attempt_at: '1234', created_at: r.createdAt, updated_at: r.createdAt });
@@ -92,8 +92,9 @@ describe.skipIf(!available)('ADR 0987 Q3 — one statement after the admission l
     for (let i = 0; i < 2; i += 1) await s().insertRun(run(), { admission: { key, cap: 2 } });
     const r = run('pending');
     const err = await s().insertRun(r, { admission: { key, cap: 2 }, dispatchOutbox: { nextAttemptAt: 1 } }).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(AdmissionRefusedError);
-    expect((err as Error).message).toContain('holds 2 of 2');
+    if (!(err instanceof AdmissionRefusedError)) throw new Error(`expected AdmissionRefusedError, got ${String(err)}`);
+    expect(err.message).toContain('holds 2 of 2');
+    expect({ cap: err.cap, holding: err.holding }).toEqual({ cap: 2, holding: 2 });
     expect((await db().query(`SELECT 1 FROM runs WHERE run_id = $1`, [r.runId])).rowCount).toBe(0);
     expect((await db().query(`SELECT 1 FROM dispatch_outbox WHERE run_id = $1`, [r.runId])).rowCount).toBe(0);
     expect(await holding(key)).toBe(2);
@@ -102,9 +103,10 @@ describe.skipIf(!available)('ADR 0987 Q3 — one statement after the admission l
   it('20 concurrent creators on one key with cap 5 admit exactly 5', async () => {
     const key = `q3-${randomUUID()}`;
     const results = await Promise.allSettled(Array.from({ length: 20 }, () => s().insertRun(run(), { admission: { key, cap: 5 }, dispatchOutbox: { nextAttemptAt: 1 } })));
-    const refused = results.filter((x) => x.status === 'rejected');
+    const refused = results.filter((x): x is PromiseRejectedResult => x.status === 'rejected');
     expect(results.filter((x) => x.status === 'fulfilled')).toHaveLength(5);
-    expect(refused.every((x) => (x as PromiseRejectedResult).reason instanceof AdmissionRefusedError)).toBe(true);
+    expect(refused).toHaveLength(15);
+    expect(refused.every((x) => x.reason instanceof AdmissionRefusedError)).toBe(true);
     expect(await holding(key)).toBe(5);
   });
 
@@ -113,14 +115,15 @@ describe.skipIf(!available)('ADR 0987 Q3 — one statement after the admission l
     await s().insertRun(run(), { admission: { key, cap: 1 } });
     const idemKey = `q3-idem-${randomUUID()}`;
     const claim = await s().claimIdempotentResponse({ tenantId, endpoint: 'POST /runs', key: idemKey, requestDigest: 'd', createdAt: new Date().toISOString(), leaseMs: 60_000 });
-    expect(claim.outcome).toBe('claimed');
-    const token = (claim as { claimToken: string }).claimToken;
+    if (claim.outcome !== 'claimed') throw new Error(`expected a fresh claim, got ${claim.outcome}`);
+    const token = claim.claimToken;
     const commit = (claimToken: string) => ({ tenantId, endpoint: 'POST /runs', key: idemKey, claimToken, responseStatus: 202, responseBody: '{}', updatedAt: new Date().toISOString() });
 
     const refused = run();
     await expect(s().insertRun(refused, { admission: { key, cap: 1 }, idempotencyCommit: commit(token) })).rejects.toBeInstanceOf(AdmissionRefusedError);
-    const state = (await db().query(`SELECT state FROM idempotent_response WHERE tenant_id = $1 AND idempotency_key = $2`, [tenantId, idemKey])).rows[0];
-    expect(state.state).not.toBe('completed');
+    // Rolled back with the refusal: still the claim, and no run recorded on it.
+    const state = (await db().query<{ state: string; run_id: string | null }>(`SELECT state, run_id FROM idempotent_response WHERE tenant_id = $1 AND idempotency_key = $2`, [tenantId, idemKey])).rows[0];
+    expect(state).toEqual({ state: 'pending', run_id: null });
 
     const rejected = run();
     await expect(s().insertRun(rejected, { admission: { key: `q3-${randomUUID()}`, cap: 5 }, idempotencyCommit: commit('not-the-token') })).rejects.toBeInstanceOf(IdempotentCommitRejectedError);

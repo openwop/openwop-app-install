@@ -53,7 +53,7 @@ afterEach(cleanup);
 
 describe('MetricsPage (ADR 0417 P4)', () => {
   it('renders the catalog with the system chip', async () => {
-    mockList.mockResolvedValue([metric('sys-pipeline-value', { title: 'Pipeline value', system: true }), metric('my-metric', { title: 'My metric' })]);
+    mockList.mockResolvedValue({ metrics: [metric('sys-pipeline-value', { title: 'Pipeline value', system: true }), metric('my-metric', { title: 'My metric' })], viewer: { canManage: true } });
     render(<MetricsPage />);
     const sysRow = (await screen.findByText('Pipeline value')).closest('tr')!;
     expect(within(sysRow).getByText('System')).toBeTruthy();
@@ -63,10 +63,10 @@ describe('MetricsPage (ADR 0417 P4)', () => {
   });
 
   it('runs a metric inline and renders the points', async () => {
-    mockList.mockResolvedValue([metric('sys-pipeline-value', { title: 'Pipeline value', system: true })]);
+    mockList.mockResolvedValue({ metrics: [metric('sys-pipeline-value', { title: 'Pipeline value', system: true })], viewer: { canManage: true } });
     mockRun.mockResolvedValue({
       metricId: 'sys-pipeline-value', title: 'Pipeline value', aggregate: 'sum', entityType: 'crm.deal',
-      points: [{ key: '2026-07', value: 4000, n: 3 }], totalRows: 3, bucket: 'month',
+      points: [{ key: '2026-07', value: 4000, n: 3 }], scope: 'org', totalRows: 3, bucket: 'month',
     });
     render(<MetricsPage />);
     fireEvent.click(await screen.findByText('Run'));

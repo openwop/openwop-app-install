@@ -9,19 +9,36 @@
  * own `turnRef`), asking while the turn still streams or when the chat tool failed
  * (a wasted read per bubble), rendering the cards INSIDE the collapsed fold, or a card
  * that does not open the artifact it shows.
+ *
+ * Sabotage-witnessed (wave 82): the swapped pair, each of the four gates of
+ * "asks for nothing" (settled, tool error, tool id, Workbench), cards rendered only
+ * when the fold is open, a card opening a different id, the raw subtitle, a failed
+ * read folded into "ready, empty", and a retry that does not re-ask. The "asks for
+ * nothing" case asserts `calls` after `waitFor`, whose act() scope flushes the
+ * effect's dynamic import of the (mocked) client: each gate probe was red there, so
+ * that wait is long enough as written.
  */
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (k: string, o?: { count?: number }) => (o?.count !== undefined ? `${k}:${o.count}` : k) }) }));
 vi.mock('../lib/toolEffects.js', () => ({ useToolEffects: () => new Map() }));
+import type { RunArtifact } from '../RunArtifactCards.js';
+
 const calls: Array<[string, string]> = [];
+/** A production-shaped chat-viz row, as `GET /artifacts?conversationRunId=` answers it. */
+const FLOW: RunArtifact = {
+  artifactId: 'run-event:chat-viz:t:c:render:abc', tenantId: 't', orgId: 't', artifactTypeId: 'interactive.mermaid',
+  source: 'run-event', sourceId: 'chat-viz:t:c:render:abc', title: 'Flow', kind: 'text', format: 'text/plain', status: 'final',
+  createdBy: { kind: 'run', id: 'chat-viz:t:c' }, createdAt: '2026-10-31T10:00:01.000Z', provenance: { runId: 'chat-viz:t:c', nodeId: 'render:abc' },
+  runNodeId: 'render:abc',
+};
 let failNext = false;
 vi.mock('../artifacts/artifactClient.js', () => ({
   listChatTurnArtifacts: (runId: string, turnMessageId: string) => {
     calls.push([runId, turnMessageId]);
     if (failNext) { failNext = false; return Promise.reject(new Error('503')); }
-    return Promise.resolve([{ artifactId: 'run-event:chat-viz:t:c:render:abc', title: 'Flow', kind: 'text', format: 'text/plain', artifactTypeId: 'interactive.mermaid', runNodeId: 'render:abc' }]);
+    return Promise.resolve([FLOW]);
   },
 }));
 
@@ -55,7 +72,7 @@ describe('TurnReceipt — chat-tool artifacts (ADR 1017 D2)', () => {
     const card = await screen.findByText('Flow');
     expect(calls).toEqual([[TURN_REF.conversationRunId, TURN_REF.turnMessageId]]);
     // The receipt is collapsed for a healthy settled turn; the card is still visible.
-    expect(document.querySelector('.turn-receipt-details')).toBeNull();
+    expect(screen.getByRole('button', { name: 'receiptShow' }).getAttribute('aria-expanded')).toBe('false');
     expect(card.closest('.turn-receipt')).toBeNull();
     // The subtitle is the localized TYPE, not the raw `kind · format` machine values.
     expect(screen.getByText('libraryType_diagram')).toBeTruthy();
@@ -77,8 +94,11 @@ describe('TurnReceipt — chat-tool artifacts (ADR 1017 D2)', () => {
   it('a failed read is its own state with a retry, never a silently missing card', async () => {
     failNext = true;
     withWorkbench(turn(call(RENDER)));
-    fireEvent.click(await screen.findByRole('button', { name: 'chatTurnArtifactsRetry' }));
+    const retry = await screen.findByRole('button', { name: 'chatTurnArtifactsRetry' });
+    expect(screen.getByText('chatTurnArtifactsFailed')).toBeTruthy(); // the failure is SAID, not just a button
+    fireEvent.click(retry);
     expect(await screen.findByText('Flow')).toBeTruthy();
+    expect(screen.queryByText('chatTurnArtifactsFailed')).toBeNull(); // and withdrawn once the retry lands
     expect(calls).toHaveLength(2);
   });
 });

@@ -10,6 +10,7 @@ import { registerWorkflowsFeature } from '../../host/workflowFeatureGate.js';
 import { registerDestinationSyncRoutes } from './routes.js';
 import { buildDestinationSyncSurface } from './surface.js';
 import { registerDestinationSyncAgentTools } from './agentTools.js';
+import { registerWarehouseLoadEligibility } from './approvalEligibility.js';
 
 export const destinationSyncFeature: BackendFeature = {
   id: 'destination-sync',
@@ -18,6 +19,9 @@ export const destinationSyncFeature: BackendFeature = {
     // in `features/index.ts`): every launch resolves 'destination-sync' (toggle + plan).
     registerWorkflowsFeature(ONWARD_SYNC_WORKFLOWS.map((w) => w.workflowId), 'destination-sync');
     registerDestinationSyncRoutes(deps);
+    // ADR 1024 D3.4 — who may decide a warehouse-load approval (separation of duties).
+    // Registered regardless of the toggle: a pending row outlives a toggle flip.
+    registerWarehouseLoadEligibility();
     // CHAT-FIRST-PORT-AUDIT D7 — register the chat lane that ignites the onward
     // egress (openwop-host workflow + governed warehouse load) from the one chat.
     registerDestinationSyncAgentTools({ storage: deps.storage, hostSuite: deps.hostSuite });

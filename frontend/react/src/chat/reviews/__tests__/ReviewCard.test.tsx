@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
+import { t } from 'i18next';
 vi.mock('../ReviewHandoff.js', () => ({ ReviewHandoff: () => null })); // own tests: reviewHandoff.test.tsx
 import { render, screen, fireEvent, cleanup, waitFor, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
@@ -163,9 +164,35 @@ describe('ReviewCard', () => {
     render(<ReviewCard review={base} onDecide={onDecide} />);
     fireEvent.click(screen.getByRole('button', { name: /Reject/ }));
     await waitFor(() => expect(confirm).toHaveBeenCalledTimes(1));
-    expect(confirm).toHaveBeenCalledWith(expect.objectContaining({ danger: true }));
+    expect(confirm).toHaveBeenCalledWith(expect.objectContaining({ danger: true, title: t('chat:reviewRejectConfirmTitle'), body: t('chat:reviewRejectConfirmBody') }));
     await drain(); // the declined answer has settled — anything it would post, it has
     expect(onDecide).not.toHaveBeenCalled();
+  });
+
+  async function rejectInterrupt(accepted: boolean) {
+    vi.mocked(confirm).mockResolvedValueOnce(accepted);
+    const onDecide = vi.fn().mockResolvedValue(undefined);
+    render(<ReviewCard review={{ ...base, reviewId: 'interrupt:copy', source: 'interrupt', kind: 'approval', runId: 'r-1', nodeId: 'review' }} onDecide={onDecide} />);
+    fireEvent.click(screen.getByRole('button', { name: /^reject$/i }));
+    await waitFor(() => expect(confirm).toHaveBeenCalledTimes(1));
+    const call = vi.mocked(confirm).mock.calls[0];
+    if (!call) throw new Error('Interrupt rejection confirmation was not shown');
+    expect(call[0]).toMatchObject({ title: t('interrupts:rejectConfirmTitle'), body: t('interrupts:rejectConfirmBody'), danger: true, confirmLabel: t('interrupts:actionReject') });
+    expect(call[0].title).toBe('Reject this request?');
+    expect(call[0].body).toBe('What happens next depends on the workflow; rejection can end the run. Work already done is not undone.');
+    await drain();
+    return onDecide;
+  }
+
+  it('interrupt rejection confirmation describes workflow-dependent outcome and a declined confirm posts nothing', async () => {
+    const onDecide = await rejectInterrupt(false);
+    expect(onDecide).not.toHaveBeenCalled();
+  });
+
+  it('interrupt rejection confirmation describes workflow-dependent outcome and preserves the confirmed payload', async () => {
+    const onDecide = await rejectInterrupt(true);
+    expect(onDecide).toHaveBeenCalledTimes(1);
+    expect(onDecide).toHaveBeenCalledWith('reject', {});
   });
 
   it('ADR 0778 APUX-10 — a same-tick double click posts once', async () => {
@@ -288,6 +315,31 @@ describe('ADR 0905 — a unified email send review', () => {
     expect(screen.getByText('From news@agency.test')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: /^Approve$/ }));
     await waitFor(() => expect(onDecide).toHaveBeenCalledWith('approve', { expectedContentHash: 'full-send-review' }));
+  });
+
+  // NYI-EMAIL-1 follow-up — without the digest the server refuses any approve, so the card
+  // must not offer one. Sabotage: dropping `emailApproveBlocked` from the button reds both
+  // cases (Approve posts with no hash); dropping the note in EmailSendReviewContext reds both.
+  const emailRow = (emailSend: ReviewRequest['emailSend']): ReviewRequest => {
+    const row: ReviewRequest = { ...base, kind: 'email-campaign-send', actions: [{ action: 'approve', label: 'Approve' }, { action: 'reject', label: 'Reject' }] };
+    if (emailSend) row.emailSend = emailSend;
+    return row;
+  };
+  it.each([
+    ['no emailSend', emailRow(undefined)],
+    ['no reviewHash', emailRow({ campaignId: 'campaign-1', templateId: 'template-1', templateVersion: 3, contentHash: 'template-only',
+      senderAddress: 'news@agency.test', audienceHash: 'a', audienceLabel: 'stage: lead', templateName: 'Launch', subject: 'Pinned email subject', body: 'Pinned email body' })],
+  ])('%s: Approve is dead and posts nothing, and Reject still works', async (_name, review) => {
+    const onDecide = vi.fn().mockResolvedValue(undefined);
+    render(<MemoryRouter><ReviewCard review={review} onDecide={onDecide} /></MemoryRouter>);
+    expect(await screen.findByText(/out of date and can.t be approved/)).toBeTruthy();
+    const approve = screen.getByRole('button', { name: /^Approve$/ }) as HTMLButtonElement;
+    expect(approve.disabled).toBe(true);
+    fireEvent.click(approve);
+    await drain();
+    expect(onDecide).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: /^Reject$/ }));
+    await waitFor(() => expect(onDecide).toHaveBeenCalledWith('reject', {}));
   });
 });
 

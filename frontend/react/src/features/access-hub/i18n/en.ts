@@ -33,6 +33,7 @@ export const messages = {
   tab_roles: 'Roles',
   'tab_capability-firewall': 'Capability firewall',
   'tab_example-data': 'Example data',
+  tab_channels: 'Chat channels',
 
   // Empty state
   emptyTitle: 'Nothing to manage here yet',

@@ -12,8 +12,9 @@ export interface DocsNavItem {
 
 const root = `${config.baseUrl}/host/openwop-app`;
 
-/** Fetch the published docs nav tree. A 404 (docs off / unknown org) is the
- *  designed EMPTY state ([]); a network/5xx failure is NULL so the page can
+/** Fetch the published docs nav tree. Docs off / unknown org answers `200
+ *  { docs: [] }` (a 404 from an older backend reads the same: EMPTY, `[]`);
+ *  a network/5xx failure is NULL so the page can
  *  render an error state instead of masquerading as "no docs yet"
  *  (grade-ux UX-D2 — error/empty conflation). */
 export async function getDocsNav(orgId: string): Promise<DocsNavItem[] | null> {

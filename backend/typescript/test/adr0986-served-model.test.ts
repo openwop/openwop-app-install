@@ -13,11 +13,25 @@
  *    source's rows (code-review H1);
  *  - never throws (a failed write is logged; the turn goes on).
  *
- * Sabotage witnesses: `dispatchedModel` → `model` in the BYOK return reds the bump
- * case; dropping `managed: true` reds the managed case; removing the mock gate reds
- * the mock case; `put` instead of a create-only CAS reds the fork case.
+ * Sabotage witnesses (measured wave 77): `dispatchedModel` → `model` in the BYOK return
+ * reds the bump case; dropping `managed: true` reds each managed case; removing the
+ * mock gate reds the mock case; `put` instead of a create-only CAS reds the fork case;
+ * a rethrown write failure, or dropping its log line, reds the never-throws case.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+
+// The failed write's log line, observed through the real logger.
+const warns = vi.hoisted((): Array<{ msg: string; fields?: Record<string, unknown> }> => []);
+vi.mock('../src/observability/logger.js', async (orig) => {
+  const actual = await orig<typeof import('../src/observability/logger.js')>();
+  return {
+    ...actual,
+    createLogger: (component: string) => {
+      const real = actual.createLogger(component);
+      return { ...real, warn: (msg: string, fields?: Record<string, unknown>) => { warns.push({ msg, ...(fields ? { fields } : {}) }); real.warn(msg, fields); } };
+    },
+  };
+});
 
 let failures: Error[] = [];
 vi.mock('../src/providers/dispatch.js', async (importOriginal) => {
@@ -44,6 +58,7 @@ vi.mock('../src/providers/managedProvider.js', async (importOriginal) => {
   };
 });
 
+import { dispatchChat } from '../src/providers/dispatch.js';
 import { dispatchReply } from '../src/host/exchange/dispatchTurn.js';
 import { runConversationAgentToolTurn } from '../src/host/conversationToolLoop.js';
 import type { ResolvedAgentManifest } from '../src/executor/agentRegistry.js';
@@ -87,22 +102,28 @@ describe('dispatchReply reports what answered', () => {
     const selected = 'gemini-selected-lite'; // the tenant's own pick, which the bump moves off
     expect(bumped).not.toBe(selected);
     failures = [new Error('google_429: quota'), new Error('google_429: quota')]; // the bump + its one retry
+    vi.mocked(dispatchChat).mockClear();
     const out = await dispatchReply(
       run({ provider: 'google', model: selected, credentialRef: 'byok:google' }),
       [{ role: 'user', content: 'hi' }], undefined, undefined, undefined,
       { conversationType: 'group', agentModelClass: 'reasoning' },
     );
     expect(out.served).toEqual({ provider: 'google', model: selected });
+    // The bump really ran: asked for twice, then the selection answered.
+    expect(failures).toEqual([]);
+    expect(vi.mocked(dispatchChat).mock.calls.map(([req]) => req.model)).toEqual([bumped, bumped, selected]);
   });
 });
 
 describe('the tool loop reports what answered', () => {
+  const agent: ResolvedAgentManifest = { agentId: 'a', persona: 'P', modelClass: 'general', systemPrompt: 'sp', packName: 'test.s986', packVersion: '0.0.1', toolAllowlist: [] };
+  const policyResolver: ProviderPolicyResolver = { async resolveForRun() { return []; } };
   it('managed: the tier, marked managed — the same row the single completion lands on', async () => {
     const out = await runConversationAgentToolTurn({
       run: run({ credentialRef: 'managed:openwop-free' }),
-      agent: { agentId: 'a', persona: 'P', toolAllowlist: [] } as unknown as ResolvedAgentManifest,
+      agent,
       systemPrompt: 'sp', history: [], runId: 'r-served', nodeId: 'n', conversationId: 'c',
-      policyResolver: (() => undefined) as unknown as ProviderPolicyResolver,
+      policyResolver,
     });
     expect(out?.text).toBe('tool-loop answer');
     expect(out?.served).toEqual({ provider: 'openwop-free', model: 'openwop-free', managed: true });
@@ -112,12 +133,16 @@ describe('the tool loop reports what answered', () => {
 describe('recordTurnAttribution', () => {
   const T = 'tenant-attr';
   it('writes no mock row unless the mock provider is enabled', async () => {
-    process.env.OPENWOP_MOCK_PROVIDER_ENABLED = 'false';
-    await recordTurnAttribution({ tenantId: T, wireMessageId: 'run-m:gate:0:2:agent', runId: 'run-m', served: { provider: 'mock', model: 'm' } });
-    expect(await getTurnAttribution(T, conversationMessageId('run-m:gate:0:2:agent'))).toBeNull();
-    process.env.OPENWOP_MOCK_PROVIDER_ENABLED = 'true';
-    await recordTurnAttribution({ tenantId: T, wireMessageId: 'run-m:gate:0:2:agent', runId: 'run-m', served: { provider: 'mock', model: 'm' } });
-    expect(await getTurnAttribution(T, conversationMessageId('run-m:gate:0:2:agent'))).toMatchObject({ provider: 'mock', runId: 'run-m' });
+    try {
+      process.env.OPENWOP_MOCK_PROVIDER_ENABLED = 'false';
+      await recordTurnAttribution({ tenantId: T, wireMessageId: 'run-m:gate:0:2:agent', runId: 'run-m', served: { provider: 'mock', model: 'm' } });
+      expect(await getTurnAttribution(T, conversationMessageId('run-m:gate:0:2:agent'))).toBeNull();
+      process.env.OPENWOP_MOCK_PROVIDER_ENABLED = 'true';
+      await recordTurnAttribution({ tenantId: T, wireMessageId: 'run-m:gate:0:2:agent', runId: 'run-m', served: { provider: 'mock', model: 'm' } });
+      expect(await getTurnAttribution(T, conversationMessageId('run-m:gate:0:2:agent'))).toMatchObject({ provider: 'mock', runId: 'run-m' });
+    } finally {
+      if (saved.mock === undefined) delete process.env.OPENWOP_MOCK_PROVIDER_ENABLED; else process.env.OPENWOP_MOCK_PROVIDER_ENABLED = saved.mock;
+    }
   });
 
   it('never throws: a failed write is logged and the turn it describes goes on', async () => {
@@ -125,7 +150,10 @@ describe('recordTurnAttribution', () => {
     const spy = vi.spyOn(DurableCollection.prototype, 'compareAndSwap').mockRejectedValueOnce(new Error('db down'));
     try {
       await expect(recordTurnAttribution({ tenantId: T, wireMessageId: 'run-f:gate:0:2:agent', runId: 'run-f', served: { provider: 'openai', model: 'x' } })).resolves.toBeUndefined();
+      expect(spy).toHaveBeenCalledOnce();
     } finally { spy.mockRestore(); }
+    expect(warns.find((w) => w.msg === 'turn_attribution_write_failed')?.fields).toMatchObject({ runId: 'run-f', error: 'db down' });
+    expect(await getTurnAttribution(T, conversationMessageId('run-f:gate:0:2:agent'))).toBeNull();
   });
 
   it('is create-only: a fork writing the source\'s wire id cannot replace the source\'s row', async () => {

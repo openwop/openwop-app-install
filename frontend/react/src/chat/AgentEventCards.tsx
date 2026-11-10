@@ -21,6 +21,7 @@ import type {
 } from './hooks/useChatSession.js';
 import { formatDurationMs, formatPercent } from '../i18n/format.js';
 import { ScaleIcon, ShieldIcon, WrenchIcon } from '../ui/icons/index.js';
+import { useToolLabel } from './lib/toolLabels.js';
 
 function formatDuration(ms: number): string {
   return formatDurationMs(ms);
@@ -101,6 +102,7 @@ export function toolErrorText(t: (k: string) => string, err: { code?: string; me
 export function ToolCallCard({ call }: { call: AgentToolCall }): JSX.Element {
   const { t } = useTranslation('chat');
   const [open, setOpen] = useState(false);
+  const label = useToolLabel(call.toolName);
   const inFlight = call.finishedAt == null;
   const durationMs = call.finishedAt
     ? Date.parse(call.finishedAt) - Date.parse(call.startedAt)
@@ -124,7 +126,7 @@ export function ToolCallCard({ call }: { call: AgentToolCall }): JSX.Element {
         <span className="muted u-iflex" aria-hidden>
           <WrenchIcon size={12} />
         </span>
-        <span className="u-fw-600">{call.toolName}</span>
+        <span className="u-fw-600" {...(label !== call.toolName ? { title: call.toolName } : {})}>{label}</span>
         {call.agentId && (
           // RFC 0040 cross-host causation — surface which agent issued the
           // call. Mono-font chip matches the HandoffIndicator idiom.

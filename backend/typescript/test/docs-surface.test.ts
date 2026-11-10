@@ -4,12 +4,13 @@
  * authored/published through the normal CMS flow; the public docs nav tree
  * lists only published docs (ordered by docsNav); docs pages are EXCLUDED from
  * the marketing sitemap/RSS but SERVED at their public slug; and the docs nav
- * 404s when the `docs` toggle is off. TST-CWC-3.
+ * is empty (200, uniform with an unknown org) when the `docs` toggle is off.
+ * TST-CWC-3.
  *
  * Red when (sabotage-witnessed, wave 69): the sitemap stops excluding docs; the
  * nav ignores `docsNav` (the fixture's docsNav order is the REVERSE of slug
  * order) or sorts it backwards; the nav lists draft docs; the toggle gate is
- * removed (the same org answers 200 first, so the 404 is the gate's); the CMS
+ * removed (the same org lists its doc first, so the empty list is the gate's); the CMS
  * `collection=docs` filter is dropped; an edit stops moving `updatedAt`.
  */
 import http from 'node:http';
@@ -43,7 +44,6 @@ async function setDocs(status: 'on' | 'off'): Promise<void> {
 }
 
 interface Res<T> { status: number; body: T }
-interface ErrorBody { error?: string; message?: string }
 interface NavDoc { slug: string; title: string; order: string; updatedAt: string }
 interface NavBody { docs: NavDoc[] }
 interface PageBody { pageId: string; slug: string; title: string }
@@ -145,20 +145,25 @@ describe('ADR 0392 Phase 1 — docs collection + public tier + SEO exclusion', (
     expect(after?.updatedAt).toBe(new Date(editAt).toISOString());
   });
 
-  it('the docs nav 404s when the docs toggle is OFF', async () => {
+  it('the docs nav is EMPTY (200, not 404) when the docs toggle is OFF, and the same for an unknown org', async () => {
     await setDocs('on');
-    const { orgId } = await ownerOrg();
-    // Positive control: the SAME org answers while docs is on, so the 404 below
-    // is the toggle gate's, not an unknown org's.
-    expect((await client().get<NavBody>(navUrl(orgId))).status).toBe(200);
+    const { owner, orgId } = await ownerOrg();
+    const doc = await publishPage(owner, orgId, { title: 'Gated Guide', slug: 'gated-guide', collection: 'docs', sections: [{ type: 'hero', data: { heading: 'G' } }] });
+    // Positive control: the SAME org lists the doc while docs is on, so the empty
+    // list below is the toggle gate's, not an org without docs.
+    expect((await client().get<NavBody>(navUrl(orgId))).body.docs.map((d) => d.slug)).toEqual([doc.slug]);
     await setDocs('off');
     try {
-      const nav = await client().get<ErrorBody>(navUrl(orgId));
-      expect(nav.status).toBe(404);
-      expect(nav.body.message).toBe('No documentation site here.');
+      const nav = await client().get<NavBody>(navUrl(orgId));
+      expect(nav.status).toBe(200);
+      expect(nav.body).toEqual({ docs: [] });
     } finally {
       await setDocs('on');
     }
+    // Uniform: an unknown org answers exactly like a gated one (no org enumeration).
+    const unknown = await client().get<NavBody>(navUrl('org-does-not-exist'));
+    expect(unknown.status).toBe(200);
+    expect(unknown.body).toEqual({ docs: [] });
   });
 
   it('the CMS list filters by collection (docs vs site)', async () => {

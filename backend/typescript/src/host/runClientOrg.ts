@@ -55,6 +55,21 @@ export function runClientStamp(metadata: Record<string, unknown> | undefined): {
   return { orgId: [...named][0]! };
 }
 
+/** The client org a run is FOR, from its host-written stamps only (no access
+ *  check; callers apply their own floor). `undefined` = not a client run; a refusal
+ *  when the run is unreadable or its stamps disagree. Used by the core
+ *  ad-budget-update node (ADR 1022 follow-up, Q-1) as "the run's org". */
+export async function runClientOrgOf(tenantId: string, runId: string): Promise<{ orgId: string } | { refused: 'wrong_client' | 'unreadable' } | undefined> {
+  try {
+    const run = await hostExtStorage().getRun(runId);
+    if (!run || run.tenantId !== tenantId) return { refused: 'unreadable' };
+    return runClientStamp(run.metadata as Record<string, unknown> | undefined);
+  } catch (err) {
+    log.warn('run_client_stamp_unreadable', { tenantId, runId, error: err instanceof Error ? err.message : String(err) });
+    return { refused: 'unreadable' };
+  }
+}
+
 /** The client binding for agent memory on one run (ADR 0944 D2, run lane). */
 export async function resolveRunMemoryClient(scope: {
   tenantId: string;

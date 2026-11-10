@@ -10,6 +10,12 @@
  * Plus: consent refusal records nothing (uniform 204), the sub-toggle gates both
  * lanes, the input contract is closed-world (typed 400s), the per-row cell cap and
  * the experiment arm k-anonymity floor hold, and the authed read is member-only.
+ *
+ * Sabotage measured (wave 75, each red, then restored): a new row field; the bot
+ * branch; a bot batch creating a page; the consent refusal; the toggle on either
+ * lane; the query strip; the section alphabet; the cell, page and section caps
+ * (the 500/200/100/30 numbers are pinned as literals); the catalog CAS; retention
+ * either way (the 390-day row); the arm floor; the membership check.
  */
 import http from 'node:http';
 import { createHash } from 'node:crypto';
@@ -43,7 +49,7 @@ beforeAll(async () => {
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   await setToggle('analytics', 'on');
-});
+}, 120_000);
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 afterEach(async () => {
   await __resetHeatStoreForTests();
@@ -68,9 +74,9 @@ function client() {
   return { get: <T>(p: string) => call<T>('GET', p), post: <T>(p: string, b?: unknown, h?: Record<string, string>) => call<T>('POST', p, b, h) };
 }
 let seq = 0;
-async function ownerWithOrg() {
+async function ownerWithOrg(tenantId?: string) {
   const owner = client();
-  const su = await owner.post('/host/openwop-app/test/login', { email: `heat-${Date.now()}-${seq++}@acme.test` });
+  const su = await owner.post('/host/openwop-app/test/login', { email: `heat-${Date.now()}-${seq++}@acme.test`, ...(tenantId ? { tenantId } : {}) });
   expect(su.status).toBe(201);
   const org = await owner.post<{ orgId: string; tenantId?: string }>('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status).toBe(201);
@@ -80,8 +86,8 @@ const BROWSER_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605
 const SESSION_SENTINEL = 'vk-0951-SENTINEL-session';
 const IP_SENTINEL = '203.0.113.51';
 const pub = client();
-const heat = (orgId: string, body: Record<string, unknown>, ua = BROWSER_UA) =>
-  pub.post(`/host/openwop-app/public-analytics/${orgId}/heat`, { sessionKey: SESSION_SENTINEL, page: '/pricing', device: 'desktop', ...body }, { 'user-agent': ua, 'x-forwarded-for': IP_SENTINEL });
+const heat = <T = unknown>(orgId: string, body: Record<string, unknown>, ua = BROWSER_UA) =>
+  pub.post<T>(`/host/openwop-app/public-analytics/${orgId}/heat`, { sessionKey: SESSION_SENTINEL, page: '/pricing', device: 'desktop', ...body }, { 'user-agent': ua, 'x-forwarded-for': IP_SENTINEL });
 const EVENTS = [
   { t: 'click', x: 0.5, y: 0.1 },
   { t: 'click', sel: 'cta-buy' },
@@ -178,7 +184,7 @@ describe('ADR 0951 P1 — closed-world input', () => {
   ])('%j is a typed 400 naming %s', async (body, field) => {
     const { orgId } = await ownerWithOrg();
     await setToggle('analytics.heatmaps', 'on');
-    const r = await heat(orgId, body) as Res<{ error?: { details?: { field?: string } }; details?: { field?: string } }>;
+    const r = await heat<{ error?: { details?: { field?: string } }; details?: { field?: string } }>(orgId, body);
     expect(r.status).toBe(400);
     expect(r.body.error?.details?.field ?? r.body.details?.field).toBe(field);
     expect(await __listHeatRowsForTests()).toEqual([]);
@@ -207,6 +213,7 @@ describe('ADR 0951 P1 — bounds and k-anonymity', () => {
   });
 
   it('simultaneous new pages cannot overfill the last org page slot', async () => {
+    expect(MAX_PAGES_PER_ORG).toBe(200);
     const input = { ...base, tenantId: 't-page-cap', orgId: 'o-page-cap' };
     for (let i = 0; i < MAX_PAGES_PER_ORG - 1; i++) {
       expect(await recordHeat({ ...input, pageKey: `/seed-${i}` }, [{ t: 'scroll', depth: 1 }])).toBe(true);
@@ -217,6 +224,7 @@ describe('ADR 0951 P1 — bounds and k-anonymity', () => {
   });
 
   it('valid section names cannot bypass the section cap through Object prototype members', async () => {
+    expect(MAX_SECTIONS_PER_ROW).toBe(100);
     const events = Array.from({ length: MAX_SECTIONS_PER_ROW }, (_, i) => ({ t: 'attn' as const, section: `section-${i}`, ms: 1000 }));
     await recordHeat(base, [...events, { t: 'attn', section: 'constructor', ms: 4000 }, { t: 'attn', section: 'toString', ms: 2000 }]);
     const [row] = await __listHeatRowsForTests();
@@ -249,6 +257,7 @@ describe('ADR 0951 P1 — bounds and k-anonymity', () => {
   });
 
   it('a row keeps at most 500 cells; the rest fold into `other`', async () => {
+    expect(MAX_CELLS_PER_ROW).toBe(500);
     const clicks = [];
     for (let i = 0; i < MAX_CELLS_PER_ROW + 20; i++) clicks.push({ t: 'click' as const, cell: `s:c${i}` });
     await recordHeat(base, clicks);
@@ -258,6 +267,7 @@ describe('ADR 0951 P1 — bounds and k-anonymity', () => {
   });
 
   it('an experiment arm below the view floor is suppressed and its cells are not returned', async () => {
+    expect(MIN_ARM_VIEWS).toBe(30);
     for (let i = 0; i < MIN_ARM_VIEWS - 1; i++) await recordHeat({ ...base, arm: 'exp/b' }, [{ t: 'scroll', depth: 1 }, { t: 'click', cell: 's:only-b' }]);
     const v = await readHeatmap({ ...base, device: 'all', days: 30, arm: 'exp/b' });
     expect(v.arms).toEqual([{ arm: 'exp/b', views: MIN_ARM_VIEWS - 1, suppressed: true }]);
@@ -271,9 +281,10 @@ describe('ADR 0951 P1 — bounds and k-anonymity', () => {
   it('rows age out at 13 months on the kv lane; a recent row stays', async () => {
     const old = new Date(Date.now() - 400 * 86_400_000);
     await recordHeat({ ...base, pageKey: '/old', now: old }, [{ t: 'scroll', depth: 1 }]);
+    await recordHeat({ ...base, pageKey: '/edge', now: new Date(Date.now() - 390 * 86_400_000) }, [{ t: 'scroll', depth: 1 }]);
     await recordHeat({ ...base, pageKey: '/new' }, [{ t: 'scroll', depth: 1 }]);
     await __runKvAgeOutOnce(__hostExtStorage()!);
-    expect((await __listHeatRowsForTests()).map((r) => r.pageKey)).toEqual(['/new']);
+    expect((await __listHeatRowsForTests()).map((r) => r.pageKey).sort()).toEqual(['/edge', '/new']);
   });
 
   it('scroll reach is the share of views reaching each 5% step', async () => {
@@ -289,13 +300,21 @@ describe('ADR 0951 P1 — bounds and k-anonymity', () => {
 
 describe('ADR 0951 P1 — the authed read', () => {
   it('lists pages and is member-only', async () => {
-    const { owner, orgId } = await ownerWithOrg();
+    // A same-tenant non-member: a stranger in another tenant is refused before the
+    // membership check runs. NOT a personal `user:` tenant, where every signed-in
+    // caller is an implicit owner.
+    const tenantId = `heat-t-${seq++}`;
+    const { owner, orgId } = await ownerWithOrg(tenantId);
     await setToggle('analytics.heatmaps', 'on');
     await heat(orgId, { events: EVENTS });
     const pages = await owner.get<{ pages: Array<{ pageKey: string }> }>(`/host/openwop-app/analytics/orgs/${orgId}/heatmap/pages`);
     expect(pages.body.pages.map((p) => p.pageKey)).toEqual(['/pricing']);
-    const stranger = client();
-    await stranger.post('/host/openwop-app/test/login', { email: `heat-x-${Date.now()}@evil.test` });
-    expect([403, 404]).toContain((await stranger.get(`/host/openwop-app/analytics/orgs/${orgId}/heatmap?page=%2Fpricing`)).status);
+    const url = `/host/openwop-app/analytics/orgs/${orgId}/heatmap?page=%2Fpricing`;
+    expect((await owner.get(url)).status).toBe(200);
+    const peer = client();
+    expect((await peer.post('/host/openwop-app/test/login', { email: `heat-x-${seq++}@acme.test`, tenantId })).status).toBe(201);
+    const refused = await peer.get<{ error: string }>(url);
+    expect(refused.status).toBe(403);
+    expect(refused.body.error).toBe('forbidden_scope');
   });
 });

@@ -1,6 +1,6 @@
 {
   "name": "@openwop/app-web",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "private": true,
   "type": "module",
   "description": "OpenWOP application frontend — React SPA consuming @openwop/openwop.",
@@ -37,6 +37,7 @@
     "test:e2e:built": "playwright test -c playwright.built.config.ts",
     "test:e2e:offline": "node scripts/build-offline-fixture.mjs --out node_modules/.cache/offline-e2e/A --variant A && node scripts/build-offline-fixture.mjs --out node_modules/.cache/offline-e2e/B --variant B && playwright test -c playwright.offline.config.ts",
     "test:e2e:routes": "OPENWOP_E2E_ROUTES=1 playwright test feature-routes announcement-delivery",
+    "postinstall": "patch-package --error-on-fail",
     "prebuild": "node ../../scripts/gen-distribution.mjs",
     "check:hosting-wire-rewrites": "node scripts/check-hosting-wire-rewrites.cjs",
     "build:steward": "npm run build && node scripts/design-system-inventory.mjs --check && node scripts/check-hv-citations.mjs && node scripts/check-network-recorder-posture.mjs && node scripts/check-inert-mocks.mjs"
@@ -81,7 +82,7 @@
     "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.1",
     "remark-math": "^6.0.0",
-    "y-prosemirror": "^1.3.7",
+    "y-prosemirror": "1.3.7",
     "y-protocols": "^1.0.7",
     "y-websocket": "^2.1.0",
     "yjs": "^13.6.31",
@@ -103,6 +104,7 @@
     "eslint-plugin-react-hooks": "^5.2.0",
     "fontkit": "^2.0.4",
     "jsdom": "^25.0.1",
+    "patch-package": "8.0.1",
     "typescript": "^5.6.0",
     "typescript-eslint": "^8.60.1",
     "vite": "^7.3.7",

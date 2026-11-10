@@ -22,13 +22,14 @@ import http from 'node:http';
 import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import { bareRunId } from './support/bareRunId.js';
+import { envKeyPrincipalId } from '../src/middleware/envKeyPrincipal.js';
 
 describe('run acting-user provenance (ADR 0024 §4 / D2)', () => {
   let server: http.Server;
   let storage: Storage;
   let BASE: string;
   const TOKEN = 'dev-token';
-  const EXPECTED_ACTOR = `bearer:${TOKEN.slice(0, 8)}`; // auth.ts derives bearer:<8>
+  const EXPECTED_ACTOR = envKeyPrincipalId(TOKEN); // auth.ts derives bearer:<sha256(key) 16 hex> (ADR 1045)
   let workflowId: string;
 
   beforeAll(async () => {

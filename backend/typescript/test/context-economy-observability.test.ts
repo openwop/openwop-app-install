@@ -5,13 +5,18 @@
  * record at all: nothing said how many turns the window dropped, how many
  * retrieved items the memory budget cut, or what the tool diet saved. Guardrail
  * 4 ("flip on once measured") had no instrument. These cases pin the one line,
- * `context_economy_applied`, on the real funnels: it fires only when a lever
+ * `context_economy_applied`, on the tool-diet and memory funnels (the transcript
+ * funnel's line, `conversationExchange.ts`, is asserted by no test — a recorded
+ * gap, TST-EWF-G1, not claimed here): it fires only when a lever
  * changed something, carries counts and the plain `tenantId` only, and never a
  * tool name or a byte of retrieved content.
  *
  * Sabotage (witnessed 2026-10-29): deleting the log call in `dietToolSurface`
  * or in the memory composition reds its case; logging the tool names or the
- * content reds the "counts only" assertions.
+ * content reds the "counts only" assertions. Re-witnessed w80, plus: the diet
+ * running with its lever off, a negative byte count, a dropped `tenantId`, and
+ * the memory budget applied with its lever off (the off case sets a 50-char cap
+ * that WOULD drop items, so it can tell off from on).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { dietToolSurface } from '../src/providers/toolSchemaCompaction.js';
@@ -87,8 +92,12 @@ describe('context_economy_applied (ADR 1003 D4)', () => {
   });
 
   it('memory budget off → no line', async () => {
-    const retrieve = resolveSubjectKnowledgeRetrieve('t1', MEMORY_ONLY, memoryPort(['x'.repeat(100), 'y'.repeat(100)]), 'agent:a');
-    await retrieve!('q');
+    // The cap is set and WOULD drop two of three items; only the lever is off.
+    process.env.OPENWOP_CONTEXT_ECONOMY_MEMORY_MAX_CHARS = '50';
+    const memory = memoryPort(['PRIVATE-FACT-ONE '.repeat(3), 'PRIVATE-FACT-TWO '.repeat(3), 'PRIVATE-FACT-THREE '.repeat(3)]);
+    const retrieve = resolveSubjectKnowledgeRetrieve('t1', MEMORY_ONLY, memory, 'agent:a');
+    expect(retrieve).toBeDefined();
+    expect(await retrieve!('q')).toHaveLength(3);
     expect(applied()).toEqual([]);
   });
 });

@@ -37,7 +37,7 @@ let googleCalls = 0;
 
 /** A minimal SSE response Gemini's stream parser accepts (one candidate text part). */
 function sseResponse(text: string): Response {
-  const data = JSON.stringify({ candidates: [{ content: { parts: [{ text }] } }], usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5 } });
+  const data = JSON.stringify({ candidates: [{ content: { parts: [{ text }] }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5 } });
   return new Response(`data: ${data}\n\n`, { status: 200, headers: { 'content-type': 'text/event-stream' } });
 }
 

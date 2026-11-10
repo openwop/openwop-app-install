@@ -23,6 +23,7 @@ import { useFeatureVisible, useFeatureLocked, useAllFeatureAccess } from '../../
 import { useEffectiveAccessState, isAdminCaller } from '../../client/useEffectiveAccess.js';
 import { getLayout, putLayout, type TileLayout } from './dashboardClient.js';
 import { ALL_DASHBOARD_TILES } from './allTiles.js';
+import { tileNamespace } from './tileTypes.js';
 import { resolveTiles, mergeForPersist, type SavedTile } from './resolveTiles.js';
 import { DashboardTileCard } from './DashboardTileCard.js';
 import { invalidateHomeActivity } from './sharedRead.js';
@@ -30,8 +31,14 @@ import { invalidateHomeActivity } from './sharedRead.js';
 /** Picker group order — the catalog's categories, work-first. */
 const CATEGORY_ORDER = ['Work', 'Business', 'Content', 'AI', 'Operations'] as const;
 
+/** ADR 1031 — the namespaces feature-contributed tiles translate in (empty in openwop-app). */
+const FEATURE_TILE_NAMESPACES: string[] = [...new Set(ALL_DASHBOARD_TILES.map(tileNamespace).filter((ns) => ns !== 'dashboard'))];
+
 export function DashboardPage(): JSX.Element {
   const { t } = useTranslation('dashboard');
+  // ADR 1031 — load each feature tile's own namespace (suspending like any lazy
+  // catalog) before the grid paints; its labels are then `t(key, { ns })`.
+  useTranslation(FEATURE_TILE_NAMESPACES);
   const isVisible = useFeatureVisible();
   const isLocked = useFeatureLocked();
   const { loading: accessLoading } = useAllFeatureAccess();
@@ -192,7 +199,7 @@ export function DashboardPage(): JSX.Element {
   /** The tile's display name — used by every announcement so they read alike. */
   const nameOf = (id: string): string => {
     const def = defById.get(id);
-    return def ? t(def.labelKey, { defaultValue: def.label }) : id;
+    return def ? t(def.labelKey, { ns: tileNamespace(def), defaultValue: def.label }) : id;
   };
 
   // DASH-1 (round 2) — keyboard reorder was O(n) presses to cross a long grid;
@@ -229,7 +236,7 @@ export function DashboardPage(): JSX.Element {
       return w;
     });
     mutate(next);
-    setAnnounce(t('movedAnnounce', { name: t(defById.get(id)!.labelKey, { defaultValue: defById.get(id)!.label }), pos: idx + 1 + dir, total: enabledOrdered.length }));
+    setAnnounce(t('movedAnnounce', { name: t(defById.get(id)!.labelKey, { ns: tileNamespace(defById.get(id)!), defaultValue: defById.get(id)!.label }), pos: idx + 1 + dir, total: enabledOrdered.length }));
     // Same restore as the edge moves: a single step can also land the tile at
     // an end, disabling the button that was just pressed.
     setRefocus({
@@ -405,8 +412,8 @@ export function DashboardPage(): JSX.Element {
             const q = pickerQuery.trim().toLowerCase();
             const matches = (tile: (typeof disabledTiles)[number]): boolean => {
               if (!q) return true;
-              const label = t(tile.def.labelKey, { defaultValue: tile.def.label }).toLowerCase();
-              const desc = t(tile.def.descriptionKey, { defaultValue: '' }).toLowerCase();
+              const label = t(tile.def.labelKey, { ns: tileNamespace(tile.def), defaultValue: tile.def.label }).toLowerCase();
+              const desc = t(tile.def.descriptionKey, { ns: tileNamespace(tile.def), defaultValue: '' }).toLowerCase();
               return label.includes(q) || desc.includes(q);
             };
             const visible = disabledTiles.filter(matches);
@@ -425,12 +432,12 @@ export function DashboardPage(): JSX.Element {
                 <ul className="dash-picker__list u-list-none u-m-0 u-p-0">
                   {group.map((tile) => {
                     const Icon = tile.def.icon;
-                    const label = t(tile.def.labelKey, { defaultValue: tile.def.label });
+                    const label = t(tile.def.labelKey, { ns: tileNamespace(tile.def), defaultValue: tile.def.label });
                     return (
                       <li key={tile.def.id} className="dash-picker__row">
                         <span className="dash-picker__meta">
                           <span className="dash-picker__label"><Icon size={14} /> {label}</span>
-                          <span className="dash-picker__desc muted">{t(tile.def.descriptionKey, { defaultValue: '' })}</span>
+                          <span className="dash-picker__desc muted">{t(tile.def.descriptionKey, { ns: tileNamespace(tile.def), defaultValue: '' })}</span>
                         </span>
                         <Button variant="secondary" size="sm" onClick={() => setEnabled(tile.def.id, true)} aria-label={t('addTileNamed', { defaultValue: 'Add', name: label })}>
                           <PlusIcon size={14} /> {t('add')}

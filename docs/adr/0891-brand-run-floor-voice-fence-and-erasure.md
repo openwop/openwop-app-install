@@ -175,6 +175,16 @@ the brief had no brand (both nodes already treat the voice as optional). This ma
 brief↔brand binding an enforced invariant at generation time. The brief WRITE path stays as
 it is; validating `brandId` there is filed for the campaign-brief row (OQ-2).
 
+**Correction (2026-11-05, CORE-5).** The brief and persona editors now offer only
+brands whose existing `orgId` matches the client being edited. The previous
+workspace-wide picker offered a foreign brand that generation silently ignored.
+An unavailable saved binding stays visible with a warning until explicitly
+replaced or removed; removing it sends the supported empty-string clear. The
+brief review no longer labels an unavailable binding as active. This is an
+editor honesty correction: the deferred write-path validation policy above is
+unchanged, and no cross-client voice disclosure is claimed.
+
+
 ### D8 — Erasure reaches every person field, and the brand survives
 
 `features/brand/erasure.ts` `eraseBrandSubject(tenantId, subjectKey)`, registered from

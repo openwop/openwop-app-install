@@ -7,12 +7,12 @@
  * Sabotage witnessed 2026-10-28:
  *  - drop `...(execOut.hostMessage ? { hostVouched: true } : {})` in agentDispatch → chat "vouched" case.
  *  - drop `...(out.hostMessage ? { hostVouched: true } : {})` in toolBridge → voice "vouched" case.
+ *  - (w79) drop `hostMessage` from `toolError`, or always fence an exact vouched error → both cases.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { AddressInfo } from 'node:net';
-import http from 'node:http';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
-import { registerFeatureAgentTool } from '../src/host/agentToolProvider.js';
+import { registerFeatureAgentTool, createAgentToolProvider } from '../src/host/agentToolProvider.js';
+import type { BundleScope } from '../src/host/inMemorySurfaces.js';
 import { toolError } from '../src/host/agentToolKit.js';
 import { runChatToolLoop, type CompiledTool } from '../src/host/agentDispatch.js';
 import type { AiToolCallRequest, AiToolCallResult } from '../src/executor/types.js';
@@ -23,13 +23,11 @@ import { __clearAgentIdentityCache } from '../src/host/agentIdentity.js';
 const VOUCHED = 'openwop:toc2cd11-lanes.vouched';
 const AGENT = 'probe.toc2cd11.lanes';
 const HOST_REFUSAL = toolError('org_required', 'This workspace has 2 organizations — pass `orgId` (ask the user which).');
-let server: http.Server;
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
-  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { void (server.address() as AddressInfo); res(); }); });
+  await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   // UNTRUSTED on purpose: only the provenance flag can keep its refusal unfenced.
   registerFeatureAgentTool({
     contentTrust: 'untrusted', effect: 'read',
@@ -41,13 +39,12 @@ beforeAll(async () => {
     toolAllowlist: [VOUCHED], packName: 'test.toc2cd11-lanes', packVersion: '0.0.1',
   });
   __clearAgentIdentityCache();
-});
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+}, 120_000);
 
 describe('TOC2CD-11 — chat lane (runChatToolLoop with the real provider)', () => {
   async function lastToolMessage(tool: string): Promise<string> {
-    const { createAgentToolProvider } = await import('../src/host/agentToolProvider.js');
-    const { executeTool } = createAgentToolProvider({ tenantId: 't1', runId: 'r1' } as never);
+    const scope: BundleScope = { tenantId: 't1', runId: 'r1' };
+    const { executeTool } = createAgentToolProvider(scope);
     const compiled: CompiledTool = { def: { name: tool, description: 'd', inputSchema: { type: 'object' } }, validate: () => ({ ok: true }) };
     const seen: AiToolCallRequest[] = [];
     let round = 0;

@@ -8,6 +8,11 @@
  * (the registry overwrote the first), and switching org left the previous org's
  * commands registered (the header of `promptCommands.test.ts` claimed a test
  * caught that; none did).
+ *
+ * Sabotage (witnessed, wave 78), one case each: the handler also calling
+ * `ctx.send`; no `seedLiveComposer` fallback; no generation check; `freeName`
+ * reusing the taken name; no unregister on re-read; offering `available:false`;
+ * not putting the command back after a failed render.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -54,6 +59,8 @@ describe('ADR 0993 D1 — insert for review', () => {
       : Promise.resolve([entry('e2', 'Fresh')])));
     const slow = registerPromptCommands(['slow']);
     await registerPromptCommands(['fast']);
+    // The slow read must really be in flight; otherwise `releaseSlow` is a no-op and `await slow` hangs.
+    await vi.waitFor(() => expect(listPrompts).toHaveBeenCalledWith('slow'));
     releaseSlow([entry('e1', 'Stale')]);
     await slow;
     expect(findCommand('/p-stale')).toBeNull();

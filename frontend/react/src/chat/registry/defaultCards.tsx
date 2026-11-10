@@ -136,18 +136,12 @@ function ApprovalCard({ payload, onAction, isLoading, context, autoFocus }: Card
   const resolvedElsewhere = liveStatus !== undefined && liveStatus !== 'pending';
   const disabled = isLoading || resolvedElsewhere;
 
-  // ADR 0600 §Correction 5 (`ISU-12`) — §7 confirmed REJECT on
-  // `interrupts/ApprovalCard` and left THIS card, which is the other half of the
-  // same pair §2 had just finished unifying. The verb is identical on both: a
-  // rejected `core.approvalGate` appends `run.failed` with `approval_rejected`
-  // and never resolves the suspend, discarding the query, the model call and the
-  // reviewer's attention. A confirm on one of two surfaces is not a confirm.
-  // APPROVE stays ungated here for §7's stated reason — friction on the common
-  // path is what teaches people to click through the one that matters — and the
-  // ≥2-option "Pick this" button is an approve, so it is ungated too.
+  // ADR 0600 §Correction 5 / rejection-copy correction — both approval
+  // surfaces confirm rejection. The workflow owns whether its rejection branch
+  // continues or its run fails; the generic card must not predict that outcome.
+  // Approve and option selection keep their existing ungated behavior.
   async function resolveWithRejectConfirm(action: string): Promise<void> {
-    // ADR 0894 — a browser-action gate's reject ends the browser session (the run
-    // completes), so it gets its own copy rather than "fail the run".
+    // ADR 0894 — a browser-action rejection has its own session-ending copy.
     const browserGate = isBrowserActionGate(data);
     if (action === 'reject' && !(await confirm({
       title: t(browserGate ? 'interrupts:cuRejectConfirmTitle' : 'interrupts:rejectConfirmTitle'),

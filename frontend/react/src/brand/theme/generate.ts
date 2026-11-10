@@ -24,6 +24,8 @@ export interface ThemeInputs {
   contrastLevel?: ContrastLevel;
   radius?: 'sm' | 'md' | 'lg';
   density?: 'compact' | 'comfortable'; // reserved (Phase D); not emitted yet
+  /** ADR 1029 D6 — the public pages' motion preset (`calm` = stock tokens). */
+  motion?: 'calm' | 'lively' | 'subtle';
 }
 export interface GeneratedTheme { light: Record<string, string>; dark: Record<string, string>; warnings: string[] }
 
@@ -39,6 +41,14 @@ const STOCK_DARK: Record<string, string> = {
 };
 const TARGET: Record<ContrastLevel, number> = { standard: 4.5, medium: 5.5, high: 7 };
 const RADIUS_PX: Record<NonNullable<ThemeInputs['radius']>, string> = { sm: '6px', md: '10px', lg: '14px' };
+/** ADR 1029 D6 — the motion presets, as overrides of the D1 tokens (identical in
+ *  light and dark: motion carries no contrast). `calm` is the stock values, so it
+ *  emits nothing. `lively` uses Open Props `--ease-out-4` (MIT, PROVENANCE.json). */
+const MOTION_TOKENS: Record<'lively' | 'subtle', Record<string, string>> = {
+  lively: { '--ease-reveal': 'cubic-bezier(0, 0, 0.1, 1)', '--reveal-distance': '28px', '--rise-distance': '64px', '--stagger-step': '10%', '--slide-distance': '56px', '--zoom-from': '0.92', '--hover-lift': '5px' },
+  subtle: { '--reveal-distance': '0px', '--rise-distance': '0px', '--stagger-step': '4%', '--slide-distance': '0px', '--zoom-from': '1', '--hover-lift': '0px' },
+};
+const motionTokens = (m: ThemeInputs['motion']): Record<string, string> => (m === 'lively' || m === 'subtle' ? MOTION_TOKENS[m] : {});
 
 /** Lightness targets for a generated neutral ramp (calibrated near the stock warm grays). */
 const NEUTRAL_L = {
@@ -83,7 +93,10 @@ function neutralRamp(seed: Oklch, dark: boolean): Record<string, string> {
 
 /** Generate the theme token maps from the input set. */
 export function generateTheme(inputs: ThemeInputs): GeneratedTheme {
-  if (isStock(inputs)) return { light: { ...STOCK_LIGHT }, dark: { ...STOCK_DARK }, warnings: [] };
+  // The motion preset rides on both paths: a theme that sets ONLY motion is
+  // still stock in colour, and must not lose its motion on the stock fast path.
+  const motion = motionTokens(inputs.motion);
+  if (isStock(inputs)) return { light: { ...STOCK_LIGHT, ...motion }, dark: { ...STOCK_DARK, ...motion }, warnings: [] };
 
   const warnings: string[] = [];
   const accent = parseColorToOklch(inputs.accentSeed || STOCK_ACCENT) ?? parseColorToOklch(STOCK_ACCENT)!;
@@ -121,6 +134,7 @@ export function generateTheme(inputs: ThemeInputs): GeneratedTheme {
   light['--ink-3'] = formatOklch(i3Light.color); dark['--ink-3'] = formatOklch(i3Dark.color);
 
   if (inputs.radius) { light['--radius'] = RADIUS_PX[inputs.radius]; dark['--radius'] = RADIUS_PX[inputs.radius]; }
+  Object.assign(light, motion); Object.assign(dark, motion);
 
   return { light, dark, warnings };
 }

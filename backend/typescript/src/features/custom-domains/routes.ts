@@ -13,6 +13,7 @@ import {
   listDomains, addDomain, removeDomain, verifyDomain, retryDomainEdge, domainStatus, forceRemoveDomain,
 } from '../../host/customDomains.js';
 import { loadEdgeConfig } from '../../host/edgeCertificates/index.js';
+import { getSiteBrandId, listSiteBrandChoices, setSiteBrandId } from '../../host/siteBrand.js';
 
 const FEATURE = { toggleId: 'custom-domains', label: 'Custom domains' };
 const BASE = '/host/openwop-app/custom-domains/orgs/:orgId';
@@ -24,6 +25,27 @@ export function registerCustomDomainsRoutes(deps: RouteDeps): void {
     try {
       const { orgId, tenantId } = await authorizeOrgScope(req, FEATURE, 'workspace:read');
       res.json({ domains: await listDomains(tenantId, orgId), edge: edgeSummary() });
+    } catch (err) { next(err); }
+  });
+
+  // ADR 1030 P2 — which of the workspace's brands styles its custom-domain site
+  // (with `custom-domains.designed-pages` on), and the brands it may choose from.
+  app.get(`${BASE}/site-brand`, async (req: Request, res: Response, next) => {
+    try {
+      const { orgId, tenantId } = await authorizeOrgScope(req, FEATURE, 'workspace:read');
+      const [stored, choices] = await Promise.all([getSiteBrandId(tenantId, orgId), listSiteBrandChoices(tenantId, orgId)]);
+      // A choice whose brand was since deleted, or lost its identity, is reported
+      // as none: the page already falls back to the default look for it.
+      const brandId = stored && choices.some((c) => c.id === stored) ? stored : null;
+      res.json({ brandId, choices });
+    } catch (err) { next(err); }
+  });
+
+  app.put(`${BASE}/site-brand`, async (req: Request, res: Response, next) => {
+    try {
+      const { user, orgId, tenantId } = await authorizeOrgScope(req, FEATURE, 'workspace:write');
+      const brandId = await setSiteBrandId(tenantId, orgId, (req.body ?? {}).brandId ?? null, user.userId);
+      res.json({ brandId });
     } catch (err) { next(err); }
   });
 

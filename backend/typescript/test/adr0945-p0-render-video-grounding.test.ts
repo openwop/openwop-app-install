@@ -21,6 +21,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { openStorage } from '../src/storage/index.js';
+import type { Storage } from '../src/storage/storage.js';
 import { configureMediaBudget } from '../src/aiProviders/mediaBudget.js';
 import { createBrief, __clearCreativeBriefs } from '../src/features/creative-briefs/creativeBriefsService.js';
 import { renderForBrief, __clearCreativeRenders } from '../src/features/creative-briefs/render/renderService.js';
@@ -37,8 +38,10 @@ const PNG_A = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQD
 const PNG_B = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMEAQDWUFLAAAAAAElFTkSuQmCC';
 const sha = (b64: string): string => createHash('sha256').update(Buffer.from(b64, 'base64')).digest('hex');
 
+let storage: Storage;
+
 beforeEach(async () => {
-  const storage = await openStorage('memory://');
+  storage = await openStorage('memory://');
   initHostExtPersistence(storage);
   initInMemorySurfaces({ dataDir: mkdtempSync(join(tmpdir(), 'owp-g945-')) });
   configureMediaBudget({ storage });
@@ -86,9 +89,9 @@ describe('video finaliser grounding', () => {
     };
     const prompt = `A slow pan. ${'detail '.repeat(400)}`;
     expect(prompt.length).toBeGreaterThan(2000);
-    const out = await textToVideo({ storage: undefined as never, tenantId: TENANT, runId: 'run-1', actingUserId: 'u', orgId: ORG }, { tenantId: TENANT, orgId: ORG, prompt, createdBy: 'u' }, adapter);
-    expect(out.status).toBe('completed');
-    const asset = await getAsset(TENANT, ORG, (out as { assetId: string }).assetId);
+    const out = await textToVideo({ storage, tenantId: TENANT, runId: 'run-1', actingUserId: 'u', orgId: ORG }, { tenantId: TENANT, orgId: ORG, prompt, createdBy: 'u' }, adapter);
+    if (out.status !== 'completed') throw new Error(JSON.stringify(out));
+    const asset = await getAsset(TENANT, ORG, out.assetId);
     expect(asset?.lineage?.grounding).toMatchObject({ mode: 'none', sources: [], op: 'text-to-video', promptHash: createHash('sha256').update(prompt.trim()).digest('hex') });
   });
 });

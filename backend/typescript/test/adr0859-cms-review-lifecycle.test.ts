@@ -27,6 +27,7 @@ import * as cmsService from '../src/features/cms/cmsService.js';
 import { buildCmsSurface } from '../src/features/cms/surface.js';
 import { queueContentApproval } from '../src/features/cms/contentApproval.js';
 import { getSystemEntity, putSystemEntity } from '../src/features/entities/entitiesService.js';
+import { declaredPathList } from './helpers/featureRatchetTables.js';
 import {
   createContentApproval,
   eraseApprovalSubject,
@@ -225,15 +226,14 @@ describe('D5 — ADR 0594 D2 tripwire: no CMS lane can widen what an entity sect
     // `host/demoContentMarketingSeed.ts` flips `cms.page` publicRead for the demo tenant's
     // blog list — a host seed acting as the admin, not a CMS lane. A new caller must be
     // judged against ADR 0594 before it is added here.
-    expect(callers).toEqual([
+    // ADR 1031 P2 — plus each feature package's named callers (`ratchetTables.json`).
+    expect(callers).toEqual([...declaredPathList('adr0859.updateEntityTypeCallers'), ...[
       'features/entities/entitiesService.ts',
       'features/entities/routes.ts',
       'features/job-search/boards/listing.ts',
-      'features/kicktodo-community/creatorProfileProjection.ts',
-      'features/kicktodo-community/reviewProjection.ts',
       'host/demoContentMarketingSeed.ts',
       'host/demoEntitiesSeed.ts',
-    ]);
+    ]].sort());
   });
 
   it('the entities type PATCH (the publicRead flip) stays admin-tier', () => {

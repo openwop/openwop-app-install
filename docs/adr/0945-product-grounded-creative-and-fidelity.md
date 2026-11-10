@@ -771,3 +771,24 @@ the user's authorization; the merge train is the canonical integration gate.
 
 > **Update 2026-10-31:** the live fidelity evaluation has since run green in
 > production (4/4, google `gemini-3.5-flash`); see the P2 correction above.
+
+
+### Correction — 2026-11-07: show both judge-check verdicts
+
+The normal-UI QA judge check returned a wrong logo-swap case even though its
+combined outcome was `fail`: `runJudgeEval` correctly requires **both** the
+independent AI judge and the combined checks to match the expected outcome.
+The panel displayed only the combined outcome, making “Wrong; expected fail,
+got fail” unexplained. Show the already-returned `judged` value separately from
+`outcome`, alongside the expected result and an explanation of the two-part
+acceptance rule. A missing optional verdict is labelled “not returned”; it is
+never invented as `needs_review`. Provider errors retain their existing copy.
+
+This is a host UI/localization correction only. The judge prompt, parser,
+correctness/combined-outcome rules, route, response fields, permissions, model,
+key/default bindings and publication gates are unchanged. Component regression
+cases distinguish a missed logo (`judged: pass` or `needs_review`, combined
+`fail`, case wrong) from a correctly detected change (both `fail`, case right).
+New regressions are authored but **NOT RUN** at source preservation; no new
+vendor calls are part of this change. The original live model miss remains
+evidence and is not reclassified as a correct judgment by this UI repair.

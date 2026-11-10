@@ -5,8 +5,10 @@
  * Packs: node + agent manifests validate; the write is side-effectful + kept out
  * of the advisory agent's allowlist; index.mjs exports the node functions.
  *
+ * ADR 1034 D1 — the write SUBMITS the review card and never decides.
+ *
  * TST-CUD-4. Red when the governed write skips the acting-user check (system run)
- * or the host:dealers:manage check — each refusal is asserted by its OWN message,
+ * or the host:dealers:manage check, or decides instead of submitting — each refusal is asserted by its OWN message,
  * since both throw `forbidden_scope` — or when the advisory agent's allowlist
  * gains the write tool.
  */
@@ -39,7 +41,7 @@ interface Res<T> { status: number; body: T }
 /** The union of the response fields these routes return (each call reads only its own). */
 interface Body {
   user: { userId: string }; orgId: string; companyId: string; dealerId: string; token: string;
-  registrations: Array<{ regId: string }>;
+  registrations: Array<{ regId: string; status?: string; decidedBy?: string }>;
 }
 function client(withCookie = true) {
   let cookie = '';
@@ -78,8 +80,17 @@ describe('dealers P3 — governed surface write + reads', () => {
       .rejects.toMatchObject({ code: 'forbidden_scope', message: expect.stringMatching(/system runs denied/) });
     // neither refusal decided anything
     expect((await owner.get(`${B}/registrations`)).body.registrations[0]).toMatchObject({ regId, status: 'pending' });
-    const out = await surfaceFor(ownerId).approveRegistration!({ orgId, regId });
-    expect(out).toMatchObject({ success: true, registration: { regId, status: 'approved' } });
+    // ADR 1034 D1 — the owner SUBMITS: the registration's review card comes back pending and
+    // the registration is NOT decided. This used to assert `status: 'approved'`, i.e. it
+    // pinned a workflow approving a partner's deal with no second person.
+    const out = await surfaceFor(ownerId).approveRegistration!({ orgId, regId }) as { submittedForReview: boolean; review: { approvalId: string; status: string } };
+    expect(out).toMatchObject({ success: true, submittedForReview: true, review: { approvalId: `appr:dealreg:${regId}`, status: 'pending' } });
+    expect((await owner.get(`${B}/registrations`)).body.registrations[0]).toMatchObject({ regId, status: 'pending' });
+    // A human decides it in /reviews; decidedBy is that human, never `run:<id>`.
+    expect((await owner.post(`/host/openwop-app/reviews/approval:${out.review.approvalId}/actions/approve`)).status).toBe(200);
+    expect((await owner.get(`${B}/registrations`)).body.registrations[0]).toMatchObject({ regId, status: 'approved', decidedBy: ownerId });
+    // A registration that is no longer pending is a 409, not a fresh card.
+    await expect(surfaceFor(ownerId).approveRegistration!({ orgId, regId })).rejects.toMatchObject({ code: 'conflict' });
   });
 });
 

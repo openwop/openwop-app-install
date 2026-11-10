@@ -8,19 +8,29 @@
  *     accepts or rejects; reject needs a reason, which is sent;
  *   - the server's refusal is shown verbatim.
  *
- * Sabotage: mapping a failed read to an empty list reds the failed case;
- * rendering a file as an <img> or link to a URL reds the "downloads" assertion.
+ * Sabotage-witnessed (w77): mapping a failed read to an empty list reds the failed
+ * case; treating every 404 as "off" reds the off case; rendering a file as an <img>
+ * or link reds the downloads case, as do showing the scan chip always or never, or
+ * a wrong rights date; accepting a blank reason, or sending it untrimmed, reds the
+ * reject case.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, fireEvent, waitFor } from '@testing-library/react';
 
-const h = vi.hoisted(() => ({ listClientIntakes: vi.fn(), acceptClientIntake: vi.fn(), rejectClientIntake: vi.fn(), downloadIntakeFile: vi.fn() }));
+import type * as C from '../intakeClient.js';
+
+const h = vi.hoisted(() => ({
+  listClientIntakes: vi.fn<typeof C.listClientIntakes>(),
+  acceptClientIntake: vi.fn<typeof C.acceptClientIntake>(),
+  rejectClientIntake: vi.fn<typeof C.rejectClientIntake>(),
+  downloadIntakeFile: vi.fn<typeof C.downloadIntakeFile>(),
+}));
 vi.mock('../intakeClient.js', async (orig) => ({ ...(await orig<Record<string, unknown>>()), ...h }));
 
 import { ClientIntakeSection } from '../ClientIntakeSection.js';
 import { CampaignOpsError } from '../campaignOpsClient.js';
 
-const INTAKE = {
+const INTAKE: C.AgencyIntake = {
   intakeId: 'intk_1', orgId: 'o1', campaignId: 'c1', grantId: 'cgr_1', collaboratorId: 'ccb_1',
   files: [{ fileId: 'ifl_1', name: 'hero.png', contentType: 'image/png', bytes: 2048, contentHash: 'a'.repeat(64), scan: 'not_configured' }],
   rights: { license: 'licensed-term', termEndsAt: '2027-06-30', credit: 'Dana Studio', modelReleases: true, attestedAt: '2026-10-26T00:00:00Z' },
@@ -37,6 +47,11 @@ describe('ClientIntakeSection', () => {
     const { container } = render(<ClientIntakeSection orgId="o1" />);
     await waitFor(() => expect(h.listClientIntakes).toHaveBeenCalled());
     await waitFor(() => expect(container.textContent).toBe(''));
+    cleanup();
+    // Only the "not enabled" 404 means off: any other 404 is a failed read.
+    h.listClientIntakes.mockRejectedValueOnce(new CampaignOpsError('Not found.', 404));
+    render(<ClientIntakeSection orgId="o1" />);
+    expect((await screen.findAllByText(/Couldn’t load the submissions/)).length).toBeGreaterThan(0);
   });
 
   it('a failed read is said with a retry, never shown as nothing waiting', async () => {
@@ -54,7 +69,7 @@ describe('ClientIntakeSection', () => {
     h.downloadIntakeFile.mockResolvedValue(undefined);
     render(<ClientIntakeSection orgId="o1" />);
     expect(await screen.findByText('Dana Studio')).toBeTruthy();
-    expect(screen.getByText(/Licensed for a term · until .* · releases: yes · credit: Dana Studio/)).toBeTruthy();
+    expect(screen.getByText('Licensed for a term · until 6/30/2027 · releases: yes · credit: Dana Studio')).toBeTruthy();
     expect(screen.getByText('Not virus-scanned')).toBeTruthy();
     // Unreviewed files are never previewed or linked: only a download button.
     expect(document.querySelector('img')).toBeNull();
@@ -65,6 +80,12 @@ describe('ClientIntakeSection', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Accept into the media library' }));
     await waitFor(() => expect(h.acceptClientIntake).toHaveBeenCalledWith('o1', 'intk_1'));
     expect(await screen.findByText('Accepted. 1 file(s) added to the media library.')).toBeTruthy();
+    cleanup();
+    // The flag is about THESE files: all of them scanned clean, no warning.
+    h.listClientIntakes.mockResolvedValue([{ ...INTAKE, files: INTAKE.files.map((f) => ({ ...f, scan: 'clean' as const })) }]);
+    render(<ClientIntakeSection orgId="o1" />);
+    expect(await screen.findByText('Dana Studio')).toBeTruthy();
+    expect(screen.queryByText('Not virus-scanned')).toBeNull();
   });
 
   it('reject needs a reason and sends it; a server refusal is shown verbatim', async () => {
@@ -73,7 +94,10 @@ describe('ClientIntakeSection', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Reject' }));
     const confirmBtn = screen.getByRole('button', { name: 'Reject files' }) as HTMLButtonElement;
     expect(confirmBtn.disabled).toBe(true);
-    fireEvent.change(screen.getByRole('textbox', { name: /Why/ }), { target: { value: 'Wrong bottle colour' } });
+    const why = screen.getByRole('textbox', { name: /Why/ });
+    fireEvent.change(why, { target: { value: '   ' } });
+    expect(confirmBtn.disabled).toBe(true);
+    fireEvent.change(why, { target: { value: '  Wrong bottle colour  ' } });
     h.rejectClientIntake.mockRejectedValueOnce(new CampaignOpsError('This submission is being accepted right now.', 409, 'intake_busy'));
     fireEvent.click(screen.getByRole('button', { name: 'Reject files' }));
     await waitFor(() => expect(h.rejectClientIntake).toHaveBeenCalledWith('o1', 'intk_1', 'Wrong bottle colour'));

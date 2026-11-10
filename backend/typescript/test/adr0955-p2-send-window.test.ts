@@ -14,6 +14,8 @@
  *  - the sub-toggle check removed                                           → "toggle off"
  *  - `smsSendContext` sending without a bound number (no `no_sender`)       → "typed failures"
  *  - `setSendPolicy` accepting a policy with no SMS window                   → "always has a window"
+ *  - `smsSendContext` taking the lowest number of ANY client                 → "own number"
+ *  - the send-policy route's `host:members:manage` check removed             → "reads and writes it"
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -33,6 +35,7 @@ import { addSuppression } from '../src/features/crm/suppressionService.js';
 import { createContact } from '../src/features/crm/contactsService.js';
 import { recordConsent } from '../src/features/consent/consentService.js';
 import { makeSmsAdapter } from '../src/host/smsAdapter.js';
+import { createOrg } from '../src/host/accessControlService.js';
 import { nextSendWindow, setSendPolicy, zonesFor } from '../src/features/campaign-journeys/sendPolicy.js';
 import { buildCampaignJourneysSurface } from '../src/features/campaign-journeys/surface.js';
 import * as pack from '../../../packs/feature.campaign-journeys.nodes/index.mjs';
@@ -40,6 +43,7 @@ import * as pack from '../../../packs/feature.campaign-journeys.nodes/index.mjs'
 let BASE = '';
 let storage: Storage;
 let twilio: http.Server;
+let server: http.Server;
 const sent: string[] = [];
 const T = `org:sms0955p2-${randomBytes(3).toString('hex')}`;
 const SENDER = '+15550300001';
@@ -54,7 +58,7 @@ beforeAll(async () => {
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   storage = app.locals.storage;
-  const server = app.listen(0, '127.0.0.1');
+  server = app.listen(0, '127.0.0.1');
   await new Promise<void>((r) => server.once('listening', () => r()));
   BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   twilio = http.createServer((req, res) => {
@@ -66,11 +70,15 @@ beforeAll(async () => {
   for (const id of ['campaign-journeys', 'campaign-journeys.sms', 'consent', 'crm', 'users']) await setToggle(id, 'on');
   const conn = await createSecretConnection({ tenantId: T, provider: 'twilio', kind: 'basic', secret: 'AC0955:token', scope: 'user', userId: 'u1' });
   await setSmsSender({ tenantId: T, number: SENDER, connectionId: conn.connectionId, boundBy: 'admin' });
-  await storage.insertRun({ runId: 'run-p2', workflowId: 'w', tenantId: T, status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: 'x', updatedAt: 'x' });
-});
+  // Sorts first, and belongs to another org: "any number of the workspace" would pick it.
+  const otherOrg = (await createOrg({ tenantId: T, createdBy: 'seed', name: 'Other client (synthetic)' })).orgId;
+  await setSmsSender({ tenantId: T, number: '+15550300000', orgId: otherOrg, connectionId: conn.connectionId, boundBy: 'admin' });
+  await storage.insertRun({ runId: 'run-p2', workflowId: 'w', tenantId: T, status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z' });
+}, 120_000);
 afterAll(async () => {
   delete process.env.OPENWOP_TWILIO_API_BASE;
   await new Promise<void>((r) => twilio.close(() => r()));
+  await new Promise<void>((r) => server.close(() => r()));
 });
 
 describe('ADR 0955 D4 — the next send window', () => {
@@ -108,8 +116,9 @@ describe('ADR 0955 D4 — the next send window', () => {
 });
 
 /** A contact who may receive marketing SMS. */
+let nextNumber = 1000; // a counter: a repeated random number would collide with an earlier contact
 async function textable(): Promise<string> {
-  const number = `+1555040${String(Math.floor(Math.random() * 9000) + 1000)}`;
+  const number = `+1555040${String(nextNumber++)}`;
   const c = await createContact({ tenantId: T, name: 'Pat', phone: number });
   await recordConsent({ tenantId: T, subjectKey: c.contactId, categories: { 'marketing.sms': true }, source: 'test' });
   return c.contactId;
@@ -218,7 +227,7 @@ describe('ADR 0955 P2 exit — a send outside the window waits, and a fork inher
     await setSendPolicy({ tenantId, orgId: '', defaultTimezone: 'UTC', windows: { sms: { start, end: `${String(h).padStart(2, '0')}:05` } }, updatedBy: 'a' });
     const contact = await createContact({ tenantId, name: 'Exec', email: 'exec@acme.test' });
     const workflowId = `adr0955-p2-wait-${randomBytes(3).toString('hex')}`;
-    registerWorkflow({ workflowId, name: 'wait for window', version: '1', nodes: [{ nodeId: 'window', typeId: 'feature.campaign-journeys.nodes.next-send-window', inputs: { contactId: contact.contactId, channel: 'sms' } }], edges: [] } as never);
+    registerWorkflow({ workflowId, nodes: [{ nodeId: 'window', typeId: 'feature.campaign-journeys.nodes.next-send-window', inputs: { contactId: contact.contactId, channel: 'sms' } }], edges: [] });
     const create = await owner.call('POST', '/runs', { workflowId, inputs: {} });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
     const runId = String(create.body.runId);
@@ -244,7 +253,6 @@ describe('ADR 0955 P2 exit — a send outside the window waits, and a fork inher
 
 describe('ADR 0955 D1 — the P2 verbs refuse an absent org once the workspace has a client', () => {
   it('checkSendWindow and smsSendContext', async () => {
-    const { createOrg } = await import('../src/host/accessControlService.js');
     const { createClient } = await import('../src/features/campaign-ops/clientService.js');
     const tenantId = `org:p2abs-${randomBytes(3).toString('hex')}`;
     const org = (await createOrg({ tenantId, createdBy: 'seed', name: 'Client (synthetic)' })).orgId;
@@ -265,9 +273,20 @@ describe('ADR 0955 D4 — the send-policy routes', () => {
     const got = await owner.call('GET', '/host/openwop-app/campaign-journeys/send-policy');
     expect(got.body.policy).toMatchObject({ defaultTimezone: 'America/Chicago', windows: { sms: { start: '10:00', end: '19:00' } }, stored: true });
     expect((await owner.call('PUT', '/host/openwop-app/campaign-journeys/send-policy', { defaultTimezone: 'Nowhere/Here' })).status).toBe(400);
+    // A same-tenant member without `host:members:manage` reaches the route's own check.
+    const member = client();
+    expect((await member.call('POST', '/host/openwop-app/test/login', { email: `p2m-${randomBytes(3).toString('hex')}@acme.test`, tenantId })).status).toBe(201);
+    const refused = await member.call('PUT', '/host/openwop-app/campaign-journeys/send-policy', { defaultTimezone: 'Asia/Tokyo' });
+    expect(refused.status).toBe(403);
+    expect(refused.body.error).toBe('forbidden_scope');
+    // The stranger's own workspace is theirs; they cannot name a real org of this one either.
+    const realOrg = (await createOrg({ tenantId, createdBy: 'seed', name: 'Real org (synthetic)' })).orgId;
     const stranger = client();
     expect((await stranger.call('POST', '/host/openwop-app/test/login', { email: `p2s-${randomBytes(3).toString('hex')}@other.test`, tenantId: `org:p2other-${randomBytes(3).toString('hex')}` })).status).toBe(201);
-    // The stranger's own workspace is theirs; they cannot name this one's client either.
-    expect([403, 404]).toContain((await stranger.call('PUT', '/host/openwop-app/campaign-journeys/send-policy', { orgId: 'org-not-theirs' })).status);
+    const foreign = await stranger.call('PUT', '/host/openwop-app/campaign-journeys/send-policy', { orgId: realOrg, defaultTimezone: 'Asia/Tokyo' });
+    expect(foreign.status).toBe(404);
+    expect(JSON.stringify(foreign.body)).toContain('Client not found.');
+    // Neither refused write landed.
+    expect((await owner.call('GET', '/host/openwop-app/campaign-journeys/send-policy')).body.policy).toMatchObject({ defaultTimezone: 'America/Chicago' });
   });
 });

@@ -18,13 +18,13 @@ export interface Org { orgId: string; name: string }
 export { SYSTEM_SITE_ORG } from './siteOrg.js';
 export type PageStatus = 'draft' | 'in_review' | 'published' | 'archived';
 export const PAGE_STATUSES: readonly PageStatus[] = ['draft', 'in_review', 'published', 'archived'];
-export type SectionType = 'hero' | 'richText' | 'image' | 'cta' | 'columns' | 'productGrid' | 'form' | 'pricing' | 'entityList' | 'entityDetail' | 'comparison' | 'faq' | 'quotes' | 'fields' | 'video';
+export type SectionType = 'hero' | 'richText' | 'image' | 'cta' | 'columns' | 'productGrid' | 'form' | 'pricing' | 'entityList' | 'entityDetail' | 'comparison' | 'faq' | 'quotes' | 'fields' | 'video' | 'statusTable' | 'dateCalc' | 'conversation' | 'featureIndex' | 'decisionTree' | 'scheduleSim'; // ADR 1080
 // The `comparison` matrix (ADR 0485) is HOST-AUTHORED (seeded via code), not built
 // through the visual editor — so it is a member of the type union (the renderer
 // handles it) but deliberately absent from the editor's add-section picker below.
 // `fields` (ADR 0748) is the same: created through the RFC 0103 content API,
 // editable here once it exists, not offered as a blank block.
-export const SECTION_TYPES: readonly SectionType[] = ['hero', 'richText', 'image', 'cta', 'columns', 'productGrid', 'form', 'pricing', 'entityList', 'entityDetail', 'faq', 'quotes', 'video'];
+export const SECTION_TYPES: readonly SectionType[] = ['hero', 'richText', 'image', 'cta', 'columns', 'productGrid', 'form', 'pricing', 'entityList', 'entityDetail', 'faq', 'quotes', 'video', 'statusTable', 'dateCalc', 'conversation', 'featureIndex', 'decisionTree', 'scheduleSim'];
 export interface Section {
   sectionId: string;
   type: SectionType;

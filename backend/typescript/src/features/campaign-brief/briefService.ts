@@ -82,6 +82,8 @@ async function snapshotBrief(brief: CampaignBrief, actor: string): Promise<void>
       version,
       snapshot: {
         name: brief.name, objective: brief.objective, brandId: brief.brandId, personaIds: [...brief.personaIds],
+        kbCollectionId: brief.kbCollectionId, groundingPolicy: brief.groundingPolicy,
+        ...(brief.competitors ? { competitors: [...brief.competitors] } : {}),
         productName: brief.productName, productDescription: brief.productDescription,
         industryVertical: brief.industryVertical, channels: brief.channels.map((c) => ({ ...c, config: { ...c.config } })),
         messaging: { ...brief.messaging, proofPoints: [...brief.messaging.proofPoints] },
@@ -341,7 +343,9 @@ function parseCompetitors(v: unknown): string[] | undefined {
   return out.length > 0 ? out : undefined;
 }
 
-const PROTECTED_CONTENT_FIELDS = ['name', 'objective', 'brandId', 'personaIds', 'kbCollectionId', 'productName', 'productDescription', 'industryVertical', 'channels', 'messaging', 'budget'] as const;
+// Generation consumes the evidence policy and competitors as well as the copy
+// inputs: changing either must invalidate kernels generated from the old context.
+const PROTECTED_CONTENT_FIELDS = ['name', 'objective', 'brandId', 'personaIds', 'kbCollectionId', 'groundingPolicy', 'competitors', 'productName', 'productDescription', 'industryVertical', 'channels', 'messaging', 'budget'] as const;
 
 export async function updateBrief(tenantId: string, briefId: string, input: BriefInput, actor = 'system'): Promise<CampaignBrief | null> {
   // ADR 1020 D11 (CS70WF-15) — a compare-and-swap, re-read on a lost race. The

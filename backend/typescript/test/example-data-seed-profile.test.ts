@@ -76,10 +76,10 @@ async function api<T = unknown>(path: string, init: RequestInit = {}): Promise<{
   const text = await res.text();
   return { status: res.status, body: (text.length ? JSON.parse(text) : null) as T };
 }
-const seed = (body: unknown = {}): Promise<{ status: number; body: { seeded: boolean } }> =>
-  api('/host/openwop-app/example-data/seed', { method: 'POST', body: JSON.stringify(body) });
+const seed = (body: { heal?: boolean } = {}): Promise<{ status: number; body: { seeded: boolean } }> =>
+  api('/host/openwop-app/example-data/seed', { method: 'POST', body: JSON.stringify({ ...body, expectedTenantId: 'default' }) });
 const clearAgents = (): Promise<{ status: number; body: unknown }> =>
-  api('/host/openwop-app/example-data/clear', { method: 'POST', body: JSON.stringify({ steps: ['agents'] }) });
+  api('/host/openwop-app/example-data/clear', { method: 'POST', body: JSON.stringify({ steps: ['agents'], expectedTenantId: 'default' }) });
 const roster = async (): Promise<RosterEntry[]> => (await api<{ roster: RosterEntry[] }>('/host/openwop-app/roster')).body.roster;
 const profileOf = (rosterId: string): Promise<{ status: number; body: ProfileResp }> =>
   api(`/host/openwop-app/agents/${encodeURIComponent(rosterId)}/profile`);

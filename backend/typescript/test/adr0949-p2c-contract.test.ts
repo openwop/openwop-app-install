@@ -11,8 +11,8 @@
  *      it FOR THIS STEP: a pre-P1b copy with no engine row is imported by the
  *      read and then stored as a pointer; a copy whose engine row belongs to
  *      another step is kept whole.
- *   5. A write after a hydrated read is not refused as a conflict, and a write
- *      from a stale read still is (the CAS compares the row as stored).
+ *   5. A write after a hydrated read is not refused as a conflict (the CAS
+ *      compares the row as stored). (A stale-read refusal is not asserted here.)
  *   6. A pointer whose engine row is missing is never minted into an engine row
  *      (it would have no salt and no arms); reads drop it, a stop is a 404, and
  *      the next write leaves it out.
@@ -34,13 +34,18 @@
  * A2 (2026-10-26): `dehydrate` returning its input reds 3, 4's import case, 5
  * and 7; `storesAsPointer` without its surface-ref check reds 4's other-step
  * case; `storesAsPointer` ignoring `legacy` reds 8 and 9; hydrate trying the
- * copy before `linkedStepExperiment` reds 8 and 9; `swapStored` comparing the
+ * copy before `linkedStepExperiment` reds 9 (re-measured wave 84: 8's stored
+ * value is already the pointer, so it never reaches that branch); `swapStored` comparing the
  * hydrated read instead of the stored row reds 3, 5, 6, 8, 9 and the ADR 0950
  * funnel-step rollback.
  * A3 (2026-10-26): `storesAsPointer` restored to legacy-only reds 8; it
  * answering `true` for any engine row of the step reds 8's draft case;
  * `publishFunnel`'s approval CAS comparing the hydrated read reds 10; the
  * re-delivered create returning the stored row reds 11.
+ * Wave 84: `resolveStepExperiment` refusing a pointer mirror reds the public-read
+ * case's stored-row leg (production callers hydrate first, which would hide it);
+ * `linkedStepExperiment` ignoring the step ref reds both other-step cases now
+ * that the second managed step shares the tenant.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
@@ -91,7 +96,7 @@ describe('ADR 0949 P2c A1 — CMS contract', () => {
     await legacy.put(gone); // a copy an older image wrote back
 
     const r = await contractLegacyCmsExperiments();
-    expect(r.imported).toBeGreaterThanOrEqual(1);
+    expect(r).toEqual({ imported: 1, deleted: 2 }); // `unread` imported; both rows deleted
     expect(await legacy.get(unread.experimentId)).toBeNull();
     expect(await legacy.get(gone.experimentId)).toBeNull();
     expect(await getExperimentRow(tenantId, 'o-unread', unread.experimentId)).toMatchObject({ legacy: true, salt: unread.salt });
@@ -138,6 +143,10 @@ describe('ADR 0949 P2c — funnel steps store the pointer', () => {
     const id = funnel.steps[0]!.experiment!.experimentId;
     const read = await getFunnel(tenantId, 'o', funnel.funnelId);
     expect((await publicFunnelStep(tenantId, 'o', read!, 0, 'vk-1'))?.experiment?.experimentId).toBe(id);
+    // The row as stored holds only the pointer; the public step resolves it from the engine too.
+    const stored = (await funnelRows.get(funnel.funnelId))!;
+    expect(stored.steps[0]?.experiment).toEqual({ experimentId: id });
+    expect((await publicFunnelStep(tenantId, 'o', stored, 0, 'vk-1'))?.experiment?.experimentId).toBe(id);
   });
 
   it('a pre-P1b full copy with no engine row is imported by the read, then stored as a pointer', async () => {
@@ -187,11 +196,15 @@ describe('ADR 0949 P2c — funnel steps store the pointer', () => {
   });
 
   const PLAN = { primaryMetric: { kind: 'conversion', name: 'signup' }, guardrails: [], baselineRate: 0.1, mde: 0.02, alpha: 0.05, power: 0.8, fdrQ: 0.05, minDays: 7, maxDays: 30 };
-  async function managedOnStep() {
-    const tenantId = `t-c4-${n++}`;
-    const page = await createPage({ tenantId, orgId: 'o', title: `M ${n}`, createdBy: 'u', sections: [{ type: 'hero', data: { heading: 'Hi' } }] });
-    await transitionPage(tenantId, 'o', page.pageId, 'publish', 'u');
-    const f = await createFunnel({ tenantId, orgId: 'o', createdBy: 'u', name: `M ${n}`, steps: [{ stepId: 's1', kind: 'landing', pageId: page.pageId }] });
+  /** `into` places the funnel and its managed step in an existing tenant (another step there). */
+  async function managedOnStep(into?: { tenantId: string; page: { pageId: string } }) {
+    const tenantId = into?.tenantId ?? `t-c4-${n++}`;
+    let page = into?.page;
+    if (!page) {
+      page = await createPage({ tenantId, orgId: 'o', title: `M ${n}`, createdBy: 'u', sections: [{ type: 'hero', data: { heading: 'Hi' } }] });
+      await transitionPage(tenantId, 'o', page.pageId, 'publish', 'u');
+    }
+    const f = await createFunnel({ tenantId, orgId: 'o', createdBy: 'u', name: `M ${n++}`, steps: [{ stepId: 's1', kind: 'landing', pageId: page.pageId }] });
     const d = await createDraft(tenantId, 'o', 'u', { name: 'Step', surface: { kind: 'funnel.step', ref: `${f.funnelId}:s1` }, arms: [{ key: 'control', ref: null, weight: 50 }, { key: 'b', ref: page.pageId, weight: 50 }] });
     await lockPlan(tenantId, 'o', d.experimentId, PLAN);
     await launch(tenantId, 'o', d.experimentId, 'u');
@@ -216,7 +229,10 @@ describe('ADR 0949 P2c — funnel steps store the pointer', () => {
     const { tenantId, page, funnelId } = await managedOnStep();
     const draft = await createDraft(tenantId, 'o', 'u', { name: 'Draft', surface: { kind: 'funnel.step', ref: `${funnelId}:s1` }, arms: [{ key: 'control', ref: null, weight: 50 }, { key: 'b', ref: page.pageId, weight: 50 }] });
     expect(await storesAsPointer(tenantId, 'o', funnelId, 's1', draft.experimentId)).toBe(false);
-    const { id: otherStep } = await managedOnStep();
+    // Same tenant and org, another funnel's step: the engine holds it, for that step only.
+    const { id: otherStep, funnelId: otherFunnel } = await managedOnStep({ tenantId, page });
+    expect(await getExperimentRow(tenantId, 'o', otherStep)).not.toBeNull();
+    expect(await storesAsPointer(tenantId, 'o', otherFunnel, 's1', otherStep)).toBe(true); // positive control
     expect(await storesAsPointer(tenantId, 'o', funnelId, 's1', otherStep)).toBe(false);
   });
 

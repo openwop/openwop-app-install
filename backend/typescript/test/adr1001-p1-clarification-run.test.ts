@@ -8,35 +8,46 @@
  * agent-runner node → `GET …/interrupts` (the card's read) → the by-node resolve
  * (a session lane) or the token lane → the run completes.
  *
- * What each case pins (and is red on `origin/main`, where the envelope became
- * the node's SUCCESSFUL output and no interrupt was raised):
- *  1. ask → card → answer → resumed: the interrupt carries the LIFTED questions
- *     and the asking agent's name, and is caused by the envelope (`causationId`); the agent's continuation receives the answer
- *     inside an untrusted fence; and the mock program holds exactly the calls a
- *     non-repeating continuation makes, so a re-run of the turn before the ask
- *     would exhaust it and fail the run.
- *  2. injection in a choice: a choice carrying markup and a fake fence end comes
- *     back to the model inside ONE intact fence.
- *  3. the cap, read from the discovery document: round `cap` is accepted and
- *     round `cap + 1` emits `cap.breached{kind:'clarification'}` and fails the
- *     node (`capabilities.md` §Engine-enforced limits).
- *  4. an unanswered question expires into the spec's empty `ClarificationResume`,
- *     a person's late answer is refused (410), and the agent is told not to
- *     guess.
+ * What each case pins:
+ *  1. ask → card → answer → resumed: the interrupt carries the LIFTED questions,
+ *     the asking agent's name and round 1, and is caused by the host-minted ask
+ *     id (`causationId`); the continuation receives the answer inside an
+ *     untrusted fence; and the mock program holds exactly the calls a
+ *     non-repeating continuation makes (a re-run of the turn before the ask
+ *     would answer without the fenced message).
+ *  2. injection in a choice: a choice carrying a fake fence end comes back to
+ *     the model inside ONE intact fence.
+ *  3. the cap, read from the discovery document: round `cap` is asked and round
+ *     `cap + 1` emits `cap.breached{kind:'clarification'}` and fails the node
+ *     (`capabilities.md` §Engine-enforced limits).
+ *  4. an unanswered question expires into the spec's empty
+ *     `ClarificationResume`, a person's late answer is refused (410), and the
+ *     agent is told not to guess. Only `Date` is faked to pass the deadline.
  *  5. a question written after reading tool output is answerable only by the
  *     run's acting person, and never over the capability-token lane (ISWF-23).
- *  6. with the toggle off, an envelope-only reply is a typed failure, not a
- *     successful output.
+ *     The node sets BOTH `untrustedContext` and `approverRefs`, and the route's
+ *     `isRestrictedAgentClarification` reads either, so each is probed alone.
+ *  6. with the toggle off (no run stamp) the tool is not offered, and a forced
+ *     call is refused as not permitted and raises nothing.
+ *  7. text shaped like the deleted fenced envelope (ADR 1007) is ordinary
+ *     output. Ceiling: an ABSENCE claim — the acceptor is deleted, so there is
+ *     no mechanism left to sabotage.
+ *  8. a refused ask gets ONE error-fed repair, then `clarification_ask_invalid`.
+ *  9. a mixed round: the earlier call runs, the later call is not run and the
+ *     model is told, and the ask ends the turn.
  *
- * Sabotage-witnessed: dropping the loop's clarification branch reds 1-5;
- * removing the fence in `clarificationAnswerMessage` reds 1-2; passing the
- * post-increment round to the acceptor reds 3; dropping the expiry profile reds
- * 4; dropping the token-lane refusal reds 5; dropping the toggle-off refusal
- * reds 6.
+ * Sabotage-witnessed (wave 81): disabling the loop's ask branch reds 1-5, 8, 9;
+ * removing the answer fence reds 1-2; using the pre-increment round reds 1;
+ * reporting the wrong `observed` reds 3; dropping the 410 or the expiry profile
+ * reds 4; dropping the token-lane refusal, `approverRefs` or `toolOutputSeen`
+ * reds 5; stamping regardless of the toggle reds 6; repairing twice or not
+ * feeding the refusal back reds 8; disarming the ended-turn branch reds 9;
+ * changing the causation id, dropping `askedBy` or skipping the checkpoint on
+ * re-entry reds 1.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { getSetCookies } from './headerCookies.js';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
@@ -115,17 +126,17 @@ async function start(c: Client, offerTools: string[] = []): Promise<string> {
     workflowId: 'openwop-app.agent-mention',
     inputs: { agentId: AGENT, task: 'prepare the quarterly report', provider: 'mock', model: 'mock-1', offerTools },
   });
-  expect([200, 201, 202], JSON.stringify(created.body)).toContain(created.status);
+  expect(created.status, JSON.stringify(created.body)).toBe(201);
   return created.body.runId;
 }
-async function waitStatus(c: Client, runId: string, pred: (s: string) => boolean, timeoutMs = 20_000): Promise<string> {
-  const t0 = Date.now();
-  for (;;) {
-    const s = (await c.get<{ status?: string }>(`/runs/${encodeURIComponent(runId)}`)).body?.status ?? '';
-    if (pred(s)) return s;
-    if (Date.now() - t0 > timeoutMs) throw new Error(`run ${runId} stuck at ${s}`);
-    await new Promise((r) => setTimeout(r, 50));
-  }
+/** Bounded below the case timeout (15 s), so a stuck run fails here, named. */
+async function waitStatus(c: Client, runId: string, pred: (s: string) => boolean): Promise<string> {
+  let s = '';
+  await vi.waitFor(async () => {
+    s = (await c.get<{ status?: string }>(`/runs/${encodeURIComponent(runId)}`)).body?.status ?? '';
+    if (!pred(s)) throw new Error(`run ${runId} stuck at ${s}`);
+  }, { timeout: 8_000, interval: 25 });
+  return s;
 }
 const terminal = (s: string): boolean => ['completed', 'failed', 'cancelled'].includes(s);
 const waiting = (s: string): boolean => s.startsWith('waiting') || terminal(s);
@@ -201,11 +212,13 @@ describe('ADR 1001 P1 — an agent asks, a person answers, the run continues', (
     const { c } = await login();
     const runId = await start(c);
     for (let round = 1; round <= cap!; round += 1) {
-      await waitStatus(c, runId, waiting);
-      const [open] = await openInterrupts(c, runId);
-      expect(open?.data).toMatchObject({ round });
+      // Wait on the CARD for this round, not the status: the status can still
+      // read the previous round's `waiting` before the resume lands.
+      await vi.waitFor(async () => {
+        const [open] = await openInterrupts(c, runId);
+        expect(open?.data).toMatchObject({ round });
+      }, { timeout: 8_000, interval: 25 });
       expect((await answer(c, runId, { answers: [{ id: `q${round - 1}`, answer: `a${round}` }] })).status).toBeLessThan(300);
-      await waitStatus(c, runId, (s) => s !== 'waiting' || terminal(s), 5_000).catch(() => undefined);
     }
     expect(await waitStatus(c, runId, terminal)).toBe('failed');
     const evs = await events(c, runId);
@@ -224,17 +237,22 @@ describe('ADR 1001 P1 — an agent asks, a person answers, the run continues', (
       const { c } = await login();
       const runId = await start(c);
       await waitStatus(c, runId, waiting);
-      await new Promise((r) => setTimeout(r, 1_300));
+      // The deadline is checked against Date.now(): move only the clock past
+      // it (timers stay real, so HTTP and the executor run normally).
+      vi.useFakeTimers({ toFake: ['Date'], shouldAdvanceTime: true });
+      vi.setSystemTime(Date.now() + 5_000);
       // A person's late answer is refused on the session lane too: only the
       // host's expiry resolves an expired question.
       const late = await answer(c, runId, { answers: [{ id: 'region', answer: 'EMEA' }] });
       expect(late.status).toBe(410);
+      expect(JSON.stringify(late.body)).toContain('This question expired before it was answered.');
       // The card's read is the lazy expiry path.
       expect(await openInterrupts(c, runId)).toEqual([]);
       expect(await waitStatus(c, runId, terminal)).toBe('completed');
       expect(lastUserMessage()).toContain('the person skipped it, or it expired');
       expect(lastUserMessage()).toContain('Do not guess');
     } finally {
+      vi.useRealTimers();
       delete process.env.OPENWOP_AGENT_CLARIFICATION_TIMEOUT_SEC;
     }
   });

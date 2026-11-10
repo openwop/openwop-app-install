@@ -93,7 +93,10 @@ describe('parseAgentClarification fails closed (ADR 1001 D8)', () => {
     const q = (schema: unknown) => ({ ...P, questions: [{ id: 'q', question: 'x?', schema }] });
     expect(parseAgentClarification(q({ type: 'string', pattern: 'a' }))).not.toBeNull(); // pattern ignored, host already refused it
     expect(parseAgentClarification(q({ type: 'object' }))).toBeNull();
+    // The caps hold at the boundary: 8 choices and 5 questions are the legal maximum; one more is refused.
+    expect(parseAgentClarification(q({ type: 'string', enum: Array.from({ length: 8 }, (_, i) => `c${i}`) }))).not.toBeNull();
     expect(parseAgentClarification(q({ type: 'string', enum: Array.from({ length: 9 }, (_, i) => `c${i}`) }))).toBeNull();
+    expect(parseAgentClarification({ ...P, questions: Array.from({ length: 5 }, (_, i) => ({ id: `q${i}`, question: 'x?' })) })).not.toBeNull();
     expect(parseAgentClarification({ ...P, questions: Array.from({ length: 6 }, (_, i) => ({ id: `q${i}`, question: 'x?' })) })).toBeNull();
     expect(parseAgentClarification({ ...P, questions: [{ id: 'q', question: 'a?' }, { id: 'q', question: 'b?' }] })).toBeNull();
     // Another producer's questions[] clarification has its own resume shape.

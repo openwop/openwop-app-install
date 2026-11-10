@@ -24,6 +24,12 @@ const BASE = 'https://app.example.test';
 function fixture(type: Section['type']): Section {
   const base = { sectionId: `sec-${type}`, type } as const;
   switch (type) {
+    case 'statusTable': return { ...base, data: { heading: 'Orders', columns: ['Tag', 'Item'], rows: [{ cells: ['UP-07', 'Sofa'], status: 'CFA overdue', tone: 'bad' }] } };
+    case 'dateCalc': return { ...base, data: { heading: 'Work back', note: 'Lead times are estimates.', needDate: '2027-03-12', leadWeeks: 10, floatDays: 10, approveDays: 5 } };
+    case 'conversation': return { ...base, data: { heading: 'Ask', exchanges: [{ q: 'Why late?', a: 'The CFA is overdue.' }] } };
+    case 'featureIndex': return { ...base, data: { heading: 'Index', groups: [{ name: 'Leads', items: [{ label: 'Inquiry capture' }] }] } };
+    case 'decisionTree': return { ...base, data: { heading: 'Decide', trees: [{ title: 'Go', nodes: [{ id: 'a', text: 'In scope?', options: [{ label: 'No', outcome: 'Refer out.' }] }] }] } };
+    case 'scheduleSim': return { ...base, data: { heading: 'Timeline', milestones: [{ id: 'm', label: 'Plumbing rough', startWeek: 0, weeks: 2, floatDays: 3, rework: 'Open tile' }], decisions: [{ title: 'Valve', milestone: 'm', kind: 'selection', options: [{ label: 'On time', delayDays: 0 }] }] } };
     case 'hero': return { ...base, data: { heading: 'Hero', subheading: 'Sub', ctaLabel: 'Go', ctaUrl: '/p/next' } };
     case 'richText': return { ...base, data: { heading: 'Rich', text: 'Para one.' } };
     case 'image': return { ...base, data: { token: 'tok-abc', alt: 'An alt', caption: 'A caption' } };

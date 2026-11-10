@@ -24,7 +24,7 @@ describe('word slugs survive the secret scrub', () => {
     const slug = 'plans-that-adapt-without-erasing-progress';
     expect(slug.length).toBeGreaterThanOrEqual(40);
     expect(scrubSecretShaped(slug)).toBe(slug);
-    const url = `https://kicktodo.com/blog/${slug}`;
+    const url = `https://acme.example/blog/${slug}`;
     expect(safeUrl(url, 2048)).toBe(url);
   });
 

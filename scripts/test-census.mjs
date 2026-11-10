@@ -208,9 +208,21 @@ for (const file of files) {
   const firstCase = text.search(/^\s*(describe|it|test)(\.\w+)*\(/m);
   const preamble = text.slice(0, firstCase === -1 ? 6000 : Math.min(firstCase, 6000));
   const header = (preamble.match(/\/\*[\s\S]*?\*\/|(?:^[ \t]*\/\/.*\n){2,}/m) ?? [''])[0];
-  const casts = (text.match(/\bas any\b/g) ?? []).length
-    + (text.match(/\bas unknown as\b/g) ?? []).length
-    + (text.match(/@ts-(ignore|nocheck|expect-error)/g) ?? []).length;
+  // Casts are counted from the AST, not the text: a comment saying "not as any
+  // 429" was read as a laundering cast and capped the file at B (calibration:
+  // adr0987-admission-insert, grade-tests wave 78). `as any` and the double
+  // `as unknown as T` are AsExpressions; the `@ts-` directives live in comments,
+  // so they stay a text match.
+  let casts = (text.match(/@ts-(ignore|nocheck|expect-error)/g) ?? []).length;
+  const isKw = (t, k) => t && t.kind === k;
+  const visitCasts = (n) => {
+    if (ts.isAsExpression(n)) {
+      if (isKw(n.type, ts.SyntaxKind.AnyKeyword)) casts += 1;
+      else if (ts.isAsExpression(n.expression) && isKw(n.expression.type, ts.SyntaxKind.UnknownKeyword)) casts += 1;
+    }
+    ts.forEachChild(n, visitCasts);
+  };
+  visitCasts(sf);
   const fakeTimers = /useFakeTimers|setSystemTime|clockShift/.test(text);
   const clockUses = (text.match(/\bDate\.now\(\)|new Date\(\)|Math\.random\(\)|performance\.now\(\)/g) ?? []).length;
   const sleeps = (text.match(/setTimeout\([^,)]*,\s*[1-9]\d*\s*\)|\bsleep\(\s*[1-9]|waitForTimeout\(/g) ?? []).length;
@@ -286,7 +298,11 @@ for (const file of files) {
         collect(fn.body);
         const bound = [...used].filter((id) => topLevel.has(id)).sort().map((id) => `${id}=${topLevel.get(id)}`).join(';');
         const norm = normalise(fn.body.getText()) + '|' + normalise(bound);
-        if (norm.length > 120) {
+        // `.agents/skills/` is a byte-exact mirror of `.claude/skills/`, held by
+        // check-agent-skill-mirror.mjs, so its cases are not a second body to
+        // dedupe (calibration, wave 77: DUPLICATE_BODY capped both qualify-live
+        // copies at C, 20/21 cases "unable to fail", on the mirror alone).
+        if (norm.length > 120 && !file.startsWith('.agents/skills/')) {
           // Hash per LANE: the same body in backend and frontend proves each lane
           // separately (calibration: the two clockshift-armed witnesses).
           const laneKey = file.startsWith('backend/') ? 'backend' : file.includes('/e2e/') ? 'e2e' : file.startsWith('frontend/') ? 'frontend' : 'other';

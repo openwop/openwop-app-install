@@ -11,7 +11,9 @@
  *  D1 — the ad-hoc agent dispatch builds its tool executor through the ONE scope
  *       composer, carrying the human (it was the last hand-rolled literal).
  *  D1 — the tenant-scoped KB namespaces are exactly the synthetic org ids the
- *       managed indexers file under, so recall cannot silently lose one.
+ *       managed indexers file under, so recall cannot silently lose one. ADR 1031
+ *       round 3: "listed" means the host set (`_team`) or a composed feature's
+ *       `hostContributions.kbTenantNamespaces`, and the scan walks both feature roots.
  *  D3 — `knowledge.augment-prompt` fences untrusted chunks.
  *  D6 — `kb.reindex` is internal (not in the gallery or the `/` picker).
  *  D7 — a chain that retrieves from KB delivers its product to the approval gate
@@ -19,15 +21,18 @@
  *
  * Measured (wave-6 /grade-tests), each red here: the kb surface without
  * `assertRunScopeOrg`, the seam without `floor()`, a pinned surface losing its shape,
- * a new absent-org surface, `actingUserId` dropped from routes/agents.ts, `_kickbot`
- * dropped from TENANT_SCOPED_KB_ORGS, any of the three fence legs in the pack, the
+ * a new absent-org surface, `actingUserId` dropped from routes/agents.ts, a feature's
+ * namespace neither in the host set nor declared (was: `_kickbot` dropped from
+ * TENANT_SCOPED_KB_ORGS), any of the three fence legs in the pack, the
  * reindex chain un-hidden, and a wrong delivery port in a KB chain.
  */
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import '../src/features/index.js'; // ADR 1031 round 3 — records the composed features' declared namespaces
 import { TENANT_SCOPED_KB_ORGS } from '../src/features/kb/kbService.js';
+import { featureSourceRoots } from './helpers/featureSourceRoots.js';
 import { stripComments } from './helpers/stripComments.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -121,9 +126,9 @@ describe('D1 — tenant-scoped KB namespaces', () => {
         }
       }
     };
-    walk(join(SRC, 'features'));
-    expect(found.size, 'the scan must find the two known namespaces').toBeGreaterThanOrEqual(2);
-    for (const org of found) expect(TENANT_SCOPED_KB_ORGS.has(org), `${org} is not in TENANT_SCOPED_KB_ORGS`).toBe(true);
+    for (const root of featureSourceRoots()) walk(root);
+    expect(found.size, 'the scan must find the known namespaces').toBeGreaterThanOrEqual(1);
+    for (const org of found) expect(TENANT_SCOPED_KB_ORGS.has(org), `${org} is neither a host namespace nor declared in its feature's hostContributions.kbTenantNamespaces`).toBe(true);
   });
 });
 

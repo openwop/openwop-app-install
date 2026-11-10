@@ -59,7 +59,12 @@ export const messages = {
     requiredPlaceholder: 'Required',
     optionalPlaceholder: 'Optional',
     missingHint: 'Fill the {{n}} required input(s) to run.',
-    credentialDefault: 'Workspace default key',
+    aiKey: "AI key for this run",
+    aiKeyHelp: "Optional. This key applies only to steps using its provider. Other providers need their own declared keys. No override adds no workspace key and leaves existing or managed credentials unchanged.",
+    noKeyOverride: "No key override",
+    keyLoadFailed: "Stored keys could not be loaded. Retry before choosing a key.",
+    noSavedAiKeys: "No saved AI keys are available. Add a key in Settings → Keys, or continue without an override.",
+    credentialDefault: "No key override",
     credentialHelp: 'Which stored API key this run\'s AI steps use. Keys live under Settings → Keys.',
   },
   // KTUX-10 — ONE localized transport-failure vocabulary. `classifyHttpError`

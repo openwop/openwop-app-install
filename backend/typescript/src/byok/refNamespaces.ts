@@ -46,3 +46,37 @@ export function systemOwnedRefOwner(ref: string): string | null {
   }
   return null;
 }
+
+/**
+ * ADR 0779 D2, RUN lane (correction 2026-11-03) — may a USER name this namespace
+ * where a user-named ref is resolved: a run's `credentialRefs`, a chat, voice,
+ * image or widget binding, a deferred sensitive variable? D2 refused every owned
+ * namespace on the Keys and vault routes, but the run lane resolved any ref a
+ * workflow named straight into `ctx.secrets`, so a member could read a
+ * colleague's `connection:<id>` credential. A `Record` over the prefix keys, so
+ * a new owner cannot be added without deciding this.
+ *
+ * - `subscription:` — named by a run as its AI credential (RFC 0121; stored at
+ *   the user's personal tenant only, ADR 0757), so a user may name it.
+ * - `managed:` — a sentinel, never resolved from the store (the run lane skips it).
+ * - everything else is minted and used only by its owner: never user-named.
+ */
+const USER_NAMEABLE: Record<keyof typeof OWNED_REF_PREFIXES, boolean> = {
+  connection: false,
+  connectionInbound: false,
+  subscription: true,
+  compatKey: false,
+  pmPeer: false,
+  emailWebhook: false,
+  managed: true,
+};
+
+/** The owning lifecycle when a USER may not name `ref`, else null. */
+export function reservedCredentialRefOwner(ref: string): string | null {
+  const entries = (Object.keys(OWNED_REF_PREFIXES) as Array<keyof typeof OWNED_REF_PREFIXES>)
+    .sort((a, b) => OWNED_REF_PREFIXES[b].length - OWNED_REF_PREFIXES[a].length);
+  for (const key of entries) {
+    if (ref.startsWith(OWNED_REF_PREFIXES[key])) return USER_NAMEABLE[key] ? null : OWNERS[key];
+  }
+  return null;
+}

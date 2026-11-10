@@ -72,10 +72,11 @@ describe('user-visible copy cites no ADR / RFC numbers (all locales, all namespa
   // or filter that silently reads less than that reds here instead of passing on less.
   it('non-vacuity: every locale has catalogs, and route manifests are read', () => {
     for (const l of LOCALES) {
-      expect(CATALOGS.filter((p) => localeOf(p) === l).length, l).toBeGreaterThanOrEqual(132);
+      // 128 since KickTodo's four catalog namespaces left (ADR 1031 P3; was 132).
+      expect(CATALOGS.filter((p) => localeOf(p) === l).length, l).toBeGreaterThanOrEqual(128);
     }
-    expect(ROUTE_MANIFESTS.length).toBeGreaterThanOrEqual(88);
-    expect(ROUTE_MANIFESTS.flatMap((f) => lines(f, NAV_COPY_LINE)).length).toBeGreaterThanOrEqual(153);
+    expect(ROUTE_MANIFESTS.length).toBeGreaterThanOrEqual(84); // 88 until KickTodo's route manifests left (ADR 1031 P3)
+    expect(ROUTE_MANIFESTS.flatMap((f) => lines(f, NAV_COPY_LINE)).length).toBeGreaterThanOrEqual(132); // 153 until KickTodo's nav copy left (ADR 1031 P3)
   });
 
   it('positive control: the matcher flags the copy this guard exists for', () => {

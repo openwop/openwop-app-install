@@ -86,7 +86,7 @@ describe('startTotpEnrollment Key URI', () => {
 
 describe('buildOtpauthUrl', () => {
   it.each([
-    ['plain', 'KickTodo', 'owner@example.com'],
+    ['plain', 'AcmeApp', 'owner@example.com'],
     ['space and ampersand', 'Acme & Co', 'a b@example.com'],
     ['colon and hash', 'Ops: #1', 'ops#1@example.com'],
     ['plus and percent', 'Q+A 100%', 'q+a%x@example.com'],

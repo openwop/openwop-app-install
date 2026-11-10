@@ -33,6 +33,9 @@ import { isAuthoredByOtherTenant } from '../../host/workflowOwnership.js';
 import { getUser } from '../users/usersService.js';
 import { listProviders, getProvider, type CredentialKind } from './providerRegistry.js';
 import { sendError } from '../../middleware/errorEnvelope.js';
+import { sendChannelInboundRateLimited } from '../../middleware/rateLimit.js';
+import { resolveOne } from '../../host/featureToggles/service.js';
+import { getPairing, pairConnection, unpair, type OutboundProvider } from './messagingOutbound.js';
 import {
   setHostOAuthClient,
   listHostOAuthClients,
@@ -70,6 +73,8 @@ import {
   inboundConfigurable,
   inboundObserverOnly,
   isStreamInbound,
+  CONVERSATIONAL_INBOUND_PROVIDERS,
+  conversationalIngressAvailable,
 } from './inboundWebhooks.js';
 
 const log = createLogger('connections.routes');
@@ -122,7 +127,7 @@ export async function listCallerConnections(req: Request): Promise<Connection[]>
  * for an ORG-shared row and (ADR 0780 D1) a WORKSPACE row, judged at the
  * workspace-root org (`orgId === tenantId`). Read by PROVENANCE, never by the id
  * string (ADR 0601 C4): it used to resolve `actingUserOf` alone, which refused
- * the env-key operator (its `bearer:<8>` id is no member) and a workspace owner
+ * the env-key operator (its `bearer:<id>` id is no member) and a workspace owner
  * whose member row is keyed by the other spelling. Deliberately at the ORG, not
  * the tenant-wide union: a sub-org admin is not a workspace-root admin.
  */
@@ -164,7 +169,7 @@ async function requireConnectionsManage(req: Request, orgId: string): Promise<vo
  *     It used to fall through ("no API create path" — false: `scope:'workspace'`
  *     created one), so any member could delete, probe or re-wire it.
  */
-async function authorizeManage(req: Request, connection: { userId?: string; orgId?: string; connectionId: string }): Promise<void> {
+export async function authorizeManage(req: Request, connection: { userId?: string; orgId?: string; connectionId: string }): Promise<void> {
   if (connection.orgId) {
     await requireConnectionsManage(req, connection.orgId);
     return;
@@ -177,6 +182,40 @@ async function authorizeManage(req: Request, connection: { userId?: string; orgI
   }
   await requireConnectionsManage(req, tenantOf(req));
 }
+
+/**
+ * ADR 1042 D1 — the inbound provider for a connection: its own provider, or
+ * `whatsapp-twilio` when a `twilio` connection asks for it. Any other override
+ * (or one on a non-Twilio connection) is a 400, so a request can never route a
+ * credential's deliveries through a different provider's verifier.
+ */
+export function resolveInboundProvider(connectionProvider: string, requested: unknown): string {
+  if (requested === undefined || requested === null || requested === '' || requested === connectionProvider) return connectionProvider;
+  if (connectionProvider === 'twilio' && requested === 'whatsapp-twilio') return 'whatsapp-twilio';
+  throw new OpenwopError('validation_error', `A '${connectionProvider}' connection cannot receive inbound as '${String(requested)}'.`, 400, { field: 'inboundProvider' });
+}
+
+/**
+ * ADR 1042 D3 — validate a sender binding for its provider: the E.164 sender
+ * number (Twilio BSP), the numeric Meta phone-number id (Cloud API), or a
+ * platform chat/channel id (Slack, Discord, Telegram — Telegram ids may be
+ * negative). Returns the normalized id, or throws a field-named 400.
+ */
+export function validateBindingChannelId(provider: string, raw: unknown): string {
+  const v = typeof raw === 'string' ? raw.trim() : '';
+  const bad = (hint: string): never => {
+    throw new OpenwopError('validation_error', `\`channelId\` ${hint}`, 400, { field: 'channelId' });
+  };
+  if (provider === 'whatsapp-twilio') {
+    const bare = v.startsWith('whatsapp:') ? v.slice('whatsapp:'.length) : v;
+    return /^\+[1-9]\d{6,14}$/.test(bare) ? bare : bad('MUST be the E.164 sender number (e.g. +15551234567).');
+  }
+  if (provider === 'whatsapp-cloud') return /^\d{5,20}$/.test(v) ? v : bad('MUST be the numeric Meta phone-number id.');
+  return /^-?[A-Za-z0-9_.:]{1,128}$/.test(v) ? v : bad('MUST be the platform chat or channel id.');
+}
+
+/** The providers a sender binding exists for (the `OutboundProvider` set). */
+const BINDABLE_PROVIDERS: ReadonlySet<string> = new Set(['slack', 'discord', 'telegram', 'whatsapp-twilio', 'whatsapp-cloud']);
 
 const SCOPE_AXES: ReadonlySet<string> = new Set<ConnectionScope>(['user', 'org', 'workspace']);
 
@@ -572,18 +611,34 @@ export function registerConnectionsRoutes(deps: RouteDeps): void {
       throw new OpenwopError('validation_error', `Inbound webhooks are not supported for '${existing.provider}'.`, 400, { provider: existing.provider });
     }
     const body = (req.body ?? {}) as Record<string, unknown>;
+    // ADR 1042 D1 (CHAN-P0-1) — the inbound provider is the connection's own,
+    // except that ONE Twilio credential serves both SMS and WhatsApp
+    // (OPENWOP-WHATSAPP.md § Setup): a `twilio` connection may configure its
+    // inbound as `whatsapp-twilio`. Nothing else may pick a provider.
+    const inboundProvider = resolveInboundProvider(existing.provider, body.inboundProvider);
     // RFC 0127 — a streaming/CDC ingress connection declares which broker source it
     // delivers (`stream` | `change`, default `stream`); ignored for the messaging trio.
     const streamSource = body.source === 'change' || body.source === 'stream' ? body.source : undefined;
     // OBSERVER-ONLY providers (ADR 0404 zoom-webinar) fire no workflow — a
     // workflowId is meaningless for them, so it is not required (and ignored).
-    const observerOnly = inboundObserverOnly(existing.provider);
+    const observerOnly = inboundObserverOnly(inboundProvider);
     const signingSecret = requireString(body.signingSecret, 'signingSecret');
     if (signingSecret.length < MIN_SIGNING_SECRET_LENGTH) {
       throw new OpenwopError('validation_error', `\`signingSecret\` MUST be at least ${MIN_SIGNING_SECRET_LENGTH} characters.`, 400, { field: 'signingSecret' });
     }
+    // ADR 1042 D7 — conversation mode is the default for a chat provider when no
+    // workflow is named (an explicit `mode: "workflow"` or a `workflowId` keeps the
+    // workflow trigger). It needs the channel-ingress feature on for the tenant.
+    const wantsConversation = body.mode === 'conversation' || (body.mode === undefined && (body.workflowId === undefined || body.workflowId === null || body.workflowId === ''));
+    const conversationMode = !observerOnly && CONVERSATIONAL_INBOUND_PROVIDERS.has(inboundProvider) && wantsConversation;
+    if (body.mode === 'conversation' && !conversationMode) {
+      throw new OpenwopError('validation_error', `Inbound '${inboundProvider}' cannot run in conversation mode.`, 400, { field: 'mode' });
+    }
+    if (conversationMode && !(await conversationalIngressAvailable(tenantOf(req)))) {
+      throw new OpenwopError('validation_error', 'Conversation mode needs the Channels into chat feature (channel-ingress) turned on for this workspace. Name a workflowId to fire a workflow instead.', 400, { field: 'mode' });
+    }
     let workflowId: string | undefined;
-    if (!observerOnly) {
+    if (!observerOnly && !conversationMode) {
       workflowId = requireString(body.workflowId, 'workflowId');
       // ADR 0780 D5 — the target must be a workflow THIS workspace may run. An
       // unknown id was accepted and every delivery became a silent `nofire:`; the
@@ -609,8 +664,9 @@ export function registerConnectionsRoutes(deps: RouteDeps): void {
     const config = await setInboundConfig({
       tenantId: tenantOf(req),
       connectionId: req.params.id,
-      provider: existing.provider,
+      provider: inboundProvider,
       ...(workflowId !== undefined ? { workflowId } : {}),
+      ...(conversationMode ? { mode: 'conversation' as const } : {}),
       ...(projectId ? { projectId } : {}),
       signingSecret,
       ...(isStreamInbound(existing.provider) && streamSource ? { streamSource } : {}),
@@ -623,6 +679,47 @@ export function registerConnectionsRoutes(deps: RouteDeps): void {
     if (!existing) throw new OpenwopError('not_found', 'Connection not found.', 404, { connectionId: req.params.id });
     await authorizeManage(req, existing);
     await removeInboundConfig(tenantOf(req), req.params.id);
+    res.status(204).end();
+  }));
+
+  // ── Sender binding (ADR 1042 D3, CHAN-P0-3) ──
+  // The connection↔sender binding a WhatsApp send needs (`pairConnection`) and a
+  // chat app's home channel. Same gates as the inbound config: manage the
+  // connection AND hold a workspace write. Only while WhatsApp or Channels into
+  // chat is on for the workspace (both default off).
+  const requireBindingFeature = async (req: Request): Promise<void> => {
+    const on = async (id: string) => (await resolveOne(id, { tenantId: tenantOf(req) }).catch(() => null))?.enabled === true;
+    if (!(await on('whatsapp')) && !(await on('channel-ingress'))) {
+      throw new OpenwopError('not_found', 'Sender binding is not enabled for this workspace.', 404);
+    }
+  };
+  const bindingTarget = async (req: Request) => {
+    await requireBindingFeature(req);
+    const existing = await getConnection(tenantOf(req), req.params.id);
+    if (!existing) throw new OpenwopError('not_found', 'Connection not found.', 404, { connectionId: req.params.id });
+    await authorizeManage(req, existing);
+    return existing;
+  };
+  app.get('/host/openwop-app/connections/:id/pairing', wrap(async (req, res) => {
+    await bindingTarget(req);
+    res.json({ pairing: await getPairing(req.params.id) });
+  }));
+  app.put('/host/openwop-app/connections/:id/pairing', wrap(async (req, res) => {
+    const existing = await bindingTarget(req);
+    await requireTenantWrite(req);
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    // A twilio connection binds its WhatsApp sender (the one override resolveInboundProvider allows).
+    const provider = resolveInboundProvider(existing.provider, body.provider);
+    if (!BINDABLE_PROVIDERS.has(provider)) {
+      throw new OpenwopError('validation_error', `A '${provider}' connection has no sender binding.`, 400, { field: 'provider' });
+    }
+    const channelId = validateBindingChannelId(provider, body.channelId);
+    res.status(201).json({ pairing: await pairConnection(req.params.id, provider as OutboundProvider, channelId) });
+  }));
+  app.delete('/host/openwop-app/connections/:id/pairing', wrap(async (req, res) => {
+    await bindingTarget(req);
+    await requireTenantWrite(req);
+    await unpair(req.params.id);
     res.status(204).end();
   }));
 
@@ -753,6 +850,11 @@ export function registerConnectionsRoutes(deps: RouteDeps): void {
         case 'ignored':
           res.status(202).json({ accepted: true });
           return;
+        case 'dropped':
+          // ADR 1042 (security review M6) — acknowledged with a plain 200 (Slack
+          // treats anything else as a failure and disables endpoints that keep failing).
+          res.status(200).json({ accepted: true });
+          return;
         case 'rejected':
           // RFC 0127 — a verified push whose body failed normalization (e.g. an invalid
           // CDC `op`, over-cap body) — verified sender, unprocessable payload.
@@ -769,6 +871,10 @@ export function registerConnectionsRoutes(deps: RouteDeps): void {
           return;
         case 'unauthorized':
           sendError(res, 401, 'unauthorized', 'Webhook signature verification failed.');
+          return;
+        case 'rate_limited':
+          // ADR 1042 D6 — the canonical 429 + Retry-After; the provider retries.
+          sendChannelInboundRateLimited(res, outcome.retryAfterSeconds);
           return;
         case 'not_found':
         default:

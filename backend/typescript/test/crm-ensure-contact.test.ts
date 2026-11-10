@@ -39,9 +39,9 @@ describe('ensureContact (ADR 0449 P1)', () => {
   });
 
   it('creates once, then finds — never a duplicate on re-ensure', async () => {
-    const a = await ensureContact({ tenantId: T, email: 'Jo@X.test', name: 'Jo', leadSource: 'kicktodo' });
+    const a = await ensureContact({ tenantId: T, email: 'Jo@X.test', name: 'Jo', leadSource: 'acme-app' });
     expect(a?.email).toBe('Jo@X.test');
-    expect(a?.leadSource).toBe('kicktodo');
+    expect(a?.leadSource).toBe('acme-app');
     // Re-ensure with a different-cased email + different name resolves to the SAME row.
     const b = await ensureContact({ tenantId: T, email: 'jo@x.test', name: 'Different' });
     expect(b?.contactId).toBe(a?.contactId);

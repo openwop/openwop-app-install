@@ -152,6 +152,10 @@ export interface BriefVersion {
     objective: string;
     brandId?: string;
     personaIds: string[];
+    /** Evidence context; absent from revisions captured before this was recorded. */
+    kbCollectionId?: string;
+    groundingPolicy?: CampaignBrief['groundingPolicy'];
+    competitors?: string[];
     productName: string;
     productDescription: string;
     industryVertical: string;

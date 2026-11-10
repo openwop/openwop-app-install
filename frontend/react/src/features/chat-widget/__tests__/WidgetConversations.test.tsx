@@ -5,12 +5,26 @@
  * if a delete runs without the confirm or leaves the open transcript on screen, if the
  * list read is not scoped to THIS org + widget, or if the panel grows a composer (it is
  * a record, not a second chat — CLAUDE.md "one AI chat").
+ *
+ * Sabotage-witnessed (wave 82): the transcript or the preview rendered through
+ * `dangerouslySetInnerHTML`, the list read with org and widget swapped, delete without
+ * awaiting the confirm's answer, the open transcript kept after delete, the wrong thread
+ * deleted, and a textbox added to the transcript. The markup witness is the `img`
+ * check: jsdom never fetches images, so `onerror` never fires and `__pwned` is only
+ * defence in depth. The cancel leg's "not called" check runs after `await vi.waitFor`,
+ * which already yields long enough for an unguarded handler to reach the delete (the
+ * confirm probe was red there).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup } from '@testing-library/react';
+import type { Conversation, ConversationSummary, Widget } from '../../../client/chatWidgetClient.js';
+import type { ConfirmOptions } from '../../../ui/confirm.js';
 
 const { listConversations, getConversation, deleteConversation, confirmMock } = vi.hoisted(() => ({
-  listConversations: vi.fn(), getConversation: vi.fn(), deleteConversation: vi.fn(), confirmMock: vi.fn(),
+  listConversations: vi.fn<(orgId: string, widgetId: string) => Promise<ConversationSummary[]>>(),
+  getConversation: vi.fn<(orgId: string, widgetId: string, threadId: string) => Promise<Conversation>>(),
+  deleteConversation: vi.fn<(orgId: string, widgetId: string, threadId: string) => Promise<void>>(),
+  confirmMock: vi.fn<(opts: ConfirmOptions) => Promise<boolean>>(),
 }));
 vi.mock('../../../client/chatWidgetClient.js', async (orig) => ({
   ...(await orig<typeof import('../../../client/chatWidgetClient.js')>()),
@@ -19,11 +33,10 @@ vi.mock('../../../client/chatWidgetClient.js', async (orig) => ({
 vi.mock('../../../ui/confirm.js', () => ({ confirm: confirmMock }));
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 import { WidgetConversations } from '../WidgetConversations.js';
-import type { Widget } from '../../../client/chatWidgetClient.js';
 
 const W: Widget = { widgetId: 'w1', agentId: 'support', allowedDomains: ['acme.com'], caps: {}, token: 'wgt_abc', enabled: true };
 const HOSTILE = '<img src=x onerror="window.__pwned=1">Do you ship?';
-const SUMMARY = { threadId: 'a'.repeat(32), startedAt: '2026-10-31T10:00:00.000Z', updatedAt: '2026-10-31T10:05:00.000Z', messageCount: 2, preview: HOSTILE };
+const SUMMARY: ConversationSummary = { threadId: 'a'.repeat(32), startedAt: '2026-10-31T10:00:00.000Z', updatedAt: '2026-10-31T10:05:00.000Z', messageCount: 2, preview: HOSTILE };
 
 beforeEach(() => {
   for (const m of [listConversations, getConversation, deleteConversation, confirmMock]) m.mockReset();

@@ -163,7 +163,10 @@ describe('ADR 0826 D1 — pack curation is a workspace WRITE', () => {
     const l = await owner.get(`${MKT}/listings`);
     const listings = l.body.listings ?? [];
     expect(listings.length).toBeGreaterThan(0);
-    for (const x of listings) expect(['steward', 'operator-trusted', 'untrusted', 'revoked']).toContain(x.trust?.tier);
+    // Every PackTrustTier (`host/packTrust.ts`), including ADR 1048's `adopter`: an
+    // adopter checkout's own attested packs list under it, so an allowlist without
+    // it is red in every adopter tree and green only here, where none exists.
+    for (const x of listings) expect(['steward', 'adopter', 'operator-trusted', 'untrusted', 'revoked']).toContain(x.trust?.tier);
     // integrity is shown ONLY for a verified registry install.
     for (const x of listings) if (x.integrity) expect(x.trust?.tier).toBe('operator-trusted');
   });

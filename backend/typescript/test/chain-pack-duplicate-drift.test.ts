@@ -24,7 +24,7 @@ import {
 } from '../src/host/workflowChainPackLoader.js';
 
 const REPO_ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..');
-const SEED_PACK = join(REPO_ROOT, 'examples', 'workflow-chain-packs', 'kicktodo-challenge-factory', 'pack.json');
+const SEED_PACK = join(REPO_ROOT, 'examples', 'workflow-chain-packs', 'campaign-brief', 'pack.json');
 
 const scratch = mkdtempSync(join(tmpdir(), 'owp-dup-drift-'));
 const rootA = join(scratch, 'rootA');

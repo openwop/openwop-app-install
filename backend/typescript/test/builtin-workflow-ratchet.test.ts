@@ -55,6 +55,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { LEGACY_PINNED_WORKFLOWS } from '../src/features/index.js';
+import { declaredIdTable } from './helpers/featureRatchetTables.js';
 import {
   loadWorkflowChainPacks,
   defaultWorkflowChainPackRoots,
@@ -75,9 +76,7 @@ function currentBuiltinIds(): string[] {
 
 /** Builtins that have MIGRATED out → { old builtin id, new chainId } — the
  *  reachability direction of the ratchet. Grows as migrations land. */
-const MIGRATED: ReadonlyArray<{ builtinId: string; chainId: string }> = [
-  { builtinId: 'openwop-app.kicktodo.challenge-factory', chainId: 'openwop-app.kicktodo.challenge-factory' },
-  { builtinId: 'openwop-app.kicktodo.lesson-batch', chainId: 'openwop-app.kicktodo.lesson-batch' },
+const HOST_MIGRATED: ReadonlyArray<{ builtinId: string; chainId: string }> = [
   { builtinId: 'campaign-studio.campaign-orchestration', chainId: 'campaign-studio.campaign-orchestration' },
   { builtinId: 'campaign-studio.channel.landing-page', chainId: 'campaign-studio.channel.landing-page' },
   { builtinId: 'campaign-studio.channel.ad-variants', chainId: 'campaign-studio.channel.ad-variants' },
@@ -85,13 +84,8 @@ const MIGRATED: ReadonlyArray<{ builtinId: string; chainId: string }> = [
   { builtinId: 'campaign-studio.channel.creative-briefs', chainId: 'campaign-studio.channel.creative-briefs' },
   { builtinId: 'campaign-studio.channel.social-posts', chainId: 'campaign-studio.channel.social-posts' },
   { builtinId: 'openwop-app.cdp.sync-to-openwop-host', chainId: 'openwop-app.cdp.sync-to-openwop-host' },
-  { builtinId: 'openwop-app.kicktodo.replan', chainId: 'openwop-app.kicktodo.replan' },
   { builtinId: 'campaign-studio.market-intel', chainId: 'campaign-studio.market-intel' },
   { builtinId: 'campaign-studio.messaging-kernel', chainId: 'campaign-studio.messaging-kernel' },
-  { builtinId: 'openwop-app.kicktodo.calendar-sync', chainId: 'openwop-app.kicktodo.calendar-sync' },
-  { builtinId: 'openwop-app.kicktodo.session-reminder', chainId: 'openwop-app.kicktodo.session-reminder' },
-  { builtinId: 'openwop-app.kicktodo.plan-generation', chainId: 'kicktodo.plan-generation' }, // #2430
-  { builtinId: 'openwop-app.kicktodo.research', chainId: 'kicktodo.research' }, // ADR 0472 P2
   // ADR 0472 P2 — insights trio: chain-backed under the SAME ids (ignition/replay unchanged).
   { builtinId: 'openwop-app.insights.weekly-variance', chainId: 'openwop-app.insights.weekly-variance' },
   { builtinId: 'openwop-app.insights.anniversary-draft', chainId: 'openwop-app.insights.anniversary-draft' },
@@ -106,9 +100,6 @@ const MIGRATED: ReadonlyArray<{ builtinId: string; chainId: string }> = [
   { builtinId: 'notebooks.mcp.search', chainId: 'notebooks.mcp.search' }, // ADR 0472 P4 MCP
   { builtinId: 'commerce.ucp.mcp.catalog-search', chainId: 'commerce.ucp.mcp.catalog-search' }, // ADR 0472 P4 MCP
   { builtinId: 'app-builder.mcp.catalog', chainId: 'app-builder.mcp.catalog' }, // ADR 0472 P4 MCP
-  { builtinId: 'openwop-app.kicktodo.enrollment', chainId: 'openwop-app.kicktodo.enrollment' }, // ADR 0472 P4
-  { builtinId: 'openwop-app.kicktodo.daily-loop', chainId: 'openwop-app.kicktodo.daily-loop' }, // ADR 0472 P4
-  { builtinId: 'openwop-app.kicktodo.reminder-loop', chainId: 'openwop-app.kicktodo.reminder-loop' }, // ADR 0472 P4
   { builtinId: 'notebooks.summarize', chainId: 'notebooks.summarize' }, // ADR 0472 P4 notebooks
   { builtinId: 'notebooks.transform', chainId: 'notebooks.transform' }, // ADR 0472 P4 notebooks
   { builtinId: 'notebooks.ingest-audio', chainId: 'notebooks.ingest-audio' }, // ADR 0472 P4 notebooks
@@ -122,6 +113,8 @@ const MIGRATED: ReadonlyArray<{ builtinId: string; chainId: string }> = [
   // call site by the DEFINITION'S ORIGIN.
   { builtinId: 'feature.agent-knowledge.auto-ingest', chainId: 'feature.agent-knowledge.auto-ingest' },
 ];
+/** ADR 1031 P2 — plus each feature package's migrated builtins (`ratchetTables.json` idTables `builtinWorkflow.migrated`: builtinId → chainId). */
+const MIGRATED: ReadonlyArray<{ builtinId: string; chainId: string }> = [...HOST_MIGRATED, ...Object.entries(declaredIdTable<string>('builtinWorkflow.migrated')).map(([builtinId, chainId]) => ({ builtinId, chainId }))];
 
 describe('ADR 0472 — builtinWorkflows retirement ratchet', () => {
   it('NO-GROWTH: no new builtin may be declared beyond the frozen baseline', () => {

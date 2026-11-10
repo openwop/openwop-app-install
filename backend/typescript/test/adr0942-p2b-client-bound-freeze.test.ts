@@ -17,9 +17,17 @@
  * Sabotage witnesses (each reds the named case; run 2026-10-20):
  *   - `registerClientAutonomyStamp()` removed from campaign-ops `feature.ts`:
  *     "a client-bound run…" (no stamp; the gate goes legacy);
- *   - `clientBoundOrg(metadata) !== null` dropped from `runAutonomyOf.bound`:
- *     "…stamp is missing… fails closed" (an unstamped client-bound run went
+ *   - the client-stamp arm dropped from `runAutonomyOf.bound` (at HEAD it reads
+ *     `metadata['openwop-app.campaignOps'] !== undefined`, so malformed scope stays
+ *     bound): "…stamp is missing… fails closed" (an unstamped client-bound run went
  *     legacy). A STAMPED run is bound by its stamp either way.
+ *   (Corrected wave 80: this note used to name `clientBoundOrg(metadata) !== null`,
+ *   the pre-recovery expression.)
+ *   - also probe-measured, wave 80: `autonomyOrgOf`'s every-org-agrees check and the
+ *     gate's org refusal (the conflicting-scope and missing-stamp cases); the enforce
+ *     chokepoint's stamp-present clause (corrupt stamp, toggles off); the client floor
+ *     in `resolve.ts` (deleted client); the fallback preset in `resolveEffectivePolicy`;
+ *     the not-a-client `dangling` arm; the contributor's toggle check.
  *   - Precedence is held twice: the client arm returns early on a campaign tag,
  *     and the merge is first-writer-wins with the campaign contributor
  *     registered first. Removing the early return alone stays green (measured);
@@ -76,7 +84,10 @@ beforeAll(async () => {
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   storage = app.locals.storage;
 });
-afterAll(() => undefined);
+afterAll(async () => {
+  await setToggle('campaign-orchestration', true);
+  await setToggle(AUTONOMY_TOGGLE, true);
+});
 beforeEach(async () => {
   await setToggle('campaign-orchestration', true);
   await setToggle(AUTONOMY_TOGGLE, true);
@@ -114,7 +125,8 @@ describe('ADR 0942 P2b — the client-bound freeze', () => {
     const v = decideGate({ run, actionClass: 'report.publish', facts: {}, toggleOn: true });
     expect(v.mode).toBe('approve');
     if (v.mode !== 'approve') throw new Error('expected approve');
-    expect(v.interruptData.approverRoleRefs?.length).toBeGreaterThan(0);
+    // Guarded's report.publish is a plain approve by the default approvers (presets.ts DEFAULT_APPROVER).
+    expect(v.interruptData.approverRoleRefs).toEqual(['owner', 'admin']);
     expect(v.interruptData.autonomy).toMatchObject({ actionClass: 'report.publish', policyId: 'preset:guarded' });
   });
 

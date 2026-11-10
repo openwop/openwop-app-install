@@ -208,6 +208,30 @@ async function providerHttpError(provider: string, res: { status: number; text()
     { providerCodes: providerErrorCodes(body) });
 }
 
+/** ADR 1026 — a stream that closed before the provider's terminal signal. The
+ *  provider stopped sending (a cut connection, a server-side 5xx mid-stream),
+ *  so the text received is a fragment, not a reply. Thrown instead of returning
+ *  it; `aiProvidersHost.mapDispatchErrors` maps it to the retryable
+ *  `provider_unavailable`. */
+export interface ProviderStreamIncompleteError extends Error { streamIncomplete: true }
+
+export function isStreamIncompleteError(err: unknown): err is ProviderStreamIncompleteError {
+  return err instanceof Error && (err as Partial<ProviderStreamIncompleteError>).streamIncomplete === true;
+}
+
+/** Log, then build, the stream-incomplete failure. `streamError` is the type of
+ *  an in-band error event the provider sent before closing, when it sent one. */
+function streamIncomplete(
+  provider: ProviderId,
+  model: string,
+  facts: { chunkCount: number; completionLength: number; outputTokens?: number; streamError?: string },
+): ProviderStreamIncompleteError {
+  log.warn('provider_stream_incomplete', { provider, model, ...facts });
+  const detail = facts.streamError ? ` (stream error: ${facts.streamError})` : '';
+  return Object.assign(new Error(`${provider}_stream_incomplete: stream ended without a finish reason${detail}`),
+    { streamIncomplete: true as const });
+}
+
 export async function dispatchChat(reqIn: DispatchRequest): Promise<DispatchResult> {
   // Apply a default timeout floor so an unguarded caller can't hang forever.
   // When the caller already passed a signal we leave it untouched (it carries
@@ -439,9 +463,22 @@ async function dispatchAnthropic(req: DispatchRequest): Promise<DispatchResult> 
   let toolBlocks = 0;
   let invalidToolStream = false;
   const thinkingByIndex = new Map<number, string>();
+  let chunkCount = 0;
+  // An in-band `error` event (e.g. `overloaded_error`) the API can send
+  // mid-stream before closing it. Only its type is kept, for the failure.
+  let streamError: string | undefined;
+  let messageStopped = false;
 
   for await (const event of parseSseStream(res.body)) {
-    if (event.event === 'content_block_start') {
+    chunkCount++;
+    if (event.event === 'message_stop') {
+      messageStopped = true;
+    } else if (event.event === 'error') {
+      try {
+        const data = JSON.parse(event.data) as { error?: { type?: string } };
+        streamError = typeof data.error?.type === 'string' ? data.error.type.slice(0, 64) : 'error';
+      } catch { streamError = 'error'; }
+    } else if (event.event === 'content_block_start') {
       try {
         const data = JSON.parse(event.data) as {
           index?: number;
@@ -514,6 +551,13 @@ async function dispatchAnthropic(req: DispatchRequest): Promise<DispatchResult> 
         if (data.delta?.stop_reason) finishReason = data.delta.stop_reason;
       } catch { /* */ }
     }
+  }
+
+  // ADR 1026 — a complete Messages stream carries a non-null `stop_reason` in
+  // its `message_delta` and ends on `message_stop`. With neither, the text is a
+  // fragment. Either one alone is taken as the end of the message.
+  if (!finishReason && !messageStopped) {
+    throw streamIncomplete('anthropic', req.model, { chunkCount, completionLength: completion.length + toolJson.length, ...(outputTokens != null ? { outputTokens } : {}), ...(streamError ? { streamError } : {}) });
   }
 
   // Route through @openwop/openwop's parseRefusal() with a synthetic
@@ -616,9 +660,11 @@ async function dispatchOpenAI(req: DispatchRequest): Promise<DispatchResult> {
   // don't use this convention (OpenAI o1/GPT-5 reasoning is not
   // surfaced in the API at all — only via `usage.reasoning_tokens`).
   const splitter = new ThinkBlockSplitter();
+  let chunkCount = 0;
 
   for await (const event of parseSseStream(res.body)) {
     if (event.data === '[DONE]') break;
+    chunkCount++;
     try {
       const data = JSON.parse(event.data) as {
         choices?: Array<{ delta?: { content?: string; refusal?: string }; finish_reason?: string | null }>;
@@ -654,6 +700,11 @@ async function dispatchOpenAI(req: DispatchRequest): Promise<DispatchResult> {
   if (tail.visible) {
     completion += tail.visible;
     await req.onDelta?.(tail.visible);
+  }
+  // ADR 1026 — every complete Chat Completions stream ends its choice with a
+  // non-null `finish_reason`; without one the text is a fragment.
+  if (!finishReason) {
+    throw streamIncomplete('openai', req.model, { chunkCount, completionLength: completion.length, ...(outputTokens != null ? { outputTokens } : {}) });
   }
 
   // Route through @openwop/openwop's parseRefusal() — build a synthetic
@@ -763,9 +814,11 @@ async function dispatchOpenAICompatible(
   let outputTokens: number | undefined;
   let finishReason: string | undefined;
   const splitter = new ThinkBlockSplitter();
+  let chunkCount = 0;
 
   for await (const event of parseSseStream(res.body)) {
     if (event.data === '[DONE]') break;
+    chunkCount++;
     try {
       const data = JSON.parse(event.data) as {
         choices?: Array<{ delta?: { content?: string }; finish_reason?: string | null }>;
@@ -801,6 +854,17 @@ async function dispatchOpenAICompatible(
   if (tail.visible) {
     completion += tail.visible;
     await req.onDelta?.(tail.visible);
+  }
+  // ADR 1026 — MiniMax and the Copilot sidecar always end a complete stream
+  // with a `finish_reason`; without one the text is a fragment. A `compat`
+  // endpoint is an operator's black box with no such guarantee (RFC 0108), so
+  // there it is only logged. The sidecar's `error` finish is its own report of
+  // a mid-stream failure (clients/copilot-provider/src/server.js).
+  const sidecarFailed = opts.providerId === 'copilot' && finishReason === 'error';
+  if (!finishReason || sidecarFailed) {
+    const facts = { chunkCount, completionLength: completion.length, ...(outputTokens != null ? { outputTokens } : {}), ...(sidecarFailed ? { streamError: 'finish_reason=error' } : {}) };
+    if (opts.providerId !== 'compat') throw streamIncomplete(opts.providerId, req.model, facts);
+    log.warn('compat_stream_ended_without_finish_reason', { model: req.model, ...facts });
   }
 
   // OpenAI-compatible — same parseRefusal route as dispatchOpenAI. (MiniMax
@@ -931,7 +995,7 @@ async function dispatchCopilotSidecar(req: DispatchRequest): Promise<DispatchRes
     // The sidecar's own error bodies carry no credential; a raw transport error
     // is replaced with a fixed code rather than echoed.
     const msg = e instanceof Error ? e.message : String(e);
-    if (/^copilot_\d{3}:/.test(msg) || msg === 'copilot_no_response_body') throw e;
+    if (/^copilot_\d{3}:/.test(msg) || msg === 'copilot_no_response_body' || isStreamIncompleteError(e)) throw e;
     throw new Error('copilot_transport_error');
   }
 }
@@ -1273,13 +1337,21 @@ async function dispatchGoogle(req: DispatchRequest): Promise<DispatchResult> {
     });
   }
 
-  if (thoughtBuf.length > 0) {
-    await req.onReasoningBlock?.(thoughtBuf);
-  }
-
   // ADR 0111 follow-on: tidy up any File-API uploads now the transcript is in hand
   // (best-effort — deleteGeminiFile never throws; files auto-expire after 48 h anyway).
   for (const name of uploadedFileNames) await deleteGeminiFile(name, req.apiKey);
+
+  // ADR 1026 — a Gemini candidate's `finishReason` is empty exactly while the
+  // model "has not stopped generating tokens" (GenerateContentResponse docs), so
+  // a stream that closed without one was cut off. A blocked PROMPT has no
+  // candidate at all and ends on `promptFeedback.blockReason` instead.
+  if (!finishReason && !blockReason) {
+    throw streamIncomplete('google', req.model, { chunkCount, completionLength: completion.length, ...(outputTokens != null ? { outputTokens } : {}) });
+  }
+
+  if (thoughtBuf.length > 0) {
+    await req.onReasoningBlock?.(thoughtBuf);
+  }
 
   const citations = Array.from(citationsByUrl.values());
   // Route through parseRefusal() with a synthetic Gemini-shape response.

@@ -21,6 +21,7 @@ import { OpenwopError } from '../../../types.js';
 import { cleanString, cleanOpaqueToken } from '../../../host/boundedStrings.js';
 import { validateCommissionPlan } from './rowGuards.js';
 import { subjectKeyForms, ERASED } from '../../../host/subjectErasureRedaction.js';
+import { sameSubject } from './subject.js';
 
 export type CommissionType = 'percentage' | 'fixed';
 export type RuleBasis = 'deal-won';
@@ -68,6 +69,8 @@ export interface CommissionPlan {
   createdBy: string;
   createdAt: string;
   updatedAt: string;
+  /** ADR 1034 — who last changed it (a rate change left no trace on the row). */
+  updatedBy?: string;
 }
 
 // R3 — a percentage rate had NO upper bound, so `rate: 500` was a valid plan and a
@@ -146,6 +149,29 @@ function cleanRules(raw: unknown): CommissionRule[] {
   });
 }
 
+/**
+ * ADR 1034 D4 — ADR 0280 §8's "one active plan per assignment", enforced. Two plans with an
+ * IDENTICAL assignment (`kind` + `ref`) and overlapping effective windows would both pay
+ * every deal of that assignment. An open `effectiveTo` runs forever. Plans with different
+ * assignments (a role plan and a rep plan) may stack; the review card names that stacking.
+ */
+async function assertNoOverlap(tenantId: string, orgId: string, candidate: Pick<CommissionPlan, 'assignment' | 'effectiveFrom' | 'effectiveTo'>, exceptPlanId?: string): Promise<void> {
+  const a = candidate.assignment;
+  if (!a) return;
+  const overlaps = (x: Pick<CommissionPlan, 'effectiveFrom' | 'effectiveTo'>): boolean =>
+    x.effectiveFrom <= (candidate.effectiveTo ?? '9999-12-31') && candidate.effectiveFrom <= (x.effectiveTo ?? '9999-12-31');
+  const clash = scoped(await plans.listForTenantIndexed(tenantId), tenantId, orgId).find((p) => p.planId !== exceptPlanId
+    && p.assignment?.kind === a.kind
+    // A rep is matched across subject spellings (`user:x` and `x` are one person, D8).
+    && (a.kind === 'rep' ? sameSubject(p.assignment.ref, a.ref) : p.assignment.ref === a.ref)
+    && overlaps(p));
+  if (clash) {
+    throw new OpenwopError('conflict', `Plan “${clash.name}” already pays this ${a.kind} for an overlapping period. End it first, or give this plan a window that does not overlap.`, 409, {
+      reason: 'plan_window_overlap', conflictingPlanId: clash.planId,
+    });
+  }
+}
+
 export async function createPlan(tenantId: string, orgId: string, input: Record<string, unknown>, actor: string): Promise<CommissionPlan> {
   const count = scoped(await plans.listForTenantIndexed(tenantId), tenantId, orgId).length;
   if (count >= MAX.perOrgPlans) throw new OpenwopError('validation_error', `This org has the maximum ${MAX.perOrgPlans} commission plans.`, 409, { max: MAX.perOrgPlans });
@@ -167,8 +193,21 @@ export async function createPlan(tenantId: string, orgId: string, input: Record<
     updatedAt: now,
     ...(effectiveTo ? { effectiveTo } : {}),
   };
+  await assertNoOverlap(tenantId, orgId, plan);
   await plans.put(plan);
   return plan;
+}
+
+/**
+ * ADR 1034 D11 — which plans a reader may see. A plan is a rep's compensation (rates, caps,
+ * accelerators), and statements were already filtered to the rep while every plan was
+ * served to every reader. Without `host:commissions:manage`, a reader sees role and
+ * territory plans (team-level comp) and the rep plans assigned to them. ONE helper for the
+ * route, the workflow surface and the agent tool.
+ */
+export function plansVisibleTo(rows: CommissionPlan[], canManage: boolean, viewer: string | undefined): CommissionPlan[] {
+  if (canManage) return rows;
+  return rows.filter((p) => p.assignment?.kind !== 'rep' || (viewer !== undefined && sameSubject(p.assignment.ref, viewer)));
 }
 
 export async function listPlans(tenantId: string, orgId: string): Promise<CommissionPlan[]> {
@@ -182,7 +221,6 @@ export async function getPlan(tenantId: string, orgId: string, planId: string): 
 }
 
 export async function updatePlan(tenantId: string, orgId: string, planId: string, patch: Record<string, unknown>, actor: string): Promise<CommissionPlan> {
-  void actor;
   const existing = await getPlan(tenantId, orgId, planId);
   const next: CommissionPlan = { ...existing };
   if (patch.name !== undefined) next.name = requireName(patch.name);
@@ -192,8 +230,17 @@ export async function updatePlan(tenantId: string, orgId: string, planId: string
   if (patch.effectiveFrom !== undefined) next.effectiveFrom = requireDate(patch.effectiveFrom, 'effectiveFrom');
   if (patch.effectiveTo !== undefined) next.effectiveTo = requireDate(patch.effectiveTo, 'effectiveTo');
   if (next.effectiveTo && next.effectiveTo < next.effectiveFrom) throw new OpenwopError('validation_error', '`effectiveTo` must not precede `effectiveFrom`.', 400, { effectiveFrom: next.effectiveFrom, effectiveTo: next.effectiveTo });
+  // Only a change to WHO it pays or WHEN is checked, so a plan that already overlaps (written
+  // before this rule) can still be renamed or have its rates corrected.
+  if (patch.assignment !== undefined || patch.effectiveFrom !== undefined || patch.effectiveTo !== undefined) {
+    await assertNoOverlap(tenantId, orgId, next, planId);
+  }
   next.updatedAt = nowIso();
-  await plans.put(next);
+  next.updatedBy = actor;
+  // ADR 1034 — a CAS: two managers editing rates at once must not silently lose one edit.
+  if (!(await plans.compareAndSwap(existing, next))) {
+    throw new OpenwopError('conflict', 'This plan changed while you were editing it. Reload and try again.', 409, { planId });
+  }
   return next;
 }
 
@@ -226,6 +273,7 @@ export async function erasePlanSubject(tenantId: string, subjectKey: string): Pr
       touched = true;
     }
     if (forms.has(p.createdBy)) { next.createdBy = ERASED; touched = true; }
+    if (p.updatedBy !== undefined && forms.has(p.updatedBy)) { next.updatedBy = ERASED; touched = true; }
     if (touched) await plans.put(next);
   }
 }

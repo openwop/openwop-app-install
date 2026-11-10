@@ -16,9 +16,9 @@
  * `ctx.callAI` is faked; `fetch` (REAL SSRF-guarded HTTP to a local test
  * server), `seen`/`snapshot`/`remember` (REAL in-memory `ctx.storage.kv`,
  * via `buildHostSurfaceBundle` — the SAME factory the real executor uses),
- * and `notify` (REAL `ctx.notification.push`, gracefully degrading with no
- * connection configured, exactly as `workflow-chain-exec-ops-execution.
- * test.ts` documents for `calendar`/`finance`) are all REAL. Running the
+ * and `notify` (the real in-app notification surface and durable inbox store)
+ * are all REAL. Report-body assertions compare that stored message with the
+ * actual upstream `diff.content`, not just the node's emission verdict. Running the
  * chain TWICE with the SAME `feedUrl` in the SAME tenant proves durable,
  * per-source dedup actually round-trips end to end — not just structurally.
  *
@@ -103,6 +103,7 @@ import type { Storage } from '../src/storage/storage.js';
 import { getChain, expandChain, loadWorkflowChainPacks, _resetChainRegistryForTest } from '../src/host/workflowChainPackLoader.js';
 import { buildHostSurfaceBundle } from '../src/host/inMemorySurfaces.js';
 import { buildGraph, buildNodeInputs, evaluateTrigger, freshSnapshot, type SchedulerSnapshot } from '../src/executor/scheduler.js';
+import { resolveDeclaredInputs, buildNodeCtxInputs } from '../src/executor/nodeCtxInputs.js';
 import { makeNotificationAdapter } from '../src/host/notificationAdapter.js';
 import { buildNotificationsSurface } from '../src/features/notifications/surface.js';
 
@@ -192,17 +193,9 @@ async function runChain(
       if (verdict === 'skip') { snapshot.nodeState.set(nodeId, 'skipped'); continue; }
       const node = byId.get(nodeId)!;
       const inputsByPort = buildNodeInputs(nodeId, graph, snapshot, params);
-      // executor.ts — the single-`input` back-compat unwrap, verbatim in shape.
-      const baseInputs: unknown =
-        Object.keys(inputsByPort).length === 1 && 'input' in inputsByPort ? inputsByPort.input : inputsByPort;
-      // executor.ts (ADR 0237) — a node's DECLARED `inputs` (frozen by expandChain)
-      // win over the edge-derived ones on conflict.
-      const declared = node.inputs ?? {};
-      const ctxInputs: unknown = Object.keys(declared).length === 0
-        ? baseInputs
-        : baseInputs && typeof baseInputs === 'object' && !Array.isArray(baseInputs)
-          ? { ...Object.fromEntries(Object.entries(baseInputs)), ...declared }
-          : declared;
+      // Use the same declared-input resolution and port merge as the executor;
+      // a hand-written merge can conceal a missing notification message binding.
+      const ctxInputs = buildNodeCtxInputs(inputsByPort, resolveDeclaredInputs(node.inputs, params));
       const impl = nodeImpls[node.typeId];
       expect(impl, `node impl for ${node.typeId}`).toBeTruthy();
       const result = await impl!({
@@ -223,6 +216,24 @@ async function runChain(
     }
   }
   return results;
+}
+
+/** A green notify node alone does not prove its report reached the inbox.
+ * Assert the actual durable row, scoped to this run, against the upstream output. */
+async function expectPersistedReport(
+  results: Record<string, NodeResult>,
+  tenantId: string,
+  runId: string,
+  title: string,
+): Promise<void> {
+  const report = results.diff?.outputs?.content;
+  if (typeof report !== 'string' || report.length === 0) throw new Error('The diff node must produce a nonempty report');
+  const rows = await storage.listNotifications({ tenantId, limit: 20 });
+  const notices = rows.filter((row) => row.runId === runId && row.title === title);
+  expect(notices).toHaveLength(1);
+  const notice = notices[0];
+  if (!notice) throw new Error('The report must have a durable notification for its run');
+  expect(notice.message).toBe(report);
 }
 
 describe('content.feed-watch — end-to-end execution (mini-scheduler, real fetch/storage/notify, fake ctx.callAI)', () => {
@@ -256,6 +267,7 @@ describe('content.feed-watch — end-to-end execution (mini-scheduler, real fetc
     // degrading to nothing while the run completed green. The in-app node actually
     // DELIVERS (durable inbox row + SSE), so the honest assertion is an emission.
     expect(first.notify?.outputs).toMatchObject({ emitted: true, audience: 'tenant' });
+    await expectPersistedReport(first, tenantId, 'run:first', 'Feed Watcher & Digest');
 
     expect(feedHits - hitsBefore, 'the first run fetched the feed exactly once').toBe(1);
 
@@ -269,6 +281,7 @@ describe('content.feed-watch — end-to-end execution (mini-scheduler, real fetc
     const secondCalls: CapturedAiCall[] = [];
     const second = await runChain('content.feed-watch', params, tenantId, 'run:second', secondCalls);
     expect(second.diff?.status, JSON.stringify(second)).toBe('success');
+    await expectPersistedReport(second, tenantId, 'run:second', 'Feed Watcher & Digest');
     const secondParsed = JSON.parse(secondCalls[0]!.messages[0]!.content) as { seen?: { found?: boolean; value?: string } };
     expect(secondParsed.seen?.found).toBe(true);
     expect(secondParsed.seen?.value).toContain('https://example.com/p/1');
@@ -302,9 +315,11 @@ describe('content.page-watch — end-to-end execution (same fixes, same harness)
     expect(parsed.fetch?.body).toContain('New feature shipped');
     expect(parsed.snapshot?.found).toBe(false);
     expect(result.remember?.outputs).toEqual({ ok: true });
+    await expectPersistedReport(result, tenantId, 'run:page-first', 'Page Change Watch');
 
     const calls2: CapturedAiCall[] = [];
-    await runChain('content.page-watch', params, tenantId, 'run:page-second', calls2);
+    const second = await runChain('content.page-watch', params, tenantId, 'run:page-second', calls2);
+    await expectPersistedReport(second, tenantId, 'run:page-second', 'Page Change Watch');
     const parsed2 = JSON.parse(calls2[0]!.messages[0]!.content) as { snapshot?: { found?: boolean } };
     expect(parsed2.snapshot?.found).toBe(true);
   });

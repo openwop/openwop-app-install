@@ -80,14 +80,14 @@ describe('ADR 1019 D1 — refreshEntityChatTitle', () => {
 
   it("a person's rename landing between the read and the write keeps its title AND 'user'", async () => {
     await seed({ titleSource: 'given' });
-    const racing = {
+    const racing: typeof storage = {
       ...storage,
       getChatSession: async (t: string, id: string) => {
         const rec = await storage.getChatSession(t, id);
         await storage.updateChatSession(t, id, { title: 'My Name', titleSource: 'user' });
         return rec;
       },
-    } as typeof storage;
+    };
     await refreshEntityChatTitle(racing, T, SID, 'Q4 · board');
     expect(await storage.getChatSession(T, SID)).toMatchObject({ title: 'My Name', titleSource: 'user' });
   });

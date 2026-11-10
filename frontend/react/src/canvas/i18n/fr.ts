@@ -2,6 +2,8 @@
  * `canvas` namespace (ADR 0310 Phase A) — chaînes du framework de l’éditeur de canevas.
  */
 export const messages = {
+  type_film: "Film animé",
+  typeHint_film: "HTML animé avec repères manuels et notes privées.",
   // CPKU-2 — accessible Yes/No name for pack boolean fields (the ✓/— glyph is aria-hidden).
   boolYes: 'Oui',
   boolNo: 'Non',

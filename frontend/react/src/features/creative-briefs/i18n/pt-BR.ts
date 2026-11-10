@@ -1,5 +1,7 @@
 /** `creativeBriefs` namespace (ADR 0353). */
 export const messages = {
+  chooseOrg: "Escolha uma organização",
+  orgUnavailable: "Esta organização não está disponível neste espaço de trabalho. Escolha uma organização à qual você tenha acesso.",
   reelPending: 'Seu reel ainda está sendo gerado — isso pode levar alguns minutos. Você pode sair desta página; retomaremos quando você voltar a este briefing nesta aba.',
   eyebrow: 'MARKETING',
   title: 'Briefs criativos',
@@ -177,7 +179,9 @@ export const messages = {
   "judgeCheckCase_colour-drift": "Cor alterada",
   "judgeCheckCase_logo-swap": "Logotipo trocado",
   "judgeCheckCase_extra-part": "Peça a mais",
-  judgeCheckCaseResult: "esperado {{expected}}, obtido {{outcome}}",
+  judgeCheckCaseResult: 'esperado {{expected}}, avaliador {{judged}}, combinado {{outcome}}',
+  judgeCheckResultsHelp: 'Um caso só está correto quando tanto o avaliador de IA quanto as verificações combinadas correspondem ao resultado esperado.',
+  judgeCheckNotReturned: 'não retornado',
   judgeCheckExpect_pass: "aprovado",
   judgeCheckExpect_fail: "reprovado",
   judgeCheckExpect_not_pass: "reprovado ou revisão",

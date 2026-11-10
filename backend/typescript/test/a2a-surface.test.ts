@@ -192,13 +192,33 @@ describe('category: host.a2a error surfacing', () => {
   });
 });
 
-describe('category: host.a2a server-side demo stubs', () => {
-  it('publishAgentCard + emit* + pushSend accept calls without throwing', async () => {
-    const a2a = createA2aSurface({ tenantId: 't1' });
-    await expect(a2a.publishAgentCard({ card: AGENT_CARD })).resolves.toBeUndefined();
-    await expect(a2a.emitStatus({ taskId: 'task-1' })).resolves.toBeUndefined();
-    await expect(a2a.emitArtifact({ taskId: 'task-1' })).resolves.toBeUndefined();
-    const receipt = (await a2a.pushSend({ configId: 'cfg-1', event: {} })) as { delivered: boolean };
-    expect(receipt.delivered).toBe(false);
+// ADR 1045 D3 (CHAN-P6-3) — the four workflow-side server methods were stubs
+// that reported success for actions they did not take (publishAgentCard kept the
+// card in process memory, emitStatus/emitArtifact were no-ops, pushSend always
+// answered delivered:false). They are withdrawn. This drives the REAL pack nodes
+// against the real surface: each emit/push node must now fail TYPED
+// (`host_capability_missing`) rather than succeed, and card publish must say it
+// published nothing. Sabotage-witnessed 2026-11-03: restoring the four stub
+// methods on `createA2aSurface` turns all four assertions red (the nodes resolve
+// with status success / published:true).
+describe('ADR 1045 D3 — host.a2a has no workflow-side server methods', () => {
+  const PACK = new URL('../../../packs/core.openwop.a2a/index.mjs', import.meta.url).href;
+  const ctxFor = (inputs: Record<string, unknown>) => ({
+    a2a: createA2aSurface({ tenantId: 't1' }),
+    inputs,
+    config: {},
+  });
+
+  it('emit-status, emit-artifact and push-send fail with host_capability_missing', async () => {
+    const pack = await import(PACK) as Record<string, (ctx: unknown) => Promise<unknown>>;
+    await expect(pack.emitStatus!(ctxFor({ taskId: 'task-1', status: 'working' }))).rejects.toMatchObject({ code: 'host_capability_missing' });
+    await expect(pack.emitArtifact!(ctxFor({ taskId: 'task-1', artifact: {} }))).rejects.toMatchObject({ code: 'host_capability_missing' });
+    await expect(pack.pushSend!(ctxFor({ configId: 'cfg-1', event: {} }))).rejects.toMatchObject({ code: 'host_capability_missing' });
+  });
+
+  it('agent-card-publish reports published:false — nothing is stored or served', async () => {
+    const pack = await import(PACK) as Record<string, (ctx: unknown) => Promise<{ outputs: { published: boolean } }>>;
+    const out = await pack.agentCardPublish!(ctxFor({ card: AGENT_CARD }));
+    expect(out.outputs.published).toBe(false);
   });
 });

@@ -24,8 +24,9 @@ export type { CreateRunRequest, ErrorEnvelope, RunStatus, StreamMode };
  * two are not interchangeable for every credential the host accepts. Membership
  * rows are keyed on a caller's RBAC subject (`user:<id>` / `oidc:<sub>`), so a
  * member lookup keyed on `principalId` can only ever match the cookie/OIDC
- * lanes: an API-key principal is minted as `bearer:<first 8 chars of the key>`
- * or `apikey:<keyId>`, neither of which is a subject anyone could seed a member
+ * lanes: an API-key principal is minted as `bearer:<16 hex of sha256(key)>`
+ * (was `bearer:<first 8 chars of the key>` until ADR 1045 TST-FUD-GC-1, which
+ * merged keys sharing a prefix) or `apikey:<keyId>`, neither of which is a subject anyone could seed a member
  * row for (and the first of which changes on rotation).
  *
  * A consumer that must answer "what may this caller DO" reads this discriminant
@@ -684,6 +685,9 @@ export type OpenwopErrorCode =
   | 'bundle_not_entitled'
   | 'feature_killed'
   | 'disable_blocked'
+  // ADR 1044 (host-ext, never on the wire) — a SKILL.md import refused; the
+  // closed reason rides `details.reason` (skillImport/refusal.ts).
+  | 'skill_import_refused'
   | 'validation_error'
   // ADR 0945 D1 (host-ext, never on the wire) — a product image token that does
   // not resolve to a media asset in the product's own org (422).
@@ -795,6 +799,13 @@ export type OpenwopErrorCode =
   | 'conversation_roster_exceeded'
   | 'credential_required'
   | 'credential_forbidden'
+  // ADR 0779 D2, run lane — a user named a credential ref another lifecycle owns
+  // (`connection:<id>` and the like). See byok/userNamedSecret.ts.
+  | 'credential_ref_reserved'
+  // ADR 1035 D1 — an instance-scoped provider's connection is not bound to the
+  // request's instance (`mismatch`) or to any (`unbound`). See host/connectorInstancePin.ts.
+  | 'connector_instance_unbound'
+  | 'connector_instance_mismatch'
   // RFC 0121 §B.8 — a subscription-mode credential MUST bind at `user` scope;
   // a tenant/workspace binding is forbidden (the subscription-scope safety rail).
   | 'credential_scope_forbidden'

@@ -25,6 +25,7 @@
 import { demoMode } from './demoMode.js';
 import { SYSTEM_SITE_ORG } from './systemSite.js';
 import { configuredSiteProfile } from './systemSiteConfig.js';
+import { videoUploadDateTime } from './videoUploadDate.js';
 
 export const OPENWOP_SITE_URL = 'https://openwop.dev';
 
@@ -84,6 +85,8 @@ export function systemSiteProfile(orgId: string, slug: string, baseUrl: string, 
         '@context': 'https://schema.org',
         '@type': 'VideoObject',
         ...HERO_FILM,
+        // Google wants a datetime with a timezone (see host/videoUploadDate.ts).
+        uploadDate: videoUploadDateTime(HERO_FILM.uploadDate),
       },
     ] : [],
   };

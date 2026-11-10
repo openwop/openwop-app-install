@@ -26,6 +26,7 @@ export const messages = {
   tab_roles: 'Funções',
   'tab_capability-firewall': 'Firewall de capacidades',
   'tab_example-data': 'Dados de exemplo',
+  tab_channels: 'Canais de chat',
 
   emptyTitle: 'Ainda não há nada para gerenciar aqui',
   emptyBody: 'As ferramentas de credenciais e acesso aparecerão aqui à medida que forem habilitadas para o seu espaço de trabalho.',

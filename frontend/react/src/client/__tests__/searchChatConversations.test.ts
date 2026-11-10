@@ -3,8 +3,9 @@
  * used to return `[]`, so the rail showed a broken search as "no matches", CSU-2),
  * passes `truncated` through, and sends the query URL-encoded.
  *
- * What breaks it: a `catch` that swallows the failure again, or dropping
- * `truncated` from the result.
+ * What breaks it (each witnessed by a sabotage probe, wave 79): a `catch` that
+ * swallows the failure again, dropping `truncated` from the result, sending the
+ * query unencoded, or calling the server for a blank query.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { searchChatConversations } from '../chatSessionsClient.js';
@@ -29,7 +30,7 @@ describe('searchChatConversations', () => {
 
   it('throws on a failed request instead of reporting no matches', async () => {
     stub({ error: 'internal', message: 'boom' }, 500);
-    await expect(searchChatConversations('plan')).rejects.toThrow(/internal/);
+    await expect(searchChatConversations('plan')).rejects.toThrow('internal: boom');
   });
 
   it('does not call the server for a blank query', async () => {

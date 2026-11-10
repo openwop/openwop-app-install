@@ -73,7 +73,7 @@ beforeEach(() => {
   // mockReset, not clearAllMocks: no case's org/metric answer may leak into the next.
   for (const m of [mockOrgs, mockTypes, mockMetrics, mockCreate, mockUpdate, mockDelete, mockRun]) m.mockReset();
   mockTypes.mockResolvedValue([]);
-  mockMetrics.mockResolvedValue([]);
+  mockMetrics.mockResolvedValue({ metrics: [], viewer: { canManage: true } });
 });
 afterEach(cleanup);
 
@@ -98,7 +98,7 @@ describe('bi metrics — a failed workspace read is not a slow one', () => {
       orgId: 'o1', tenantId: 't1', name: 'Acme', slug: 'acme',
       createdBy: 'u1', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
     }]);
-    mockMetrics.mockResolvedValue([]);
+    mockMetrics.mockResolvedValue({ metrics: [], viewer: { canManage: true } });
     render(<MetricsPage />);
     expect(await screen.findByText('No metrics yet')).toBeTruthy();
     // …and no failure disclosure, because nothing failed.

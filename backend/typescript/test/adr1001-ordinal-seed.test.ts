@@ -25,7 +25,8 @@
  * a no-op reds case 1; making `peek` allocate (or create state) reds case 3;
  * ignoring the visit in `beginNodeActivity` reds case 5; rewinding a new
  * attempt to 0 instead of the visit base reds case 6; counting a retry as a new
- * visit in `visitOf` reds case 7.
+ * visit in `visitOf`, giving a re-entry of an open execution a new visit, or
+ * counting an orphan terminal (no open execution) reds case 7.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { ExecutionOrdinals } from '../src/executor/sideEffects.js';
@@ -119,7 +120,9 @@ describe('effect ordinal seeding (ADR 1001 D3.3)', () => {
     expect(revisited.visitOf('n')).toBe(1);
     revisited.terminal('n', 'completed');
     expect(revisited.visitOf('n')).toBe(2);
-    // a pre-start refusal (an orphan node.failed) does not count as anything
-    expect(ExecutionOrdinals.fold([ev('node.failed')]).visitOf('n')).toBe(0);
+    // a pre-start refusal (an orphan node.failed, no open execution) does not count
+    // as anything: after a completed visit it must not turn the next start into a
+    // retry of that visit (counted, it would read 0 here, not 1)
+    expect(ExecutionOrdinals.fold([ev('node.started'), ev('node.completed'), ev('node.failed')]).visitOf('n')).toBe(1);
   });
 });

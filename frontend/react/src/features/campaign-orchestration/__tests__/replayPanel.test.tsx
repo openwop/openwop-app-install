@@ -16,13 +16,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import type { RunEventDoc } from '@openwop/openwop';
 
 const h = vi.hoisted(() => ({ fork: vi.fn(), getRun: vi.fn(), diff: vi.fn() }));
 vi.mock('../../../client/runsClient.js', async (orig) => ({ ...(await orig<Record<string, unknown>>()), forkRun: h.fork, getRun: h.getRun, client: { runs: { diff: (...a: unknown[]) => h.diff(...a) } }, bound: async (id: string) => id }));
 
 import { ReplayPanel, replayMatched } from '../ReplayPanel.js';
 
-const START = { aEvent: { type: 'run.started' }, bEvent: { type: 'run.started' } };
+const event = (type: string, runId: string, sequence = 0): RunEventDoc => ({ eventId: `${runId}-${sequence}`, runId, type, payload: {}, timestamp: '2026-10-20T10:00:00.000Z', sequence, schemaVersion: 1 });
+const START = { aEvent: event('run.started', 'r1'), bEvent: event('run.started', 'f1') };
 
 beforeEach(() => {
   for (const f of [h.fork, h.getRun, h.diff]) f.mockReset();
@@ -62,7 +64,7 @@ describe('ReplayPanel', () => {
   });
 
   it('a divergence names the step', async () => {
-    h.diff.mockResolvedValue({ a: 'r1', b: 'f1', divergedAtSeq: 4, eventDiffs: [{ seq: 0, op: 'changed', ...START }, { seq: 4, op: 'changed', aEvent: { type: 'node.completed' }, bEvent: { type: 'node.completed' } }], stateDiff: {} });
+    h.diff.mockResolvedValue({ a: 'r1', b: 'f1', divergedAtSeq: 4, eventDiffs: [{ seq: 0, op: 'changed', ...START }, { seq: 4, op: 'changed', aEvent: event('node.completed', 'r1', 4), bEvent: event('node.completed', 'f1', 4) }], stateDiff: {} });
     mount();
     fireEvent.click(screen.getByRole('button', { name: 'Replay this run' }));
     await act(async () => { await vi.advanceTimersByTimeAsync(1_500); });
@@ -78,7 +80,7 @@ describe('ReplayPanel', () => {
   });
 
   it('replayMatched: only run.started may differ, and the end states must agree', () => {
-    expect(replayMatched({ a: 'a', b: 'b', divergedAtSeq: 0, eventDiffs: [{ seq: 0, op: 'changed', ...START }] as never, stateDiff: {} })).toBe(true);
-    expect(replayMatched({ a: 'a', b: 'b', divergedAtSeq: 0, eventDiffs: [{ seq: 0, op: 'changed', ...START }] as never, stateDiff: { status: 'x' } })).toBe(false);
+    expect(replayMatched({ a: 'a', b: 'b', divergedAtSeq: 0, eventDiffs: [{ seq: 0, op: 'changed', ...START }], stateDiff: {} })).toBe(true);
+    expect(replayMatched({ a: 'a', b: 'b', divergedAtSeq: 0, eventDiffs: [{ seq: 0, op: 'changed', ...START }], stateDiff: { status: 'x' } })).toBe(false);
   });
 });

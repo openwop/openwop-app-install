@@ -67,13 +67,13 @@ async function send(method: string, path: string, body?: unknown): Promise<Reply
   try { json = JSON.parse(text) as Record<string, unknown>; } catch { /* asserted below */ }
   return { status: res.status, json, text };
 }
+/** Polls the run until it is terminal: `vi.waitFor` on the real condition, no fixed sleep. */
 async function waitTerminal(runId: string): Promise<string> {
-  for (let i = 0; i < 400; i += 1) {
+  return vi.waitFor(async () => {
     const status = String(((await send('GET', `/runs/${runId}`)).json as { status?: string }).status ?? '');
-    if (['completed', 'failed', 'cancelled'].includes(status)) return status;
-    await new Promise((res) => setTimeout(res, 25));
-  }
-  throw new Error(`run ${runId} never settled`);
+    if (!['completed', 'failed', 'cancelled'].includes(status)) throw new Error(`run ${runId} not settled (${status || 'no status'})`);
+    return status;
+  }, { timeout: 10_000, interval: 25 });
 }
 const create = (fixture: string, extra: Record<string, unknown>): Promise<Reply> =>
   send('POST', '/runs', { mode: 'eval', evalSuiteRef: ref(fixture), agentId: SCRIPTED_AGENT_ID, ...extra });
@@ -136,11 +136,14 @@ describe('ADR 0983 D1 — field rules', () => {
     expect([noMode.status, code(noMode), reason(noMode)]).toEqual([400, 'validation_error', 'baseline_without_regression']);
     const noBase = await create(CAND_FX, { evalModes: ['golden', 'regression'] });
     expect([noBase.status, code(noBase), reason(noBase)]).toEqual([400, 'validation_error', 'regression_without_baseline']);
+    // `rubric` is implemented by this host but not declared by the suite: the SUITE check
+    // answers, not the implemented-modes check (both say validation_error, so read the message).
     const rubric = await create(CAND_FX, { evalModes: ['rubric'] });
-    expect([rubric.status, code(rubric)]).toEqual([400, 'validation_error']);
+    expect([rubric.status, code(rubric), (rubric.json['details'] as Record<string, unknown> | undefined)?.['field']]).toEqual([400, 'validation_error', 'evalModes']);
+    expect(String(rubric.json['message'])).toContain('Mode rubric is not declared by suite');
     for (const bad of [[], ['golden', 'golden'], 'golden']) {
       const r = await create(CAND_FX, { evalModes: bad });
-      expect([r.status, code(r)], JSON.stringify(bad)).toEqual([400, 'validation_error']);
+      expect([r.status, code(r), r.json['message']], JSON.stringify(bad)).toEqual([400, 'validation_error', 'evalModes must be a non-empty array of distinct modes.']);
     }
   });
 

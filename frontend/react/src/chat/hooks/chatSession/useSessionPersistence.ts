@@ -28,7 +28,7 @@ import { MESSAGE_PAGE_SIZE, parsePersistedMessages } from './lib.js';
 
 export function useSessionPersistence(core: ChatSessionCore) {
   const {
-    persist, useCurrentCache, backendKeyed, backendKeyedSessionId, onSessionIdChange,
+    persist, useCurrentCache, backendKeyed, backendKeyedSessionId, onSessionIdChange, detached, participants,
     setSession, setError, setIsSending, setIsHydrating,
     setHasOlderMessages, isLoadingEarlier, setIsLoadingEarlier,
     sessionRef, olderCursorRef, subRef, loadEpochRef, inFlightRunIdRef,
@@ -44,7 +44,8 @@ export function useSessionPersistence(core: ChatSessionCore) {
   const ensureSessionInBackend = useCallback(async (sessionId: string, title: string): Promise<void> => {
     if (backendSessionsRef.current.has(sessionId)) return;
     try {
-      await createChatSession({ sessionId, title });
+      // ADR 1040 D2 — an agent-scoped embed names its agent on the row it creates.
+      await createChatSession({ sessionId, title, ...(participants && participants.length > 0 ? { participants: [...participants] } : {}) });
       backendSessionsRef.current.add(sessionId);
     } catch (err) {
       const msg = err instanceof Error ? err.message : '';
@@ -61,7 +62,7 @@ export function useSessionPersistence(core: ChatSessionCore) {
         console.warn('chat-session BE create failed (write-through degraded)', err);
       }
     }
-  }, [backendSessionsRef]);
+  }, [backendSessionsRef, participants]);
 
   /** Fire-and-forget persist a finalized chat message to BE. Calling
    *  again with the same `msg.id` is a no-op (dedup via
@@ -175,9 +176,12 @@ export function useSessionPersistence(core: ChatSessionCore) {
       // create anything here — it defers to the first send (ensureSessionInBackend
       // runs in sendViaConversation / persistMessage). An unused "New chat" therefore
       // never writes an empty messageCount:0 conversation into the history rail.
-      if (persist) void ensureSessionInBackend(fresh.id, fresh.title);
+      // ADR 1040 D1 — a detached embed is not remounted by its own re-key, so it
+      // has no loop to break: the first send creates the row, and an unused
+      // "New chat" leaves no empty agent-stamped conversation behind.
+      if (persist && !detached) void ensureSessionInBackend(fresh.id, fresh.title);
     }
-  }, [ensureSessionInBackend, persist, useCurrentCache, backendKeyed, onSessionIdChange, closeAllWorkflowSubs, conversationCursorRef, conversationRef, conversationTurnsRef, olderCursorRef, persistedIdsRef, setError, setHasOlderMessages, setIsSending, setSession, subRef]);
+  }, [ensureSessionInBackend, persist, useCurrentCache, backendKeyed, detached, onSessionIdChange, closeAllWorkflowSubs, conversationCursorRef, conversationRef, conversationTurnsRef, olderCursorRef, persistedIdsRef, setError, setHasOlderMessages, setIsSending, setSession, subRef]);
 
   const loadSessionFromBackend = useCallback(async (sessionId: string) => {
     // GRADE-2 — load-epoch staleness guard: two overlapping loads (a rapid rail
@@ -238,7 +242,13 @@ export function useSessionPersistence(core: ChatSessionCore) {
       persistedIdsRef.current = new Set(messages.map((m) => m.id));
       backendSessionsRef.current.add(sessionId);
       if (persist) persistSession(next, { writeCurrentCache: useCurrentCache });
-      setSession(next);
+      // STRATEGIST-1 / ADR 0140 G3: catalog scoping or a later deliberate
+      // agent choice can land while this SAME session's history is loading.
+      // Preserve that current choice, not a ref captured before the await.
+      // A different conversation still starts without the prior agent lineup.
+      setSession((current) => current.id === sessionId && current.activeAgents
+        ? { ...next, activeAgents: current.activeAgents }
+        : next);
       // Re-attach to any non-terminal workflow_run in the reopened thread so its
       // cards + HITL gate come back live (rebuilt from the log + resumed SSE),
       // not frozen at the persisted snapshot. Via the ref — the real callback is
@@ -284,14 +294,14 @@ export function useSessionPersistence(core: ChatSessionCore) {
           // id; if that id has no backend row it 404s again and re-keys again — an
           // unbounded remount→404→re-key loop (the "hundreds of 404s"). Creating it up
           // front means the remount's load resolves 200 and the loop terminates.
-          if (persist) void ensureSessionInBackend(fresh.id, fresh.title);
+          if (persist && !detached) void ensureSessionInBackend(fresh.id, fresh.title); // ADR 1040 D1, as in reset()
           onSessionIdChange?.(fresh.id);
         }
         return;
       }
       setError(message);
     }
-  }, [ensureSessionInBackend, persist, useCurrentCache, backendKeyed, onSessionIdChange, backendSessionsRef, closeAllWorkflowSubs, conversationCursorRef, conversationRef, conversationTurnsRef, inFlightAssistantIdRef, inFlightRunIdRef, loadEpochRef, olderCursorRef, persistedIdsRef, rehydrateWorkflowRunsRef, setError, setHasOlderMessages, setIsSending, setSession, subRef]);
+  }, [ensureSessionInBackend, persist, useCurrentCache, backendKeyed, detached, onSessionIdChange, backendSessionsRef, closeAllWorkflowSubs, conversationCursorRef, conversationRef, conversationTurnsRef, inFlightAssistantIdRef, inFlightRunIdRef, loadEpochRef, olderCursorRef, persistedIdsRef, rehydrateWorkflowRunsRef, setError, setHasOlderMessages, setIsSending, setSession, subRef]);
 
   // Multi-tab (ADR 0140): a backend-keyed tab hydrates its thread from the BE once
   // on mount — it deliberately did NOT read the singleton localStorage cache, so the

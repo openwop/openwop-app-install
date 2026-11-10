@@ -1,3 +1,4 @@
+import '@testing-library/jest-dom/vitest';
 /**
  * ADR 0211 §2 (email side) — the campaign audience picker gains a "By segment"
  * mode alongside "All contacts" / "By stage". Covers the access-gate tri-state
@@ -26,17 +27,20 @@ const listTemplates = vi.hoisted(() => vi.fn<typeof EC.listTemplates>(async () =
 const listCampaigns = vi.hoisted(() => vi.fn<typeof EC.listCampaigns>(async () => []));
 const listSends = vi.hoisted(() => vi.fn<typeof EC.listSends>(async () => []));
 const listSegments = vi.hoisted(() => vi.fn<typeof EC.listSegments>(async () => [{ segmentId: 'seg1', name: 'Qualified leads' }]));
+const createTemplate = vi.hoisted(() => vi.fn<typeof EC.createTemplate>(async (orgId, input) => ({ ...input, templateId: 'tpl-created', orgId, createdAt: '', updatedAt: '' })));
 const createCampaign = vi.hoisted(() => vi.fn<typeof EC.createCampaign>(async () => ({ campaignId: 'cmp1', orgId: 'o1', templateId: 'tpl1', audience: {}, status: 'draft', createdAt: '', updatedAt: '' })));
 const getEmailSettings = vi.hoisted(() => vi.fn<typeof EC.getEmailSettings>(async () => ({ senderAddress: 'news@acme.test', configured: true })));
 const getProviderStatus = vi.hoisted(() => vi.fn<typeof EC.getProviderStatus>(async () => ({ providers: [], defaultProvider: null, senderAddress: 'news@acme.test' })));
 
-vi.mock('../emailClient.js', () => ({
+vi.mock('../emailClient.js', async (importOriginal) => ({
+  // Keep pure helpers such as smsSegments real; replace the HTTP seams below.
+  ...(await importOriginal<typeof import('../emailClient.js')>()),
   // ADR 0955 D7 — the page's sending-health card (a healthy sender).
   getSendingHealth: async () => ({ state: null, window: { sent: 0, hardBounces: 0, complaints: 0 }, thresholds: { minSends: 500, complaintRate: 0.001, hardBounceRate: 0.02 }, canResume: false }),
   CONTACT_STAGES: ['lead', 'qualified', 'customer', 'churned'],
   listOrgs,
   listTemplates,
-  createTemplate: vi.fn(),
+  createTemplate,
   updateTemplate: vi.fn(),
   deleteTemplate: vi.fn(),
   listCampaigns,
@@ -64,7 +68,7 @@ beforeEach(() => {
   listCampaigns.mockResolvedValue([]);
   listSegments.mockReset();
   listSegments.mockResolvedValue([{ segmentId: 'seg1', name: 'Qualified leads' }]);
-  createCampaign.mockClear();
+  createCampaign.mockClear(); createTemplate.mockClear();
   getEmailSettings.mockClear();
   getProviderStatus.mockClear();
 });
@@ -131,5 +135,132 @@ describe('EmailPage audience picker (ADR 0211 §2)', () => {
     ]);
     renderPage();
     await waitFor(() => expect(screen.getByText(/segment: Qualified leads/i)).toBeTruthy());
+  });
+});
+
+// Creation must preserve the same author-entered paragraphs as the detail editor.
+// A text input strips linebreaks before React receives the value (EMAIL-BODY-1).
+describe('new template multiline body', () => {
+  it.each(['text', 'markdown'] as const)('preserves paragraphs and placeholders in the actual %s create payload', async format => {
+    access.value = { enabled: true, loading: false, variant: undefined };
+    renderPage();
+    await screen.findByLabelText('Template name');
+    fireEvent.change(screen.getByLabelText('Template name'), { target: { value: 'QA multiline draft' } });
+    fireEvent.change(screen.getByLabelText('Body format'), { target: { value: format } });
+    fireEvent.change(screen.getByLabelText('Subject'), { target: { value: 'A small next step' } });
+    const body = 'Hello {{contact.name}},\n\nChoose one small step.\nQA SYNTHETIC — do not send.';
+    fireEvent.change(screen.getByRole('textbox', { name: 'Body' }), { target: { value: body } });
+    fireEvent.click(screen.getByRole('button', { name: 'New template' }));
+    await waitFor(() => expect(createTemplate).toHaveBeenCalledWith('o1', { name: 'QA multiline draft', subject: 'A small next step', body, format }));
+    const clearedBody = screen.getByRole('textbox', { name: 'Body' });
+    if (!(clearedBody instanceof HTMLTextAreaElement)) throw new Error('Template body must preserve multiline input');
+    expect(clearedBody.value).toBe('');
+  });
+});
+
+// EMAIL-TEMPLATE-VALIDATION-1: an enabled create action must not silently return
+// for missing required fields. Exercise the page and real controls; only HTTP
+// clients are replaced. Existing multiline payload checks above remain intact.
+describe('new template readiness (ADR 0955 D8)', () => {
+  it.each([
+    { format: 'text', field: 'name', label: 'Template name' },
+    { format: 'text', field: 'subject', label: 'Subject' },
+    { format: 'text', field: 'body', label: 'Body' },
+    { format: 'markdown', field: 'name', label: 'Template name' },
+    { format: 'markdown', field: 'subject', label: 'Subject' },
+    { format: 'markdown', field: 'body', label: 'Body' },
+  ] as const)('keeps $format creation unavailable for an empty or whitespace $field', async ({ format, label }) => {
+    access.value = { enabled: true, loading: false, variant: undefined };
+    renderPage();
+    await screen.findByLabelText('Template name');
+    fireEvent.change(screen.getByLabelText('Body format'), { target: { value: format } });
+    fireEvent.change(screen.getByLabelText('Template name'), { target: { value: 'QA private readiness' } });
+    fireEvent.change(screen.getByLabelText('Subject'), { target: { value: 'A private subject' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Body' }), { target: { value: 'Private body' } });
+    const create = screen.getByRole('button', { name: 'New template' });
+    expect(create).toBeEnabled(); // the negative must begin from an otherwise valid draft
+    for (const value of ['', '   ']) {
+      fireEvent.change(screen.getByLabelText(label), { target: { value } });
+      expect(create).toBeDisabled();
+      fireEvent.click(create);
+      expect(createTemplate).not.toHaveBeenCalled();
+    }
+  });
+
+  it.each([
+    { field: 'name', label: 'Template name' },
+    { field: 'body', label: 'Body' },
+  ] as const)('keeps SMS creation unavailable for an empty or whitespace $field', async ({ label }) => {
+    access.value = { enabled: true, loading: false, variant: undefined };
+    renderPage();
+    await screen.findByLabelText('Template name');
+    fireEvent.change(screen.getByLabelText('Body format'), { target: { value: 'sms' } });
+    fireEvent.change(screen.getByLabelText('Template name'), { target: { value: 'QA private SMS' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Body' }), { target: { value: 'QA only. Reply STOP to opt out.' } });
+    expect(screen.queryByLabelText('Subject')).toBeNull();
+    const create = screen.getByRole('button', { name: 'New template' });
+    expect(create).toBeEnabled();
+    for (const value of ['', '   ']) {
+      fireEvent.change(screen.getByLabelText(label), { target: { value } });
+      expect(create).toBeDisabled();
+      fireEvent.click(create);
+      expect(createTemplate).not.toHaveBeenCalled();
+    }
+  });
+
+  it.each(['text', 'markdown'] as const)('creates one %s template with trimmed outer fields and unchanged inner paragraphs', async format => {
+    access.value = { enabled: true, loading: false, variant: undefined };
+    renderPage();
+    await screen.findByLabelText('Template name');
+    fireEvent.change(screen.getByLabelText('Body format'), { target: { value: format } });
+    fireEvent.change(screen.getByLabelText('Template name'), { target: { value: '  QA private draft  ' } });
+    fireEvent.change(screen.getByLabelText('Subject'), { target: { value: '  A private subject  ' } });
+    const body = 'Hello {{contact.name}},\n\nChoose **one small step**.\nQA only — do not send.';
+    fireEvent.change(screen.getByRole('textbox', { name: 'Body' }), { target: { value: `  ${body}  ` } });
+    const create = screen.getByRole('button', { name: 'New template' });
+    expect(create).toBeEnabled();
+    fireEvent.click(create);
+    await waitFor(() => expect(createTemplate).toHaveBeenCalledExactlyOnceWith('o1', {
+      name: 'QA private draft', subject: 'A private subject', body, format,
+    }));
+    expect(screen.getByRole('textbox', { name: 'Body' })).toHaveValue('');
+    expect(create).toBeDisabled();
+  });
+
+  it('creates one SMS template without a subject and drops a prior email subject from its payload', async () => {
+    access.value = { enabled: true, loading: false, variant: undefined };
+    renderPage();
+    await screen.findByLabelText('Template name');
+    fireEvent.change(screen.getByLabelText('Subject'), { target: { value: 'Prior email subject' } });
+    fireEvent.change(screen.getByLabelText('Body format'), { target: { value: 'sms' } });
+    expect(screen.queryByLabelText('Subject')).toBeNull();
+    fireEvent.change(screen.getByLabelText('Template name'), { target: { value: '  QA private SMS  ' } });
+    const body = 'QA only; do not send. Reply STOP to opt out.';
+    fireEvent.change(screen.getByRole('textbox', { name: 'Body' }), { target: { value: `  ${body}  ` } });
+    const create = screen.getByRole('button', { name: 'New template' });
+    expect(create).toBeEnabled();
+    fireEvent.click(create);
+    await waitFor(() => expect(createTemplate).toHaveBeenCalledExactlyOnceWith('o1', {
+      name: 'QA private SMS', subject: '', body, format: 'sms',
+    }));
+  });
+
+  it('rechecks the subject requirement when switching between SMS and email formats', async () => {
+    access.value = { enabled: true, loading: false, variant: undefined };
+    renderPage();
+    await screen.findByLabelText('Template name');
+    fireEvent.change(screen.getByLabelText('Template name'), { target: { value: 'QA format switch' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Body' }), { target: { value: 'QA only. Reply STOP to opt out.' } });
+    const format = screen.getByLabelText('Body format');
+    const create = screen.getByRole('button', { name: 'New template' });
+    fireEvent.change(format, { target: { value: 'sms' } });
+    expect(create).toBeEnabled();
+    fireEvent.change(format, { target: { value: 'markdown' } });
+    expect(create).toBeDisabled();
+    fireEvent.change(screen.getByLabelText('Subject'), { target: { value: 'QA subject' } });
+    expect(create).toBeEnabled();
+    fireEvent.change(format, { target: { value: 'text' } });
+    expect(create).toBeEnabled();
+    expect(createTemplate).not.toHaveBeenCalled();
   });
 });

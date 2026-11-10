@@ -29,11 +29,14 @@ import {
 } from './hardSignOut.js';
 import { useAuth } from './useAuth.js';
 import { finalizeFirebaseSession } from './finalizeSession.js';
+import { reloadIntoSession } from './reloadIntoSession.js';
+import { isShellIdentity } from './shellIdentity.js';
 import { logout } from '../features/users/usersClient.js';
 import { useDemoMode } from '../client/useDemoMode.js';
 import { brand } from '../brand/brand.js';
 import {
   ExistingProviderSignInError,
+  getCurrentUser,
   getRedirectState,
   signInWithGithub,
   signInWithGoogle,
@@ -197,10 +200,20 @@ export function SignInButton() {
         // whatever it already knew and stays unresolved, so the mount-time
         // `refreshBackendSession()` can try again — publishing null here would
         // record "this account has no durable user" from a failed request.
-        const finalized = await finalizeFirebaseSession();
+        // KT-AUTH-2 — shares the run `reconcileRestoredSession` may have started.
+        const finalized = await finalizeFirebaseSession({ reuseCompleted: true });
         if (finalized.ok) setBackendSessionUser(finalized.user);
         setModalOpen(false);
         setPendingLink(null);
+        // KT-AUTH-2 — the redirect-back shell mounted as the Firebase user, so the
+        // identity rule in `onAuthed` would keep it. But its mount-time reads went
+        // out on the anon cookie before `/migrate-tenant` and `/oidc/bind` finished,
+        // and nothing re-reads them: the workspace stays "Personal sandbox".
+        // MEASURED in production 2026-11-03. A redirect return is a fresh page load
+        // with nothing unsaved in memory, so one reload costs nothing, and it cannot
+        // loop: `getRedirectState` reports `success` once (the attempted-provider
+        // marker is consumed, and `getRedirectResult` is null on the next load).
+        reloadIntoSession();
       } else if (state.kind === 'error') {
         setError(describeSignInError(state.error));
         setModalOpen(true);
@@ -241,11 +254,15 @@ export function SignInButton() {
     ? { name: backendUser.displayName ?? backendUser.email ?? t('accountFallbackName'), email: backendUser.email ?? backendUser.userId, photoURL: null, isFirebase: false }
     : null;
 
-  /** Reconcile the SPA session after a backend (password) auth + close the modal. */
+  /** Reconcile the SPA session after an in-page sign-in + close the modal, then
+   *  reload unless this shell already belongs to this person (KT-AUTH-1, see
+   *  `reloadIntoSession` and `shellIdentity`). Runs even though the dialog usually
+   *  unmounted first: the SDK reports the user before `AuthCard` gets here. */
   async function onAuthed(): Promise<void> {
     await refreshBackendSession();
     dismissReason();
     setModalOpen(false);
+    if (!isShellIdentity(getCurrentUser()?.uid ?? null)) reloadIntoSession();
   }
 
   /**

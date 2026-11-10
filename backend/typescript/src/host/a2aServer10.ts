@@ -29,6 +29,7 @@ import {
   type A2a10ErrorName,
 } from './a2aCodec10.js';
 import { a2aCardCapabilities } from './a2aCard.js';
+import { A2aPushCredentialInvalidError, pushAuthorizationFrom } from './a2aPushCredential.js';
 import {
   cancelTask,
   readTask,
@@ -243,7 +244,7 @@ export async function handleA2aRequest10(
       }
       if (!deps) return err10(req.id, 'TASK_NOT_FOUND', 'task not found');
       const cfg = (params?.config ?? params?.taskPushNotificationConfig ?? params) as
-        | { taskId?: unknown; url?: unknown }
+        | { taskId?: unknown; url?: unknown; authentication?: unknown; token?: unknown }
         | undefined;
       const id = typeof cfg?.taskId === 'string' ? cfg.taskId : taskIdOf(params);
       const url = typeof cfg?.url === 'string' ? cfg.url : undefined;
@@ -253,13 +254,20 @@ export async function handleA2aRequest10(
       const rec = await readTask(deps, principal, id, 'strict');
       if (!rec) return err10(req.id, 'TASK_NOT_FOUND', `task not found: ${id}`);
       try {
-        const updated = await setA2aTaskPushConfig(id, { url });
+        // RFC 0214 §A/§C — the registered `authentication` (or `token`) is the
+        // destination credential every push to `url` carries. It is sealed
+        // before it is persisted and never echoed: only the target is.
+        const authorization = pushAuthorizationFrom(cfg);
+        const updated = await setA2aTaskPushConfig(id, {
+          url,
+          ...(authorization !== undefined ? { authorization } : {}),
+        });
         if (!updated) return err10(req.id, 'TASK_NOT_FOUND', `task not found: ${id}`);
-        // §D.6 — `token` / `authentication.credentials` are CALLER SECRETS and
-        // never enter the persisted record or the response. Only the target
-        // is echoed.
         return ok(req.id, { taskId: updated.taskId, url: updated.pushConfig?.url });
       } catch (e) {
+        if (e instanceof A2aPushCredentialInvalidError) {
+          return err10(req.id, 'CONTENT_TYPE_NOT_SUPPORTED', e.message);
+        }
         if (e instanceof A2aPushUrlDeniedError) {
           log.warn('a2a10_push_egress_denied', { taskId: id });
           return err10(req.id, 'UNSUPPORTED_OPERATION', 'push target refused by the webhook egress guard');

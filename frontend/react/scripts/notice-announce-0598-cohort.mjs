@@ -1,3 +1,5 @@
+import { join } from 'node:path';
+import { declaredRows } from './featureGateDeclarations.mjs';
 /**
  * ADR 0598 — the failure disclosures that were INVISIBLE to
  * `check-notice-announce.mjs` until rule 2 learned four new shapes
@@ -43,7 +45,7 @@
  *
  * @type {ReadonlyArray<readonly [file: string, flag: string, count: number]>}
  */
-export const LEGACY_SILENT_READ_SITES = [
+const HOST_LEGACY_SILENT_READ_SITES = [
   ['agentAllowlists/AgentAllowlistPanel.tsx', 'error', 1],
   ['agents/AgentActivityTab.tsx', 'error', 1],
   ['agents/AgentBoardPanel.tsx', 'error', 2],
@@ -94,7 +96,6 @@ export const LEGACY_SILENT_READ_SITES = [
   ['features/commerce/StorefrontPage.tsx', 'error', 1],
   ['features/connections/OAuthClientAdminPanel.tsx', 'error', 1],
   ['features/connections/VaultAdminPanel.tsx', 'error', 1],
-  ['features/creative-briefs/CreativeBriefsPage.tsx', 'deepLinkError', 1],
   ['features/creative-briefs/CreativeBriefsPage.tsx', 'error', 1],
   ['features/creative-briefs/RendersSection.tsx', 'error', 1],
   ['features/creative-video/CreativeVideoPage.tsx', 'error', 1],
@@ -111,7 +112,6 @@ export const LEGACY_SILENT_READ_SITES = [
   ['features/environments/EnvironmentsPage.tsx', 'snapshotsError', 1],
   ['features/funnels/FunnelDetailPage.tsx', 'error', 2],
   ['features/funnels/FunnelsPage.tsx', 'error', 1],
-  ['features/kicktodo/PlanPage.tsx', 'moveError', 1],
   // ADR 0605 Tier 6 (`KSU-10`) — the two knowledge-sync rows are DELETED, not
   // lowered: both Notices now pass `announce`. Per this file's own instruction,
   // cleaning a feature deletes its rows and lowers the baseline. The UX pass
@@ -172,4 +172,11 @@ export const LEGACY_SILENT_READ_SITES = [
   ['walkthroughs/WalkthroughsPage.tsx', 'error', 1],
   ['workforces/TraceSearchPanel.tsx', 'error', 1],
   ['workforces/WorkforcesGalleryPage.tsx', 'error', 1],
+];
+
+/** ADR 1031 P2 — plus every feature package's own `noticeAnnounce.legacySilentReadSites`
+ *  rows (`<feature>/gateDeclarations.json`), from the same tree the gate scans. */
+export const LEGACY_SILENT_READ_SITES = [
+  ...HOST_LEGACY_SILENT_READ_SITES,
+  ...declaredRows(process.env.OPENWOP_GATE_SRC ?? join(process.cwd(), 'src'), 'noticeAnnounce', 'legacySilentReadSites'),
 ];

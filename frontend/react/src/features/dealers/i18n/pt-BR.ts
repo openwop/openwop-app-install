@@ -99,4 +99,13 @@ export const messages = {
   outletsLoadFailed: "Não foi possível carregar os pontos de venda, então este revendedor pode ter locais que não aparecem aqui.",
   registrationsLoadFailed: "Não foi possível carregar os registros de oportunidades, então esta lista pode estar incompleta.",
   dealerNameUnavailable: "(não foi possível carregar o nome do revendedor)",
+  // ADR 1034 D9
+  revokePortalButton: 'Revogar link do parceiro',
+  revokePortalTitle: 'Revogar este link do parceiro?',
+  revokePortalBody: 'O parceiro não poderá mais abrir o portal nem registrar negócios com o link atual. Você pode emitir um novo depois.',
+  portalRevokedToast: 'Link do parceiro revogado',
+  portalRevokeFailed: 'Não foi possível revogar o link do parceiro',
+  portalExpiresNotice: 'Ele para de funcionar em {{date}}. Copie agora: ele não será mostrado de novo.',
+  suspendConfirmTitle: 'Suspender {{name}}?',
+  suspendConfirmBody: 'O link do parceiro para de funcionar até você reativá-lo. Os links também expiram 180 dias após a emissão, então talvez seja preciso emitir um novo.',
 } as const;

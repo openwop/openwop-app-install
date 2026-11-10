@@ -18,6 +18,294 @@ Commits by the `/cut-app-release` skill; required upgrade stops are tracked in
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-11-09
+
+A MINOR release under ADR 0052. KickTodo leaves openwop-app: its feature
+packages, packs and chains are removed, and the new adopter feature seam is how a
+downstream ships its own features. It adds channels into the main chat, SKILL.md
+import, animated films, designed custom-domain pages and a large set of CMS
+section options. Runs whose every final step was skipped now complete. It closes
+several cross-tenant and cross-client paths in A2A, connections, ads and BYOK.
+There is one schema migration (sqlite 51 → 52, postgres 49 → 50, an index) and
+two app migrations (24 → 26). **This release is not rolling-safe** when the
+dealers partner portal is in use; see "Upgrading from 0.10.0".
+
+### Added
+
+- **Adopter feature seam (ADR 1031, ADR 1048).** A white-label downstream
+  registers its own feature packages from `src/adopter/features/<id>/` in the
+  backend and frontend, and its pack pins from `src/adopter/packPins.ts`.
+  `gen-adopter-features` writes the gitignored composition modules at build,
+  test and dev time. A duplicate feature id, an id that does not match its
+  directory, or an adopter re-pin of an upstream pack fails at boot. Features
+  can declare daemons, demo seeders, dashboard tiles, review renderers, nav
+  groups, approval kinds, KB namespaces and managed sources, and projected
+  compute nodes. Adopter packs are attested in `packs/.adopter-manifest.json`
+  under a new `adopter` trust tier, and any violation rejects the whole file.
+  With no adopter directories, upstream composition is unchanged (#5495, #5502,
+  #5547, #5550).
+- **Channels into chat (ADR 1041, ADR 1042, ADR 1043).** Messages from
+  connected Telegram, Discord, Slack and WhatsApp accounts, and from a user's
+  own devices through the messaging relay, land in the paired owner's main-chat
+  conversation, and replies go back to the chat they came from. Unknown senders
+  are recorded as pending and never answered. Channel turns run in `safe`
+  permission mode, so side-effect tools wait for the owner's in-app approval.
+  Relay peers are approved per device by the device's owner. A "Chat channels"
+  tab in the Access console manages connections, senders and relay devices.
+  The device relay gets tenant-checked activation, rotating device tokens,
+  presence and owner-or-admin revoke. A per-connection and per-device inbound
+  limit defaults to 600/min (`OPENWOP_RATELIMIT_CHANNEL_INBOUND_PER_MIN`).
+  Everything is behind the `channel-ingress` toggle, which stays **off** by
+  default (#5543, #5558, #5567, #5573).
+- **SKILL.md import (ADR 1044).** A workspace owner or admin can preview and
+  import an Anthropic / agentskills.io or OpenClaw SKILL.md (text, a folder map
+  or a zip) as an unverified, tenant-owned `user.<name>` agent. Nothing in an
+  import is run; scripts, shell and file tools and known lure patterns are
+  refused, and install must send back the previewed `sourceSha256`. API only
+  for now. The `marketplace.skill-import` sub-toggle stays **off** by default
+  (#5530).
+- **Agent packs from proposals (ADR 1033 P2, RFC 0253).** A reviewed proposal
+  can install an agent pack per tenant. Its agents register as tenant-owned
+  agents with the same limits as a member-authored agent, and a tenant chain's
+  sub-chain refs resolve in the same installed pack or at an exact pinned
+  version (#5516).
+- **Animated films (ADR 1075).** A shared HTML film platform: a validated film
+  timeline with grouped cues, keyboard control and reduced motion, private
+  presenter notes and timer, and a paired audience view. Create one from
+  Documents. The `films` toggle stays **off** by default (#5677).
+- **Designed pages on custom domains (ADR 1030).** A bound custom domain can
+  serve a styled page instead of the unstyled prerender, and use one of the
+  workspace's own brands (a Site brand card on the domains page). The
+  `custom-domains.designed-pages` sub-toggle stays **off** by default (#5484,
+  #5486).
+- **CMS sections and the public site.** New optional section fields; a section
+  that sets none renders as before:
+  - scroll motion per section and a brand motion preset in Appearance (ADR 1029,
+    #5481, #5482, #5483), and a wider motion vocabulary: hero emphasis, count-up
+    stats, progress fills, slide and zoom motions, and a `flow` process visual
+    (ADR 1038, #5524, #5553, #5555, #5582). Only cards that are links lift on
+    hover (#5582);
+  - canvas layouts: a film pair, a framed screenshot, bento inset cards and
+    try-it switches (ADR 1032, #5507); pictures and highlights on columns items
+    (ADR 1037, #5523); feature cards and a hub hero (ADR 1047, #5536, #5650);
+    seven illustrated hero visuals (ADR 1060, #5584);
+  - grouped site navigation and a branded grouped footer from per-page
+    `siteNav` (ADR 1049, ADR 1056, #5551, #5574), set through the API for now;
+  - layouts and pieces for the public-site redesign (ADR 1062–1074, #5598,
+    #5601, #5602, #5605, #5606, #5608, #5611, #5637, #5656, #5657, #5659, #5660,
+    #5661, #5663, #5665, #5666, #5670, #5671, #5674, #5676, #5680, #5682), and
+    "partly there" and "Not yet" states in columns lists (#5597, #5599);
+  - design-led sections (ADR 1080, #5707): `statusTable`, `dateCalc`,
+    `conversation`, `featureIndex`, `decisionTree` and `scheduleSim`, a live and
+    what-if decision simulator. Also hero `placement` (band, card, panel) and a
+    `queue` visual, a richText card and start side, gallery bleed and per-card
+    tags, a 16-column cap, and a form card photo and `submitLabel`.
+- **Forms.** A field can be marked `payment`, `health` or `credential`, which
+  keeps the page out of session recording (ADR 0951 D2, #5501).
+- **Campaign Ops.** Agency admins can register an existing organization as a
+  client (#5629).
+- **Embedded chat (ADR 1040).** An `EmbeddedChatPanel` can persist and reopen
+  its conversation and is stamped with its agent, and the sessions list takes
+  `?agentId=` (#5537). Features can register their own conversation focus
+  kinds, authorized at bind and on every tool read (#5538).
+
+### Changed
+
+- **A run whose every final step was skipped completes (RFC 0257, ADR 1027).**
+  0.10.0 failed these runs as `all_terminals_skipped`. They now end `completed`
+  with `run.completed.skippedTerminals`, are not dead-lettered, send no failure
+  notification and no longer fail a sub-workflow parent. A run with a failed
+  node still fails. Chat and run detail show "Completed: no final step ran"
+  (#5466, #5492, #5500).
+- **Keyless workspaces run workflow AI steps on the managed tier** when the
+  host's managed tier is ready, instead of failing `byok_required`. A
+  structured-output step there now fails `host_capability_missing` (ADR 0903,
+  #5477).
+- **A streamed model reply that ends without its finish reason is a retryable
+  `provider_unavailable` failure** (`reason: stream_incomplete`), not a complete
+  reply. The OpenAI-compatible black-box lane only warns (ADR 1026, #5465).
+- Three public reads (`docs`, consent posture, billing entitlements) answer
+  `200` with an empty value when the feature is off, instead of `404` (#5493).
+- Hosted media (`mp4`, `webm`, `vtt`, `m4a`, `mp3`) is cached for an hour and
+  served with range support, so videos can seek (#5514).
+- A production frontend build behind the `sign-in` gate refuses to build
+  without its three `VITE_FIREBASE_*` variables (#5651).
+- Signed-out visitors to several bare paths on a sign-in-gated deployment are
+  forwarded to the published `/p/<slug>` page (#5648).
+- The conformance pin moves to suite 2.46.42 (#5492, #5516).
+- **Business intelligence (ADR 1052).** The metric catalog is per org. A stale
+  metric (removed or retyped field, removed option, deleted type) is refused
+  with `422 metric_stale` instead of returning a number, and capped, undated
+  or truncated results say so. Edits are versioned (`409` on a stale
+  `expectedUpdatedAt`). Metrics from 0.10.0 stay listed and read-only in every
+  org until a manager adopts them into one (#5570).
+- CAD `get-design` answers `validation_error` instead of `not_found` when the
+  caller can no longer read the focused canvas (#5538).
+- In an adopter repo, the default-distribution budget build measures host code
+  only; the adopter's named-distribution build is still budgeted (#5703).
+
+### Removed
+
+- **KickTodo (ADR 1031 P3).** The `kicktodo*` and `challenge-outline` feature
+  packages, `feature.kicktodo.nodes`, `vendor.openwop-app.kicktodo.agents`, the
+  `kicktodo-*` chain examples and `distributions/kicktodo.json` are removed from
+  openwop-app. KickTodo now ships them from its own `src/adopter/features/`.
+  With them, openwop-app no longer reads `OPENWOP_CALENDAR_MCP_ENABLED`,
+  `OPENWOP_CALENDAR_PROVIDER`, `OPENWOP_CALENDAR_PROVIDER_ENABLED`,
+  `OPENWOP_CALENDAR_PROVIDER_ENDPOINT`, `OPENWOP_WEARABLE_PROVIDER_ENABLED`,
+  `OPENWOP_WEARABLE_STALE_HOURS` or `OPENWOP_KICKTODO_VERIFIER_SAMPLING_ENABLED`
+  (#5512).
+- The four A2A workflow stubs (`publishAgentCard`, `emitStatus`,
+  `emitArtifact`, `pushSend`) are withdrawn. Their pack nodes fail with
+  `host_capability_missing`, and card routes serve only the host card (ADR 1045,
+  #5531).
+
+### Fixed
+
+- **Sales ops (ADR 1034).** Commissions are computed in integer minor units and
+  a deal pays at most once per plan. The dealer-approval and model-activation
+  workflow nodes submit a review card instead of deciding. Active-model quota,
+  territory and rule writes need `host:territories:manage`. Partner links are
+  hashed at rest, expire after 180 days, can be revoked and stop working for a
+  suspended dealer. App migrations 25 and 26 re-key the stored partner tokens
+  and the geocode cache. All four features stay off by default (#5518).
+- **Campaign Studio.** Approvals stay tied to their versions and stale
+  finalization is refused, budgets use the currency's minor units, and client
+  bindings, scopes and context survive reloads. A stored AI key can be chosen
+  at launch. An event-triggered journey starts only for an event about its own
+  client (#5562, #5609, #5610, #5612, #5613, #5622, #5623, #5624, #5626, #5628,
+  #5636, #5658, #5664, #5687). Embedded-font compilation is bounded (#5621).
+- **Customer data platform (ADR 1024).** Destination sync needs
+  `workspace:read`/`workspace:write`, drops records whose labels permit nothing,
+  and sends only to its stored URL. Warehouse-load approvals are bound to a rows
+  digest and can be decided from the inbox. A person's own state ends a journey
+  through a named no-op step instead of failing the run (#5473). A DSAR now
+  reaches contacts merged into the subject, and erasing after an unmerge no
+  longer erases another contact's data (#5575).
+- **Webinars (ADR 1054).** A Zoom webinar belongs to one client, surface writes
+  need `workspace:write`, an unconfirmed registration push is queued and
+  retried, and only tracked webinars are ingested (#5571).
+- **Promotions (ADR 1025).** The loss budget is reserved with holds, so
+  concurrent checkouts can no longer spend past it (#5470).
+- **Approvals.** `/inbox` approves an email send against the review digest it
+  shows, every surface disables Approve when the digest is missing, and
+  `/approvals` redirects to `/inbox` (ADR 0905, #5504, #5513).
+- **Sign-in.** The page reloads out of the anonymous shell after an in-page or
+  redirect sign-in, the tenant handshake runs once, and `/` no longer hangs on
+  its splash when the auth SDK never answers (#5488, #5521, #5603). The
+  anonymous-to-user tenant fold reads only rows that mention the source tenant
+  (ADR 0003, #5522).
+- **Builder.** Parallel port edges no longer read as a cycle, optional template
+  inputs may be omitted, source-output bindings and launch defaults persist, and
+  a run launch can declare a saved AI key (#5616, #5617, #5618, #5619, #5620,
+  #5672).
+- **Chat.** Saved agent membership is restored after the catalog loads, role
+  context shows beside participant names, submitted turns survive reply gaps,
+  labelled stored keys are adopted in setup, and feature assistant controls stay
+  in the viewport (#5614, #5630, #5675, #5685, #5688).
+- **Custom domains and SEO.** Custom-domain pages name their own address in
+  canonical, `og:url` and JSON-LD (#5525). VideoObject `uploadDate` is kept for
+  a second film and emitted as a zoned datetime (#5604, #5648).
+- **Agents and packs.** An agent revision is numbered from the stored record
+  under concurrent edits (#5559), and an archive fetch never sweeps its own temp
+  dir (#5560).
+- Channel ingress works with PostgreSQL compound keys (#5631).
+- Page and feed watch reports reach the inbox message (#5644).
+- Also fixed: email template creation (#5686), per-user undo in the document
+  editor (COLLAB-UNDO-1, #5689), stopped-stream recovery guidance and refresh
+  warnings in runs (#5641, #5681), CRM report and KB organization switching
+  (#5646, #5668), CMS empty-org reads and Hero autosave (#5662), mobile drawer
+  focus (#5667), walkthrough and tutorial launch (#5639, #5642), example-data
+  workspace binding (#5640), canvas zoom controls (#5638), funnel detail
+  (#5627), the desktop runtime selftest (#5497), and public-site layout fixes
+  (#5494, #5499, #5510, #5546, #5654).
+- **Public site.** The Blog link shows only when the site has a published post,
+  and a photo hero keeps its picture on phones (ADR 1080, #5707).
+- **Channel ingress.** Erasing a thread's owner or a DM writer now also deletes
+  the other writers' sender-thread index rows for the deleted thread (CHAN-F5,
+  #5697).
+- Tests, grade waves, steward docs, Tracegate (ADR 1028) and CI tooling,
+  including remote-gate work behind `OPENWOP_REMOTE_GATE` (off by default,
+  ADR 0863 D9), changed internally and are not itemized.
+
+### Security
+
+- **A2A server (ADR 1045).** Callers must be authenticated, the tenant comes
+  from the principal, derived task ids are per tenant, a foreign task reads as
+  missing, and each method takes its HTTP route's scope. Run-starting methods
+  get a per-principal limit (`OPENWOP_A2A_PRINCIPAL_REQS_PER_MIN`, default 60).
+  MCP refusal audit rows use the resolved tenant (#5531). A2A push sends the
+  registered credential, stores it sealed and never follows a redirect (#5552).
+- **Operator env-key principal (ADR 1045).** The principal id is derived from
+  a hash of the full key, not its first 8 characters, so two env keys that
+  share a prefix are no longer one principal (#5593).
+- **Connections (ADR 1035, CHAN-F1).** A credential for an instance-scoped
+  provider (ServiceNow, Workday, NetSuite, Zendesk, Salesforce) is attached only
+  to its connection's own instance (#5517). A client run's instance-scoped
+  connector calls use only that client's connection (#5541). A member who left
+  a shared or declared default workspace no longer has their connections used
+  (#5649, #5679).
+- **BYOK (ADR 0779).** A run can no longer name a system-owned credential ref,
+  such as another user's `connection:` ref (#5515).
+- **Ads (ADR 1022).** Budget, delivery and metrics calls check that the run's
+  org owns the campaign, at the adapter seam (#5467, #5491, #5577).
+- **Approval gates (ADR 0773, ADR 0582).** A pack node with `role: "gate"` is
+  an approval gate for Builder Pair and the MCP campaign lane (#5549).
+- **Replay (ADR 1048).** A pack node no build classified is held on a replay
+  fork unless its manifest says it is pure (#5547).
+- **Messaging delivery log (ADR 1043).** Rows older than
+  `OPENWOP_RELAY_DELIVERY_LOG_RETENTION_DAYS` (default 7) are deleted hourly,
+  and erasure and device revoke delete their rows (#5589). Relay activation now
+  checks the caller's tenant and registration (#5567).
+
+#### Upgrading from 0.10.0
+
+- **No required stop; NOT rolling-safe.** `node scripts/upgrade-plan.mjs 0.10.0`
+  gives one step, 0.10.0 → 0.11.0. A 0.10.0 instance looks up a partner-portal
+  token by its raw value. After app migration 25, and for any token 0.11.0
+  issues, partner links return `404` on 0.10.0 instances. **If the dealers
+  partner portal is in use, stop every 0.10.0 instance before starting 0.11.0.**
+  The geocode re-key only costs cache misses on an old instance.
+- **Migrations run on boot.** Schema sqlite 51 → 52 and postgres 49 → 50 add an
+  index on `messaging_delivery_log(at)` (ADR 1043). On Postgres the index build
+  blocks writes to that one table while it runs. App migrations 24 → 26:
+  25 `rekey-partner-tokens-hashed` stores each partner token as
+  `ptokh:<sha256>` with a 180-day expiry, and existing links keep working until
+  then; 26 `rekey-geocode-cache` re-keys the sales-maps geocode cache. Both are
+  idempotent and safe when two instances run them at once (ADR 1034).
+- **KickTodo adopters.** The KickTodo packages, packs, chains and
+  `distributions/kicktodo.json` are gone from this tree. In the same sync that
+  takes 0.11.0, adopt the KickTodo packages under your own
+  `src/adopter/features/`, pin your packs in `src/adopter/packPins.ts`, and
+  generate `packs/.adopter-manifest.json`
+  (`node scripts/gen-steward-manifest.mjs --adopter`). Without the manifest,
+  the KickTodo packs are refused at boot. openwop-app no longer reads the
+  calendar, wearable and verifier env vars listed under Removed; they belonged
+  to the KickTodo packages and move with them.
+- **The delivery log is pruned.** On the first hourly sweep, delivery-log rows
+  older than 7 days are deleted. To keep them for now, set
+  `OPENWOP_RELAY_DELIVERY_LOG_RETENTION_DAYS` to a large value before upgrading.
+- **Env-key principals change once.** Old delegations, run actors and
+  scheduled jobs keep working through a legacy rule, unless two configured keys
+  share the old 8-character prefix. Owner and member rows recorded under the old
+  id stop matching, the same as a key rotation.
+- **Instance-scoped connectors need a data source.** ServiceNow, Workday,
+  NetSuite, Zendesk and Salesforce connections without one fail
+  `connector_instance_unbound`; set the data source on the connection.
+- **A2A clients** must authenticate and hold the matching scope (`runs:create`,
+  `runs:read`, `runs:cancel` or `webhooks:manage`).
+- **Runs whose every final step was skipped now complete.** Anything that
+  counted `all_terminals_skipped` failures will see `completed` instead.
+- **Sign-in-gated frontend builds** need `VITE_FIREBASE_*` set, or the build
+  fails.
+- **BI metrics** created on 0.10.0 are read-only until a manager adopts each one
+  into an org (`POST …/metrics/:id/adopt`). No data migration runs.
+- Back up the database (and object store) before upgrading. Expect a short
+  migration window on first boot.
+- No other configuration changes are required. New behaviour behind flags and
+  toggles stays off unless noted above.
+- After the upgrade, check that `/readiness` reports `version: 0.11.0`.
+
 ## [0.10.0] — 2026-11-02
 
 A MINOR release under ADR 0052. It removes the AI Envelope from the host, adds

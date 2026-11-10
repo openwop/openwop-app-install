@@ -33,11 +33,11 @@ export const messages = {
 
   submitActivate: 'Soumettre pour activation',
   submitArchive: 'Soumettre pour archivage',
-  liveNotice: 'Ce modèle est en service — il détermine la visibilité des enregistrements CRM et les prévisions. Clonez un modèle de planification pour faire des changements.',
+  liveNotice: 'Ce modèle est en service — il détermine la visibilité des enregistrements CRM et les prévisions. Pour faire des changements, créez un nouveau modèle de planification.',
   confirmActivateTitle: 'Soumettre la mise en service de ce modèle ?',
   submitActivateBody: 'C’est un changement pour tout l’espace de travail : il passe d’abord dans la boîte de Révisions. Une fois qu’un responsable l’approuve, ce modèle est mis en service — il détermine la visibilité des enregistrements CRM et les prévisions, en remplaçant le modèle actif actuel.',
   confirmArchiveTitle: 'Soumettre l’archivage de ce modèle ?',
-  submitArchiveBody: 'C’est un changement pour tout l’espace de travail : il passe d’abord dans la boîte de Révisions. Une fois qu’un responsable l’approuve, le modèle devient un historique en lecture seule et ne peut pas être réactivé (clonez-le plutôt dans un nouveau modèle de planification).',
+  submitArchiveBody: 'C’est un changement pour tout l’espace de travail : il passe d’abord dans la boîte de Révisions. Une fois qu’un responsable l’approuve, le modèle devient un historique en lecture seule et ne peut pas être réactivé (créez plutôt un nouveau modèle de planification).',
   confirmDeleteTitle: 'Supprimer ce modèle archivé ?',
   confirmDeleteBody: 'Cela supprime définitivement le modèle et TOUS ses territoires, règles d’affectation et quotas. Irréversible. (Seuls les modèles archivés peuvent être supprimés.)',
 
@@ -176,4 +176,5 @@ export const messages = {
   field_stage: "Étape du cycle de vie",
   field_company: "Nom de l’entreprise",
   field_score: "Score du prospect",
+  managerOnlyLifecycle: 'Seul un responsable des territoires peut activer ou archiver des modèles.',
 } as const;

@@ -36,7 +36,8 @@
  * tenant-wide broadcast, on exactly the kinds whose own comments say the fallthrough leaks
  * PII.
  */
-import type { ApprovalKind, PendingApproval } from './approvalService.js';
+import type { ApprovalKind, HostApprovalKind, PendingApproval } from './approvalService.js';
+import { featureApprovalKind } from './approvalKindRegistry.js';
 import { resolveEffectiveAccess, listMembers, type EffectiveAccess } from './accessControlService.js';
 import { isSuperadminTenant } from './superadmin.js';
 import { isEligibleApprover, resolveEligibleApprovers } from './approverResolution.js';
@@ -66,13 +67,13 @@ export type Audience =
 /**
  * Every approval kind's audience.
  *
- * **`null` is written out per kind on purpose.** A `Record<ApprovalKind, …>` plus the
+ * **`null` is written out per kind on purpose.** A `Record<HostApprovalKind, …>` plus the
  * completeness test in `test/approval-audience-owner.test.ts` means a NEW kind fails the
  * build until someone states its audience — which is the mechanism that stops this table
  * decaying the way `routes/approvals.ts` did. (When ADR 0672 was drafted its prose named 6
  * of the 14 tenant-scoped kinds; the prose undercounted and the type is what caught it.)
  */
-export const APPROVAL_AUDIENCE: Record<ApprovalKind, Audience> = {
+export const APPROVAL_AUDIENCE: Record<HostApprovalKind, Audience> = {
   // ── scoped to the row's org ───────────────────────────────────────────────
   'content-publish': { orgScope: 'host:members:manage' },
   'strategy-activation': { orgScope: 'host:members:manage' }, // ADR 0230 §B3 — same decide bar
@@ -96,8 +97,6 @@ export const APPROVAL_AUDIENCE: Record<ApprovalKind, Audience> = {
 
   // ── not expressible as an org scope ───────────────────────────────────────
   'commerce-listing-publish': { superadminTenant: true },
-  // ADR 0459 P2 — decided by the participant alone, so visible to them alone.
-  'kicktodo-plan-proposal': { policyApproverRef: true },
   // ADR 0785 P4 — a permission prompt about the person's OWN machine: theirs alone.
   'claude-code-permission': { policyApproverRef: true },
 
@@ -116,18 +115,26 @@ export const APPROVAL_AUDIENCE: Record<ApprovalKind, Audience> = {
   'commerce-spend': null,
   'contact-merge': null,
   'warehouse-load': null,
-  'challenge-publish': null,
-  'community-profile': null,
-  'community-review': null,
-  'metrics-verifier-sample': null,
-  'connect-seller': null,
   'environment-promotion': null,
   'composed-workflow': null,
   'compensation-action': null,
 };
 
-const audienceOf = (kind: string | undefined): Audience =>
-  APPROVAL_AUDIENCE[(kind ?? 'run-proposal') as ApprovalKind] ?? null;
+/**
+ * ADR 1031 P2 — a kind the host table does not list is a FEATURE kind, whose
+ * audience its owner registered (`approvalKindRegistry`). A kind that is in
+ * neither — a row left behind by a feature this host no longer composes — fails
+ * CLOSED to the superadmin tenant. The table's own `?? null` was only reachable
+ * through a type hole; with feature kinds it would hand an orphaned row (a
+ * coach's note about a participant, say) to every member of its tenant.
+ */
+const UNREGISTERED_KIND_AUDIENCE: Audience = { superadminTenant: true };
+function audienceOf(kind: string | undefined): Audience {
+  const k = kind ?? 'run-proposal';
+  if (Object.prototype.hasOwnProperty.call(APPROVAL_AUDIENCE, k)) return APPROVAL_AUDIENCE[k as HostApprovalKind];
+  const feature = featureApprovalKind(k);
+  return feature ? feature.audience : UNREGISTERED_KIND_AUDIENCE;
+}
 
 /**
  * ADR 0878 (grade-code SD2CD-3) — the org of a row that predates its kind's

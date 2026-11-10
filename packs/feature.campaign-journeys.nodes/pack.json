@@ -1,6 +1,6 @@
 {
   "name": "feature.campaign-journeys.nodes",
-  "version": "1.9.0",
+  "version": "1.10.0",
   "kind": "node",
   "description": "Campaign Journeys guard verbs — `enroll` (idempotent one-run-per-journey-per-contact guard; a re-fired trigger fails with already_enrolled instead of double-sending) and `eligibility` (the consent + suppression + has-email composite every send step passes first; outputs the contact's email for the downstream send). `channel-eligibility` (ADR 0955: the one per-channel check — email or SMS, a client's sender, consent + topic opt-out + channel- and sender-scoped suppression). `next-send-window` (ADR 0955 D4: waits, as a durable timer, for the client's send window in every zone the recipient may be in) and `send-sms` (one journey text from the client's own number, typed failures, never sent outside the window or to someone who replied STOP). journey-depth read verbs: `engagement` (opened/clicked → EdgeCondition branching), `frequency-gate` (per-contact send-count cap over the ledger), `segment-members` (capped segment fan-out source for core.dispatch). Over ctx.features['campaign-journeys']; contact resolves from inputs or the triggering event payload.",
   "author": "openwop",
@@ -12,28 +12,28 @@
     {
       "typeId": "feature.campaign-journeys.nodes.enroll",
       "category": "coordination",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "role": "action",
       "label": "Journey Enrollment Guard",
-      "description": "Idempotent enrollment: succeeds once per (journeyId, contactId) — per client when `orgId` is given (ADR 0955); a repeat fails with `already_enrolled` so event redelivery can never double-send. Inputs: { journeyId, contactId? (else trigger payload), orgId? (the client; required once the workspace has clients), channel?, purpose?, topicId? }.",
+      "description": "Idempotent enrollment: succeeds once per (journeyId, contactId) — per client when `orgId` is given (ADR 0955); a repeat fails with `already_enrolled` so event redelivery can never double-send. Inputs: { journeyId, contactId? (else trigger payload), orgId? (the client; required once the workspace has clients), channel?, purpose?, topicId? }. ADR 1024: with stopOnIneligible true, an ineligible person, an existing enrollment and a superseding journey succeed with {enrolled:false, stopped} for a falsy-enrolled edge to a no-op terminal.",
       "x-paletteCategory": "journey"
     },
     {
       "typeId": "feature.campaign-journeys.nodes.eligibility",
       "category": "data",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "role": "read",
       "label": "Journey Eligibility Check",
-      "description": "Consent + suppression + has-email composite. Ineligible fails with the reason (consent | suppressed | no_email | contact_not_found); eligible outputs { email, name } for the send step. Inputs: { contactId? (else trigger payload) }.",
+      "description": "Consent + suppression + has-email composite. Ineligible fails with the reason (consent | suppressed | no_email | contact_not_found); eligible outputs { email, name } for the send step. Inputs: { contactId? (else trigger payload) }. ADR 1024: with stopOnIneligible true, a person's own state (consent, topic_opt_out, suppressed, no_address, no_email, contact_not_found, frequency_cap) ends cleanly: success with {eligible:false, stopped} for a falsy-eligible edge to a no-op terminal; faults still fail.",
       "x-paletteCategory": "journey"
     },
     {
       "typeId": "feature.campaign-journeys.nodes.channel-eligibility",
       "category": "data",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "role": "read",
       "label": "Channel Eligibility Check",
-      "description": "ADR 0955 — may this contact be sent this message on this channel from this client's sender? Address (email, or the E.164 phone for SMS), consent and topic opt-out, channel- and sender-scoped suppression. Ineligible fails with the reason (contact_not_found | no_address | consent | consent_unreadable | suppressed | suppression_unreadable | topic_opt_out); eligible outputs { channel, address, to, name } (and `email` on the email channel, the legacy gate's output name). For SMS to a client, consent is that client's own grant (ADR 0955 Q7). With `stopOnSuppressed: true`, a SUPPRESSED contact (unsubscribed or bounced) succeeds with { eligible: false, stopped: 'suppressed' } so a journey can end cleanly; every other reason still fails. Inputs: { orgId, channel, purpose?, topicId?, stopOnSuppressed?, contactId? (else trigger payload) }.",
+      "description": "ADR 0955 — may this contact be sent this message on this channel from this client's sender? Address (email, or the E.164 phone for SMS), consent and topic opt-out, channel- and sender-scoped suppression. Ineligible fails with the reason (contact_not_found | no_address | consent | consent_unreadable | suppressed | suppression_unreadable | topic_opt_out); eligible outputs { channel, address, to, name } (and `email` on the email channel, the legacy gate's output name). For SMS to a client, consent is that client's own grant (ADR 0955 Q7). With `stopOnSuppressed: true`, a SUPPRESSED contact (unsubscribed or bounced) succeeds with { eligible: false, stopped: 'suppressed' } so a journey can end cleanly; every other reason still fails. Inputs: { orgId, channel, purpose?, topicId?, stopOnSuppressed?, contactId? (else trigger payload) }. ADR 1024: with stopOnIneligible true, a person's own state (consent, topic_opt_out, suppressed, no_address, no_email, contact_not_found, frequency_cap) ends cleanly: success with {eligible:false, stopped} for a falsy-eligible edge to a no-op terminal; faults still fail.",
       "x-paletteCategory": "journey"
     },
     {

@@ -16,13 +16,14 @@
  * TST-BXB-4. Red when: contacts stop counting (crm-contacts), a killed
  * dependent counts (crm-killed), a per-tenant override stops counting
  * (crm-override), the not-in-use check is dropped (crm-fresh), or
- * CRM_DEPENDENT_TOGGLES drifts from the dependsOn closure (crm-closure).
+ * the derived dependent set drifts from the dependsOn closure or drops a host
+ * dependent migration 23 shipped with (crm-closure).
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
-import { APP_MIGRATIONS, CRM_DEPENDENT_TOGGLES } from '../src/host/appMigrations.js';
+import { APP_MIGRATIONS, crmDependentToggles } from '../src/host/appMigrations.js';
 import { BACKEND_FEATURES } from '../src/features/index.js';
 import { crmFeature } from '../src/features/crm/feature.js';
 
@@ -81,7 +82,7 @@ describe('app migration 23 — grandfather CRM on for installs that use it', () 
     expect(await storage.kvGet(KEY)).toBe(admin);
   });
 
-  it('CRM_DEPENDENT_TOGGLES is exactly the dependsOn closure that reaches crm', () => {
+  it('the derived CRM dependents are exactly the dependsOn closure that reaches crm', () => {
     const deps = new Map(BACKEND_FEATURES.map((f) => [f.toggleDefault?.id ?? f.id, f.dependsOn ?? []]));
     const reaches = (id: string, seen = new Set<string>()): boolean => {
       for (const d of deps.get(id) ?? []) {
@@ -91,7 +92,22 @@ describe('app migration 23 — grandfather CRM on for installs that use it', () 
       return false;
     };
     const closure = [...deps.keys()].filter((id) => id !== 'crm' && reaches(id)).sort();
-    expect([...CRM_DEPENDENT_TOGGLES].sort()).toEqual(closure);
+    expect(crmDependentToggles(BACKEND_FEATURES).sort()).toEqual(closure);
     expect(crmFeature.toggleDefault?.status).toBe('off');
+    // ADR 1031 P2 — the list became derived. The host dependents migration 23
+    // shipped with must all still be in it (a feature's dependsOn edit that drops
+    // one changes which installs keep CRM on, and should be a decision).
+    const SHIPPED_HOST = ['csm', 'email', 'commerce', 'job-search', 'territories', 'discovery', 'promotions', 'recommendations'];
+    expect(crmDependentToggles(BACKEND_FEATURES)).toEqual(expect.arrayContaining(SHIPPED_HOST));
+  });
+
+  it('a feature enrolls itself through its own dependsOn, transitively (ADR 1031 P2)', () => {
+    const features = [
+      { id: 'crm', dependsOn: [] },
+      { id: 'shop', dependsOn: ['crm'] },
+      { id: 'adopter-shop', dependsOn: ['shop'] },
+      { id: 'unrelated', dependsOn: ['shop-less'] },
+    ];
+    expect(crmDependentToggles(features)).toEqual(['shop', 'adopter-shop']);
   });
 });

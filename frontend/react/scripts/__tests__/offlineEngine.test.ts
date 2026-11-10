@@ -33,6 +33,7 @@ import {
   checkOfflineTable,
   computePrecache,
   deriveNeverCache,
+  findOfflineDeclarationFiles,
   firebaseGlobToRegExpSource,
   generateServiceWorker,
   parseLegacyCachePurge,
@@ -655,5 +656,19 @@ describe('ADR 0873 D13 — VITE_SW_LEGACY_CACHE_PURGE, the caches a previous wor
     const names = await caches.keys();
     expect(names).not.toContain('js-chunks-v4');
     expect(names.some((n) => n.startsWith(`${OFFLINE_CACHE_PREFIX}shell-v1`))).toBe(true);
+  });
+});
+
+describe('ADR 1031 — offline declarations from adopter features', () => {
+  it('reads src/adopter/features/<id>/offline.ts beside a routes.tsx, keyed by directory; ignores a dir without routes.tsx', () => {
+    const root = mkdtempSync(join(tmpdir(), 'owp-swadopter-'));
+    const registry = join(root, 'src', 'features', 'registry.ts');
+    mkdirSync(dirname(registry), { recursive: true });
+    writeFileSync(registry, '');
+    for (const [dir, files] of [['with-routes', ['routes.tsx', 'offline.ts']], ['no-routes', ['offline.ts']]] as const) {
+      mkdirSync(join(root, 'src', 'adopter', 'features', dir), { recursive: true });
+      for (const f of files) writeFileSync(join(root, 'src', 'adopter', 'features', dir, f), '');
+    }
+    expect(findOfflineDeclarationFiles('', registry).map((f) => f.id)).toEqual(['with-routes']);
   });
 });

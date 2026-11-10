@@ -199,7 +199,7 @@ export async function mcpPendingGates(scope: BundleScope, clientId: string): Pro
           roles: Array.isArray(d.approverRoleRefs) ? d.approverRoleRefs.filter((x): x is string => typeof x === 'string') : [],
           requiredApprovals: typeof d.requiredApprovals === 'number' ? d.requiredApprovals : 1,
           ...(typeof d.timeoutMs === 'number' ? { expiresInMs: d.timeoutMs } : {}),
-          inbox: '/approvals',
+          inbox: '/inbox',
         });
       }
     }

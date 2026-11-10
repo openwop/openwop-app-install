@@ -57,8 +57,6 @@ function client() {
   return { get: <T>(p: string) => call<T>('GET', p), post: <T>(p: string, b?: unknown) => call<T>('POST', p, b), put: <T>(p: string, b?: unknown) => call<T>('PUT', p, b), patch: <T>(p: string, b?: unknown) => call<T>('PATCH', p, b), del: <T>(p: string) => call<T>('DELETE', p) };
 }
 
-
-
 let n = 0;
 async function setup() {
   const tenantId = `ws:t-arch-${n++}`;
@@ -81,7 +79,6 @@ async function setup() {
   return { tenantId, orgId, admin, C, A, invite, grantFor };
 }
 
-
 describe('ADR 0958 D7 — accept while the client is archived', () => {
   it('is refused with the uniform 404 and binds nothing; after un-archive the same invite works', async () => {
     const s = await setup();
@@ -95,8 +92,9 @@ describe('ADR 0958 D7 — accept while the client is archived', () => {
     const P = `/host/openwop-app/campaign-ops/clients/${s.orgId}`;
     expect((await s.admin.patch(P, { status: 'archived' })).status).toBe(200);
 
-    const refused = await vendor.post('/host/openwop-app/collab/invites/accept', { token: inv.body.invite.token });
+    const refused = await vendor.post<{ error: string; message: string }>('/host/openwop-app/collab/invites/accept', { token: inv.body.invite.token });
     expect(refused.status).toBe(404);
+    expect(refused.body).toMatchObject({ error: 'not_found', message: 'Invite not found.' });
     const row = await getCollaborator(s.tenantId, s.orgId, cid);
     expect(row?.status).toBe('invited');
     expect(row?.boundUserId).toBeUndefined();

@@ -99,4 +99,13 @@ export const messages = {
   outletsLoadFailed: "Les points de vente n'ont pas pu être chargés ; ce distributeur peut avoir des sites non listés ici.",
   registrationsLoadFailed: "Les enregistrements d'affaires n'ont pas pu être chargés ; cette liste peut être incomplète.",
   dealerNameUnavailable: "(le nom du distributeur n'a pas pu être chargé)",
+  // ADR 1034 D9
+  revokePortalButton: 'Révoquer le lien partenaire',
+  revokePortalTitle: 'Révoquer ce lien partenaire ?',
+  revokePortalBody: 'Le partenaire ne pourra plus ouvrir son portail ni enregistrer d’affaires avec le lien actuel. Vous pourrez en émettre un nouveau plus tard.',
+  portalRevokedToast: 'Lien partenaire révoqué',
+  portalRevokeFailed: 'Impossible de révoquer le lien partenaire',
+  portalExpiresNotice: 'Il cesse de fonctionner le {{date}}. Copiez-le maintenant : il ne sera plus affiché.',
+  suspendConfirmTitle: 'Suspendre {{name}} ?',
+  suspendConfirmBody: 'Son lien partenaire cesse de fonctionner jusqu’à sa réactivation. Les liens expirent aussi 180 jours après leur émission : vous devrez peut-être en émettre un nouveau.',
 } as const;

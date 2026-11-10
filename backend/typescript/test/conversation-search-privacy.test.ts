@@ -16,8 +16,31 @@
  *   hit out of the results (the old query took the tenant-wide top k, then
  *   filtered to the caller's conversations).
  *
- * `__resetProcessState` stands in for a restart: it drops what one process
- * holds, and leaves storage and host surfaces as they are.
+ * ADR 0997 (implemented) rebuilt search to read the chat store at request time
+ * and keep NO copy, which is what these cases now hold it to.
+ *
+ * CORRECTION (wave 79): this file used to "restart" by calling
+ * `__resetSearchEngine` / `__resetProcessState` when the engine exported them.
+ * Since ADR 0997 neither exists (git grep: 0), so the restart simulated nothing.
+ * It is removed. The claim is now the stronger one: a copy of ANY kind (process
+ * memory or the durable surface) that outlives the source write reds CSP-1/2.
+ *
+ * Measured sabotages (wave 79 probes):
+ * - a process-held candidate cache in `searchConversations` → CSP-1 and CSP-2;
+ * - the sqlite delete or DSAR write no-op'd → CSP-1 / CSP-2;
+ * - re-adding the ADR 0112 write of message text into the tenant `db.search`
+ *   index → CSP-3;
+ * - matching the raw stored envelope instead of `messageView(row).text` → CSP-5;
+ * - the old tenant-wide top-k candidate query, or the ADR 0043 visibility
+ *   predicate forced true → CSP-4.
+ *
+ * Double guards (recorded; a single edit cannot red them):
+ * - CSP-1: the delete overwrites the content itself, the storage SQL excludes
+ *   tombstones (`content <> '{"deleted":true}'`), and the engine skips a
+ *   deleted `messageView`. Only a reintroduced copy reds it.
+ * - CSP-4: the storage session filter (`searchChatMessages`, storage adapters)
+ *   and the engine's `visibleSet.has(row.sessionId)` re-check
+ *   (`searchEngine.ts`). Probed as a held pair in wave 79 (hold one, break the other).
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -28,25 +51,14 @@ import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { ensureConversationMeta } from '../src/host/conversationStore.js';
 import type { Storage } from '../src/storage/storage.js';
-import * as engine from '../src/features/conversation-search/searchEngine.js';
+import { searchVisibleConversations, type SearchHit } from '../src/features/conversation-search/searchEngine.js';
 
 const TENANT = 't-search-privacy';
 let storage: Storage;
 
-/** The caller's hits — the result shape `searchVisibleConversations` has on the
- *  current engine (`{ hits }`) or had on the old one (an array). */
-async function find(user: string, q: string, limit?: number): Promise<Array<{ conversationId: string; snippet: string }>> {
-  const r = (await engine.searchVisibleConversations(storage, TENANT, user, q, limit ? { limit } : undefined)) as unknown;
-  return (Array.isArray(r) ? r : (r as { hits: Array<{ conversationId: string; snippet: string }> }).hits);
-}
-
-/** Simulates a process restart where the engine still keeps per-process state. */
-function restart(): void {
-  const e = engine as unknown as Record<string, unknown>;
-  for (const name of ['__resetSearchEngine', '__resetProcessState']) {
-    const fn = e[name];
-    if (typeof fn === 'function') (fn as () => void)();
-  }
+/** The caller's hits, through the one owner the route and agent tool share. */
+async function find(user: string, q: string, limit?: number): Promise<SearchHit[]> {
+  return (await searchVisibleConversations(storage, TENANT, user, q, limit ? { limit } : undefined)).hits;
 }
 
 async function seed(conversationId: string, owner: string, msgs: Array<{ id: string; content: string; author?: string }>): Promise<void> {
@@ -69,7 +81,7 @@ beforeAll(async () => {
 });
 
 describe('conversation search privacy (row 63)', () => {
-  it('CSP-1: a deleted message stays unsearchable after a restart', async () => {
+  it('CSP-1: a deleted message stays unsearchable (no copy outlives the delete)', async () => {
     await seed('c-del', 'u-a', [{ id: 'c-del-m0', content: 'the launch codeword is marmalade' }]);
     // Positive control: the message is found while it exists.
     expect((await find('u-a', 'marmalade')).map((h) => h.conversationId)).toEqual(['c-del']);
@@ -77,13 +89,12 @@ describe('conversation search privacy (row 63)', () => {
     // The delete route's exact storage writes (routes/chatSessions.ts DELETE …/messages/:id).
     await storage.updateChatMessageContent('c-del', 'c-del-m0', '{"deleted":true}', JSON.stringify({ deletedAt: new Date().toISOString() }));
     await storage.updateChatSession(TENANT, 'c-del', { updatedAt: new Date(Date.now() + 60_000).toISOString() });
-    restart();
 
     const hits = await find('u-a', 'marmalade');
     expect(hits, 'deleted text must not be returned as a snippet').toEqual([]);
   });
 
-  it('CSP-2: a DSAR-erased message stays unsearchable after a restart', async () => {
+  it('CSP-2: a DSAR-erased message stays unsearchable (no copy outlives the erasure)', async () => {
     await seed('c-dsar', 'u-a', [
       { id: 'c-dsar-m0', content: 'my home address is 12 quince lane', author: 'user:u-erased' },
       { id: 'c-dsar-m1', content: 'noted', author: 'user:u-a' },
@@ -91,7 +102,6 @@ describe('conversation search privacy (row 63)', () => {
     expect((await find('u-a', 'quince')).length).toBe(1);
 
     await storage.redactChatMessagesByAuthor(TENANT, ['user:u-erased'], 'user:__erased__', new Date(Date.now() + 120_000).toISOString());
-    restart();
 
     expect(await find('u-a', 'quince')).toEqual([]);
   });
@@ -105,9 +115,9 @@ describe('conversation search privacy (row 63)', () => {
     // `core.db.search-query` delegates straight to `ctx.db.search.query`.
     const runSurface = buildHostSurfaceBundle({ tenantId: TENANT, runId: 'run-member-b', actingUserId: 'u-b' }).db.search;
     for (const index of ['chat-search', 'default']) {
-      const res = await runSurface.query({ index, q: 'zeppelin', k: 50 }) as { hits?: Array<{ fields: Record<string, unknown> }> };
-      const texts = (res.hits ?? []).map((h) => JSON.stringify(h.fields));
-      expect(texts.some((t) => t.includes('zeppelin')), `index ${index} exposes member A's message`).toBe(false);
+      const res = await runSurface.query({ index, q: 'zeppelin', k: 50 });
+      expect(res, 'the surface answered').toEqual(expect.objectContaining({ hits: expect.any(Array) }));
+      expect(JSON.stringify(res), `index ${index} exposes member A's message`).not.toContain('zeppelin');
     }
   });
 

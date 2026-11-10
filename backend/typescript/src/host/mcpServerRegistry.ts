@@ -218,7 +218,9 @@ export function requiredScopeForTool(manifest: ExposedToolManifest): 'workspace:
  *
  *  1. **It could never match for a credential principal.** `principalId` is an
  *     identity, and only the cookie/OIDC lanes mint one that is also an RBAC
- *     SUBJECT. The API-key lanes mint `bearer:<first 8 chars>` / `apikey:<keyId>`
+ *     SUBJECT. The API-key lanes mint `bearer:<id>` / `apikey:<keyId>`
+ *     (the env-key id was the first 8 chars until ADR 1045 TST-FUD-GC-1; now a
+ *     16-hex digest of the whole key)
  *     — strings no member row is ever keyed on, and the first of which changes on
  *     rotation. MEASURED on this branch, demo mode OFF: 17 gated tools before the
  *     gate, **0 after**, for env-key, `owk_` key, anonymous session AND the

@@ -56,7 +56,7 @@ async function runsFor(jobId: string) {
 describe('scheduled-job per-fire inputs', () => {
   it('seeds the fired run with the job inputs', async () => {
     await registerJob(
-      { jobId: 'daily', tenantId: 't1', cronExpr: '0 * * * *', workflowId: 'openwop-app.kicktodo.daily-loop',
+      { jobId: 'daily', tenantId: 't1', cronExpr: '0 * * * *', workflowId: 'wf.daily-loop',
         timezone: 'UTC', inputs: { enrollmentId: 'enr:abc', ownerSubject: 'user:coach' } },
       T0,
     );

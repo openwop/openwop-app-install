@@ -29,6 +29,16 @@ import { MANIFEST_SIDE_EFFECT_FLOOR, MANIFEST_DECLARED_TYPE_IDS, MANIFEST_FAST_P
 import { isSideEffectingNode } from '../src/executor/sideEffects.js';
 
 const PACKS = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'packs');
+const ADOPTER_MANIFEST = join(PACKS, '.adopter-manifest.json');
+
+/** ADR 1048 D4 — directories an ADOPTER claims carry their own floor half in
+ *  `packs/.adopter-manifest.json`, so the upstream snapshot (and this scan of
+ *  it) leaves them out. Upstream has no adopter manifest: nothing is excluded. */
+function adopterClaimed(): Set<string> {
+  if (!existsSync(ADOPTER_MANIFEST)) return new Set();
+  const m = JSON.parse(readFileSync(ADOPTER_MANIFEST, 'utf8')) as { packs?: Record<string, unknown> };
+  return new Set(Object.keys(m.packs ?? {}));
+}
 
 interface Declared { typeId: string; role: string | null; caps: string[] }
 
@@ -39,7 +49,9 @@ function scanManifests(): Declared[] {
   expect(existsSync(PACKS), `packs dir missing at ${PACKS} — this suite would pass vacuously`).toBe(true);
   const out: Declared[] = [];
   const seen = new Set<string>();
+  const claimed = adopterClaimed();
   for (const dir of readdirSync(PACKS)) {
+    if (claimed.has(dir)) continue;
     const manifest = join(PACKS, dir, 'pack.json');
     if (!existsSync(manifest)) continue;
     let json: { nodes?: Array<{ typeId?: string; id?: string; role?: unknown; capabilities?: unknown }> };
@@ -177,6 +189,23 @@ describe('replay.md req 4 — the manifest-derived side-effect floor', () => {
     expect(MANIFEST_FAST_PATH_SERVED.size).toBeLessThan(MANIFEST_SIDE_EFFECT_FLOOR.size);
     for (const t of MANIFEST_FAST_PATH_SERVED) {
       expect(MANIFEST_SIDE_EFFECT_FLOOR.has(t), `${t} is served but not in the floor`).toBe(true);
+    }
+  });
+});
+
+describe('ADR 1048 — the adopter floor half (runs only in an adopter tree)', () => {
+  const claimed = adopterClaimed();
+  it.skipIf(claimed.size === 0)('every adopter side-effect/side-effectful node is in served ∪ held, and served is classified', () => {
+    const m = JSON.parse(readFileSync(ADOPTER_MANIFEST, 'utf8')) as { packs: Record<string, { served: string[]; held: Record<string, string[]> }> };
+    for (const dir of claimed) {
+      const pack = JSON.parse(readFileSync(join(PACKS, dir, 'pack.json'), 'utf8')) as { nodes?: Array<{ typeId: string; role?: string; capabilities?: string[] }> };
+      const e = m.packs[dir]!;
+      const covered = new Set([...e.served, ...Object.values(e.held).flat()]);
+      for (const n of pack.nodes ?? []) {
+        if (n.role !== 'side-effect' && !(n.capabilities ?? []).includes('side-effectful')) continue;
+        expect(covered.has(n.typeId), `${n.typeId} is in the adopter floor but neither served nor held`).toBe(true);
+      }
+      for (const t of e.served) expect(isSideEffectingNode(t), `${t} is adopter-served but not classified`).toBe(true);
     }
   });
 });

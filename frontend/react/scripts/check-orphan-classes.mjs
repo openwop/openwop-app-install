@@ -21,7 +21,9 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
-const CSS_FILES = ['src/styles/foundations/tokens.css', 'src/styles/global.css', 'src/styles/chrome/admin.css', 'src/styles/primitives/adr0510.css', 'src/brand/brand.css'];
+import { featureStylesheets } from './gen-feature-styles.mjs';
+// ADR 1031 P2 — plus every feature-owned `<feature>/styles.css` (both feature roots).
+const CSS_FILES = ['src/styles/foundations/tokens.css', 'src/styles/global.css', 'src/styles/chrome/admin.css', 'src/styles/primitives/adr0510.css', 'src/brand/brand.css', ...featureStylesheets().map((f) => `src/${f}`)];
 /** Feature class-prefixes under the gate. Add a prefix when a feature grows a
  *  prefixed CSS family — the gate then owns its rename safety. */
 const PREFIXES = ['walkthrough-', 'notifpanel-', 'netpanel-', 'btn-', 'fstore-'];

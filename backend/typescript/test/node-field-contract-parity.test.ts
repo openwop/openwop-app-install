@@ -220,7 +220,9 @@ describe('the three node-field writers declare the same contract', () => {
     '}));',
   );
 
-  it('fixture guard: both slices actually parsed some fields', () => {
+  it('fixture guard: all four writer slices parsed fields', () => {
+    // Floors are marker guards, not counts: measured 2026-11-03 at ingest 10,
+    // emit 10, producer 7, read 10 (TST-FLC-H1 asks whether to make them exact).
     // A marker rename would silently yield two empty sets, which compare EQUAL —
     // the gate would then pass while checking nothing. This is the failure mode
     // that let the original tripwire scan 1407 files and examine zero nodes.

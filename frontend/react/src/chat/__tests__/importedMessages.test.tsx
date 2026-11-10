@@ -7,12 +7,16 @@
  * passes for one this app's agent wrote. One note after the imported block says
  * the assistant never saw it (the next turn starts a fresh run; ADR 0992 D10).
  *
- * What turns each case red: dropping the `rowMeta.source === 'import'` line in
- * `hooks/chatSession/lib.ts` (case 1, and cases 2–3 by construction); dropping the
- * label in `MessageBubble.tsx` (case 2); dropping the note, or rendering it after
+ * "Only there": the typed row's CONTENT envelope carries `source: 'import'` too,
+ * so reading the provenance from content instead of row meta turns case 1 red.
+ *
+ * What turns each case red (witnessed, wave 78): dropping the
+ * `rowMeta.source === 'import'` line in `hooks/chatSession/lib.ts` (case 1, and
+ * cases 2–3 by construction); also reading `source` from the content (case 1);
+ * dropping the label in `MessageBubble.tsx` (case 2); rendering the note after
  * every imported message instead of after the last (case 3).
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
 
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (k: string) => k }) }));
@@ -28,16 +32,19 @@ const IMPORT_META = JSON.stringify({ contentTrust: 'untrusted', source: 'import'
 const imported = (id: string, role: 'user' | 'assistant', text: string): ChatMessagePersisted => ({
   messageId: id, sessionId: 's', role, meta: IMPORT_META, authorSubject: 'user:user:me', createdAt: '2026-10-27T10:00:00.000Z',
   content: JSON.stringify({ role, content: text, createdAt: '2026-10-27T10:00:00.000Z' }),
-} as ChatMessagePersisted);
+});
+/** A typed row: no row meta. Its CONTENT claims `source: 'import'`, which must not count. */
 const typed: ChatMessagePersisted = {
   messageId: 'n1', sessionId: 's', role: 'user', meta: null, authorSubject: 'user:user:me', createdAt: '2026-10-27T11:00:00.000Z',
-  content: JSON.stringify({ role: 'user', content: 'a new question' }),
-} as ChatMessagePersisted;
+  content: JSON.stringify({ role: 'user', content: 'a new question', source: 'import' }),
+};
 
+const realScrollIntoView = window.HTMLElement.prototype.scrollIntoView;
 beforeEach(() => {
   cleanup();
   window.HTMLElement.prototype.scrollIntoView = vi.fn();
 });
+afterAll(() => { window.HTMLElement.prototype.scrollIntoView = realScrollIntoView; });
 
 describe('ADR 0992 D9 — imported messages', () => {
   const messages = parsePersistedMessages([imported('i0', 'user', 'old question'), imported('i1', 'assistant', 'old answer'), typed]);

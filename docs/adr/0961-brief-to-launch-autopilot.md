@@ -7,6 +7,62 @@ Source: the program brief (session 66) and David's original ask: "all as
 workflows with dedicated agents executing work per node … as much or as little
 HITL as each campaign needs." Net-new feature, not a MyndHyve port.
 
+## Correction — explicit saved-key launch and detached-stage AI authority (2026-11-06)
+
+The original dedicated launch and Strategist `run` tool did not forward a run AI
+credential declaration. A key saved under a labeled reference therefore was not
+necessarily available to campaign generation. This host-only candidate adds an
+optional `ai` object using the existing credentialRef/provider/model names to
+those existing host actions; it changes no protocol route or wire field.
+
+The campaign page reuses the shared RunInputsDialog and name-only BYOK inventory
+from exact ADR 0712 dependencies `cb58c6815ce77a67cb5ee6831250c305a947bda5`
+and `47a4d318138bf422a4ba23a363bf67a47786364c`. No parallel key loader, secret
+entry field, automatic vault selection, workspace binding or global alias is added.
+Blank means no override, including when the inventory cannot be read. Selection
+is explicit, reset on identity/campaign changes, and checked synchronously before
+submission. Client permission and readiness remain server decisions.
+
+The dedicated admission helper uses the existing run credential validator and
+tenant resolver before ignition or campaign mutation. It additionally checks
+provider/ref coherence and catalog model membership. For this new selection
+surface only, provider-qualified exact/colon references (optionally `byok:`)
+match the shared picker; legacy global reference grammar is unchanged. The
+server derives omitted provider/model from that provider and its catalog default.
+The Strategist tool accepts only an explicitly person-supplied reference, never
+an inferred chat key or secret value. New valid choices do not retarget reused
+ignition/live runs; reuse copy states they were not applied.
+
+> **Correction (2026-11-07, runtime qualification).** The new credential,
+> stage-choice and source-choice refusal reasons originally contained 32–34
+> base64-shaped characters, so the existing error-envelope sanitizer correctly
+> scrubbed them. That also hid their `campaign_ai_` classification from the UI.
+> Use the shorter `campaign_ai_key_forbidden`, `campaign_ai_stage_mismatch` and
+> `campaign_ai_source_mismatch` values. These undeployed host detail values keep
+> the same error codes, status codes and fail-closed decisions. The sanitizer,
+> credential admission and tenant guards remain unchanged. Real HTTP admission
+> and stage/source error-envelope regression checks cover serialization; this
+> correction does not claim full gate or live campaign qualification.
+
+Detached stages read the authorized, stored source row and project only its
+declared credential names plus effective frozen AI choice. Stage args cannot
+replace its provider/model. The existing metadata.aiDefault and configurable.ai
+owners remain authoritative. A managed source preserves its frozen sentinel and
+leaves explicit provider/model inputs absent, so the normal default injector
+keeps managed dispatch. No current binding is looked up to re-decide that stage.
+An existing deterministic stage is returned before projection; a NEW stage from
+a legacy source lacking a frozen AI decision refuses explicitly. An incompatible
+source key/provider decision also refuses. No arbitrary tools, connections or
+other configurable authority is copied. Normal child inheritance is unchanged.
+
+Source and authored tests are under independent review. NO install, test, lint,
+compiler, build, gate or live provider execution has qualified this candidate.
+The HTTP-captured declaration is exercised by a separate executor probe in the
+authored fixture: that is not successful real campaign generation. Runtime and
+managed-dispatch controls, existing launch/stage guards and canonical checks
+must run in a coordinated window before qualification. No automatic brief/kernel
+approval, publication, recipient send, scheduling or spend is introduced.
+
 ## Context
 
 Every other ADR in the program builds a block: the canonical campaign (0941),

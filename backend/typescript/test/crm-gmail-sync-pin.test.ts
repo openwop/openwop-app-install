@@ -79,6 +79,9 @@ import {
 } from '../src/features/crm/gmailSyncService.js';
 import { getSetCookies } from './headerCookies.js';
 
+/** ADR 1035 — these cases test selection, not a destination: a host-fixed egress. */
+const FIXED = { fixedEndpoint: 'test: selection only' } as const;
+
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '../../..');
 const PACK_DIR = join(REPO, 'packs/feature.crm.nodes');
 type NodeOut = { status: string; outputs?: Record<string, unknown>; error?: { code: string; message: string } };
@@ -142,12 +145,12 @@ describe('broker — a pin is EXACT; the user→org→workspace fall-through is 
     expect((await getConnection(T, dead.connectionId))!.status).toBe('needs-reconsent');
 
     // The OLD behaviour, still correct for an UNPINNED caller: fall through to the workspace credential.
-    const unpinned = await resolveConnectionCredential({ tenantId: T, provider: 'google', actingUserId: 'user:u1' });
+    const unpinned = await resolveConnectionCredential({ egress: FIXED,  tenantId: T, provider: 'google', actingUserId: 'user:u1' });
     expect(unpinned?.connection.connectionId).toBe(ws.connectionId);
 
     // The pinned lane: the dead row is refused and NOTHING is substituted.
     expect(await connectionExists({ tenantId: T, provider: 'google', actingUserId: 'user:u1', connectionId: dead.connectionId })).toBe(false);
-    expect(await resolveConnectionCredential({ tenantId: T, provider: 'google', actingUserId: 'user:u1', connectionId: dead.connectionId })).toBeNull();
+    expect(await resolveConnectionCredential({ egress: FIXED,  tenantId: T, provider: 'google', actingUserId: 'user:u1', connectionId: dead.connectionId })).toBeNull();
   });
 
   it('a pin to the actor\'s own ACTIVE row returns exactly that row; another user\'s row, a foreign provider and an unknown id are refused; a workspace row is exact too (ADR 0783 D3)', async () => {
@@ -156,7 +159,7 @@ describe('broker — a pin is EXACT; the user→org→workspace fall-through is 
     const theirs = await liveGoogleConnection(T, 'user:u2');
     const ws = await createSecretConnection({ tenantId: T, provider: 'google', kind: 'api_key', secret: 'ws', scope: 'workspace' });
     const pin = (connectionId: string, actingUserId?: string, provider = 'google') =>
-      resolveConnectionCredential({ tenantId: T, provider, ...(actingUserId ? { actingUserId } : {}), connectionId });
+      resolveConnectionCredential({ egress: FIXED,  tenantId: T, provider, ...(actingUserId ? { actingUserId } : {}), connectionId });
 
     expect((await pin(mine.connectionId, 'user:u1'))?.connection.connectionId).toBe(mine.connectionId);
     expect((await pin(mine.connectionId, 'user:u1'))?.provenance.connectionId).toBe(mine.connectionId);
@@ -169,7 +172,7 @@ describe('broker — a pin is EXACT; the user→org→workspace fall-through is 
     expect(await pin('conn:does-not-exist', 'user:u1')).toBeNull();
     // …and a pin never widens: with the pin refused, the unpinned lane would have
     // found `mine` — proving the refusal is the pin, not the tenant.
-    expect((await resolveConnectionCredential({ tenantId: T, provider: 'google', actingUserId: 'user:u1' }))?.connection.connectionId).toBe(mine.connectionId);
+    expect((await resolveConnectionCredential({ egress: FIXED,  tenantId: T, provider: 'google', actingUserId: 'user:u1' }))?.connection.connectionId).toBe(mine.connectionId);
   });
 
   it('invoker: a refused pin is `connector_pinned_connection_unusable` — distinct from `connector_no_connection`, before any dial', async () => {
@@ -431,8 +434,8 @@ describe("an EMPTY pin is a refusal, not an un-pin (review SHOULD-1) — all thr
   it("broker: connectionId '' → null even though the unpinned lane finds the actor's row; invoker: → connector_pinned_connection_unusable", async () => {
     const T = tenant();
     const mine = await liveGoogleConnection(T, 'user:u1');
-    expect((await resolveConnectionCredential({ tenantId: T, provider: 'google', actingUserId: 'user:u1' }))?.connection.connectionId).toBe(mine.connectionId);
-    expect(await resolveConnectionCredential({ tenantId: T, provider: 'google', actingUserId: 'user:u1', connectionId: '' })).toBeNull();
+    expect((await resolveConnectionCredential({ egress: FIXED,  tenantId: T, provider: 'google', actingUserId: 'user:u1' }))?.connection.connectionId).toBe(mine.connectionId);
+    expect(await resolveConnectionCredential({ egress: FIXED,  tenantId: T, provider: 'google', actingUserId: 'user:u1', connectionId: '' })).toBeNull();
     expect(await connectionExists({ tenantId: T, provider: 'google', actingUserId: 'user:u1', connectionId: '' })).toBe(false);
     await storage.insertRun({ runId: 'run-empty-pin', workflowId: 'w', tenantId: T, status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: 'x', updatedAt: 'x' });
     const out = await createConnectorInvoker({ storage }).invoke('google', {

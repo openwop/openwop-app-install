@@ -64,7 +64,8 @@ describe('ADR 0515 — CAD assist entry', () => {
     const renderEmptyState = embedded.props[0]?.renderEmptyState;
     expect(renderEmptyState).toBeTypeOf('function');
     const picked: string[] = [];
-    render(<MemoryRouter>{renderEmptyState!((t) => { picked.push(t); })}</MemoryRouter>);
+    const pick = (t: string) => { picked.push(t); };
+    render(<MemoryRouter>{renderEmptyState!(pick, { fill: pick, send: pick })}</MemoryRouter>);
     const example = screen.getAllByRole('button', { name: /cv-cad-42/ });
     expect(example).toHaveLength(3); // every example names THIS canvas
     fireEvent.click(example[0]!);

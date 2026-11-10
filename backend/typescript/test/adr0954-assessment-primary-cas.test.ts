@@ -1,5 +1,20 @@
-/** P4 recovery: actual SQLite boundaries must retain uncertain commits and
- * prevent erased or superseded qualification content from being republished. */
+/**
+ * ADR 0954 D4/P4a recovery: at real SQLite boundaries, an uncertain commit is
+ * retained and reconciled after a restart, and erased or superseded qualification
+ * content is never republished. `closeLeadBinding` fences the lead first (the
+ * closure fence), so a writer that crosses erasure loses at its own CAS.
+ *
+ * Double guards. A late visitor write after closure is refused by the tombstone
+ * read (`liveContact`) AND `owner.closed`: only an edit that breaks both reds it.
+ * A late freeze or assessment after closure is refused by the profile check,
+ * `grade.closed` AND the missing `pendingRunId`, so what is probed is what the
+ * fence row keeps.
+ *
+ * Sabotage measured (waves 74 and 75, each red, then restored): `publicGrade`
+ * leaking the stored text; the assessment and freeze replay branches; a fence
+ * that keeps the row's text; the pending-run check; both closure guards in one
+ * edit; the immutable-submission check; a bind that drops statements.
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -103,6 +118,9 @@ describe('qualification primary ownership', () => {
     expect((await getLeadGrade(tenantId, orgId, contactId))?.pendingRunId).toBe('run-2');
   });
 
+});
+
+describe('qualification primary ownership: visitor submissions', () => {
   it('separate visitor submissions survive a same-client bind without replacing one another', async () => {
     await commitLeadStatedSubmission(tenantId, contactId, { submissionId: 'visitor-one', at: '2026-10-25T01:00:00Z', answers: [{ criterionId: 'budget', value: 'small' }] });
     await commitLeadStatedSubmission(tenantId, contactId, { submissionId: 'visitor-two', at: '2026-10-25T02:00:00Z', answers: [{ criterionId: 'budget', value: 'large' }] });

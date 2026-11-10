@@ -29,7 +29,8 @@ vi.mock('../dashboardClient.js', () => ({ listOwnRuns: (...a: unknown[]) => list
 vi.mock('../../connections/connectionsClient.js', () => ({ listConnections: () => listConnections() }));
 vi.mock('../../../agents/approvalsClient.js', () => ({ listApprovals: async () => [] }));
 vi.mock('../../../client/chatSessionsClient.js', () => ({ listChatSessions: async () => [] }));
-vi.mock('../../../byok/lib/byokClient.js', () => ({ listStoredRefs: async () => [] }));
+const storedRefs = vi.hoisted(() => ({ refs: [] as string[] }));
+vi.mock('../../../byok/lib/byokClient.js', () => ({ listStoredRefs: async () => storedRefs.refs }));
 vi.mock('../../../auth/useAuth.js', () => ({ useAuth: () => ({ user: { uid: 'u1' }, loading: false }) }));
 
 const { default: NeedsYouTile, needsYouItems } = await import('../tiles/NeedsYouTile.js');
@@ -54,7 +55,7 @@ beforeEach(() => {
   listOwnRuns.mockResolvedValue({ runs: [MY_FAILED], truncated: false });
   listConnections.mockResolvedValue([]);
 });
-afterEach(() => { cleanup(); vi.clearAllMocks(); access.admin = false; });
+afterEach(() => { cleanup(); vi.clearAllMocks(); access.admin = false; storedRefs.refs = []; });
 
 describe('tier gating', () => {
   const visible = (isAdmin: boolean): string[] =>
@@ -124,6 +125,21 @@ describe('Get started', () => {
   it("ticks it from the viewer's own run", async () => {
     render(<MemoryRouter><GetStartedTile compact={false} /></MemoryRouter>);
     await waitFor(() => expect(screen.getByText('Run a workflow').closest('li')!.className).toContain('is-done'));
+  });
+
+  // Measured on myndhyve.ai 2026-11-02: a workspace with no model key showed
+  // "Add your own model key" as done, because any stored secret counted.
+  it("ticks 'Add your own model key' only for a key that names an AI provider", async () => {
+    access.admin = true;
+    storedRefs.refs = ['postmark-token', 'webhook:signing'];
+    render(<MemoryRouter><GetStartedTile compact={false} /></MemoryRouter>);
+    const step = (await screen.findByText('Add your own model key')).closest('li')!;
+    expect(step.className).not.toContain('is-done');
+    cleanup();
+    __resetSharedReads();
+    storedRefs.refs = ['postmark-token', 'anthropic:work'];
+    render(<MemoryRouter><GetStartedTile compact={false} /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByText('Add your own model key').closest('li')!.className).toContain('is-done'));
   });
 });
 

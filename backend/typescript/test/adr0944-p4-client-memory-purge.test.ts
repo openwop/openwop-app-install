@@ -3,7 +3,8 @@
  *
  * Exit criteria: `deleteOrg` refuses while client memory exists, and the purge
  * empties all three memory stores (durable notes, the recall working set, the
- * vector namespace) plus receipts, proposals, snapshots and the designation.
+ * vector namespace) plus receipts, proposals, snapshots and the designation
+ * (each one seeded, counted in the report and read back gone).
  * Also: the purge is an agency-admin act, refused under a retention hold; an
  * untrusted summary in a client scope expires (180 days); curated notes are
  * never pushed out of recall by summaries at the scope cap.
@@ -32,7 +33,10 @@ import { buildHostSurfaceBundle } from '../src/host/inMemorySurfaces.js';
 import { embedText, effectiveEmbedDims } from '../src/aiProviders/localEmbedding.js';
 import { setRetentionHold, clearRetentionHold } from '../src/host/retentionHold.js';
 import { hostExtStorage } from '../src/host/hostExtPersistence.js';
-import { recordingRecall } from '../src/host/memoryReadReceipts.js';
+import { getReadReceipt, recordingRecall } from '../src/host/memoryReadReceipts.js';
+import { insertRunWithStartContext } from '../src/host/runInsert.js';
+import { createCollection } from '../src/features/kb/kbService.js';
+import { clientContextForRun, getClientContextSources, setClientContextSources } from '../src/features/campaign-ops/clientContext.js';
 
 let BASE: string;
 let server: http.Server;
@@ -83,7 +87,7 @@ beforeAll(async () => {
   cookies.admin = cookieFor(admin, 'ws:home-admin');
   cookies.editor = cookieFor(editor, 'ws:home-editor');
   expect((await call('admin', 'POST', '/clients', { name: 'Client A', orgId: orgA })).status).toBe(201);
-});
+}, 120_000);
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 describe('ADR 0944 D8 — off-boarding', () => {
@@ -117,12 +121,29 @@ describe('ADR 0944 D8 — off-boarding', () => {
     await createSubjectMemoryPort(TENANT).write(`org:${orgA}`, { content: 'SUMMARY-PURGE', tags: ['agent', MEMORY_UNTRUSTED_TAG] });
     await proposeClientNote({ tenantId: TENANT, orgId: orgA, content: 'PROPOSED-PURGE', proposedBy: { runId: 'r1', nodeId: 'n1' } });
     expect(await vectorHits(orgA)).toBeGreaterThan(0);
+    // A read receipt, a knowledge designation and a frozen context snapshot of this client.
+    const receiptRun = `purge-receipt-${randomBytes(4).toString('hex')}`;
+    await recordingRecall({ memory: { read: async () => [], write: async () => {} } }).write({ tenantId: TENANT, runId: receiptRun, nodeId: 'copy', ordinal: 1, orgId: orgA, scope: `org:${orgA}` });
+    expect(await getReadReceipt(TENANT, receiptRun, 'copy')).not.toBeNull();
+    const collection = await createCollection(TENANT, orgA, 'seed', { name: 'Purge playbook' });
+    await setClientContextSources(TENANT, orgA, [collection.collectionId], editor);
+    const contextRun = `purge-context-${randomBytes(4).toString('hex')}`;
+    const at = new Date().toISOString();
+    await insertRunWithStartContext(hostExtStorage(), {
+      runId: contextRun, workflowId: 'w', tenantId: TENANT, status: 'running', inputs: null,
+      metadata: { 'openwop-app.campaignOps': { orgId: orgA }, actingUserId: editor }, configurable: {}, createdAt: at, updatedAt: at,
+    }, { admission: { plan: 'exempt:test-fixture' }, tenantId: TENANT });
+    expect(await clientContextForRun(TENANT, contextRun)).toMatchObject({ snapshot: { orgId: orgA } });
 
     const viaEditor = await call('editor', 'DELETE', `/clients/${orgA}/memory`);
     expect(viaEditor.status).toBe(403); // not an agency admin
-    const out = await call<{ report: { notes: number; recallEntries: number; proposals: number; complete: boolean } }>('admin', 'DELETE', `/clients/${orgA}/memory`);
+    const out = await call<{ report: { notes: number; recallEntries: number; proposals: number; receipts: number; snapshots: number; sources: number; complete: boolean } }>('admin', 'DELETE', `/clients/${orgA}/memory`);
     expect(out.status, out.raw).toBe(200);
-    expect(out.body.report).toMatchObject({ complete: true });
+    expect(out.body.report).toMatchObject({ complete: true, sources: 1 });
+    expect(out.body.report.receipts).toBeGreaterThan(0);
+    expect(out.body.report.snapshots).toBeGreaterThan(0);
+    expect(await getReadReceipt(TENANT, receiptRun, 'copy')).toBeNull();
+    expect(await getClientContextSources(TENANT, orgA)).toEqual([]);
     expect(out.body.report.notes).toBeGreaterThan(0);
     expect(out.body.report.proposals).toBeGreaterThan(0);
 
@@ -136,9 +157,12 @@ describe('ADR 0944 D8 — off-boarding', () => {
   });
 
   it('is refused under a retention hold', async () => {
+    const held = (await createOrg({ tenantId: TENANT, createdBy: 'seed', name: 'Held client' })).orgId;
+    await addClientNote(TENANT, held, 'NOTE-HELD', editor);
     await setRetentionHold(TENANT, 'litigation');
     try {
-      await expect(purgeClientMemory(TENANT, orgA)).rejects.toBeTruthy();
+      await expect(purgeClientMemory(TENANT, held)).rejects.toThrow(`Tenant ${TENANT} is under legal hold: litigation`);
+      expect((await listSubjectNotes(TENANT, orgSubject(held))).map((n) => n.content)).toEqual(['NOTE-HELD']);
     } finally {
       await clearRetentionHold(TENANT);
     }
@@ -164,7 +188,8 @@ describe('ADR 0944 D4/D8 — retention inside a client scope', () => {
     const rows = await listMemoryEntries(TENANT, `org:${orgA}`);
     const summary = rows.find((r) => r.content === 'SUMMARY-TTL');
     const note = rows.find((r) => r.content === 'NOTE-TTL');
-    const days = (Date.parse(summary!.expiresAt!) - Date.now()) / 86_400_000;
+    if (!summary?.expiresAt) throw new Error('the summary has no expiry');
+    const days = (Date.parse(summary.expiresAt) - Date.now()) / 86_400_000;
     expect(Math.round(days)).toBe(CLIENT_SUMMARY_TTL_DAYS);
     expect(note?.expiresAt).toBeUndefined();
   });
@@ -172,9 +197,8 @@ describe('ADR 0944 D4/D8 — retention inside a client scope', () => {
   it('at the scope cap, summaries are evicted before curated notes', async () => {
     const org = (await createOrg({ tenantId: TENANT, createdBy: 'seed', name: 'Busy client' })).orgId;
     const note = await addClientNote(TENANT, org, 'NOTE-OLDEST: never evicted', editor);
-    const first = await createSubjectMemoryPort(TENANT);
-    await first.write(`org:${org}`, { content: 'S-FIRST', tags: ['agent'], id: 'summary-first' });
     const port = createSubjectMemoryPort(TENANT);
+    await port.write(`org:${org}`, { content: 'S-FIRST', tags: ['agent'], id: 'summary-first' });
     for (let i = 0; i < 2005; i += 1) await port.write(`org:${org}`, { content: `S${i}`, tags: ['agent'] });
     // The oldest SUMMARY went; the older NOTE stayed (reads cap at 500, so by id).
     expect(await getMemoryEntry(TENANT, `org:${org}`, note.id)).not.toBeNull();

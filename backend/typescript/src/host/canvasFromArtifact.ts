@@ -29,6 +29,8 @@ export async function seedCanvasFromArtifact(
   opts?: {
     ownerSubject?: Subject;
     projectId?: string;
+    /** Private editor copies are per caller/org, without changing legacy keys. */
+    idempotencyScope?: string;
     /** ADR 0835 D3 — the canvas type the caller's door owns. An artifact of
      *  another type is absent to that door (null): without the pin, the slides
      *  route seeded an app-builder canvas past app-builder's own gates. */
@@ -70,7 +72,9 @@ export async function seedCanvasFromArtifact(
 
   // Idempotency: a deterministic key derived from the artifact key, so re-opening
   // the same artifact returns the same working copy (never a second canvas).
-  const idempotencyKey = `from-artifact:${artifactKey}`;
+  const idempotencyKey = opts?.idempotencyScope
+    ? `private-artifact:${JSON.stringify([opts.idempotencyScope, artifactKey])}`
+    : `from-artifact:${artifactKey}`;
   const canvas = await createCanvasForTenant(tenantId, {
     canvasTypeId,
     ...(record.title ? { name: record.title } : {}),

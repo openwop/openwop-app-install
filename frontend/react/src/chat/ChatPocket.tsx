@@ -18,6 +18,7 @@
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '../ui/Button.js';
+import { ModalPortal } from '../ui/ModalPortal.js';
 import { XIcon } from '../ui/icons/index.js';
 import { EmbeddedChatPanel } from './EmbeddedChatPanel.js';
 
@@ -85,8 +86,10 @@ export function ChatPocket({ agentId, title, initial, contextLabel, renderEmptyS
     return () => panel.removeEventListener('keydown', onKey);
   }, [open, hide]);
 
+  // The page-arrival transform makes inline fixed children page-relative.
+  // Portal both chrome pieces; the shared conversation and React scope stay here.
   return (
-    <>
+    <ModalPortal>
       {everOpened ? (
         <section
           ref={panelRef}
@@ -130,6 +133,6 @@ export function ChatPocket({ agentId, title, initial, contextLabel, renderEmptyS
           <kbd className="chat-pocket-launcher__kbd" aria-hidden="true">⌘J</kbd>
         </Button>
       )}
-    </>
+    </ModalPortal>
   );
 }

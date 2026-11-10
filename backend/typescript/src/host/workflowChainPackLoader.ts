@@ -843,6 +843,16 @@ export function getChain(chainId: string): { packName: string; packVersion: stri
   return liveChain(CHAINS.get(chainId));
 }
 
+/** ADR 1033 D3 — does the host itself own this pack name or chain id (vendored or
+ *  registry, revoked versions included)? A proposal install of either is `read-only`. */
+export function hostOwnsChainPackName(name: string): boolean {
+  for (const e of CHAINS.values()) if (e.packName === name) return true;
+  return false;
+}
+export function hostOwnsChainId(chainId: string): boolean {
+  return CHAINS.has(chainId);
+}
+
 /** All loaded chains (UI/catalog listing), minus revoked pack versions. */
 export function listChains(): ReadonlyArray<{ packName: string; packVersion: string; chain: WorkflowChain; category?: string }> {
   return [...CHAINS.values()].filter((e) => liveChain(e) !== null);
@@ -951,6 +961,8 @@ export interface ChainRequirements {
    *  (grade-ux U-1). Either list non-empty means the template is not ready. */
   pinMismatches: ChainPinMismatch[];
   connections: ChainConnectionRequirement[];
+  /** ADR 1065: advisory account usage, not a connection/auth/readiness verdict. */
+  connectionUsage: 'uses' | 'none' | 'unknown';
   /** How many human-approval gates the chain contains (day-1 UX P12/F2 —
    *  the trust signal the pre-flight surfaces: external sends wait for you). */
   approvalGateCount: number;
@@ -983,7 +995,7 @@ export function chainRequirements(
    *  not installed). A pin this host cannot honour — the type is installed, but
    *  at a different version — is reported in `pinMismatches`. Defaults to
    *  "versions unknown", which reports no pin gaps (the prior shape). */
-  installedNodeOf: (typeId: string) => { version?: string; label?: string } | undefined = () => undefined,
+  installedNodeOf: (typeId: string) => { version?: string; label?: string; usesConnections?: boolean } | undefined = () => undefined,
 ): ChainRequirements {
   const nodeTypeIds = [...new Set(chain.dag.nodes.map((n) => n.typeId))];
   const missingNodeTypeIds = nodeTypeIds.filter((t) => !knownTypeIds.has(t));
@@ -1013,11 +1025,18 @@ export function chainRequirements(
     const providerId = ref.split('.').pop() ?? ref;
     return { ref, providerId, providerInstalled: providerExists(providerId) };
   });
+  // A declared conditional path still uses Connections. Unknown metadata must
+  // not become a positive no-account claim; explicit refs always win.
+  const usage = nodeTypeIds.map((t) => installedNodeOf(t)?.usesConnections);
+  const connectionUsage = refs.length > 0 || usage.includes(true)
+    ? 'uses'
+    : nodeTypeIds.length > 0 && missingNodeTypeIds.length === 0 && usage.every((v) => v === false)
+      ? 'none' : 'unknown';
   // Approval/HITL gates by typeId convention (core.chat.approvalGate, the
   // core.openwop.hitl.* family) — a count, not identity, so packs can add
   // gate flavors without a loader change.
   const approvalGateCount = chain.dag.nodes.filter((n) => /approvalgate|\.hitl\./i.test(n.typeId)).length;
-  return { missingNodeTypeIds, pinMismatches: mismatches, connections, approvalGateCount, nodeCount: chain.dag.nodes.length, requiredFeatures };
+  return { missingNodeTypeIds, pinMismatches: mismatches, connections, connectionUsage, approvalGateCount, nodeCount: chain.dag.nodes.length, requiredFeatures };
 }
 
 /** Test seam: clear the in-process chain registry. */
@@ -1600,7 +1619,11 @@ export function expandChain(authoredChain: WorkflowChain, opts: ExpandOptions = 
         // a gap a run would fail on. Recording it made every vendor-free chain
         // look unfillable (the cadence PUT refused all of them).
         const leaf = path.slice(path.lastIndexOf('.') + 1);
-        if (resolvedParams[m[1]!] === undefined && leaf !== 'provider' && leaf !== 'model') {
+        // Only a DECLARED optional input intentionally disappears, so the node
+        // can use its defaults (e.g. metrics sync uses org settings). Required
+        // inputs and undeclared references (such as a misspelled param) still warn.
+        const declaredOptional = Object.hasOwn(paramProps, m[1]!) && !requiredParamNames.has(m[1]!);
+        if (!declaredOptional && resolvedParams[m[1]!] === undefined && leaf !== 'provider' && leaf !== 'model') {
           unresolvedParams.push({ nodeId, key: path, param: m[1]! });
         }
         return;

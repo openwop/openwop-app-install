@@ -1,5 +1,6 @@
 /**
- * The budget editor and `formatCurrencyMinor` use ISO 4217 exponents, not `Intl`.
+ * The budget editor and `formatCurrencyMinor` use ISO 4217 exponents, not `Intl`
+ * (#5211 follow-up).
  *
  * `Intl`'s `maximumFractionDigits` is display precision and drifts by ICU release
  * (ICU 78.3 reports HUF as 0 decimals; ISO says 2). The editor WRITES
@@ -10,7 +11,8 @@
  * backend's.
  *
  * Sabotage: reading `resolvedOptions()` in `currencyExponent` or in
- * `formatCurrencyMinor` again reds this file.
+ * `formatCurrencyMinor` again reds this file; truncating instead of rounding in
+ * `majorToMinor` reds the amounts that are not exact in binary.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { isoMinorUnits } from '../currencyCodes.js';
@@ -18,22 +20,27 @@ import { minorUnitsFor } from '../currencyMinorUnits.js';
 import { formatCurrencyMinor, setFormatLocale } from '../format.js';
 import { currencyExponent, isIsoCurrency, majorToMinor, minorToMajorString } from '../../features/campaign-brief/budgetUnits.js';
 
+const realOptions = new Intl.NumberFormat('en').resolvedOptions();
+
 afterEach(() => { vi.restoreAllMocks(); });
 
 describe('ISO 4217 money exponents, independent of the runtime ICU', () => {
   it('the budget editor converts HUF/IQD/JPY by ISO even when Intl says 0 decimals', () => {
-    vi.spyOn(Intl.NumberFormat.prototype, 'resolvedOptions').mockReturnValue({ maximumFractionDigits: 0 } as Intl.ResolvedNumberFormatOptions);
+    vi.spyOn(Intl.NumberFormat.prototype, 'resolvedOptions').mockReturnValue({ ...realOptions, maximumFractionDigits: 0 });
     expect(currencyExponent('HUF')).toBe(2);
     expect(currencyExponent('IQD')).toBe(3);
     expect(currencyExponent('JPY')).toBe(0);
     expect(majorToMinor('5000', 'HUF')).toBe(500_000);
     expect(minorToMajorString(500_000, 'HUF')).toBe('5000');
     expect(majorToMinor('5000', 'JPY')).toBe(5000);
+    // 0.29 × 100 and 1.005 × 1000 are both just under the integer in binary.
+    expect(majorToMinor('0.29', 'HUF')).toBe(29);
+    expect(majorToMinor('1.005', 'IQD')).toBe(1005);
   });
 
   it('formatCurrencyMinor divides by the ISO exponent even when Intl says 0 decimals', () => {
     setFormatLocale('en');
-    vi.spyOn(Intl.NumberFormat.prototype, 'resolvedOptions').mockReturnValue({ maximumFractionDigits: 0 } as Intl.ResolvedNumberFormatOptions);
+    vi.spyOn(Intl.NumberFormat.prototype, 'resolvedOptions').mockReturnValue({ ...realOptions, maximumFractionDigits: 0 });
     expect(formatCurrencyMinor(500_000, 'HUF')).toMatch(/5,000(?!\d)/);
     expect(formatCurrencyMinor(123_456, 'USD')).toBe('$1,234.56');
   });

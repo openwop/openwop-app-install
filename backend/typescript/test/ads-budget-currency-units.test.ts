@@ -11,6 +11,12 @@
  * class (1 vs 100, including the two classes where Meta and ISO disagree), plus
  * the fail-closed legs: an unreported currency, a currency Meta does not
  * support, and a caller's currency hint the platform contradicts.
+ *
+ * Red when (sabotage-witnessed): Google scales from a fixed exponent; Meta passes minor
+ * units through, either way; an unrepresentable amount is rounded; a major-unit number
+ * loses a minor unit; a contradicted hint, a foreign Meta campaign, a malformed target,
+ * an unsupported or an unreported currency reaches a write; the spend threshold compares
+ * across currencies.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import http from 'node:http';
@@ -18,7 +24,7 @@ import type { AddressInfo } from 'node:net';
 import { answerCurrencyRead, currencyReads, platformRequests, fixtureCurrency } from './adsCurrencyFixture.js';
 import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
-import { makeAdsAdapter } from '../src/host/adsAdapter.js';
+import { makeAdsAdapter, setAdsCampaignOwnershipChecker } from '../src/host/adsAdapter.js';
 import {
   minorToGoogleMicros, googleMicrosToMinor, minorToMetaBudget, metaBudgetToMinor, minorToMajorString, minorToMajorNumber, isoExponent,
   META_CURRENCY_OFFSET_1, META_CURRENCY_OFFSET_100,
@@ -122,6 +128,10 @@ beforeAll(async () => {
   process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true';
   process.env.OPENWOP_GOOGLE_ADS_DEVELOPER_TOKEN = 'DEV';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  // This file tests the platform write path. Which org owns a campaign is the
+  // adapter seam's question, with its own witnesses (adr1022-ads-ownership-seam):
+  // here every campaign counts as the acting org's.
+  setAdsCampaignOwnershipChecker(async () => true);
   storage = app.locals.storage;
   await __resetConnectionsStore();
   srv = http.createServer((req, res) => {
@@ -152,8 +162,8 @@ beforeAll(async () => {
     registerProvider({ id, label: id, kind: 'oauth2', authFlow: 'manual', reach: 'openapi', scopes: { read: [] }, refreshable: true, defaultScopes: [], consumerNodes: [], apiHosts: ['127.0.0.1'] });
     await createSecretConnection({ tenantId: T, provider: id, kind: 'bearer', secret: 'TOK', scope: 'user', userId: 'u1' });
   }
-  await storage.insertRun({ runId: 'p9-run', workflowId: 'w', tenantId: T, status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: 'x', updatedAt: 'x' });
-});
+  await storage.insertRun({ runId: 'p9-run', workflowId: 'w', tenantId: T, status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: '2026-10-20T00:00:00.000Z', updatedAt: '2026-10-20T00:00:00.000Z' });
+}, 120_000);
 afterAll(async () => {
   for (const k of ['OPENWOP_META_API_BASE', 'OPENWOP_GOOGLE_ADS_API_BASE', 'OPENWOP_GOOGLE_ADS_DEVELOPER_TOKEN']) delete process.env[k];
   fixtureCurrency.value = 'USD';
@@ -256,7 +266,8 @@ describe('ADR 0952 P9 — live budget writes convert through the account currenc
     fixtureCurrency.fault = fault;
     try {
       const result = await adapter().updateBudget({ platform: 'google', adAccountId: '1', campaignId: '22', dailyBudgetMinor: 5000 });
-      expect(result.outcome).toBe('failed');
+      const reason = { http: 'http_503', malformed: 'bad_response', business: 'account_currency_rejected' }[fault];
+      expect(result).toEqual({ outcome: 'failed', error: `account_currency_unreadable:${reason}` });
       expect(currencyReads).toHaveLength(1);
       expect(platformRequests).toHaveLength(1);
       expect(writes).toHaveLength(0);
@@ -268,19 +279,22 @@ describe('ADR 0952 P9 — live budget writes convert through the account currenc
 describe('ADR 0952 residual (a) — the spend threshold is compared only in its own currency', () => {
   it('USD threshold vs a USD account compares as before; vs a JPY account it asks (no FX); an explicit JPY threshold compares in yen', async () => {
     await setGovernancePolicy(T, { adSpend: { approvalThresholdMinor: 10_000 } }, 'test'); // $100.00 (absent currency = USD)
-    fixtureCurrency.value = 'USD';
-    expect((await adapter().updateBudget({ platform: 'google', adAccountId: '1', campaignId: '22', dailyBudgetMinor: 5000 })).outcome).toBe('updated'); // $50 < $100
-    // ¥5,000 is NOT 5,000 cents: a different account currency is never compared.
-    fixtureCurrency.value = 'JPY';
-    writes = [];
-    expect((await adapter().updateBudget({ platform: 'google', adAccountId: '1', campaignId: '22', dailyBudgetMinor: 5000 })).outcome).toBe('requires_approval');
-    expect(writes).toHaveLength(0);
-    // A yen threshold compares yen to yen.
-    await setGovernancePolicy(T, { adSpend: { approvalThresholdMinor: 10_000, approvalThresholdCurrency: 'JPY' } }, 'test');
-    expect((await adapter().updateBudget({ platform: 'google', adAccountId: '1', campaignId: '23', dailyBudgetMinor: 5000 })).outcome).toBe('updated');
-    expect((await adapter().updateBudget({ platform: 'google', adAccountId: '1', campaignId: '24', dailyBudgetMinor: 20_000 })).outcome).toBe('requires_approval');
-    await setGovernancePolicy(T, { adSpend: {} }, 'test');
-    fixtureCurrency.value = 'USD';
+    try {
+      fixtureCurrency.value = 'USD';
+      expect((await adapter().updateBudget({ platform: 'google', adAccountId: '1', campaignId: '22', dailyBudgetMinor: 5000 })).outcome).toBe('updated'); // $50 < $100
+      // ¥5,000 is NOT 5,000 cents: a different account currency is never compared.
+      fixtureCurrency.value = 'JPY';
+      writes = [];
+      expect((await adapter().updateBudget({ platform: 'google', adAccountId: '1', campaignId: '22', dailyBudgetMinor: 5000 })).outcome).toBe('requires_approval');
+      expect(writes).toHaveLength(0);
+      // A yen threshold compares yen to yen.
+      await setGovernancePolicy(T, { adSpend: { approvalThresholdMinor: 10_000, approvalThresholdCurrency: 'JPY' } }, 'test');
+      expect((await adapter().updateBudget({ platform: 'google', adAccountId: '1', campaignId: '23', dailyBudgetMinor: 5000 })).outcome).toBe('updated');
+      expect((await adapter().updateBudget({ platform: 'google', adAccountId: '1', campaignId: '24', dailyBudgetMinor: 20_000 })).outcome).toBe('requires_approval');
+    } finally {
+      await setGovernancePolicy(T, { adSpend: {} }, 'test');
+      fixtureCurrency.value = 'USD';
+    }
   });
 });
 

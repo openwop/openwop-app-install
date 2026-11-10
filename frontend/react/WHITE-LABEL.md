@@ -237,6 +237,14 @@ your own CSS), or the families won't render.
 keep legible on your `--paper`); `--color-flag-*`, `--color-trace-*`
 (registry/trace category accents).
 
+**Front-page tokens** (ADR 0920 — the public CMS site; set them in the same
+`:root` block of `brand.css`, defaults live in `src/styles/global.css`):
+`--fp-em-style` (heading emphasis), `--fp-eyebrow-font`, `--fp-eyebrow-color`,
+`--fp-btn-radius`, `--fp-hero-title-size` (default `clamp(40px, 7vw, 82px)`)
+and `--fp-hero-title-max-width` (default `540px`; the title's measure on wide
+screens — it goes full width under 900px). The two hero-title tokens size the
+default hero; the run, film and plan hero variants set their own title size.
+
 ---
 
 ## 3. What you can vs. can't (yet) change cleanly

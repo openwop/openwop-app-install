@@ -94,15 +94,16 @@ export async function runRemoteGate({ repo, home, commit, main, trust, workRoot,
   // knows admitted jobs); it runs to its own time limit and reads as busy.
   const abandon = () => remoteGateControl({ connect, requestBytes, operation: 'cancel', spoolRoot }).catch(() => {});
   // Bring a finished job's gate log home (into logDir, when the caller gives one).
+  let logError = null;
   const keepLog = async () => {
     if (!logDir) return null;
     try {
       const got = await remoteGateControl({ connect, requestBytes, operation: 'log', spoolRoot });
-      if (got.code !== WORKER_EXIT.ok) return null;
-      const dest = join(logDir, `${id}.log`);
-      try { copyFileSync(got.frame.paths['gate.log'], dest); } finally { rmSync(got.frame.work, { recursive: true, force: true }); }
+      if (got.code !== WORKER_EXIT.ok) { logError = got.reason; return null; }
+      const dest = join(logDir, `${id}.log.gz`);
+      try { copyFileSync(got.frame.paths['gate.log.gz'], dest); } finally { rmSync(got.frame.work, { recursive: true, force: true }); }
       return dest;
-    } catch { return null; }
+    } catch (error) { logError = String(error.message); return null; }
   };
   try {
     // The worker replies only after rebuilding and verifying the candidate, which
@@ -122,6 +123,13 @@ export async function runRemoteGate({ repo, home, commit, main, trust, workRoot,
         return fallback(sent.code === WORKER_EXIT.ssh ? 'ssh failed' : 'worker refused', { id, detail: sent.reason });
       }
       status = readStatus(asked.frame);
+    }
+    // Nothing runs until we ask, and we ask only after seeing the job: from here
+    // on we hold the request bytes that can cancel it (closes the D9 P3 residual).
+    if (status.state === 'accepted') {
+      const started = await remoteGateControl({ connect, requestBytes, operation: 'start', spoolRoot });
+      if (started.code !== WORKER_EXIT.ok) { await abandon(); return fallback('remote gate would not start', { id, detail: started.reason }); }
+      status = readStatus(started.frame);
     }
     log(`remote gate ${id}: ${status.state}`);
     const began = performance.now();
@@ -147,14 +155,23 @@ export async function runRemoteGate({ repo, home, commit, main, trust, workRoot,
     // 70 and 124 are the worker's own faults (publication refused, its time limit),
     // not the candidate's: gate locally rather than report a red nobody earned.
     if (status.state === 'failed' && WORKER_FAULT_EXITS.has(status.exitCode)) return fallback(`remote worker fault (exit ${status.exitCode})`, { id, status });
-    if (status.state === 'failed') return { verdict: 'red', id, reason: 'remote gate failed', status, log: await keepLog() };
-    if (status.state !== 'completed') return fallback(`remote gate ${status.state}`, { id, status, log: await keepLog() });
-    const fetched = await remoteGateControl({ connect, requestBytes, operation: 'fetch', spoolRoot });
+    if (status.state === 'failed') { const log = await keepLog(); return { verdict: 'red', id, reason: 'remote gate failed', status, log, ...(logError ? { logError } : {}) }; }
+    if (status.state !== 'completed') { const log = await keepLog(); return fallback(`remote gate ${status.state}`, { id, status, log, ...(logError ? { logError } : {}) }); }
+    // A completed job's artifacts are immutable, so a failed fetch is retried
+    // before it becomes a fallback: one dropped transfer through the IAP relay
+    // threw away a green gate (shadow 12, 2026-11-02).
+    let fetched;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      fetched = await remoteGateControl({ connect, requestBytes, operation: 'fetch', spoolRoot });
+      if (fetched.code === WORKER_EXIT.ok) break;
+      log(`fetch attempt ${attempt} failed (${fetched.reason}); ${attempt < 3 ? 'retrying' : 'giving up'}`);
+      if (attempt < 3) await delay(Math.min(pollMs, 10_000));
+    }
     if (fetched.code !== WORKER_EXIT.ok) return fallback('fetch failed', { id, detail: fetched.reason });
     try {
       const p = fetched.frame.paths;
       const accepted = acceptRemoteGateResult({ repo, home, requestBytes, trust,
-        resultBytes: readFileSync(p['result.json']), gateLog: readFileSync(p['gate.log']),
+        resultBytes: readFileSync(p['result.json']), gateLog: readFileSync(p['gate.log.gz']),
         evidenceBytes: readFileSync(p['evidence.json']), browserLedger: readFileSync(p['browser.tsv']),
         authenticatedHostKey: fetched.authenticatedHostKey });
       return { verdict: 'green', id, accepted };

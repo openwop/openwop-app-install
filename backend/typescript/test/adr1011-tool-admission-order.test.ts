@@ -6,6 +6,23 @@
  * safety stop was retried; a person was asked to approve a call that would then
  * be refused. The provider half (malformed JSON is marked, blank is no arguments)
  * runs through the real OpenAI-compatible round.
+ *
+ * Sabotage witnessed (wave 84, each reds the named cases, restored after):
+ *  - the `finishReason === 'length'` branch off             → every truncated-round case
+ *  - the one-repair flag dropped / the last-round bound dropped → "second truncated" / "was the last one"
+ *  - the truncated or refused return keeping the round's text → "second truncated" / "refused round"
+ *  - the `content-filter` branch off, or the nudge ignoring it → "refused round" / "does not nudge"
+ *  - the mark ignored; the approval gate or the firewall run before validation → the three gate cases
+ *  - `parseToolArgs` accepting arrays, catching to `{}`, marking `null`, or not trimming → its it.each rows
+ *  - Responses `incomplete` unread; `refusal` not normalized; `toolRoundResult` dropping the
+ *    stop reason; the MiniMax bound loop running a cut round        → their cases
+ *
+ * The three "does not rebuild tool calls field by field" rows are a protected ban-pattern
+ * that matches ONE spelling, `(t) => ({ id: t.id, name: t.name, input: t.input })`. Any other
+ * parameter name dodges them (w84g3-ta-scan-dodge stays green by design; widening the pattern
+ * is human ask HA-FOA-1). Behavioural twins: `managed-tools-round-workflow-adapter.test.ts`
+ * (the `aiProvidersHost.ts` managed round) and `adr1011-managed-chat-signals.test.ts`
+ * (`conversationToolLoop.ts`). The `publicGateway.ts` row has no twin.
  */
 import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -69,7 +86,9 @@ describe('completion comes first', () => {
   });
 
   it('fails typed when the truncated round was the last one', async () => {
-    const res = await runChatToolLoop(opts({ maxRounds: 1 }), { ...scripted(cut), executeTool: async () => ({ content: 'x' }) });
+    let ran = 0;
+    const res = await runChatToolLoop(opts({ maxRounds: 1 }), { ...scripted(cut), executeTool: async () => { ran += 1; return { content: 'x' }; } });
+    expect(ran).toBe(0);
     expect(res.error?.code).toBe('envelope_truncation_unrecoverable');
   });
 
@@ -87,6 +106,11 @@ describe('completion comes first', () => {
     const model = scripted({ content: 'First I will send it:', toolCalls: [], finishReason: 'content-filter' });
     await runChatToolLoop(opts(), { callAIWithTools: model.callAIWithTools, executeTool: async () => ({ content: 'x' }) });
     expect(model.seen).toHaveLength(1);
+    // Positive control: the same text on a normal stop IS nudged once.
+    const control = scripted({ content: 'First I will send it:', toolCalls: [], finishReason: 'stop' }, { content: 'done', toolCalls: [], finishReason: 'stop' });
+    await runChatToolLoop(opts(), { callAIWithTools: control.callAIWithTools, executeTool: async () => ({ content: 'x' }) });
+    expect(control.seen).toHaveLength(2);
+    expect(control.seen[1]).toMatch(/announced an action/);
   });
 });
 
@@ -98,6 +122,12 @@ describe('arguments before gates', () => {
     );
     expect(res.pendingApprovals).toBeUndefined();
     expect(returned(res.events)[0]).toMatchObject({ status: 'error', error: { code: 'invalid_args' } });
+    // Positive control: the same call with valid arguments IS held for approval.
+    const held = await runChatToolLoop(
+      opts({ capabilityScope: { enabled: [TOOL], requireApproval: [TOOL] } }),
+      { ...scripted({ toolCalls: [{ id: 'c2', name: TOOL, input: { to: 'a' } }], finishReason: 'tool-call' }, { content: 'ok', toolCalls: [] }), executeTool: async () => ({ content: 'x' }) },
+    );
+    expect(held.pendingApprovals).toEqual([{ toolName: TOOL, callId: 'c2', input: { to: 'a' }, origin: 'baseline' }]);
   });
 
   it('never consults the firewall for invalid arguments', async () => {
@@ -107,6 +137,15 @@ describe('arguments before gates', () => {
       { ...scripted({ toolCalls: [{ id: 'c1', name: TOOL, input: {} }], finishReason: 'tool-call' }, { content: 'ok', toolCalls: [] }), executeTool: async () => ({ content: 'x' }) },
     );
     expect(evaluate).not.toHaveBeenCalled();
+    // Positive control: a valid call IS put to the firewall.
+    // The loop appends to the seen list after the call, so copy it at call time.
+    const asked: Array<[string[], string]> = [];
+    const consulted = (seen: readonly string[], next: string) => { asked.push([[...seen], next]); return { decision: 'allow' as const }; };
+    await runChatToolLoop(
+      opts({ firewall: { evaluate: consulted } }),
+      { ...scripted({ toolCalls: [{ id: 'c2', name: TOOL, input: { to: 'a' } }], finishReason: 'tool-call' }, { content: 'ok', toolCalls: [] }), executeTool: async () => ({ content: 'x' }) },
+    );
+    expect(asked).toEqual([[[], TOOL]]);
   });
 
   it('refuses a call the provider marked, even when its empty input would validate', async () => {
@@ -159,8 +198,20 @@ describe('the other paths', () => {
       choices: [{ message: { content: '', tool_calls: [{ id: 'c1', type: 'function', function: { name: TOOL, arguments: '' } }] }, finish_reason }],
     }), { status: 200 }));
     const onToolUse = vi.fn(async () => ({ toolUseId: 'c1', content: 'x' }));
-    await dispatchMiniMaxWithTools({ provider: 'minimax', model: 'm', apiKey: 'k', messages: [{ role: 'user', content: 'go' }], tools: [], onToolUse });
+    const out = await dispatchMiniMaxWithTools({ provider: 'minimax', model: 'm', apiKey: 'k', messages: [{ role: 'user', content: 'go' }], tools: [], onToolUse });
     expect(onToolUse).not.toHaveBeenCalled();
+    expect(out.finishReason).toBe(finish_reason); // the loop stopped on that round, and says so
+  });
+
+  it('positive control: the bound-workflow MiniMax loop runs the call of a complete round', async () => {
+    const reply = (finish_reason: string, toolCalls: boolean) => new Response(JSON.stringify({
+      choices: [{ message: { content: toolCalls ? '' : 'done', ...(toolCalls ? { tool_calls: [{ id: 'c1', type: 'function', function: { name: TOOL, arguments: '{"to":"a"}' } }] } : {}) }, finish_reason }],
+    }), { status: 200 });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(reply('tool_calls', true)).mockResolvedValueOnce(reply('stop', false));
+    const onToolUse = vi.fn(async () => ({ toolUseId: 'c1', content: 'x' }));
+    const out = await dispatchMiniMaxWithTools({ provider: 'minimax', model: 'm', apiKey: 'k', messages: [{ role: 'user', content: 'go' }], tools: [], onToolUse });
+    expect(onToolUse).toHaveBeenCalledWith({ id: 'c1', name: TOOL, input: { to: 'a' } });
+    expect(out.finishReason).toBe('stop');
   });
 });
 

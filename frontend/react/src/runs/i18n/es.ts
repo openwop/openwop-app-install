@@ -346,6 +346,9 @@ export const messages = {
   segStatusFailed: 'fallida',
   segStatusSuspended: 'suspendida',
   segStatusCut: 'detenida con la ejecución',
+  segStatusIncomplete: "intento anterior (incompleto)",
+  timelineObservedDuration: "{{duration}} observados",
+  timelineHistoryHint: "La línea de tiempo sigue las marcas de tiempo registradas, incluido el historial heredado. La duración mide la ejecución actual.",
   timelineDurationMs: '{{n}}ms',
   timelineDurationSeconds: '{{n}}s',
   timelineDurationMinutes: '{{m}}m {{s}}s',
@@ -432,7 +435,7 @@ export const messages = {
   flagRate: 'Tasa de marcado',
   eventViewAria: 'Vista de eventos',
   eventStreamHeading: 'Flujo de eventos',
-  eventStreamConnError: 'Error de conexión del flujo de eventos (se reconectará)',
+  eventStreamConnError: 'Las actualizaciones de eventos en directo se han detenido. Recarga esta página para volver a conectar.',
   runRefreshFailed: 'No se pudo actualizar la ejecución tras su último cambio; los detalles pueden estar desactualizados.',
   streamModeLabel: 'modo',
   eventViewTimeline: 'Cronología',
@@ -443,6 +446,10 @@ export const messages = {
   retentionPin: 'Fijar',
   retentionUnpin: 'Desfijar',
   retentionPinTitle: 'Conservar esta ejecución indefinidamente (exenta de la limpieza de retención)',
+
+  // RFC 0257 (ADR 1027 P3) — a completed run that reached no terminal node.
+  statusCompletedNoFinalStep: 'Completado: no se ejecutó ningún paso final',
+  noFinalStepRanNotice: 'Esta ejecución terminó sin ejecutar ningún paso final. Sus condiciones omitieron todos los pasos finales ({{steps}}), así que no produjo ningún entregable.',
 
   // ADR 0475 — bucle de depuración: chips de procedencia + depurar en el builder + redrive masivo.
   summaryProvenance: 'Procedencia',

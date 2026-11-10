@@ -49,6 +49,20 @@
  * `BASELINE` as a SHRINK-ONLY quarantine — a number that may only fall, never rise,
  * and never a coverage claim. That is a deliberate scope decision, stated rather
  * than hidden: this change does not silently claim commerce/production are clean.
+ *
+ * WHAT THIS CANNOT SEE (w83, probe-witnessed). "Whatever it is named" holds for a
+ * renamed `resolveCallerUser` binding, a whole-object gate binding and a wrapper-bound
+ * whole object. It does NOT hold for a RENAMED DESTRUCTURE THROUGH A LOCAL WRAPPER:
+ * `const { user: me } = await authz(req, …)` then `me.tenantId`. Caller-destructure
+ * discovery knows only the three literal `GATES` names, not the wrappers found later,
+ * so that shape counts 0 (it stayed green when injected into marketplace/routes.ts).
+ * No module uses it today. Widening the matcher is a counted-spelling change to this
+ * ratchet, so it waits on a human decision (TST-FLB-H1).
+ *
+ * Sabotage-witnessed (w83): `ctx.tenantId` → `ctx.user.tenantId` in crm/routes.ts reds
+ * the offender and CRM-at-zero cases; a renamed `resolveCallerUser` binding in
+ * marketplace/routes.ts reds the offender case; `(authorizeOrgScope)(…)` in the CRM
+ * wrapper reds only the blind-spot tripwire.
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';

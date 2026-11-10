@@ -15,6 +15,9 @@
  * envelope naming a different channel fails `channel_mismatch` rather than
  * being delivered somewhere its author did not intend.
  *
+ * ADR 1043 H1: a relay with an OWNER is a person's own account, so only a run
+ * whose acting user is that owner may send through it (else `connector_not_found`).
+ *
  * Dedup (ADR 0619 mechanics): the pack's `idempotencyKey` embeds `Date.now()`,
  * so it differs on every attempt and cannot dedup anything. The host IGNORES it
  * and derives its own over `(runId, nodeId, relayId, conversation, content)` —
@@ -27,6 +30,7 @@
  */
 import { createHash } from 'node:crypto';
 import { enqueueOutbound } from '../routes/messaging.js';
+import { getRelayOwnerRecord } from '../messaging/relayOwner.js';
 import type { ChatEgressEnvelope } from '../messaging/types.js';
 import type { BrokeredEgressDeps } from './brokeredEgress.js';
 import { egressLedgerKey, priorSend, reserveSend, recordSend, releaseSend } from './egressSentLedger.js';
@@ -83,6 +87,11 @@ export function makeChatEgressAdapter(deps: BrokeredEgressDeps): ChatEgressAdapt
       const device = await deps.storage.getRelayDevice(relayId);
       if (!device || device.tenantId !== deps.tenantId) return { success: false, error: 'connector_not_found' };
       if (device.status === 'revoked') return { success: false, error: 'connector_revoked' };
+      // ADR 1043 H1 — a device with an owner is that person's personal account: only
+      // a run acting AS its owner may send through it. Another member's run (and a
+      // system run with no acting user) is refused, the same answer as a foreign id.
+      const owner = await getRelayOwnerRecord(device.relayId, device.tenantId);
+      if (owner && owner.ownerUserId !== deps.actingUserId) return { success: false, error: 'connector_not_found' };
 
       const channel = str(envelope.channel);
       if (channel && channel !== device.channel) return { success: false, error: 'channel_mismatch' };

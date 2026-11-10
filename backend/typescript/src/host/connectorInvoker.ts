@@ -66,6 +66,8 @@ export interface ConnectorInvokeArgs {
      *  `connector_pinned_connection_unusable` so the caller can react (the CRM
      *  gmail sync marks itself `needs-reconsent`). */
     connectionId?: string;
+    /** ADR 1035 D2 — only `context.orgId`'s connection (no fall-through). */
+    orgOnly?: boolean;
     signal?: AbortSignal;
   };
 }
@@ -160,6 +162,7 @@ export function createConnectorInvoker(deps: { storage: BrokeredEgressDeps['stor
         // `!== undefined`, not truthiness: an EMPTY pin is a refusal, never an un-pin
         // (the broker gates on `!== undefined` too — three layers, one rule).
         ...(args.request.connectionId !== undefined ? { connectionId: args.request.connectionId } : {}),
+        ...(args.request.orgOnly ? { orgOnly: true } : {}),
         ...(args.request.signal ? { signal: args.request.signal } : {}),
       });
 
@@ -172,6 +175,8 @@ export function createConnectorInvoker(deps: { storage: BrokeredEgressDeps['stor
       }
       if (r.outcome === 'host_not_allowed') return { ok: false, error: 'connector_host_not_allowed' };
       if (r.outcome === 'insecure_base') return { ok: false, error: 'connector_insecure_base' };
+      // ADR 1035 D1 — not bound to this instance (or to any): nothing was sent.
+      if (r.outcome === 'instance_refused') return { ok: false, error: r.error };
       if (r.outcome === 'request_failed') return { ok: false, error: r.timedOut ? 'connector_timeout' : 'connector_request_failed' };
 
       // Stamp provenance only on a transport success (an HTTP error from the

@@ -2,7 +2,8 @@
  * XCH-CAD-1 (LLM-EXCHANGE-AUDIT Wave 3): the CAD Modeler prompt hand-carries
  * the solid-kind vocabulary validateCadDoc enforces (in sync by manual
  * discipline only). Pin it — the drawings agent DID drift this way
- * (XCH-DRAW-1) before Wave 1 caught it.
+ * (XCH-DRAW-1) before Wave 1 caught it. Both directions: the prompt's kind list must
+ * EQUAL the validator's, so an added kind and an invented bullet both red.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -15,9 +16,11 @@ describe('cad-modeler prompt ↔ validateCadDoc solid-kind parity (XCH-CAD-1)', 
   const promptPath = join(here, '../../../../../../packs/vendor.openwop-app.cad.agents/prompts/cad-modeler.md');
   const prompt = readFileSync(promptPath, 'utf8');
 
-  it('names every solid kind as a backtick-quoted token', () => {
-    for (const kind of CAD_SOLID_KINDS) {
-      expect(prompt, `prompt must document solid kind '${kind}'`).toContain(`\`${kind}\``);
-    }
+  it('names every solid kind as a bullet, and no kind the validator refuses', () => {
+    const start = prompt.indexOf('Solid kinds and their geometry');
+    expect(start).toBeGreaterThan(-1);
+    const section = prompt.slice(start, prompt.indexOf('\n\n', start));
+    const bullets = [...section.matchAll(/^- `([a-z]+)`/gm)].map((m) => m[1]);
+    expect(bullets.sort()).toEqual([...CAD_SOLID_KINDS].sort());
   });
 });

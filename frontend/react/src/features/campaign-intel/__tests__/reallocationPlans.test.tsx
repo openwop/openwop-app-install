@@ -1,6 +1,6 @@
 /**
  * ADR 0952 D3 — the reallocation plans panel: renders nothing until a plan
- * exists; shows each change's before/after and outcome; applies a plan and says
+ * exists (a failed read is said, never "nothing"); shows each change's before/after and outcome; applies a plan and says
  * honestly what happened (needs approval / applied / partly applied); hides the
  * one-click route's stamp-back records (history, not decisions).
  */
@@ -38,6 +38,12 @@ beforeEach(() => { listReallocations.mockReset(); applyReallocationPlan.mockRese
 afterEach(() => cleanup());
 
 describe('ReallocationPlansPanel (ADR 0952 D3)', () => {
+  it('a failed read is said, never the empty panel', async () => {
+    listReallocations.mockRejectedValue(new Error('boom'));
+    await view();
+    expect(screen.getByText('Could not load reallocation plans.')).toBeTruthy();
+  });
+
   it('renders nothing with no plans, and ignores route stamp-backs', async () => {
     listReallocations.mockResolvedValue([{ ...PLAN, planId: 'rr_1', source: { kind: 'route' } }]);
     await view();
@@ -62,6 +68,10 @@ describe('ReallocationPlansPanel (ADR 0952 D3)', () => {
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Apply plan' })); });
     expect(applyReallocationPlan).toHaveBeenCalledWith('org-1', 'rp_1');
     expect(screen.getByText(/needs approval first/)).toBeTruthy();
+
+    applyReallocationPlan.mockResolvedValueOnce({ outcome: 'applied', plan: { ...PLAN, status: 'applied' } });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Apply plan' })); });
+    expect(screen.getByText('Plan applied.')).toBeTruthy();
 
     applyReallocationPlan.mockResolvedValueOnce({ outcome: 'partial', plan: { ...PLAN, status: 'partial' } });
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Apply plan' })); });

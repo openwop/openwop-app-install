@@ -44,6 +44,7 @@ import { workflowRoomLive } from '../host/collab/workflowCollabResource.js';
 import { deleteTenantWorkflow } from '../host/tenantWorkflowDelete.js';
 import { assertNoDisabledPacks } from '../host/packEnablement.js';
 import { instantiateOwnedChain } from '../host/chainInstantiation.js';
+import { getTenantInstalledChain, installedChainResolution, listTenantInstalledChains } from '../host/tenantInstalledPacks.js';
 import { preserveDroppedFields, parseFieldContract, FIELD_CONTRACT_HEADER } from '../host/preserveDroppedFields.js';
 import { getProvider } from '../features/connections/providerRegistry.js';
 import { getToggleDefault } from '../host/featureToggles/registry.js';
@@ -977,7 +978,7 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
 
   // Discovery: the installed workflow-chain packs (RFC 0013), host-global like the
   // node-catalog (authed, but not tenant data). Feeds the builder template gallery.
-  app.get('/host/openwop-app/workflow-chains', (_req, res, next) => {
+  app.get('/host/openwop-app/workflow-chains', async (req, res, next) => {
     try {
       // Day-1 UX P3 — per-chain requirements feed the template pre-flight
       // (uninstalled node types + named connection bindings). Host-global
@@ -989,7 +990,9 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
       // RFC 0135 — composition-only chains (internal: true, e.g. an RFC 0133 sub-chain
       // child) MUST be omitted from the default template listing. They stay loadable,
       // resolvable, composable, and from-chain-instantiable by id (presentational only).
-      const chains = listChains().filter(({ chain }) => chain.internal !== true).map(({ packName, chain, category }) => ({
+      // ADR 1033 D5 — plus the chains of packs this tenant installed by applying a proposal.
+      const tenantChains = (await listTenantInstalledChains(tenantOf(req))).map((e) => ({ ...e, category: undefined }));
+      const chains = [...listChains(), ...tenantChains].filter(({ chain }) => chain.internal !== true).map(({ packName, chain, category }) => ({
         chainId: chain.chainId,
         packName,
         label: chain.label,
@@ -1031,7 +1034,9 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
         throw new OpenwopError('validation_error', 'subject must look like `<feature>:<id>` (lowercase feature prefix, then up to 200 of [A-Za-z0-9:._-]).', 400, { field: 'subject' });
       }
       const subject = typeof body.subject === 'string' ? body.subject : undefined;
-      const found = getChain(body.chainId);
+      // ADR 1033 D5 — a host chain, else one from a pack this tenant installed by apply.
+      const hostChain = getChain(body.chainId);
+      const found = hostChain ?? await getTenantInstalledChain(tenantOf(req), body.chainId);
       if (!found) {
         throw new OpenwopError('not_found', 'workflow chain not found', 404, { chainId: body.chainId });
       }
@@ -1060,6 +1065,8 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
         chain: found.chain,
         params,
         deferred,
+        // ADR 1033 P2 — a tenant chain's sub-chains resolve in its own installed pack.
+        ...(hostChain ? {} : { resolve: await installedChainResolution(tenantOf(req), found.packName) }),
         ...(req.userId ? { createdBy: req.userId } : {}),
         ...(subject ? { subject } : {}),
       });

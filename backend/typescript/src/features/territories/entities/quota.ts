@@ -65,7 +65,17 @@ export async function listQuotas(tenantId: string, orgId: string, modelId: strin
   return scoped(await quotas.listForTenantIndexed(tenantId), tenantId, orgId).filter((q) => q.modelId === modelId && (!period || q.period === period));
 }
 
-export async function setQuota(tenantId: string, orgId: string, modelId: string, territoryId: string, input: { period?: unknown; amount?: unknown; currency?: unknown; repSplits?: unknown }): Promise<Quota> {
+/**
+ * Upsert a territory's quota for a period.
+ *
+ * `repSplits` REPLACES the stored splits — omitting it clears them — unless
+ * `opts.keepSplitsWhenOmitted` is set (ADR 1034 D2: the workflow node's contract is
+ * "omit to keep, pass [] to clear", and before this the surface never forwarded the field,
+ * so every node call silently erased the splits commission accelerators read). The write
+ * is a CAS against the row this call read, so a concurrent edit is a 409, never a silent
+ * overwrite of splits read a moment earlier.
+ */
+export async function setQuota(tenantId: string, orgId: string, modelId: string, territoryId: string, input: { period?: unknown; amount?: unknown; currency?: unknown; repSplits?: unknown }, opts: { keepSplitsWhenOmitted?: boolean } = {}): Promise<Quota> {
   await requireEditableModel(tenantId, orgId, modelId);
   // territory must exist in this model (IDOR) — listTerritories is model+org scoped
   const terr = (await listTerritories(tenantId, orgId, modelId)).find((t) => t.territoryId === territoryId);
@@ -106,8 +116,14 @@ export async function setQuota(tenantId: string, orgId: string, modelId: string,
   const id = quotaId(modelId, territoryId, period);
   if (existingCount >= MAX.perModelQuotas && !(await quotas.get(id))) throw new OpenwopError('validation_error', `This model has the maximum ${MAX.perModelQuotas} quotas.`, 409, { max: MAX.perModelQuotas });
 
-  const quota: Quota = { quotaId: id, tenantId, orgId, modelId, territoryId, period, amount, repSplits, updatedAt: nowIso(), ...(currency ? { currency } : {}) };
-  await quotas.put(quota);
+  const raw = await quotas.get(id);
+  const existing = raw && raw.tenantId === tenantId && raw.orgId === orgId ? raw : null;
+  if (raw && !existing) throw new OpenwopError('not_found', 'Territory not found in this model.', 404, { territoryId });
+  const splits = input.repSplits === undefined && opts.keepSplitsWhenOmitted && existing ? existing.repSplits : repSplits;
+  const quota: Quota = { quotaId: id, tenantId, orgId, modelId, territoryId, period, amount, repSplits: splits, updatedAt: nowIso(), ...(currency ? { currency } : {}) };
+  if (!(await quotas.compareAndSwap(existing, quota))) {
+    throw new OpenwopError('conflict', 'This quota changed while it was being saved. Reload and try again.', 409, { territoryId, period });
+  }
   return quota;
 }
 

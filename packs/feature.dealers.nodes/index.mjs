@@ -45,14 +45,20 @@ export async function listRegistrations(ctx) {
   return { status: 'success', outputs: { registrations: out.registrations ?? [] } };
 }
 
-/* ─── Governed write (ADR 0281 P3) — the surface enforces the run owner's scope ─── */
+/* ─── Governed write (ADR 0281 P3) — submits for human review (ADR 1034 D1); the surface enforces the run owner's scope ─── */
 
 export async function approveRegistration(ctx) {
   const d = ensure(ctx);
   if (typeof d.approveRegistration !== 'function') throw Object.assign(new Error('ctx.features.dealers.approveRegistration not exposed'), { code: 'host_capability_missing', capability: 'host.sample.dealers' });
   const i = args(ctx);
   const out = await d.approveRegistration({ orgId: str(i.orgId), regId: str(i.regId) });
-  return { status: 'success', outputs: { success: out.success ?? true, registration: out.registration ?? null } };
+  // ADR 1034 D1 — the surface SUBMITS for review and returns the card. A result without
+  // one is a typed failure, never `success` with nothing in it (the COM2-M3 lesson,
+  // feature.sales-commissions.nodes approveStatement).
+  if (!out?.review?.approvalId) {
+    throw Object.assign(new Error('the dealers surface did not return a review for this registration'), { code: 'invalid_response' });
+  }
+  return { status: 'success', outputs: { success: out.success ?? true, submittedForReview: true, review: out.review } };
 }
 
 // Parity tripwire fix (NODE-PACK-AUDIT 2026-07-17): the loader reads the

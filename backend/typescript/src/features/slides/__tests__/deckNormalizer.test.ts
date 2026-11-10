@@ -4,6 +4,9 @@
  * trait's identity fields, required by `validateSlidesDoc`), which the
  * positional artifact schema REJECTS. Any path that re-emits a working copy
  * as a `canvas.slides` artifact must route through `normalizeDeckForArtifact`.
+ *
+ * That function has no product caller yet: it is the recorded dormant seam `SL-8`, kept
+ * for the re-emit path ADR 0359 routes through it. The later blocks: ADR 0328.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { registerSlidesArtifactType } from '../artifactTypes.js';
@@ -54,7 +57,7 @@ describe('validateSlidesDoc — blocks slides', () => {
     slides: [{ id: 's1', name: 'S', layout: 'blocks', blocks: [], ...over }],
   });
 
-  it('accepts a valid blocks slide (catalog types, variant, nesting)', () => {
+  it('accepts a valid blocks slide (catalog types, variant)', () => {
     const doc = slide({
       variant: 'two-col',
       blocks: [
@@ -66,7 +69,9 @@ describe('validateSlidesDoc — blocks slides', () => {
   });
 
   it('rejects unknown block types, bad variants, and blocks on a non-blocks layout', () => {
-    expect(validateSlidesDoc(slide({ blocks: [{ type: 'hologram', props: {} }] })).errors.length).toBeGreaterThan(0);
+    expect(validateSlidesDoc(slide({ blocks: [{ type: 'hologram', props: {} }] })).errors).toEqual([
+      { path: 'slides[0].blocks[0]', message: "unknown component type 'hologram' (not in the 'canvas.slides' catalog)" },
+    ]);
     expect(validateSlidesDoc(slide({ variant: 'diagonal' })).errors.some((e) => e.path.endsWith('.variant'))).toBe(true);
     const wrongLayout = { title: 'D', slides: [{ id: 's1', name: 'S', layout: 'title', blocks: [] }] };
     expect(validateSlidesDoc(wrongLayout).errors.some((e) => e.path.endsWith('.blocks'))).toBe(true);

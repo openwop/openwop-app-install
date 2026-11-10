@@ -21,6 +21,7 @@ import http from 'node:http';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createApp } from '../src/index.js';
+import { derivedA2aTaskId } from '../src/host/a2aServer.js';
 import { loadAgentsFromManifest } from '../src/packs/agentLoader.js';
 import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 
@@ -31,6 +32,9 @@ let A2A_URL: string;
 // `..`, which resolved outside the repo, so the load below was a silent no-op.)
 const REPO_ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..');
 const SUPERVISOR = 'core.openwop.agents.supervisor.default';
+// ADR 1045 D4 — the 0.3 derived task id is per tenant; `dev-token` is the
+// wildcard operator key, which acts in `default`.
+const DERIVED_ID = derivedA2aTaskId(SUPERVISOR, 'default');
 
 let server: http.Server;
 
@@ -104,7 +108,7 @@ describe('A7 / RFC 0076 — live A2A server endpoint', () => {
     // answer it (a missing id alone could not tell the two apart).
     const sent = await (await rpc('message/send', { agentId: SUPERVISOR, message: { parts: [{ kind: 'text', text: 'begin' }] } })).json() as RpcBody;
     const opened = (sent.result as { id?: string } | undefined)?.id;
-    expect(opened).toBe(`a2a:${SUPERVISOR}`);
+    expect(opened).toBe(DERIVED_ID);
     const body = await (await rpc('tasks/get', { id: opened })).json() as RpcBody;
     expect(body.result).toBeUndefined();
     expect(body.error?.code).toBe(-32001);

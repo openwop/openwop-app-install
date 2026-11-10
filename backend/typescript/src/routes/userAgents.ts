@@ -36,7 +36,7 @@ import {
 import { idempotencyOutcomeOf, recordIdempotencyClaim } from '../observability/metricSeams.js';
 import { requireTenantWrite } from '../features/featureRoute.js';
 import { deleteCaptureSetting } from '../host/evals/toolBoundary.js';
-import { alignHead, currentRevision, onUserAgentDeleted, revisionForRecord } from '../host/userAgentRevisions.js';
+import { alignHead, currentRevision, onUserAgentDeleted, revisionContentKey, revisionForRecord, revisionOfContent } from '../host/userAgentRevisions.js';
 
 const log = createLogger('routes.userAgents');
 
@@ -303,16 +303,30 @@ export function registerUserAgentRoutes(app: Express, deps: Deps): void {
       if (!updated || !replaced) throw staleWriteError('agent', undefined);
       // ADR 1014 P5 — an edit that changes the content is a new revision; the old one
       // stays. Numbering never fails the edit: a fault leaves the next read to catch up.
-      let revision: string;
+      //
+      // TST-FIB-GC1 (ADR 1014 review M1) — number the record as STORED NOW, never this
+      // caller's copy. Another edit can commit between this CAS and the line below;
+      // numbering `updated` then minted a head revision for content that was no longer
+      // stored (forced race: head 3 = 'a' while the agent held 'b'). The edit's author
+      // is credited only when the stored record is still this edit's content.
+      const stored = (await storage.getUserAgent(tenantId, agentId).catch(() => null)) ?? updated;
+      const storedIsOurs = revisionContentKey(stored) === revisionContentKey(updated);
+      let headRevision: string;
       try {
-        revision = await alignHead(updated, req.userId);
+        headRevision = await alignHead(stored, storedIsOurs ? req.userId : undefined, () => storage.getUserAgent(tenantId, agentId));
       } catch (err) {
         log.warn('user_agent_revision_failed', { agentId: updated.agentId, error: err instanceof Error ? err.message : String(err) });
-        revision = await currentRevision(tenantId, updated.agentId).catch(() => '0');
+        headRevision = await currentRevision(tenantId, updated.agentId).catch(() => '0');
       }
+      // The response describes THIS edit's content, so it names that content's own
+      // revision. A newer edit already numbered it (its pre-edit catch-up) when it is
+      // no longer the head.
+      const revision = storedIsOurs
+        ? headRevision
+        : (await revisionOfContent(updated).catch(() => null)) ?? headRevision;
       // Re-register so the in-process registry (GET /v1/agents, the chat `@`
-      // picker, the chat-responder system prompt) reflects the edit at once.
-      registerUserAgent(updated, revision);
+      // picker, the chat-responder system prompt) reflects the STORED agent at once.
+      registerUserAgent(stored, headRevision);
       // ADR 0775 P3d — other instances drop their copy and re-read the edit.
       await broadcastAgentEviction(tenantId, updated.agentId);
       res.setHeader('ETag', etagHeader(userAgentEtag(updated)));

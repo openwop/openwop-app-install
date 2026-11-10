@@ -59,7 +59,7 @@ export async function requireWorkflowRead(req: Request): Promise<void> {
  * composed-workflow proposal. `propose` itself is deliberately NOT gated: it
  * only creates a request, which that approval check decides.
  * `apikey:<id>` actors resolve through their issuer inside `assertTenantScope`
- * (ADR 0795 D1); `bearer:<8>` operator keys take the branch below.
+ * (ADR 0795 D1); `bearer:<id>` operator keys take the branch below.
  */
 export async function hasWorkflowScope(
   who: { tenantId: string; actingUserId?: string | undefined; personalTenant?: string | undefined },
@@ -67,7 +67,7 @@ export async function hasWorkflowScope(
 ): Promise<boolean> {
   if (!who.actingUserId) return false;
   // ADR 0822 D1 (architect B2) — an operator env key's run is stamped with its
-  // `bearer:<8>` principal as the actor (`features/workflow-author/routes.ts`), which
+  // `bearer:<id>` principal as the actor (`features/workflow-author/routes.ts`), which
   // no member row can match. While that key is still configured it is the
   // tenant's own principal — the reading `credentialAuthority` gives the request
   // lane (ADR 0601 C4) — so a run the route admitted is not refused mid-run.

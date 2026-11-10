@@ -15,12 +15,23 @@
  *     at the moment of the write);
  *   - the intent is retired only on OBSERVED evidence that the run started;
  *   - the wakeup hint and the durable worker cannot both dispatch one run.
+ *
+ * Duplicate delivery is held by TWO fences in `runDispatchSweeper.ts` (the
+ * status fence and the live-lease fence); each has its own isolating case, and
+ * the w80 probe that breaks both in one edit reds the duplicate-delivery case.
+ *
+ * Sabotage (witnessed, w80): the enqueue gate, the hint grace, the claim lease
+ * clause, the tenant-table introspection, the run+intent transaction, the
+ * dispatch handoff, the deferred-override overlay, either fence, the
+ * observed-start retirement, the attempt cap, the run-missing discharge and the
+ * migration's CHECK and due index each red their case.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import type { RunRecord } from '../src/types.js';
-import type { HostAdapterSuite } from '../src/host/index.js';
+import { createHostAdapterSuite, type HostAdapterSuite } from '../src/host/index.js';
+import type { WorkflowDefinition } from '../src/executor/types.js';
 import { sweepDispatchOutbox } from '../src/host/runDispatchSweeper.js';
 import { insertRunWithStartContext, DISPATCH_OUTBOX_HINT_GRACE_MS } from '../src/host/runInsert.js';
 import { setEventLogBackend } from '../src/executor/eventLog.js';
@@ -59,9 +70,14 @@ function makeRun(over: Partial<RunRecord> & { runId: string }): RunRecord {
   };
 }
 
-/** A host suite whose catalog resolves `wf-1` to a trivial one-node workflow. */
-function stubHostSuite(getWorkflow?: () => Promise<{ workflowId: string; definition: unknown } | null>): HostAdapterSuite {
+/** A host suite whose catalog resolves `wf-1` to a trivial one-node workflow.
+ *  The rest is the real suite for this storage (no cast). */
+function stubHostSuite(
+  storage: Storage,
+  getWorkflow?: () => Promise<{ workflowId: string; definition: WorkflowDefinition } | null>,
+): HostAdapterSuite {
   return {
+    ...createHostAdapterSuite({ storage }),
     workflowCatalog: {
       getWorkflow: getWorkflow ?? (async () => ({
         workflowId: 'wf-1',
@@ -71,8 +87,16 @@ function stubHostSuite(getWorkflow?: () => Promise<{ workflowId: string; definit
         definition: { workflowId: 'wf-1', nodes: [{ nodeId: 'a', typeId: 'core.noop' }], edges: [] },
       })),
     },
-    providerPolicyResolver: undefined,
-  } as unknown as HostAdapterSuite;
+  };
+}
+
+/** Wait for the dispatched run to COMPLETE (a condition, not a tick budget).
+ *  `completed`, not "no longer pending": the fail-closed tail marks a run that
+ *  could not start `failed`. */
+async function untilCompleted(storage: Storage, runId: string): Promise<void> {
+  await vi.waitFor(async () => {
+    expect((await storage.getRun(runId))?.status).toBe('completed');
+  }, { timeout: 5_000, interval: 10 });
 }
 
 function tableExists(db: Database.Database, name: string): boolean {
@@ -85,7 +109,10 @@ function columns(db: Database.Database, table: string): string[] {
     .sort();
 }
 
-/** Let queued `setImmediate` work (the dispatch handoff) drain. */
+/** Let queued `setImmediate` work (the dispatch handoff) drain. Used only where
+ *  the claim is that NOTHING further ran (a second delivery, a held lease, a
+ *  run that never leaves pending): absence has no condition to wait for, so a
+ *  tick drain is the honest ceiling there. Started runs use `untilCompleted`. */
 async function flush(times = 20): Promise<void> {
   for (let i = 0; i < times; i++) await new Promise((r) => setTimeout(r, 0));
 }
@@ -205,10 +232,10 @@ describe('ADR 0551 P1 — dispatch outbox worker', () => {
 
     const due = (await storage.getDispatchOutbox('stranded'))!.nextAttemptAt;
     // A DIFFERENT worker id: this is the surviving instance, not the dead one.
-    const dispatched = await sweepDispatchOutbox({ storage, hostSuite: stubHostSuite() }, 'instance-b', due);
+    const dispatched = await sweepDispatchOutbox({ storage, hostSuite: stubHostSuite(storage) }, 'instance-b', due);
     expect(dispatched).toBe(1);
 
-    await flush();
+    await untilCompleted(storage, 'stranded');
     // Eventual start, proven at the durable layer rather than by a spy.
     //
     // Asserted as `completed` + a `run.started` event, NOT as "no longer
@@ -228,16 +255,16 @@ describe('ADR 0551 P1 — dispatch outbox worker', () => {
       if (!ctx.variables) throw new Error('executor did not provide variables');
       return { status: 'success', outputs: { value: ctx.config?.picked, remembered: ctx.variables.get('target') } };
     } });
-    const definition = {
-      workflowId: 'wf-1', name: 'recover initial variables', version: '1.0.0',
+    const definition: WorkflowDefinition = {
+      workflowId: 'wf-1',
       variables: [{ name: 'target', defaultValue: 'wrong default' }],
       metadata: { deferredParameterAliases: { bareTarget: 'target' } },
       nodes: [{ nodeId: 'read', typeId, config: { picked: '{{inputs.target}}' } }], edges: [],
     };
     await insertRunWithStartContext(storage, makeRun({ runId: 'unseeded-variables', inputs: { target: 'input' }, configurable: { bareTarget: 'accepted override' } }), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true });
     const due = (await storage.getDispatchOutbox('unseeded-variables'))!.nextAttemptAt;
-    expect(await sweepDispatchOutbox({ storage, hostSuite: stubHostSuite(async () => ({ workflowId: 'wf-1', definition })) }, 'survivor', due)).toBe(1);
-    await flush();
+    expect(await sweepDispatchOutbox({ storage, hostSuite: stubHostSuite(storage, async () => ({ workflowId: 'wf-1', definition })) }, 'survivor', due)).toBe(1);
+    await untilCompleted(storage, 'unseeded-variables');
     expect((await storage.getRun('unseeded-variables'))?.status).toBe('completed');
     const completed = (await storage.listEvents('unseeded-variables', { limit: 100 })).find((e) => e.type === 'node.completed' && e.nodeId === 'read');
     expect(completed?.payload).toMatchObject({ outputs: { value: 'accepted override', remembered: 'accepted override' } });
@@ -246,10 +273,10 @@ describe('ADR 0551 P1 — dispatch outbox worker', () => {
   it('duplicate delivery of one intent yields exactly one logical execution', async () => {
     await insertRunWithStartContext(storage, makeRun({ runId: 'dup' }), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true });
     const due = (await storage.getDispatchOutbox('dup'))!.nextAttemptAt;
-    const deps = { storage, hostSuite: stubHostSuite() };
+    const deps = { storage, hostSuite: stubHostSuite(storage) };
 
     expect(await sweepDispatchOutbox(deps, 'instance-a', due)).toBe(1);
-    await flush();
+    await untilCompleted(storage, 'dup');
 
     // Second delivery: the first holder's lease has lapsed, so the row is
     // re-claimable and IS re-claimed. It must not start the run again.
@@ -273,11 +300,10 @@ describe('ADR 0551 P1 — dispatch outbox worker', () => {
     // thing standing between a re-delivery and a second execution.
     await insertRunWithStartContext(storage, makeRun({ runId: 'terminal' }), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true });
     const due = (await storage.getDispatchOutbox('terminal'))!.nextAttemptAt;
-    const deps = { storage, hostSuite: stubHostSuite() };
+    const deps = { storage, hostSuite: stubHostSuite(storage) };
 
     await sweepDispatchOutbox(deps, 'instance-a', due);
-    await flush();
-    expect((await storage.getRun('terminal'))!.status).toBe('completed');
+    await untilCompleted(storage, 'terminal');
     await storage.setRunDispatchLease('terminal', null, null);
 
     expect(await sweepDispatchOutbox(deps, 'instance-b', due + 60_001)).toBe(0);
@@ -289,7 +315,7 @@ describe('ADR 0551 P1 — dispatch outbox worker', () => {
   it('keeps the intent pending until it can SEE the run start, then retires it', async () => {
     await insertRunWithStartContext(storage, makeRun({ runId: 'observed' }), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true });
     const due = (await storage.getDispatchOutbox('observed'))!.nextAttemptAt;
-    const deps = { storage, hostSuite: stubHostSuite() };
+    const deps = { storage, hostSuite: stubHostSuite(storage) };
 
     await sweepDispatchOutbox(deps, 'instance-a', due);
     // Still pending immediately after the handoff: the worker has dispatched
@@ -297,7 +323,7 @@ describe('ADR 0551 P1 — dispatch outbox worker', () => {
     // handoff and `executeRun` would lose the intent silently.
     expect((await storage.getDispatchOutbox('observed'))?.status).toBe('pending');
 
-    await flush();
+    await untilCompleted(storage, 'observed');
     await sweepDispatchOutbox(deps, 'instance-a', due + 60_001);
     expect(await storage.getDispatchOutbox('observed')).toBeNull();
   });
@@ -328,7 +354,7 @@ describe('ADR 0551 P1 — dispatch outbox worker', () => {
       },
     });
     await insertRunWithStartContext(stuck, makeRun({ runId: 'looping' }), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true });
-    const deps = { storage: stuck, hostSuite: stubHostSuite() };
+    const deps = { storage: stuck, hostSuite: stubHostSuite(stuck) };
     let at = (await storage.getDispatchOutbox('looping'))!.nextAttemptAt;
 
     for (let attempt = 1; attempt <= 5; attempt++) {
@@ -350,7 +376,7 @@ describe('ADR 0551 P1 — dispatch outbox worker', () => {
     // An instance is between `run.started` and the status write.
     await storage.setRunDispatchLease('held', 'instance-a', due + 600_000);
 
-    expect(await sweepDispatchOutbox({ storage, hostSuite: stubHostSuite() }, 'instance-b', due)).toBe(0);
+    expect(await sweepDispatchOutbox({ storage, hostSuite: stubHostSuite(storage) }, 'instance-b', due)).toBe(0);
     await flush();
     expect((await storage.listEvents('held', { limit: 100 })).filter((e) => e.type === 'run.started')).toHaveLength(0);
     // The intent is discharged: an owner exists, and the orphan lane covers it
@@ -363,13 +389,13 @@ describe('ADR 0551 P1 — dispatch outbox worker', () => {
     const due = (await storage.getDispatchOutbox('gone'))!.nextAttemptAt;
     await storage.deleteRun('gone');
 
-    expect(await sweepDispatchOutbox({ storage, hostSuite: stubHostSuite() }, 'w1', due)).toBe(0);
+    expect(await sweepDispatchOutbox({ storage, hostSuite: stubHostSuite(storage) }, 'w1', due)).toBe(0);
     expect(await storage.getDispatchOutbox('gone')).toBeNull();
   });
 
   it('retries, then marks dead, an intent whose workflow cannot be resolved', async () => {
     await insertRunWithStartContext(storage, makeRun({ runId: 'unresolvable' }), { admission: { plan: 'exempt:test-fixture' }, enqueueDispatch: true });
-    const deps = { storage, hostSuite: stubHostSuite(async () => null) };
+    const deps = { storage, hostSuite: stubHostSuite(storage, async () => null) };
     let at = (await storage.getDispatchOutbox('unresolvable'))!.nextAttemptAt;
 
     for (let attempt = 1; attempt <= 5; attempt++) {
@@ -441,6 +467,7 @@ describe('ADR 0551 P1 — forward migration onto a real pre-outbox database', ()
     // RFC 0173 §C.2 (suite 2.42.5): bumped to 49 (`invocation_log.presented_key`).
     // ADR 0812 P3d: bumped to 50 (drop the major-1 webhook subscriptions).
     // ADR 0987 D2: bumped to 51 (`runs.admission_key` + its index).
-    expect(LATEST_SCHEMA_VERSION).toBe(51);
+    // ADR 1043 RELAY-LOG-RETENTION-1: bumped to 52 (`idx_messaging_delivery_log_at`).
+    expect(LATEST_SCHEMA_VERSION).toBe(52);
   });
 });

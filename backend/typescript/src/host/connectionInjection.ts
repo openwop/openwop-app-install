@@ -234,12 +234,20 @@ export function makeConnectionSafeFetch(deps: ConnectionEgressDeps): HostSafeFet
     const transportOk = url.protocol === 'https:' || safeFetchPrivateEgressAllowed();
     const provider = transportOk ? matchAllowedProvider(url.hostname, deps.allowedProviders) : null;
     if (provider) {
+      // ADR 1035 D1 — the URL picks, and pins, the connection for an
+      // instance-scoped provider: a token never goes to another customer's
+      // instance under the same vendor suffix, and the request is refused.
       const resolved = await resolveConnectionCredential({
+        egress: { url: url.href },
         tenantId: deps.tenantId,
         provider,
         ...(deps.actingUserId ? { actingUserId: deps.actingUserId } : {}),
         ...(deps.orgId ? { orgId: deps.orgId } : {}),
       });
+      if (resolved && 'refused' in resolved) {
+        await emitToolReturned(deps.runId, callId, 'forbidden');
+        throw new Error(`${resolved.refused}: the ${provider} connection is not bound to ${url.origin}`);
+      }
       if (resolved && (resolved.connection.kind === 'oauth2' || resolved.connection.kind === 'bearer')) {
         headers.authorization = `Bearer ${resolved.secret}`;
         injected = true;

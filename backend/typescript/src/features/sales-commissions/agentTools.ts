@@ -22,27 +22,17 @@
  */
 
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
-import { resolveFeatureToggle } from '../../host/agentToolKit.js';
-import { listOrgs, resolveEffectiveAccess } from '../../host/accessControlService.js';
+import { resolveReadOrgScope, type ToolResult } from '../../host/agentToolKit.js';
+import { resolveEffectiveAccess } from '../../host/accessControlService.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
-import { listPlans } from './entities/plan.js';
+import { listPlans, plansVisibleTo } from './entities/plan.js';
 import { listStatements } from './entities/statement.js';
 
 export const COMMISSIONS_LIST_PLANS_TOOL_ID = 'openwop:sales-commissions.list-plans';
 export const COMMISSIONS_LIST_STATEMENTS_TOOL_ID = 'openwop:sales-commissions.list-statements';
 
-type ToolResult = { content: string; isError?: boolean; hostMessage?: true };
-
-function toolError(error: string, message: string): ToolResult {
-  return { content: JSON.stringify({ error, message }), isError: true, hostMessage: true };
-}
 
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
-
-/** Per-call toggle honesty (the app-builder precedent): per-tenant, fail-closed. */
-async function commissionsEnabled(scope: BundleScope): Promise<boolean> {
-  return resolveFeatureToggle('sales-commissions', scope);
-}
 
 type ReadScope =
   | { kind: 'ok'; orgId: string; viewer: string; canSeeAll: boolean }
@@ -50,24 +40,17 @@ type ReadScope =
   | { kind: 'error'; result: ToolResult };
 
 /**
- * The SAME access decision the read routes make (`authorizeOrgScope` → toggle +
- * `resolveEffectiveAccess` `workspace:read` in the org), for a chat-tool scope.
- * Also resolves `canSeeAll` (`host:commissions:manage`) for the route's
- * statement subject-scoping — a rep sees only their own unless they hold manage.
+ * The read routes' access decision for a chat-tool scope. ADR 1034 D11 — through the
+ * SHARED `resolveReadOrgScope` (the dealers tools' helper), not a hand-rolled copy: the
+ * CLAUDE.md rule is one predicate for a route and its tool. Then `canSeeAll`
+ * (`host:commissions:manage`) for the subject-scoping both statements and plans use.
  */
 async function resolveCommissionRead(scope: BundleScope, orgIdInput?: string): Promise<ReadScope> {
-  const viewer = scope.actingUserId;
-  if (!viewer) return { kind: 'empty' };
-  if (!(await commissionsEnabled(scope))) {
-    return { kind: 'error', result: toolError('feature_disabled', 'The Sales Commissions feature is not enabled for this workspace — tell the user you cannot answer comp questions here.') };
-  }
-  const orgs = await listOrgs(scope.tenantId);
-  const orgId = orgIdInput ?? (orgs.length === 1 ? orgs[0]!.orgId : undefined);
-  if (!orgId) return { kind: 'error', result: toolError('org_required', `This workspace has ${orgs.length} organizations — pass \`orgId\` (ask the user which).`) };
-  if (!orgs.some((o) => o.orgId === orgId)) return { kind: 'empty' };
-  const access = await resolveEffectiveAccess(scope.tenantId, { subject: viewer, orgId });
-  if (!access.scopes.includes('workspace:read')) return { kind: 'empty' };
-  return { kind: 'ok', orgId, viewer, canSeeAll: access.scopes.includes('host:commissions:manage') };
+  const r = await resolveReadOrgScope(scope, { featureId: 'sales-commissions', featureLabel: 'Sales Commissions' }, orgIdInput);
+  if (r.kind === 'error') return r;
+  if (r.kind === 'empty' || !scope.actingUserId) return { kind: 'empty' };
+  const access = await resolveEffectiveAccess(scope.tenantId, { subject: scope.actingUserId, orgId: r.orgId });
+  return { kind: 'ok', orgId: r.orgId, viewer: scope.actingUserId, canSeeAll: access.scopes.includes('host:commissions:manage') };
 }
 
 export function registerCommissionAgentTools(): void {
@@ -85,7 +68,7 @@ export function registerCommissionAgentTools(): void {
       const r = await resolveCommissionRead(scope, str(input.orgId));
       if (r.kind === 'empty') return { content: JSON.stringify({ plans: [] }) };
       if (r.kind === 'error') return r.result;
-      return { content: JSON.stringify({ plans: await listPlans(scope.tenantId, r.orgId) }) };
+      return { content: JSON.stringify({ plans: plansVisibleTo(await listPlans(scope.tenantId, r.orgId), r.canSeeAll, r.viewer) }) };
     },
   });
 

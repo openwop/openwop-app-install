@@ -121,8 +121,10 @@ async function stampPersonaMedia(tenantId: string, orgId: string, personaIdByNam
  * `governance.compliance` on the brand, `groundingPolicy` + `competitors` on
  * the brief, persona stamps on the mapped demo assets. Strictly fill-if-absent:
  * a non-demo edit (a tuned policy, a user competitor list) is never overwritten.
- * Neither brief field is PROTECTED content, so the update never demotes a
- * confirmed brief nor stales its kernel.
+ * CORRECTION (2026-11-06): both brief fields are protected kernel context.
+ * Restoring missing context therefore demotes the brief and stales its existing
+ * kernel, including for seeded content. This retrofit never reapproves it;
+ * generating/reviewing a current kernel is a separate operation.
  */
 async function retrofitCampaignShowcase(
   tenantId: string,

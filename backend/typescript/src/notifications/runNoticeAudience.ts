@@ -21,6 +21,7 @@
  *   - **A participant-facing run never produces a participant-visible failure
  *     notice.** Its feature decides whether to retry or say something kind.
  */
+import { featureParticipantFacingPurposes } from '../host/featureContributions.js';
 import { isPersonalTenantId } from '../host/requestSubject.js';
 
 /**
@@ -34,16 +35,17 @@ import { isPersonalTenantId } from '../host/requestSubject.js';
  * operator's problem". Values are the ones already written at the scheduling
  * sites, not new strings.
  */
-export const PARTICIPANT_FACING_PURPOSES: ReadonlySet<string> = new Set([
-  'kickbot-coach-turn',        // kickbotCoachTurnService.ts
-  'kicktodo-reminder',         // enrollmentService.ts
-  'kicktodo-session-reminder', // sessionService.ts
-  'kicktodo-calendar-sync',    // calendarSyncService.ts
-]);
+export const PARTICIPANT_FACING_PURPOSES: ReadonlySet<string> = new Set<string>([]);
+
+/** ADR 1031 P2 — the host's rows plus every composed feature's
+ *  `hostContributions.participantFacingRunPurposes` (KickTodo declares its four). */
+export function participantFacingPurposes(): Set<string> {
+  return new Set([...PARTICIPANT_FACING_PURPOSES, ...featureParticipantFacingPurposes()]);
+}
 
 export function isParticipantFacingRun(metadata: Record<string, unknown> | undefined): boolean {
   const purpose = metadata?.purpose;
-  return typeof purpose === 'string' && PARTICIPANT_FACING_PURPOSES.has(purpose);
+  return typeof purpose === 'string' && (PARTICIPANT_FACING_PURPOSES.has(purpose) || featureParticipantFacingPurposes().includes(purpose));
 }
 
 export interface RunNoticeAudience {

@@ -47,8 +47,11 @@ import { fileURLToPath } from 'node:url';
 // reference it without TDZ error.
 const { pgMemAdapters } = vi.hoisted(() => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { newDb } = require('pg-mem') as typeof import('pg-mem');
+  const { newDb, DataType } = require('pg-mem') as typeof import('pg-mem');
   const db = newDb();
+  // pg-mem has no `strpos`, which real Postgres ships; the tenant fold's bounded read
+  // uses it (ADR 0003 4c correction, 2026-11-03). Same semantics: 1-based, 0 = absent.
+  db.public.registerFunction({ name: 'strpos', args: [DataType.text, DataType.text], returns: DataType.integer, implementation: (s: string, sub: string) => s.indexOf(sub) + 1 });
   return { pgMemAdapters: db.adapters.createPg() };
 });
 vi.mock('pg', () => ({ default: pgMemAdapters, ...pgMemAdapters }));

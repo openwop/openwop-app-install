@@ -148,12 +148,12 @@ describe('v2Wire — the one seam between the major-2 wire and the v1-shaped SPA
     expect(loader).not.toHaveBeenCalled();
   });
 
-  it('kicktodo.com 2026-10-25: an Inbox listing personal-workspace runs does not re-bind another run to the personal tenant', async () => {
-    rememberWireTenant('host-kicktodo'); // the session is in the KickTodo workspace (`/me/workspaces`)
+  it('an adopter deploy, 2026-10-25: an Inbox listing personal-workspace runs does not re-bind another run to the personal tenant', async () => {
+    rememberWireTenant('host-acme'); // the session is in a declared default workspace (`/me/workspaces`)
     // The Inbox lists items from every workspace the person belongs to.
     unbindRunIds({ items: [{ runId: 'u-0123456789abcdef0123456789abcdef/d529ccdcf46aaaaaaaaa' }] });
     const loader = vi.fn(async () => ({ active: 'should-not-be-called' }));
-    expect(await bindRunIdValue('6fc86dd1-34f4-4c5e-94ee-2531db5797de', loader)).toBe('host-kicktodo/6fc86dd1-34f4-4c5e-94ee-2531db5797de');
+    expect(await bindRunIdValue('6fc86dd1-34f4-4c5e-94ee-2531db5797de', loader)).toBe('host-acme/6fc86dd1-34f4-4c5e-94ee-2531db5797de');
     // …while the personal run itself still goes back to its own tenant.
     expect(await bindRunIdValue('d529ccdcf46aaaaaaaaa', loader)).toBe('u-0123456789abcdef0123456789abcdef/d529ccdcf46aaaaaaaaa');
     expect(loader).not.toHaveBeenCalled();

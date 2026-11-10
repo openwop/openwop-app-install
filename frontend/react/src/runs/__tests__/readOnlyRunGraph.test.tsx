@@ -10,7 +10,10 @@
  * Sabotage: dropping `persist` from MUTATING_ACTIONS reds "graph writes are
  * no-ops" (localStorage is written); sharing the singleton (returning
  * `useBuilderStore` from createReadOnlyBuilderStore) reds "a separate instance";
- * removing the `seen` de-dup reds "…de-duplicated".
+ * removing the `seen` de-dup reds "…de-duplicated"; leaving any one of updateNode,
+ * removeNodes, addEdge, setName or persist live on the store reds "graph writes are
+ * no-ops" while the partition stays green; not buffering or not sorting the merged
+ * history reds "a late initial poll".
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, renderHook, waitFor } from '@testing-library/react';
@@ -25,7 +28,7 @@ import { MUTATING_ACTIONS, READ_ONLY_SAFE_ACTIONS, createReadOnlyBuilderStore, l
 import { useLiveRunOverlay } from '../liveRunOverlay.js';
 
 const ev = (sequence: number, type: string, nodeId?: string): RunEventDoc =>
-  ({ runId: 'tenant/r1', sequence, type, timestamp: '2026-10-20T00:00:00Z', ...(nodeId ? { nodeId } : {}), payload: {} }) as unknown as RunEventDoc;
+  ({ eventId: `e${sequence}`, runId: 'tenant/r1', sequence, type, timestamp: '2026-10-20T00:00:00Z', ...(nodeId ? { nodeId } : {}), payload: {}, schemaVersion: 1 });
 const node = (id: string) => ({ id, kind: 'core.noop', name: id, position: { x: 0, y: 0 }, config: {} });
 
 beforeEach(() => {
@@ -53,16 +56,17 @@ describe('read-only builder store', () => {
 
   it('graph writes are no-ops and nothing reaches local storage', () => {
     const ro = createReadOnlyBuilderStore();
-    loadReadOnlyGraph(ro, { workflowId: 'run-wf', name: 'Run', nodes: [node('a')], edges: [] });
+    loadReadOnlyGraph(ro, { workflowId: 'run-wf', name: 'Run', nodes: [node('a'), node('b')], edges: [] });
     const setItem = vi.spyOn(Storage.prototype, 'setItem');
     const s = ro.getState();
     s.updateNode('a', { name: 'renamed' });
     s.removeNodes(['a']);
-    s.addEdge({ id: 'e', source: 'a', target: 'a', sourcePort: 'out', targetPort: 'in' } as never);
+    s.addEdge({ source: 'a', target: 'b', sourcePort: 'out', targetPort: 'in' });
     s.setName('x');
     s.persist();
-    expect(ro.getState().nodes.map((n) => n.name)).toEqual(['a']);
+    expect(ro.getState().nodes.map((n) => n.name)).toEqual(['a', 'b']);
     expect(ro.getState().edges).toEqual([]);
+    expect(ro.getState().name).toBe('Run');
     expect(setItem).not.toHaveBeenCalled();
   });
 });

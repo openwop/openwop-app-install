@@ -59,7 +59,12 @@ export const messages = {
     requiredPlaceholder: 'Obligatoire',
     optionalPlaceholder: 'Facultatif',
     missingHint: 'Renseignez les {{n}} entrées obligatoires pour exécuter.',
-    credentialDefault: 'Clé par défaut de l’espace de travail',
+    aiKey: "Clé IA pour cette exécution",
+    aiKeyHelp: "Facultatif. Cette clé ne concerne que les étapes de son fournisseur. Les autres fournisseurs nécessitent leurs propres clés déclarées. Sans remplacement, aucune clé n’est ajoutée et les identifiants existants ou gérés sont conservés.",
+    noKeyOverride: "Aucun remplacement de clé",
+    keyLoadFailed: "Impossible de charger les clés enregistrées. Réessayez avant de choisir une clé.",
+    noSavedAiKeys: "Aucune clé IA enregistrée disponible. Ajoutez-en une dans Paramètres → Clés ou continuez sans remplacement.",
+    credentialDefault: "Aucun remplacement de clé",
     credentialHelp: 'La clé d’API enregistrée qu’utilisent les étapes d’IA de cette exécution. Les clés se trouvent dans Paramètres → Clés.',
   },
   // KTUX-10 — ONE localized transport-failure vocabulary. `classifyHttpError`

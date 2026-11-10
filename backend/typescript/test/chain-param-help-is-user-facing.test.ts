@@ -59,7 +59,7 @@ for (const dir of PACK_DIRS) {
 
 describe('the scan reaches real parameter copy', () => {
   it('finds a substantial number of described chain parameters', () => {
-    expect(PARAMS.length, 'no described parameters found — the ratchet is scanning nothing').toBeGreaterThan(673); // measured 683 (699 on 2026-10-29, before ADR 1023 D2 removed 16 dead provider/model params from the eight funnel blueprint and step chains)
+    expect(PARAMS.length, 'no described parameters found — the ratchet is scanning nothing').toBeGreaterThan(640); // 650 after the KickTodo packs left (ADR 1031 P3); measured 683 (699 on 2026-10-29, before ADR 1023 D2 removed 16 dead provider/model params from the eight funnel blueprint and step chains)
   });
 });
 

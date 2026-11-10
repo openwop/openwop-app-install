@@ -21,11 +21,22 @@
  * selected chat target, case 6 goes red (the Anthropic key is returned for
  * MiniMax speech); with the Anthropic cache reads left out of the cap rows,
  * case 7 goes red; with a stored unsupported provider mapped to MiniMax, case 4
- * goes red (the MiniMax key is sent); with the refresh latch unbounded, case 5b
- * times out.
+ * goes red (the MiniMax key is sent). Re-witnessed in grade-tests wave 78, with each
+ * other case's own sabotage (setting precedence, vault-first, no cross-provider key,
+ * last-good on a failed read, the setting's cap, the candidate's own key).
+ *
+ * CORRECTED 2026-11-03 (wave 78): case 5b used to fail only by HANGING to the test
+ * timeout when the latch was unbounded (a hang, not a witness). It now races the
+ * refresh against a 1 s bound and asserts the result, so a latched refresh is a
+ * plain failed assertion. And the test-message case's "never echoes the key" check
+ * could not fail: the fixture's provider error never contained the key, so the scrub
+ * was never reached. The fixture now echoes it.
  */
 
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import { resetCachedMasterKey } from '../src/byok/encryption.js';
 import { clearCache, configureSecretResolver, setSecret } from '../src/byok/secretResolver.js';
@@ -46,15 +57,22 @@ import {
 import type { Storage } from '../src/storage/storage.js';
 
 let storage: Storage;
-const DATA_DIR = '/tmp/openwop-managed-tier-select-test';
+const DATA_DIR = mkdtempSync(join(tmpdir(), 'openwop-managed-tier-select-'));
 const ENV_KEYS = [
   'OPENWOP_MANAGED_PROVIDER', 'ANTHROPIC_API_KEY', 'ANTHROPIC_MODEL', 'MINIMAX_API_KEY', 'MINIMAX_MODEL',
   'OPENAI_API_KEY', 'OPENAI_MODEL', 'GOOGLE_API_KEY', 'GOOGLE_MODEL', 'OPENWOP_BYOK_EPHEMERAL',
 ] as const;
 
+const FILE_ENV = ['OPENWOP_BYOK_ENCRYPTION_KEY', 'OPENWOP_MANAGED_DAILY_TOKEN_CAP', ...ENV_KEYS] as const;
+const savedEnv = Object.fromEntries(FILE_ENV.map((k) => [k, process.env[k]]));
+
 beforeAll(() => {
   process.env.OPENWOP_BYOK_ENCRYPTION_KEY = 'a'.repeat(64);
   process.env.OPENWOP_MANAGED_DAILY_TOKEN_CAP = '100000';
+});
+afterAll(() => {
+  for (const k of FILE_ENV) { const v = savedEnv[k]; if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  rmSync(DATA_DIR, { recursive: true, force: true });
 });
 
 /** The seam the feature registers, under the test's control. */
@@ -126,13 +144,16 @@ function anthropicSse(text: string, usage: { input: number; output: number; cach
 }
 
 /** The URL, the key header (whichever the provider uses) and the model of the first call. */
-function sentTo(spy: ReturnType<typeof vi.spyOn>): { url: string; key: string | undefined; model: unknown } {
-  const [url, init] = spy.mock.calls[0] as [string, RequestInit];
-  const headers = init.headers as Record<string, string>;
-  const auth = headers.authorization ?? headers.Authorization;
-  const key = headers['x-api-key'] ?? (auth ? auth.replace(/^Bearer /, '') : undefined);
-  const body = init.body ? JSON.parse(String(init.body)) as { model?: unknown } : {};
-  return { url: String(url), key, model: body.model };
+function sentTo(spy: MockInstance<typeof fetch>): { url: string; key: string | undefined; model: unknown } {
+  const call = spy.mock.calls[0];
+  if (!call) throw new Error('no outbound request was made');
+  const [input, init] = call;
+  const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+  const headers = new Headers(init?.headers);
+  const auth = headers.get('authorization');
+  const key = headers.get('x-api-key') ?? (auth ? auth.replace(/^Bearer /, '') : undefined);
+  const body = typeof init?.body === 'string' ? (JSON.parse(init.body) as { model?: unknown }) : {};
+  return { url, key, model: body.model };
 }
 
 const chat = () => dispatchManagedChat({
@@ -221,7 +242,13 @@ describe('ADR 0990 — the free tier runs on the owner\'s chosen provider', () =
     const now = Date.now();
     vi.spyOn(Date, 'now').mockReturnValue(now + 11_000); // past the 10 s bound
     registerManagedTierConfigProvider(async () => ({ provider: 'openai', model: 'gpt-5.6-terra' }));
-    await refreshManagedTierSelection(true);
+    // Bounded: a refresh still latched on the hung read would never settle; the race
+    // turns that into a failed assertion instead of a test-timeout hang.
+    const settled = await Promise.race([
+      refreshManagedTierSelection(true).then(() => 'settled' as const),
+      new Promise<'latched'>((r) => setTimeout(() => r('latched'), 1000)),
+    ]);
+    expect(settled).toBe('settled');
     expect(effectiveManagedTierSelection()).toMatchObject({ provider: 'openai', source: 'setting' });
   });
 
@@ -266,7 +293,8 @@ describe('ADR 0990 — the free tier runs on the owner\'s chosen provider', () =
     await bootstrapManagedProvider();
     const spy = vi.spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(openAiSse('ready'))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'The model `gpt-nope` does not exist' } }), { status: 404, headers: { 'content-type': 'application/json' } }));
+      // A provider error that ECHOES the key, so the scrub is on the path.
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'The model `gpt-nope` does not exist for key sk-openai' } }), { status: 404, headers: { 'content-type': 'application/json' } }));
 
     const ok = await testManagedTierCandidate({ provider: 'openai', model: 'gpt-5.6-terra', tenantId: 'user:op' });
     expect(ok).toMatchObject({ ok: true, provider: 'openai', reply: 'ready' });
@@ -277,6 +305,7 @@ describe('ADR 0990 — the free tier runs on the owner\'s chosen provider', () =
     const bad = await testManagedTierCandidate({ provider: 'openai', model: 'gpt-nope', tenantId: 'user:op' });
     expect(bad.ok).toBe(false);
     expect(JSON.stringify(bad)).not.toContain('sk-openai');
+    expect(bad.ok === false ? bad.message : '').toContain('***');
 
     const noKey = await testManagedTierCandidate({ provider: 'google', model: 'gemini-3.8-flash', tenantId: 'user:op' });
     expect(noKey).toMatchObject({ ok: false, code: 'managed_key_missing' });

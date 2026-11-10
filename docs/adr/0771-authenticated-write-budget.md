@@ -93,6 +93,8 @@ automated client, and a stranger gets nothing new.
     auth.ts:1375).
   - A minted `owk_` key is `api-key` and can never be `env-key`.
 
+> **CORRECTED 2026-11-05 (ADR 1045, TST-FUD-GC-1):** an env key's principal id is now `bearer:<16 hex of sha256(key)>`, not `bearer:<first 8 chars>`; the 8-char form made two keys sharing a prefix one principal (one budget, one audit identity, and an operator-issuer check that let a surviving key vouch for a removed one). Legacy 8-char ids in stored rows are honoured as operator issuers only when exactly one configured key has that prefix. See ADR 1045 § "Env-key principal collision".
+
 ## Alternatives weighed
 
 | option | why not |

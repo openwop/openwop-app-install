@@ -111,18 +111,27 @@ describe('Access Hub manifest wiring (the real FEATURES)', () => {
     expect(memberIds).not.toContain('keys');
   });
 
+  it('ADR 1042 CHAN-P0-8 — the Chat channels tab is a member surface, shown only while `channel-ingress` is on', () => {
+    const member = (on: boolean) => visibleHubRoutes(FEATURES, (id) => id !== 'channel-ingress' || on, false, 'access', ACCESS_GROUPS).map(tabIdOf);
+    // A member who owns a personal Telegram connection manages its senders; the backend's per-connection check decides.
+    expect(member(true)).toContain('channels');
+    expect(member(false)).not.toContain('channels');
+  });
+
   it('tags exactly the Credentials + Identity surfaces as hub tabs', () => {
     // Users/People is intentionally NOT a hub tab — it keeps its own /users
     // surface (ADR 0144 §correction).
     expect(new Set(adminHub().map(tabIdOf))).toEqual(
-      new Set(['keys', 'connections', 'voice', 'endpoints', 'mcp', 'api-keys', 'orgs', 'capability-firewall']),
+      // ADR 1042 CHAN-P0-8 — `channels` (the chat-channel settings, gated on
+      // `channel-ingress`; visible here because the predicate is `() => true`).
+      new Set(['keys', 'connections', 'voice', 'endpoints', 'mcp', 'api-keys', 'channels', 'orgs', 'capability-firewall']),
     );
   });
 
   it('groups them correctly', () => {
     const hub = adminHub();
     const groupOf = (id: string) => hub.find((r) => tabIdOf(r) === id)!.hubTab.group;
-    for (const id of ['keys', 'connections', 'voice', 'endpoints', 'mcp', 'api-keys']) expect(groupOf(id)).toBe('credentials');
+    for (const id of ['keys', 'connections', 'voice', 'endpoints', 'mcp', 'api-keys', 'channels']) expect(groupOf(id)).toBe('credentials');
     for (const id of ['orgs', 'capability-firewall']) expect(groupOf(id)).toBe('identity');
   });
 

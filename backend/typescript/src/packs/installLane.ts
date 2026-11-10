@@ -17,7 +17,7 @@
 import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, renameSync, rmSync } from 'node:fs';
-import { ARCHIVE_DIR, archivedVersionDir } from './agentPackArchive.js';
+import { ARCHIVE_DIR, archivedVersionDir, holdArchiveTemp } from './agentPackArchive.js';
 import { invalidatePackTrustVerdict } from '../host/packTrust.js';
 import { OpenwopError } from '../types.js';
 import { isTombstoned } from '../host/packTombstones.js';
@@ -166,6 +166,7 @@ export function fetchArchivedVersion(name: string, version: string, opts: { time
 function startArchiveFetch(key: string, name: string, version: string): Promise<boolean> {
   const p = (async (): Promise<boolean> => {
     let tmp: string | undefined;
+    let releaseTmp: (() => void) | undefined;
     try {
       const packDir = resolveDefaultPackDir();
       const final = archivedVersionDir(packDir, name, version);
@@ -176,6 +177,7 @@ function startArchiveFetch(key: string, name: string, version: string): Promise<
       const parent = join(packDir, ARCHIVE_DIR, name);
       mkdirSync(parent, { recursive: true });
       tmp = join(parent, `.tmp-${version}-${randomBytes(4).toString('hex')}`);
+      releaseTmp = holdArchiveTemp(tmp); // TST-FIA-GC1: the install's own prune must not sweep it
       const registry = process.env.OPENWOP_REGISTRY_URL;
       await installPackFromRegistry(target, { packDir, destDir: tmp, ...(registry ? { registry } : {}), trustedKeysDir: trustedKeysDir() });
       // A dir without a marker is a partial or tampered leftover: replace it.
@@ -202,6 +204,7 @@ function startArchiveFetch(key: string, name: string, version: string): Promise<
       if (tmp) {
         try { rmSync(tmp, { recursive: true, force: true }); } catch { /* best-effort */ }
       }
+      releaseTmp?.();
     }
   })().finally(() => inflight.delete(key));
   inflight.set(key, p);

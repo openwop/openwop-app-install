@@ -15,6 +15,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { render } from '@testing-library/react';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { declaredRows } from '../../../scripts/featureGateDeclarations.mjs';
 
 import { Notice } from '../Notice.js';
 import { GlobalLiveRegion, announce } from '../announce.js';
@@ -48,7 +49,7 @@ const announcedSuccess = (p: string): number =>
   (read(p).match(/<Notice[^>]*variant\s*=\s*"success"[^>]*\bannounce\s*[:=]/g) ?? []).length;
 
 /** Sites that report a completed user action. Each announces exactly one notice. */
-const WIRED = [
+const HOST_WIRED = [
   // Phase 1 — render shape alone identifies them: `{notice ? <Notice …>{notice}</Notice> : null}`.
   'agents/AgentBoardPanel.tsx',
   'agents/AgentDashboardPage.tsx',
@@ -67,12 +68,14 @@ const WIRED = [
   'byok/SubscriptionCredentialCard.tsx',
   'features/commerce/StorefrontPage.tsx',
   'features/forms/render/PublicFormRenderer.tsx',
-  'features/kicktodo-studio/CandidateWorkspacePage.tsx',
   'features/profiles/ProfileWorkflowsTab.tsx',
   'features/projects/ProjectWorkflowsTab.tsx',
   'features/sharing/SharedQuoteView.tsx',
   'orgs/InvitesSection.tsx',
 ];
+/** ADR 1031 P2 — plus each feature package's `noticeAnnounceSuccess.wired` rows
+ *  (`<feature>/gateDeclarations.json`, both feature roots). */
+const WIRED = [...HOST_WIRED, ...declaredRows(SRC, 'noticeAnnounceSuccess', 'wired').map(([f]) => f as string)];
 
 /**
  * Deliberately SILENT, with the reason — because the skip is the part a later
@@ -201,26 +204,4 @@ describe('tranche 2 wiring stays wired', () => {
     expect(bannerLines[0]).not.toMatch(/\bannounce\s*[:=]/);
   });
 
-  /**
-   * `ProgressPage` is split the same way, so it left `NOT_ANNOUNCED` (whose
-   * `announced()` counts every variant). The `completed` celebration stays
-   * SILENT: it renders from a standing state and would re-announce on every
-   * visit. The PT-2 catalog-failure warning DOES announce: a failed read is new
-   * information the user has no other way to learn (the InvitesSection
-   * precedent above), and it only renders when this visit's read failed.
-   * The Leave-challenge failure announces for the same reason: it is an `error`
-   * Notice gated on `leaveFailed`, so it speaks only when the user's own leave
-   * just failed, never from a standing state. Both announcing notices are
-   * failures; a success announce on this page is still 0.
-   */
-  it('ProgressPage announces only its two failures, never the completed celebration', () => {
-    const s = read('features/kicktodo/ProgressPage.tsx');
-    const celebration = s.split('\n').filter((l) => l.includes("t('progressCompletionCelebration')"));
-    expect(celebration).toHaveLength(1); // the celebration exists — the check is not vacuous
-    expect(celebration[0]).not.toMatch(/\bannounce\s*[:=]/);
-    expect(announcedSuccess('features/kicktodo/ProgressPage.tsx')).toBe(0);
-    expect(announced('features/kicktodo/ProgressPage.tsx')).toBe(2);
-    expect(s).toContain("announce={t('progressNamesUnknown')}");
-    expect(s).toContain(`{leaveFailed && <Notice variant="error" announce={t('leaveError')}>`);
-  });
 });

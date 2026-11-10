@@ -380,7 +380,7 @@ export async function activateModel(tenantId: string, orgId: string, modelId: st
   const pid = pointerId(tenantId, orgId);
   const current = await activePointers.get(pid);
   if (current && current.modelId === modelId) return projectModel(raw, modelId, current.at); // already active — idempotent
-  if (raw.state === 'archived') throw new OpenwopError('validation_error', 'An archived model cannot be re-activated; clone it into a new planning model.', 409, { modelId });
+  if (raw.state === 'archived') throw new OpenwopError('validation_error', 'An archived model cannot be re-activated; create a new planning model instead.', 409, { modelId });
 
   const next: ActivePointer = { pointerId: pid, tenantId, orgId, modelId, at: nowIso() };
   const swapped = await activePointers.compareAndSwap(current, next);

@@ -63,7 +63,11 @@ export function CmsLanguageSettings({ orgId, onChange }: {
     // the same stale-write family as everywhere else.
     let live = true;
     setSettings(null); setError(null); setGrants(null);
-    setSettingsError(null); setGrantsError(null);
+    setSettingsError(null); setGrantsError(null); setMembers([]);
+    setGrantSubject(''); setGrantLocales(''); setNewLocale('');
+    // CMS-SCOPE-EMPTY-1: an empty route/selection is not an organization.
+    // Cleanup of the previous effect already invalidated its late reads.
+    if (!orgId) return () => { live = false; };
     void getLanguageSettings(orgId)
       .then((s) => { if (!live) return; setSettings(s); onChangeRef.current?.(s); })
       // Leaving `settings` null rendered "Loading languages…" FOREVER — a panel
@@ -117,6 +121,7 @@ export function CmsLanguageSettings({ orgId, onChange }: {
     }
   }, [orgId, errMsg]);
 
+  if (!orgId) return <span className="u-label-sm">{t('langLoading')}</span>;
   if (settingsError) {
     return <Notice variant="error">{t('langLoadFailed', { error: settingsError })}</Notice>;
   }

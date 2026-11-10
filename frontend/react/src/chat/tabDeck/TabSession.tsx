@@ -158,7 +158,7 @@ function TabSessionImpl({
     session, isSending, isHydrating, thinkingAgentId, error, send, cancel, reset, resolveInterrupt, runWorkflowMention,
     regenerate, setFeedback, hasOlderMessages, isLoadingEarlier, loadEarlierMessages, activeAgents, emitSystem, cancelWorkflowRun, loadSessionFromBackend, upsertTranscriptTurn, refreshNewestMessages,
   } = useChatSession({ sessionId, onSessionIdChange: handleSessionIdChange });
-  const { entries: agentEntries } = useAgentMentions();
+  const { entries: agentEntries, isLoading: agentsLoading, error: agentsError } = useAgentMentions();
   // ADR 0154 FU-6 — live channel message delivery (deck parity with ChatSidebar).
   useChannelMessageStream(sessionId, conversationType === 'channel', refreshNewestMessages); // ADR 0327 P2 slice — incremental merge, not a full session reset per frame
   // ADR 0192 D2/D8 — resolved roster for a channel tab (strip, empty state,
@@ -219,21 +219,21 @@ function TabSessionImpl({
   // Count of agent participants — gates the convene footer (mirrors ChatSidebar).
   const conveneAgentCount = (participants ?? []).filter((p) => p.subjectRef.startsWith('agent:')).length;
 
-  // Restore the agent lineup from the conversation's participants once they're
-  // available (mirrors ChatSidebar.selectConversation → activeAgents.setLineup). The
-  // ref guard makes it one-shot per (sessionId, participants) so it doesn't fight the
-  // user re-ordering the lineup mid-session.
+  // ADR 0140 — initial membership needs BOTH the saved participants and a
+  // successfully settled catalog. A loading [] must not consume the one-shot.
+  // Restoration adds known members without replacing a newer local choice;
+  // ordinary participant edits remain owned by the existing callbacks below.
   const lineupDerivedRef = useRef<string | null>(null);
-  const setLineup = activeAgents.setLineup;
+  const restoreLineup = activeAgents.restoreLineup;
   useEffect(() => {
-    if (!participants || participants.length === 0) return;
+    if (!participants || participants.length === 0 || agentsLoading || agentsError || isHydrating || session.id !== sessionId) return;
     if (lineupDerivedRef.current === sessionId) return;
     lineupDerivedRef.current = sessionId;
-    setLineup(participantsToLineup(participants, (agentId) => {
+    restoreLineup(sessionId, participantsToLineup(participants, (agentId) => {
       const e = agentEntries.find((x) => x.agentId === agentId);
       return e ? { persona: e.displayName, slug: e.slug, modelClass: e.modelClass } : null;
     }));
-  }, [participants, sessionId, agentEntries, setLineup]);
+  }, [participants, sessionId, session.id, isHydrating, agentEntries, agentsLoading, agentsError, restoreLineup]);
 
   // Surface streaming transitions to the deck (eviction protection). Fires only on
   // change (effect dep), and the deck's handler no-ops on an unchanged value.

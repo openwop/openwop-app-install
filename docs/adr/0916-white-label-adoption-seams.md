@@ -87,3 +87,24 @@ offers one button per vendor.
 
 - [x] D1–D5 with tests
 - [ ] Tell Book AI the PR number, so it can drop its overrides and the FU-14 edit
+
+## Correction (2026-11-04, ADR 1031 P2): lazy nav copy for lazy-only surfaces
+
+D3 makes a feature's `navMessages` eager so the SIDEBAR and site nav show translated
+labels on first paint. That obligation stands. ADR 1031 P2 adds one narrow allowance:
+
+- **Allowed:** nav copy shown ONLY by a lazily loaded surface may ride the feature's
+  lazy declarations (`FrontendFeature.lazyExtensions` → `extensions.navMessages`) instead
+  of the entry chunk. Today that means the admin rail (`chrome/AdminLayout`), which
+  imports `features/featureExtensions.ts`; the module's top-level await merges the copy into
+  `nav` before the rail renders. It uses the same `<feature id>.` prefix rule, the same
+  no-overwrite merge and the same cap.
+  KickTodo's Trust/Safety admin labels and hints are the first user.
+- **Stays eager:** any nav copy the sidebar, site nav or another first-paint surface
+  shows. Those keep `FrontendFeature.navMessages`, as D3 says.
+- **Enforcement:**
+  - `featureNavMessages.test.ts` applies the cap and the reviewed-declarer list to
+    lazy catalogs as well as eager ones.
+  - `features/kicktodo/__tests__/featureHostDeclarations.test.ts` keeps the KickTodo
+    admin copy OUT of the eager `navMessages` (entry chunk), and proves it resolves
+    in every shipped locale once `featureExtensions` has loaded.

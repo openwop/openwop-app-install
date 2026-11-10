@@ -11,9 +11,23 @@
  *   - re-entry is idempotent (a replayed/resumed gate finds the same record, no new one);
  *   - a CHOKEPOINT reached with a veto-window decision resolves to approve (it cannot wait).
  *
- * What turns it red: the gate suspending as an approval; the early-resolve refusal
- * removed (either lane); the veto outcome not read on resume; a non-recipient allowed;
- * the chokepoint fallback dropped (it would proceed as plain notify-after).
+ * What turns it red (each probe-measured, wave 80): the veto-window branch dropped from
+ * `decideGate` or the `vetoWindow` flag cleared on the timer; the session early-resolve
+ * refusal in `resolveAndResume`; the veto outcome not read on resume; `mayVeto` dropped
+ * from the veto route (a non-recipient is admitted); the 409 on a closed window; the
+ * deadline check in `closeVetoWindow`; `markVetoNotified` skipped; the chokepoint fallback
+ * dropped (it would proceed as plain notify-after); `autonomy-gate` dropped from
+ * `SIDE_EFFECTING_TYPE_PATTERNS` (`executor/sideEffects.ts`), which is what serves the gate on
+ * a replay fork. `MANIFEST_SIDE_EFFECT_FLOOR` has no runtime reader, so removing the gate
+ * from it is green (measured).
+ *
+ * Guards held twice (a single-copy probe is green, by design):
+ *  - the MCP early-resolve refusal: `mcpSemantics.resumeInterrupt` and `resolveAndResume`
+ *    (different files; the session half is witnessed, the MCP copy alone is a ceiling);
+ *  - another run's window: the surface's `record.runId !== run.runId` and
+ *    `closeVetoWindow`'s own run check (different files; witnessed as a held pair);
+ *  - a failed notice: `emitter.emit()` rethrows the insert failure before the stored-row
+ *    check in `emitAutonomyNotice` runs (that check alone is green, measured).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -113,14 +127,15 @@ beforeAll(async () => {
       return { status: 'failure', error: { code: r.error?.code ?? 'pack_node_error', message: r.error?.message ?? 'Pack node returned non-success outcome' } };
     },
   });
-  registerHostWorkflow({
-    workflowId: WF, name: WF, version: '1.0.0',
+  const def: WorkflowDefinition = {
+    workflowId: WF,
     nodes: [
       { nodeId: 'kernel-approve', typeId: GATE, config: { actionClass: 'plan.approve', prompt: 'Run the plan?' } },
       { nodeId: 'after', typeId: 'core.noop', config: {} },
     ],
     edges: [{ edgeId: 'e1', sourceNodeId: 'kernel-approve', targetNodeId: 'after', triggerRule: 'all_success' }],
-  } as unknown as WorkflowDefinition);
+  };
+  registerHostWorkflow(def);
   await setToggle('campaign-orchestration', true);
   await setToggle(AUTONOMY_TOGGLE, true);
   TENANT = (await createWorkspace({ name: 'Veto Agency', ownerSubject: 'oidc:veto-owner' })).tenantId;
@@ -173,7 +188,8 @@ describe('ADR 0942 P4b — the veto window is a timer, never an approval', () =>
     const notices = async () => (await storage.listNotifications({ tenantId: TENANT }))
       .filter(n => n.type === 'campaign.autonomy.notice' && n.metadata?.runId === run.runId);
     const first = await notices();
-    expect(first.length).toBeGreaterThan(0);
+    // Set membership, not a count: another case adds a home-tenant admin to the org.
+    expect(first.map(n => n.recipientUserId)).toEqual(expect.arrayContaining([U.requester, U.admin2]));
     await surface.autonomyResolve(args);
     expect((await notices()).map(n => n.notificationId).sort()).toEqual(first.map(n => n.notificationId).sort());
   });
@@ -226,7 +242,11 @@ describe('ADR 0942 P4b — the veto window is a timer, never an approval', () =>
     const forkId = bareRunId(body.runId ?? '');
     expect(forkId).not.toBe('');
     await vi.waitFor(async () => expect(await statusOf(forkId)).toBe('completed'), { timeout: 8000, interval: 25 });
-    const reproduced = (await storage.listEvents(forkId)).find(e => e.type === 'node.completed' && e.nodeId === 'kernel-approve')?.payload;
+    const forkEvents = await storage.listEvents(forkId);
+    // Served, never re-run: the fork's gate neither suspends nor raises an interrupt.
+    expect(forkEvents.filter(e => e.nodeId === 'kernel-approve').map(e => e.type)).toEqual(['node.started', 'node.completed']);
+    expect(forkEvents.some(e => e.type === 'interrupt.requested')).toBe(false);
+    const reproduced = forkEvents.find(e => e.type === 'node.completed' && e.nodeId === 'kernel-approve')?.payload;
     expect(reproduced).toMatchObject({ outputs: (recorded as { outputs: unknown }).outputs });
     expect((await listOpenVetoes(TENANT, campaign.id)).filter(w => w.runId === forkId)).toEqual([]);
   });
@@ -242,19 +262,21 @@ describe('ADR 0942 P4b — the veto window is a timer, never an approval', () =>
     await fireTimers(WINDOW_MS + 1000);
     await __awaitRunResumeChainForTests(run.runId);
     expect(await statusOf(run.runId)).toBe('failed');
-    const events = await storage.listEvents(run.runId);
-    expect(JSON.stringify(events)).toContain('autonomy_vetoed');
+    const failed = (await storage.listEvents(run.runId)).find(e => e.type === 'node.failed' && e.nodeId === 'kernel-approve')?.payload;
+    expect(failed).toMatchObject({ error: { code: 'autonomy_vetoed' } });
   });
 
   it('nobody can end the window early: a session resolve and an MCP retry are refused', async () => {
-    const { run, interruptId } = await gateRun();
+    const { run, interruptId, status } = await gateRun();
     if (!interruptId) throw new Error('expected a waiting gate');
+    expect(status).not.toBe('completed');
     await expect(resolveAndResume(storage, hostSuite, interruptId, { elapsed: true }, { subjectRef: U.admin2 }))
       .rejects.toMatchObject({ httpStatus: 403, details: { reason: 'autonomy_veto_window' } });
-    const deps = { storage, hostSuite, principal: { principalId: U.requester, tenants: [TENANT] } as unknown as Principal };
+    const principal: Principal = { principalId: U.requester, tenants: [TENANT], token: '' };
+    const deps = { storage, hostSuite, principal };
     expect((await resumeInterrupt(deps, interruptId, { elapsed: true })).kind).toBe('failed');
     expect((await storage.getInterrupt(interruptId))?.resolvedAt).toBeUndefined();
-    expect(await statusOf(run.runId)).not.toBe('completed');
+    expect(await statusOf(run.runId)).toBe(status);
   });
 });
 

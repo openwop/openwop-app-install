@@ -6,8 +6,8 @@
  * Sabotage (wave 14): drop `_` from the prose escaper, the code+link order, the
  * inline fence widening or space padding, the code-block fence widening, the href
  * paren escape, either block-lead escape, the paragraph-only scope of that escape,
- * the deletion→strike export, the nested-list indent, or the table pipe escape →
- * the named case goes red.
+ * the deletion→strike export, the nested-list indent, the table pipe escape, or the
+ * final trim → the named case goes red.
  */
 import { describe, it, expect } from 'vitest';
 import { pmToMarkdown } from '../pmToMarkdown.js';
@@ -56,6 +56,9 @@ describe('pmToMarkdown', () => {
       { type: 'paragraph', content: [text('body')] },
     ]));
     expect(out).toBe('# H\n\nbody\n');
+    const p = (t?: string): JSONContent => ({ type: 'paragraph', ...(t ? { content: [text(t)] } : {}) });
+    // Empty paragraphs would leave runs of newlines and a trailing gap.
+    expect(pmToMarkdown(doc([p('x'), p(), p(), p('y'), p()]))).toBe('x\n\ny\n');
   });
 
   it('degrades an empty document to a trailing newline', () => {
@@ -171,6 +174,7 @@ describe('block-leading escaping (grade pass)', () => {
       { type: 'paragraph', content: [{ type: 'text', text: '> Not a quote' }] },
       { type: 'paragraph', content: [{ type: 'text', text: '- Not a bullet' }] },
       { type: 'paragraph', content: [{ type: 'text', text: '10) Also not a list' }] },
+      { type: 'paragraph', content: [{ type: 'text', text: '+ Not a plus bullet' }] },
     ] });
     const lines = md.trim().split('\n\n');
     expect(lines[0]).toBe('1\\. First point about pricing');
@@ -178,6 +182,7 @@ describe('block-leading escaping (grade pass)', () => {
     expect(lines[2]).toBe('\\> Not a quote');
     expect(lines[3]).toBe('\\- Not a bullet');
     expect(lines[4]).toBe('10\\) Also not a list');
+    expect(lines[5]).toBe('\\+ Not a plus bullet');
   });
 
   it('a REAL heading/list block still emits its live syntax (escaping is paragraph-only)', () => {

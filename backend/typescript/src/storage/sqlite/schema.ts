@@ -1170,6 +1170,13 @@ export const MIGRATIONS: Record<number, (db: Database) => void> = {
     const has = db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'runs'`).get();
     if (has) db.exec(`CREATE INDEX IF NOT EXISTS runs_admission_key_status_idx ON runs (admission_key, status);`);
   },
+  52: (db) => {
+    // ADR 1043 RELAY-LOG-RETENTION-1 — the delivery log's age-out (`pruneDeliveryLog`)
+    // deletes by `at` across tenants; the (tenant_id, at) index cannot serve that.
+    // Mirrors postgres mig 50.
+    const has = db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'messaging_delivery_log'`).get();
+    if (has) db.exec(`CREATE INDEX IF NOT EXISTS idx_messaging_delivery_log_at ON messaging_delivery_log (at);`);
+  },
 };
 
 /** Highest defined migration — DERIVED from MIGRATIONS, never a hand-bumped cap

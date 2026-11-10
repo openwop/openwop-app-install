@@ -14,7 +14,7 @@
 import { resolveHeadlessAi } from '../../host/headlessAi.js';
 import { OpenwopError } from '../../types.js';
 import type { ChatMessage } from '../../providers/dispatch.js';
-import { sanitizeSectionOverlay, type SectionType } from './cmsService.js';
+import { restoreItemStates, sanitizeSectionOverlay, type SectionType } from './cmsService.js';
 import { createLogger } from '../../observability/logger.js';
 
 const log = createLogger('feature.cms.rewrite');
@@ -107,7 +107,8 @@ export async function rewriteSectionData(
   const attempt = (completion: string): Record<string, unknown> | null => {
     const extracted = extractObject(completion);
     if (!extracted) return null;
-    const cleaned = sanitizeSectionOverlay(sectionType, extracted);
+    // ADR 1038 D8 — a rewrite changes words, never a list item's state.
+    const cleaned = sanitizeSectionOverlay(sectionType, restoreItemStates(data, extracted));
     if (Object.keys(cleaned).length === 0) return null;
     return keepNonText(data, { ...data, ...cleaned }) as Record<string, unknown>;
   };

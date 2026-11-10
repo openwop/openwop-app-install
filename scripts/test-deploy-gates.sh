@@ -2068,9 +2068,22 @@ fg_reset; printf '[{"id":7,"enforcement":"active","name":"release-freeze | holde
 check "release-freeze: an expired freeze still reports frozen" 3 "$(RF status)"
 grep -q 'EXPIRED' "$FG/out" && ok "  ...flagged EXPIRED (the holder may be gone)" || bad "  ...but not flagged as expired"
 # merge-train refuses BEFORE its 45-minute gate when someone else holds the freeze.
-MT() { ( PATH="$FGBIN:$PATH" FG_DIR="$FG" RELEASE_FREEZE_REPO=o/r OPENWOP_FREEZE_HOLDER="${1:-}" OPENWOP_TRAIN_DIR="$TMP/no-train" OPENWOP_TRAIN_LOCK="$TMP/no-train.lock" \
+# This runs against the REAL checkout, so `git fetch origin` must never happen here:
+# it moved refs/remotes/origin/* in the shared clone during every gate, and failed
+# (128) on the remote gate VM, whose rebuilt checkout has no remote (ADR 0863 D9
+# shadow gate, 2026-11-02). A git shim refuses and records any fetch.
+NOFETCH="$TMP/nofetch-bin"; mkdir -p "$NOFETCH"; : > "$FG/git-fetch"
+REAL_GIT="$(command -v git)"
+cat > "$NOFETCH/git" <<SHIM
+#!/bin/sh
+for a in "\$@"; do [ "\$a" = fetch ] && { echo fetch >> "$FG/git-fetch"; exit 128; }; done
+exec "$REAL_GIT" "\$@"
+SHIM
+chmod +x "$NOFETCH/git"
+MT() { ( PATH="$NOFETCH:$FGBIN:$PATH" FG_DIR="$FG" RELEASE_FREEZE_REPO=o/r OPENWOP_FREEZE_HOLDER="${1:-}" OPENWOP_TRAIN_DIR="$TMP/no-train" OPENWOP_TRAIN_LOCK="$TMP/no-train.lock" \
         bash "$ROOT/scripts/merge-train.sh" --dry-run 4242 >"$FG/mt" 2>&1; echo $? ); }
 check "merge-train: someone else's freeze → refuses" 1 "$(MT me)"
+[ ! -s "$FG/git-fetch" ] && ok "  ...without fetching first (no network, no ref moves)" || bad "  ...but it ran git fetch before refusing"
 grep -q 'Not gating a train that cannot merge' "$FG/mt" && ok "  ...before the gate, naming the freeze" || bad "  ...but not for the freeze: $(tail -2 "$FG/mt")"
 
 # Restore for anything downstream.

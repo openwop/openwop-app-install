@@ -188,6 +188,15 @@ describe('ADR 0390 P3 — custom-domain /pod mapping', () => {
     expect(epBot.status).toBe(200);
     expect(epBot.body).toContain('<h1>Episode One</h1>');
 
+    // The pages name the domain's own addresses (canonical, og:url, the episode
+    // link and the JSON-LD series URL), never the platform's org-scoped path.
+    const canon = (html: string): string => /<link rel="canonical" href="([^"]+)">/.exec(html)?.[1] ?? '';
+    expect(canon(showBot.body)).toBe(`https://${host}/pod/${showSlug}`);
+    expect(showBot.body).toContain(`href="https://${host}/pod/${showSlug}/${episodeSlug}"`);
+    expect(canon(epBot.body)).toBe(`https://${host}/pod/${showSlug}/${episodeSlug}`);
+    expect(epBot.body).toContain(`"url":"https://${host}/pod/${showSlug}"`);
+    expect(showBot.body + epBot.body).not.toContain(`/pod/${orgId}/`);
+
     // unknown show on the bound host → uniform 404
     expect((await rawGet(`/pod/no-such-show`, { host })).status).toBe(404);
   });

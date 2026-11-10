@@ -27,16 +27,25 @@
  * legs for approvalSla / actionExecution would be new coverage.
  */
 import { describe, expect, it } from 'vitest';
-import { runNoticeAudience, isParticipantFacingRun, PARTICIPANT_FACING_PURPOSES } from '../src/notifications/runNoticeAudience.js';
+// ADR 1031 P2 — participant-facing purposes are feature-declared, recorded at composition.
+import '../src/features/index.js';
+import { runNoticeAudience, isParticipantFacingRun, PARTICIPANT_FACING_PURPOSES, participantFacingPurposes } from '../src/notifications/runNoticeAudience.js';
+import { featureParticipantFacingPurposeOwners } from '../src/host/featureContributions.js';
+import { featureSourceRoots } from './helpers/featureSourceRoots.js';
 import { setNotificationBackend } from '../src/notifications/emitter.js';
 import { openStorage } from '../src/storage/index.js';
 import { emitRunFailureNotification } from '../src/notifications/notify.js';
-import { readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const src = (rel: string): string =>
   readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', rel), 'utf8');
+
+const walkTs = (d: string): string[] => readdirSync(d).flatMap((n) => {
+  const p = path.join(d, n);
+  return statSync(p).isDirectory() ? (n === '__tests__' ? [] : walkTs(p)) : (p.endsWith('.ts') ? [p] : []);
+});
 
 describe('ADR 0710 — run-notice audience', () => {
   it('leg 1: a PERSONAL workspace keeps the broadcast — role-addressing it would hide a solo user\'s own failures', () => {
@@ -79,31 +88,27 @@ describe('ADR 0710 — run-notice audience', () => {
     expect(solo[0]!.recipientRole ?? null, 'a personal workspace keeps the broadcast').toBeNull();
   });
 
-  it('leg 4: a participant-facing purpose is recognised and marks the notice for aggregation', () => {
+  it('leg 4: an ordinary purpose is NOT participant-facing (the positive path over a real feature purpose lives with that feature\'s tests)', () => {
     const shared = 'ws:0d2f9c';
-    expect(isParticipantFacingRun({ purpose: 'kickbot-coach-turn' })).toBe(true);
     expect(isParticipantFacingRun({ purpose: 'some-ordinary-workflow' })).toBe(false);
     expect(isParticipantFacingRun(undefined)).toBe(false);
-
-    const p = runNoticeAudience({ tenantId: shared, metadata: { purpose: 'kickbot-coach-turn' } });
-    expect(p.aggregatePerJobPerDay, 'a participant-facing run aggregates').toBe(true);
-    expect(p.reason).toBe('operator-role-participant-facing');
 
     const o = runNoticeAudience({ tenantId: shared, metadata: { purpose: 'ordinary' } });
     expect(o.aggregatePerJobPerDay, 'an ordinary workflow does NOT aggregate').toBe(false);
   });
 
-  it('leg 5: the registry names purposes that are actually WRITTEN at the scheduling sites', () => {
-    // A registry of strings nobody emits is a gate that cannot fire. Each entry
-    // must appear as a `purpose:` in the feature that schedules the run.
-    const sites = [
-      'features/kicktodo-core/kickbotCoachTurnService.ts',
-      'features/kicktodo-core/enrollmentService.ts',
-      'features/kicktodo-accountability/sessionService.ts',
-      'features/kicktodo-integrations/calendarSyncService.ts',
-    ].map(src).join('\n');
-    for (const purpose of PARTICIPANT_FACING_PURPOSES) {
-      expect(sites, `registry entry '${purpose}' is not written by any scheduling site — the registry would never match`).toContain(`purpose: '${purpose}'`);
+  it('leg 5: every registered purpose is actually WRITTEN at a scheduling site in its declaring feature', () => {
+    // A registry of strings nobody emits is a gate that cannot fire. ADR 1031 P2:
+    // the purposes are feature-declared (`hostContributions.participantFacingRunPurposes`),
+    // so each must appear as a `purpose:` in a file of the feature that declares it,
+    // wherever that feature lives (src/features or src/adopter/features).
+    const owners = featureParticipantFacingPurposeOwners();
+    expect([...participantFacingPurposes()].sort()).toEqual([...PARTICIPANT_FACING_PURPOSES, ...owners.map((o) => o.purpose)].sort());
+    for (const { featureId, purpose } of owners) {
+      const dir = featureSourceRoots().map((r) => path.join(r, featureId)).find((d) => existsSync(d));
+      expect(dir, `${featureId} has no source directory`).toBeDefined();
+      const text = walkTs(dir!).map((f) => readFileSync(f, 'utf8')).join('\n');
+      expect(text, `'${purpose}' (declared by ${featureId}) is not written by any of its scheduling sites — the registry would never match`).toContain(`purpose: '${purpose}'`);
     }
   });
 
@@ -136,38 +141,6 @@ describe('ADR 0710 — run-notice audience', () => {
     expect(c, 'the audience decision must be written where the emit is').toContain('ADR 0710 AUDIENCE DECISION');
     expect(c, 'and must state what would reverse it').toContain('What WOULD change this');
   });
-  it('leg 9: BEHAVIOURAL — a participant-facing job emits ONE operator notice per day, an ordinary workflow emits every time', async () => {
-    const storage = await openStorage('memory://');
-    setNotificationBackend(storage);
-    const TENANT = 'ws:agg-test';
-
-    const seed = async (runId: string, workflowId: string, purpose?: string): Promise<void> => {
-      await storage.insertRun({
-        runId, tenantId: TENANT, workflowId, status: 'failed',
-        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-        inputs: {}, configurable: {},
-        metadata: purpose ? { purpose } : {},
-      });
-    };
-    const countFor = async (workflowId: string): Promise<number> =>
-      (await storage.listNotifications({ tenantId: TENANT, limit: 200, includeArchived: true }))
-        .filter((r) => r.type === 'workflow.failed' && r.workflowId === workflowId).length;
-
-    // participant-facing: three failed runs of the SAME job
-    await seed('run:p1', 'wf:coach', 'kickbot-coach-turn');
-    await seed('run:p2', 'wf:coach', 'kickbot-coach-turn');
-    await seed('run:p3', 'wf:coach', 'kickbot-coach-turn');
-    for (const r of ['run:p1', 'run:p2', 'run:p3']) {
-      await emitRunFailureNotification(storage, r, { code: 'x', userMessage: 'boom' });
-    }
-    expect(await countFor('wf:coach'), 'a broken reminder must page the operator ONCE, not once per participant').toBe(1);
-
-    // ordinary workflow: aggregation must NOT apply — every failure is its own event
-    await seed('run:o1', 'wf:ordinary');
-    await seed('run:o2', 'wf:ordinary');
-    for (const r of ['run:o1', 'run:o2']) {
-      await emitRunFailureNotification(storage, r, { code: 'x', userMessage: 'boom' });
-    }
-    expect(await countFor('wf:ordinary'), 'an ordinary workflow must not be silently aggregated').toBe(2);
-  });
+  // Leg 9 (BEHAVIOURAL aggregation over a participant-facing purpose) moved with its
+  // KickTodo purpose to test/kicktodo/kicktodo-run-notice-audience.test.ts (ADR 1031 P2).
 });

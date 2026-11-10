@@ -56,13 +56,13 @@ async function send(method: string, path: string, body?: unknown): Promise<Reply
   try { json = JSON.parse(text) as Record<string, unknown>; } catch { /* asserted below */ }
   return { status: res.status, json, text };
 }
+/** Polls the run until it is terminal: `vi.waitFor` on the real condition, no fixed sleep. */
 async function waitTerminal(runId: string): Promise<string> {
-  for (let i = 0; i < 400; i += 1) {
+  return vi.waitFor(async () => {
     const status = String(((await send('GET', `/runs/${runId}`)).json as { status?: string }).status ?? '');
-    if (['completed', 'failed', 'cancelled'].includes(status)) return status;
-    await new Promise((res) => setTimeout(res, 25));
-  }
-  throw new Error(`run ${runId} never settled`);
+    if (!['completed', 'failed', 'cancelled'].includes(status)) throw new Error(`run ${runId} not settled (${status || 'no status'})`);
+    return status;
+  }, { timeout: 10_000, interval: 25 });
 }
 type Ev = { type: string; sequence: number; payload: Record<string, unknown> };
 
@@ -103,8 +103,9 @@ describe('ADR 0989 D1/D4/D5 — the isolation fixture over HTTP', () => {
       .sort((a, b) => a.sequence - b.sequence);
     const calls = evs.filter((e) => e.type === 'agent.tool-called' && e.payload['toolName'] === MEMORY_TOOL);
     const rets = evs.filter((e) => e.type === 'agent.tool-returned' && e.payload['toolName'] === MEMORY_TOOL);
-    expect(rets.length).toBe(calls.length);
-    expect(rets.length).toBeGreaterThanOrEqual(8);
+    // The vendored fixture scripts 4 memory calls and runs `trials.count` 2: exactly 8.
+    expect(calls).toHaveLength(8);
+    expect(rets).toHaveLength(8);
     for (const r of rets) expect(r.payload['outcome'], JSON.stringify(r.payload)).toBeDefined();
     const byCall = new Map(rets.map((r) => [r.payload['callId'], r.payload['outcome'] as Record<string, unknown>]));
     const reads = calls.filter((e) => (e.payload['inputs'] as Record<string, unknown>)['op'] === 'read')

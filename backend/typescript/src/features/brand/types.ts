@@ -164,6 +164,9 @@ export interface BrandTheme {
   contrastLevel?: 'standard' | 'medium' | 'high';
   radius?: 'sm' | 'md' | 'lg';
   density?: 'compact' | 'comfortable';
+  /** ADR 1029 D6 — the public pages' motion character. Absent/`calm` = the stock
+   *  motion tokens; `lively` travels further; `subtle` fades without travel. */
+  motion?: 'calm' | 'lively' | 'subtle';
   /** Advanced tier: explicit per-token overrides layered over the generated set. */
   override?: BrandThemeOverride;
 }

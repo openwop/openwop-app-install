@@ -29,6 +29,27 @@ function scopedArgs(i) {
   return { orgId: orgId || undefined, channel: channel || 'email', purpose: str(i.purpose) || undefined, topicId: str(i.topicId) || undefined };
 }
 
+/** ADR 1024 D6.1 (`CDP2WF-9`) — the ineligibility reasons that describe the PERSON, not a
+ *  fault: they did not consent (`consent`), opted out of the topic (`topic_opt_out`), are
+ *  suppressed, have no address (`no_address`/`no_email`), are no longer in the CRM
+ *  (`contact_not_found`: erased or deleted; a mis-mapped trigger id reads the same, which
+ *  is why the stop records the reason), or have had enough mail (`frequency_cap`). With `stopOnIneligible`, a journey
+ *  node ends cleanly on one of these (`success`, `{ eligible|enrolled: false, stopped }`)
+ *  so the chain can branch to a no-op terminal instead of failing the run. Everything
+ *  else still FAILS: an unreadable store, a paused sender, a missing client, quiet hours
+ *  (that one should wait, not end: filed `CDP2WF-26`). Pinned against the service's reason
+ *  unions by `test/adr1024-journeys-normal-stops.test.ts`. */
+export const NORMAL_STOP_REASONS = Object.freeze([
+  'consent', 'topic_opt_out', 'suppressed', 'no_address', 'no_email', 'contact_not_found', 'frequency_cap',
+]);
+
+/** `stopOnIneligible` (ADR 1024) or its single-reason predecessor `stopOnSuppressed`
+ *  (J955WF-12). */
+function stopsCleanlyOn(i, reason) {
+  if (i.stopOnIneligible === true) return NORMAL_STOP_REASONS.includes(reason);
+  return i.stopOnSuppressed === true && reason === 'suppressed';
+}
+
 function contactIdOf(ctx) {
   const i = ctx.inputs ?? {};
   return str(i.contactId)
@@ -37,7 +58,10 @@ function contactIdOf(ctx) {
 
 /** Idempotent enrollment guard: enrolled:false ⇒ FAIL the run with
  *  `already_enrolled` — the honest stop that prevents double-sends on event
- *  redelivery or manual re-fires. */
+ *  redelivery or manual re-fires. With `stopOnIneligible: true` (ADR 1024 D6.1) an
+ *  ineligible person, an existing enrollment and a superseding journey all END the
+ *  run cleanly: `success` with `{ enrolled: false, stopped: <reason> }`, for a
+ *  `falsy enrolled` edge to a no-op terminal. */
 export async function enroll(ctx) {
   const cj = ensureJourneys(ctx);
   const i = ctx.inputs ?? {};
@@ -62,6 +86,7 @@ export async function enroll(ctx) {
     ? await cj.checkChannelEligibility({ contactId, orgId: scoped.orgId, channel: scoped.channel, purpose: scoped.purpose, topicId: scoped.topicId })
     : await cj.checkEligibility({ contactId });
   if (!elig.eligible) {
+    if (stopsCleanlyOn(i, elig.reason)) return { status: 'success', outputs: { enrolled: false, stopped: elig.reason, journeyId, contactId } };
     return { status: 'failed', error: { code: 'not_eligible', message: `Contact ${contactId} is not eligible: ${elig.reason}.` } };
   }
   // ADR 0299: optional cross-journey arbitration. `priority` (higher wins) +
@@ -77,6 +102,9 @@ export async function enroll(ctx) {
     ...(exclusivityGroup ? { exclusivityGroup } : {}),
   });
   if (!r.enrolled) {
+    if (i.stopOnIneligible === true) {
+      return { status: 'success', outputs: { enrolled: false, stopped: r.reason === 'superseded' ? 'superseded' : 'already_enrolled', journeyId, contactId } };
+    }
     // `superseded` (ADR 0299) ⇒ a higher-priority journey holds the exclusivity
     // group; this one is skipped, honestly and stably (not a double-send).
     if (r.reason === 'superseded') {
@@ -98,6 +126,7 @@ export async function eligibility(ctx) {
   }
   const r = await cj.checkEligibility({ contactId });
   if (!r.eligible) {
+    if (stopsCleanlyOn(ctx.inputs ?? {}, r.reason)) return { status: 'success', outputs: { eligible: false, stopped: r.reason, contactId } };
     return { status: 'failed', error: { code: 'not_eligible', message: `Contact ${contactId} is not eligible: ${r.reason}.` } };
   }
   // `to` rides the edge into a downstream email-send node's input port.
@@ -124,8 +153,9 @@ export async function channelEligibility(ctx) {
     // this re-check is a CORRECT end of the journey, not a failure: with `stopOnSuppressed`, that
     // ONE reason succeeds with `{ eligible: false, stopped: 'suppressed' }` so the chain can branch
     // to a clean terminal. Every other reason (consent, no address, unreadable stores…) still fails.
-    if (r.reason === 'suppressed' && i.stopOnSuppressed === true) {
-      return { status: 'success', outputs: { eligible: false, stopped: 'suppressed', contactId, channel: r.channel } };
+    // ADR 1024 D6.2 — `stopOnIneligible` widens this to every NORMAL_STOP_REASONS reason.
+    if (stopsCleanlyOn(i, r.reason)) {
+      return { status: 'success', outputs: { eligible: false, stopped: r.reason, contactId, channel: r.channel } };
     }
     return { status: 'failed', error: { code: 'not_eligible', message: `Contact ${contactId} is not eligible for ${r.channel}: ${r.reason}.` } };
   }

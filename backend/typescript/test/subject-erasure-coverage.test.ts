@@ -57,7 +57,7 @@ const ERASED = new Map<string, string>([
   ['workspace-join:record', 'eraseSubjectWorkspaceJoins — the record is DELETED (workspaceJoinLedger, ADR 0684 §7). It is subject-keyed and says where a person has been, so a DSAR must reach it. That CONFLICTS with §7, which wants the record durable so a removed participant is never silently re-joined: erasing it lets a removed user be auto-joined again on next sign-in. Erasure still wins, because membership removal is NOT the ban control — `authRoutes.ts` refuses a non-active ACCOUNT with a 403 before auto-join runs, and no data-subject right reaches that. §7 protects the ordinary case (an operator tidying a roster); a genuine ban is enforced one layer up. An operator who bans by removing membership alone has always had a weaker control than they thought, which is worth stating rather than hiding behind an exemption.'],
   ['job-search:apply-grant', 'eraseSubjectApplyGrants — the grant is DELETED, not redacted (ADR 0541): it is standing authority to act on a named person\'s behalf, and a tombstone that still authorises anything is worse than useless. Matches on subjectId AND grantedBy, since the authoriser is also a person who must not be left named on a live authority record.'],
   ['job-search:submission-claim', 'eraseSubjectApplyGrants — DELETED. A claim exists only to stop a duplicate application for a subject; once that subject is erased here it has nothing left to protect.'],
-  ['approval', 'store-level eraser walks pending+resolved rows applying the ADR 0464 §2.3 per-kind redactor registry (approvalService.eraseApprovalSubject); kicktodo-plan-proposal migrated onto it'],
+  ['approval', 'store-level eraser walks pending+resolved rows applying the ADR 0464 §2.3 per-kind redactor registry (approvalService.eraseApprovalSubject); feature kinds register their redactors on it'],
   ['compensation:obligation', 'eraseCompensationSubject — the free-text `reason` is REDACTED, the row is KEPT (compensationLedger). Deleting it would erase the audit fact RFC 0151 §E requires, and worse: removing an UNRESOLVED obligation makes compensationStatusForRun report `completed` for a run whose unwind never finished. `reason` is the only subject-bearing field — the rest are ids, one-way digests, ordinals and enums. Tenant-scoped, since an obligation belongs to a run and a run belongs to a tenant, not to a user.'],
   ['approval:delegation', 'eraseDelegationsForSubject — fromSubject/toSubject/createdBy/reason redacted (approvalDelegations)'],
   ['approval:teams-delivery', 'eraseTeamsDeliveryForSubject — userId/chatId delivery rows deleted (teamsApprovalDelivery)'],
@@ -114,6 +114,7 @@ const ERASED = new Map<string, string>([
   ['autonomy:binding', 'updatedBy → [erased]; the binding is the org\'s configuration (autonomyPolicy eraser, ADR 0942)'],
   ['autonomy:digest-item', 'rows DELETED for the subject — a queued daily notice addressed to that person (recipientUserId) is theirs; deleted after delivery anyway (autonomyPolicy eraser, ADR 0942 D7)'],
   ['autonomy:veto', 'vetoedBy → [erased]; the veto decision and its window stay (they decided whether a campaign step ran, ADR 0942 P4b; autonomyPolicy eraser)'],
+  ['site:brand', 'eraseSubjectSiteBrand (host/siteBrand.ts, ADR 1030 P2) — updatedBy → [erased]; which brand a workspace\'s site uses is org config and is kept (the workflow:budget precedent)'],
   ['workflow:budget', 'updatedBy → [erased] across the tenant\'s budget rows; the budget itself is tenant config (workflowBudgets eraser, ADR 0482 store — the workflow:revision createdBy precedent)'],
   ['auth:subjectLinkDeny', 'rows DELETED — the deny row IS the subject: its key is the opaque externalId (== persistent SAML NameID, RFC 0159). A lingering row is fail-safe (only ever denies, never grants) but is still a subject identifier, so it is removed. Matched via subjectKeyForms + a saml:/scim: prefix strip so a bare-externalId or principal-scoped DSAR key both reach it (subjectLinkService eraser, ADR 0613 store)'],
 ]);
@@ -140,6 +141,12 @@ const REVIEWED_EXEMPT = new Map<string, Exemption>([
   // OUT of this layer by design (ADR 0993 D4, `prompts:entry-version`, erased with
   // their entry). Tenant-indexed (tenantOf), so ADR 0284 teardown reaches it.
   ['proposal-installed-prompts', { reason: 'ADR 0993 D5 tenant prompt-template layer — RFC 0028 templates (id, version, kind, text, variables) keyed by tenant; no host-stamped subject or actor; private library bodies live in prompts:entry-version, not here; tenant-indexed for ADR 0284 teardown' }],
+  // ADR 1033 D2 — the same layer for packs: a tenant's applied workflow-chain or
+  // agent pack, `{ tenantId, name, kind, version, manifest, proposalId, installedAt }`.
+  // The manifest is the reviewed artifact verbatim (RFC 0253: nothing host-owned is
+  // written into it), so the host stamps no subject or actor; who reviewed and
+  // applied it lives on the proposal, which the approval eraser covers.
+  ['proposals:installed-packs', { reason: 'ADR 1033 D2 tenant pack layer — the applied pack.json verbatim plus name, kind, version, source proposal id and install time, keyed by tenant; no host-stamped subject or actor (the reviewer lives on the proposal); tenant-indexed for ADR 0284 teardown' }],
   // ADR 0949 P1b — derived experiment rollup: aggregate COUNTS per (experiment,
   // arm, cohort day). No unit key, visitor id or actor is stored; a subject's
   // erasure removes their CDP events and the next rebuild drops them from `n`.

@@ -7,7 +7,8 @@
  * resolved nowhere after ADR 0775 P2d), and a saved dead id rendered as valid.
  *
  * Sabotage that turns it red: render `wf.workflowCatalog` again; drop the
- * `savedTargetMissing` notice; drop the `isUnresolvedTarget` branch.
+ * `savedTargetMissing` notice; drop the `isUnresolvedTarget` branch; send the save
+ * without its target or its `If-Match` etag.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
@@ -96,7 +97,11 @@ describe('migration target picker', () => {
     patchMigrationJourney.mockRejectedValue(new ApiError('raw', 400, 'raw server text', 'target_workflow_unresolved'));
     await mount();
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Save & continue' })); });
-    expect(patchMigrationJourney).toHaveBeenCalled();
+    expect(patchMigrationJourney).toHaveBeenCalledWith(
+      'w1',
+      { target: { workflowId: 'wf.seed.service-desk-sla-escalation', targetOutcome: 'Clear invoices' }, stageStatus: { target: 'done' } },
+      { ifMatch: 'v1' },
+    );
     expect(document.body.textContent).toContain('That workflow does not exist in this workspace.');
     expect(document.body.textContent).not.toContain('raw server text');
   });

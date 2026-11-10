@@ -1,6 +1,6 @@
 /**
- * Shared-chunk headroom (2026-10-26) — the `settings` and `workforces` catalogs are LAZY
- * (resources.ts), so their pages must wait inside the route <Suspense> until the
+ * Shared-chunk headroom (2026-10-26, ADR 0490 / ADR 0819) — the `settings` and `workforces`
+ * catalogs are LAZY (resources.ts), so their pages must wait inside the route <Suspense> until the
  * namespace loads. Rendering before that paints raw keys ("auditTitle") to a real user.
  *
  * The suite preloads every lazy namespace (src/test/i18n-setup.ts), so no page test can
@@ -50,8 +50,9 @@ let restoreRead = (): void => {};
  *  loaded, and its backend read held open until `release()`. The real ADR 0490 backend
  *  then delivers it, so the page's own `useTranslation` does the suspending. */
 function hold(ns: string): void {
-  const connector = (i18n.services as unknown as { backendConnector: Connector }).backendConnector;
-  bundle = { ...(i18n.getResourceBundle('en', ns) as Record<string, unknown>) };
+  const connector: Connector = i18n.services.backendConnector;
+  const current: Record<string, unknown> = i18n.getResourceBundle('en', ns);
+  bundle = { ...current };
   i18n.removeResourceBundle('en', ns);
   delete connector.state[`en|${ns}`];
   requested = false;

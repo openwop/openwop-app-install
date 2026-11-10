@@ -114,8 +114,11 @@ export function seedDefaultHostSurfaces(): void {
     // A7 — the A2A advertisement flips honestly with the live server endpoint
     // (OPENWOP_A2A_SERVER_ENABLED). The CLIENT is always live; only the
     // server-as-agent posture changes: with the env set, POST /host/openwop-app/a2a
-    // answers agent/getCard + message/send for real (handleA2aRequest), so the
-    // demo-stub caveat is dropped.
+    // answers agent/getCard + message/send for real (handleA2aRequest).
+    // ADR 1045 D3 — in BOTH postures the workflow-side server methods
+    // (publishAgentCard / emitStatus / emitArtifact / pushSend) are ABSENT, and
+    // every note says so: with the server on, the note used to drop the caveat
+    // while the methods were still stubs.
     process.env.OPENWOP_A2A_SERVER_ENABLED === 'true'
       ? {
           name: 'host.a2a',
@@ -130,10 +133,10 @@ export function seedDefaultHostSurfaces(): void {
                 // `streaming` is decoupled onto OPENWOP_A2A_STREAMING (default off →
                 // advertised false) — no conformance 1.34.0 resubscribe witness; the
                 // JSON-RPC server still serves resubscribe, it's just unadvertised.
-                'RFC 0076 §A + RFC 0100. A2A 0.3 JSON-RPC client AND a live server endpoint at POST /host/openwop-app/a2a with DURABLE Tasks — message/send persists the projected A2ATaskState, tasks/get returns live state after disconnect, tasks/resubscribe re-attaches the update stream, and tasks/pushNotificationConfig/set registers an SSRF-guarded push (ADR 0035).'
-              : 'RFC 0076 §A. A2A 0.3 JSON-RPC client (discover/send/stream/tasks/pushConfig) AND a live server endpoint at POST /host/openwop-app/a2a — agent/getCard + message/send route to a real manifest-agent dispatch (synchronous core; set OPENWOP_A2A_DURABLE_TASKS=true for durable Tasks per RFC 0100 / ADR 0035).',
+                'RFC 0076 §A + RFC 0100. A2A 0.3 JSON-RPC client AND a live server endpoint at POST /host/openwop-app/a2a with DURABLE Tasks — message/send persists the projected A2ATaskState, tasks/get returns live state after disconnect, tasks/resubscribe re-attaches the update stream, and tasks/pushNotificationConfig/set registers an SSRF-guarded push (ADR 0035). Authenticated, non-anonymous callers only, tenant bound from the principal, per-principal rate limit on run-starting methods (ADR 1045). The workflow-side server methods (publishAgentCard/emitStatus/emitArtifact/pushSend) are absent: the card is generated from routing, task status is projected from the run, and push fires from the task store.'
+              : 'RFC 0076 §A. A2A 0.3 JSON-RPC client (discover/send/stream/tasks/pushConfig) AND a live server endpoint at POST /host/openwop-app/a2a — agent/getCard + message/send route to a real manifest-agent dispatch (synchronous core; set OPENWOP_A2A_DURABLE_TASKS=true for durable Tasks per RFC 0100 / ADR 0035). Authenticated, non-anonymous callers only, tenant bound from the principal, per-principal rate limit on run-starting methods (ADR 1045). The workflow-side server methods (publishAgentCard/emitStatus/emitArtifact/pushSend) are absent: the card is generated from routing and task status is projected from the run.',
         }
-      : { name: 'host.a2a', supported: true, implementation: 'workflow-engine', note: 'RFC 0076 §A. A2A 0.3 JSON-RPC client from host/a2aSurface.ts — discover/send/stream/tasks/pushConfig against any peer A2A agent; wire state-form normalized to the pack vocabulary. Server-as-agent methods (publishAgentCard/emit*/pushSend) are demo stubs (set OPENWOP_A2A_SERVER_ENABLED=true for a live server endpoint).' },
+      : { name: 'host.a2a', supported: true, implementation: 'workflow-engine', note: 'RFC 0076 §A. A2A 0.3 JSON-RPC client from host/a2aSurface.ts — discover/send/stream/tasks/pushConfig against any peer A2A agent; wire state-form normalized to the pack vocabulary. The workflow-side server methods (publishAgentCard/emit*/pushSend) are absent (ADR 1045); set OPENWOP_A2A_SERVER_ENABLED=true for the live server endpoint.' },
     // These two are already advertised honestly elsewhere — pre-seed
     // them as supported so the UI doesn't show contradictory data.
     { name: 'host.aiProviders', supported: true, implementation: 'workflow-engine', note: 'BYOK via /host/openwop-app/byok/secrets.' },

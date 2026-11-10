@@ -5,10 +5,11 @@
  * pointer/zoom GEOMETRY is proven in the pure `viewport.ts` suite (jsdom drops
  * pointer `button`/`pointerType`), so the pan gate is tested as a pure predicate.
  *
- * Named jsdom ceilings: (1) synthetic pointer events carry no `button` /
- * `pointerType`, so arming is proven on `armsBackgroundPan`, not via fireEvent;
- * (2) jsdom does not implement `isContentEditable`, so that branch of
- * `isInteractiveTarget` is not reachable here.
+ * Named jsdom ceilings: synthetic pointer events carry no `button` /
+ * `pointerType`, so arming is proven on `armsBackgroundPan`. Explicit editable
+ * attributes are real DOM here; the native isContentEditable fallback requires
+ * a browser. GraphSurface additionally exercises native mouse events with
+ * pointer type names to retain button data through React's bubbling path.
  */
 import { describe, it, expect } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
@@ -106,5 +107,65 @@ describe('isInteractiveTarget — the chrome gate shared by pan-arm + graph dese
     const el = document.createElement('div');
     el.setAttribute('role', 'button');
     expect(isInteractiveTarget(el)).toBe(true);
+  });
+});
+
+
+// Real descendant nodes are important: an icon pointer target is SVG, while
+// zoom chrome owns activation through its ancestor button (not the path).
+describe('canvas chrome descendant targets', () => {
+  const base = { backgroundPan: true, button: 0, pointerType: 'mouse', spaceDown: false, panActive: false };
+  function iconIn(parent: Element): SVGPathElement {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    svg.append(path); parent.append(svg); return path;
+  }
+
+  it('keeps SVG icons and nested HTML labels owned by their button or link', () => {
+    for (const tag of ['button', 'a']) {
+      const owner = document.createElement(tag);
+      const path = iconIn(owner);
+      expect(isInteractiveTarget(path)).toBe(true);
+      expect(armsBackgroundPan({ ...base, target: path })).toBe(false);
+      const label = document.createElement('span'); owner.append(label);
+      expect(isInteractiveTarget(label)).toBe(true);
+      expect(armsBackgroundPan({ ...base, target: label })).toBe(false);
+    }
+  });
+
+  it('keeps descendants of ARIA widgets interactive without treating groups as widgets', () => {
+    for (const role of ['button', 'combobox', 'slider', 'textbox']) {
+      const widget = document.createElement('div'); widget.setAttribute('role', role);
+      const path = iconIn(widget);
+      expect(isInteractiveTarget(path)).toBe(true);
+      expect(armsBackgroundPan({ ...base, target: path })).toBe(false);
+    }
+    const group = document.createElement('div'); group.setAttribute('role', 'group');
+    const path = iconIn(group);
+    expect(isInteractiveTarget(path)).toBe(false);
+    expect(armsBackgroundPan({ ...base, target: path })).toBe(true);
+  });
+
+  it('respects editable ancestors and the nearest explicit noneditable island', () => {
+    for (const value of ['', 'true', 'plaintext-only']) {
+      const editor = document.createElement('div'); editor.setAttribute('contenteditable', value);
+      const path = iconIn(editor);
+      expect(isInteractiveTarget(path)).toBe(true);
+      expect(armsBackgroundPan({ ...base, target: path })).toBe(false);
+      const readOnly = document.createElement('span'); readOnly.setAttribute('contenteditable', 'false');
+      editor.append(readOnly);
+      const readOnlyPath = iconIn(readOnly);
+      expect(isInteractiveTarget(readOnlyPath)).toBe(false);
+      expect(armsBackgroundPan({ ...base, target: readOnlyPath })).toBe(true);
+    }
+  });
+
+  it('still arms on a noninteractive SVG canvas path and ignores non-element targets', () => {
+    const canvas = document.createElement('div');
+    const path = iconIn(canvas);
+    expect(isInteractiveTarget(path)).toBe(false);
+    expect(armsBackgroundPan({ ...base, target: path })).toBe(true);
+    expect(isInteractiveTarget(document.createTextNode('background'))).toBe(false);
+    expect(isInteractiveTarget(window)).toBe(false);
   });
 });

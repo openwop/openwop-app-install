@@ -31,7 +31,7 @@ import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
 import { cleanString } from '../../host/boundedStrings.js';
 import { subjectKeyForms } from '../../host/subjectErasureRedaction.js';
-import { listProducts, listOrders, quantizeMoney, CURRENCIES, type Order, type Product } from '../commerce/commerceService.js';
+import { listProducts, listOrders, quantizeMoney, CURRENCIES, ORDER_IDEM_STALE_MS, type Order, type Product } from '../commerce/commerceService.js';
 import type { OrderDiscountContext, OrderDiscountResult, AppliedPromotion } from '../commerce/promotionSeam.js';
 import { resolveSegmentMembers } from '../crm/segmentsService.js';
 import { resolveToggle } from '../../host/featureToggles/service.js';
@@ -282,6 +282,7 @@ export async function deletePromotion(tenantId: string, orgId: string, promotion
   const p = await getPromotion(tenantId, orgId, promotionId);
   if (!p) return false;
   await promotions.delete(promotionId);
+  await ledgers.delete(promotionId).catch(() => undefined); // ADR 1025 D1 — its holds go with it
   log.info('promotion deleted', { tenantId, orgId, promotionId });
   return true;
 }
@@ -321,7 +322,85 @@ export interface PromotionUsage { amount: number; quantity: number }
 export const isDenominated = (p: Promotion): boolean =>
   p.minSpend !== undefined || p.reward.kind === 'fixed' || p.budget?.maxDiscount !== undefined;
 
-function usageFromOrders(orders: Order[]): Map<string, PromotionUsage> {
+// ── Budget holds (ADR 1025 D1) ───────────────────────────────────────────────
+/**
+ * The loss budget used to be DERIVED only: `usageFromOrders` read the order history,
+ * and the order that would count a checkout's spend was written seconds later (after
+ * the inventory CAS and a network tax quote). Five concurrent 1-unit checkouts against
+ * `maxDiscount: 10` burned 50 (probed, MCHWF-1). A HOLD is the in-flight half: the
+ * order lane appends one to the promotion's ledger by compare-and-swap before the order
+ * exists, and commerce commits it (stamps the orderId) after the order row lands, or
+ * releases it on any failure.
+ *
+ * What counts against a budget is unchanged (`usageFromOrders` below, verbatim). Holds
+ * only ADD checkouts that have no order row yet:
+ *   usage = Σ live holds + usageFromOrders(orders NOT named by a live hold).
+ * A committed hold keeps its orderId until it expires, so its order is counted once
+ * through the hold, then through `appliedPromotions`. The ledger is read BEFORE the
+ * orders, so an in-flight spend is never counted zero times while its hold lives; a
+ * commit CAS that fails after the order exists counts it twice for at most the TTL.
+ * Both errors under-spend; neither over-spends. A crashed checkout's hold expires by
+ * itself: no second counter that can leak (ADR 0274's reason for deriving the budget).
+ */
+export const BUDGET_HOLD_TTL_MS = ORDER_IDEM_STALE_MS; // one constant: a hold outlives any createOrder
+/** Grade MCHA-1 — a flash sale on one loss leader is exactly where checkouts contend on
+ *  one ledger row; 5 attempts with no backoff failed late checkouts closed while budget
+ *  remained. Retries re-read only the ledger (not the order history) after a jittered
+ *  backoff. */
+const HOLD_CAS_ATTEMPTS = 25;
+const backoff = (attempt: number): Promise<void> => new Promise((r) => setTimeout(r, Math.floor(Math.random() * (4 + attempt * 4))));
+interface BudgetHold { holdId: string; amount: number; quantity: number; expiresAt: string; orderId?: string }
+/** `version` rises on every write, so a row can never return to byte-identical content
+ *  (grade MCHA-4: hold → commit → expiry prune could otherwise re-match a stale read). */
+interface BudgetLedger { promotionId: string; tenantId: string; orgId: string; version?: number; holds: BudgetHold[] }
+const ledgers = new DurableCollection<BudgetLedger>('promotions:budget-hold', (l) => l.promotionId, undefined, (l) => l.tenantId);
+
+const isBudgeted = (p: Promotion): boolean => p.budget?.maxDiscount !== undefined || p.budget?.maxQuantity !== undefined;
+const liveHolds = (row: BudgetLedger | null, nowMs: number): BudgetHold[] =>
+  (row?.holds ?? []).filter((h) => Date.parse(h.expiresAt) > nowMs);
+/** A hold reference carried through commerce: `<promotionId>|<holdId>`. */
+const holdRef = (promotionId: string, holdId: string): string => `${promotionId}|${holdId}`;
+const parseRef = (ref: string): { promotionId: string; holdId: string } | null => {
+  const i = ref.lastIndexOf('|');
+  return i > 0 ? { promotionId: ref.slice(0, i), holdId: ref.slice(i + 1) } : null;
+};
+
+/** Rewrite one ledger by CAS (bounded retries). `edit` returns the new holds. */
+async function casLedger(tenantId: string, promotionId: string, edit: (holds: BudgetHold[]) => BudgetHold[]): Promise<void> {
+  for (let attempt = 0; attempt < HOLD_CAS_ATTEMPTS; attempt++) {
+    const row = await ledgers.get(promotionId);
+    if (!row || row.tenantId !== tenantId) return;
+    if (await ledgers.compareAndSwap(row, { ...row, version: (row.version ?? 0) + 1, holds: edit(liveHolds(row, Date.now())) })) return;
+    await backoff(attempt);
+  }
+  log.warn('promotion budget hold update lost every race — the hold will expire on its own', { tenantId, promotionId });
+}
+
+/** Commerce, after the order row is written: name the order on each hold. */
+export async function commitBudgetHolds(tenantId: string, refs: readonly string[], orderId: string): Promise<void> {
+  for (const ref of refs) {
+    const r = parseRef(ref);
+    if (!r) continue;
+    await casLedger(tenantId, r.promotionId, (holds) => {
+      // Grade MCHA-3 — the TTL is a bound createOrder is expected to meet, not one it is
+      // forced to. If the hold already expired, the order now counts through its own
+      // `appliedPromotions`; say so, because for that gap the spend was counted zero times.
+      if (!holds.some((h) => h.holdId === r.holdId)) log.warn('promotion budget hold expired before its order was written', { tenantId, promotionId: r.promotionId, orderId, code: 'promotion_hold_expired' });
+      return holds.map((h) => (h.holdId === r.holdId ? { ...h, orderId } : h));
+    });
+  }
+}
+/** Commerce, when the order was NOT written: give the budget back. */
+export async function releaseBudgetHolds(tenantId: string, refs: readonly string[]): Promise<void> {
+  for (const ref of refs) {
+    const r = parseRef(ref);
+    if (r) await casLedger(tenantId, r.promotionId, (holds) => holds.filter((h) => h.holdId !== r.holdId));
+  }
+}
+
+/** `skip(promotionId, orderId)` — a spend already counted through a live hold (ADR 1025
+ *  D1). Per PAIR, not per order: an order can carry a held promotion and an unheld one. */
+function usageFromOrders(orders: Order[], skip?: (promotionId: string, orderId: string) => boolean): Map<string, PromotionUsage> {
   const out = new Map<string, PromotionUsage>();
   for (const o of orders) {
     if (o.status === 'canceled' || o.status === 'refunded') continue;
@@ -353,6 +432,7 @@ function usageFromOrders(orders: Order[]): Map<string, PromotionUsage> {
       ? Math.max(0, Math.min(1, (o.total - (o.refundedAmount ?? 0)) / o.total))
       : 1;
     for (const ap of o.appliedPromotions ?? []) {
+      if (skip?.(ap.promotionId, o.orderId)) continue;
       const cur = out.get(ap.promotionId) ?? { amount: 0, quantity: 0 };
       cur.amount += ap.amount * kept;
       cur.quantity += ap.quantity ?? 0; // whole units — a partial refund does not return a fraction of one
@@ -391,11 +471,15 @@ export async function applyPromotions(ctx: OrderDiscountContext): Promise<OrderD
   // ADR 0819 §1 opt-out — money/compliance truth: this must apply whatever the tenant's plan.
   const assignment = await resolveToggle('promotions', { tenantId: ctx.tenantId });
   if (!assignment?.enabled) return { discount: 0, appliedPromotions: [] };
-  return applyPromotionsUngated(ctx);
+  // ADR 1025 D1 — the ORDER lane reserves; previews (the chat tool, the run surface) call
+  // the engine without `reserve` and never touch the ledger.
+  return applyPromotionsUngated(ctx, { reserve: true });
 }
 
-/** The pure engine (toggle-gate already passed) — deterministic + directly testable. */
-export async function applyPromotionsUngated(ctx: OrderDiscountContext): Promise<OrderDiscountResult> {
+/** The pure engine (toggle-gate already passed) — deterministic + directly testable.
+ *  `reserve` (the order lane only) takes a budget hold for every budgeted promotion that
+ *  fires; the result's `holdIds` must then be committed or released by the caller. */
+export async function applyPromotionsUngated(ctx: OrderDiscountContext, opts: { reserve?: boolean } = {}): Promise<OrderDiscountResult> {
   const nowMs = Date.parse(nowIso());
   const active = (await listPromotions(ctx.tenantId, ctx.orgId))
     .filter((p) => p.active && inWindow(p, nowMs))
@@ -406,11 +490,78 @@ export async function applyPromotionsUngated(ctx: OrderDiscountContext): Promise
     // order cleared a "spend 50" threshold meant as dollars and took ¥10 off.
     .filter((p) => !isDenominated(p) || !p.currency || p.currency === ctx.currency);
   if (active.length === 0) return { discount: 0, appliedPromotions: [] };
-  // ONE order-history read for every budgeted promotion in this evaluation (PRO2-P13).
-  const usage = active.some((p) => p.budget?.maxDiscount !== undefined || p.budget?.maxQuantity !== undefined)
-    ? await promotionUsage(ctx.tenantId, ctx.orgId)
-    : new Map<string, PromotionUsage>();
+  const budgeted = active.filter(isBudgeted);
+  if (budgeted.length === 0) return evaluatePromotions(ctx, active, new Map<string, PromotionUsage>());
+  // Ledger FIRST, then the order history once; a retry re-reads only the ledger. An order
+  // written after the history read has a live hold (committed or not), so it is counted
+  // through that hold.
+  let rows = await readLedgers(ctx, budgeted);
+  const orders = await listOrders(ctx.tenantId, ctx.orgId);
+  if (!opts.reserve) {
+    // A preview: the burn as the order lane would see it (holds included), no new hold.
+    return evaluatePromotions(ctx, active, usageWithHolds(rows, orders, Date.now()));
+  }
+  for (let attempt = 0; attempt < HOLD_CAS_ATTEMPTS; attempt++) {
+    if (attempt > 0) { await backoff(attempt); rows = await readLedgers(ctx, budgeted); }
+    const nowMs = Date.now();
+    const usage = usageWithHolds(rows, orders, nowMs);
+    const result = await evaluatePromotions(ctx, active, usage);
+    const taken: string[] = [];
+    let lost = false;
+    try {
+      for (const ap of result.appliedPromotions) {
+        const promo = budgeted.find((p) => p.promotionId === ap.promotionId);
+        if (!promo) continue;
+        const expected = rows.get(promo.promotionId) ?? null;
+        const hold: BudgetHold = { holdId: randomUUID(), amount: ap.amount, quantity: ap.quantity ?? 0, expiresAt: new Date(nowMs + BUDGET_HOLD_TTL_MS).toISOString() };
+        const next: BudgetLedger = { promotionId: promo.promotionId, tenantId: ctx.tenantId, orgId: ctx.orgId, version: (expected?.version ?? 0) + 1, holds: [...liveHolds(expected, nowMs), hold] };
+        if (!(await ledgers.compareAndSwap(expected, next))) { lost = true; break; }
+        taken.push(holdRef(promo.promotionId, hold.holdId));
+      }
+    } catch (err) {
+      // Commerce swallows a hook error, so ids never returned would strand until the TTL.
+      await releaseBudgetHolds(ctx.tenantId, taken).catch(() => undefined);
+      throw err;
+    }
+    if (!lost) return { ...result, ...(taken.length ? { holdIds: taken } : {}) };
+    // Another checkout moved a ledger between our read and our write: give back what this
+    // attempt took and re-evaluate against the fresh ledger (its spend may change what fires).
+    await releaseBudgetHolds(ctx.tenantId, taken);
+  }
+  // Fail CLOSED for the whole evaluation, never for one promotion: dropping only the
+  // contended one would let a lower-priority promotion that an exclusive winner excludes
+  // fire instead, and would change the approval gateKey between proposal and resume.
+  log.warn('promotion budget contention — this order gets no promotion', { tenantId: ctx.tenantId, orgId: ctx.orgId, code: 'promotion_budget_contended' });
+  return { discount: 0, appliedPromotions: [] };
+}
 
+async function readLedgers(ctx: OrderDiscountContext, budgeted: Promotion[]): Promise<Map<string, BudgetLedger | null>> {
+  const rows = new Map<string, BudgetLedger | null>();
+  for (const p of budgeted) {
+    const row = await ledgers.get(p.promotionId);
+    rows.set(p.promotionId, row && row.tenantId === ctx.tenantId ? row : null);
+  }
+  return rows;
+}
+
+/** usage = Σ live holds + every order spend not already counted through one. */
+function usageWithHolds(rows: Map<string, BudgetLedger | null>, orders: Order[], nowMs: number): Map<string, PromotionUsage> {
+  const held = new Set<string>();
+  for (const [promotionId, row] of rows) for (const h of liveHolds(row, nowMs)) if (h.orderId) held.add(`${promotionId}|${h.orderId}`);
+  const usage = usageFromOrders(orders, (promotionId, orderId) => held.has(`${promotionId}|${orderId}`));
+  for (const [promotionId, row] of rows) {
+    for (const h of liveHolds(row, nowMs)) {
+      const cur = usage.get(promotionId) ?? { amount: 0, quantity: 0 };
+      cur.amount += h.amount;
+      cur.quantity += h.quantity;
+      usage.set(promotionId, cur);
+    }
+  }
+  return usage;
+}
+
+/** One deterministic pass over the active promotions against a given usage. */
+async function evaluatePromotions(ctx: OrderDiscountContext, active: Promotion[], usage: Map<string, PromotionUsage>): Promise<OrderDiscountResult> {
   // Load scoped products once for category matching (bounded per-org catalog).
   const products = new Map<string, Product>((await listProducts(ctx.tenantId, ctx.orgId)).map((p) => [p.productId, p]));
   const applied: AppliedPromotion[] = [];
@@ -489,4 +640,5 @@ export async function applyPromotionsUngated(ctx: OrderDiscountContext): Promise
 
 export async function __resetPromotions(): Promise<void> {
   await promotions.__clear();
+  await ledgers.__clear();
 }

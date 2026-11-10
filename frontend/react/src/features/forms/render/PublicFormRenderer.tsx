@@ -18,6 +18,7 @@ import { useTranslation } from 'react-i18next';
 import { config, fetchOpts } from '../../../client/config.js';
 import { Notice } from '../../../ui/Notice.js';
 import { Skeleton } from '../../../ui/Skeleton.js';
+import { CheckIcon } from '../../../ui/icons/index.js';
 import { CheckboxField, SelectField, TextField, TextareaField } from '../../../ui/Field.js';
 import type { FieldError } from '../../../runs/inputSchemaForm.js';
 import { validatePublicField, validatePublicValues, visibleFields, type PublicFormField } from './deriveFields.js';
@@ -45,6 +46,12 @@ export interface PublicFormRendererProps {
   /** Heading level for the form title — the hosted page passes 'h1' so the
    *  public document has a proper heading root (FRMX-7). */
   titleAs?: 'h1' | 'h2';
+  /** ADR 1064 — the CMS form card: short one-line fields (text, email,
+   *  number) pair two to a row on wide screens, and the success state leads
+   *  with a tick. Off by default, so every other embed is unchanged. */
+  card?: boolean;
+  /** ADR 1080 D12 — the embedding section's own words for the button. */
+  submitLabel?: string | undefined;
 }
 
 const ROOT = () => `${config.baseUrl}/host/openwop-app/public-forms`;
@@ -141,7 +148,7 @@ function fetchPublicForm(formId: string): Promise<RenderSchema> {
   return p;
 }
 
-export function PublicFormRenderer({ formId, context, onSubmitted, renderUnavailable, hideTitle, titleAs }: PublicFormRendererProps): JSX.Element | null {
+export function PublicFormRenderer({ formId, context, onSubmitted, renderUnavailable, hideTitle, titleAs, card = false, submitLabel }: PublicFormRendererProps): JSX.Element | null {
   const { t } = useTranslation('forms');
   // ADR 0339 §D2 — an embedding surface (funnel viewer) can supply context +
   // an onSubmitted hook via the provider; explicit props win on key conflicts.
@@ -439,7 +446,10 @@ export function PublicFormRenderer({ formId, context, onSubmitted, renderUnavail
     // R2 F7 — "submit another": kiosk/table-top and multi-entry embeds needed a
     // remount before. Resets everything INCLUDING the idempotency key (reusing
     // it would dedupe the second submission into the first).
-    return <div ref={(el) => { if (el && successRef.current !== el) { successRef.current = el; el.focus(); } }} tabIndex={-1} className="u-grid u-gap-2">
+    return <div ref={(el) => { if (el && successRef.current !== el) { successRef.current = el; el.focus(); } }} tabIndex={-1} className={card ? 'u-grid u-gap-2 form-card-done' : 'u-grid u-gap-2'}>
+      {/* ADR 1064 — the card's tick: decoration (the Notice carries the words).
+          It pops in by scale only, so with reduced motion it is simply there. */}
+      {card ? <span className="form-card-done__tick" aria-hidden="true"><CheckIcon size={28} /></span> : null}
       <Notice variant="success" announce={schema.submitMessage || t('fillSuccessDefault')}>{schema.submitMessage || t('fillSuccessDefault')}</Notice>
       <button
         type="button" className="fp-btn fp-btn--ghost u-w-auto"
@@ -456,7 +466,7 @@ export function PublicFormRenderer({ formId, context, onSubmitted, renderUnavail
   }
 
   return (
-    <form className="u-grid u-gap-2" onSubmit={(e) => { void submit(e); }} noValidate>
+    <form className={card ? 'u-grid u-gap-2 form-card' : 'u-grid u-gap-2'} onSubmit={(e) => { void submit(e); }} noValidate>
       {hideTitle ? null : titleAs === 'h1' ? <h1 className="u-fs-16 u-m-0">{schema.title}</h1> : <h2 className="u-fs-16 u-m-0">{schema.title}</h2>}
       {/* F-G3 — the error SUMMARY. Focus still lands on the first invalid control
           (FRMX-2/RUX-1, unchanged), so this is announced via role="alert" rather
@@ -494,6 +504,8 @@ export function PublicFormRenderer({ formId, context, onSubmitted, renderUnavail
           required: f.required,
           ...(f.description ? { help: f.description } : {}),
           ...(err ? { error: err } : {}),
+          // ADR 0951 D2 — the replay recorder refuses any page carrying this attribute.
+          ...(f.sensitivity ? { 'data-owx-sensitivity': f.sensitivity } : {}),
         };
         const onBlur = (): void => onBlurField(f.key);
         const ref = (el: HTMLElement | null): void => { controlRefs.current[f.key] = el; };
@@ -511,7 +523,7 @@ export function PublicFormRenderer({ formId, context, onSubmitted, renderUnavail
         if (f.type === 'textarea') {
           return <TextareaField key={f.key} ref={ref} {...common} name={f.key} rows={4} value={typeof values[f.key] === 'string' ? (values[f.key] as string) : ''} onBlur={onBlur} onChange={(e) => onValue(f.key, e.target.value)} />;
         }
-        return (
+        const textField = (
           <TextField
             key={f.key}
             ref={ref}
@@ -529,6 +541,9 @@ export function PublicFormRenderer({ formId, context, onSubmitted, renderUnavail
             onChange={(e) => onValue(f.key, e.target.value)}
           />
         );
+        // ADR 1064 — in the card, a one-line field may share a row (CSS pairs
+        // consecutive short fields on wide screens; the order is unchanged).
+        return card ? <div key={f.key} className="form-card__short">{textField}</div> : textField;
       })}
       {/* Honeypot — named by the server, invisible to people (ADR 0017 abuse controls). */}
       <div className="visually-hidden" aria-hidden="true">
@@ -555,7 +570,7 @@ export function PublicFormRenderer({ formId, context, onSubmitted, renderUnavail
       ) : null}
       <div>
         <button type="submit" className="fp-btn fp-btn--primary" disabled={state === 'submitting'}>
-          {state === 'submitting' ? t('fillSubmitting') : t('fillSubmit')}
+          {state === 'submitting' ? t('fillSubmitting') : (submitLabel || t('fillSubmit'))}
         </button>
       </div>
     </form>

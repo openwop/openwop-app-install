@@ -4,7 +4,8 @@
  * with an "enable-first" case. Each suite records `sourceCommit` + `sourceFiles`
  * so the skill can detect staleness on later runs.
  */
-import type { FeatureToggle, TestSuite, TestCategory } from './manualTestTypes.js';
+import type { TestSuite, TestCategory } from './manualTestTypes.js';
+import { ON, offVia } from './suiteHelpers.js';
 
 const AT = '2026-06-17';
 const SHA0 = '7ebb93b6'; // original first-pass suites
@@ -13,155 +14,8 @@ const AT2 = '2026-06-20';
 const SHA2 = '8e9770e4'; // a11y pass: Strategy suite + chat workflow-progress cases
 const AT3 = '2026-07-04';
 const SHA3 = 'eaf86b86'; // CRM · Gmail inbox sync suite (ADR 0252)
-const ON = { off: false, howToEnable: [] as string[] };
 
-/** OFF feature gated by a `/feature-toggles` flag — the standard enable recipe.
- *
- *  ADR 0600 §7 (`ISU-16`) — step 3 used to read "the feature appears in the nav
- *  and its route is reachable" unconditionally. That is FALSE for every feature
- *  with no page, and this boilerplate is what a human tester follows: they would
- *  file the missing nav entry as THE bug and never reach the real one. `hasPage`
- *  makes the claim conditional instead of dropping it — a feature that DOES get
- *  a nav entry should still be told so. */
-const offVia = (id: string, opts: { hasPage?: boolean } = {}): FeatureToggle => ({
-  off: true,
-  id,
-  howToEnable: [
-    'Open Admin → Platform → Feature toggles (/feature-toggles)',
-    `Switch the "${id}" toggle ON for your tenant`,
-    opts.hasPage === false
-      ? 'Reload. This feature has NO nav entry and NO route of its own — it surfaces through the chat, the Builder gallery, runs and notifications. Do not look for a page.'
-      : 'Reload — the feature appears in the nav and its route is reachable',
-  ],
-  howToRevert: [`Switch the "${id}" toggle OFF again on /feature-toggles`],
-});
-
-export const SUITES: TestSuite[] = [
-  // ── KickTodo G/H waves (ADRs 0425/0426/0428/0432 + 0429/0430) ───────────
-  {
-    key: 'kicktodo-engagement', feature: 'KickTodo Engagement', route: '/leaderboard',
-    description: 'Opt-in leaderboard (k-floor, closed projection) and deterministic awards.',
-    toggle: offVia('kicktodo-engagement'), updatedAt: '2026-07-19', sourceCommit: '',
-    sourceFiles: ['frontend/react/src/features/kicktodo-engagement', 'backend/typescript/src/features/kicktodo-engagement'],
-    cases: [
-      { id: 'KTE-01', title: 'The join gate discloses exactly what becomes visible', priority: 'P0', blocker: true,
-        preconditions: ['kicktodo-engagement toggle ON'],
-        steps: [
-          { action: 'Navigate to /leaderboard without having joined', expect: 'The join card states that ONLY a display name and completed-action count become visible to other members, and that leaving is immediate' },
-          { action: 'Enter a display name and press Join', expect: 'The board renders with you on it' },
-        ] },
-      { id: 'KTE-02', title: 'Below 3 members the board shows only you, and says why', priority: 'P0', blocker: true,
-        preconditions: ['Fewer than 3 members have joined in this workspace'],
-        steps: [
-          { action: 'View the board', expect: 'An info notice explains the board shows others once at least 3 members join; only your own row is listed — no partial list of other people' },
-        ] },
-      { id: 'KTE-03', title: 'Leaving is immediate', priority: 'P1', blocker: false,
-        preconditions: ['You have joined'],
-        steps: [
-          { action: 'Press "Leave leaderboard", then reload', expect: 'You are back to the join gate; your row is gone from the board for everyone' },
-        ] },
-      { id: 'KTE-04', title: 'Awards appear as labeled chips after a check-in', priority: 'P1', blocker: false,
-        preconditions: ['kicktodo-core ON with an active enrollment'],
-        steps: [
-          { action: 'Complete one action on /today, then return to the leaderboard', expect: 'A "First check-in" award chip appears; repeating the same check-in does NOT add a duplicate award' },
-        ] },
-    ],
-  },
-  {
-    key: 'kicktodo-community', feature: 'KickTodo Community', route: '/kicktodo/community',
-    description: 'Approval-gated creator profiles and proof-gated challenge reviews.',
-    toggle: offVia('kicktodo-community'), updatedAt: '2026-07-19', sourceCommit: '',
-    sourceFiles: ['frontend/react/src/features/kicktodo-community', 'backend/typescript/src/features/kicktodo-community'],
-    cases: [
-      { id: 'KTC-01', title: 'A profile is not public until a DIFFERENT identity approves it', priority: 'P0', blocker: true,
-        preconditions: ['kicktodo-community toggle ON'],
-        steps: [
-          { action: 'Fill in handle + display name and press "Submit for approval"', expect: 'The state chip reads "Pending approval" — not "Public"' },
-          { action: 'As the SAME user, attempt to approve your own profile (via the approvals inbox)', expect: 'Refused — separation of duties; the profile stays pending' },
-        ] },
-      { id: 'KTC-02', title: 'A taken handle is refused', priority: 'P1', blocker: false,
-        preconditions: ['Another profile already holds the handle'],
-        steps: [
-          { action: 'Enter that handle (any casing) and save', expect: 'An error surfaces; the handle is not reassigned' },
-        ] },
-      { id: 'KTC-03', title: 'Reviews require proven participation', priority: 'P0', blocker: true,
-        preconditions: ['An enrollment you have NOT completed and have not purchased'],
-        steps: [
-          { action: 'Pick a star rating and press "Submit review"', expect: 'An explanatory notice appears saying you must finish or purchase the challenge first — the composer is NOT hidden, the denial is explained' },
-          { action: 'Complete the challenge, then submit again', expect: 'The review saves and shows a "verified participant" badge — never your name' },
-        ] },
-      { id: 'KTC-04', title: 'Editing a review overwrites rather than duplicating', priority: 'P1', blocker: false,
-        preconditions: ['You have submitted a review'],
-        steps: [
-          { action: 'Change the rating and submit again', expect: 'Still exactly ONE review from you; the rating reflects the newer value' },
-        ] },
-    ],
-  },
-  {
-    key: 'kicktodo-org-programs', feature: 'KickTodo Org programs', route: '/kicktodo/org-programs',
-    description: 'Org challenge libraries and k-anonymous cohort outcome reports.',
-    toggle: offVia('kicktodo-organizations'), updatedAt: '2026-07-19', sourceCommit: '',
-    sourceFiles: ['frontend/react/src/features/kicktodo-org-programs', 'backend/typescript/src/features/kicktodo-organizations'],
-    cases: [
-      { id: 'KTO-01', title: 'A library turns Discover into an allowlist, and says so', priority: 'P0', blocker: true,
-        preconditions: ['kicktodo-organizations toggle ON', 'At least one organization exists', 'You hold an org-admin role'],
-        steps: [
-          { action: 'With no challenges selected, read the library note', expect: 'It states members see the FULL catalog (not curated)' },
-          { action: 'Add one challenge to the library', expect: 'The note flips to state members see ONLY the selected challenges' },
-        ] },
-      { id: 'KTO-02', title: 'A non-admin cannot mutate the library', priority: 'P0', blocker: true,
-        preconditions: ['A member WITHOUT org-admin'],
-        steps: [
-          { action: 'Attempt to add a challenge to the library', expect: 'Refused (403/404) — the page does not silently appear to succeed' },
-        ] },
-      { id: 'KTO-03', title: 'Small cohorts are WITHHELD, never shown as a small number', priority: 'P0', blocker: true,
-        preconditions: ['A linked cohort with fewer than 5 active members'],
-        steps: [
-          { action: 'Read the outcome report', expect: 'That row shows a "Withheld — cohort too small" chip; NO counts or percentages appear for it' },
-        ] },
-    ],
-  },
-  {
-    key: 'kicktodo-studio', feature: 'KickTodo Studio', route: '/kicktodo/studio',
-    description: 'Challenge Factory operator surface: intake, risk classification, pipeline, publication state.',
-    toggle: offVia('kicktodo-creator'), updatedAt: '2026-07-19', sourceCommit: '',
-    sourceFiles: ['frontend/react/src/features/kicktodo-studio', 'backend/typescript/src/features/kicktodo-creator'],
-    cases: [
-      { id: 'KTS-01', title: 'Intake classifies risk and shows the classifier reasoning', priority: 'P0', blocker: true,
-        preconditions: ['kicktodo-creator toggle ON'],
-        steps: [
-          { action: 'Create a candidate with an everyday topic (e.g. "sleep hygiene basics")', expect: 'It appears in the pipeline with a risk chip AND, when signals matched, the matched classifier signals in plain text' },
-        ] },
-      { id: 'KTS-02', title: 'A prohibited topic is refused at the door', priority: 'P0', blocker: true,
-        preconditions: ['kicktodo-creator toggle ON'],
-        steps: [
-          { action: 'Create a candidate with a clearly medical/self-harm topic', expect: 'Creation is REFUSED with an explanation — no candidate row is created' },
-        ] },
-    ],
-  },
-  {
-    key: 'kicktodo-metrics', feature: 'KickTodo Metrics', route: '/kicktodo/metrics',
-    description: 'PRD §15 outcome metrics as computed-on-read projections with k-floor withholding.',
-    toggle: offVia('kicktodo-metrics'), updatedAt: '2026-07-19', sourceCommit: '',
-    sourceFiles: ['frontend/react/src/features/kicktodo-metrics', 'backend/typescript/src/features/kicktodo-metrics'],
-    cases: [
-      { id: 'KTM-01', title: 'Cells below the k-floor are withheld with a stated reason', priority: 'P0', blocker: true,
-        preconditions: ['kicktodo-metrics toggle ON', 'Fewer than 5 enrollments in the workspace'],
-        steps: [
-          { action: 'Open /kicktodo/metrics', expect: 'Rate cells read "Withheld" with the reason (too few participants) — never a small number; raw totals like "enrollments started" may still show' },
-        ] },
-      { id: 'KTM-02', title: 'Every rate states its denominator', priority: 'P1', blocker: false,
-        preconditions: ['kicktodo-metrics toggle ON'],
-        steps: [
-          { action: 'Read any rate row', expect: 'The contributor count is shown beside the value — no bare percentage with an implied denominator' },
-        ] },
-      { id: 'KTM-03', title: 'Verifier quality reports resolved vs sampled', priority: 'P1', blocker: false,
-        preconditions: ['At least one verifier sample minted'],
-        steps: [
-          { action: 'Read the verifier-quality panel', expect: 'It shows resolved / sampled; with nothing graded yet the rate is blank (never 0%)' },
-        ] },
-    ],
-  },
+const HOST_SUITES: TestSuite[] = [
   // ── Core always-on (first pass) ──────────────────────────────────────────
   {
     key: 'chat', feature: 'Chat', route: '/', description: 'Conversational entry point — talk to agents and start work.',
@@ -1339,248 +1193,6 @@ export const SUITES: TestSuite[] = [
     toggle: ON, updatedAt: '2026-07-01', sourceCommit: 'e1a37bb2', sourceFiles: ['frontend/react/src/features/profiles'],
     cases: [ { id: 'PROF-01', title: 'Edit profile', priority: 'P2', preconditions: ['Signed in'],
       steps: [ { action: 'Open /profile, edit display name/avatar, view /team', expect: 'Changes persist; the team page lists members' } ] } ] },
-  // ── KickTodo (ADR 0414 — participant loop; authored 2026-07-18) ──────────
-  {
-    key: 'kicktodo', feature: 'KickTodo', route: '/today',
-    description: 'Guided challenges: Discover → enroll → Today actions → check-in → judged completion.',
-    toggle: offVia('kicktodo-core'), updatedAt: '2026-07-18', sourceCommit: 'bd772c33',
-    sourceFiles: ['frontend/react/src/features/kicktodo', 'backend/typescript/src/features/kicktodo-core'],
-    cases: [
-      { id: 'KT-01', title: 'Discover shows the published catalog (or its designed empty state)', priority: 'P0', blocker: true,
-        preconditions: ['kicktodo-core toggle ON', 'Optionally: at least one published challenge (operator: publish one via the creator API / Challenge Factory)'],
-        steps: [
-          { action: 'Navigate to /discover', expect: 'The Discover page renders; published challenges appear as cards with days/actions/outcome, or the "No challenges published yet" empty state shows' },
-        ] },
-      { id: 'KT-20', title: 'Substitute swaps today\u2019s action for a publisher-declared alternative (ADR 0429)', priority: 'P1', blocker: false,
-        preconditions: ['An active enrollment whose today action declares alternatives'],
-        steps: [
-          { action: 'On /today press "Substitute" on an action', expect: 'The alternatives disclose as a list, each with its VISIBLE instructions (not a tooltip)' },
-          { action: 'Choose one', expect: 'The card retitles to the alternative; the action still checks in normally and counts as done' },
-          { action: 'Press Substitute again and pick the SAME alternative', expect: 'No error and no duplicate — the choice is idempotent' },
-        ] },
-      { id: 'KT-21', title: 'Missed-window recovery collapses missed days into ONE action (ADR 0429)', priority: 'P1', blocker: false,
-        preconditions: ['A challenge published with missedWindowPolicy collapse-recovery', 'At least one missed day within the last week'],
-        steps: [
-          { action: 'Let the daily loop run (or invoke the apply-missed-window node)', expect: 'Exactly ONE "Recovery: get back on track" card appears — never a backlog of every missed day' },
-          { action: 'Run it again', expect: 'Still exactly one recovery card (deterministic id)' },
-        ] },
-      { id: 'KT-22', title: 'Challenge language is independent of the interface language (ADR 0430)', priority: 'P1', blocker: false,
-        preconditions: ['At least one challenge with a published translation'],
-        steps: [
-          { action: 'On /discover set "Challenge language" to a language you have a translation for', expect: 'The card shows the translated title; the option list shows language NAMES, not raw tags like pt-BR' },
-          { action: 'Set it to a language with NO translation', expect: 'The source-language card still appears with a "Shown in <language>" chip — an honest fallback, never an empty catalog' },
-        ] },
-      { id: 'KT-02', title: 'Enroll in a challenge', priority: 'P0', blocker: true,
-        preconditions: ['A published challenge exists'],
-        steps: [
-          { action: 'On /discover, press "Start this challenge" on a card', expect: 'The button shows "Starting…" then the card flips to an "Enrolled" chip' },
-          { action: 'Press "Start this challenge" flow again by revisiting the page', expect: 'The same challenge still shows "Enrolled" (idempotent — no duplicate enrollment)' },
-        ] },
-      { id: 'KT-03', title: 'Today lists due actions; Done completes with a check-in', priority: 'P0', blocker: true,
-        preconditions: ['An active enrollment (KT-02)'],
-        steps: [
-          { action: 'Navigate to /today', expect: 'The enrollment section shows day/action chips and today’s due actions with Done buttons' },
-          { action: 'Press Done on an action', expect: 'The action flips to a green "Done" chip; the counter (e.g. "1 of 2 actions done") updates' },
-          { action: 'Reload the page', expect: 'The completed action stays Done (recorded evidence wins — no reset)' },
-        ] },
-      { id: 'KT-04', title: 'Progress verdict via "Check progress"', priority: 'P1', blocker: false,
-        preconditions: ['An active enrollment with at least one incomplete action'],
-        steps: [
-          { action: 'On /today press "Check progress"', expect: 'An info notice reports remaining actions with encouraging copy (no guilt language)' },
-          { action: 'Complete ALL actions across the challenge days, then press "Check progress"', expect: 'A success notice celebrates completion and the section shows the "Completed" chip' },
-        ] },
-      { id: 'KT-05', title: 'Snooze and resume are first-class (no guilt mechanics)', priority: 'P1', blocker: false,
-        preconditions: ['An active enrollment'],
-        steps: [
-          { action: 'Press Snooze on the enrollment', expect: 'A "Snoozed" chip appears; Done buttons disable; copy stays neutral' },
-          { action: 'Press Resume', expect: 'The enrollment returns to "Active" and actions are actionable again' },
-        ] },
-      { id: 'KT-06', title: 'Ask your guide deep-links the ONE shared chat', priority: 'P1', blocker: false,
-        preconditions: ['An active enrollment'],
-        steps: [
-          { action: 'Press "Ask your guide" on /today', expect: 'The main chat opens scoped to the KickBot agent (URL /?agent=host:kickbot) — the same shared chat surface, not a separate panel' },
-        ] },
-    ],
-  },
-  // ── KickTodo Admin & Trust console (ADR 0438 A0–A8 + 0460 exception ledger) ──
-  {
-    key: 'kicktodo-admin', feature: 'KickTodo Admin & Trust', route: '/admin/kicktodo',
-    description: 'Admin-tier trust console riding the kicktodo-core toggle: exception ledger, Safety inbox, catalog health, audit & metrics, honest AI/connections state, commerce reconciliation + payouts, and the read-only people & access lens.',
-    toggle: offVia('kicktodo-core'), updatedAt: '2026-07-24', sourceCommit: 'ee10aabe4',
-    sourceFiles: ['frontend/react/src/features/kicktodo-admin', 'backend/typescript/src/features/kicktodo-core'],
-    cases: [
-      { id: 'KTADM-01', title: 'The console loads with the "Needs you" count and the Exception ledger', priority: 'P0', blocker: true,
-        preconditions: ['kicktodo-core toggle ON', 'Signed in as a platform ADMIN (the /admin tier gates on isAdminCaller)'],
-        steps: [
-          { action: 'Navigate to /admin/kicktodo (nav: Operations → "KickTodo Trust")', expect: 'The page titles "KickTodo Trust & Operations"; the "Needs you" card shows "Open safety queue" plus a live chip — "Nothing awaiting a decision" or "N awaiting a decision" — never a stale flash of "nothing" while loading (it shows "checking…" first)' },
-          { action: 'Read the "Exception ledger" card', expect: 'Rows render with severity chips (Blocker / Action required / Attention / Feed down) and each deep-links its owning surface via Review/Open/Moderate; empty reads "Nothing needs attention right now."' },
-          { action: 'If any ledger source is down, read the notice', expect: 'A red "Some feeds could not be read (…) — this list may be incomplete." notice — a degraded feed is never a silent "all clear"' },
-        ] },
-      { id: 'KTADM-02', title: 'Safety inbox: a decision is recorded through the ONE shared review system', priority: 'P0', blocker: true,
-        preconditions: ['A pending KickTodo review exists (e.g. submit a community profile or a challenge publication)'],
-        steps: [
-          { action: 'Navigate to /admin/kicktodo/safety (nav: "KickTodo Safety")', expect: 'The "Safety & approvals" page renders with the note "You decide here; the server enforces who may decide. A decision updates every other surface live."; empty state is "Nothing waiting"' },
-          { action: 'Decide a pending item on its ReviewCard', expect: 'A green "Decision recorded." notice; the item leaves this queue AND the chat Reviews rail (same store, no parallel queue)' },
-        ] },
-      { id: 'KTADM-03', title: 'Catalog health and Audit & metrics lenses are honest about thin data', priority: 'P1', blocker: false,
-        preconditions: ['On /admin/kicktodo'],
-        steps: [
-          { action: 'Click "Open catalog & content health" (→ /admin/kicktodo/catalog)', expect: '"Catalog & content health" shows the "Candidate pipeline" by state (intake/researched/planned/published/withdrawn) and the "Published catalog" by lifecycle; with a thin pipeline the publish rate reads "Publish rate withheld (below the privacy floor; N contributors)." — never a small number' },
-          { action: 'Back to console, click "Open audit & metrics" (→ /admin/kicktodo/audit-metrics)', expect: '"Verifier quality" shows "No verifier samples yet." when empty; with unverified samples the caveat "Disagreement rate is indicative, not audited, until the sample is verified." appears; the Audit trail card links "Open audit log" (superadmin authority) rather than rebuilding it' },
-        ] },
-      { id: 'KTADM-04', title: 'AI & connections states the calendar-write port honestly', priority: 'P1', blocker: false,
-        preconditions: ['On /admin/kicktodo', 'Deployment has NO calendar transport configured (OPENWOP_CALENDAR_MCP_ENABLED / OPENWOP_CALENDAR_PROVIDER_ENABLED unset — the default)'],
-        steps: [
-          { action: 'Click "Open AI & connections" (→ /admin/kicktodo/connections) and read the "Calendar write" card', expect: 'The chip reads "awaiting adapter — no production transport" (read from the server, never assumed), with the copy explaining the port is inactive but "participants can still subscribe to the read-only calendar feed"' },
-          { action: 'Read "Providers & delivery"', expect: 'It links "Open Connections" to the platform surface instead of duplicating BYOK/provider management here' },
-        ] },
-      { id: 'KTADM-05', title: 'Commerce: entitlement + seat reconcile are idempotent; payout runs need evidence', priority: 'P1', blocker: false,
-        preconditions: ['On /admin/kicktodo/commerce ("Open commerce & reconciliation")', 'Optionally: kicktodo-commerce data (orders, a cohort circle id, accrued author shares)'],
-        steps: [
-          { action: 'Press "Run reconciliation" on a healthy tenant', expect: '"Healthy — nothing to repair (N orders scanned)." — idempotent, repairs nothing; a stranded paid order instead reports "Repaired N entitlement(s) across N orders scanned."' },
-          { action: 'Under "Reconcile cohort seats", enter a cohort circle id (circle:…) and press "Reconcile seats"', expect: '"Seats now X of Y." — a healthy cohort is unchanged; a bad id surfaces "Could not reconcile that cohort. Check the circle id and retry."' },
-          { action: 'Under "Author share & payout runs", press "Open payout run", then try "Confirm paid" with an empty Payment-evidence field', expect: 'Confirming is blocked — "Needs external payment evidence (a payout id or note) before rows can flip to paid." Nothing moves money here (the page says so); "Cancel run" asks "Cancel this payout run?" and keeps balances accrued' },
-        ] },
-      { id: 'KTADM-06', title: 'People & access is a read-only aggregate lens (role chips, consent posture)', priority: 'P1', blocker: false,
-        preconditions: ['On /admin/kicktodo', 'Workspace has members with mixed roles'],
-        steps: [
-          { action: 'Click "Open people & access lens" (→ /admin/kicktodo/people)', expect: '"People & access" shows "N members in this workspace." with per-role COUNT chips ("Viewer: N", "Editor: N", "Admin: N", "Owner: N", "N without a role") — never a per-person row, name, or email' },
-          { action: 'Read "Organizations & cohorts" and "Consent posture"', expect: 'Orgs list member/cohort-link counts (+ a "Curated library" chip where set); the consent card states cohort aggregate reports stay consent-gated and only LINKS each surface at its own authority ("Open access & roles", "Open org programs") — no write control exists anywhere on the page' },
-        ] },
-    ],
-  },
-  // ── KickTodo Circles (ADR 0419 P5 accountability + ADR 0431 P4 seats) ────
-  {
-    key: 'kicktodo-circles', feature: 'KickTodo Circles', route: '/circles',
-    description: 'Consensual accountability: create a circle from an enrollment, invite with explicit scopes + a concrete privacy preview, instant revoke, coach proposals, cohort sessions — plus the coach-shared cohort seat purchase (/kicktodo/seats/:productId, kicktodo-commerce).',
-    toggle: offVia('kicktodo-accountability'), updatedAt: '2026-07-24', sourceCommit: 'ee10aabe4',
-    sourceFiles: ['frontend/react/src/features/kicktodo-circles', 'frontend/react/src/features/kicktodo-seats', 'backend/typescript/src/features/kicktodo-accountability'],
-    cases: [
-      { id: 'KTCIR-01', title: 'Enable + create a circle from an active enrollment', priority: 'P0', blocker: true,
-        preconditions: ['kicktodo-accountability toggle ON (and kicktodo-core ON)', 'An ACTIVE KickTodo enrollment that has no circle yet'],
-        steps: [
-          { action: 'Navigate to /circles (nav: KickTodo → Circles)', expect: 'The page renders with the lede "Share exactly what you choose, with exactly who you choose."; with no circles, the "No circles yet" empty state offers "New circle" (only when an active enrollment exists)' },
-          { action: 'Press "New circle"', expect: 'A circle card appears named after the page title with a type chip (Partner) and a "Members & scopes" section' },
-        ] },
-      { id: 'KTCIR-02', title: 'Invite with explicit scopes — the privacy preview is the disclosure', priority: 'P0', blocker: true,
-        preconditions: ['A circle exists (KTCIR-01)', 'A second workspace member exists'],
-        steps: [
-          { action: 'Under "Invite someone", pick a member from the "Invite a workspace member" select (people, not ids)', expect: 'The scope chips (Progress summary / Action status / Check-in notes / Messages & nudges / Coach proposals) toggle; the "They will see:" preview lists the CONCRETE reveal copy for each selected scope (e.g. "…but not your check-in notes or measurements")' },
-          { action: 'Select "Check-in notes" with "Action status" off', expect: '"Action status" is pulled in automatically (notes only disclose with action status); dropping "Action status" drops "Check-in notes" with it — the preview can never promise what the feed won\u2019t make' },
-          { action: 'Press "Invite"', expect: 'The member appears under "Members & scopes" with their scope chips and an "Invited" (then "Active") badge' },
-        ] },
-      { id: 'KTCIR-03', title: 'Revoke is immediate and never silent', priority: 'P1', blocker: true,
-        preconditions: ['A circle with an active/invited grant'],
-        steps: [
-          { action: 'Press "Revoke" on the member row', expect: 'The badge flips to "Revoked", the Revoke button disappears for that row, and the member loses the projected feed immediately; a failure surfaces "That change didn\u2019t save. Try again." — never a silent no-op' },
-        ] },
-      { id: 'KTCIR-04', title: 'Coach proposals + sessions ride the ONE chat', priority: 'P2', blocker: false,
-        preconditions: ['A circle you own', 'Optionally a pending coach plan-proposal'],
-        steps: [
-          { action: 'Read the "Coach proposals" section', expect: 'Empty reads "Ask KickBot to adjust your plan — swaps, schedule moves, and recovery land here for your decision."; a carded pending proposal shows "Awaiting your decision" and the hint "Decide these on the card in this circle\u2019s conversation, or in your reviews rail." with "Open the conversation" — the decision happens on the card, not here (Apply/Decline appear inline ONLY for a degraded, card-less proposal)' },
-          { action: 'Under "Sessions", set a title + a datetime and press "Schedule"', expect: 'The session lists with its date and a "Join in chat" link that deep-links the circle\u2019s conversation (/?conversation=…) — the shared chat, no second chat surface' },
-        ] },
-      { id: 'KTCIR-05', title: 'Cohort seat purchase: hold → pay → confirm, honest full state', priority: 'P1', blocker: false,
-        preconditions: ['kicktodo-commerce toggle ON', 'A coach-shared seat link /kicktodo/seats/<productId> for a cohort with seats left'],
-        steps: [
-          { action: 'Open the shared link', expect: '"Reserve your seat" renders with a start-date chip, a "N seats left" chip, and the "Cancellation and refunds" terms BEFORE the reserve action; an invalid link shows "This seat link is not valid"' },
-          { action: 'Press "Hold a seat" (panel "1 · Reserve")', expect: 'The panel flips to the real countdown ("A seat is held for you for about N more minutes…", serif "min held" figure) and panel "2 · Pay" offers "Continue to checkout" (storefront link) — panel "3 · Confirm" stays words-only: confirmation is the verified-payment CAS, never a client button' },
-          { action: 'On a FULL cohort (or after losing the race), reload / press reserve', expect: 'The "Full" chip shows and the reserve button is gone; the race loser reads "The last seat was taken while you were deciding. Nothing was charged."; an expired hold reads "Your hold has expired. Reserve again if a seat is still free."' },
-        ] },
-    ],
-  },
-  // ── KickTodo Wearables (ADR 0462 webhook lane — NO dedicated FE surface) ──
-  {
-    key: 'kicktodo-wearables', feature: 'KickTodo Wearables', route: '/journal',
-    description: 'ADR 0462 wearable evidence is backend-webhook-only — there is NO wearable page, settings, or consent UI in the SPA. This suite exercises it through its VISIBLE EFFECTS: a consented, rule-matched wearable metric auto-attaches a check-in (visible on /journal + /today), and a quiet stream raises an admin Exception-ledger row. Setup steps go through the owner-session REST lane.',
-    toggle: offVia('kicktodo-integrations'), updatedAt: '2026-07-24', sourceCommit: 'ee10aabe4',
-    sourceFiles: ['backend/typescript/src/features/kicktodo-integrations/integrationService.ts', 'backend/typescript/src/features/kicktodo-integrations/routes.ts', 'backend/typescript/src/features/kicktodo-integrations/exceptionSources.ts', 'frontend/react/src/features/kicktodo/JournalPage.tsx'],
-    cases: [
-      { id: 'KTW-01', title: 'A wearable metric over threshold auto-completes the check-in (visible in Journal/Today)', priority: 'P0', blocker: true,
-        preconditions: ['kicktodo-integrations AND kicktodo-core toggles ON', 'An active enrollment with a today action', 'Via the owner-session REST lane (/host/openwop-app/kicktodo/integrations/…): grant the wearable-evidence consent, POST wearable-link for a provider, and POST a wearable-rule mapping a metric (e.g. steps, threshold 8000) to that activity'],
-        steps: [
-          { action: 'POST …/kicktodo/integrations/wearable-ingest with { metric: "steps", value: 10000 } as the enrolled user', expect: '200 — the kernel records a check-in for the mapped activity (fail-closed: with the consent revoked the same call is refused, ConsentRequiredError)' },
-          { action: 'Open /journal (and /today)', expect: 'A journal entry appears with the verbatim note "wearable:steps=10000 (threshold 8000)" and a "measured: 10000" chip; on Today the mapped action shows Done — the evidence auto-attached, no manual tap' },
-        ] },
-      { id: 'KTW-02', title: 'The public webhook is honest-off by default; a quiet stream surfaces in the Exception ledger', priority: 'P1', blocker: false,
-        preconditions: ['OPENWOP_WEARABLE_PROVIDER_ENABLED unset (the default)', 'Admin access for the ledger check'],
-        steps: [
-          { action: 'POST /public/kicktodo/wearable-webhook/<any-token> (the provider-push lane)', expect: '404 — with the operator env gate unset the public route does not exist; no silent accept, no partial ingest' },
-          { action: 'With a registered webhook whose stream has stopped reporting, open /admin/kicktodo as an admin', expect: 'The "Exception ledger" shows the row "A consented wearable stream has gone quiet (last reading …)." with an Open action deep-linking /admin/kicktodo/connections — staleness is surfaced, never silently dropped' },
-        ] },
-    ],
-  },
-  // ── KickTodo Calendar (ADR 0421 P1 ICS feed + ADR 0466 calendar-write MCP) ──
-  {
-    key: 'kicktodo-calendar', feature: 'KickTodo Calendar', route: '/admin/kicktodo/connections',
-    description: 'The read-only ICS feed (consent-gated mint via REST — there is NO mint/copy/revoke button in the SPA) + the ADR 0466 calendar-WRITE port, whose only FE surface is the honest status on the admin "AI & connections" page. Feed lifecycle is exercised via REST + the public feed URL; write stays "awaiting adapter" until an operator wires a transport.',
-    toggle: offVia('kicktodo-integrations'), updatedAt: '2026-07-24', sourceCommit: 'ee10aabe4',
-    sourceFiles: ['frontend/react/src/features/kicktodo-admin/AiConnectionsPage.tsx', 'backend/typescript/src/features/kicktodo-integrations/integrationService.ts', 'backend/typescript/src/features/kicktodo-integrations/routes.ts', 'backend/typescript/src/features/kicktodo-integrations/agentTools.ts'],
-    cases: [
-      { id: 'KTCAL-01', title: 'The calendar-write port states its honest awaiting-adapter state', priority: 'P0', blocker: true,
-        preconditions: ['kicktodo-integrations AND kicktodo-core toggles ON', 'Admin access', 'No calendar transport configured (OPENWOP_CALENDAR_MCP_ENABLED / OPENWOP_CALENDAR_PROVIDER_ENABLED unset — the default)'],
-        steps: [
-          { action: 'Open /admin/kicktodo → "Open AI & connections" and read the "Calendar write" card', expect: 'The chip reads "awaiting adapter — no production transport" — READ from the server status, never assumed — with copy stating the port is inactive and that "participants can still subscribe to the read-only calendar feed"' },
-        ] },
-      { id: 'KTCAL-02', title: 'Mint the ICS feed (consent-gated) and subscribe unauthenticated', priority: 'P0', blocker: true,
-        preconditions: ['An enrolled user session', 'Grant the calendar-project consent via POST /host/openwop-app/kicktodo/integrations/consents'],
-        steps: [
-          { action: 'POST …/kicktodo/integrations/feed-token as the user', expect: '200 with { token, feedPath } — the raw token is returned exactly ONCE (stored hashed); without the consent the mint is refused (409 ConsentRequired)' },
-          { action: 'GET /public/kicktodo/feed/<token> with NO auth (or subscribe in a calendar app)', expect: 'A valid ICS calendar renders containing the enrollment\u2019s scheduled action events — the read-only projection, no write' },
-        ] },
-      { id: 'KTCAL-03', title: 'Revoking the consent kills EVERY feed URL — uniform 404', priority: 'P1', blocker: true,
-        preconditions: ['A live feed URL (KTCAL-02); optionally mint a second token — both must die together'],
-        steps: [
-          { action: 'POST …/kicktodo/integrations/consents/revoke for calendar-project, then GET the old feed URL(s)', expect: 'Every previously-minted URL now returns 404 with the uniform body "Not found." (never 401, never a distinguishable "revoked" hint); re-render also fail-closes if the tenant toggle is switched off' },
-        ] },
-      { id: 'KTCAL-04', title: 'The chat reads integration state through the read-only status tool', priority: 'P2', blocker: false,
-        preconditions: ['KickBot available in the chat (kicktodo packs installed)'],
-        steps: [
-          { action: 'In the ONE chat, ask KickBot whether your calendar feed / integrations are set up', expect: 'It answers from the openwop:kicktodo.integrations-status tool — granted consents, linked wearable providers, and whether a calendar-write transport is configured — and states that granting/linking happens on the integration surfaces, not in chat; no MCP calendar-write tool is exposed to the user' },
-        ] },
-    ],
-  },
-  // ── Challenge Factory authoring (outline canvas + publish SoD — NOT covered by 'kicktodo-studio') ──
-  {
-    key: 'challenge-outline', feature: 'Challenge Factory authoring', route: '/kicktodo/studio',
-    description: 'What the kicktodo-studio suite does not cover: the structured-outline canvas (/challenge-outline/:canvasId) with validate-then-persist Apply, and the publication separation-of-duties flow — submit via the Challenge Author chat as one identity, decide in the Reviews inbox as ANOTHER, with both 403 lanes.',
-    toggle: offVia('kicktodo-creator'), updatedAt: '2026-07-24', sourceCommit: 'ee10aabe4',
-    sourceFiles: ['frontend/react/src/features/kicktodo-studio/CandidateWorkspacePage.tsx', 'frontend/react/src/features/challenge-outline', 'backend/typescript/src/features/kicktodo-creator/publishService.ts', 'backend/typescript/src/features/kicktodo-creator/routes.ts'],
-    cases: [
-      { id: 'KTCO-01', title: 'Open the outline canvas from a candidate workspace', priority: 'P0', blocker: true,
-        preconditions: ['kicktodo-creator toggle ON (depends on kicktodo-core)', 'A candidate exists (create one on /kicktodo/studio)', 'Caller holds host:kicktodo:manage'],
-        steps: [
-          { action: 'Open /kicktodo/studio/candidates/<id> and find the "Structured outline" section', expect: 'Copy explains it is a working draft — "the validated plan revision stays the source of truth until you apply" — with an "Open outline" button' },
-          { action: 'Press "Open outline"', expect: 'Routes to the full-bleed /challenge-outline/<canvasId> editor ("Challenge outline editor"); with no validated plan yet it seeds a skeleton and says "Seeded from the intake targets — no validated plan yet, so the days start empty."' },
-          { action: 'Add a day from the palette and fill Title / Action instruction / Why it matters / Evidence', expect: 'The "Outline preview" renders "Day N" cards live ("Days (N)"); empty reads "No days yet — add days from the palette or refine the plan in chat."' },
-        ] },
-      { id: 'KTCO-02', title: 'Apply outline is validate-then-persist — defects block, nothing half-saves', priority: 'P0', blocker: true,
-        preconditions: ['An outline draft with edits (KTCO-01)'],
-        steps: [
-          { action: 'Back on the candidate workspace, press "Apply outline" with a VALID draft', expect: '"Outline applied — plan revision N saved." — a new plan revision persists only on zero defects' },
-          { action: 'Make the draft invalid (e.g. an empty day title / broken day numbering) and press "Apply outline" again', expect: 'A defect list under "The outline was not applied (N issues)" — the plan revision is unchanged; no partial write' },
-        ] },
-      { id: 'KTCO-03', title: 'Publish SoD: submit as identity A, decide as identity B — self-approval 403s', priority: 'P0', blocker: true,
-        preconditions: ['A candidate with a validated plan and passing gates', 'TWO identities with host:kicktodo:manage (A = author, B = approver)'],
-        steps: [
-          { action: 'As A, read the publication section of the candidate workspace', expect: 'There is NO submit button — "Submission happens through the factory\u2019s final step (drive it with the Challenge Author in chat) — there is no submit button here."; the gate matrix shows Evidence/Claims/Rights/Safety/Simulation with Pass/Open/Disclosure chips' },
-          { action: 'As A, drive submission through the Challenge Author in the chat (the factory\u2019s terminal step)', expect: 'The candidate strip shows the "submitted · needs a different approver" pill and "Submitted — awaiting a decision by someone other than the submitter, in the chat\u2019s Reviews rail." with an "Open the Reviews inbox" link (/chat?rail=reviews)' },
-          { action: 'As the SAME identity A, attempt to approve the publication (Reviews inbox or complete-publication)', expect: 'Refused with 403: "Publication must be approved by someone other than the submitter (separation of duties)." — the candidate stays submitted' },
-          { action: 'As B, decide the approval in the Reviews inbox', expect: 'The publication completes ("approved by <B>", phase "completed"); the challenge reaches the published catalog and the candidate state chip reads "Published"' },
-        ] },
-      { id: 'KTCO-04', title: 'The second 403 lane: deciding without KickTodo manage authority', priority: 'P1', blocker: false,
-        preconditions: ['A submitted publication (KTCO-03)', 'An identity WITHOUT host:kicktodo:manage'],
-        steps: [
-          { action: 'As that identity, attempt to decide the challenge-publish approval', expect: 'Refused with 403: "Deciding a challenge publication requires KickTodo manage authority." — authority and SoD are enforced server-side on the generic decision lane too (review card, decide-by-email included)' },
-        ] },
-      { id: 'KTCO-05', title: 'A published challenge refuses outline re-apply', priority: 'P2', blocker: false,
-        preconditions: ['A candidate whose challenge is published (KTCO-03)'],
-        steps: [
-          { action: 'Reopen the candidate\u2019s outline and press "Apply outline"', expect: 'Refused with "This challenge is already published; the outline cannot be re-applied. Start a new candidate to revise it." — published content is immutable from the draft lane' },
-        ] },
-    ],
-  },
-
   // ── Reviews & HITL (ADR 0068/0074 inbox + ADR 0070 quorum + ADR 0478 completion) ──
   {
     key: 'reviews-hitl', feature: 'Reviews & HITL approvals', route: '/',
@@ -1632,13 +1244,6 @@ export const SUITES: TestSuite[] = [
           { action: 'Approve as A', expect: 'The card stays PENDING at "1 of 2 approved" — a vote is recorded, the gate does not finalize' },
           { action: 'Attempt a second approval as A (or as A\u2019s delegate)', expect: 'The count stays at 1 — the vote ledger dedups on the consumed identity, so a principal + their delegate can never count twice' },
           { action: 'Approve as B', expect: 'Quorum met — the gate finalizes exactly once and the run proceeds' },
-        ] },
-      { id: 'RVW-06', title: 'Challenge-publish eligibility (KTFULL-B2) — a two-identity test', priority: 'P1', blocker: false,
-        preconditions: ['kicktodo-creator toggle ON', 'User A (KickTodo manage authority) has submitted a challenge for publication from /kicktodo/studio, raising a challenge-publish approval'],
-        steps: [
-          { action: 'As user B — workspace WRITE access but WITHOUT host:kicktodo:manage — decide the review (card button, or POST the reviews decide endpoint)', expect: '403: "Deciding a challenge publication requires KickTodo manage authority." — the generic decision lane (cards, inbox, decide-by-email) enforces the owner\u2019s eligibility, not just the Studio routes' },
-          { action: 'As user A (the submitter, WITH manage authority), decide it', expect: '403 — a publication must be decided by someone other than the submitter (separation of duties)' },
-          { action: 'As a THIRD user holding manage authority, approve', expect: 'The decision lands and the challenge publishes' },
         ] },
       ],
   },
@@ -1961,15 +1566,11 @@ export const CATEGORIES: TestCategory[] = [
 ];
 
 /** suite key → category id. A suite with no entry falls into an "Other" bucket in the runner. */
-export const CATEGORY_OF: Record<string, string> = {
-  kicktodo: 'workspace',
-  'kicktodo-admin': 'governance', 'kicktodo-circles': 'workspace', 'kicktodo-wearables': 'workspace',
-  'kicktodo-calendar': 'workspace', 'challenge-outline': 'workspace',
+const HOST_CATEGORY_OF: Record<string, string> = {
   'reviews-hitl': 'workspace', 'chat-first-remediation': 'workspace', 'workflow-proposals': 'governance',
   'workflow-versioning': 'workspace', 'workflow-debug': 'workspace', 'workflow-fleet-cost': 'workspace',
   'workflow-evals': 'workspace',
-  'kicktodo-engagement': 'workspace', 'kicktodo-community': 'workspace', 'kicktodo-org-programs': 'workspace',
-  'kicktodo-studio': 'workspace', 'kicktodo-metrics': 'workspace', 'app-builder': 'workspace',
+  'app-builder': 'workspace',
   chat: 'workspace', agents: 'workspace', workflows: 'workspace', runs: 'workspace', boards: 'workspace',
   workforces: 'workspace', inbox: 'workspace', projects: 'workspace', mission: 'workspace',
   'agent-templates': 'workspace', roster: 'workspace',
@@ -1988,3 +1589,53 @@ export const CATEGORY_OF: Record<string, string> = {
   profiles: 'access',
   'design-system-hv': 'platform',
 };
+
+/**
+ * ADR 1031 P2 — a feature package may ship its own manual-test suites in
+ * `<feature dir>/manualTests.ts` (`manualTestSuites` + `manualTestCategoryOf`),
+ * collected from both feature roots, so a feature (first-party or an adopter's
+ * `src/adopter/features/<id>/`) carries its own suites and this file names none
+ * of them. They list after the host suites. A suite key may not repeat.
+ */
+interface FeatureManualTests {
+  manualTestSuites?: readonly TestSuite[];
+  manualTestCategoryOf?: Readonly<Record<string, string>>;
+  /** Cases a feature appends to an EXISTING suite (suite key → cases), after the
+   *  suite's own. An unknown suite key throws. */
+  manualTestSuiteCases?: Readonly<Record<string, readonly TestSuite['cases'][number][]>>;
+}
+// Vite replaces the `import.meta.glob(...)` call at build time. Outside Vite (the
+// Playwright spec that imports SUITES runs under Node) the call does not exist and
+// throws, so that context gets the host suites only — `e2e/feature-routes.spec.ts`
+// reads the feature files from disk itself.
+function featureManualTestModules(): Record<string, FeatureManualTests> {
+  try {
+    return import.meta.glob<FeatureManualTests>(['/src/features/*/manualTests.ts', '/src/adopter/features/*/manualTests.ts'], { eager: true });
+  } catch {
+    return {};
+  }
+}
+const FEATURE_MANUAL_TESTS = Object.entries(featureManualTestModules())
+  .sort(([a], [b]) => a.localeCompare(b)).map(([, m]) => m);
+
+const extraCases = new Map<string, TestSuite['cases']>();
+for (const m of FEATURE_MANUAL_TESTS) {
+  for (const [key, cases] of Object.entries(m.manualTestSuiteCases ?? {})) extraCases.set(key, [...(extraCases.get(key) ?? []), ...cases]);
+}
+for (const key of extraCases.keys()) {
+  if (!HOST_SUITES.some((s) => s.key === key)) throw new Error(`manual-test cases declared for unknown suite '${key}' (ADR 1031 P2)`);
+}
+export const SUITES: TestSuite[] = [
+  ...HOST_SUITES.map((s) => (extraCases.has(s.key) ? { ...s, cases: [...s.cases, ...extraCases.get(s.key)!] } : s)),
+  ...FEATURE_MANUAL_TESTS.flatMap((m) => [...(m.manualTestSuites ?? [])]),
+];
+{
+  const seen = new Set<string>();
+  for (const suite of SUITES) {
+    if (seen.has(suite.key)) throw new Error(`duplicate manual-test suite key '${suite.key}' (ADR 1031 P2)`);
+    seen.add(suite.key);
+  }
+}
+
+/** suite key → category id. A suite with no entry falls into an "Other" bucket in the runner. */
+export const CATEGORY_OF: Record<string, string> = Object.assign({}, HOST_CATEGORY_OF, ...FEATURE_MANUAL_TESTS.map((m) => m.manualTestCategoryOf ?? {}));

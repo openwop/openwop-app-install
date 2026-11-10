@@ -14,7 +14,7 @@
  *   - contention: 8 durable events emitted at once, 4 from each process, on one
  *     tenant's log head (production's measured burst is 7 per second on one head,
  *     ADR 0988 D5) all commit, and replay in one gap-free order;
- *   - S04-T2: A emits a backlog and is killed with no drain; a FRESH process C
+ *   - S04-T2: a backlog process emits a backlog and is killed with no drain; a FRESH process C
  *     answers `Last-Event-ID` + `replay=required` with exactly the later durable
  *     events, in commit order, and no ephemeral frame;
  *   - legacy unchanged (RFC 0250 `0250.legacy-unchanged`): on C, an unknown cursor
@@ -33,7 +33,21 @@
  *   - an oversized event falling back to local-only delivery reds S04-T1;
  *   - the head CAS giving up after 1 attempt (it allows 8) reds the burst case, so
  *     the bound is what carries 8 concurrent emits across two processes.
- * Without a DSN or Docker all 5 cases skip.
+ *     CORRECTED 2026-11-03 (grade-tests wave 78): no longer true on its own. ADR 0988
+ *     D2's bounded append retry (1 + 3 attempts, jittered) now ALSO absorbs a lost
+ *     head CAS, so with the bound cut to 1 the burst still commits (re-probed against
+ *     real Postgres 15: 0 of 6 red). The burst case is held by two guards, the CAS
+ *     bound and the D2 retry; only breaking both reds it. Ignoring a lost CAS (treating
+ *     it as committed) reds it on its own.
+ * Without a DSN or Docker all 6 cases skip (so `npm run ci` witnesses none of them).
+ *
+ * CORRECTED 2026-11-03 (grade-tests wave 78): the backlog block used to kill A itself, so
+ * under `--sequence.shuffle` the top-level cases could run after A was gone and throw.
+ * The backlog now comes from its own process (D), which is the one killed; A and B live
+ * for the whole file. The D2 fault case no longer sleeps a fixed 1.5 s: a small control
+ * event is awaited on both streams first, so the oversized event's absence is read after
+ * delivery is shown to work. "Legacy unchanged" now asserts the stream is live (a new
+ * event arrives) and replays nothing, not only a 200.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { execSync, spawn, type ChildProcess } from 'node:child_process';
@@ -161,6 +175,7 @@ function ev(eventId: string, opts: { delivery?: 'durable' | 'ephemeral'; bytes?:
 let A: Instance | null = null;
 let B: Instance | null = null;
 let C: Instance | null = null;
+let D: Instance | null = null;
 
 beforeAll(async () => {
   if (!available) {
@@ -178,7 +193,7 @@ beforeAll(async () => {
   B = await startInstance();
 }, 200_000);
 afterAll(async () => {
-  await Promise.all([A?.kill(), B?.kill(), C?.kill()]);
+  await Promise.all([A?.kill(), B?.kill(), C?.kill(), D?.kill()]);
   await stopContainer?.();
 });
 
@@ -207,11 +222,15 @@ describe.skipIf(!available)('ADR 0988 — host events across two real processes 
     expect((await A!.call({ cmd: 'failAppends', count: 4 })).ok).toBe(true);
     const big = newId();
     expect((await A!.call({ cmd: 'fanout', tenantId: T, event: ev(big, { bytes: 9000 }) })).ok).toBe(true);
-    await new Promise((r) => setTimeout(r, 1500));
+    // Control: a small event emitted afterwards reaches both streams, so a delivery of
+    // `big` (local on A, or cross-process on B) would already have landed.
+    const control = newId();
+    expect((await A!.call({ cmd: 'fanout', tenantId: T, event: ev(control) })).ok).toBe(true);
+    await until(() => eventIds(onA.text()).includes(control) && eventIds(onB.text()).includes(control));
     onA.close();
     onB.close();
-    expect(eventIds(onA.text())).toEqual([]); // not local-only on A
-    expect(eventIds(onB.text())).toEqual([]);
+    expect(eventIds(onA.text())).toEqual([control]); // `big` is not local-only on A
+    expect(eventIds(onB.text())).toEqual([control]);
     expect((await B!.call({ cmd: 'deadLetters' })).summary!.total).toBe(before + 1); // visible from the other process
   }, 60_000);
 
@@ -233,19 +252,20 @@ describe.skipIf(!available)('ADR 0988 — host events across two real processes 
     expect(new Set(got).size).toBe(got.length);
   }, 60_000);
 
-  describe('a backlog on A, A killed, a fresh process C', () => {
+  describe('a backlog on its own process D, D killed, a fresh process C', () => {
     const T = `org:two-proc-t2-${runTag}`;
     const d = [newId(), newId(), newId()];
     const eph = newId();
 
     beforeAll(async () => {
       if (!available) return;
+      D = await startInstance();
       for (const e of [ev(d[0]!), ev(d[1]!), ev(eph, { delivery: 'ephemeral' }), ev(d[2]!)]) {
-        const r = await A!.call({ cmd: 'fanout', tenantId: T, event: e });
-        expect(r.ok, r.error).toBe(true);
+        const r = await D.call({ cmd: 'fanout', tenantId: T, event: e });
+        if (!r.ok) throw new Error(`backlog fanout failed: ${r.error}`);
       }
-      await A!.kill();
-      A = null;
+      await D.kill();
+      D = null;
       C = await startInstance();
     }, 120_000);
 
@@ -259,10 +279,18 @@ describe.skipIf(!available)('ADR 0988 — host events across two real processes 
     }, 60_000);
 
     it('legacy unchanged: an unknown cursor without the parameter still opens the stream on C', async () => {
-      const cookie = await login(C!.base, T);
+      // Its own tenant, so the live control event never joins T's backlog (which the D1
+      // case below replays in full).
+      const TL = `org:two-proc-legacy-${runTag}`;
+      const cookie = await login(C!.base, TL);
       const s = await openStream(C!.base, { cookie, lastEventId: newId() });
-      s.close();
       expect(s.status).toBe(200);
+      // Opened LIVE: a new event reaches it, and nothing was replayed.
+      const live = newId();
+      expect((await C!.call({ cmd: 'fanout', tenantId: TL, event: ev(live) })).ok).toBe(true);
+      await until(() => eventIds(s.text()).includes(live));
+      s.close();
+      expect(eventIds(s.text())).toEqual([live]);
     }, 30_000);
 
     // ADR 0988 D1: a known cursor without `replay=required` resumes from the durable

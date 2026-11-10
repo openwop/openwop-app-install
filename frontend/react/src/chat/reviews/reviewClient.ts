@@ -86,12 +86,6 @@ export interface ReviewRequest {
    *  draft (steps + role badges) and the approve echoes `liveDefinitionHash`
    *  back as `expectedDefinitionHash` (approve-what-you-see, server-enforced).
    *  Lockstep with the backend `host/reviewProjection.ts` block. */
-  /** ADR 0501 step 4 — ids only; the preview is FETCHED at render, never projected
-   *  (a stored diff goes stale between the coach's proposal and the decision). */
-  planProposal?: {
-    enrollmentId: string;
-    proposalId: string;
-  };
   /** ADR 0862 — an assistant action's card fields + the hash the approve MUST echo as
    *  `expectedContentHash`. Lockstep with the backend `host/reviewProjection.ts` block. */
   assistantAction?: { actionId: string; kind: string; contentHash: string; payload: Record<string, unknown> };
@@ -182,27 +176,6 @@ export async function listReviews(status?: ReviewStatus, opts: { conversationId?
   if (opts.boardId) params.set('boardId', opts.boardId);
   const q = params.size > 0 ? `?${params.toString()}` : '';
   return (await http<{ items: ReviewRequest[] }>(`${BASE}${q}`)).items;
-}
-
-/**
- * ADR 0501 step 4 — what accepting this coach proposal WOULD do.
- *
- * A discriminated union, mirroring the backend, because the distinction is the point:
- * `advice-only` means there is nothing executable to preview (and accept will refuse),
- * which is NOT the same as a computed diff that happens to be empty. Collapsing them
- * would render "no changes to your plan" — a confident answer nobody earned.
- *
- * Fetched at RENDER, deliberately: the plan can move between the proposal and the
- * decision, and re-validation at accept is what actually protects the participant.
- */
-export type ProposalPreview =
-  | { kind: 'advice-only' }
-  | { kind: 'changes'; changes: Array<{ lane: string; line: string; day?: number; fromDate?: string; toDate?: string }> };
-
-export async function fetchProposalPreview(enrollmentId: string, proposalId: string): Promise<ProposalPreview> {
-  return http<ProposalPreview>(
-    `/host/openwop-app/kicktodo/enrollments/${encodeURIComponent(enrollmentId)}/proposals/${encodeURIComponent(proposalId)}/preview`,
-  );
 }
 
 export async function getReview(reviewId: string): Promise<ReviewRequest> {

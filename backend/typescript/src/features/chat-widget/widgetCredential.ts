@@ -22,7 +22,7 @@
  * `isSuperadminTenant`), the same as the storefront's platform lane.
  */
 import { getChatByokConfig, isManagedRef } from '../../host/chatByokConfig.js';
-import { resolveSecret } from '../../byok/secretResolver.js';
+import { resolveUserNamedSecret } from '../../byok/userNamedSecret.js';
 import { isListedSuperadminTenant } from '../../host/superadmin.js';
 import { listSelectableProviderIds } from '../../providers/catalog.js';
 import { dispatchChat, type ChatMessage, type ProviderId } from '../../providers/dispatch.js';
@@ -56,7 +56,7 @@ export async function resolveWidgetCredential(tenantId: string): Promise<WidgetC
   const own = binding && !isManagedRef(binding.credentialRef) && !binding.credentialRef.startsWith('subscription:')
     && listSelectableProviderIds().includes(binding.provider) ? binding : null;
   if (own) {
-    const apiKey = await resolveSecret(own.credentialRef, { tenantId }).catch(() => null);
+    const apiKey = await resolveUserNamedSecret(own.credentialRef, { tenantId }).catch(() => null);
     // A bound key that no longer resolves is refused — never quietly replaced by managed.
     if (!apiKey) return { kind: 'refused', reason: 'key_unavailable' };
     return { kind: 'byok', provider: own.provider as ProviderId, model: own.model, credentialRef: own.credentialRef, apiKey };

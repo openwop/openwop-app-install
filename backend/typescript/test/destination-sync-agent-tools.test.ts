@@ -36,6 +36,7 @@ import { __resetIgnitionClaims } from '../src/host/ignitionGuard.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getApproval } from '../src/host/approvalService.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import { createMember } from '../src/host/accessControlService.js';
 
 const TENANT = 'default';
 const USER = 'u-1';
@@ -46,6 +47,10 @@ beforeAll(async () => {
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { void (server.address() as AddressInfo); res(); }); });
+  // ADR 1024 D1 — the tools now run the routes' scope predicate, so the acting user must
+  // actually hold `workspace:write` here (a Viewer's refusal is witnessed in
+  // `adr1024-destination-sync-egress.test.ts`).
+  await createMember({ orgId: TENANT, tenantId: TENANT, displayName: 'U1', subject: USER, roles: ['editor'] });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 

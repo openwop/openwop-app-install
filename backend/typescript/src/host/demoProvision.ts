@@ -16,6 +16,7 @@
 
 import { enableTenantOverride, getStoredConfig, resolveOne } from './featureToggles/service.js';
 import { recordToggleChange } from './featureToggles/audit.js';
+import { featureDemoToggleIds } from './featureDemoContributions.js';
 
 /**
  * The feature toggles the 10-phase demo program's seeders gate on. Kept in sync
@@ -103,7 +104,9 @@ export async function provisionDemoFeatures(
   // get→merge→save would lose updates when two tenants are provisioned against
   // the same shared toggle config concurrently. CAS makes each per-tenant
   // override land atomically without a lost write.
-  for (const id of DEMO_FEATURE_TOGGLE_IDS) {
+  // ADR 1031 — plus the toggles a feature declared on `BackendFeature.demo`
+  // (none in openwop-app itself, so the loop is unchanged here).
+  for (const id of [...new Set([...DEMO_FEATURE_TOGGLE_IDS, ...featureDemoToggleIds()])]) {
     const before = await getStoredConfig(id);
     const result = await enableTenantOverride(id, tenantId, actor);
     if (result === 'enabled') {

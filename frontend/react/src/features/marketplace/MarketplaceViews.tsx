@@ -57,7 +57,10 @@ function ListingChips({ l, t, wsDisabled, orderStatus }: { l: Listing; t: TFunct
  */
 function TrustChip({ l, t }: { l: Listing; t: TFunction }): JSX.Element | null {
   switch (l.trust?.tier) {
-    case 'steward': return <span className="chip chip--muted" title={t('trustStewardWhy')}>{t('trustSteward')}</span>;
+    // ADR 1048 — an adopter pack ships with THIS app too (the adopter's release
+    // attests its bytes, as upstream's attests a steward pack's), so it reads the same.
+    case 'steward':
+    case 'adopter': return <span className="chip chip--muted" title={t('trustStewardWhy')}>{t('trustSteward')}</span>;
     case 'operator-trusted': return <span className="chip chip--success" title={t('trustVerifiedWhy')}>{t('trustVerified')}</span>;
     case 'untrusted': return <span className="chip chip--warning" title={t('trustUnverifiedWhy')}>{t('trustUnverified')}</span>;
     case 'revoked': return <span className="chip chip--danger" title={t('trustRevokedWhy')}>{t('trustRevoked')}</span>;

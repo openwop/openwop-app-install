@@ -26,7 +26,8 @@ import { OpenwopError } from '../../types.js';
 import { requireOrgScope, requireString, optionalString } from '../featureRoute.js';
 import { createAiProvidersAdapter, AiProviderError } from '../../aiProviders/aiProvidersHost.js';
 import { NATIVE_IMAGE_PROVIDERS, IMAGE_OP_SUPPORT } from '../../providers/dispatchImages.js';
-import { resolveSecret, listSecretRefs } from '../../byok/secretResolver.js';
+import { listSecretRefs } from '../../byok/secretResolver.js';
+import { resolveUserNamedSecret } from '../../byok/userNamedSecret.js';
 import { resolveMediaAsset } from '../../host/inMemorySurfaces.js';
 import * as mediaStorage from './mediaStorage.js';
 import { withOrgCapacity, createAsset, findAssetByContentHash, getAsset, mergeAssetMetadataOnDedup, viewAsset, groundingForGenerated, stampGroundingIfAbsent, type MediaAssetLineage } from './mediaService.js';
@@ -103,7 +104,7 @@ export function registerImageGenRoutes(deps: RouteDeps): void {
         const refs = await listSecretRefs({ tenantId: tenantId });
         credentialRef = refs.find((r) => refMatchesProvider(r, provider));
       }
-      const apiKey = allowMock ? 'mock' : credentialRef ? await resolveSecret(credentialRef, { tenantId: tenantId }) : null;
+      const apiKey = allowMock ? 'mock' : credentialRef ? await resolveUserNamedSecret(credentialRef, { tenantId: tenantId }) : null;
       if (allowMock) credentialRef = 'mock';
       if (!credentialRef || !apiKey) {
         throw new OpenwopError('host_capability_missing', `No stored ${provider} credential for this workspace — add one under Providers.`, 409, { provider });
@@ -210,7 +211,7 @@ export function registerImageGenRoutes(deps: RouteDeps): void {
       const refs = await listSecretRefs({ tenantId: tenantId });
       credentialRef = refs.find((r) => refMatchesProvider(r, provider));
     }
-    const apiKey = allowMock ? 'mock' : credentialRef ? await resolveSecret(credentialRef, { tenantId: tenantId }) : null;
+    const apiKey = allowMock ? 'mock' : credentialRef ? await resolveUserNamedSecret(credentialRef, { tenantId: tenantId }) : null;
     if (allowMock) credentialRef = 'mock';
     if (!credentialRef || !apiKey) {
       throw new OpenwopError('host_capability_missing', `No stored ${provider} credential for this workspace — add one under Providers.`, 409, { provider });

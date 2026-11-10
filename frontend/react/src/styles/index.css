@@ -5,10 +5,16 @@
  *
  *   1. foundations — tokens, theme modes            (styles/foundations/)
  *   2. the legacy monolith — shrinking tranche by tranche
+ *      2b. feature-owned stylesheets (ADR 1031 P2, generated import list)
  *   3. ADR 0510 primitives — post-monolith additions (styles/primitives/)
  */
 @import './foundations/tokens.css';
 @import './global.css';
+/* ADR 1031 P2 — feature-owned `<feature>/styles.css`, by convention (gitignored list
+ * written by scripts/gen-feature-styles.mjs at vite config load). Right after the
+ * monolith: KickTodo's rules moved out of it, and the cascade proof in the ADR 1031
+ * P2 addendum is against exactly this position. */
+@import './features.generated.css';
 @import './features/visitor-consent.css';
 @import './chrome/admin.css';
 @import './primitives/adr0510.css';

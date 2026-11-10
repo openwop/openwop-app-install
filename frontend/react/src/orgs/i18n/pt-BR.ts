@@ -223,4 +223,7 @@ export const messages = {
   ownerGroupsLockedNote: 'Grupos que concedem acesso de proprietário só podem ser alterados por um proprietário.',
   errorCreateOrgOwnerRequired: 'Só um proprietário pode criar uma organização aqui. Peça a um proprietário de uma organização existente que torne você proprietário e tente de novo.',
   errorForbiddenScope: 'Você não tem permissão para fazer isso nesta organização. Peça a um proprietário ou administrador do espaço de trabalho.',
+  // ADR 1034 — OrgAccessNotice
+  accessReadFailed: 'Não conseguimos verificar o que você pode alterar aqui, então os controles de gestão estão ocultos por enquanto.',
+  accessReadRetry: 'Verificar de novo',
 } as const;

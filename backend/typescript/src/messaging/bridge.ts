@@ -27,7 +27,7 @@
  *    no XFF) so messaging-driven runs don't share one IP bucket.
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { enqueueOutbound } from '../routes/messaging.js';
 import type { ChatIngressEnvelope, MessagingBridge, MessagingRoutingRuleRecord, RelayChannel, RelayDeviceRecord } from './types.js';
 import type { Storage } from '../storage/storage.js';
@@ -57,6 +57,11 @@ export interface SelfHttpBridgeConfig {
   fetchImpl?: typeof fetch;
   pollIntervalMs?: number;
   timeoutMs?: number;
+}
+
+/** ADR 1042 D5 — the bridge's run-create Idempotency-Key for one platform message. */
+export function relayInboundIdempotencyKey(relayId: string, conversationId: string, platformMessageId: string): string {
+  return `relay-inbound-${createHash('sha256').update(`${relayId}\u0000${conversationId}\u0000${platformMessageId}`).digest('hex')}`;
 }
 
 export function createSelfHttpBridge(cfg: SelfHttpBridgeConfig): MessagingBridge {
@@ -111,7 +116,10 @@ export function createSelfHttpBridge(cfg: SelfHttpBridgeConfig): MessagingBridge
       const workflowId = rule?.workflowId ?? cfg.defaultWorkflowId;
       const createRes = await fetchImpl(`${cfg.baseUrl}/runs`, {
         method: 'POST',
-        headers: { ...headers, ...selfCallHeaders() },
+        // ADR 1042 D5 — one platform message creates at most one run, even if a
+        // retry reaches here past the route's inbound claim. Hashed: the v2 key
+        // grammar is [A-Za-z0-9._~-]{22,128}, and platform ids carry anything.
+        headers: { ...headers, ...selfCallHeaders(), 'idempotency-key': relayInboundIdempotencyKey(device.relayId, envelope.conversationId, envelope.platformMessageId) },
         body: JSON.stringify({
           workflowId,
           tenantId: device.tenantId,

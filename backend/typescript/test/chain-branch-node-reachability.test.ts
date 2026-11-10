@@ -81,7 +81,7 @@ const BRANCH_NODES = PACKS.flatMap(({ file, chains }) =>
 
 describe('the scan reaches a real corpus (a vacuous scan would pass forever)', () => {
   it('finds chain packs and at least one core.flow.if node', () => {
-    expect(PACKS.length, 'no chain packs found — the ratchet is scanning nothing').toBeGreaterThan(71); // measured 75
+    expect(PACKS.length, 'no chain packs found — the ratchet is scanning nothing').toBeGreaterThan(63); // measured 75; 67 after the KickTodo chain packs left (ADR 1031 P3)
     expect(BRANCH_NODES.length, 'no core.flow.if nodes found — the ratchet is vacuous').toBeGreaterThanOrEqual(7); // measured 7
   });
 });

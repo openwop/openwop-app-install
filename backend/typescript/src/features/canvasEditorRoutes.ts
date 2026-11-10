@@ -38,6 +38,8 @@ import { kitsForCanvasType } from '../host/canvasContentPackLoader.js';
 import { mintPresentRemoteToken, presentOutlineFor } from '../host/presentRemote.js';
 import { canvasReadAllowed, canvasWriteAllowed, createCanvasForTenant, getCanvasForTenant, updateCanvasForTenant, deleteCanvasForTenant, listCanvasVersions, getCanvasVersion, restoreCanvasVersion, type CanvasRecordView } from '../host/canvasSurface.js';
 import { seedCanvasFromArtifact } from '../host/canvasFromArtifact.js';
+import { getRunArtifact } from '../host/runArtifactStore.js';
+import { loadReadableRun } from '../host/runAccess.js';
 import { registerCollabCanvasType } from '../host/collab/collabRegistry.js';
 import { registerCanvasTypeOwner } from '../host/canvasTypeOwnership.js';
 import type { CollabShape } from '../host/collab/collabStateMirror.js';
@@ -84,6 +86,8 @@ export interface CanvasEditorRouteConfig {
    *  satisfy its own schema fails closed with 422 rather than persisting an
    *  invalid document. `name` is the caller's display name. */
   blankState?: (name: string) => Record<string, unknown>;
+  /** Private by default for new types; existing canvas types retain their default. */
+  defaultOwnerToCaller?: boolean;
   // WF-SHARE-3 — `shareResourceType` (the ResourceType whose share links purged
   // on canvas delete) is REMOVED, not merely unused: the purge moved to sharing's
   // own `onCanvasDeleted` registration, which derives the resource type from
@@ -262,7 +266,7 @@ export function registerCanvasEditorRoutes(deps: RouteDeps, cfg: CanvasEditorRou
         const body = (req.body ?? {}) as Record<string, unknown>;
         const name = typeof body.name === 'string' && body.name.trim() ? body.name.trim().slice(0, 120) : 'Untitled';
         const projectId = typeof body.projectId === 'string' && body.projectId ? body.projectId : undefined;
-        const owner = ownerSubject(body);
+        const owner = ownerSubject(body) ?? (cfg.defaultOwnerToCaller ? { kind: 'user' as const, id: user.userId } : undefined);
         // Same F13 spoof guard as from-artifact: a caller-asserted USER owner
         // must be the caller (§R6 visibility anchors on it).
         if (owner?.kind === 'user' && owner.id !== user.userId) {
@@ -281,7 +285,9 @@ export function registerCanvasEditorRoutes(deps: RouteDeps, cfg: CanvasEditorRou
         // Grade pass GC-CV: an optional client idempotency key dedups a retried
         // create (the FE also disables the button in-flight), so a network retry
         // converges to one canvas instead of a duplicate "Untitled".
-        const idempotencyKey = typeof body.idempotencyKey === 'string' && body.idempotencyKey ? `blank:${body.idempotencyKey}` : undefined;
+        const idempotencyKey = typeof body.idempotencyKey === 'string' && body.idempotencyKey
+          ? cfg.defaultOwnerToCaller ? `private-blank:${JSON.stringify([cfg.canvasTypeId, orgId, user.userId, body.idempotencyKey])}` : `blank:${body.idempotencyKey}`
+          : undefined;
         const canvas = await createCanvasForTenant(tenantId, {
           canvasTypeId: cfg.canvasTypeId,
           name,
@@ -301,7 +307,12 @@ export function registerCanvasEditorRoutes(deps: RouteDeps, cfg: CanvasEditorRou
       const { user, orgId, tenantId } = await authz(req, 'workspace:write');
       const body = (req.body ?? {}) as Record<string, unknown>;
       const artifactKey = requireString(body.artifactKey, 'artifactKey');
-      const owner = ownerSubject(body);
+      if (cfg.defaultOwnerToCaller) {
+        const artifact = await getRunArtifact(artifactKey);
+        if (!artifact || artifact.tenantId !== tenantId) throw notFound(artifactKey);
+        await loadReadableRun(req, deps.storage, artifact.runId, { streamToken: false });
+      }
+      const owner = ownerSubject(body) ?? (cfg.defaultOwnerToCaller ? { kind: 'user' as const, id: user.userId } : undefined);
       // Grade pass 2026-07-07 (F13): a caller-asserted USER owner must be the
       // caller — the field anchors §R6 visibility later, so it cannot be spoofed.
       if (owner?.kind === 'user' && owner.id !== user.userId) {
@@ -317,6 +328,7 @@ export function registerCanvasEditorRoutes(deps: RouteDeps, cfg: CanvasEditorRou
         canvasTypeId: cfg.canvasTypeId,
         ...(cfg.validateSeed ? { validate: cfg.validateSeed } : {}),
         ...(owner ? { ownerSubject: owner } : {}),
+        ...(cfg.defaultOwnerToCaller ? { idempotencyScope: JSON.stringify([cfg.canvasTypeId, orgId, user.userId]) } : {}),
       });
       if (!canvas) throw notFound(artifactKey);
       res.status(201).json(canvas);

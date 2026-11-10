@@ -49,6 +49,7 @@ import { subWorkflowId, cadenceWorkflowId } from '../src/host/workflowId.js';
 import { buildWorkflowAuthorSurface } from '../src/features/workflow-author/surface.js';
 import { WORKFLOW_AUTHOR_GET_TOOL_ID, WORKFLOW_AUTHOR_PERSIST_TOOL_ID } from '../src/features/workflow-author/agentTools.js';
 import { COMPOSE_AND_RUN_TOOL_ID, PROPOSE_TOOL_ID } from '../src/host/workflowComposeTool.js';
+import { envKeyPrincipalId } from '../src/middleware/envKeyPrincipal.js';
 
 const TENANT = 'tenant-0822';
 const VICTIM = 'tenant-0822-victim';
@@ -195,13 +196,13 @@ describe('ADR 0822 D3 — the author lane never creates a server-minted id', () 
 describe('ADR 0822 D1 — the predicate judges the actor by provenance (no legitimate lane locked out)', () => {
   it('an operator env key\'s run actor (`bearer:<8>`) persists through the surface', async () => {
     const id = 'wf.adr0822.env-key-surface';
-    const surface = surfaceFor({ tenantId: TENANT, actingUserId: `bearer:${TENANT_ENV_KEY.slice(0, 8)}` });
+    const surface = surfaceFor({ tenantId: TENANT, actingUserId: envKeyPrincipalId(TENANT_ENV_KEY) });
     await expect(surface.persistDraft({ definition: noop(id) }))
       .resolves.toMatchObject({ workflowId: id });
   });
 
   it('a configured key is nobody in a tenant it is NOT bound to (grade-code WFAC-17)', async () => {
-    const surface = surfaceFor({ tenantId: VICTIM, actingUserId: `bearer:${TENANT_ENV_KEY.slice(0, 8)}` });
+    const surface = surfaceFor({ tenantId: VICTIM, actingUserId: envKeyPrincipalId(TENANT_ENV_KEY) });
     await expect(surface.persistDraft({ definition: noop('wf.adr0822.key-wrong-tenant') }))
       .rejects.toMatchObject({ code: 'forbidden_scope' });
     expect(await getRegisteredWorkflowAsync('wf.adr0822.key-wrong-tenant')).toBeNull();

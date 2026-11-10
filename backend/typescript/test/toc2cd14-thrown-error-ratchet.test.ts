@@ -7,9 +7,14 @@
  * ${err.message}` straight into the model's tool result, from a file no fence ratchet
  * listed. So this keys on the SHAPE, across all of `src`: inside a `catch (e)`, an
  * object literal with `isError: true` whose `content` mentions `e` must either
- *  - build `content` with `toModelToolResult(…, { fromThrow: true })`, or
+ *  - build `content` with a fence call (`toModelToolResult(…)` or `fenceThrownToolError(…)`), or
  *  - carry `fromThrow: true`, so `toModelToolResult` fences it,
  * unless the site is listed in NOT_MODEL_FACING with its reason.
+ *
+ * What the scan does NOT check (human-ask TST-ESA-1): that a `toModelToolResult` call
+ * passes `{ fromThrow: true }` — the call's name alone satisfies it (the sibling
+ * dispatcher ratchet does check the option for `providers/`). Content built through an
+ * intermediate variable, or a binding-less `catch {}`, is outside the shape scan.
  *
  * Sabotage witnessed 2026-10-28: restoring either dispatcher's raw template reds
  * "every catch-built error result is fenced"; so does dropping `fromThrow: true` from
@@ -81,7 +86,8 @@ describe('TOC2CD-11 — a caught error never reaches a model as an unfenced erro
   it('found the catch-built error results at all (anti-vacuity)', () => {
     // MEASURED 2026-10-28 on main: the two provider dispatchers, the two tool-loop
     // catches, five returned-error sites and the eval recorder.
-    expect(result.checked).toBeGreaterThanOrEqual(10);
+    // 8 after the KickTodo packages left (ADR 1031 P3: two of the returned-error sites).
+    expect(result.checked).toBeGreaterThanOrEqual(8);
   });
 
   it('every catch-built error result is fenced', () => {

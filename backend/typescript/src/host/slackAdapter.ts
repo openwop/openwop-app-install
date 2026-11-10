@@ -25,7 +25,12 @@ function chatPostMessageBase(): string {
   return (process.env.OPENWOP_SLACK_API_BASE ?? 'https://slack.com').replace(/\/+$/, '');
 }
 
-export type SlackAdapterDeps = BrokeredEgressDeps;
+export type SlackAdapterDeps = BrokeredEgressDeps & {
+  /** ADR 1042 D4 — host-only: pin the post to ONE connection row (a channel
+   *  reply goes back through the connection the message arrived on). Never set
+   *  from node config. */
+  connectionId?: string;
+};
 
 /** Args the integration pack passes to `ctx.slack.postMessage`. */
 export interface SlackPostArgs {
@@ -64,7 +69,7 @@ export function makeSlackAdapter(deps: SlackAdapterDeps): SlackAdapter {
 
       let r: Awaited<ReturnType<typeof brokeredPost>>;
       try {
-        r = await brokeredPost(deps, { provider: 'slack', url: `${chatPostMessageBase()}/api/chat.postMessage`, body: JSON.stringify(body) });
+        r = await brokeredPost(deps, { provider: 'slack', url: `${chatPostMessageBase()}/api/chat.postMessage`, body: JSON.stringify(body), ...(deps.connectionId !== undefined ? { connectionId: deps.connectionId } : {}) });
       } catch (err) {
         // The ADR 0187 egress firewall THROWS (egress_blocked) before the
         // brokered outcome envelope forms — without this map the adapter broke

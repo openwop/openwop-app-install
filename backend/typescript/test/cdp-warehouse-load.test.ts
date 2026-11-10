@@ -177,10 +177,10 @@ describe('CDP-D §6 warehouse load (ADR 0292)', () => {
     expect(hits).toHaveLength(0); // NO brokeredPost in a dry-run
   });
 
-  it('insertId is deterministic across two builds (dedup on replay/:fork)', () => {
-    const sync = { syncId: 'dsync:fixed', syncMode: 'batch' as const, cursor: undefined, cursorField: 'updatedAt', fieldMap: [{ from: 'email', to: 'EMAIL' }], warehouseKeyField: 'id' };
-    const a = buildWarehouseRows(sync, records);
-    const b = buildWarehouseRows(sync, records);
+  it('insertId is deterministic across two builds (dedup on replay/:fork)', async () => {
+    const sync = { tenantId: TENANT, syncId: 'dsync:fixed', syncMode: 'batch' as const, cursor: undefined, cursorField: 'updatedAt', fieldMap: [{ from: 'email', to: 'EMAIL' }], warehouseKeyField: 'id' };
+    const a = await buildWarehouseRows(sync, records);
+    const b = await buildWarehouseRows(sync, records);
     expect(a.rows.map((r) => r.insertId)).toEqual(b.rows.map((r) => r.insertId));
     // Distinct rows get distinct insertIds.
     expect(a.rows[0].insertId).not.toBe(a.rows[1].insertId);

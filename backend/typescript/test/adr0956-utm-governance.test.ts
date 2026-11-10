@@ -7,11 +7,21 @@
  *   - `publish-ad-variants` stamps through the host helper and refuses a link
  *     that breaks the client's policy BEFORE dispatch;
  *   - subject erasure tombstones the editor, keeps the org's configuration.
+ *
+ * Every case seeds its own tenant and org (`seedOrg`, `savedPolicy`): the file used
+ * to run in order from a "setup" case, and red under shuffle.
+ *
+ * Sabotage measured (waves 74 and 75, each red, then restored): the stale-version
+ * check; a blind write in place of the policy CAS (a write forced between the read
+ * and the swap, DUG-ERASE-CAS-1's sibling); the alias join-key and foreign-campaign
+ * checks; the source lint; URL params winning; the protocol check; the publish
+ * refusal; both trackedUrl org checks; a blind rewrite in erasure.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getSetCookies } from './headerCookies.js';
+import type { Storage } from '../src/storage/storage.js';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
@@ -68,16 +78,17 @@ describe('ADR 0956 D5 — buildTrackedUrl / lintTrackedUrl (pure)', () => {
   });
 });
 
-interface Res { status: number; body: Record<string, unknown> }
+interface Res<T> { status: number; body: T }
 let BASE = '';
 let server: http.Server;
-function client(): { call: (method: string, path: string, body?: unknown) => Promise<Res> } {
+let storage: Storage;
+function client(): { call: <T = Record<string, unknown>>(method: string, path: string, body?: unknown) => Promise<Res<T>> } {
   let cookie = '';
   return {
-    call: async (method, path, body) => {
+    call: async <T>(method: string, path: string, body?: unknown) => {
       const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
       for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-      return { status: res.status, body: ((await res.json().catch(() => ({}))) ?? {}) as Record<string, unknown> };
+      return { status: res.status, body: ((await res.json().catch(() => ({}))) ?? {}) as T };
     },
   };
 }
@@ -110,40 +121,54 @@ describe('ADR 0956 D5 — UTM governance over HTTP + the publish path', () => {
     process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
     process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
     const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+    storage = app.locals.storage;
     await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-  });
+  }, 120_000);
+  beforeEach(async () => { await setIntel('on'); });
   afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-  // NOT a personal `user:` tenant: there every signed-in caller is an implicit owner.
-  const tenantId = `utm-${Date.now()}`;
-  let orgId = '';
-  let ownerId = '';
-  let peerId = '';
-  const owner = client();
-  const peer = client();
+  let seq = 0;
+  const run = Date.now();
+  /** A tenant of the case's own: an owner with an org and a same-tenant non-member.
+   *  NOT a personal `user:` tenant: there every signed-in caller is an implicit owner. */
+  async function seedOrg() {
+    const n = seq++;
+    const tenantId = `utm-${run}-${n}`;
+    const owner = client();
+    const peer = client();
+    const ownerLogin = await owner.call<{ user: { userId: string } }>('POST', '/host/openwop-app/test/login', { email: `utm-o-${run}-${n}@acme.test`, tenantId });
+    expect(ownerLogin.status).toBe(201);
+    const org = await owner.call<{ orgId: string }>('POST', '/host/openwop-app/orgs', { name: 'Client A' });
+    expect(org.status).toBe(201);
+    const peerLogin = await peer.call<{ user: { userId: string } }>('POST', '/host/openwop-app/test/login', { email: `utm-p-${run}-${n}@acme.test`, tenantId });
+    expect(peerLogin.status).toBe(201);
+    return { tenantId, orgId: org.body.orgId, ownerId: ownerLogin.body.user.userId, peerId: peerLogin.body.user.userId, owner, peer };
+  }
+  /** The saved policy (version 1) the lint, trackedUrl and publish cases judge against. */
+  const savedPolicy = (s: { tenantId: string; orgId: string }) => setUtmPolicy(s.tenantId, s.orgId, parseUtmPolicy({ sources: ['meta', 'google'], mediums: ['cpc', 'paid-social'] }), 0, 'test');
 
   it('setup: an owner with an org and a same-tenant non-member', async () => {
-    await setIntel('on');
-    const ownerLogin = await owner.call('POST', '/host/openwop-app/test/login', { email: `utm-o-${Date.now()}@acme.test`, tenantId });
-    expect(ownerLogin.status).toBe(201);
-    ownerId = String((ownerLogin.body.user as { userId: string }).userId);
-    const org = await owner.call('POST', '/host/openwop-app/orgs', { name: 'Client A' });
-    expect(org.status).toBe(201);
-    orgId = String(org.body.orgId);
-    const peerLogin = await peer.call('POST', '/host/openwop-app/test/login', { email: `utm-p-${Date.now()}@acme.test`, tenantId });
-    expect(peerLogin.status).toBe(201);
-    peerId = String((peerLogin.body.user as { userId: string }).userId);
+    const s = await seedOrg();
+    expect(s.ownerId).not.toBe(s.peerId);
+    expect((await getUtmPolicy(s.tenantId, s.orgId)).version).toBe(0);
   });
 
   it('policy: default at version 0, CAS on version, stale → 409, invalid → 400, non-member write → 403', async () => {
+    const { tenantId, orgId, owner, peer } = await seedOrg();
     const base = `/host/openwop-app/campaign-intel/orgs/${orgId}/utm-policy`;
     const dflt = await owner.call('GET', base);
     expect(dflt.status).toBe(200);
     expect(dflt.body).toMatchObject({ version: 0, isDefault: true });
 
-    expect((await owner.call('PUT', base, { mediums: ['cpc'] })).status).toBe(400); // expectedVersion required
-    expect((await owner.call('PUT', base, { mediums: ['cpc'], bogus: true, expectedVersion: 0 })).status).toBe(400);
-    expect((await peer.call('PUT', base, { mediums: ['cpc'], expectedVersion: 0 })).status).toBe(403);
+    const noVersion = await owner.call<{ details: { field: string } }>('PUT', base, { mediums: ['cpc'] });
+    expect(noVersion.status).toBe(400);
+    expect(noVersion.body.details.field).toBe('expectedVersion');
+    const unknown = await owner.call<{ message: string }>('PUT', base, { mediums: ['cpc'], bogus: true, expectedVersion: 0 });
+    expect(unknown.status).toBe(400);
+    expect(unknown.body.message).toMatch(/Unknown field/);
+    const nonMember = await peer.call<{ error: string }>('PUT', base, { mediums: ['cpc'], expectedVersion: 0 });
+    expect(nonMember.status).toBe(403);
+    expect(nonMember.body.error).toBe('forbidden_scope');
 
     const saved = await owner.call('PUT', base, { sources: ['meta', 'google'], mediums: ['cpc', 'paid-social'], expectedVersion: 0 });
     expect(saved.status).toBe(200);
@@ -153,19 +178,39 @@ describe('ADR 0956 D5 — UTM governance over HTTP + the publish path', () => {
     expect(stale.status).toBe(409);
     expect(JSON.stringify(stale.body)).toContain('utm_policy_stale');
     expect((await getUtmPolicy(tenantId, orgId)).policy.mediums).toEqual(['cpc', 'paid-social']); // the stale write landed nothing
+
+    // The CAS itself: a save that lands between the read and the swap beats a writer
+    // that passed the version check.
+    const raced = `hostext:campaign-intel:utm-policy:${tenantId}::org-race`;
+    const get = storage.kvGet.bind(storage);
+    let crossed = false;
+    const hold = vi.spyOn(storage, 'kvGet').mockImplementation(async (key) => {
+      const observed = await get(key);
+      if (!crossed && key === raced) { crossed = true; await setUtmPolicy(tenantId, 'org-race', parseUtmPolicy({ mediums: ['email'] }), 0, 'winner'); }
+      return observed;
+    });
+    try {
+      await expect(setUtmPolicy(tenantId, 'org-race', parseUtmPolicy({ mediums: ['cpc'] }), 0, 'loser')).rejects.toMatchObject({ details: { reason: 'utm_policy_stale' } });
+    } finally { hold.mockRestore(); }
+    expect(crossed).toBe(true);
+    expect(await getUtmPolicy(tenantId, 'org-race')).toMatchObject({ version: 1, policy: { mediums: ['email'] } });
   });
 
   it('lint route: per-URL violations against the saved policy; bounded input', async () => {
+    const s = await seedOrg();
+    const { orgId, owner } = s;
+    await savedPolicy(s);
     const base = `/host/openwop-app/campaign-intel/orgs/${orgId}/utm-lint`;
-    const out = await owner.call('POST', base, { urls: ['https://ex.com/?utm_source=meta&utm_medium=cpc&utm_campaign=c', 'https://ex.com/?utm_source=tiktok&utm_medium=cpc&utm_campaign=c'] });
+    const out = await owner.call<{ results: Array<{ violations: Array<{ param: string; rule: string }> }> }>('POST', base, { urls: ['https://ex.com/?utm_source=meta&utm_medium=cpc&utm_campaign=c', 'https://ex.com/?utm_source=tiktok&utm_medium=cpc&utm_campaign=c'] });
     expect(out.status).toBe(200);
-    const results = out.body.results as Array<{ violations: Array<{ param: string; rule: string }> }>;
+    const { results } = out.body;
     expect(results[0]?.violations).toEqual([]);
     expect(results[1]?.violations).toEqual([expect.objectContaining({ param: 'utm_source', rule: 'not_allowed' })]);
     expect((await owner.call('POST', base, { urls: [] })).status).toBe(400);
   });
 
   it('aliases: join-key conflict 409, foreign campaign 400, and an aliased conversion is attributed; triage lists the rest', async () => {
+    const { tenantId, orgId, owner, peer } = await seedOrg();
     const mine = await makeCampaign(tenantId, orgId, 'Launch', { campaign: 'launch' });
     const foreign = await makeCampaign(tenantId, 'org-other', 'Theirs', { campaign: 'theirs' });
     const base = `/host/openwop-app/campaign-intel/orgs/${orgId}/utm-aliases`;
@@ -173,8 +218,12 @@ describe('ADR 0956 D5 — UTM governance over HTTP + the publish path', () => {
     const conflict = await owner.call('PUT', base, { utmCampaign: 'launch', campaignId: mine.campaignId });
     expect(conflict.status).toBe(409);
     expect(JSON.stringify(conflict.body)).toContain('utm_alias_conflicts_join_key');
-    expect((await owner.call('PUT', base, { utmCampaign: 'Launch_2026', campaignId: foreign.campaignId })).status).toBe(400);
-    expect((await peer.call('PUT', base, { utmCampaign: 'Launch_2026', campaignId: mine.campaignId })).status).toBe(403);
+    const foreignRefused = await owner.call<{ details: { reason: string; field: string } }>('PUT', base, { utmCampaign: 'Launch_2026', campaignId: foreign.campaignId });
+    expect(foreignRefused.status).toBe(400);
+    expect(foreignRefused.body.details).toMatchObject({ reason: 'utm_alias_invalid', field: 'campaignId' });
+    const peerRefused = await peer.call<{ error: string }>('PUT', base, { utmCampaign: 'Launch_2026', campaignId: mine.campaignId });
+    expect(peerRefused.status).toBe(403);
+    expect(peerRefused.body.error).toBe('forbidden_scope');
 
     for (const [key, n] of [['launch', 1], ['Launch_2026', 2], ['typo-x', 3]] as const) {
       for (let i = 0; i < n; i++) await recordEvent({ tenantId, orgId, raw: { type: 'conversion', path: '/thanks', sessionKey: `${key}-${i}`, utm: { campaign: key } } });
@@ -200,19 +249,24 @@ describe('ADR 0956 D5 — UTM governance over HTTP + the publish path', () => {
   });
 
   it('trackedUrl: unlinted while campaign-intel is off; linted against the brief org policy when on', async () => {
+    const s = await seedOrg();
+    const { tenantId, orgId } = s;
+    await savedPolicy(s);
     const { briefId } = await makeCampaign(tenantId, orgId, 'Tracked', { source: 'tiktok', medium: 'cpc', campaign: 'tracked' });
     const surface = buildCampaignBriefSurface({ tenantId });
     await setIntel('off');
-    const off = await surface.trackedUrl({ briefId, url: 'https://ex.com/lp', variantKey: 'a', adRef: 'ad-1' });
-    expect(off).toMatchObject({ linted: false, violations: [] });
-    expect(String(off.url)).toContain('utm_id=ad-1');
-    await setIntel('on');
+    try {
+      const off = await surface.trackedUrl({ briefId, url: 'https://ex.com/lp', variantKey: 'a', adRef: 'ad-1' });
+      expect(off).toMatchObject({ linted: false, violations: [] });
+      expect(String(off.url)).toContain('utm_id=ad-1');
+    } finally { await setIntel('on'); }
     const on = await surface.trackedUrl({ briefId, url: 'https://ex.com/lp' });
     expect(on).toMatchObject({ linted: true, policyVersion: 1 });
     expect(on.violations).toEqual([expect.objectContaining({ param: 'utm_source', rule: 'not_allowed' })]);
   });
 
   it('trackedUrl is org-scoped: a run whose person cannot read the brief\'s client org gets a uniform not-found (cross-client witness)', async () => {
+    const { tenantId, orgId, ownerId, peerId } = await seedOrg();
     const d = getToggleDefault('campaign-brief');
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
     const { briefId } = await makeCampaign(tenantId, orgId, 'Scoped', { source: 'meta', medium: 'cpc', campaign: 'scoped' });
@@ -225,9 +279,14 @@ describe('ADR 0956 D5 — UTM governance over HTTP + the publish path', () => {
     await expect(asPeer.trackedUrl!({ briefId, url: 'https://ex.com/lp' })).rejects.toMatchObject({ code: 'not_found' });
     // Naming a different org than the brief's is the same not-found, never the brief.
     await expect(asOwner.trackedUrl!({ briefId, orgId: 'org-other', url: 'https://ex.com/lp' })).rejects.toMatchObject({ code: 'not_found' });
+    // The seam's org policy refuses that first; the surface's own arg check holds without it.
+    await expect(buildCampaignBriefSurface({ tenantId }).trackedUrl({ briefId, orgId: 'org-other', url: 'https://ex.com/lp' })).rejects.toMatchObject({ code: 'not_found' });
   });
 
   it('publish-ad-variants refuses a link that breaks the policy BEFORE dispatch, and passes a clean one with adRef', async () => {
+    const s = await seedOrg();
+    const { tenantId, orgId } = s;
+    await savedPolicy(s);
     const bad = await makeCampaign(tenantId, orgId, 'Bad', { source: 'tiktok', medium: 'cpc', campaign: 'bad' });
     const good = await makeCampaign(tenantId, orgId, 'Good', { source: 'meta', medium: 'paid-social', campaign: 'good' });
     const surface = buildCampaignBriefSurface({ tenantId });
@@ -259,6 +318,7 @@ describe('ADR 0956 D5 — UTM governance over HTTP + the publish path', () => {
   });
 
   it('utm-lint node: typed failure with per-link results; success passes the results through', async () => {
+    const orgId = 'org-lint'; // the node passes it through; the stub never reads it
     const node = intelNodes['feature.campaign-intel.nodes.utm-lint'];
     const optimizeBudget = async () => ({}); // ensureIntel's surface probe
     const ci = { optimizeBudget, utmLint: async (a: { orgId: string; urls: string[] }) => ({ policyVersion: 1, results: a.urls.map((url) => ({ url, violations: url.includes('bad') ? [{ param: 'utm_source', rule: 'missing', message: 'x' }] : [] })) }) };
@@ -274,14 +334,26 @@ describe('ADR 0956 D5 — UTM governance over HTTP + the publish path', () => {
   it('erasure tombstones the editor and keeps the org configuration; it never sweeps unscoped', async () => {
     const T = `utm-erase-${Date.now()}`;
     const { campaignId } = await makeCampaign(T, 'org-e', 'E', { campaign: 'e-key' });
+    const { campaignId: repointed } = await makeCampaign(T, 'org-e', 'E2', { campaign: 'e2-key' });
     await setUtmPolicy(T, 'org-e', parseUtmPolicy({ mediums: ['cpc'] }), 0, 'user:alice');
     await setAlias(T, 'org-e', 'e-typo', campaignId, 'user:alice');
     expect((await eraseCampaignIntelSubject(T, '')).rowsTouched).toBe(0);
-    expect((await eraseCampaignIntelSubject(T, 'user:alice')).rowsTouched).toBe(2);
+    // An edit that lands between the eraser's rewrite read and its write (the
+    // tenant list reads the row first) survives, and still loses its author.
+    const aliasKey = `hostext:campaign-intel:utm-alias:${T}::org-e::e-typo`;
+    const get = storage.kvGet.bind(storage);
+    let reads = 0;
+    const hold = vi.spyOn(storage, 'kvGet').mockImplementation(async (key) => {
+      const observed = await get(key);
+      if (key === aliasKey && ++reads === 2) await setAlias(T, 'org-e', 'e-typo', repointed, 'user:alice');
+      return observed;
+    });
+    try { expect((await eraseCampaignIntelSubject(T, 'user:alice')).rowsTouched).toBe(2); } finally { hold.mockRestore(); }
+    expect(reads).toBeGreaterThanOrEqual(2);
     const policy = await getUtmPolicy(T, 'org-e');
     expect(policy.policy.mediums).toEqual(['cpc']);
     const [alias] = await listAliases(T, 'org-e');
-    expect(alias?.campaignId).toBe(campaignId);
+    expect(alias?.campaignId).toBe(repointed);
     expect(alias?.createdBy).toBe(ERASED_USER_REF);
   });
 });

@@ -33,6 +33,7 @@ import { createApp } from '../src/index.js';
 import { buildHostSurfaceBundle } from '../src/host/inMemorySurfaces.js';
 import { DurableSearchUnavailableError } from '../src/host/webResearchSurface.js';
 import { readPackManifest } from './helpers/readPackManifest.js';
+import { declaredIdTable } from './helpers/featureRatchetTables.js';
 
 let app: http.Server;
 let provider: http.Server;
@@ -131,7 +132,16 @@ describe('the evidence-storing chains ASK for the durable gate', () => {
     return pack.chains.flatMap((c) => c.dag?.nodes ?? []).filter((n) => n.typeId === 'core.web.search');
   };
 
-  for (const chain of ['kicktodo-challenge-factory', 'kicktodo-research']) {
+  // Feature-owned rows (ADR 1031 P2): `idTables["webSearch.durableChainPacks"]`.
+  const durableChainPacks = Object.keys(declaredIdTable<string>('webSearch.durableChainPacks')).sort();
+  // With no feature declaring one (this repo after ADR 1031 P3 moved KickTodo's two
+  // downstream) the suite still needs a case: the declared set is read and empty.
+  if (durableChainPacks.length === 0) {
+    it('no composed feature declares an evidence-storing chain pack', () => {
+      expect(durableChainPacks).toEqual([]);
+    });
+  }
+  for (const chain of durableChainPacks) {
     it(`${chain} declares suitability:durable on every search node`, () => {
       const nodes = searchNodesOf(chain);
       expect(nodes.length, 'the chain must still have a search node for this to mean anything').toBeGreaterThan(0);

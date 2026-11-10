@@ -27,8 +27,9 @@
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { IDEMPOTENT_ENDPOINTS } from '../src/host/idempotentResponse.js';
+import { collectFeatureRatchetDeclarations } from './helpers/featureRatchetDeclarations.js';
 
 const SRC = join(__dirname, '..', 'src');
 
@@ -45,7 +46,7 @@ const READS_HEADER = /req\.header\(\s*['"]idempotency-key['"]\s*\)/i;
  * Files permitted to call the fire-once mutex: the daemons and sweeps whose
  * keys are machine-generated. NO-GROWTH.
  */
-const MUTEX_ALLOWLIST = new Set<string>([
+const HOST_MUTEX_ALLOWLIST = new Set<string>([
   'host/retentionSweepDaemon.ts',
   'host/scheduleDaemon.ts',
   'host/heartbeatService.ts',
@@ -62,7 +63,6 @@ const MUTEX_ALLOWLIST = new Set<string>([
   'features/knowledge-sync/knowledgeSyncService.ts',
   'features/connections/refreshDaemon.ts',
   'features/cms/publishSweep.ts',
-  'features/kicktodo-metrics/verifierSampleDaemon.ts',
   // ADR 0820 §7 (PR #4582) — the weekly paywall-funnel summary daemon. Its one
   // claim is `paywall-weekly-summary:sent:<isoWeek>`, a machine-generated ISO-week
   // key (never caller-supplied), so two instances or a redeploy send at most once a
@@ -140,6 +140,17 @@ const FILES = walk(SRC).map((p) => ({
   rel: relative(SRC, p).split(sep).join('/'),
   text: readFileSync(p, 'utf8'),
 }));
+
+/** ADR 1031 P2 — the host list plus each feature package's declared
+ *  `fireOnceMutexCallers` (paths relative to its own directory, resolved here to
+ *  `src/`-relative), so a feature carries its own reviewed entry. Same NO-GROWTH
+ *  and no-ghost assertions over the union. */
+let MUTEX_ALLOWLIST: ReadonlySet<string> = HOST_MUTEX_ALLOWLIST;
+beforeAll(async () => {
+  const declared = (await collectFeatureRatchetDeclarations())
+    .flatMap((d) => (d.declarations.fireOnceMutexCallers ?? []).map((f) => `${d.srcRel}/${f}`));
+  MUTEX_ALLOWLIST = new Set([...HOST_MUTEX_ALLOWLIST, ...declared]);
+});
 
 describe('ADR 0549 — idempotency lane separation', () => {
   it('no route module calls the fire-once mutex', () => {

@@ -26,6 +26,7 @@ export const messages = {
   tab_roles: 'Rôles',
   'tab_capability-firewall': 'Pare-feu de capacités',
   'tab_example-data': 'Données d’exemple',
+  tab_channels: 'Canaux de discussion',
 
   emptyTitle: 'Rien à gérer ici pour l’instant',
   emptyBody: 'Les outils d’identifiants et d’accès apparaîtront ici à mesure qu’ils sont activés pour votre espace de travail.',

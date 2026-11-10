@@ -159,14 +159,14 @@ describe('PRB-1..5 — the lifecycle holds (no resurrection, no rewriting an app
 
 describe('PRB-6 — apply never claims an install that did not happen', () => {
   it('apply of a draft does not report `installed:` and does not flip the row to applied', async () => {
-    // ADR 0972 P2: `prompt-template` has an installer now, so the probe uses a kind
-    // that still has none.
-    const id = await seed('draft', undefined, WS, 'agent-pack');
+    // ADR 0972 P2 and ADR 1033: `prompt-template` and both pack kinds have an
+    // installer now, so the probe uses the kind that still has none.
+    const id = await seed('draft', undefined, WS, 'automation');
     const before = await admin.get<ProposalView>(`${P}/${id}`);
     const r = await admin.post(`${P}/${id}/apply`, { revision: before.body.revision, artifactDigest: before.body.artifactDigest });
     expect(JSON.stringify(r.body), 'apply claimed an install').not.toContain('installed:');
     expect(r.status).toBe(409);
-    expect(r.body).toMatchObject({ error: 'conflict', details: { reason: 'proposal_not_installable', kind: 'agent-pack' } });
+    expect(r.body).toMatchObject({ error: 'conflict', details: { reason: 'proposal_not_installable', kind: 'automation' } });
     const after = await getProposal(WS, id);
     expect(after?.state).toBe('draft');
     expect(after?.activation).toBeUndefined();
@@ -260,12 +260,13 @@ describe('PRB-11 — the agent tool shares the route predicate', () => {
 describe('PRB-12 — advertisement follows what apply can do', () => {
   it('agents.proposals advertises exactly the kinds that have an installer', () => {
     // ADR 0972 P2: before the 2.46.21 pin no kind had one and the facet was absent.
-    // Now `prompt-template` does; the three kinds without an installer stay unlisted.
+    // Now `prompt-template` does, and both pack kinds since ADR 1033; `automation`,
+    // without an installer, stays unlisted.
     const prev = process.env.OPENWOP_PROPOSALS_ENABLED;
     process.env.OPENWOP_PROPOSALS_ENABLED = 'true';
     try {
       const facet = agentsCapability().proposals as ProposalsFacet | undefined;
-      expect(facet?.artifactKinds).toEqual(['prompt-template']);
+      expect([...(facet?.artifactKinds ?? [])].sort()).toEqual(['agent-pack', 'prompt-template', 'workflow-chain-pack']);
     } finally {
       if (prev === undefined) delete process.env.OPENWOP_PROPOSALS_ENABLED; else process.env.OPENWOP_PROPOSALS_ENABLED = prev;
     }

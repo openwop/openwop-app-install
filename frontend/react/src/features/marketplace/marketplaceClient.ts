@@ -44,7 +44,8 @@ export interface Listing {
   };
 }
 
-export type PackTrustTier = 'steward' | 'operator-trusted' | 'untrusted' | 'revoked';
+/** ADR 1048 adds `adopter`: a white-label adopter's own pack, attested by its repo. */
+export type PackTrustTier = 'steward' | 'adopter' | 'operator-trusted' | 'untrusted' | 'revoked';
 
 /** ADR 0826 D1 — what THIS caller may do, computed server-side by the same
  *  predicates the write routes enforce. Presentation only; the server decides. */

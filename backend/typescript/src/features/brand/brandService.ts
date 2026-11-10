@@ -312,6 +312,7 @@ function sanitizeTheme(raw: unknown): BrandTheme | undefined {
     contrastLevel: enumOr(t.contrastLevel, ['standard', 'medium', 'high'] as const),
     radius: enumOr(t.radius, ['sm', 'md', 'lg'] as const),
     density: enumOr(t.density, ['compact', 'comfortable'] as const),
+    motion: enumOr(t.motion, ['calm', 'lively', 'subtle'] as const), // ADR 1029 D6
     override,
   }) as BrandTheme | undefined;
 }

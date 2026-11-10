@@ -19,6 +19,7 @@ import { createLogger } from '../../observability/logger.js';
 import { listActivitiesByIdPrefix } from '../crm/crmEntitiesService.js';
 import { getContact } from '../crm/contactsService.js';
 import { makeWebinarAdapter } from './host/webinarAdapter.js';
+import { listPendingPushes } from './pendingPush.js';
 import { ingestWebinarEvent, flushWebinarContactImports, type WebinarContactBatch, type WebinarPhase } from './webinarProcessor.js';
 import type { MarketingEvent } from './entities/marketingEvent.js';
 
@@ -116,7 +117,7 @@ export async function computeEventCountsBatch(tenantId: string, orgId: string): 
 
 export type SyncOutcome =
   | { outcome: 'cooldown'; retryAtIso: string }
-  | { outcome: 'synced'; attendees: number; noShows: number; partial?: boolean }
+  | { outcome: 'synced'; attendees: number; noShows: number; registrants: number; partial?: boolean }
   | { outcome: 'error'; reason: string };
 
 /**
@@ -128,7 +129,44 @@ export async function syncEvent(deps: BrokeredEgressDeps, tenantId: string, orgI
   const claim = await claimWebinarSync(tenantId, orgId, event.eventId);
   if (!claim.claimed) return { outcome: 'cooldown', retryAtIso: claim.retryAtIso! };
 
-  const adapter = makeWebinarAdapter(deps);
+  // ADR 1054 D2/D3 — pinned to the tracked event's connection when it names one.
+  const adapter = makeWebinarAdapter(deps, event.connectionId);
+
+  // ADR 1054 D5 — registrants first. Webhook ingest is tracked-only (D4), so a person who
+  // registered on Zoom before the webinar was tracked arrives by no webhook; without this
+  // walk they would never be counted, and never be a no-show either. A failed or bounded
+  // walk makes the picture partial, and a partial picture never feeds the no-show pass.
+  let registrantsComplete = false;
+  const registrantEmails = new Set<string>();
+  const registrantBatch: WebinarContactBatch = { contactsCreated: 0 };
+  let regCursor: string | undefined;
+  for (let page = 0; page < 20; page++) {
+    const res = await adapter.listRegistrants(event.providerEventId, regCursor);
+    if (!res.ok) {
+      // A 400/404 on the FIRST page is the webinar's own answer (registration not enabled,
+      // or Zoom does not know the id); the attendance walk below still runs, but without a
+      // registrant list the no-show pass is unsafe, so the sync is reported partial.
+      if (page === 0 && /^zoom_40[04]/.test(res.error)) break;
+      if (page === 0) {
+        // Same rule as the attendance walk: an error that read nothing must not consume the cooldown.
+        await releaseWebinarSyncClaim(tenantId, orgId, event.eventId);
+        return { outcome: 'error', reason: res.error };
+      }
+      break; // partial: registrantsComplete stays false
+    }
+    for (const row of res.value.rows) {
+      registrantEmails.add(row.email.trim().toLowerCase());
+      await ingestWebinarEvent(tenantId, orgId, event.connectionId, {
+        provider: event.provider, providerEventId: event.providerEventId, phase: 'registered',
+        participantEmail: row.email, ...(row.name ? { participantName: row.name } : {}),
+        ...(event.title ? { title: event.title } : {}), ...(row.createdAt ? { occurredAt: row.createdAt } : {}),
+      }, { batch: registrantBatch });
+    }
+    if (!res.value.nextCursor) { registrantsComplete = true; break; }
+    regCursor = res.value.nextCursor;
+  }
+  flushWebinarContactImports(tenantId, orgId, registrantBatch);
+
   const attendedContactIds = new Set<string>();
   // R2 WB-SP-8 — count DISTINCT people, not report rows: Zoom emits one row
   // per join session, so a drop-and-rejoin attendee counted twice in the toast.
@@ -175,16 +213,16 @@ export async function syncEvent(deps: BrokeredEgressDeps, tenantId: string, orgI
   // false "you missed it" journey. If we saw zero attendees this pass, defer.
   if (attendees === 0) {
     log.info('webinar sync — attendance report empty, deferring no-show computation', { eventId: event.eventId });
-    return { outcome: 'synced', attendees, noShows: 0 };
+    return { outcome: 'synced', attendees, noShows: 0, registrants: registrantEmails.size, ...(registrantsComplete ? {} : { partial: true }) };
   }
   // R2 WB-SP-1 — the walk broke early (page failure or the 20-page bound): the
   // attendance picture is INCOMPLETE, so no-show conclusions are unsafe. Keep
   // the partial attendee ingest, defer the accusation.
-  if (!walkComplete) {
-    log.warn('webinar sync — partial attendance walk, deferring no-show computation', { eventId: event.eventId, attendees });
+  if (!walkComplete || !registrantsComplete) {
+    log.warn('webinar sync — partial attendance or registrant walk, deferring no-show computation', { eventId: event.eventId, attendees, walkComplete, registrantsComplete });
     // review Minor 3 — the OPERATOR must see this too, not just the log: a
     // plain 'synced' toasted "N attended, 0 no-show" as a full-success claim.
-    return { outcome: 'synced', attendees, noShows: 0, partial: true };
+    return { outcome: 'synced', attendees, noShows: 0, registrants: registrantEmails.size, partial: true };
   }
 
   // No-shows: registered contacts with no attended activity. Read the registered
@@ -192,12 +230,16 @@ export async function syncEvent(deps: BrokeredEgressDeps, tenantId: string, orgI
   const registered = await listActivitiesByIdPrefix(tenantId, orgId, `act:webinar:${event.providerEventId}:`);
   const attendedIds = new Set(registered.filter((a) => a.activityId.endsWith(':attended')).map((a) => a.contactId));
   for (const cid of attendedIds) if (cid) attendedContactIds.add(cid);
+  // ADR 1054 review (WEB-7) — a registrant still in the push queue never received a Zoom
+  // join link, so "no-show" would accuse someone who could not attend.
+  const unpushed = new Set((await listPendingPushes(tenantId, orgId, event.eventId)).map((p) => p.email.trim().toLowerCase()));
   let noShows = 0;
   for (const a of registered) {
     if (!a.activityId.endsWith(':registered') || !a.contactId) continue;
     if (attendedContactIds.has(a.contactId)) continue;
     const contact = await getContact(a.contactId).catch(() => null);
     if (!contact || contact.tenantId !== tenantId || !contact.email) continue;
+    if (unpushed.has(contact.email.trim().toLowerCase())) continue;
     await ingestWebinarEvent(tenantId, orgId, event.connectionId, {
       provider: event.provider, providerEventId: event.providerEventId, phase: 'no-show',
       participantEmail: contact.email, ...(event.title ? { title: event.title } : {}),
@@ -206,6 +248,6 @@ export async function syncEvent(deps: BrokeredEgressDeps, tenantId: string, orgI
   }
 
   log.info('webinar sync complete', { eventId: event.eventId, attendees, noShows });
-  return { outcome: 'synced', attendees, noShows };
+  return { outcome: 'synced', attendees, noShows, registrants: registrantEmails.size };
 }
 

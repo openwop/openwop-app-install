@@ -12,6 +12,17 @@ const here = dirname(fileURLToPath(import.meta.url));
 const REPO = join(here, '../../..');
 const DEFAULT_PACKS = join(REPO, 'packs');
 const DEFAULT_FEATURES = join(here, '../src/features');
+/**
+ * ADR 1031 P3 — the scan is FIRST-PARTY: packs an adopter pins in
+ * `src/adopter/packPins.ts` (ADOPTER_PACK_PINS) call the adopter's own surfaces,
+ * which this scanner does not register, so they are left out. The pinned
+ * denominators then hold in openwop-app and in every adopter's tree alike.
+ */
+const ADOPTER_PINS_FILE = join(here, '../src/adopter/packPins.ts');
+function adopterPackNames(): Set<string> {
+  if (!existsSync(ADOPTER_PINS_FILE)) return new Set();
+  return new Set([...readFileSync(ADOPTER_PINS_FILE, 'utf8').matchAll(/['"]([a-z0-9][\w.-]*)['"]\s*:\s*['"]/g)].map((m) => m[1]!));
+}
 
 /** Roots the scan walks — overridable so the test can run the REAL scanner
  *  against a synthetic corpus (the S3 self-test) instead of re-implementing it. */
@@ -142,7 +153,7 @@ function classifyMethod(fn: ts.ArrowFunction | ts.FunctionExpression | ts.Method
  *  adds no key the pack sends). Without this the wrapped surfaces leave the scan's
  *  population silently — ADR 0901 (DEC-1) wrapped all nine KickTodo surfaces and
  *  the denominators fell by 61 call sites. Adding a name here is a review. */
-const SURFACE_WRAPPERS = new Set(['bindKicktodoSurface']);
+const SURFACE_WRAPPERS = new Set<string>([]);
 
 function surfaceMethods(surfaces: ReturnType<typeof registeredSurfaces>): SurfaceMethod[] {
   const out: SurfaceMethod[] = [];
@@ -191,8 +202,10 @@ function surfaceMethods(surfaces: ReturnType<typeof registeredSurfaces>): Surfac
 
 function packCallSites(PACKS: string, surfaceIds: Set<string>, methodsBySurface: Map<string, Set<string>>): CallSite[] {
   const out: CallSite[] = [];
+  const adopterPacks = adopterPackNames();
   for (const pack of readdirSync(PACKS)) {
     if (!/^feature\..+\.nodes$/.test(pack)) continue;
+    if (adopterPacks.has(pack)) continue;
     const entry = join(PACKS, pack, 'index.mjs');
     if (!existsSync(entry) || !statSync(entry).isFile()) continue;
     const sf = parse(entry);

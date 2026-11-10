@@ -166,6 +166,8 @@ describe('R3 — a percentage rate is bounded (rate: 500 was a valid plan)', () 
   it('still accepts 100% exactly, and a fixed rate above 100 (the bound is percentage-only)', async () => {
     const { owner, orgId } = await ownerWithMember('editor');
     expect((await owner.post(`${base(orgId)}/plans`, { ...validPlan, name: 'Cap edge', rules: [{ basis: 'deal-won', type: 'percentage', rate: 100 }] })).status).toBe(201);
-    expect((await owner.post(`${base(orgId)}/plans`, { ...validPlan, name: 'Flat 500', rules: [{ basis: 'deal-won', type: 'fixed', rate: 500 }] })).status).toBe(201);
+    // A different assignment: ADR 1034 D4 refuses a second plan for the SAME assignment over
+    // an overlapping window (`plan_window_overlap`), which is not what this case is about.
+    expect((await owner.post(`${base(orgId)}/plans`, { ...validPlan, name: 'Flat 500', assignment: { kind: 'role', ref: 'sdr' }, rules: [{ basis: 'deal-won', type: 'fixed', rate: 500 }] })).status).toBe(201);
   });
 });

@@ -10,7 +10,12 @@
  *     server's answer, the panel never decides it;
  *   - quality checks: off ⇒ said once, every cell "Off"; on ⇒ "x of y tasks";
  *   - "Chat" deep-links the ONE chat to the agent the role actually uses;
- *   - a failed read is said, never shown as an empty team.
+ *   - a failed read is said, never shown as an empty team;
+ *   - a reset confirm still open when the client changes touches neither client.
+ *
+ * Sabotage: drop `!ok` → the cancelled reset still deletes; offer the controls
+ * without `canEdit` → the reader case reds; read the role's eval on a bound row →
+ * "Not checked yet" reds.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, fireEvent, waitFor, within, act } from '@testing-library/react';
@@ -31,7 +36,7 @@ const view = (over: Partial<TeamView> = {}): TeamView => ({
   evals: { available: true },
   members: [
     { role: { ...role('pack.copywriter', 'Campaign Copywriter'), eval: { suiteRef: 's@1', runId: 'r1', passed: true, passedCount: 9, taskCount: 10, completedAt: '2026-10-19T10:00:00Z' } }, binding: null, narrowerBindings: 0 },
-    { role: role('pack.producer', 'Campaign Producer'), binding: { bindingId: 'agb_1', agent: { agentId: 'tenant.producer', label: 'Our Producer', eval: null } }, narrowerBindings: 1 },
+    { role: { ...role('pack.producer', 'Campaign Producer'), eval: { suiteRef: 's@1', runId: 'r2', passed: true, passedCount: 5, taskCount: 5, completedAt: '2026-10-19T10:00:00Z' } }, binding: { bindingId: 'agb_1', agent: { agentId: 'tenant.producer', label: 'Our Producer', eval: null } }, narrowerBindings: 1 },
   ],
   ...over,
 });
@@ -113,9 +118,14 @@ describe('TeamPanel', () => {
     h.unbindRoleAgent.mockResolvedValue(undefined);
     renderPanel();
     const prod = await rowOf('Campaign Producer');
+    h.confirm.mockResolvedValueOnce(false);
+    fireEvent.click(within(prod).getByRole('button', { name: 'Use the default agent for Campaign Producer' }));
+    await waitFor(() => expect(h.confirm).toHaveBeenCalledTimes(1));
+    await act(async () => {});
+    expect(h.unbindRoleAgent).not.toHaveBeenCalled();
     fireEvent.click(within(prod).getByRole('button', { name: 'Use the default agent for Campaign Producer' }));
     await waitFor(() => expect(h.unbindRoleAgent).toHaveBeenCalledWith('o1', 'agb_1'));
-    expect(h.confirm).toHaveBeenCalledTimes(1);
+    expect(h.confirm).toHaveBeenCalledTimes(2);
   });
 
   it('a reader sees no change controls and is told why', async () => {

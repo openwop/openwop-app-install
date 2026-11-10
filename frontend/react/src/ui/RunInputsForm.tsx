@@ -11,14 +11,17 @@
  * "Run now" flow both use it (no second input UI). Built on the shared `Modal` +
  * `Field` primitives; presentational + host-only, no wire change.
  */
+import { PROVIDERS } from '../byok/lib/providers.js';
+import { Notice } from './Notice.js';
 import { Button } from '../ui/Button.js';
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { RunConfigurable } from '@openwop/openwop';
 import { Modal } from './Modal.js';
 import { TextField, CheckboxField, SelectField } from './Field.js';
 import type { RunVariable } from '../workflows/workflowsClient.js';
-import { listStoredRefs } from '../byok/lib/byokClient.js';
+import { refsForExactProviders, useStoredCredentialRefs } from '../byok/lib/useStoredCredentialRefs.js';
+import { StoredCredentialField } from '../byok/components/StoredCredentialField.js';
 
 /** ADR 0507 — `expandChain({deferred:true})` names variables
  *  `<chainIdSlug>_<12-hex expansionId>_<param>`. Anchored on the 12-hex segment so
@@ -211,9 +214,14 @@ export function RunInputsDialog({
   onCancel,
   busy = false,
   error,
+  initialInputs = {},
+  aiKeyOption = false,
 }: {
   workflowName: string;
   variables: RunVariable[];
+  initialInputs?: Record<string, unknown>;
+  /** Explicit run option, independent of the workflow input contract. */
+  aiKeyOption?: boolean;
   /** `configurable` is set when the run names a stored key (ADR 0712) — pass it
    *  to `createRun` beside `inputs`. */
   onRun: (inputs: Record<string, unknown>, configurable?: RunConfigurable) => void;
@@ -222,18 +230,22 @@ export function RunInputsDialog({
   error?: string | null;
 }): JSX.Element {
   const { t } = useTranslation('common');
-  const [values, setValues] = useState<Record<string, unknown>>(() => initialRunInputValues(variables));
+  const [values, setValues] = useState<Record<string, unknown>>(() => ({ ...initialRunInputValues(variables), ...initialInputs }));
   const missing = useMemo(() => missingRequired(variables, values), [variables, values]);
-  const wantsCredential = useMemo(() => variables.some(isCredentialRefVariable), [variables]);
-  const [credentialRefs, setCredentialRefs] = useState<readonly string[] | undefined>(undefined);
-  useEffect(() => {
-    if (!wantsCredential) return undefined;
-    let live = true;
-    // A failed read degrades to the free-text field; the server still refuses a
-    // name that is not in the vault, so nothing is lost but the convenience.
-    listStoredRefs().then((refs) => { if (live) setCredentialRefs(refs); }, () => undefined);
-    return () => { live = false; };
-  }, [wantsCredential]);
+  const declaredCredential = useMemo(() => variables.some(isCredentialRefVariable), [variables]);
+  const wantsCredential = declaredCredential || aiKeyOption;
+  const separateKey = aiKeyOption && !declaredCredential;
+  const [selectedRef, setSelectedRef] = useState('');
+  const keys = useStoredCredentialRefs({ enabled: wantsCredential, onInvalidate: () => {
+    setSelectedRef('');
+    setValues((prior) => Object.fromEntries(Object.entries(prior).filter(([key]) => !variables.some(v => v.name === key && isCredentialRefVariable(v)))));
+  } });
+  const credentialRefs = keys.refs;
+  const keyError = keys.failed;
+  const selectableRefs = credentialRefs && refsForExactProviders(credentialRefs, PROVIDERS.filter(p => !p.managed && !p.hidden).map(p => p.id));
+  const keyPending = aiKeyOption && keys.pending;
+  const pickedRef = separateKey ? selectedRef : variables.filter(isCredentialRefVariable).map(v => values[v.name]).find(v => typeof v === 'string' && v.trim());
+  const keyUnverified = aiKeyOption && Boolean(pickedRef) && (keyPending || !keys.isVerified());
 
   return (
     <Modal onClose={onCancel} label={t('runInputs.title', { name: workflowName })} error={error ?? undefined} showClose>
@@ -241,9 +253,13 @@ export function RunInputsDialog({
         className="u-grid u-gap-4"
         onSubmit={(e) => {
           e.preventDefault();
-          if (busy || missing.length > 0) return;
-          const split = splitRunCredential(variables, toRunInputs(variables, values));
-          onRun(split.inputs, split.configurable);
+          if (busy || missing.length > 0 || keyUnverified
+            || (aiKeyOption && Boolean(pickedRef) && !keys.isVerified())) return;
+          const untouched = Object.fromEntries(Object.entries(initialInputs).filter(([key]) => !variables.some(v => v.name === key)));
+          const split = splitRunCredential(variables, { ...untouched, ...toRunInputs(variables, values) });
+          onRun(split.inputs, separateKey && selectedRef
+            ? { version: 1, ai: { credentialRef: selectedRef } }
+            : split.configurable);
         }}
       >
         <div className="u-grid u-gap-1">
@@ -251,6 +267,12 @@ export function RunInputsDialog({
           <p className="muted u-fs-13">{t('runInputs.blurb')}</p>
         </div>
         <RunInputsForm variables={variables} values={values} credentialRefs={credentialRefs} onChange={(name, value) => setValues((p) => ({ ...p, [name]: value }))} />
+        {separateKey ? <StoredCredentialField label={t('runInputs.aiKey')} help={t('runInputs.aiKeyHelp')} value={selectedRef} refs={selectableRefs ?? []} emptyLabel={t('runInputs.noKeyOverride')} disabled={keyPending} onChange={setSelectedRef} /> : null}
+        {aiKeyOption && keyPending ? <Notice variant={keyError ? 'warning' : 'info'} announce={t(keyError ? 'runInputs.keyLoadFailed' : 'loading')}>
+          {t(keyError ? 'runInputs.keyLoadFailed' : 'loading')}
+          {keyError ? <Button variant="link" onClick={keys.retry}>{t('retry')}</Button> : null}
+        </Notice> : null}
+        {separateKey && credentialRefs !== undefined && selectableRefs?.length === 0 ? <Notice variant="info">{t('runInputs.noSavedAiKeys')}</Notice> : null}
         {/* The live region is ALWAYS MOUNTED; only its text is conditional.
             Mounting a `role="status"` together with its content announces NOTHING —
             a screen reader observes insertions into an EXISTING live region, so a
@@ -263,7 +285,7 @@ export function RunInputsDialog({
         </p>
         <div className="action-bar u-justify-end">
           <Button variant="quiet" onClick={onCancel} disabled={busy}>{t('cancel')}</Button>
-          <Button variant="primary" type="submit" disabled={busy || missing.length > 0}>
+          <Button variant="primary" type="submit" disabled={busy || missing.length > 0 || keyUnverified}>
             {busy ? t('runInputs.starting') : t('runInputs.run')}
           </Button>
         </div>

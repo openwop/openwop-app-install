@@ -24,6 +24,9 @@ import { ConfirmDialog } from '../../ui/ConfirmDialog.js';
 import { toast } from '../../ui/toast.js';
 import { ScaleIcon } from '../../ui/icons/index.js';
 import { formatNumber } from '../../i18n/format.js';
+import { useOrgScopes } from '../../orgs/useOrgScopes.js';
+import { OrgAccessNotice } from '../../orgs/OrgAccessNotice.js';
+import { useBackendSession } from '../../auth/backendSession.js';
 import {
   listOrgs, type Org,
   listPlans, createPlan, deletePlan, type CommissionPlan, type CommissionType, type AssignmentKind, type CommissionAccelerator,
@@ -82,6 +85,15 @@ export function CommissionsPage(): JSX.Element {
   );
 }
 
+/** ADR 1034 D8 — the server's subject-spelling rule: a raw id and its `user:` scope are one person. */
+function isOwnStatement(subjectId: string, viewerId: string | undefined): boolean {
+  if (!viewerId) return false;
+  // The raw id, its `user:` scope, and the `user:user:` double prefix some writers produce.
+  const forms = new Set([viewerId, `user:${viewerId}`, `user:user:${viewerId}`]);
+  if (viewerId.startsWith('user:')) forms.add(viewerId.slice(5));
+  return forms.has(subjectId);
+}
+
 function CommissionsForOrg({ orgId }: { orgId: string }): JSX.Element {
   const { t } = useTranslation('sales-commissions');
   const [plans, setPlans] = useState<CommissionPlan[] | null>(null);
@@ -90,6 +102,11 @@ function CommissionsForOrg({ orgId }: { orgId: string }): JSX.Element {
   const [statementsFailed, setStatementsFailed] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // ADR 1034 D11 — offer plan admin, compute, submit and pay only to the people the server
+  // lets use them (`host:commissions:manage`); a rep used to see every button and get a 403.
+  const access = useOrgScopes(orgId);
+  const canManage = access.has('host:commissions:manage');
+  const viewerId = useBackendSession().user?.userId;
 
   const load = useCallback(() => {
     setErr(null);
@@ -118,16 +135,21 @@ function CommissionsForOrg({ orgId }: { orgId: string }): JSX.Element {
   useEffect(load, [load]);
 
   return (
-    <div className="u-grid u-grid-2 u-gap-4 u-items-start">
+    <div className="u-flex u-flex-col u-gap-4">
+      {/* Notices sit ABOVE the two-column grid: inside it each took a grid cell and pushed
+          the panels out of place (grade-ux H6). */}
       {err ? <Notice variant="error">{err}</Notice> : null}
-      <PlansPanel orgId={orgId} plans={plans} plansFailed={plansFailed} busy={busy} setBusy={setBusy} onChange={load} />
-      <StatementsPanel orgId={orgId} plans={plans ?? []} plansFailed={plansFailed} statements={statements} statementsFailed={statementsFailed} busy={busy} setBusy={setBusy} onChange={load} />
+      <OrgAccessNotice access={access} />
+      <div className="u-grid u-grid-2 u-gap-4 u-items-start">
+        <PlansPanel orgId={orgId} plans={plans} plansFailed={plansFailed} busy={busy} setBusy={setBusy} onChange={load} canManage={canManage} accessResolved={access.resolved} />
+        <StatementsPanel orgId={orgId} plans={plans ?? []} plansFailed={plansFailed} statements={statements} statementsFailed={statementsFailed} busy={busy} setBusy={setBusy} onChange={load} canManage={canManage} accessResolved={access.resolved} viewerId={viewerId} />
+      </div>
     </div>
   );
 }
 
 // ── Plans ──────────────────────────────────────────────────────────────────
-function PlansPanel({ orgId, plans, plansFailed, busy, setBusy, onChange }: { orgId: string; plans: CommissionPlan[] | null; /** R2 COM2-I1 — whether the READ failed, so an unknown list is not shown as an empty one. */ plansFailed: boolean; busy: boolean; setBusy: (b: boolean) => void; onChange: () => void }): JSX.Element {
+function PlansPanel({ orgId, plans, plansFailed, busy, setBusy, onChange, canManage, accessResolved }: { orgId: string; plans: CommissionPlan[] | null; /** R2 COM2-I1 — whether the READ failed, so an unknown list is not shown as an empty one. */ plansFailed: boolean; busy: boolean; setBusy: (b: boolean) => void; onChange: () => void; /** ADR 1034 D11 — holds host:commissions:manage. */ canManage: boolean; /** The access read has answered (no read-only claim before it does). */ accessResolved: boolean }): JSX.Element {
   const { t } = useTranslation('sales-commissions');
   const [name, setName] = useState('');
   const [currency, setCurrency] = useState('USD');
@@ -144,7 +166,7 @@ function PlansPanel({ orgId, plans, plansFailed, busy, setBusy, onChange }: { or
   const [query, setQuery] = useState('');
   const visiblePlans = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return (plans ?? []).filter((p) => !q || p.name.toLowerCase().includes(q) || p.assignment.ref.toLowerCase().includes(q));
+    return (plans ?? []).filter((p) => !q || p.name.toLowerCase().includes(q) || (p.assignment?.ref ?? '').toLowerCase().includes(q));
   }, [plans, query]);
 
   const addAccelerator = (): void => setAccelerators((a) => [...a, { attainmentGte: 100, rate: Number(rate) || 0 }]);
@@ -190,7 +212,7 @@ function PlansPanel({ orgId, plans, plansFailed, busy, setBusy, onChange }: { or
       {plansFailed ? (
         <StateCard announce icon={<ScaleIcon />} title={t('plansLoadFailedTitle')} body={t('plansLoadFailedBody')} action={<Button variant="primary" onClick={onChange}>{t('retryButton')}</Button>} />
       ) : plans === null ? <Skeleton /> : plans.length === 0 ? (
-        <p className="u-text-muted">{t('noPlansYet')}</p>
+        <p className="u-text-muted">{!accessResolved || canManage ? t('noPlansYet') : t('noPlansYetRep')}</p>
       ) : visiblePlans.length === 0 ? (
         <StateCard icon={<ScaleIcon />} title={t('noMatchTitle')} body={t('noMatchBody')} action={<Button variant="secondary" onClick={() => setQuery('')}>{t('clearFilters')}</Button>} />
       ) : (
@@ -199,15 +221,19 @@ function PlansPanel({ orgId, plans, plansFailed, busy, setBusy, onChange }: { or
             <li key={p.planId} className="u-flex u-justify-between u-items-center u-gap-2">
               <div className="u-flex-col">
                 <strong>{p.name}</strong>
-                <span className="u-text-muted u-text-sm">{assignmentLabel(p.assignment.kind, t)}: {p.assignment.ref} · {ruleSummary(p, t)}</span>
+                {/* An erased rep's plan has no assignment (R2 COM2-M9); this line used to crash the panel on it. */}
+                <span className="u-text-muted u-text-sm">{p.assignment ? `${assignmentLabel(p.assignment.kind, t)}: ${p.assignment.ref}` : t('unassignedPlan')} · {ruleSummary(p, t)}</span>
               </div>
-              <Button variant="primary" className="u-text-danger" disabled={busy} onClick={() => setToDelete(p)}>{t('deleteButton')}</Button>
+              {canManage ? <Button variant="danger" disabled={busy} onClick={() => setToDelete(p)}>{t('deleteButton')}</Button> : null}
             </li>
           ))}
         </ul>
       )}
 
-      <fieldset className="u-flex-col u-gap-2 u-fieldset-bare">
+      {/* Only once the access read has ANSWERED: before that a manager would be told they
+          are not one, on every org switch (grade-ux H2). */}
+      {accessResolved && !canManage ? <p className="u-text-muted u-text-sm u-mb-0">{t('plansReadOnly')}</p> : null}
+      {canManage ? <fieldset className="u-flex-col u-gap-2 u-fieldset-bare">
         <legend className="u-text-sm u-text-muted">{t('newPlanLegend')}</legend>
         <TextField label={t('nameLabel')} value={name} onChange={(e) => setName(e.target.value)} placeholder={t('namePlaceholder')} />
         <div className="u-grid u-grid-2 u-gap-2">
@@ -242,7 +268,7 @@ function PlansPanel({ orgId, plans, plansFailed, busy, setBusy, onChange }: { or
             <div key={i} className="u-flex u-gap-2 u-items-end">
               <TextField label={t('attainmentGteLabel')} inputMode="decimal" value={String(a.attainmentGte)} onChange={(e) => setAcc(i, { attainmentGte: Number(e.target.value) || 0 })} />
               <TextField label={type === 'percentage' ? t('boostedRateLabel') : t('boostedAmountLabel')} inputMode="decimal" value={String(a.rate)} onChange={(e) => setAcc(i, { rate: Number(e.target.value) || 0 })} />
-              <Button variant="primary" className="u-text-danger" aria-label={t('removeAcceleratorAria', { n: i + 1 })} onClick={() => removeAcc(i)}>{t('removeButton')}</Button>
+              <Button variant="danger" aria-label={t('removeAcceleratorAria', { n: i + 1 })} onClick={() => removeAcc(i)}>{t('removeButton')}</Button>
             </div>
           ))}
         </div>
@@ -250,7 +276,7 @@ function PlansPanel({ orgId, plans, plansFailed, busy, setBusy, onChange }: { or
         <div className="action-bar">
           <Button variant="primary" disabled={busy || !name.trim() || !ref.trim()} onClick={() => void create()}>{t('createPlanButton')}</Button>
         </div>
-      </fieldset>
+      </fieldset> : null}
 
       {toDelete ? (
         <ConfirmDialog
@@ -268,7 +294,7 @@ function PlansPanel({ orgId, plans, plansFailed, busy, setBusy, onChange }: { or
 }
 
 // ── Statements ───────────────────────────────────────────────────────────────
-function StatementsPanel({ orgId, plans, plansFailed, statements, statementsFailed, busy, setBusy, onChange }: { orgId: string; plans: CommissionPlan[]; /** R2 review — the plans READ failed, so the picker must not claim there are none. */ plansFailed: boolean; statements: CommissionStatement[] | null; statementsFailed: boolean; busy: boolean; setBusy: (b: boolean) => void; onChange: () => void }): JSX.Element {
+function StatementsPanel({ orgId, plans, plansFailed, statements, statementsFailed, busy, setBusy, onChange, canManage, accessResolved, viewerId }: { orgId: string; plans: CommissionPlan[]; /** R2 review — the plans READ failed, so the picker must not claim there are none. */ plansFailed: boolean; statements: CommissionStatement[] | null; statementsFailed: boolean; busy: boolean; setBusy: (b: boolean) => void; onChange: () => void; /** ADR 1034 D11 */ canManage: boolean; accessResolved: boolean; viewerId: string | undefined }): JSX.Element {
   // COM2-G3 — the compute form already picks a rep BY NAME via the shared
   // UserPicker ("instead of a raw subject id", as its own comment says), and the
   // table right beneath it then printed the raw subject id. Resolve names once
@@ -305,8 +331,28 @@ function StatementsPanel({ orgId, plans, plansFailed, statements, statementsFail
   const compute = async (): Promise<void> => {
     if (!planId || !subjectId.trim() || !period.trim()) { toast.error(t('statementValidationError')); return; }
     setBusy(true);
-    try { const s = await computeStatement(orgId, planId, subjectId.trim(), period.trim()); toast.success(t('statementComputedToast', { amount: money(s.total, s.currency) })); onChange(); }
+    try {
+      const s = await computeStatement(orgId, planId, subjectId.trim(), period.trim());
+      // ADR 1034 D4 — say when deals were left off because another statement of this plan
+      // already paid them, rather than letting a lower total look like a mistake.
+      const excluded = s.excludedDeals?.length ?? 0;
+      toast.success(excluded > 0
+        ? t('statementComputedExcludedToast', { amount: money(s.total, s.currency), count: excluded })
+        : t('statementComputedToast', { amount: money(s.total, s.currency) }));
+      onChange();
+    }
     catch (e) { toast.error(e instanceof Error ? e.message : t('computeFailed')); } finally { setBusy(false); }
+  };
+  const recompute = async (s: CommissionStatement): Promise<void> => {
+    setBusy(true);
+    try {
+      const next = await computeStatement(orgId, s.planId, s.subjectId, s.period);
+      const excluded = next.excludedDeals?.length ?? 0;
+      toast.success(excluded > 0
+        ? t('statementComputedExcludedToast', { amount: money(next.total, next.currency), count: excluded })
+        : t('statementComputedToast', { amount: money(next.total, next.currency) }));
+      onChange();
+    } catch (e) { toast.error(e instanceof Error ? e.message : t('computeFailed')); } finally { setBusy(false); }
   };
   const advance = async (s: CommissionStatement, action: 'approve' | 'pay'): Promise<void> => {
     // COM2-G2 — "mark paid" SETTLES the record: the row becomes terminal with no
@@ -338,9 +384,11 @@ function StatementsPanel({ orgId, plans, plansFailed, statements, statementsFail
   return (
     <Panel className="surface-card u-flex-col u-gap-3">
       <h2 className="u-mb-0">{t('statementsHeading')}</h2>
-      <p className="u-text-muted u-mt-0">{t('statementsLede')}</p>
+      {/* Audience copy waits for the access answer: a manager must not read rep copy on
+          every org switch (closing grade-ux H1). */}
+      {accessResolved ? <p className="u-text-muted u-mt-0">{canManage ? t('statementsLede') : t('statementsLedeRep')}</p> : null}
 
-      <fieldset className="u-flex-col u-gap-2 u-fieldset-bare">
+      {canManage ? <fieldset className="u-flex-col u-gap-2 u-fieldset-bare">
         <legend className="u-text-sm u-text-muted">{t('computeStatementLegend')}</legend>
         <SelectField label={t('planLabel')} value={planId} onChange={(e) => setPlanId(e.target.value)} disabled={plans.length === 0}>
           {/* R2 review — the I1 comment named TWO symptoms (the shimmering skeleton AND
@@ -359,7 +407,7 @@ function StatementsPanel({ orgId, plans, plansFailed, statements, statementsFail
         <div className="action-bar">
           <Button variant="primary" disabled={busy || !planId || !subjectId.trim()} onClick={() => void compute()}>{t('computeButton')}</Button>
         </div>
-      </fieldset>
+      </fieldset> : null}
 
       {statementsFailed ? (
         <Notice variant="warning" announce={t('statementsLoadFailed')}>{t('statementsLoadFailed')} <Button variant="link" onClick={onChange}>{t('retryButton')}</Button></Notice>
@@ -384,7 +432,7 @@ function StatementsPanel({ orgId, plans, plansFailed, statements, statementsFail
         </div>
       ) : null}
       {statementsFailed ? null : statements === null ? <Skeleton /> : statements.length === 0 ? (
-        <StateCard icon={<ScaleIcon />} title={t('noStatementsTitle')} body={t('noStatementsBody')} />
+        <StateCard icon={<ScaleIcon />} title={t('noStatementsTitle')} body={!accessResolved || canManage ? t('noStatementsBody') : t('noStatementsBodyRep')} />
       ) : visibleStatements.length === 0 ? (
         <StateCard icon={<ScaleIcon />} title={t('noMatchTitle')} body={t('noMatchBody')} action={<Button variant="secondary" onClick={clearFilters}>{t('clearFilters')}</Button>} />
       ) : (
@@ -407,12 +455,39 @@ function StatementsPanel({ orgId, plans, plansFailed, statements, statementsFail
                     <td className="tabular-nums">{s.period}</td>
                     <td>{planName.get(s.planId) ?? s.planId}</td>
                     <td className="u-text-right tabular-nums">{s.attainmentPct !== undefined ? `${formatNumber(s.attainmentPct, { maximumFractionDigits: 0 })}%` : '—'}</td>
-                    <td className="u-text-right tabular-nums">{money(s.total, s.currency)}</td>
+                    <td className="u-text-right tabular-nums">
+                      {/* ADR 1034 D4 — say why a total is lower, on the row, for everyone who
+                          reads it (the compute toast reached only the manager who clicked).
+                          Stacked under the amount so the chip never widens the column, and
+                          the periods are real text, not a hover-only title. */}
+                      <span className="u-flex u-flex-col u-items-end u-gap-1">
+                        <span>{money(s.total, s.currency)}</span>
+                        {s.excludedDeals?.length ? (
+                          <span className="chip chip--muted">
+                            {t('excludedDealsChip', { count: s.excludedDeals.length })}
+                            <span className="sr-only"> {t('excludedDealsTitle', { periods: [...new Set(s.excludedDeals.map((d) => d.period))].join(', ') })}</span>
+                          </span>
+                        ) : null}
+                      </span>
+                    </td>
                     <td><StatusBadge status={b.status} label={b.label} /></td>
                     <td>
-                      {s.status === 'draft' ? <Button variant="primary" size="sm" disabled={busy} onClick={() => void advance(s, 'approve')}>{t('submitForApprovalButton')}</Button>
-                        : s.status === 'approved' ? <Button variant="primary" size="sm" disabled={busy} onClick={() => void advance(s, 'pay')}>{t('markPaidButton')}</Button>
-                          : <span className="u-text-muted u-text-sm">{t('statusPaid')}</span>}
+                      {s.status === 'paid' ? <span className="u-text-muted u-text-sm">{t('statusPaid')}</span>
+                        // ADR 1034 (grade-ux H5) — a pending review is not a fresh draft…
+                        : s.status === 'draft' && s.review?.status === 'pending' ? <span className="chip chip--muted">{t('inReviewChip')}</span>
+                        // …and a review closed because deals were already paid needs a RECOMPUTE,
+                        // not another Submit that would be superseded again.
+                        : s.status === 'draft' && s.review?.superseded ? (
+                          <span className="u-flex u-gap-1 u-items-center u-flex-wrap">
+                            <span className="chip chip--muted">{t('reviewSupersededChip')}</span>
+                            {canManage ? <Button variant="secondary" size="sm" disabled={busy} onClick={() => void recompute(s)}>{t('recomputeButton')}</Button> : null}
+                          </span>
+                        )
+                        : !canManage ? null
+                          : s.status === 'draft' ? <Button variant="primary" size="sm" disabled={busy} onClick={() => void advance(s, 'approve')}>{t('submitForApprovalButton')}</Button>
+                            // ADR 1034 D8 — the server refuses self-pay; say so instead of offering it.
+                            : isOwnStatement(s.subjectId, viewerId) ? <span className="u-text-muted u-text-sm">{t('ownStatementPayNote')}</span>
+                              : <Button variant="primary" size="sm" disabled={busy} onClick={() => void advance(s, 'pay')}>{t('markPaidButton')}</Button>}
                     </td>
                   </tr>
                 );

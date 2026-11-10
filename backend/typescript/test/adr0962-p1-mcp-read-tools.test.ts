@@ -14,11 +14,34 @@
  * What turns it red: dropping `bindExternalRead` from a read; reading the client
  * row before the access check (B would answer `external_agents_off`); a default of
  * anything but `off`; skipping the campaign/run org checks; not stamping.
+ * Re-probed 2026-11-04 (w84g1-*): the `mcpFeatureToggle` and read tier, the
+ * `external_agents_off` refusal and its `off` default, the 403/404 → not-found
+ * mapping, the campaign and run org checks and the stamp merge each red their case.
+ *
+ * ADR 0962 P2 — `campaign_request_change` is a REQUEST, never an effect: listed
+ * write-tier; a read-only client refuses it (no request row); client B is still
+ * not-found; with `request` allowed it writes a request row and starts the governed
+ * change-request run awaiting a person (provenance copied, client-stamped, a
+ * campaign run), and a replay of the MCP wrapper creates no second request or run
+ * (w84g1-mcp-readonly reds the read-only case).
+ *
+ * Recovery (ADR 0962, binding and payload privacy): a tool read whose source run is
+ * missing, or is a campaign-B run, cannot bind to client A (w84g1-mcp-missing-run);
+ * gate summaries and run status never carry gate payload text or tokens (D5,
+ * w84g1-mcp-gate-title), and a stale campaign-A index cannot authorize a run whose
+ * binding moved (w84g1-mcp-run-org).
+ * Double guard (recorded): the conflicting-source half is refused by
+ * `bindExternal`'s binding check AND by `stampRunClient`'s post-merge verify (both
+ * externalRead.ts), so a one-edit probe on either is vacuous; it is witnessed as a
+ * held pair (w84g1-held-mcp-conflict-bind).
+ *
+ * Every case that needs a client's `externalAgents` state sets it itself; the D7
+ * default case uses its OWN fresh client, so no order of cases can hide the default.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { randomBytes } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
@@ -115,7 +138,8 @@ beforeAll(async () => {
   const page = await createPage({ tenantId: TENANT, orgId: orgA, title: 'Spring landing', createdBy: 'seed', sections: [{ type: 'hero', data: { heading: 'Spring is here' } }] });
   const asset = await req<{ asset?: { assetId: string } }>(operator, 'POST', `/host/openwop-app/campaign-ops/clients/${orgA}/assets`, { destination: 'openwop.cms.page', locator: { pageId: page.pageId }, label: 'Spring landing', editableFields: ['title'] });
   expect(asset.status, JSON.stringify(asset.body)).toBe(201);
-  assetA = asset.body.asset!.assetId;
+  if (!asset.body.asset) throw new Error('expected the seeded asset');
+  assetA = asset.body.asset.assetId;
   campaignA = await finalizeFromBrief(TENANT, await createBrief(TENANT, orgA, 'seed', { name: 'Spring A', channels: [] }), 'seed');
   campaignB = await finalizeFromBrief(TENANT, await createBrief(TENANT, orgB, 'seed', { name: 'Secret B', channels: [] }), 'seed');
   // A campaign run of client B (the tag is what makes it B's).
@@ -145,14 +169,23 @@ describe('ADR 0962 P1 — listing', () => {
 
 describe('ADR 0962 P1 — one client per call, the agency\'s RBAC', () => {
   it('D7: an outside agent is refused until the client allows it; a bad value is a 400', async () => {
-    expect((await setAgents(orgA, 'auto-within-caps')).status).toBe(400);
-    const off = await tool(operator, 'campaign_list', { clientId: orgA });
+    // A fresh client of its own: no other case can have moved its `externalAgents` off the default.
+    const orgC = (await createOrg({ tenantId: TENANT, createdBy: 'seed', name: 'Client C' })).orgId;
+    await createMember({ tenantId: TENANT, orgId: orgC, subject: operatorUserId, displayName: 'Operator', roles: ['editor'] });
+    const created = await req(agency, 'POST', '/host/openwop-app/campaign-ops/clients', { name: 'Client C', orgId: orgC });
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    const campaignC = await finalizeFromBrief(TENANT, await createBrief(TENANT, orgC, 'seed', { name: 'Autumn C', channels: [] }), 'seed');
+    const bad = await setAgents(orgC, 'auto-within-caps');
+    expect(bad.status).toBe(400);
+    expect(bad.body).toMatchObject({ error: 'validation_error' });
+    const off = await tool(operator, 'campaign_list', { clientId: orgC });
     expect(off.isError).toBe(true);
     expect(off.text).toMatch(/does not allow outside agents/);
-    expect((await setAgents(orgA, 'read')).status).toBe(200);
-    const on = await tool(operator, 'campaign_list', { clientId: orgA });
+    expect((await setAgents(orgC, 'read')).status).toBe(200);
+    const on = await tool(operator, 'campaign_list', { clientId: orgC });
     expect(on.isError, on.text).toBe(false);
-    expect(on.text).toContain(campaignA.id);
+    expect(on.text).toContain(campaignC.id);
+    expect(on.text).not.toContain(campaignA.id);
     expect(on.text).not.toContain(campaignB.id);
   });
 
@@ -173,10 +206,17 @@ describe('ADR 0962 P1 — one client per call, the agency\'s RBAC', () => {
     const get = await tool(operator, 'campaign_get', { clientId: orgA, campaignId: campaignA.id });
     expect(get.isError, get.text).toBe(false);
     expect(get.text).toContain('Spring A');
-    expect((await tool(operator, 'campaign_get', { clientId: orgA, campaignId: campaignB.id })).text).toContain('Campaign not found');
-    expect((await tool(operator, 'campaign_performance', { clientId: orgA, campaignId: campaignB.id })).text).toContain('Campaign not found');
-    expect((await tool(operator, 'campaign_run_status', { clientId: orgA, runId: runB })).text).toContain('Run not found');
-    expect((await tool(operator, 'campaign_explain', { clientId: orgA, runId: runB })).text).toContain('Run not found');
+    for (const [name, args, refusal] of [
+      ['campaign_get', { clientId: orgA, campaignId: campaignB.id }, 'Campaign not found'],
+      ['campaign_performance', { clientId: orgA, campaignId: campaignB.id }, 'Campaign not found'],
+      ['campaign_run_status', { clientId: orgA, runId: runB }, 'Run not found'],
+      ['campaign_explain', { clientId: orgA, runId: runB }, 'Run not found'],
+    ] as const) {
+      const out = await tool(operator, name, args);
+      expect(out.isError, `${name}: ${out.text}`).toBe(true);
+      expect(out.text, name).toContain(refusal);
+      expect(out.text, name).not.toContain('Secret B');
+    }
     const gates = await tool(operator, 'campaign_pending_gates', { clientId: orgA });
     expect(gates.isError, gates.text).toBe(false);
     expect(JSON.parse(gates.text)).toMatchObject({ clientId: orgA, gates: [], truncated: false });
@@ -184,9 +224,14 @@ describe('ADR 0962 P1 — one client per call, the agency\'s RBAC', () => {
 
   it('D3: the tool\'s own run is client-stamped, with the approver org', async () => {
     await setAgents(orgA, 'read');
-    await tool(operator, 'campaign_list', { clientId: orgA });
-    const runs = await storage.listRuns({ tenantId: TENANT, workflowId: 'campaign-studio.mcp.list', limit: 1 });
-    const md = (runs[0]?.metadata ?? {}) as Record<string, unknown>;
+    const listRunIds = async (): Promise<string[]> => (await storage.listRuns({ tenantId: TENANT, workflowId: 'campaign-studio.mcp.list', limit: 500 })).map((r) => r.runId);
+    const before = new Set(await listRunIds());
+    const out = await tool(operator, 'campaign_list', { clientId: orgA });
+    expect(out.isError, out.text).toBe(false);
+    // Exactly this call's run, never "the newest list run" (refused calls make list runs too).
+    const fresh = (await listRunIds()).filter((id) => !before.has(id));
+    expect(fresh).toHaveLength(1);
+    const md = ((await storage.getRun(fresh[0] ?? ''))?.metadata ?? {}) as Record<string, unknown>;
     expect(md[CAMPAIGN_OPS_RUN_STAMP]).toEqual({ orgId: orgA });
     expect(md.approverOrgId).toBe(orgA);
   });
@@ -200,10 +245,12 @@ describe('ADR 0962 P2 — campaign_request_change: a request, never an effect', 
 
   it('a read-only client refuses it; the refusal names what an admin can change', async () => {
     await setAgents(orgA, 'read');
+    const before = (await listRequests(TENANT, orgA)).map((x) => x.requestId).sort();
     const r = await tool(operator, 'campaign_request_change', { clientId: orgA, text: 'Change the hero headline to Summer is here', assetIds: [assetA] });
     expect(r.isError).toBe(true);
     expect(r.text).toMatch(/may only read/);
-    expect((await listRequests(TENANT, orgA)).length).toBe(0);
+    // No request row was written (compared with this case's own before-set, not with zero).
+    expect((await listRequests(TENANT, orgA)).map((x) => x.requestId).sort()).toEqual(before);
   });
 
   it('client B is still not-found for a request', async () => {
@@ -239,11 +286,11 @@ describe('ADR 0962 P2 — campaign_request_change: a request, never an effect', 
     const fork = await req<{ runId: string }>(operator, 'POST', `/runs/${encodeURIComponent(`${TENANT}/${source!.runId}`)}:fork`, { mode: 'replay', fromSeq: 0 });
     expect(fork.status, JSON.stringify(fork.body)).toBe(201);
     const forkId = fork.body.runId.includes('/') ? fork.body.runId.slice(fork.body.runId.lastIndexOf('/') + 1) : fork.body.runId;
-    const deadline = Date.now() + 10_000;
-    let replay = await storage.getRun(forkId);
-    while (replay && !['completed', 'failed', 'cancelled'].includes(replay.status) && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 25)); replay = await storage.getRun(forkId);
-    }
+    const replay = await vi.waitFor(async () => {
+      const row = await storage.getRun(forkId);
+      expect(['completed', 'failed', 'cancelled']).toContain(row?.status);
+      return row;
+    }, { timeout: 10_000, interval: 25 });
     expect(replay?.status).toBe('completed');
     expect((await listRequests(TENANT, orgA)).map((r) => r.requestId).sort()).toEqual(requestsBefore);
     expect((await storage.listRuns({ tenantId: TENANT, workflowId: 'campaign-ops.change-request', limit: 100 })).map((r) => r.runId).sort()).toEqual(childrenBefore);
@@ -274,7 +321,7 @@ describe('ADR 0962 recovery — binding and payload privacy', () => {
     try {
       const summary = await tool(operator, 'campaign_pending_gates', { clientId: orgA });
       expect(summary.isError, summary.text).toBe(false);
-      expect(JSON.parse(summary.text).gates).toEqual(expect.arrayContaining([expect.objectContaining({ runId: id, title: 'Approval' })]));
+      expect(JSON.parse(summary.text).gates).toEqual(expect.arrayContaining([expect.objectContaining({ runId: id, title: 'Approval', inbox: '/inbox' })]));
       const status = await mcpRunStatus({ tenantId: TENANT, actingUserId: operatorUserId }, orgA, id);
       expect(status.waitingOn).toEqual(['Approval']);
       for (const secret of ['PRIVATE-CLIENT-PAYLOAD', 'PRIVATE-CREDENTIAL-TEXT', 'PRIVATE-BEARER-TOKEN']) {

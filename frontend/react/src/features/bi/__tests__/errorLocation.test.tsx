@@ -107,7 +107,7 @@ beforeEach(() => {
   // mockReset, not clearAllMocks: a case's mockRejectedValue must not answer the next case.
   for (const m of [listOrgs, listBiMetrics, createBiMetric, listEntityTypes]) m.mockReset();
   listOrgs.mockResolvedValue([ORG]);
-  listBiMetrics.mockResolvedValue([]);
+  listBiMetrics.mockResolvedValue({ metrics: [], viewer: { canManage: true } });
   listEntityTypes.mockResolvedValue([DEAL]);
 });
 

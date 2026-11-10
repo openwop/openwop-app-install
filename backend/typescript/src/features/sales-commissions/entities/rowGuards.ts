@@ -13,6 +13,7 @@
  */
 import type { CommissionPlan } from './plan.js';
 import type { CommissionStatement } from './statement.js';
+import type { DealClaim } from './dealClaims.js';
 
 type Rec = Record<string, unknown>;
 const isObj = (v: unknown): v is Rec => typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -35,3 +36,8 @@ function isCommissionStatement(v: unknown): v is CommissionStatement {
 
 export const validateCommissionPlan = (v: unknown): CommissionPlan | null => (isCommissionPlan(v) ? v : null);
 export const validateCommissionStatement = (v: unknown): CommissionStatement | null => (isCommissionStatement(v) ? v : null);
+
+function isDealClaim(v: unknown): v is DealClaim {
+  return identified(v, 'claimId') && isNeStr(v.planId) && isNeStr(v.dealId) && isNeStr(v.statementId);
+}
+export const validateDealClaim = (v: unknown): DealClaim | null => (isDealClaim(v) ? v : null);

@@ -8,10 +8,15 @@
  * calls, `auth/stepUp.js` for the re-authentication itself); the real
  * `withRecentLogin` seam and the real `<ReauthRoot>` host run.
  *
- * Sabotage-witnessed (2026-10-29): removing the retry in `withRecentLogin`
- * (returning after the dialog instead of calling the action again) turns the
- * "retried once and succeeds" cases red; mapping a cancel to the original
- * error turns the cancel case red.
+ * Origin: #5392 (re-authenticate in place, then retry).
+ *
+ * Sabotage-witnessed (2026-10-29, re-measured in /grade-tests wave 80):
+ *   - calling `startTotpEnrollment()` without `withRecentLogin` reds the
+ *     enrollment, cancel and second-refusal cases;
+ *   - calling `unenrollMfaFactor()` without it reds the remove case;
+ *   - dropping the panel's quiet `ReauthCancelledError` return reds the cancel
+ *     case (the cancel message shows as an error);
+ *   - a `withRecentLogin` that retries twice reds the second-refusal case.
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, cleanup, fireEvent } from '@testing-library/react';
@@ -118,6 +123,7 @@ describe('SecurityPanel — recent-login re-authentication', () => {
 
     await waitFor(() => expect(mocks.unenrollMfaFactor).toHaveBeenCalledTimes(2));
     expect(mocks.unenrollMfaFactor).toHaveBeenLastCalledWith('f1');
+    expect(mocks.reauthenticateWithProviderPopup).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(mocks.reportFactorEvent).toHaveBeenCalledWith('unbound', 0));
   });
 

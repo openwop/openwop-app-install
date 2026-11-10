@@ -46,6 +46,10 @@ const roas = (n: number): string => `${formatNumber(n, { minimumFractionDigits: 
 export function CampaignConnectorsPage(): JSX.Element {
   const { t } = useTranslation('campaign-connectors');
   const { t: tc } = useTranslation('common');
+  // Explicit0 means no revenue was reported. Undefined is an older-server
+  // response and retains numeric behavior; measured0/zero-spend rows count.
+  const revenueRoas = (value: number, reportedCount: number | undefined): string =>
+    reportedCount === 0 ? t('notReported') : roas(value);
   const [orgs, setOrgs] = useState<OrgRef[]>([]);
   const [orgsFailed, setOrgsFailed] = useState(false);
   const [orgId, setOrgId] = useState('');
@@ -226,7 +230,7 @@ export function CampaignConnectorsPage(): JSX.Element {
                 <KpiCard label={t('kpiClicks')} value={fmt(kpi.totals.clicks)} />
                 <KpiCard label={t('kpiConversions')} value={fmt(kpi.totals.conversions)} />
                 <KpiCard label={t('kpiRevenue')} value={orgMoney(kpi.totals.revenue, kpi)} />
-                <KpiCard label={t('kpiRoas')} value={roas(kpi.totals.roas)} />
+                <KpiCard label={t('kpiRoas')} value={revenueRoas(kpi.totals.roas, kpi.totals.reportedRevenueRecordCount)} />
               </div>
 
               <section className="surface-card">
@@ -249,7 +253,7 @@ export function CampaignConnectorsPage(): JSX.Element {
                         <td className="u-text-right u-py-2"><span className="data-stack-label">{t('kpiSpend')}</span>{orgMoney(p.spend, kpi)}</td>
                         <td className="u-text-right u-py-2"><span className="data-stack-label">{t('kpiClicks')}</span>{fmt(p.clicks)}</td>
                         <td className="u-text-right u-py-2"><span className="data-stack-label">{t('kpiConversions')}</span>{fmt(p.conversions)}</td>
-                        <td className="u-text-right u-py-2"><span className="data-stack-label">{t('kpiRoas')}</span>{roas(p.roas)}</td>
+                        <td className="u-text-right u-py-2"><span className="data-stack-label">{t('kpiRoas')}</span>{revenueRoas(p.roas, p.reportedRevenueRecordCount)}</td>
                       </tr>
                     ))}
                   </tbody>

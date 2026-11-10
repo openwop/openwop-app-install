@@ -218,6 +218,22 @@ Each phase is additive and gated. The **bound-session path is new** (nothing set
   > no longer exists. The anon-sandbox adopt-migration (the rest of 4c) is unchanged and now
   > runs for ALL Firebase logins via `/migrate-tenant`. Phase 4b (account linking) is
   > likewise moot — Firebase links providers natively (ADR 0026).
+  >
+  > **Correction (2026-11-03): the host-ext pass no longer reads the whole table.** Point 2's
+  > "re-keyed by JSON `tenantId`/`orgId`" was implemented as `SELECT k, v FROM host_ext_kv`
+  > over the WHOLE table (minus the scaffolding prefixes), with every value `JSON.parse`d,
+  > plus a read of all of `run_budget`. That runs on every sign-in that adopts a sandbox, so
+  > its memory and time grew with the database, not the tenant: a real adoption took 3–7 s
+  > in production logs. Both adapters now select only rows whose KEY contains the source
+  > tenant or whose VALUE contains its JSON-escaped form (`tenantFoldNeedles`), and only
+  > `run_budget` buckets that contain it. Matching is a plain substring test (`strpos` /
+  > `instr`), never `LIKE`, because an escape the engine reads differently would
+  > under-select and orphan rows. Every rewrite needs that substring, so the read is a
+  > superset of what the full scan rewrote, and `planHostExtRekey` still decides each row.
+  > Equality with the old pass is pinned on sqlite, pg-mem and real Postgres 15
+  > (`fold-bounded-read*.test.ts`). Both production heap OOMs (2026-11-02, 2026-11-03) had
+  > two adoptions in flight. That link is a **suspicion**: four other concurrent pairs did
+  > not crash, so this is not recorded as an OOM fix.
 - **4d — One-shot subject re-key.** A transactional, maintenance-gated migration rewrites
   every `OrgMember.subject` from a legacy `oidc:<sub>`/`password:<email>` to the canonical
   `user:<userId>`. It re-keys **only the RBAC subject, never the run's owning tenant** —

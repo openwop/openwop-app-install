@@ -16,7 +16,9 @@
  * keyword tables (a census built from the code under test agrees with its bugs).
  *
  * Sabotage (witnessed 2026-10-29): restoring the depth-blind `compactValue`
- * reds the add-todo case and both census cases.
+ * reds the add-todo case and both census cases. Re-witnessed w80: letting the
+ * diet strip a property NAMED like an annotation, or strip `required`, reds all
+ * three.
  */
 import { readdirSync, readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
@@ -69,7 +71,7 @@ beforeAll(async () => {
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   // Booting registers every feature's agent tools into the registry.
   await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-});
+}, 120_000);
 
 describe('tool diet census (ADR 1003 D1)', () => {
   it('the real openwop:kanban.add-todo keeps its title parameter', () => {

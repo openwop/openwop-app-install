@@ -28,6 +28,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { WorkflowDefinition } from '../src/executor/types.js';
 import { getEventLog } from '../src/executor/eventLog.js';
 import { bareRunId } from './support/bareRunId.js';
+import { envKeyPrincipalId } from '../src/middleware/envKeyPrincipal.js';
 
 // Static imports hoist above beforeAll, and the provider registry reads
 // OPENWOP_COMPAT_PROVIDER_ENABLED at module load — so src modules are imported
@@ -74,7 +75,7 @@ beforeAll(async () => {
   // tenant, and the run's actor — the operator env key, `bearer:<first 8>` (the
   // principal `POST /v1/runs` stamps) — is its owner. It used to be a bare id.
   const { createOrg } = await import('../src/host/accessControlService.js');
-  await createOrg({ tenantId: TENANT, createdBy: 'g8-probe', name: 'G8', orgId: ORG, ownerSubject: `bearer:${TOKEN.slice(0, 8)}` });
+  await createOrg({ tenantId: TENANT, createdBy: 'g8-probe', name: 'G8', orgId: ORG, ownerSubject: envKeyPrincipalId(TOKEN) });
   const bound = await createTemplate({
     tenantId: TENANT, orgId: ORG, name: 'G8 bound', kind: 'doc', outputFormat: 'markdown',
     promptBody: 'Write a one-pager about {{topic}}.', artifactTypeId: 'doc.one-pager', createdBy: 'g8-probe',

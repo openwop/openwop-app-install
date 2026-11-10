@@ -301,6 +301,7 @@ export const messages = {
   emailReviewAudience: 'Para {{audience}}',
   emailReviewEstimate_one: 'Cerca de {{n}} destinatário (estimativa)',
   emailReviewEstimate_other: 'Cerca de {{n}} destinatários (estimativa)',
+  emailReviewMissing: "Esta revisão está desatualizada e não pode ser aprovada. Peça a quem a enviou que a envie de novo.",
   approvalEmailStale: 'Esta campanha mudou depois de ser enviada para revisão. Peça a quem a enviou que a envie para revisão de novo.',
   approvalEmailClosed: 'Esta revisão foi fechada automaticamente: a campanha não está mais nesta revisão.',
   approvalsCreativeReviewGroup: "Criativos com IA para revisar antes de publicar",
@@ -311,4 +312,8 @@ export const messages = {
   approvalsFunnelPublishHelp: "A aprovação publica este funil e disponibiliza suas ofertas para compra. As páginas das etapas já devem estar publicadas.",
   approvalsFunnelPublishApprove: "Aprovar e publicar",
   toastApprovedFunnelPublish: "Aprovado: o funil foi publicado.",
+  approvalsWarehouseLoadGroup: "Aprovações de carga no data warehouse",
+  approvalsWarehouseLoadAsk_one: "Carregar {{count}} linha de clientes em {{dataset}}.{{table}}",
+  approvalsWarehouseLoadAsk_other: "Carregar {{count}} linhas de clientes em {{dataset}}.{{table}}",
+  toastApprovedWarehouseLoad: "Aprovado. Execute a sincronização de novo para carregar estas linhas.",
 } as const;

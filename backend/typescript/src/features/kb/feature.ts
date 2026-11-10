@@ -33,7 +33,7 @@ export const kbFeature: BackendFeature = {
     setKnowledgeBackend({ retrieve: tenantRetrieve });
   },
   // Face 2 (ADR 0014 Phase 1): the typed `ctx.features.kb` workflow surface.
-  // ADR 0832 D2 — `_team`/`_kickbot` are tenant-level namespaces, not orgs: the
+  // ADR 0832 D2 — `_team` and feature-declared namespaces are tenant-level, not orgs: the
   // seam's org floor passes them by name on this surface and nowhere else.
   surface: { id: 'kb', build: buildKbSurface, orgPolicy: { tenantScopedOrgs: TENANT_SCOPED_KB_ORGS } },
   // No toggleDefault → always-on (ADR 0010/0024 graduation; toggle removed, gates open).

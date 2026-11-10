@@ -300,6 +300,10 @@ export async function canvasReadAllowed(
   caller: SubjectCaller,
 ): Promise<boolean> {
   if (!canvas.ownerSubject) return true;
+  // User-kind has no membership resolver: its legacy null fall-through means
+  // tenant-wide, which is not private ownership. Enforce the canonical actor
+  // here so HTTP, listing, tools and sharing all use the same privacy rule.
+  if (canvas.ownerSubject.kind === 'user' && !caller.preAuthorized) return caller.subject === canvas.ownerSubject.id;
   return subjectReadAllowed(tenantId, canvas.ownerSubject, caller);
 }
 
@@ -317,6 +321,7 @@ export async function canvasWriteAllowed(
   caller: SubjectCaller,
 ): Promise<boolean> {
   if (!canvas.ownerSubject) return true;
+  if (canvas.ownerSubject.kind === 'user' && !caller.preAuthorized) return caller.subject === canvas.ownerSubject.id;
   return subjectWriteAllowed(tenantId, canvas.ownerSubject, caller);
 }
 

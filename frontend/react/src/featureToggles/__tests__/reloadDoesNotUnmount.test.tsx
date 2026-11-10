@@ -16,7 +16,11 @@
  * Runs the REAL provider and the REAL `EntitlementGuard` (wave 50: an earlier
  * version re-implemented the guard in the test, and never checked that the
  * reload actually fired — so an unwired reloader passed). The page counts its
- * own mounts in an effect, so a remount is a number, not an inference.
+ * own mounts in a LAYOUT effect, so a remount is a number, not an inference.
+ * A passive `useEffect` counter could lag the commit that put 'content' on
+ * screen, so `mounts` read 0 right after the text appeared (train 414 red
+ * under load; 3/3 alone). A layout effect runs in the same commit, before
+ * the DOM is observable, so the text and the count can never disagree.
  *
  * Sabotage that turns it red: `if (!settledOnce.current) setLoading(true)` →
  * unconditional (case 1); never setting `settledOnce` (case 1); not registering
@@ -25,7 +29,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, act } from '@testing-library/react';
-import { useEffect } from 'react';
+import { useLayoutEffect } from 'react';
 const { fetchAssignments, fetchEntitlements } = vi.hoisted(() => ({ fetchAssignments: vi.fn(), fetchEntitlements: vi.fn() }));
 vi.mock('../../client/featureTogglesClient.js', () => ({ fetchAssignments, fetchEntitlements }));
 vi.mock('../../client/config.js', () => ({ onAuthChange: () => () => {} }));
@@ -39,7 +43,7 @@ import { noteRequestStatus, __resetEntitlementRefreshForTest } from '../../clien
 /** How many times the guarded page has MOUNTED (an unmount + remount adds one). */
 let mounts = 0;
 function Page(): JSX.Element {
-  useEffect(() => { mounts += 1; }, []);
+  useLayoutEffect(() => { mounts += 1; }, []);
   return <div>content</div>;
 }
 const view = () => render(

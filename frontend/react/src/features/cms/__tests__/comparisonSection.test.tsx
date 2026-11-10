@@ -9,6 +9,8 @@
  * hard-code the highlighted index; drop `role="region"` or the row-header
  * `<th scope="row">`; render a table with no rows.
  */
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, screen, cleanup, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
@@ -104,5 +106,30 @@ describe('comparison section renderer (ADR 0485)', () => {
     cleanup();
     const noCols = renderSection(comparisonSection({ columns: [] }));
     expect(noCols.container.querySelector('table')).toBeNull();
+  });
+
+  // The compare page's TEXT matrix (CMP-03/04/05). Red when: the modifier is
+  // dropped, applied without `style: 'text'`, or the variant's rules are lost.
+  it("opts a text matrix into fp-matrix--text, and only with style 'text'", () => {
+    const { container } = renderSection(comparisonSection({ style: 'text' }));
+    expect(container.querySelector('section.fp-matrix')?.classList.contains('fp-matrix--text')).toBe(true);
+    cleanup();
+    const plain = renderSection(comparisonSection());
+    expect(plain.container.querySelector('section.fp-matrix')?.classList.contains('fp-matrix--text')).toBe(false);
+    cleanup();
+    const other = renderSection(comparisonSection({ style: 'bold' }));
+    expect(other.container.querySelector('section.fp-matrix')?.classList.contains('fp-matrix--text')).toBe(false);
+  });
+
+  it('styles the text matrix: start-aligned roomy cells, mono 120px row heads, mono footnote', () => {
+    const css = readFileSync(join(__dirname, '..', '..', '..', 'styles', 'global.css'), 'utf8');
+    const rule = (sel: string) => { const i = css.lastIndexOf(`${sel} {`); expect(i, sel).toBeGreaterThan(0); return css.slice(i, css.indexOf('}', i)); };
+    const cells = rule('.fp-matrix--text .fp-matrix__rowhead');
+    expect(css).toContain('.fp-matrix--text .fp-matrix__colhead,\n.fp-matrix--text .fp-matrix__cell,\n.fp-matrix--text .fp-matrix__rowhead { padding: calc(var(--space-4) + var(--space-1)) calc(var(--space-4) + 2px); text-align: start;');
+    expect(cells).toContain('font-family: var(--mono)');
+    expect(cells).toContain('text-transform: uppercase');
+    expect(cells).toContain('inline-size: 120px');
+    expect(rule('.fp-matrix--text .fp-matrix__note')).toContain('font-family: var(--mono)');
+    expect(rule('.fp-matrix--text .fp-matrix__table tbody tr:last-child :is(.fp-matrix__cell, .fp-matrix__rowhead)')).toContain('border-bottom: 1px solid var(--rule)');
   });
 });

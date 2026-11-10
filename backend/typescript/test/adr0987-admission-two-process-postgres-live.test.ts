@@ -16,9 +16,18 @@
  * Runs against `OPENWOP_PG_TEST_DSN`, else a `postgres:15-alpine` testcontainer when
  * Docker is reachable (`ci:full`), else skips, as the `*-postgres-live` tests do in
  * `npm run ci`.
+ *
+ * Sabotage witnesses (probes w80g3-tp-*, 2026-11-03, against local Postgres 15):
+ *  - each instance stamps its own admission key (a per-process count, the P0
+ *    defect): only the cross-instance case reds; the one-instance control holds;
+ *  - the insert's admitted-row check removed: both cap cases red.
+ * The two cap cases assert the exact outcome (five 201s, then a 429 whose
+ * reason is `session_concurrent`), so a lane that admits fewer, or refuses for
+ * another limiter, cannot pass.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { execSync, spawn, type ChildProcess } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { getSetCookies } from './headerCookies.js';
 
@@ -105,7 +114,7 @@ afterAll(async () => {
 async function login(base: string): Promise<string> {
   const r = await fetch(`${base}/host/openwop-app/test/login`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ email: `adm-${Date.now()}@acme.test` }),
+    body: JSON.stringify({ email: `adm-${randomUUID()}@acme.test` }),
   });
   expect(r.status, await r.clone().text()).toBe(201);
   for (const c of getSetCookies(r.headers) as string[]) {
@@ -114,24 +123,27 @@ async function login(base: string): Promise<string> {
   }
   throw new Error('no session cookie');
 }
-async function startRun(base: string, cookie: string): Promise<number> {
+interface Started { status: number; reason?: string }
+async function startRun(base: string, cookie: string): Promise<Started> {
   const r = await fetch(`${base}/runs`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ workflowId: WF, inputs: {} }) });
-  await r.arrayBuffer();
-  return r.status;
+  const raw = await r.text();
+  let reason: string | undefined;
+  try { reason = (JSON.parse(raw) as { details?: { reason?: string } }).details?.reason; } catch { reason = undefined; }
+  return { status: r.status, ...(reason ? { reason } : {}) };
 }
 
 describe.skipIf(!available)('ADR 0987 P0 — one user, two instances, one concurrency cap', () => {
   it('positive control: one instance refuses the run past the cap', async () => {
     const cookie = await login(A!.base);
-    const statuses: number[] = [];
-    for (let i = 0; i < CAP + 1; i += 1) statuses.push(await startRun(A!.base, cookie));
-    expect(statuses.filter((s) => s === 201)).toHaveLength(CAP);
-    expect(statuses[CAP]).toBe(429);
+    const started: Started[] = [];
+    for (let i = 0; i < CAP + 1; i += 1) started.push(await startRun(A!.base, cookie));
+    expect(started.map((s) => s.status)).toEqual([201, 201, 201, 201, 201, 429]);
+    expect(started[CAP]?.reason).toBe('session_concurrent');
   }, 60_000);
 
   it('positive control: instance B serves the same user and workflow (so the case below cannot pass vacuously)', async () => {
     const cookie = await login(A!.base);
-    expect(await startRun(B!.base, cookie)).toBe(201);
+    expect((await startRun(B!.base, cookie)).status).toBe(201);
   }, 60_000);
 
   // ADR 0987 D2 (P1): the run insert counts this user's pending/running runs across
@@ -139,9 +151,11 @@ describe.skipIf(!available)('ADR 0987 P0 — one user, two instances, one concur
   // its own runs and admitted 6 (this case was `it.fails` in P0, #5325).
   it('a user\'s concurrency cap holds across instances: 3 runs on A and 3 on B admit at most 5', async () => {
     const cookie = await login(A!.base);
-    const statuses: number[] = [];
-    for (let i = 0; i < 3; i += 1) statuses.push(await startRun(A!.base, cookie));
-    for (let i = 0; i < 3; i += 1) statuses.push(await startRun(B!.base, cookie));
-    expect(statuses.filter((s) => s === 201).length).toBeLessThanOrEqual(CAP);
+    const started: Started[] = [];
+    for (let i = 0; i < 3; i += 1) started.push(await startRun(A!.base, cookie));
+    for (let i = 0; i < 3; i += 1) started.push(await startRun(B!.base, cookie));
+    // At most 5: the controls above show 5 fit, so exactly 5, and B refuses the 6th.
+    expect(started.map((s) => s.status)).toEqual([201, 201, 201, 201, 201, 429]);
+    expect(started[5]?.reason).toBe('session_concurrent');
   }, 60_000);
 });

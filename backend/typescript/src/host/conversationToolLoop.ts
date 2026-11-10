@@ -39,7 +39,8 @@
 import { maybeCaptureExecuteTool } from './evals/toolBoundary.js';
 import { createAiProvidersAdapter, providerSupportsToolCalling, toolRoundResult, AiProviderError, CREDENTIAL_PROVIDERS } from '../aiProviders/aiProvidersHost.js';
 import { explicitRefNamesOtherProvider } from '../aiProviders/credentialRefLadder.js';
-import { createScopedAgentToolProvider, builtinAgentToolIds } from './agentToolProvider.js';
+import { createScopedAgentToolProvider, builtinAgentToolIds, builtinAgentTool } from './agentToolProvider.js';
+import { resolveToolCapability } from '../features/capability-firewall/toolCapabilityResolver.js';
 import { createTurnRunDispatchCollector, type TurnRunDispatch } from './turnRunDispatch.js';
 import { createChatClarificationCollector, isChatAskEnabled, type ChatClarificationAsk } from './clarificationChat.js';
 import { ASK_USER_TOOL } from './clarificationLift.js';
@@ -53,17 +54,17 @@ import { featureForToolName } from './managedCredits.js';
 import { dietToolSurface } from '../providers/toolSchemaCompaction.js';
 import { resolveConversationModelTarget, unchosenModelTarget, type ConversationModelTierInput, type ConversationModelTargetInput } from '../features/model-router/applyRoute.js';
 import type { RoutingTarget } from '../features/model-router/routeTurn.js';
-import { resolveSecret } from '../byok/secretResolver.js';
+import { resolveUserNamedSecret } from '../byok/userNamedSecret.js';
 import { createLogger } from '../observability/logger.js';
-import { listToolApprovals, recordToolApprovalRequested, approvedToolSets } from '../features/conversation-tools/approvalLedger.js';
+import { listToolApprovals, recordToolApprovalRequested, approvedToolSets, spendToolApproval } from '../features/conversation-tools/approvalLedger.js';
 import { computeFirewallStamp } from '../features/capability-firewall/firewallHook.js';
-import { buildLaneFirewall } from './laneFirewall.js';
+import { buildLaneFirewall, safeModeBaseline } from './laneFirewall.js';
 import { resolveConversationToolGate } from './conversationToolScope.js';
 import { toolAuthorityHolds } from './conversationVisibility.js';
 import type { ResolvedAgentManifest } from '../executor/agentRegistry.js';
 import { readCompactionDecision } from '../executor/compaction.js';
 import type { AiCallMessage, AiToolCallRequest, AiToolCallResult } from '../executor/types.js';
-import type { ChatMessage } from '../providers/dispatch.js';
+import { isStreamIncompleteError, type ChatMessage } from '../providers/dispatch.js';
 import type { ProviderPolicyResolver } from './index.js';
 import type { RunRecord } from '../types.js';
 import type { Storage } from '../storage/storage.js';
@@ -97,6 +98,83 @@ export interface AgentToolTurnResult {
   /** ADR 0986 D1 — what ANSWERED: the loop's provider and the model it actually
    *  used after any bump fallback (a managed TIER id on the managed path). */
   served?: ServedModel;
+}
+
+/**
+ * ADR 1042 D9 ("Owner full, others narrow", user decision 2026-11-03) — the tool
+ * scope of a channel turn that is NOT the owner's own linked account (an approved
+ * outside sender, any group, a relay contact). The turn is offered ONLY the
+ * configured agent's explicit allowlist (no ADR 0315 default-on baseline), and of
+ * that only tools that cannot change anything: a builtin whose declared `effect` is
+ * `read`, not held by the safe-mode baseline, and with no classified egress. An
+ * unknown tool (MCP, unclassified) is not offered. Empty ⇒ no tools: the model
+ * answers from its instructions and the conversation alone.
+ */
+export interface ChannelToolScope {
+  mode: 'narrow';
+  /** Absent ⇒ the SERVED agent's own explicit allowlist (its super-admin override,
+   *  else its manifest), resolved in the loop — never re-read from the registry by a
+   *  caller, so it always matches the agent version that answers (ADR 1014). */
+  allowlist?: readonly string[];
+}
+
+/**
+ * ADR 1042 D9 — the hand-kept, REVIEWED list of tools a narrow channel turn (an
+ * outside sender, a group, a relay contact) may ever be offered. THIS LIST IS THE
+ * GATE: a tool is offered only if the lane's configured agent allowlists it AND it
+ * is listed here. It starts EMPTY on purpose (fail closed): every workspace tool
+ * reads something the owner can see and an outsider should not, so a tool joins
+ * only after a review that it reads nothing sensitive, across tenants included.
+ * Add an id with the review's reasoning beside it.
+ */
+export const CHANNEL_SAFE_READ_TOOLS: ReadonlySet<string> = new Set<string>([]);
+
+/** The tool ids a narrow channel turn may be offered (fail-closed, see `ChannelToolScope`):
+ *  on the agent's allowlist AND on `CHANNEL_SAFE_READ_TOOLS` (`safeList`, injectable for
+ *  tests only), and as extra conditions a builtin, not held by the safe-mode baseline,
+ *  with no classified egress, and declaring `effect: 'read'`. */
+export function narrowChannelToolIds(allowlist: readonly string[], safeList: ReadonlySet<string> = CHANNEL_SAFE_READ_TOOLS): string[] {
+  const baseline = safeModeBaseline().tools;
+  return allowlist.filter((id) => {
+    if (!safeList.has(id)) return false;
+    const tool = builtinAgentTool(id);
+    if (!tool || tool.effect !== 'read') return false;
+    if (baseline.has(id)) return false;
+    const egress = resolveToolCapability(id)?.egress;
+    return egress === undefined || egress === 'none';
+  });
+}
+
+/** Review N1 — is this conversation run a NARROW channel conversation (stamped at
+ *  creation by channel-ingress, `run.metadata.channelIngress.scope === 'narrow'`)? */
+export function isNarrowChannelRun(run: Pick<RunRecord, 'metadata'>): boolean {
+  const ci = (run.metadata as Record<string, unknown> | undefined)?.['channelIngress'];
+  return typeof ci === 'object' && ci !== null && (ci as { scope?: unknown }).scope === 'narrow';
+}
+
+/** Review N1 — the scope a turn actually runs under: the per-turn channel scope when
+ *  given, else NARROW for any turn of a narrow channel conversation (the agent's own
+ *  explicit allowlist, never the baseline), else none. */
+export function effectiveTurnScope(
+  run: Pick<RunRecord, 'metadata'>,
+  perTurn: ChannelToolScope | undefined,
+  override: readonly string[] | undefined,
+  agentAllowlist: readonly string[] | undefined,
+): ChannelToolScope | undefined {
+  const served = override ?? agentAllowlist ?? [];
+  if (perTurn) return perTurn.allowlist ? perTurn : { mode: 'narrow', allowlist: served };
+  return isNarrowChannelRun(run) ? { mode: 'narrow', allowlist: served } : undefined;
+}
+
+/** The allowlist a chat turn compiles its tools from: the narrow channel scope
+ *  when given (ADR 1042 D9), else the ADR 0315 resolver (override ?? manifest ∪
+ *  default-on baseline). */
+export function turnToolAllowlist(
+  agentAllowlist: readonly string[] | undefined,
+  override: readonly string[] | undefined,
+  toolScope: ChannelToolScope | undefined,
+): string[] {
+  return toolScope?.mode === 'narrow' ? narrowChannelToolIds(toolScope.allowlist ?? override ?? agentAllowlist ?? []) : effectiveToolAllowlist(agentAllowlist, override);
 }
 
 export interface AgentToolTurnParams {
@@ -143,6 +221,8 @@ export interface AgentToolTurnParams {
   tier?: ConversationModelTierInput;
   /** ADR 1016 D3 — this exchange's model route (`resolveTurnModelRoute`). */
   route?: RoutingTarget | null;
+  /** ADR 1042 D9 — a narrow channel turn (see `ChannelToolScope`). Absent ⇒ the agent's usual tools. */
+  toolScope?: ChannelToolScope;
 }
 
 /**
@@ -212,18 +292,21 @@ export function isProviderRateLimited(err: unknown): boolean {
  *  which status or why. 501 and 505+ are permanent, so they are not here. */
 const TRANSIENT_5XX = new Set([500, 502, 503, 504]);
 
-/** A failure worth exactly ONE retry: an upstream rate limit (above), or a
- *  transient 5xx. Same two shapes as the 429 check — the TYPED
- *  `provider_unavailable` from aiProvidersHost (BYOK) and the RAW
- *  `<provider>_<status>:` the managed dispatchers propagate. Retrying is safe
- *  for the same reason the 429 retry is: the retried call is the model request
- *  alone, and no tool has run for it. */
+/** A failure worth exactly ONE retry: an upstream rate limit (above), a
+ *  transient 5xx, or a stream the provider closed before its finish reason
+ *  (ADR 1026). Same two shapes as the 429 check — the TYPED
+ *  `provider_unavailable` from aiProvidersHost (BYOK) and the RAW error the
+ *  managed dispatchers propagate. Retrying is safe for the same reason the 429
+ *  retry is: the retried call is the model request alone, and no tool has run
+ *  for it. */
 export function isTransientProviderFailure(err: unknown): boolean {
   if (isProviderRateLimited(err)) return true;
   if (managedLimitCode(err)) return false;
   if (err instanceof AiProviderError) {
-    return err.code === 'provider_unavailable' && TRANSIENT_5XX.has(Number(err.details.status));
+    return err.code === 'provider_unavailable'
+      && (TRANSIENT_5XX.has(Number(err.details.status)) || err.details.reason === 'stream_incomplete');
   }
+  if (isStreamIncompleteError(err)) return true;
   if (!(err instanceof Error)) return false;
   const m = /^[a-z][a-z0-9-]*_(\d{3}):/i.exec(err.message);
   return !!m && TRANSIENT_5XX.has(Number(m[1]));
@@ -238,6 +321,7 @@ export function providerFailureFields(err: unknown): Record<string, unknown> {
     return {
       code: err.code,
       ...(err.details.status !== undefined ? { status: err.details.status } : {}),
+      ...(typeof err.details.reason === 'string' ? { reason: err.details.reason } : {}),
       ...(typeof up === 'string' && up ? { upstreamMessage: up.slice(0, 200) } : {}),
     };
   }
@@ -409,7 +493,15 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
   // manifest allowlist.
   const allowlistOverride = await resolveAgentToolAllowlistOverride(run.tenantId, agent.agentId);
   // ADR 0315 — one resolver: override (full-replace) ?? manifest ∪ baseline.
-  const tools = compileAgentTools(agent, builtinAgentToolIds(), toolProvider.resolveTool, effectiveToolAllowlist(agent.toolAllowlist, allowlistOverride))
+  // ADR 1042 D9 — a narrow channel turn replaces the allowlist (full-replace, the
+  // override's own semantics) with the configured agent's read-only explicit tools.
+  // Review N1 — a NARROW channel conversation stays narrow for EVERY turn, an in-app
+  // turn the owner sends from the main chat included: its history holds outsiders'
+  // text, so no full-tools turn may ever read it. Without a per-turn scope the
+  // agent's own explicit allowlist (never the baseline) is filtered the narrow way.
+  const turnScope = effectiveTurnScope(run, params.toolScope, allowlistOverride, agent.toolAllowlist);
+  const turnAllowlist = turnToolAllowlist(agent.toolAllowlist, allowlistOverride, turnScope);
+  const tools = compileAgentTools(agent, builtinAgentToolIds(), toolProvider.resolveTool, turnAllowlist)
     .filter((t) => chatAskOn || t.def.name !== ASK_USER_TOOL);
   if (tools.length === 0) return null;
 
@@ -479,7 +571,7 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
     // the one typed answer (`credential_unavailable`, reason
     // `explicit_ref_wrong_provider`) before its own `resolveSecret`.
     if (explicitRefNamesOtherProvider(provider, credentialRef, CREDENTIAL_PROVIDERS) !== null) return null;
-    const apiKey = await resolveSecret(credentialRef, { tenantId: run.tenantId });
+    const apiKey = await resolveUserNamedSecret(credentialRef, { tenantId: run.tenantId });
     if (!apiKey) return null;
     const adapter = createAiProvidersAdapter({
       runId, nodeId, tenantId: run.tenantId, attempt: 1,
@@ -548,9 +640,17 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
   // ADR 0135 / ADR 0834 D1 — the capability firewall, built by the ONE lane factory and
   // ALWAYS (the old skip — bypass + rule-less + default-allow — is how a lane could be
   // firewall-less at all). The factory wires decision + shadow logging.
+  // ADR 1042 (security review H2) — a channel-ingress turn spends each approval on the
+  // ONE call it lets through: the approved ledger row is removed, so the next call of
+  // that tool (any arguments, any later turn) asks the owner again.
+  // The hook is synchronous, so the spent names are collected and the ledger rows
+  // removed (awaited) once the loop returns, before the next turn can read them.
+  const channelTurn = Boolean((run.metadata as Record<string, unknown> | undefined)?.['channelIngress']);
+  const spentApprovals: string[] = [];
   const { hook: firewall, posture: fw } = await buildLaneFirewall({
     tenantId: run.tenantId, lane: 'chat', bypass,
     approvedTools, approvedBaselineTools,
+    ...(channelTurn ? { singleUseApprovals: true, onApprovalSpent: (toolName: string) => { spentApprovals.push(toolName); } } : {}),
     resource: params.conversationId, dedupeKey: runId,
   });
   // ADR 0397 — stamp the resolved posture for provenance. Written when there are rules, a
@@ -603,6 +703,9 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
   // A class-bumped model that can't serve this key (429 quota / 404 preview
   // access) degrades to the tenant's own selection instead of failing the turn.
   const { result: loop, modelUsed } = await runLoopWithBumpFallback(runOnce, loopModel, loopFallbackModel);
+  for (const toolName of spentApprovals) {
+    try { await spendToolApproval(run.tenantId, conversationStateKey, toolName); } catch { /* the next ask re-reads the ledger; a stale row is re-spent there */ }
+  }
 
   // ADR 0132 Phase 3 — record any tool call the agent deferred for approval, with the
   // ask's origin and arguments, so the composer's conversation-tools control shows it

@@ -72,7 +72,7 @@ const status = async (): Promise<Step[]> => {
   return r.body.steps;
 };
 const clearAll = async (): Promise<void> => {
-  const { body } = await api<RunResult>('/host/openwop-app/example-data/clear', { method: 'POST', body: JSON.stringify({}) });
+  const { body } = await api<RunResult>('/host/openwop-app/example-data/clear', { method: 'POST', body: JSON.stringify({ expectedTenantId: 'default' }) });
   expect(body.success).toBe(true);
 };
 
@@ -107,7 +107,7 @@ describe('demo-seeder registry', () => {
     expect(afterDry.every((s) => s.count === 0)).toBe(true);
 
     // run seeds all steps; counts go up.
-    const first = await api<RunResult>('/host/openwop-app/example-data/run', { method: 'POST', body: JSON.stringify({}) });
+    const first = await api<RunResult>('/host/openwop-app/example-data/run', { method: 'POST', body: JSON.stringify({ expectedTenantId: 'default' }) });
     expect(first.body.success).toBe(true);
     expect(first.body.summary.created).toBeGreaterThan(0);
     const seeded = await status();
@@ -115,7 +115,7 @@ describe('demo-seeder registry', () => {
     expect(seeded.find((s) => s.id === 'workforces')?.count).toBeGreaterThan(0);
 
     // re-run skips (idempotent).
-    const second = await api<RunResult>('/host/openwop-app/example-data/run', { method: 'POST', body: JSON.stringify({}) });
+    const second = await api<RunResult>('/host/openwop-app/example-data/run', { method: 'POST', body: JSON.stringify({ expectedTenantId: 'default' }) });
     expect(second.body.summary.created).toBe(0); // all present → skipped
     expect(second.body.results.length).toBeGreaterThan(0);
     expect(second.body.results.every((r) => r.action === 'skipped')).toBe(true);
@@ -128,7 +128,7 @@ describe('demo-seeder registry', () => {
 
   it('run honours a step selection', async () => {
     await clearAll();
-    const { body } = await api<RunResult>('/host/openwop-app/example-data/run', { method: 'POST', body: JSON.stringify({ steps: ['agents'] }) });
+    const { body } = await api<RunResult>('/host/openwop-app/example-data/run', { method: 'POST', body: JSON.stringify({ steps: ['agents'], expectedTenantId: 'default' }) });
     expect(body.results.map((r) => r.step)).toEqual(['agents']);
     // Only the selected step wrote: agents present, workforces untouched.
     const after = await status();

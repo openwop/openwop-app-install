@@ -92,6 +92,9 @@ named by `title`.
 ### D6 — Emphasis and CTA alignment
 
 `.fp-em` reads `--fp-em-style` (default `normal`, so stock is unchanged).
+The default hero's title reads `--fp-hero-title-size` (default
+`clamp(40px, 7vw, 82px)`) and `--fp-hero-title-max-width` (default `540px`), so
+an adopter can resize it from `brand.css`; stock is unchanged.
 `cta` gains `align: 'center' | 'start'`.
 
 Links (`safeLink`, every CTA) also accept a **same-page fragment**,
@@ -120,3 +123,7 @@ there.
 - **P1 (this PR):** D1–D7, renderer and validation, unit tests, editor
   round-trip (unknown-to-the-editor fields are preserved, not stripped).
 - **P2:** editor controls for the new fields in `SectionsEditor`.
+
+> **CORRECTED 2026-11-03 (ADR 1046).** Stored markup stays rejected for sections.
+> Pack components with typed props, and admin code injection on custom domains
+> only, are decided in ADR 1046.

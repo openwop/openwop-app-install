@@ -28,7 +28,8 @@
 # status prints a note without its text; the secret guard is skipped; updateQueue stops retrying on 412; publish
 # drops `--if-generation-match=0`; the mjs throws past main(); isLive ignores
 # leaseUntil; release_bus_hold replaces the EXIT trap instead of chaining; the
-# hook calls `exit`.
+# hook calls `exit`; renew is missing, shortens a lease or revives a released one;
+# release_bus_hold stops renewing while the caller runs (6 red on main's lib).
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/release-bus.XXXXXX")"
@@ -326,6 +327,40 @@ fresh
 check "$(Q 'q.active.length')" "0" "the EXIT hook released the lease"
 check "$(ls "$TMP/gcs" | grep '^events__' | grep -vc '\.gen$')" "2" "  ...and published start and end"
 check "$(cat "$TMP"/gcs/events__* | grep -c '"phase":"end","exit":3')" "1" "  ...the end event carries the caller's exit status"
+
+# ── renew + the heartbeat (train 201 read STALE mid-gate, 2026-11-03) ───────
+fresh
+BUS claim --id r1 --kind gate --ttl-min 1 >/dev/null
+before="$(Q 'q.active[0].leaseUntil')"
+out="$(BUS renew --id r1 --ttl-min 30)"
+has "$out" "release-bus: renewed gate r1" "renew reports the new lease"
+check "$(Q 'Date.parse(q.active[0].leaseUntil) - Date.now() > 25*60000')" "true" "  ...and pushes leaseUntil to now + the TTL"
+BUS renew --id r1 --ttl-min 0.01 >/dev/null
+check "$(Q 'Date.parse(q.active[0].leaseUntil) - Date.now() > 25*60000')" "true" "  ...never shortens it"
+check "$(Q 'q.active[0].leaseUntil > "'"$before"'"')" "true" "  ...(the 30-min renewal outlasted the 1-min claim)"
+out="$(BUS renew --id gone)"
+has "$out" "no running lease gone" "renew of a released id says so"
+check "$(Q 'q.active.length')" "1" "  ...and never creates an entry (a heartbeat racing release cannot revive one)"
+
+cat > "$TMP/beat.sh" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+. "$ROOT/scripts/lib/release-bus.sh"
+release_bus_hold beat-1 gate '' --ttl-min 0.05
+sleep 6
+node -e 'const q=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const e=q.active.find(x=>x.id==="beat-1");console.log(e&&Date.parse(e.leaseUntil)>Date.now()?"LIVE":"STALE")' "$TMP/gcs/queue.json" > "$TMP/beat.marker"
+EOF
+for every in 1 0; do
+  fresh; rm -f "$TMP/beat.marker"
+  ( PATH="$BIN:$PATH" FAKE_GCS="$TMP/gcs" OPENWOP_RELEASE_BUS=on OPENWOP_RELEASE_BUS_RENEW_S="$every" bash "$TMP/beat.sh" >/dev/null 2>&1 )
+  if [ "$every" = 1 ]; then
+    check "$(cat "$TMP/beat.marker")" "LIVE" "a hold that outlives its 3 s lease still reads LIVE (heartbeat every 1 s)"
+    sleep 2
+    check "$(Q 'q.active.length')" "0" "  ...the EXIT hook released it and no heartbeat revived it"
+  else
+    check "$(cat "$TMP/beat.marker")" "STALE" "  ...control: with the heartbeat off the same hold reads STALE"
+  fi
+done
 
 # ── merge-train.sh: same exit status whatever the bus does ──────────────────
 G() { git -c user.email=t@t -c user.name=t "$@"; }

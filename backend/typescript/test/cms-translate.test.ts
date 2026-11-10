@@ -71,3 +71,13 @@ describe('sanitizeSectionOverlay — AI output is cleaned like a stored overlay'
     expect((long.heading as string).length).toBeGreaterThan(150);
   });
 });
+
+describe('translateSectionData — list-item states come from the base (ADR 1038 D8)', () => {
+  it('puts back a state the model translated', async () => {
+    const dispatch = vi.fn<HeadlessDispatch>(async () => JSON.stringify({ heading: 'Hola', flow: { nodes: [{ label: 'Encargo', state: 'hecho' }, { label: 'Borrador', state: 'en attente' }] } }));
+    mockResolve.mockResolvedValue(dispatch);
+    const base = { heading: 'Hi', visual: 'flow', flow: { nodes: [{ label: 'Brief', state: 'done' }, { label: 'Draft', state: 'waiting' }] } };
+    const overlay = await translateSectionData('t-translate', 'hero', base, 'es');
+    expect((overlay.flow as { nodes: Array<{ state?: string }> }).nodes.map((n) => n.state)).toEqual(['done', 'waiting']);
+  });
+});

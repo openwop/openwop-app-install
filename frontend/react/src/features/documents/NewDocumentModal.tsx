@@ -182,7 +182,7 @@ export function NewDocumentModal({ orgId, onClose, onCreated }: {
         ? `${canvasTarget.def.editorPath}/${rec.canvasId}`
         : `/canvas/${canvasTarget.row.canvasTypeId}/${rec.canvasId}`;
       onClose();
-      navigate(path);
+      navigate(`${path}?org=${encodeURIComponent(orgId)}`);
     } catch (e) { setError(e instanceof Error ? e.message : t('actionFailed')); setBusy(false); }
   }
 

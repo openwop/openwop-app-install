@@ -8,11 +8,12 @@
  * strict/evaluation label makes "evaluation remains clearly labeled" something a
  * deploy smoke can read.
  *
- * Sabotage-witnessed (2026-10-26): dropping the KMS row from
- * `productionProfileStartupErrors` reds 4 of 7 (per-row, three-at-once,
- * cross-owner, hatch); making `serverStartupErrors` keep only the first entry
- * reds 2 (three-at-once, cross-owner); adding hatch names to the readiness body
- * reds the readiness case.
+ * Sabotage-witnessed (w77): dropping the KMS row from
+ * `productionProfileStartupErrors` reds the per-row, three-at-once, cross-owner
+ * and hatch cases; making `serverStartupErrors` keep only the first entry reds
+ * three-at-once, cross-owner and the P3 together case; letting one hatch clear
+ * another's row reds the hatch cases; hard-coding the label or adding hatch names
+ * to the readiness body reds the readiness case.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import http from 'node:http';
@@ -103,8 +104,21 @@ describe('ADR 0981 D3 — every strict-profile row, reported together', () => {
     strictEnv();
     vi.stubEnv('NODE_ENV', 'test');
     vi.stubEnv('OPENWOP_BYOK_KMS_KEY', '');
+
     vi.stubEnv('OPENWOP_ALLOW_INSECURE_AUTH_POSTURE', 'true');
+    const insecureOnly = productionProfileStartupErrors('memory://');
+    expect(insecureOnly).toHaveLength(2);
+    expect(insecureOnly[0]).toMatch(DSN_ROW);
+    expect(insecureOnly[1]).toMatch(KMS_ROW);
+
+    vi.stubEnv('OPENWOP_ALLOW_INSECURE_AUTH_POSTURE', '');
     vi.stubEnv('OPENWOP_ALLOW_EPHEMERAL_STORAGE', 'true');
+    const ephemeralOnly = productionProfileStartupErrors('memory://');
+    expect(ephemeralOnly).toHaveLength(2);
+    expect(ephemeralOnly[0]).toMatch(NODE_ENV_ROW);
+    expect(ephemeralOnly[1]).toMatch(KMS_ROW);
+
+    vi.stubEnv('OPENWOP_ALLOW_INSECURE_AUTH_POSTURE', 'true');
     const errors = productionProfileStartupErrors('memory://');
     expect(errors).toHaveLength(1);
     expect(errors[0]).toMatch(KMS_ROW);
@@ -145,6 +159,9 @@ describe('ADR 0981 P3 — the membership and superadmin-MFA rows (D2 rows 7–8)
     vi.stubEnv('OPENWOP_AUTHORIZATION_ENFORCEMENT', '');
     vi.stubEnv('OPENWOP_ALLOW_UNENFORCED_AUTHORIZATION', 'true');
     expect(serverStartupErrors(PG)).toEqual([]);
+    // Only its own: a listed superadmin's MFA row survives the membership hatch.
+    vi.stubEnv('OPENWOP_SUPERADMIN_TENANTS', 'user:op1');
+    expect(serverStartupErrors(PG)).toEqual([expect.stringMatching(MFA_ROW)]);
   });
 
   it('listed superadmins without the MFA requirement are refused, naming enrollment and the hatch', () => {
@@ -220,10 +237,20 @@ describe('ADR 0981 D5 — readiness carries the profile label and no hatch names
 
   it('reports evaluation, and a set hatch never reaches the public body', async () => {
     vi.stubEnv('OPENWOP_ALLOW_EPHEMERAL_STORAGE', 'true');
-    const res = await fetch(`${base}/readiness`);
-    const text = await res.text();
-    const body = JSON.parse(text) as { profile?: string };
-    expect(body.profile).toBe('evaluation');
-    expect(text).not.toMatch(/OPENWOP_ALLOW_/);
+    vi.stubEnv('OPENWOP_DEPLOY_POSTURE', 'cookie-per-visitor');
+    // The body is the claim: readiness is a 503 here when no managed key is set.
+    const read = async (): Promise<{ text: string; profile: string | undefined }> => {
+      const text = await (await fetch(`${base}/readiness`)).text();
+      return { text, profile: (JSON.parse(text) as { profile?: string }).profile };
+    };
+    const evaluation = await read();
+    expect(evaluation.profile).toBe('evaluation');
+    expect(evaluation.text).not.toMatch(/OPENWOP_ALLOW_/);
+
+    // The label follows the posture, and strict names no hatch either.
+    vi.stubEnv('OPENWOP_DEPLOY_POSTURE', 'auth');
+    const strict = await read();
+    expect(strict.profile).toBe('strict');
+    expect(strict.text).not.toMatch(/OPENWOP_ALLOW_/);
   });
 });

@@ -21,12 +21,20 @@
  *   - the surface refuses an untagged or actorless run, an unknown stage, and
  *     a stage start by a read-only person.
  *
- * Sabotage witnesses (each reds the named case; run 2026-10-20):
- *   - `requireFeatureEnabled(req, 'campaign-orchestration', …)` removed from
- *     `requireAutopilot`: "both toggles gate…";
+ * Sabotage witnesses (each reds the named case; run 2026-10-20, re-measured
+ * by probes w80g3-ap-* on 2026-11-03):
+ *   - either `requireFeatureEnabled` removed from `requireAutopilot`: "both
+ *     toggles gate…";
+ *   - the org predicate in `loadCampaignScoped` dropped: "a campaign of another
+ *     client…";
+ *   - `canLaunch` computed from `workspace:read`: "a read-only member…";
  *   - `loadCampaignScoped(req, 'workspace:write')` → `'workspace:read'` on launch:
  *     "a read-only member…";
- *   - `claimIgnition` result ignored (always start): "a second launch…";
+ *   - DOUBLE GUARD: the "second launch reuses it" leg is held by BOTH the
+ *     ignition claim and the live-spine join (`liveAutopilotRun`, same file).
+ *     Ignoring `claimIgnition` alone stays green (the spine is still live a
+ *     moment later); ignoring both reds "the run is tagged…", "after the
+ *     ignition window…" and "a live drafting STAGE…";
  *   - the surface reading `args.campaignId` instead of the run tag is not
  *     expressible (the surface takes no argument); dropping the `!tag` refusal
  *     reds "the preflight surface refuses…";
@@ -36,12 +44,19 @@
  *     `startStageRun`: "starting a stage needs…";
  *   - the `isStage` arm dropped from `liveAutopilotRun`: "a live drafting STAGE…";
  *   - the `if (live)` join removed: "after the ignition window…";
- *   - `if (!ready)` block removed from the preflight node: "an incomplete brief…".
+ *   - the preflight node's readiness check (`out.ready === true`, in
+ *     `packs/feature.campaign-autopilot.nodes/index.mjs`) made always-true:
+ *     "an incomplete brief…";
+ *   - the stage tag's frozen goalVersion replaced by the campaign's current one:
+ *     "an independent stage retains…";
+ *   - the inheritance seam's tenant check dropped: "the internal inheritance…".
+ * 404s assert the exact refusal (feature off vs campaign not found), and the
+ * settle waits are `vi.waitFor` on the run's real status.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { randomBytes } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import type { HostAdapterSuite } from '../src/host/index.js';
 import { startWorkflowRun } from '../src/host/runStarter.js';
@@ -63,6 +78,7 @@ import { bareRunId } from './support/bareRunId.js';
 import { insertRunWithStartContext } from '../src/host/runInsert.js';
 import { stampCampaignRun } from '../src/features/campaign-orchestration/campaignRunTag.js';
 import { buildAutonomyStamp, FALLBACK_PRESET, presetPolicy } from '../src/host/autonomyPolicy/index.js';
+import { getDefaultModel } from '../src/providers/catalog.js';
 import { __resetIgnitionClaims } from '../src/host/ignitionGuard.js';
 
 let BASE: string;
@@ -83,6 +99,7 @@ function cookieFor(userId: string, personalTenant: string): string {
 }
 
 interface Res<T> { status: number; body: T }
+interface Refusal { error?: string; message?: string }
 async function call<T = Record<string, unknown>>(cookie: string, method: string, path: string, body?: unknown): Promise<Res<T>> {
   const res = await fetch(`${BASE}${path}`, {
     method,
@@ -114,13 +131,10 @@ async function campaignFor(orgId: string, complete = true): Promise<MarketingCam
 
 const runOf = async (runId: string) => storage.getRun(bareRunId(runId));
 
-async function untilTerminal(runId: string, ms = 15_000): Promise<string> {
-  const end = Date.now() + ms;
-  for (;;) {
-    const s = (await runOf(runId))?.status ?? 'missing';
-    if (['completed', 'failed', 'cancelled'].includes(s) || Date.now() > end) return s;
-    await new Promise((r) => setTimeout(r, 50));
-  }
+async function untilTerminal(runId: string): Promise<void> {
+  await vi.waitFor(async () => {
+    expect(['completed', 'failed', 'cancelled']).toContain((await runOf(runId))?.status);
+  }, { timeout: 15_000, interval: 50 });
 }
 
 const GOAL = { outcome: { metric: 'leads' as const, target: 200 }, mediaBudget: { totalMinor: 500_00, currency: 'USD' } };
@@ -154,20 +168,32 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 describe('ADR 0961 P0 — gating and access', () => {
   it('both toggles gate the routes (404 when either is off)', async () => {
     const c = await campaignFor(orgA);
+    const offMessage: Record<string, string> = {
+      'campaign-autopilot': 'Campaign autopilot is not enabled for this tenant.',
+      'campaign-orchestration': 'Campaign Studio is not enabled for this tenant.',
+    };
     for (const off of ['campaign-autopilot', 'campaign-orchestration']) {
       await setToggle(off, false);
       try {
-        expect((await call(adminCookie, 'GET', ap(c.id, 'preflight'))).status, off).toBe(404);
-        expect((await call(adminCookie, 'POST', ap(c.id, 'launch'))).status, off).toBe(404);
+        for (const r of [await call<Refusal>(adminCookie, 'GET', ap(c.id, 'preflight')), await call<Refusal>(adminCookie, 'POST', ap(c.id, 'launch'))]) {
+          expect(r.status, off).toBe(404);
+          expect(r.body, off).toMatchObject({ error: 'not_found', message: offMessage[off] });
+        }
       } finally { await setToggle(off, true); }
     }
   });
 
   it('a campaign of another client is a uniform 404', async () => {
     const other = await campaignFor(orgB);
-    expect((await call(adminCookie, 'GET', ap(other.id, 'preflight'))).status).toBe(404);
-    expect((await call(adminCookie, 'POST', ap(other.id, 'launch'))).status).toBe(404);
-    expect((await call(adminCookie, 'GET', ap('cmp_nothing', 'preflight'))).status).toBe(404);
+    // Uniform: a foreign client's campaign is refused exactly like a missing one.
+    for (const r of [
+      await call<Refusal>(adminCookie, 'GET', ap(other.id, 'preflight')),
+      await call<Refusal>(adminCookie, 'POST', ap(other.id, 'launch')),
+      await call<Refusal>(adminCookie, 'GET', ap('cmp_nothing', 'preflight')),
+    ]) {
+      expect(r.status).toBe(404);
+      expect(r.body).toMatchObject({ error: 'not_found', message: 'Campaign not found.' });
+    }
   });
 
   it('a read-only member may see the preflight but not launch (403)', async () => {
@@ -228,7 +254,8 @@ describe('ADR 0961 recovery — frozen stage context', () => {
     await storage.insertRun({ runId: foreignId, workflowId: AUTOPILOT_CHAIN_ID, tenantId: 'foreign-tenant', status: 'running', inputs: {},
       metadata: { campaignForkPosture: 'attended' }, configurable: {}, createdAt: now, updatedAt: now });
     for (const inheritFromRunId of [foreignId, `${foreignId}-missing`]) {
-      await expect(startWorkflowRun({ storage, hostSuite }, { tenantId: TENANT, workflowId: AUTOPILOT_CHAIN_ID, inheritFromRunId })).rejects.toMatchObject({ httpStatus: 404 });
+      await expect(startWorkflowRun({ storage, hostSuite }, { tenantId: TENANT, workflowId: AUTOPILOT_CHAIN_ID, inheritFromRunId }))
+        .rejects.toMatchObject({ httpStatus: 404, message: 'The source run for inherited context is unavailable.' });
     }
   });
 
@@ -240,7 +267,7 @@ describe('ADR 0961 recovery — frozen stage context', () => {
     const parentId = `parent-frozen-${randomBytes(4).toString('hex')}`;
     const policy = buildAutonomyStamp({ policy: presetPolicy(FALLBACK_PRESET), source: 'default', campaignId: c.id, orgId: orgA, resolvedAt: now, mcpOrigin: false });
     await storage.insertRun({ runId: parentId, workflowId: AUTOPILOT_CHAIN_ID, tenantId: TENANT, status: 'running', inputs: {},
-      metadata: { campaignOrchestration: stampCampaignRun({ ...c, goal: frozen }, { role: 'spine' }), campaignGoal: frozen, campaignAutonomy: policy, campaignForkPosture: 'attended', actingUserId: adminUser },
+      metadata: { campaignOrchestration: stampCampaignRun({ ...c, goal: frozen }, { role: 'spine' }), campaignGoal: frozen, campaignAutonomy: policy, campaignForkPosture: 'attended', actingUserId: adminUser, aiDefault: { provider: 'google', model: getDefaultModel('google'), source: 'catalog' } },
       configurable: {}, createdAt: now, updatedAt: now });
     await setCampaignGoal(TENANT, c.id, { ...GOAL, outcome: { metric: 'leads', target: 999 } });
     const result = await buildCampaignAutopilotSurface({ tenantId: TENANT, runId: parentId, actingUserId: adminUser }).startStage({ stage: 'drafts' });
@@ -320,6 +347,7 @@ describe('ADR 0961 P0 — launch', () => {
     await insertRunWithStartContext(storage, stage, { admission: { plan: 'exempt:test-fixture' } });
     await __resetIgnitionClaims();
     const r = await call<{ runId: string; reused: boolean }>(adminCookie, 'POST', ap(c.id, 'launch'));
+    expect(r.status).toBe(200);
     expect(r.body).toMatchObject({ runId: stage.runId, reused: true });
   });
 
@@ -328,14 +356,9 @@ describe('ADR 0961 P0 — launch', () => {
     const r = await call<{ runId: string }>(adminCookie, 'POST', ap(c.id, 'launch'));
     expect(r.status).toBe(201);
     // Since P1 the spine waits on a checklist card instead of failing.
-    const end = Date.now() + 15_000;
-    let status = '';
-    while (Date.now() < end) {
-      status = (await runOf(r.body.runId))?.status ?? '';
-      if (status !== 'pending' && status !== 'running') break;
-      await new Promise((res) => setTimeout(res, 50));
-    }
-    expect(status).toMatch(/^waiting/);
+    await vi.waitFor(async () => {
+      expect((await runOf(r.body.runId))?.status).toMatch(/^waiting/);
+    }, { timeout: 15_000, interval: 50 });
     expect(await runOf(stageRunId(TENANT, bareRunId(r.body.runId), 'drafts'))).toBeNull();
   });
 });

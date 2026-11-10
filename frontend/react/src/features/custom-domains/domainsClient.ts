@@ -122,6 +122,21 @@ export async function forceRemoveDomain(orgId: string, hostname: string): Promis
   await parse<{ ok: boolean }>(res);
 }
 
+/** ADR 1030 P2 — the brand a workspace's custom-domain site is styled with, and
+ *  the workspace's brands it may choose from (those with an app identity). */
+export interface SiteBrand { brandId: string | null; choices: Array<{ id: string; name: string }> }
+
+const siteBrandUrl = (orgId: string): string => `${base}/orgs/${encodeURIComponent(orgId)}/site-brand`;
+
+export async function getSiteBrand(orgId: string): Promise<SiteBrand> {
+  return parse<SiteBrand>(await fetch(siteBrandUrl(orgId), { headers: authedHeaders(), ...fetchOpts }));
+}
+
+export async function setSiteBrand(orgId: string, brandId: string | null): Promise<string | null> {
+  const res = await fetch(siteBrandUrl(orgId), { method: 'PUT', headers: jsonHeaders(), body: JSON.stringify({ brandId }), ...fetchOpts });
+  return (await parse<{ brandId: string | null }>(res)).brandId;
+}
+
 /** "Check again" — re-issues a failed certificate, else refreshes. 429 within a minute. */
 export async function retryDomain(orgId: string, hostname: string): Promise<CustomDomain> {
   const res = await fetch(`${orgBase(orgId)}/${encodeURIComponent(hostname)}/retry`, { method: 'POST', headers: authedHeaders(), ...fetchOpts });

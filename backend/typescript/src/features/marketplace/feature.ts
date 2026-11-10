@@ -51,6 +51,20 @@ export const marketplaceFeature: BackendFeature = {
     bucketUnit: 'tenant',
     salt: 'marketplace',
   },
+  // ADR 1044 — SKILL.md import (tenant-local, scanned, never executed). A
+  // sub-capability of the marketplace, OFF until a workspace opts in.
+  extraToggleDefaults: [
+    {
+      id: 'marketplace.skill-import',
+      label: 'Skill import (SKILL.md)',
+      description:
+        'Let workspace admins import an Anthropic or OpenClaw SKILL.md as an unverified agent in this workspace. Install lures and bundled scripts are refused; nothing in a skill is executed. A sub-capability of Marketplace.',
+      category: 'Platform',
+      status: 'off',
+      bucketUnit: 'tenant',
+      salt: 'marketplace-skill-import',
+    },
+  ],
   requiredPacks: [
     'feature.marketplace.nodes',
     'vendor.openwop-app.marketplace.agents', // CFP-1 real search tool

@@ -9,10 +9,24 @@
  *
  * Red when: an upgrade deletes the outgoing version; the archive loses its trust
  * verdict; a named version falls back to the head (or the head is overwritten by
- * an archive load); a version a deployment row names is pruned; an unreadable pin
- * source lets the prune delete anything; or a pack with no agents is archived.
+ * an archive load); the archive dir loses its leading dot (it would show up in
+ * every pack-dir scan); a version a deployment row names is pruned; an unreadable
+ * pin source lets the prune delete anything; or a pack with no agents is archived.
+ * The background fetch is red when it touches the head, drops single-flight, the
+ * marker cache or the failure backoff, or keeps a partial leftover.
+ *
+ * Sabotage-witnessed (grade-tests w83): dropping the installer's archive call,
+ * registering an archive load as the head, a named version falling back to the
+ * head, archiving a pack with no agents, dropping row pins / semver order / the
+ * fail-safe on an unreadable pin source, accepting any path segment, renaming
+ * `.versions`, dropping single-flight, backoff, the marker cache, the partial
+ * replace or `destDir`, and letting an archive failure fail the install.
+ * The temp-dir sweep is witnessed by the clock-ahead case (TST-FIA-GC1, fixed in
+ * #5560): with the wall clock 72 minutes ahead, the fetch keeps its own `.tmp-*`
+ * dir and still sweeps a dead one. The other `stray()` checks are defense in
+ * depth (a refused signature fails before any temp dir exists).
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash, generateKeyPairSync, sign as edSign } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -109,7 +123,8 @@ describe('ADR 1014 D1 — an upgrade archives the outgoing agent-pack version', 
     // The marker travels with the bytes, so the archive keeps the install's trust.
     expect(classifyPackDir(archived).dispatchable).toBe(true);
     // Hidden from every `readdirSync(packDir)` scan: only the head and the dot dir.
-    expect(readdirSync(packDir).sort()).toEqual([ARCHIVE_DIR, NAME].sort());
+    // Pinned as a literal: the product constant would move with a rename.
+    expect(readdirSync(packDir).sort()).toEqual(['.versions', NAME].sort());
   });
 
   it('a pack that declares no agents is replaced as before, not archived', () => {
@@ -167,6 +182,7 @@ describe('ADR 1014 Q3 — retention: newest ten plus every version a row names',
     const dropped = await pruneAgentPackArchive(packDir, NAME);
     expect(dropped.sort()).toEqual(['1.0.1', '1.0.2', '1.0.3']);
     expect(left()).toEqual(['1.0.0', ...versions.slice(-ARCHIVE_KEEP_NEWEST)]);
+    expect(left()).toHaveLength(11); // ten newest + the row-named 1.0.0
   });
 
   it('an unreadable pin source deletes nothing', async () => {
@@ -214,7 +230,7 @@ describe('ADR 1014 D1 (corrected) — a version is fetched from the registry, in
     expect(hits, 'a cached version is not fetched again').toBe(1);
   });
 
-  it('a bad signature is refused: nothing is cached and no temp dir is left', async () => {
+  it('a bad signature is refused: nothing is cached', async () => {
     serve('1.0.0', { badSig: true });
     expect(await fetchArchivedVersion(NAME, '1.0.0')).toBe(false);
     expect(cached('1.0.0')).toBe(false);
@@ -236,17 +252,49 @@ describe('ADR 1014 D1 (corrected) — a version is fetched from the registry, in
   });
 
   it('a hung registry is bounded for the caller and never stacks a second download', async () => {
-    let calls = 0;
-    globalThis.fetch = (() => { calls += 1; return new Promise<Response>(() => undefined); }) as typeof globalThis.fetch;
+    // Only the tarball hangs: discovery and the manifest answer, so a second
+    // download would reach the tarball again (a fully hung fetch would park the
+    // second caller on the cached discovery request and hide a lost single-flight).
+    serve('1.0.0');
+    const serving = globalThis.fetch;
+    let tarballs = 0;
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const u = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (u.endsWith('.tgz')) { tarballs += 1; return new Promise<Response>(() => undefined); }
+      return serving(input);
+    }) as typeof globalThis.fetch;
     const t0 = Date.now();
-    expect(await fetchArchivedVersion(NAME, '1.0.0', { timeoutMs: 50 })).toBe(false);
+    expect(await fetchArchivedVersion(NAME, '1.0.0', { timeoutMs: 200 })).toBe(false);
     expect(Date.now() - t0).toBeLessThan(2_000);
-    const during = calls;
-    expect(await fetchArchivedVersion(NAME, '1.0.0', { timeoutMs: 50 })).toBe(false);
-    expect(calls, 'the first download still holds the slot').toBe(during);
+    await vi.waitFor(() => expect(tarballs, 'the first download reached the tarball').toBe(1), { timeout: 2_000, interval: 10 });
+    expect(await fetchArchivedVersion(NAME, '1.0.0', { timeoutMs: 200 })).toBe(false);
+    expect(tarballs, 'the first download still holds the slot').toBe(1);
     expect(cached('1.0.0')).toBe(false);
     // Never a fallback: the registry still answers null for the version.
     expect(await getAgentRegistry().resolve(AGENT, undefined, '1.0.0')).toBeNull();
+  });
+
+  // TST-FIA-GC1 (grade-tests w83) — the install's own prune sweeps `.tmp-*` dirs older than
+  // an hour by `Date.now() - mtime`. With the wall clock 72 min ahead of the files it swept
+  // the fetch's OWN temp dir mid-install, so the fetch failed and cached nothing.
+  // Sabotage: drop `holdArchiveTemp` in installLane (this case reds: false, not cached);
+  // skip the sweep entirely (the stale dir survives, red).
+  it('with the clock an hour ahead, a fetch keeps its own temp dir and still sweeps a dead one', async () => {
+    serve('1.1.0');
+    await install('1.1.0');
+    const dead = join(packDir, ARCHIVE_DIR, NAME, '.tmp-0.0.9-dead');
+    mkdirSync(dead, { recursive: true });
+    serve('1.0.0');
+    const real = Date.now.bind(Date);
+    const shifted = vi.spyOn(Date, 'now').mockImplementation(() => real() + 72 * 60_000);
+    try {
+      expect(await fetchArchivedVersion(NAME, '1.0.0')).toBe(true);
+    } finally {
+      shifted.mockRestore();
+    }
+    expect(cached('1.0.0')).toBe(true);
+    expect(existsSync(dead), 'a temp dir no fetch holds is still swept').toBe(false);
+    expect(stray(), 'no temp dir left behind').toEqual([]);
   });
 
   it('a failed archive never fails the install: the new version still lands', async () => {

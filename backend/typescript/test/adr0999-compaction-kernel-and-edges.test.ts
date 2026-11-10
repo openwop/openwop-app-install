@@ -63,8 +63,9 @@ describe('ADR 0999 D5 — the lossy kernel', () => {
     const deep = '['.repeat(20_000) + ']'.repeat(20_000);
     expect(JSON.parse(deep)).toBeDefined(); // the validator accepts it, so the transform is reached
     expect(compactToolOutput(deep, LOSSY)).toBe(deep);
-    const surface = buildToolOutputCompactionSurface({} as never);
-    const compact = surface.compact as (a: Record<string, unknown>) => Promise<{ output: string }>;
+    const surface = buildToolOutputCompactionSurface({ tenantId: 'adr0999-kernel' });
+    const compact = surface.compact;
+    if (!compact) throw new Error('the compaction surface has no compact verb');
     await expect(compact({ input: deep, mode: 'lossy' })).resolves.toMatchObject({ output: deep });
   });
 });
@@ -147,7 +148,7 @@ describe('ADR 0999 D3.2 — a compaction marker sent back to a tool is refused',
       },
       { callAIWithTools, executeTool },
     );
-    return { executeTool, events: res.events as unknown as Array<Record<string, unknown>> };
+    return { executeTool, events: res.events };
   }
 
   it('under a lossy decision the write tool never runs, and the refusal is a typed tool error', async () => {
@@ -159,7 +160,10 @@ describe('ADR 0999 D3.2 — a compaction marker sent back to a tool is refused',
   });
 
   it('control — without a lossy decision the same input runs (no marker can have come from us)', async () => {
-    const { executeTool } = await loop({ mode: 'lossless' });
+    const { executeTool, events } = await loop({ mode: 'lossless' });
     expect(executeTool).toHaveBeenCalledTimes(1);
+    const returned = events.find((e) => e.type === 'agent.toolReturned');
+    expect(returned).toHaveProperty('durationMs'); // the tool really ran
+    expect(returned).not.toHaveProperty('error');
   });
 });

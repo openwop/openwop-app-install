@@ -110,4 +110,13 @@ export const messages = {
   outletsLoadFailed: "Outlets could not be loaded, so this dealer may have locations that are not listed here.",
   registrationsLoadFailed: "Deal registrations could not be loaded, so this list may be incomplete.",
   dealerNameUnavailable: "(the dealer's name could not be loaded)",
+  // ADR 1034 D9
+  revokePortalButton: 'Revoke partner link',
+  revokePortalTitle: 'Revoke this partner link?',
+  revokePortalBody: 'The partner can no longer open their portal or register deals with the current link. You can issue a new one later.',
+  portalRevokedToast: 'Partner link revoked',
+  portalRevokeFailed: 'Could not revoke the partner link',
+  portalExpiresNotice: 'It stops working on {{date}}. Copy it now: it is not shown again.',
+  suspendConfirmTitle: 'Suspend {{name}}?',
+  suspendConfirmBody: 'Their partner link stops working until you reactivate them. Links also expire 180 days after they are issued, so you may need to issue a new one.',
 } as const;

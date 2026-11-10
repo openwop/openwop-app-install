@@ -97,4 +97,20 @@ describe('AppGate sign-in mode (GT-APPGATE-SIGNIN-1)', () => {
     render(<AppGate><div>SECRET CONTENT</div></AppGate>);
     expect(screen.getByText('SECRET CONTENT')).toBeTruthy();
   });
+
+  // myndhyve.ai 2026-11-07: a visitor read "requires sign-in, but Firebase Auth is not
+  // configured" as a broken site. The visitor gets plain copy that names no vendor; the
+  // operator detail goes to the console. Sabotage: restore the old string, or drop the warn.
+  it('sign-in not configured: plain visitor copy, operator detail only in the console', () => {
+    brandMock.appGate.mode = 'sign-in';
+    authMock.state = { user: null, loading: false, isConfigured: false };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    render(<AppGate><div>SECRET CONTENT</div></AppGate>);
+    expect(screen.queryByText('SECRET CONTENT')).toBeNull();
+    const alert = screen.getByRole('alert').textContent ?? '';
+    expect(alert).toMatch(/isn’t set up on this site yet/);
+    expect(alert).not.toMatch(/firebase|deployment|configured/i);
+    expect(warn.mock.calls.some((c) => /VITE_FIREBASE_/.test(String(c[0])))).toBe(true);
+    warn.mockRestore();
+  });
 });

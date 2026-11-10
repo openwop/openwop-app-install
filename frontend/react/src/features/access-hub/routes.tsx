@@ -30,7 +30,7 @@ const routes: FeatureRoute[] = [
       hint: 'Credentials, connections & access in one place',
       hintKey: 'accessHubHint',
       order: 0,
-      activeFor: ['/keys', '/orgs', '/connections', '/capability-firewall', '/access/voice', '/access/endpoints'],
+      activeFor: ['/keys', '/orgs', '/connections', '/capability-firewall', '/access/voice', '/access/endpoints', '/access/channels'],
       // ADR 0144 §Correction (2026-06-26): graduated off its feature toggle to a
       // permanent admin surface (the Connections/Users precedent) — no featureId.
     },

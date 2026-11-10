@@ -17,9 +17,11 @@
  *    redrive-shaped contributor case). Both `:fork` cases stay green alone,
  *    correctly: the fork route passes no definition, and the bound source is
  *    also held by run-start's never-overwrite merge;
- *  - read the org from any stamp regardless of mismatch / key bindings by tenant
- *    only (drop the `orgId` filter in `listAgentBindings`) → red (B's override
- *    lands on A's run);
+ *  - read the org from any stamp regardless of mismatch → red. Keying bindings by
+ *    tenant only needs BOTH halves of `listAgentBindings` broken at once: the read
+ *    is a prefix read keyed `${tenantId}::${orgId}::` AND re-filters by org, so
+ *    dropping the filter alone is green (corrected wave 80: this note used to say
+ *    the filter alone reds). Breaking both reds "deleting a binding…" (measured);
  *  - un-reserve `openwop-app.agentBindings` → red (the forged map survives);
  *  - drop the `nodeAgent` rung in `resolveParams` → red; put the binding after
  *    config → red;
@@ -28,6 +30,16 @@
  *  - read a toggle/bindings fault as "no binding" (return {} in the catch), or
  *    drop the runner's unresolved refusal → red; let the binding model fall back
  *    to the node's credentialRef → red.
+ * Re-measured wave 80 (each red): the node-pin rung, binding-before-config, the
+ * no-borrow key rule, the chain-prefix match, the two-stamp refusal, the
+ * `derivedFromRun` return, both fault arms, the reserved key, tools-cover, paused,
+ * unknown agent, node-without-workflow, the BYOK-manage gate, the stored-key check,
+ * the uniform 404, the surface's actor and org-scope checks, the runner's unresolved
+ * refusal / frozen dispatch / `agent_not_found`, the child-stamp projector and its
+ * refusal, the sub-workflow parent-tenant and missing-parent checks, and canvas's
+ * post-resolve parent re-check. Canvas's foreign / missing parent is held twice (the
+ * ancestor walk and the post-resolve re-check, `canvasSurface.ts`), witnessed as a
+ * held pair. Every case that writes bindings uses a client of its own (`newClient`).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -109,14 +121,30 @@ function registerAgents(): void {
 function definition(workflowId: string): WorkflowDefinition {
   return {
     workflowId,
-    version: '1',
     nodes: [
       { nodeId: 'write', typeId: AGENT_RUNNER_TYPE_ID, config: { agentId: PIN, task: 'Write the ad.' } },
       { nodeId: 'review', typeId: AGENT_RUNNER_TYPE_ID, agent: { agentId: PIN }, config: { task: 'Review it.' } },
     ],
-    edges: [{ from: 'write', to: 'review' }],
-  } as unknown as WorkflowDefinition;
+    edges: [{ edgeId: 'e1', sourceNodeId: 'write', targetNodeId: 'review' }],
+  };
 }
+
+/** A typed NodeContext: the required fields, then the case's own. */
+function nodeCtx(over: Partial<NodeContext>): NodeContext {
+  return { runId: 'run-ctx', nodeId: 'write', tenantId: TENANT, inputs: {}, configurable: {}, attempt: 1, secrets: {}, emit: async () => ({ eventId: 'evt-1', sequence: 1 }), ...over };
+}
+
+/** A client of the case's own (with the operator as editor when asked), so no case's
+ *  binding writes reach another case: the file is order-independent under shuffle. */
+async function newClient(withOperator = false): Promise<string> {
+  const orgId = (await createOrg({ tenantId: TENANT, createdBy: 'seed', name: `Client ${n++}` })).orgId;
+  if (withOperator) await createMember({ tenantId: TENANT, orgId, subject: operatorUserId, displayName: 'Operator', roles: ['editor'] });
+  const r = await call(adminCookie, 'POST', '/host/openwop-app/campaign-ops/clients', { name: `Client ${orgId}`, orgId });
+  expect(r.status, r.raw).toBe(201);
+  return orgId;
+}
+const bind = (orgId: string, body: Record<string, unknown>): Promise<ClientAgentBinding> =>
+  bindingService.upsertAgentBinding({ tenantId: TENANT, orgId, updatedBy: operatorUserId, body });
 
 async function clientRun(orgId: string | undefined, workflowId: string, extra: Record<string, unknown> = {}): Promise<RunRecord> {
   const now = new Date().toISOString();
@@ -170,7 +198,7 @@ beforeAll(async () => {
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 describe('ADR 0943 D2.1 — the runner honours the pin and the frozen binding', () => {
-  const ctx = (over: Partial<NodeContext>): NodeContext => ({ inputs: {}, configurable: {}, ...over } as unknown as NodeContext);
+  const ctx = nodeCtx;
 
   it('falls back to nodes[].agent.agentId when nothing else names an agent (F1)', () => {
     expect(resolveParams(ctx({ nodeAgent: { agentId: 'pinned' } })).agentId).toBe('pinned');
@@ -241,39 +269,55 @@ describe('ADR 0943 D2.2 — closed-world writes', () => {
   });
 
   it('another client is a uniform 404 to the operator', async () => {
-    expect((await call(operatorCookie, 'GET', ops(orgB))).status).toBe(404);
-    expect((await call(operatorCookie, 'PUT', ops(orgB), { pinnedAgentId: PIN, agentId: OTHER })).status).toBe(404);
+    // Positive control: the operator's own client answers.
+    expect((await call(operatorCookie, 'GET', ops(orgA))).status).toBe(200);
+    // "Uniform": a client the operator cannot read is indistinguishable from none.
+    const none = await call<{ error?: string; message?: string }>(operatorCookie, 'GET', ops('org-nonexistent0'));
+    expect(none.status, none.raw).toBe(404);
+    for (const r of [await call<{ error?: string; message?: string }>(operatorCookie, 'GET', ops(orgB)),
+      await call<{ error?: string; message?: string }>(operatorCookie, 'PUT', ops(orgB), { pinnedAgentId: PIN, agentId: OTHER })]) {
+      expect(r.status, r.raw).toBe(404);
+      expect({ error: r.body.error, message: r.body.message }).toEqual({ error: none.body.error, message: none.body.message });
+    }
   });
 
   it('one row per scope: a second write to the same scope replaces the first', async () => {
-    const a = await call<{ binding: ClientAgentBinding }>(operatorCookie, 'PUT', ops(orgA), { pinnedAgentId: PIN, agentId: OTHER });
+    const org = await newClient(true);
+    const a = await call<{ binding: ClientAgentBinding }>(operatorCookie, 'PUT', ops(org), { pinnedAgentId: PIN, agentId: OTHER });
     expect(a.status, a.raw).toBe(200);
-    const b = await call<{ binding: ClientAgentBinding }>(operatorCookie, 'PUT', ops(orgA), { pinnedAgentId: PIN, agentId: REPLACEMENT });
+    const b = await call<{ binding: ClientAgentBinding }>(operatorCookie, 'PUT', ops(org), { pinnedAgentId: PIN, agentId: REPLACEMENT });
     expect(b.body.binding.bindingId).toBe(a.body.binding.bindingId);
-    const list = await call<{ bindings: ClientAgentBinding[] }>(operatorCookie, 'GET', ops(orgA));
+    const list = await call<{ bindings: ClientAgentBinding[] }>(operatorCookie, 'GET', ops(org));
     expect(list.body.bindings.map((x) => x.agentId)).toEqual([REPLACEMENT]);
   });
 });
 
 describe('ADR 0943 matrix row 3 — the workflow surface reads bindings client-bound', () => {
   it('reads its own client, refuses another and an actorless run, and never exposes a key name', async () => {
+    const org = await newClient(true);
+    await bind(org, { pinnedAgentId: PIN, agentId: REPLACEMENT, model: { provider: 'openai', model: 'gpt-4o', credentialRef: 'managed:openwop-free' } });
     const surface = buildCampaignOpsSurface({ tenantId: TENANT, actingUserId: operatorUserId });
-    const own = await surface.listAgentBindings({ orgId: orgA }) as { bindings: Array<Record<string, unknown>> };
+    const own = await surface.listAgentBindings({ orgId: org }) as { bindings: Array<Record<string, unknown>> };
     expect(own.bindings.map((b) => b.agentId)).toEqual([REPLACEMENT]);
+    expect(own.bindings[0]?.model).toEqual({ provider: 'openai', model: 'gpt-4o' });
     expect(JSON.stringify(own)).not.toContain('credentialRef');
-    await expect(surface.listAgentBindings({ orgId: orgB })).rejects.toBeTruthy();
-    await expect(buildCampaignOpsSurface({ tenantId: TENANT }).listAgentBindings({ orgId: orgA })).rejects.toMatchObject({ details: { reason: 'no_acting_user' } });
+    // The operator holds no role in client B: refused by the run-org scope check, before any read.
+    await expect(surface.listAgentBindings({ orgId: orgB })).rejects.toMatchObject({ httpStatus: 403 });
+    await expect(buildCampaignOpsSurface({ tenantId: TENANT }).listAgentBindings({ orgId: org })).rejects.toMatchObject({ details: { reason: 'no_acting_user' } });
   });
 });
 
 describe('ADR 0943 D2.3 — frozen at run start, per client', () => {
   it("client B's override never applies to client A's run", async () => {
-    // A: pin-only binding → REPLACEMENT (from the previous block). B: OTHER, plus a node binding.
-    expect((await call(adminCookie, 'PUT', ops(orgB), { pinnedAgentId: PIN, agentId: OTHER })).status).toBe(200);
-    expect((await call(adminCookie, 'PUT', ops(orgB), { pinnedAgentId: PIN, agentId: REPLACEMENT, workflowId: 'wf.agb', nodeId: 'review' })).status).toBe(200);
-    const runA = await clientRun(orgA, 'wf.agb');
+    // A: pin-only binding → REPLACEMENT. B: OTHER, plus a node binding.
+    const a = await newClient();
+    const b = await newClient();
+    expect((await call(adminCookie, 'PUT', ops(a), { pinnedAgentId: PIN, agentId: REPLACEMENT })).status).toBe(200);
+    expect((await call(adminCookie, 'PUT', ops(b), { pinnedAgentId: PIN, agentId: OTHER })).status).toBe(200);
+    expect((await call(adminCookie, 'PUT', ops(b), { pinnedAgentId: PIN, agentId: REPLACEMENT, workflowId: 'wf.agb', nodeId: 'review' })).status).toBe(200);
+    const runA = await clientRun(a, 'wf.agb');
     expect(bindingsOf(runA)).toMatchObject({ write: { agentId: REPLACEMENT }, review: { agentId: REPLACEMENT } });
-    const runB = await clientRun(orgB, 'wf.agb');
+    const runB = await clientRun(b, 'wf.agb');
     // The node binding outranks B's pin-only binding on `review`.
     expect(bindingsOf(runB)).toMatchObject({ write: { agentId: OTHER }, review: { agentId: REPLACEMENT } });
     expect(bindingsOf(await clientRun(undefined, 'wf.agb')), 'no client stamp, no bindings').toBeUndefined();
@@ -289,10 +333,12 @@ describe('ADR 0943 D2.3 — frozen at run start, per client', () => {
   });
 
   it(':fork keeps the source bindings after the override changes', async () => {
-    const src = await clientRun(orgA, fixtureWorkflowId);
+    const org = await newClient();
+    await bind(org, { pinnedAgentId: PIN, agentId: REPLACEMENT });
+    const src = await clientRun(org, fixtureWorkflowId);
     expect(bindingsOf(src)).toMatchObject({ write: { agentId: REPLACEMENT } });
     await getEventLog().append({ runId: src.runId, type: 'run.started', payload: { workflowId: fixtureWorkflowId } });
-    expect((await call(adminCookie, 'PUT', ops(orgA), { pinnedAgentId: PIN, agentId: OTHER })).status).toBe(200);
+    expect((await call(adminCookie, 'PUT', ops(org), { pinnedAgentId: PIN, agentId: OTHER })).status).toBe(200);
     const forked = await call<{ runId: string }>(adminCookie, 'POST', `/runs/${encodeURIComponent(toWireRunId(src.runId, TENANT))}:fork`, { fromSeq: 0, mode: 'replay' });
     expect(forked.status, forked.raw).toBe(201);
     const fork = (await storage.getRun(localRunId(forked.body.runId)))!;
@@ -300,8 +346,11 @@ describe('ADR 0943 D2.3 — frozen at run start, per client', () => {
   });
 
   it('a fork never GAINS bindings its source was born without', async () => {
-    // Born before client A had any binding for this pin: simulate by stripping it.
-    const born = await clientRun(orgA, fixtureWorkflowId);
+    // Born before the client had any binding for this pin: simulate by stripping it.
+    const org = await newClient();
+    await bind(org, { pinnedAgentId: PIN, agentId: REPLACEMENT });
+    const born = await clientRun(org, fixtureWorkflowId);
+    expect(bindingsOf(born)).toMatchObject({ write: { agentId: REPLACEMENT } }); // non-vacuity: a binding WAS there to gain
     const { [RUN_AGENT_BINDINGS_KEY]: _dropped, ...unbound } = born.metadata as Record<string, unknown>;
     await storage.updateRun(born.runId, { metadata: unbound });
     await getEventLog().append({ runId: born.runId, type: 'run.started', payload: { workflowId: fixtureWorkflowId } });
@@ -311,22 +360,25 @@ describe('ADR 0943 D2.3 — frozen at run start, per client', () => {
   });
 
   it('a node binding authored with the bare chain node id applies to the expanded node', async () => {
-    const expanded = {
+    const expanded: WorkflowDefinition = {
       ...definition('wf.agb.chain'),
       nodes: [{ nodeId: 'demo_chain_0a1b2c_write', typeId: AGENT_RUNNER_TYPE_ID, config: { agentId: PIN } }],
       edges: [],
       metadata: { expandedFrom: { chainId: 'demo.chain', version: '1', params: {} } },
-    } as unknown as WorkflowDefinition;
-    expect((await call(adminCookie, 'PUT', ops(orgB), { pinnedAgentId: PIN, agentId: REPLACEMENT, workflowId: 'wf.agb.chain', nodeId: 'write' })).status).toBe(200);
-    const out = await agentBindingContributor({ tenantId: TENANT, metadata: { [CAMPAIGN_OPS_RUN_STAMP]: { orgId: orgB } }, definition: expanded });
+    };
+    const org = await newClient();
+    expect((await call(adminCookie, 'PUT', ops(org), { pinnedAgentId: PIN, agentId: REPLACEMENT, workflowId: 'wf.agb.chain', nodeId: 'write' })).status).toBe(200);
+    const out = await agentBindingContributor({ tenantId: TENANT, metadata: { [CAMPAIGN_OPS_RUN_STAMP]: { orgId: org } }, definition: expanded });
     expect(out).toEqual({ [RUN_AGENT_BINDINGS_KEY]: { demo_chain_0a1b2c_write: expect.objectContaining({ agentId: REPLACEMENT }) } });
   });
 
   it('a derived run that DOES carry its definition (the debug redrive lane) still contributes nothing', async () => {
     // The `:fork` route passes no definition, so that lane is doubly held; the
     // redrive (`routes/workflowDebug.ts`) passes one with `derivedFromRun`, so
-    // only the derivedFromRun rule holds it. Client A has a binding right now.
-    const meta = { [CAMPAIGN_OPS_RUN_STAMP]: { orgId: orgA } };
+    // only the derivedFromRun rule holds it. The client has a binding right now.
+    const org = await newClient();
+    await bind(org, { pinnedAgentId: PIN, agentId: REPLACEMENT });
+    const meta = { [CAMPAIGN_OPS_RUN_STAMP]: { orgId: org } };
     expect(await agentBindingContributor({ tenantId: TENANT, metadata: meta, definition: definition('wf.agb') })).toHaveProperty(RUN_AGENT_BINDINGS_KEY);
     expect(await agentBindingContributor({ tenantId: TENANT, metadata: meta, definition: definition('wf.agb'), derivedFromRun: true })).toEqual({});
   });
@@ -344,10 +396,14 @@ describe('ADR 0943 D2.3 — frozen at run start, per client', () => {
   });
 
   it('deleting a binding removes it from runs started after, not before', async () => {
-    const before = await clientRun(orgA, 'wf.agb');
-    const list = await call<{ bindings: ClientAgentBinding[] }>(adminCookie, 'GET', ops(orgA));
-    for (const b of list.body.bindings) expect((await call(adminCookie, 'DELETE', `${ops(orgA)}/${b.bindingId}`)).status).toBe(204);
-    expect(bindingsOf(await clientRun(orgA, 'wf.agb'))).toBeUndefined();
+    const org = await newClient();
+    await bind(org, { pinnedAgentId: PIN, agentId: REPLACEMENT });
+    await bind(org, { pinnedAgentId: PIN, agentId: OTHER, workflowId: 'wf.agb', nodeId: 'review' });
+    const before = await clientRun(org, 'wf.agb');
+    const list = await call<{ bindings: ClientAgentBinding[] }>(adminCookie, 'GET', ops(org));
+    expect(list.body.bindings).toHaveLength(2);
+    for (const b of list.body.bindings) expect((await call(adminCookie, 'DELETE', `${ops(org)}/${b.bindingId}`)).status).toBe(204);
+    expect(bindingsOf(await clientRun(org, 'wf.agb'))).toBeUndefined();
     expect(bindingsOf((await storage.getRun(before.runId))!)).toBeDefined();
   });
 });
@@ -356,18 +412,18 @@ describe('ADR 0943 D2 — the runner dispatches the frozen replacement', () => {
   it('a stored run with a binding runs the client agent, not the pin', async () => {
     const now = new Date().toISOString();
     const runId = `run-agb-exec-${String(n++).padStart(8, '0')}`;
-    await storage.insertRun({
+    const row: RunRecord = {
       runId, workflowId: 'wf.agb', tenantId: TENANT, status: 'running', inputs: {}, configurable: {}, createdAt: now, updatedAt: now,
       metadata: { [RUN_AGENT_BINDINGS_KEY]: { write: { agentId: REPLACEMENT, bindingId: 'agb_x' } } },
-    } as RunRecord);
+    };
+    await storage.insertRun(row);
     const callAI = vi.fn<(req: AiCallRequest) => Promise<AiCallResult>>(async () => ({ data: 'done' }));
     const callAIWithTools = vi.fn(async () => { throw new Error('no tools were offered'); });
-    const out = await agentRunnerNode.execute({
-      tenantId: TENANT, runId, nodeId: 'write', inputs: {}, configurable: {}, emit: async () => {},
-      actingUserId: 'someone',
+    const out = await agentRunnerNode.execute(nodeCtx({
+      runId, actingUserId: 'someone',
       config: { agentId: PIN, task: 'Write the ad.', offerTools: [], credentialRef: 'managed:openwop-free' },
       callAI, callAIWithTools,
-    } as unknown as NodeContext);
+    }));
     expect(out.status, JSON.stringify(out)).toBe('success');
     expect((out as { outputs: Record<string, unknown> }).outputs.agentId).toBe(REPLACEMENT);
   });
@@ -375,15 +431,17 @@ describe('ADR 0943 D2 — the runner dispatches the frozen replacement', () => {
   it('a binding whose agent was uninstalled after start is a typed node failure, never the pin', async () => {
     const now = new Date().toISOString();
     const runId = `run-agb-exec-${String(n++).padStart(8, '0')}`;
-    await storage.insertRun({
+    const row: RunRecord = {
       runId, workflowId: 'wf.agb', tenantId: TENANT, status: 'running', inputs: {}, configurable: {}, createdAt: now, updatedAt: now,
       metadata: { [RUN_AGENT_BINDINGS_KEY]: { write: { agentId: 'test.cs.uninstalled-writer' } } },
-    } as RunRecord);
-    const callAI = vi.fn(async () => ({ data: 'should not run' }));
-    const out = await agentRunnerNode.execute({
-      tenantId: TENANT, runId, nodeId: 'write', inputs: {}, configurable: {}, emit: async () => {}, actingUserId: 'someone',
-      config: { agentId: PIN, task: 'Write the ad.', offerTools: [], credentialRef: 'managed:openwop-free' }, callAI, callAIWithTools: callAI,
-    } as unknown as NodeContext);
+    };
+    await storage.insertRun(row);
+    const callAI = vi.fn(async (): Promise<AiCallResult> => ({ data: 'should not run' }));
+    const callAIWithTools = vi.fn(async () => { throw new Error('should not run'); });
+    const out = await agentRunnerNode.execute(nodeCtx({
+      runId, actingUserId: 'someone',
+      config: { agentId: PIN, task: 'Write the ad.', offerTools: [], credentialRef: 'managed:openwop-free' }, callAI, callAIWithTools,
+    }));
     expect(out).toMatchObject({ status: 'failure', error: { code: 'agent_not_found' } });
     expect(callAI).not.toHaveBeenCalled();
   });
@@ -391,15 +449,17 @@ describe('ADR 0943 D2 — the runner dispatches the frozen replacement', () => {
   it('a run whose bindings could not be read refuses the node instead of running the pin', async () => {
     const now = new Date().toISOString();
     const runId = `run-agb-exec-${String(n++).padStart(8, '0')}`;
-    await storage.insertRun({
+    const row: RunRecord = {
       runId, workflowId: 'wf.agb', tenantId: TENANT, status: 'running', inputs: {}, configurable: {}, createdAt: now, updatedAt: now,
       metadata: { [RUN_AGENT_BINDINGS_KEY]: { write: { unresolved: true } } },
-    } as RunRecord);
-    const callAI = vi.fn(async () => ({ data: 'should not run' }));
-    const out = await agentRunnerNode.execute({
-      tenantId: TENANT, runId, nodeId: 'write', inputs: {}, configurable: {}, emit: async () => {}, actingUserId: 'someone',
-      config: { agentId: PIN, task: 'Write the ad.', offerTools: [] }, callAI, callAIWithTools: callAI,
-    } as unknown as NodeContext);
+    };
+    await storage.insertRun(row);
+    const callAI = vi.fn(async (): Promise<AiCallResult> => ({ data: 'should not run' }));
+    const callAIWithTools = vi.fn(async () => { throw new Error('should not run'); });
+    const out = await agentRunnerNode.execute(nodeCtx({
+      runId, actingUserId: 'someone',
+      config: { agentId: PIN, task: 'Write the ad.', offerTools: [] }, callAI, callAIWithTools,
+    }));
     expect(out).toMatchObject({ status: 'failure', error: { code: 'agent_binding_unresolved' } });
     expect(callAI).not.toHaveBeenCalled();
   });

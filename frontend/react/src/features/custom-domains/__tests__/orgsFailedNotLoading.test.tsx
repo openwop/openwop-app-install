@@ -28,6 +28,8 @@ import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatu
 vi.mock('../domainsClient.js', async (orig) => ({
   ...(await orig<typeof import('../domainsClient.js')>()),
   listOrgs, listDomainPage,
+  // ADR 1030 P2 — the site-brand card is not this test's subject.
+  getSiteBrand: async () => ({ brandId: null, choices: [] }),
 }));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', async (orig) => ({
   ...(await orig<typeof import('../../../featureToggles/FeatureAccessContext.js')>()),

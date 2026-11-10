@@ -2,9 +2,13 @@
  * ADR 0956 D6 — the reconciliation and AdMap sections: the sustained-inflation
  * flag and the overlap line are shown, landing pages and funnel steps resolve,
  * the ledger cap is said, and a failed read is shown in plain words.
+ *
+ * Off means the section renders NOTHING: the error Notice is a div, so "no
+ * section" would pass with the off branch removed. Assert the empty container.
+ * Sabotage: drop either FeatureDisabledError exclusion → the off case reds.
  */
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import '../../../i18n/index.js';
 import type { AdMapReport, ReconciliationReport } from '../campaignIntelClient.js';
 
@@ -18,6 +22,9 @@ vi.mock('../campaignIntelClient.js', async (orig) => {
 import { ReconciliationSection } from '../ReconciliationSection.js';
 import { AdMapSection } from '../AdMapSection.js';
 import { FeatureDisabledError } from '../campaignIntelClient.js';
+
+/** A macrotask: every promise settled. While off, nothing renders, so no signal exists. */
+const settled = (): Promise<void> => act(async () => { await new Promise((r) => setTimeout(r, 0)); });
 
 const recon: ReconciliationReport = {
   model: 'linear',
@@ -52,8 +59,9 @@ describe('ReconciliationSection', () => {
   it('hides while the feature is off; a failed read is shown', async () => {
     getReconciliation.mockRejectedValueOnce(new FeatureDisabledError('not enabled'));
     const { container, unmount } = render(<ReconciliationSection orgId="o1" />);
-    await new Promise((r) => setTimeout(r, 0));
-    expect(container.querySelector('section')).toBeNull();
+    await settled();
+    expect(getReconciliation).toHaveBeenCalledTimes(1);
+    expect(container.innerHTML).toBe('');
     unmount();
     getReconciliation.mockRejectedValueOnce(new Error('boom'));
     render(<ReconciliationSection orgId="o2" />);
@@ -75,5 +83,16 @@ describe('AdMapSection', () => {
     expect(screen.getByText('Funnel: Launch')).toBeTruthy();
     expect(screen.getByText('arm-b')).toBeTruthy();
     expect(screen.getByText(/most recent 500 ad dispatches/)).toBeTruthy();
+  });
+  it('stays hidden while off; a failed read is said', async () => {
+    getAdMap.mockRejectedValueOnce(new FeatureDisabledError('not enabled'));
+    const { container, unmount } = render(<AdMapSection orgId="o1" />);
+    await settled();
+    expect(getAdMap).toHaveBeenCalledTimes(1);
+    expect(container.innerHTML).toBe('');
+    unmount();
+    getAdMap.mockRejectedValueOnce(new Error('boom'));
+    render(<AdMapSection orgId="o2" />);
+    expect(await screen.findByText('Could not load the AdMap.')).toBeTruthy();
   });
 });

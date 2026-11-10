@@ -1,17 +1,29 @@
-// ADR 0757 — the Copilot runner with a FAKE SDK client: no runtime, no network,
-// no real token. Pins the multi-user lock-down config and token handling.
+// ADR 0757 — the Copilot runner with a FAKE SDK client: no runtime, no network, no real token.
+// Pins the multi-user lock-down config and token handling, on the helper AND on what a real
+// turn hands `createSession`.
+//
+// Sabotage that reds it: any lock-down field changed (mode, ambient login, a client-wide token,
+// tools, permissions, discovery, instructions, `replace`) in `sessionConfig` or overridden at
+// `createSession`; a working directory left behind; `default` passed as a model; content
+// returned over the stream, or no delta when the runtime did not stream; no disconnect; a
+// client per turn; a shared token; any GitHub token prefix left unscrubbed; every or no error
+// classed as auth; system text in the transcript; a wrong role label.
+//
+// `npm run ci` does not run this file: run `node --test` in clients/copilot-provider.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync, readdirSync } from 'node:fs';
 import { createCopilotRunner, sessionConfig, flattenMessages, rejectAll, CopilotTurnError } from '../src/copilot.js';
 
 function fakeClientCtor({ reply = 'hello', deltas = ['hel', 'lo'], failWith = null } = {}) {
-  const seen = { clientOpts: null, sessionConfigs: [], prompts: [], disconnects: 0, starts: 0 };
+  const seen = { clientOpts: null, sessionConfigs: [], workdirListings: [], prompts: [], disconnects: 0, starts: 0 };
   class FakeClient {
     constructor(opts) { seen.clientOpts = opts; }
     async start() { seen.starts++; }
     async createSession(config) {
       seen.sessionConfigs.push(config);
+      seen.workdirListings.push(readdirSync(config.workingDirectory));
       const handlers = {};
       return {
         on(type, fn) { handlers[type] = fn; return () => { delete handlers[type]; }; },
@@ -50,6 +62,18 @@ test('every session is locked to plain chat: no tools, all permissions rejected,
   // APPEND keeps the SDK guardrails; `replace` would strip them.
   assert.deepEqual(cfg.systemMessage, { mode: 'append', content: 'be brief' });
   assert.equal(cfg.workingDirectory, '/tmp/w');
+
+  // The same lock-down on what a real turn hands the SDK, not only on the helper.
+  const { FakeClient, seen } = fakeClientCtor();
+  await createCopilotRunner({ ClientCtor: FakeClient, baseDirectory: '/tmp/x' })({ token: 'gho_abc', messages: [{ role: 'user', content: 'hi' }] });
+  const live = seen.sessionConfigs[0];
+  assert.deepEqual(live.availableTools, []);
+  assert.equal(live.onPermissionRequest, rejectAll);
+  assert.equal(live.enableConfigDiscovery, false);
+  assert.equal(live.skipCustomInstructions, true);
+  assert.equal(live.streaming, true);
+  assert.equal('mcpServers' in live, false);
+  assert.equal('tools' in live, false);
 });
 
 test('the caller token is the SESSION-level gitHubToken (never client-wide)', () => {
@@ -64,7 +88,8 @@ test('the chat tile\'s `default` model leaves the model to Copilot; a real id is
 });
 
 test('streams deltas, returns the text, and disconnects the session', async () => {
-  const { FakeClient, seen } = fakeClientCtor();
+  // `reply` differs from the joined deltas, so the streamed text is what must come back.
+  const { FakeClient, seen } = fakeClientCtor({ reply: 'whole' });
   const run = createCopilotRunner({ ClientCtor: FakeClient, baseDirectory: '/tmp/x' });
   const got = [];
   const text = await run({ token: 'gho_abc', model: 'gpt-5', messages: [{ role: 'system', content: 's' }, { role: 'user', content: 'q' }], onDelta: (d) => got.push(d) });
@@ -72,7 +97,15 @@ test('streams deltas, returns the text, and disconnects the session', async () =
   assert.deepEqual(got, ['hel', 'lo']);
   assert.equal(seen.disconnects, 1);
   assert.equal(seen.sessionConfigs[0].model, 'gpt-5');
-  assert.match(seen.prompts[0], /User: q/);
+  assert.equal(seen.sessionConfigs[0].systemMessage.content, 's');
+  assert.equal(seen.prompts[0], 'User: q');
+
+  // A runtime that did not stream: the whole answer is surfaced as one delta.
+  const { FakeClient: Silent } = fakeClientCtor({ reply: 'whole', deltas: [] });
+  const whole = [];
+  const silentRun = createCopilotRunner({ ClientCtor: Silent, baseDirectory: '/tmp/x' });
+  assert.equal(await silentRun({ token: 'gho_abc', messages: [{ role: 'user', content: 'q' }], onDelta: (d) => whole.push(d) }), 'whole');
+  assert.deepEqual(whole, ['whole']);
 });
 
 test('one shared client across turns (one runtime), one session per turn', async () => {
@@ -85,16 +118,38 @@ test('one shared client across turns (one runtime), one session per turn', async
   // Each session carries ITS caller's token — never another user's.
   assert.equal(seen.sessionConfigs[0].gitHubToken, 'gho_a');
   assert.equal(seen.sessionConfigs[1].gitHubToken, 'gho_b');
+  // Each turn gets its own empty working directory, and removes it.
+  const [first, second] = seen.sessionConfigs.map((c) => c.workingDirectory);
+  assert.notEqual(first, second);
+  assert.deepEqual(seen.workdirListings, [[], []]);
+  assert.equal(existsSync(first), false);
+  assert.equal(existsSync(second), false);
 });
 
 test('a runtime error is scrubbed of any GitHub credential and classified', async () => {
-  const { FakeClient, seen } = fakeClientCtor({ failWith: 'Unauthorized for token gho_SECRET123' });
+  const { FakeClient, seen } = fakeClientCtor({ failWith: 'Unauthorized for gho_SECRET1, ghu_SECRET2, ghs_SECRET3, ghp_SECRET4 and github_pat_SECRET5' });
   const run = createCopilotRunner({ ClientCtor: FakeClient, baseDirectory: '/tmp/x' });
   await assert.rejects(
-    () => run({ token: 'gho_SECRET123', messages: [{ role: 'user', content: 'q' }] }),
-    (err) => err instanceof CopilotTurnError && err.isAuth === true && !err.message.includes('gho_SECRET123'),
+    () => run({ token: 'gho_SECRET1', messages: [{ role: 'user', content: 'q' }] }),
+    (err) => {
+      assert.ok(err instanceof CopilotTurnError);
+      assert.equal(err.isAuth, true);
+      assert.equal(err.message, 'Unauthorized for [REDACTED], [REDACTED], [REDACTED], [REDACTED] and [REDACTED]');
+      return true;
+    },
   );
   assert.equal(seen.disconnects, 1, 'the session is disconnected on failure too');
+
+  const { FakeClient: Broken } = fakeClientCtor({ failWith: 'runtime crashed' });
+  await assert.rejects(
+    () => createCopilotRunner({ ClientCtor: Broken, baseDirectory: '/tmp/x' })({ token: 'gho_abc', messages: [{ role: 'user', content: 'q' }] }),
+    (err) => {
+      assert.ok(err instanceof CopilotTurnError);
+      assert.equal(err.isAuth, false);
+      assert.equal(err.message, 'runtime crashed');
+      return true;
+    },
+  );
 });
 
 test('flattenMessages separates system text from the transcript', () => {

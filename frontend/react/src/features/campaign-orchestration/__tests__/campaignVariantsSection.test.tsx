@@ -13,7 +13,7 @@
  * the chosen version reds the history case.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, cleanup, screen, fireEvent } from '@testing-library/react';
+import { render, cleanup, screen, fireEvent, waitFor } from '@testing-library/react';
 
 const h = vi.hoisted(() => ({ listVariantSets: vi.fn(), listVariantSetVersions: vi.fn() }));
 vi.mock('../variantsClient.js', async (orig) => ({ ...(await orig<Record<string, unknown>>()), listVariantSets: h.listVariantSets, listVariantSetVersions: h.listVariantSetVersions }));
@@ -36,15 +36,15 @@ describe('CampaignVariantsSection', () => {
   it('renders nothing when the variant factory is off', async () => {
     h.listVariantSets.mockRejectedValue(new FeatureDisabledError('Creative variant factory is not enabled for this tenant.'));
     const { container } = render(<CampaignVariantsSection campaignId="c1" />);
-    await vi.waitFor(() => expect(h.listVariantSets).toHaveBeenCalled());
-    await new Promise((r) => setTimeout(r, 0));
-    expect(container.innerHTML).toBe('');
+    await waitFor(() => expect(container.innerHTML).toBe(''));
+    expect(h.listVariantSets).toHaveBeenCalledWith('c1');
   });
 
   it('a failed read is said, with a retry', async () => {
     h.listVariantSets.mockRejectedValueOnce(new Error('boom')).mockResolvedValueOnce([]);
     render(<CampaignVariantsSection campaignId="c1" />);
     expect(await screen.findByText('Variant sets could not be loaded. Nothing has changed.')).toBeTruthy();
+    expect(screen.queryByText(/No variant sets yet/)).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     expect(await screen.findByText(/No variant sets yet/)).toBeTruthy();
   });

@@ -1,6 +1,14 @@
 /** ADR 0954 P0 recovery: model content/selection survive DSAR, attribution does
  * not. File-backed primary rows and physical CAS barriers witness late writers,
- * missing secondary markers, >200 versions and restart after an uncertain write. */
+ * missing secondary markers, >200 versions and restart after an uncertain write.
+ *
+ * Breaks if (each sabotage-witnessed, w78): erasure stops at the 200-version
+ * display cap; a pending receipt is not matched by its hashes; a save ignores
+ * the tombstone barrier; publication blind-writes instead of CAS; a barrier
+ * fault publishes the raw actor; contention is reported as success; a user
+ * erasure expands a scoped `agent:` actor; only one key form is tombstoned; or
+ * the scan leaves its tenant (key prefix, `observed.tenantId` and
+ * `fresh.tenantId` together — three layers, broken in one edit). */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';

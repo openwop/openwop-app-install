@@ -17,10 +17,11 @@
  *     and the caller serves the SPA shell — never a partial document.
  */
 import type { Section } from '../cms/cmsService.js';
+import { videoUploadDateTime } from '../../host/videoUploadDate.js';
 // ADR 0406 Phase 1 — settings are core-owned now; importing the core module
 // directly removes the publishing→cms feature edge this line used to carry.
 import { getOrg } from '../../host/accessControlService.js';
-import { publicPageBySlug, negotiatePublicLocale, listPublicBlog } from './publishingService.js';
+import { publicPageBySlug, negotiatePublicLocale, listPublicBlog, publicPageUrl, customDomainPageUrl } from './publishingService.js';
 import { escapeHtml, pageBodyHtml } from './sectionHtml.js';
 import { resolveContentSection, isEssentialSectionType, type ResolvedContentSection } from '../../host/contentDataSources.js';
 import { TtlLruCache } from './publicReadCache.js';
@@ -210,7 +211,8 @@ export function videoObject(d: Record<string, unknown>): object | null {
   if (!name || !description || !thumbnailUrl || !contentUrl) return null;
   const duration = videoIsoDuration(text(d.length));
   const youtube = https(d.youtubeUrl);
-  const uploadDate = text(d.uploadDate);
+  // Google wants a datetime with a timezone; a stored date becomes midnight UTC.
+  const uploadDate = videoUploadDateTime(d.uploadDate);
   return {
     '@context': 'https://schema.org',
     '@type': 'VideoObject',
@@ -259,6 +261,10 @@ export function jsonLdBlocks(input: JsonLdInput): object[] {
     if (s.type !== 'video') continue;
     const v = videoObject(s.data as Record<string, unknown>);
     if (v) blocks.push(v);
+    // ADR 1032 — a second film in the same section is its own VideoObject.
+    const f2 = (s.data as { film2?: unknown }).film2;
+    const v2 = f2 && typeof f2 === 'object' ? videoObject(f2 as Record<string, unknown>) : null;
+    if (v2) blocks.push(v2);
   }
   if (siteName) {
     blocks.push({
@@ -315,8 +321,18 @@ export async function prerenderPage(
   baseUrl: string,
   acceptLanguage: string | null | undefined,
   siteName?: string,
+  /** The verified custom domain this page is served on (`https://<host>`), from
+   *  `boundSiteOrigin`. It becomes the canonical, `og:url` and JSON-LD site URL;
+   *  asset URLs keep `baseUrl`. Absent on the platform origin. */
+  siteOrigin?: string | null,
 ): Promise<PrerenderResult | null> {
-  const { page, locale, served } = await publicPageBySlug(orgId, slug, baseUrl, acceptLanguage ?? null, null);
+  const found = await publicPageBySlug(orgId, slug, baseUrl, acceptLanguage ?? null, null);
+  const { locale, served } = found;
+  // A canonical the author set stays theirs; only the derived app URL is replaced.
+  // A copy, never a write into the projection (which may be shared).
+  const page = siteOrigin && found.page.seo.canonicalUrl === publicPageUrl(baseUrl, orgId, found.page)
+    ? { ...found.page, seo: { ...found.page.seo, canonicalUrl: customDomainPageUrl(siteOrigin, found.page) } }
+    : found.page;
 
   // og:site_name / JSON-LD Organization from the org record — never invented.
   // An operator-provided site name (env) overrides; absence omits the fields.
@@ -391,7 +407,7 @@ export async function prerenderPage(
       ...(alternates !== undefined ? { alternates } : {}),
       jsonLd: [
         ...jsonLdBlocks({
-          seo: page.seo, page, locale, baseUrl,
+          seo: page.seo, page, locale, baseUrl: siteOrigin ?? baseUrl,
           ...(resolvedSiteName !== undefined ? { siteName: resolvedSiteName } : {}),
           ...(profile ? { organizationSameAs: profile.organizationSameAs } : {}),
         }),
@@ -457,6 +473,7 @@ export async function prerenderPageCached(
   baseUrl: string,
   acceptLanguage: string | null | undefined,
   siteName?: string,
+  siteOrigin?: string | null,
 ): Promise<PrerenderResult | null> {
   const locale = await negotiatePublicLocale(orgId, acceptLanguage);
   if (locale === null) {
@@ -465,7 +482,7 @@ export async function prerenderPageCached(
     // the next: every failing request collapsed to the same fabricated `'en'`
     // key, and the first render (correct for ITS visitor) became everyone's hit.
     // Render fresh and store nothing — degraded hit-rate, never wrong content.
-    return prerenderPage(orgId, slug, baseUrl, acceptLanguage, siteName);
+    return prerenderPage(orgId, slug, baseUrl, acceptLanguage, siteName, siteOrigin);
   }
   // ADR 0836 D7 — `baseUrl` is bound into every absolute URL of the document
   // (canonical, og, hreflang, JSON-LD, image src). It is stable only when it
@@ -474,11 +491,15 @@ export async function prerenderPageCached(
   // origin to every visitor for the TTL. Request-derived ⇒ render fresh, store
   // nothing (the PUB2-B1 posture above). Keying on it instead would let forged
   // hosts evict the whole LRU.
-  if (baseUrl !== configuredPublicBaseUrl()) return prerenderPage(orgId, slug, baseUrl, acceptLanguage, siteName);
-  const key = `${orgId}\n${slug}\n${locale}`;
+  if (baseUrl !== configuredPublicBaseUrl()) return prerenderPage(orgId, slug, baseUrl, acceptLanguage, siteName, siteOrigin);
+  // The site origin is part of the key: a page served on its custom domain names
+  // that domain, so it must never be served from the platform-origin entry (or the
+  // reverse). Safe to key on: it comes from a verified bound domain, never from a
+  // request header, so a forged host cannot mint entries.
+  const key = `${orgId}\n${slug}\n${locale}\n${siteOrigin ?? ''}`;
   const hit = prerenderHtmlCache.get(key);
   if (hit) return hit;
-  const out = await prerenderPage(orgId, slug, baseUrl, acceptLanguage, siteName);
+  const out = await prerenderPage(orgId, slug, baseUrl, acceptLanguage, siteName, siteOrigin);
   if (out) prerenderHtmlCache.set(key, out);
   return out;
 }
@@ -497,6 +518,8 @@ export async function prerenderBlogIndex(
   baseUrl: string,
   siteName?: string,
   acceptLanguage?: string | null,
+  /** The verified custom domain (see `prerenderPage`); its `/blog` is the canonical. */
+  siteOrigin?: string | null,
 ): Promise<string> {
   // ADR 0668 D3 (CMSLWF-20) — the reader's locale was dropped HERE. This function
   // negotiates a locale for `<html lang>` (below) but called `listPublicBlog` with no
@@ -525,7 +548,7 @@ export async function prerenderBlogIndex(
 ${items}
 </ul>
 </main>`;
-  const canonical = `${vendorPublicBase(baseUrl)}/public/${encodeURIComponent(orgId)}/blog`;
+  const canonical = siteOrigin ? `${siteOrigin}/blog` : `${vendorPublicBase(baseUrl)}/public/${encodeURIComponent(orgId)}/blog`;
   const locale = await negotiatePublicLocale(orgId, acceptLanguage);
   const head: HeadInput = {
     seo: {

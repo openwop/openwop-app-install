@@ -12,7 +12,9 @@
  *
  * Proven here:
  *   1. `KNOWN_BRAND_ENV_VARS` is exactly the set of `VITE_BRAND_*` names the
- *      app's source reads, so the list cannot drift from the code;
+ *      app's source reads, so the list cannot drift from the code. The walk leaves
+ *      out `brand/defaults.ts`: it spells every known name in `BRAND_ENV_KEYS`, so
+ *      with it included a known name that nothing reads could never fail;
  *   2. the compose file and its Dockerfile forward exactly that set (build arg,
  *      `ARG`, and the line written into `.env.production`);
  *   3. the typo detector names an unknown variable and the likely intended one;
@@ -22,7 +24,8 @@
  * Sabotage: deleting the `unknownBrandEnvVars` call in vite.config.ts reds case 4
  * (the build proceeds and the 60 s cap kills it). Dropping a variable from the
  * compose args reds case 2. Reading a new `VITE_BRAND_*` in src without adding it
- * to `BRAND_ENV_KEYS` reds case 1.
+ * to `BRAND_ENV_KEYS` reds case 1, and so does removing the only read of a known
+ * variable.
  */
 import { describe, it, expect } from 'vitest';
 import { spawnSync } from 'node:child_process';
@@ -48,7 +51,8 @@ const names = (text: string): string[] => [...new Set([...text.matchAll(/VITE_BR
 
 describe('BRAND-01 — one checked set of brand build variables', () => {
   it('1. the known set is exactly what the app source reads', () => {
-    const read = names([...walk(join(FE, 'src')), join(FE, 'index.html')].map((p) => readFileSync(p, 'utf8')).join('\n'));
+    const sources = walk(join(FE, 'src')).filter((p) => p !== join(FE, 'src/brand/defaults.ts'));
+    const read = names([...sources, join(FE, 'index.html')].map((p) => readFileSync(p, 'utf8')).join('\n'));
     expect([...KNOWN_BRAND_ENV_VARS].sort()).toEqual(read);
     expect(KNOWN_BRAND_ENV_VARS).toContain('VITE_BRAND_PRIVACY_URL');
   });

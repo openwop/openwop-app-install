@@ -38,6 +38,7 @@ import { findContactByEmail } from '../src/features/crm/contactsService.js';
 import { setPolicy, writeErasureTombstone } from '../src/features/consent/consentService.js';
 import { instrumentBody } from '../src/features/email/engagementService.js';
 import { purgeRetained } from '../src/host/retentionPurger.js';
+import { declaredIdTable } from './helpers/featureRatchetTables.js';
 
 let BASE: string;
 let server: http.Server;
@@ -103,6 +104,9 @@ async function publishedForm(tenantId: string): Promise<string> {
   expect(pubd.status, JSON.stringify(pubd.body)).toBe(200);
   return form.formId;
 }
+
+/** The host's own resolvers; a feature's are its `idTables["adr0857.subjectKeyResolvers"]` rows (ADR 1031 P2). */
+const HOST_SUBJECT_KEY_RESOLVERS = ['identityLinkResolver', 'resolveCrmSubjectKeys', 'usersEmailKeyResolver'];
 
 describe('ADR 0857 D1 — a session key is its own keyspace', () => {
   it('the grammar admits the first-party key and refuses every DSAR identity shape', () => {
@@ -190,7 +194,7 @@ describe('ADR 0857 A2/A3 — the grammar\'s neighbours', () => {
     expect(
       registeredSubjectKeyResolverNames().sort(),
       'A new subject-key resolver was registered. ADR 0857 D1 is safe only while no other identity space mints keys matching `isLinkableSessionKey` — check its key shapes, then add its name here.',
-    ).toEqual(['identityLinkResolver', 'kicktodoCoreResolver', 'resolveCrmSubjectKeys', 'usersEmailKeyResolver']);
+    ).toEqual([...HOST_SUBJECT_KEY_RESOLVERS, ...Object.keys(declaredIdTable('adr0857.subjectKeyResolvers'))].sort());
   });
 });
 

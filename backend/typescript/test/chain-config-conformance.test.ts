@@ -140,7 +140,7 @@ const findings = chains.flatMap((c) => {
 
 describe('chain node config conformance', () => {
   it('the scan is NON-VACUOUS (a broken reader would report zero and pass)', () => {
-    expect(chains.length, 'no chains read — the walker is broken, not the content').toBeGreaterThan(268); // measured 272 (2026-10-29)
+    expect(chains.length, 'no chains read — the walker is broken, not the content').toBeGreaterThan(258); // measured 272 (2026-10-29); 261 after the KickTodo packs left (ADR 1031 P3)
     expect(requiredMap.size, 'no node type declared required config — schemas unreadable').toBeGreaterThan(10);
     // The known-good control: this node type genuinely requires `outputSchema`.
     // (CORRECTED 2026-10-17, ADR 0903: it used to be chatCompletion's
@@ -677,8 +677,8 @@ describe('required INPUTS conformance (the unratcheted half)', () => {
         }
       }
     }
-    expect(tokens, 'no param tokens found at all — the scan is looking at the wrong place').toBeGreaterThan(941); // measured 957 (966 before ADR 1023 D2 removed the funnel step chains' dead provider/model config tokens; 981 before ADR 1020 D1 deleted the orchestration's 15 per-item `nextWorkerInputs` tokens)
-    expect(withDeclarations, 'no chain declares parameters — the `declared` set is always empty').toBeGreaterThan(181); // measured 184
+    expect(tokens, 'no param tokens found at all — the scan is looking at the wrong place').toBeGreaterThan(870); // 883 after the KickTodo packs left (ADR 1031 P3); measured 957 (966 before ADR 1023 D2 removed the funnel step chains' dead provider/model config tokens; 981 before ADR 1020 D1 deleted the orchestration's 15 per-item `nextWorkerInputs` tokens)
+    expect(withDeclarations, 'no chain declares parameters — the `declared` set is always empty').toBeGreaterThan(170); // measured 184; 173 after the KickTodo packs left (ADR 1031 P3)
   });
 });
 

@@ -16,17 +16,19 @@
  * `retention.ttlDays`, `deferredParameterAliases` (RFC 0124), `expandedFrom`
  * (chain re-expansion), `mintedPromptTemplates`, and authoring provenance.
  *
- * Ownership is two-tier and unchanged: `name` and `lifecycle` are BUILDER-owned
- * (the user renames; the builder promotes/archives) and overlay the carried
- * object; every other key is author/server-owned, carried verbatim, never
- * invented and never dropped.
+ * Builder-owned `name`, `lifecycle` and the namespaced raw launch defaults
+ * overlay their SavedWorkflow values. Other metadata and editor-namespace
+ * siblings are carried verbatim. The editor leaf uses customProperties, the
+ * canonical host-extension slot; it is not a new runtime-default field.
  */
 
+import i18n from '../../i18n/index.js';
+import { BuilderEditorMetadataError, withBuilderDefaultInputs } from './editorMetadata.js';
 import type { SavedWorkflow } from '../schema/workflow.js';
 
-/** The BUILDER-owned metadata keys — each has its own home on `SavedWorkflow`
- *  and exactly one writer. Stripped from the carried copy at load so the two
- *  never disagree (a stale carried `name` would shadow a rename). */
+/** Top-level builder-owned keys. The nested editor container stays carried so
+ *  unknown siblings survive; definitionMetadataFor overlays its current raw
+ *  defaultInputs leaf when the caller models it. */
 export const BUILDER_OWNED_METADATA_KEYS = ['name', 'lifecycle'] as const;
 
 export function stripBuilderOwnedKeys(metadata: Record<string, unknown>): Record<string, unknown> {
@@ -41,8 +43,20 @@ export function stripBuilderOwnedKeys(metadata: Record<string, unknown>): Record
  * erases the keys it does not model.
  */
 export function definitionMetadataFor(wf: SavedWorkflow): Record<string, unknown> {
+  const carried = wf.metadata ?? {};
+  let metadata = carried;
+  if (typeof wf.defaultInputs === 'string') {
+    try {
+      metadata = withBuilderDefaultInputs(carried, wf.defaultInputs);
+    } catch (error) {
+      if (error instanceof BuilderEditorMetadataError) {
+        throw new BuilderEditorMetadataError(i18n.t('builder:defaultInputsMetadataConflict'));
+      }
+      throw error;
+    }
+  }
   return {
-    ...(wf.metadata ?? {}),
+    ...metadata,
     name: wf.name,
     ...(wf.lifecycle ? { lifecycle: wf.lifecycle } : {}),
   };

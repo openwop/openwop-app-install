@@ -8,7 +8,8 @@
  */
 import { Button } from '../../ui/Button.js';
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { onAuthChange } from '../../client/config.js';
 import { useTranslation } from 'react-i18next';
 import { Notice, PageHeader, StateCard, Skeleton } from '../../ui/index.js';
 import { TextField, TextareaField } from '../../ui/Field.js';
@@ -46,9 +47,17 @@ export function CreativeBriefsPage(): JSX.Element {
   const access = useFeatureAccess('creative-briefs');
   const grounded = useFeatureAccess('creative-briefs.product-grounded');
   const [orgs, setOrgs] = useState<Org[] | null>(null);
-  const [orgId, setOrgId] = useState('');
+  const [params] = useSearchParams();
+  const requestedOrg = params.get('org') ?? '';
+  const authGeneration = useRef(0);
+  const [authEpoch, setAuthEpoch] = useState(0);
+  const [validatedEpoch, setValidatedEpoch] = useState(-1);
+  const orgId = requestedOrg
+    ? (orgs?.some(o => o.orgId === requestedOrg) ? requestedOrg : '')
+    : (orgs?.[0]?.orgId ?? '');
   const [briefs, setBriefs] = useState<CreativeBrief[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const [listFailed, setListFailed] = useState(false);
   const [error, setError] = useState('');
   // ADR 0522 — the open brief is a ROUTE (`/creative-briefs/:briefId`), not a
   // `?brief=` mirror: this detail is a full-page swap, which §4.5 rule 12 puts
@@ -57,9 +66,15 @@ export function CreativeBriefsPage(): JSX.Element {
   const { briefId: selectedId = '' } = useParams<{ briefId: string }>();
   const navigate = useNavigate();
   /** A cell's href — a real URL the browser can open in a new tab or copy. */
-  const briefHref = useCallback((id: string): string => `/creative-briefs/${encodeURIComponent(id)}`, []);
+  const briefHref = useCallback((id: string, oid: string): string =>
+    `/creative-briefs/${encodeURIComponent(id)}?org=${encodeURIComponent(oid)}`, []);
+  const currentScope = useRef({ orgId, selectedId, generation: authGeneration.current });
+  currentScope.current = { orgId, selectedId, generation: authGeneration.current };
+  const ownsScope = useCallback((scope: { orgId: string; selectedId?: string; generation: number }): boolean =>
+    scope.generation === authGeneration.current && scope.orgId === currentScope.current.orgId
+    && (scope.selectedId === undefined || scope.selectedId === currentScope.current.selectedId), []);
   const [selected, setSelected] = useState<CreativeBrief | null>(null);
-  // CS-UX-6: the ?brief= deep-link resolves with a visible loading state and a
+  // CS-UX-6: the detail deep-link resolves with a visible loading state and a
   // surfaced (not swallowed) failure.
   const [briefLoading, setBriefLoading] = useState(false);
   const [deepLinkError, setDeepLinkError] = useState('');
@@ -76,63 +91,104 @@ export function CreativeBriefsPage(): JSX.Element {
   // CS-UX-7: surface a genuine load failure instead of masking it as the
   // "no organizations" empty state (the KB page pattern). Extracted so the
   // failure card can offer a real RETRY (review fold-in).
+  const orgReadSeq = useRef(0);
+  const reloadSeq = useRef(0);
+  const detailSeq = useRef(0);
+  const [detailRetry, setDetailRetry] = useState(0);
+  const orgsReady = validatedEpoch === authEpoch && !orgsFailed && orgs !== null;
+  const scopeReady = orgsReady && Boolean(orgId);
   const loadOrgs2 = useCallback(() => {
-    setOrgsFailed(false); setError('');
-    void listOrgs().then((o) => { setOrgs(o); setOrgId((cur) => cur || (o[0]?.orgId ?? '')); })
-      .catch((e) => { setOrgsFailed(true); setError(e instanceof Error && e.message ? e.message : t('loadOrgsFailed')); });
+    const generation = authGeneration.current;
+    const seq = ++orgReadSeq.current;
+    setValidatedEpoch(-1); setOrgsFailed(false); setError('');
+    void listOrgs().then((o) => {
+      if (generation !== authGeneration.current || seq !== orgReadSeq.current) return;
+      setOrgs(o); setValidatedEpoch(generation);
+    }).catch((e) => {
+      if (generation !== authGeneration.current || seq !== orgReadSeq.current) return;
+      setOrgsFailed(true); setError(e instanceof Error && e.message ? e.message : t('loadOrgsFailed'));
+    });
   }, [t]);
   useEffect(() => {
-    if (!access.enabled) return;
-    loadOrgs2();
-  }, [access.enabled, loadOrgs2]);
-
-  // R2 CRB-SP-14 — latest-wins: two quick org switches could land the OLDER
-  // org's list last.
-  const reloadSeq = useRef(0);
-  const reload = useCallback(async (oid: string) => {
-    const seq = ++reloadSeq.current;
-    try { const rows = await listBriefs(oid); if (seq === reloadSeq.current) { setBriefs(rows); setLoaded(true); } }
-    catch (e) { if (seq === reloadSeq.current) { setError(e instanceof Error ? e.message : 'load failed'); setLoaded(true); } }
+    setAuthEpoch(authGeneration.current);
+    const sequences = [authGeneration, orgReadSeq, reloadSeq, detailSeq];
+    const unsubscribe = onAuthChange(() => {
+      for (const seq of sequences) ++seq.current;
+      setValidatedEpoch(-1); setAuthEpoch(authGeneration.current);
+    });
+    return () => { unsubscribe(); for (const seq of sequences) ++seq.current; };
   }, []);
-
-  useEffect(() => { if (orgId) { setLoaded(false); void reload(orgId); } }, [orgId, reload]);
-
-  const open = useCallback((id: string | null): void => {
-    navigate(id ? briefHref(id) : '/creative-briefs', { replace: !id });
-  }, [navigate, briefHref]);
-
-  // URL-owned selection (ADR 0336): the param IS the source of truth.
   useEffect(() => {
-    if (!orgId || !selectedId) { setSelected(null); setBriefLoading(false); return; }
+    if (access.enabled) loadOrgs2();
+  }, [access.enabled, authEpoch, loadOrgs2]);
+
+  const reload = useCallback(async (oid: string) => {
+    const scope = { orgId: oid, generation: authGeneration.current };
+    const seq = ++reloadSeq.current;
+    setLoaded(false); setListFailed(false); setError('');
+    try {
+      const rows = await listBriefs(oid);
+      if (ownsScope(scope) && seq === reloadSeq.current) { setBriefs(rows); setLoaded(true); }
+    } catch (e) {
+      if (ownsScope(scope) && seq === reloadSeq.current) { setError(e instanceof Error ? e.message : 'load failed'); setListFailed(true); setLoaded(true); }
+    }
+  }, [ownsScope]);
+  useEffect(() => {
+    if (scopeReady) { setLoaded(false); void reload(orgId); }
+  }, [orgId, scopeReady, reload]);
+
+  const open = useCallback((id: string | null, oid = orgId): void => {
+    navigate(id ? briefHref(id, oid) : `/creative-briefs${oid ? `?org=${encodeURIComponent(oid)}` : ''}`, { replace: !id });
+  }, [navigate, briefHref, orgId]);
+  const chooseOrg = (oid: string): void => {
+    if (!orgsReady || validatedEpoch !== authGeneration.current || !orgs?.some(o => o.orgId === oid)) return;
+    open(selectedId || null, oid);
+  };
+
+  // Keep a legacy target on failure: choosing its org or retrying can recover it.
+  useEffect(() => {
+    if (!orgId || !selectedId) { setSelected(null); setBriefLoading(false); setDeepLinkError(''); return; }
+    if (!scopeReady) return;
     let cancelled = false;
-    setBriefLoading(true);
+    const seq = ++detailSeq.current;
+    const scope = { orgId, selectedId, generation: authGeneration.current };
+    const current = (): boolean => !cancelled && seq === detailSeq.current && ownsScope(scope);
+    setSelected(cur => cur?.orgId === orgId && cur.briefId === selectedId ? cur : null);
+    setBriefLoading(true); setDeepLinkError('');
     getBrief(orgId, selectedId)
-      .then((b) => { if (!cancelled) { setSelected(b); setDeepLinkError(''); } })
-      .catch((e) => {
-        if (cancelled) return;
-        setSelected(null);
-        setDeepLinkError(e instanceof Error && e.message ? e.message : t('briefLoadFailed'));
-        open(null); // clear the dead param so the list renders (CS-UX-6)
+      .then((b) => {
+        if (!current()) return;
+        if (b.orgId !== orgId || b.briefId !== selectedId) throw new Error(t('briefLoadFailed'));
+        setSelected(b); setDeepLinkError('');
       })
-      .finally(() => { if (!cancelled) setBriefLoading(false); });
+      .catch((e) => {
+        if (!current()) return;
+        setSelected(cur => cur?.orgId === orgId && cur.briefId === selectedId ? cur : null);
+        setDeepLinkError(e instanceof Error && e.message ? e.message : t('briefLoadFailed'));
+      })
+      .finally(() => { if (current()) setBriefLoading(false); });
     return () => { cancelled = true; };
-  }, [orgId, selectedId, open, t]);
+  }, [orgId, selectedId, scopeReady, authEpoch, detailRetry, ownsScope, t]);
 
   const visibleBriefs = useMemo(() => {
     const q = briefQuery.trim().toLowerCase();
-    return briefs.filter((b) => (!q || b.title.toLowerCase().includes(q)) && (!statusFilter || b.status === statusFilter));
-  }, [briefs, briefQuery, statusFilter]);
+    return briefs.filter((b) => b.orgId === orgId && (!q || b.title.toLowerCase().includes(q)) && (!statusFilter || b.status === statusFilter));
+  }, [briefs, briefQuery, statusFilter, orgId]);
 
   const createNew = async (): Promise<void> => {
-    if (creating || !orgId) return;
+    if (creating || !scopeReady || validatedEpoch !== authGeneration.current) return;
+    const scope = { orgId, selectedId, generation: authGeneration.current };
     setCreating(true);
     try {
       const b = await createBrief(orgId, { title: t('untitled'), sceneDescription: t('scenePlaceholderNew'), directions: [], moodBoard: [] });
-      await reload(orgId);
+      if (!ownsScope(scope)) return;
+      if (b.orgId !== scope.orgId) throw new Error(t('actionFailed'));
+      await reload(scope.orgId);
+      if (!ownsScope(scope)) return;
       setDeepLinkError('');
-      open(b.briefId);
-    } catch (e) { toast.error(e instanceof Error ? e.message : t('actionFailed')); }
-    finally { setCreating(false); }
+      open(b.briefId, b.orgId);
+    } catch (e) { if (ownsScope(scope)) toast.error(e instanceof Error ? e.message : t('actionFailed')); }
+    finally { if (ownsScope(scope)) setCreating(false); }
   };
 
   // R2 CRB-SP-13 — an in-flight guard (a double-click stacked two DELETEs, the
@@ -140,22 +196,29 @@ export function CreativeBriefsPage(): JSX.Element {
   // the RENDER delete already had but the bigger delete lacked.
   const [removing, setRemoving] = useState(false);
   const remove = async (b: CreativeBrief): Promise<void> => {
-    if (removing) return;
+    if (removing || !scopeReady || validatedEpoch !== authGeneration.current) return;
+    const scope = { orgId, selectedId, generation: authGeneration.current };
     if (!(await confirm({ title: t('deleteConfirm', { title: b.title }), body: t('deleteConfirmCascade'), danger: true, confirmLabel: t('common:delete') }))) return;
+    if (!ownsScope(scope)) return;
     setRemoving(true);
     try {
-      await deleteBrief(orgId, b.briefId);
+      await deleteBrief(scope.orgId, b.briefId);
+      if (!ownsScope(scope)) return;
       if (selectedId === b.briefId) open(null);
       await reload(orgId);
-    } catch (e) { toast.error(e instanceof Error ? e.message : t('actionFailed')); }
-    finally { setRemoving(false); }
+    } catch (e) { if (ownsScope(scope)) toast.error(e instanceof Error ? e.message : t('actionFailed')); }
+    finally { if (ownsScope(scope)) setRemoving(false); }
   };
+
+  useEffect(() => { setCreating(false); setRemoving(false); }, [orgId, selectedId, authEpoch]);
 
   if (access.loading) return <Skeleton />;
   if (!access.enabled) return <StateCard icon={<LockIcon />} title={t('disabledTitle')} body={t('disabledBody')} />;
 
+  const editorReady = scopeReady && !deepLinkError;
   const orgPicker = orgs && orgs.length > 0 ? (
-    <select value={orgId} onChange={(e) => setOrgId(e.target.value)} className="u-w-auto" aria-label={t('orgAriaLabel')}>
+    <select value={orgId} onChange={(e) => chooseOrg(e.target.value)} disabled={!orgsReady} className="u-w-auto" aria-label={t('orgAriaLabel')}>
+      {!orgId ? <option value="">{t('chooseOrg')}</option> : null}
       {orgs.map((o) => <option key={o.orgId} value={o.orgId}>{o.name}</option>)}
     </select>
   ) : undefined;
@@ -165,14 +228,18 @@ export function CreativeBriefsPage(): JSX.Element {
       <PageHeader eyebrow={t('eyebrow')} title={t('title')} lede={t('lede')} actions={
         <>
           {orgPicker}
-          <Button variant="accent-solid" disabled={!orgId || creating} onClick={() => void createNew()}><PlusIcon size={14} aria-hidden /> {t('newBrief')}</Button>
+          <Button variant="accent-solid" disabled={!scopeReady || creating} onClick={() => void createNew()}><PlusIcon size={14} aria-hidden /> {t('newBrief')}</Button>
         </>
       } />
-      {grounded.enabled && orgId ? <Suspense fallback={null}><GroundingSettingsPanel orgId={orgId} /></Suspense> : null}
+      {grounded.enabled && scopeReady ? <Suspense fallback={null}><GroundingSettingsPanel orgId={orgId} /></Suspense> : null}
       {error ? <Notice variant="error">{error}</Notice> : null}
-      {deepLinkError ? <Notice variant="error">{deepLinkError}</Notice> : null}
+      {orgsReady && requestedOrg && !orgId ? <Notice variant="warning">{t('orgUnavailable')}</Notice> : null}
+      {deepLinkError && scopeReady ? <Notice variant="error" announce={deepLinkError}>{deepLinkError}{' '}
+        {!selected || selected.orgId !== orgId || selected.briefId !== selectedId ? <Button variant="link" onClick={() => setDetailRetry(n => n + 1)}>{t('common:retry')}</Button> : null}{' '}
+        <Button variant="link" onClick={() => open(null)}>{t('backToList')}</Button>
+      </Notice> : null}
 
-      {selected ? (
+      {selected && selected.orgId === orgId && selected.briefId === selectedId ? (
         // R2 CRB-SP-1 — `key` remounts the WHOLE detail (RendersSection
         // included) when the brief identity changes. Without it, "New brief"
         // navigated A→B with the component staying mounted: the form kept A's
@@ -181,26 +248,41 @@ export function CreativeBriefsPage(): JSX.Element {
         // R2 CRB-SP-14 — onChanged guards against a post-save resolve landing
         // AFTER Back cleared the URL-owned selection (it used to resurrect the
         // detail while the URL said /creative-briefs).
-        <BriefDetail key={selected.briefId} t={t} orgId={orgId} brief={selected} onBack={() => open(null)}
+        <>
+        <fieldset className="u-m-0 u-p-0 u-border-0" aria-label={t('title')} disabled={!editorReady} hidden={!editorReady}>
+        <BriefDetail key={`${selected.orgId}:${selected.briefId}`} active={editorReady} t={t} orgId={orgId} brief={selected} onBack={() => open(null)}
           onChanged={async () => {
-            const forBrief = selected.briefId;
-            const b = await getBrief(orgId, forBrief);
-            setSelected((cur) => (cur && cur.briefId === forBrief ? b : cur));
-            await reload(orgId);
+            const scope = { orgId, selectedId: selected.briefId, generation: authEpoch };
+            if (!scopeReady || !ownsScope(scope)) return;
+            const b = await getBrief(scope.orgId, scope.selectedId);
+            if (!ownsScope(scope) || b.orgId !== scope.orgId || b.briefId !== scope.selectedId) return;
+            setSelected((cur) => cur?.orgId === scope.orgId && cur.briefId === scope.selectedId ? b : cur);
+            await reload(scope.orgId);
           }}
           onDelete={() => void remove(selected)} />
-      ) : briefLoading ? (
+        </fieldset>
+        {!editorReady ? orgsFailed || deepLinkError ? <StateCard announce icon={<FileTextIcon size={20} />} title={t('common:loadFailedTitle')}
+          action={<Button onClick={orgsFailed ? loadOrgs2 : () => setDetailRetry(n => n + 1)}>{t('common:retry')}</Button>} />
+          : <StateCard loading icon={<FileTextIcon size={20} />} title={t('common:loading')} /> : null}
+        </>
+      ) : briefLoading || (!orgsReady && !orgsFailed) ? (
         <div role="status"><span className="sr-only">{t('common:loading')}</span><Skeleton width="40%" /><Skeleton width="90%" /><Skeleton width="75%" /></div>
       ) : orgsFailed ? (
         <StateCard announce icon={<FileTextIcon size={20} />} title={t('common:loadFailedTitle')} body={t('common:loadFailedBody')}
           action={<Button variant="secondary" size="sm" onClick={loadOrgs2}>{t('common:retry')}</Button>} />
       ) : !orgs ? <Skeleton /> : orgs.length === 0 ? (
         <StateCard icon={<FileTextIcon size={20} />} title={t('noOrgsTitle')} body={t('noOrgsBody')} />
+      ) : requestedOrg && !orgId ? (
+        <StateCard announce icon={<FileTextIcon size={20} />} title={t('chooseOrg')} body={t('orgUnavailable')}
+          action={<Button onClick={loadOrgs2}>{t('common:retry')}</Button>} />
       ) : !loaded ? (
         <div role="status"><span className="sr-only">{t('common:loading')}</span><Skeleton width="60%" /><Skeleton width="90%" /></div>
-      ) : briefs.length === 0 ? (
+      ) : listFailed ? (
+        <StateCard announce icon={<FileTextIcon size={20} />} title={t('common:loadFailedTitle')} body={t('common:loadFailedBody')}
+          action={<Button onClick={() => void reload(orgId)}>{t('common:retry')}</Button>} />
+      ) : visibleBriefs.length === 0 && briefs.every(b => b.orgId !== orgId) ? (
         <StateCard icon={<FileTextIcon size={20} />} title={t('emptyTitle')} body={t('emptyBody')}
-          action={<Button variant="primary" disabled={!orgId || creating} onClick={() => void createNew()}>{t('newBrief')}</Button>} />
+          action={<Button variant="primary" disabled={!scopeReady || creating} onClick={() => void createNew()}>{t('newBrief')}</Button>} />
       ) : (
         <>
           <div className="filterbar" role="group" aria-label={t('filterGroup')}>
@@ -236,11 +318,11 @@ export function CreativeBriefsPage(): JSX.Element {
             />
           ) : viewMode === 'grid' ? (
             <div className="card-grid">
-              {visibleBriefs.map((b) => <BriefCard key={b.briefId} t={t} brief={b} href={briefHref(b.briefId)} />)}
+              {visibleBriefs.map((b) => <BriefCard key={b.briefId} t={t} brief={b} href={briefHref(b.briefId, b.orgId)} />)}
             </div>
           ) : (
             <div className="surface-card list-view">
-              {visibleBriefs.map((b) => <BriefRow key={b.briefId} t={t} brief={b} href={briefHref(b.briefId)} />)}
+              {visibleBriefs.map((b) => <BriefRow key={b.briefId} t={t} brief={b} href={briefHref(b.briefId, b.orgId)} />)}
             </div>
           )}
         </>
@@ -298,8 +380,8 @@ function BriefRow({ t, brief: b, href }: { t: TFn; brief: CreativeBrief; href: s
 
 type TFn = ReturnType<typeof useTranslation>['t'];
 
-function BriefDetail({ t, orgId, brief, onBack, onChanged, onDelete }: {
-  t: TFn; orgId: string; brief: CreativeBrief; onBack: () => void; onChanged: () => Promise<void>;
+function BriefDetail({ t, orgId, brief, onBack, onChanged, onDelete, active = true }: {
+  active?: boolean; t: TFn; orgId: string; brief: CreativeBrief; onBack: () => void; onChanged: () => Promise<void>;
   /** §4.5 rule 12 — delete belongs to the entity's own surface, so it lives
    *  here rather than on the collection cell. */
   onDelete: () => void;
@@ -340,13 +422,14 @@ function BriefDetail({ t, orgId, brief, onBack, onChanged, onDelete }: {
 
   const moodBoard = brief.moodBoard;
   useEffect(() => {
+    if (!active) return;
     if (moodBoard.length === 0) { setAssetsById(new Map()); return; }
     let cancelled = false;
     listAssets(orgId)
       .then((all) => { if (!cancelled) setAssetsById(new Map(all.map((a) => [a.assetId, a]))); })
       .catch(() => { if (!cancelled) { setAssetsById(new Map()); toast.error(t('actionFailed')); } });
     return () => { cancelled = true; };
-  }, [orgId, moodBoard, t]);
+  }, [orgId, moodBoard, active, t]);
 
   const exportPdf = async (): Promise<void> => {
     if (exporting) return;
@@ -609,17 +692,17 @@ function BriefDetail({ t, orgId, brief, onBack, onChanged, onDelete }: {
             })}
           </div>
         )}
-        {pickerOpen ? <MediaPickerDialog orgId={orgId} onSelect={(a) => void addMoodAsset(a)} onClose={() => setPickerOpen(false)} /> : null}
+        {active && pickerOpen ? <MediaPickerDialog orgId={orgId} onSelect={(a) => void addMoodAsset(a)} onClose={() => setPickerOpen(false)} /> : null}
       </section>
 
       {/* R2 CRB-SP-3 — the render lane saves-first when the form is dirty (the
           CRB-G1 pattern, extended to the cost-bearing actions); the callback
           reports whether the save landed so a failed save aborts the render. */}
-      <RendersSection orgId={orgId} brief={brief} dirty={dirty}
+      {active ? <RendersSection orgId={orgId} brief={brief} dirty={dirty}
         onSaveFirst={async () => {
           try { await saveFields(); await onChanged(); return true; }
           catch (e) { toast.error(e instanceof Error ? e.message : t('actionFailed')); return false; }
-        }} />
+        }} /> : null}
 
       <section className="surface-card u-p-4 u-grid u-gap-2">
         <div className="u-flex u-items-center u-gap-2">

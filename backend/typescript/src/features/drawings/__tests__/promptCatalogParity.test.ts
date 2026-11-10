@@ -10,7 +10,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
-import { DRAWING_SHAPE_KINDS } from '../validateDrawingDoc.js';
+import { DRAWING_SHAPE_KINDS, validateDrawingDoc } from '../validateDrawingDoc.js';
 import { ASSET_SERVE_PATH } from '../../../host/assetServePath.js';
 
 describe('illustrator prompt ↔ validateDrawingDoc shape-kind parity (XCH-DRAW-1)', () => {
@@ -18,12 +18,16 @@ describe('illustrator prompt ↔ validateDrawingDoc shape-kind parity (XCH-DRAW-
   const promptPath = join(here, '../../../../../../packs/vendor.openwop-app.drawings.agents/prompts/illustrator.md');
   const prompt = readFileSync(promptPath, 'utf8');
 
-  it('names every validator kind as a `kind` bullet', () => {
-    for (const kind of DRAWING_SHAPE_KINDS) {
-      // Kinds are documented as backtick-quoted bullets; `stroke` alone would
-      // false-positive on the paint field, so require the quoted-token form.
-      expect(prompt, `prompt must document shape kind '${kind}'`).toContain(`\`${kind}\``);
-    }
+  it('names every validator kind as a `kind` bullet, and no kind the validator refuses', () => {
+    // Read the "Shape kinds" BULLETS, not the whole prompt: the paint field is also
+    // written `stroke`, in backticks, so a whole-prompt check could not see the kind go
+    // missing, which is the exact XCH-DRAW-1 drift.
+    const start = prompt.indexOf('Shape kinds and their geometry');
+    expect(start).toBeGreaterThan(-1);
+    const section = prompt.slice(start, prompt.indexOf('\n\n', start));
+    const bullets = section.split('\n').filter((l) => l.startsWith('- ')).map((l) => l.slice(0, l.indexOf('{')));
+    const kinds = bullets.flatMap((l) => [...l.matchAll(/`([a-z]+)`/g)].map((m) => m[1]));
+    expect(kinds.sort()).toEqual([...DRAWING_SHAPE_KINDS].sort());
   });
 
   it('names the image `src` address the host MINTS — unversioned, from its one owner (ADR 0669)', () => {
@@ -39,5 +43,11 @@ describe('illustrator prompt ↔ validateDrawingDoc shape-kind parity (XCH-DRAW-
   it('documents the arrow head vocabulary', () => {
     expect(prompt).toContain('startHead');
     expect(prompt).toContain('endHead');
+    // `HEADS` is not exported, so the validator is the other side of this parity.
+    const heads = /`"(\w+)"` or `"(\w+)"`/.exec(prompt)?.slice(1) ?? [];
+    expect(heads).toHaveLength(2);
+    const arrow = (head: string): Record<string, unknown> => ({ shapes: [{ kind: 'arrow', x1: 0, y1: 0, x2: 9, y2: 9, startHead: head, endHead: head }] });
+    for (const head of heads) expect(validateDrawingDoc(arrow(head)).errors, `prompt offers head '${head}'`).toEqual([]);
+    expect(validateDrawingDoc(arrow('triangle')).errors.map((e) => e.path).sort()).toEqual(['shapes[0].endHead', 'shapes[0].startHead']);
   });
 });

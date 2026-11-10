@@ -91,13 +91,18 @@ export function JudgeCheckPanel({ orgId }: { orgId: string }): JSX.Element {
         <>
           <Notice variant={report.passed ? 'success' : 'warning'} announce={summary}>{summary}</Notice>
           <p className="field-help u-m-0">{t('judgeCheckWho', { provider: report.provider, model: report.model ?? '', calls: report.calls })}</p>
+          <p className="field-help u-m-0">{t('judgeCheckResultsHelp')}</p>
           <ul className="u-list-plain u-grid u-gap-1 u-m-0 u-p-0" aria-label={t('judgeCheckCases')}>
             {report.cases.map((c) => (
               <li key={c.id} className="u-flex u-flex-wrap u-items-center u-gap-2">
                 <span className={`chip ${c.passed ? 'chip--success' : 'chip--danger'}`}>{c.passed ? t('judgeCheckCaseOk') : t('judgeCheckCaseMiss')}</span>
                 <span>{t(`judgeCheckCase_${c.id}`, { defaultValue: c.id })}</span>
                 <span className="u-text-muted">
-                  {c.error ? t(`judgeCheckError_${c.error}`) : t('judgeCheckCaseResult', { expected: t(`judgeCheckExpect_${c.expected}`), outcome: t(`judgeCheckOutcome_${c.outcome ?? 'needs_review'}`) })}
+                  {c.error ? t(`judgeCheckError_${c.error}`) : t('judgeCheckCaseResult', {
+                    expected: t(`judgeCheckExpect_${c.expected}`),
+                    judged: c.judged ? t(`judgeCheckOutcome_${c.judged}`) : t('judgeCheckNotReturned'),
+                    outcome: c.outcome ? t(`judgeCheckOutcome_${c.outcome}`) : t('judgeCheckNotReturned'),
+                  })}
                 </span>
                 {c.providerError ? <span className="u-text-muted">{t('judgeCheckProviderDetail', { detail: providerDetail(c.providerError) })}</span> : null}
               </li>

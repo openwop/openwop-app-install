@@ -239,7 +239,7 @@ async function easypostRate(secret: string, shipFrom: ShipFrom, address: TaxShip
 
 async function resolveCred(provider: string, scope: { tenantId: string; actingUserId?: string; orgId: string }): Promise<string | null> {
   try {
-    const resolved = await resolveConnectionCredential({ tenantId: scope.tenantId, provider, actingUserId: scope.actingUserId, orgId: scope.orgId });
+    const resolved = await resolveConnectionCredential({ egress: { fixedEndpoint: 'the tax or shipping provider fixed API host' }, tenantId: scope.tenantId, provider, actingUserId: scope.actingUserId, orgId: scope.orgId });
     return resolved?.secret ?? null;
   } catch { return null; }
 }

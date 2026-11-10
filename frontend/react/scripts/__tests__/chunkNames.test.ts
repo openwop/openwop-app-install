@@ -71,7 +71,7 @@ describe('check-bundle-budget — named overrides', () => {
   });
 
   it('skips the dead-override check for a named distribution', () => {
-    const r = runBudget(HEALTHY.filter((f) => !f.startsWith('katex-')), { OPENWOP_DISTRIBUTION: 'kicktodo' });
+    const r = runBudget(HEALTHY.filter((f) => !f.startsWith('katex-')), { OPENWOP_DISTRIBUTION: 'no-sales' });
     expect(r.out).not.toContain('matches no built chunk');
     expect(r.out).toContain('✓ check-bundle-budget: entry chunk');
     expect(r.code).toBe(0);

@@ -32,6 +32,17 @@ async function emitCanvasArtifact(runId: string, nodeId: string, tenantId = TENA
 }
 
 describe('host.canvas ownerSubject (additive, R6)', () => {
+  it('scopes private artifact copies by caller and preserves repeat opening within that scope', async () => {
+    const artifact = await emitCanvasArtifact('film-scope-run', 'deliver');
+    if (!artifact) throw new Error('Artifact was not persisted');
+    const a = { canvasTypeId: 'canvas.app-builder', ownerSubject: { kind: 'user' as const, id: 'user:a' }, idempotencyScope: 'org-1:user:a' };
+    const b = { ...a, ownerSubject: { kind: 'user' as const, id: 'user:b' }, idempotencyScope: 'org-1:user:b' };
+    const first = await seedCanvasFromArtifact(TENANT, 'film-scope-run:deliver', a);
+    expect(first?.ownerSubject).toEqual(a.ownerSubject);
+    expect((await seedCanvasFromArtifact(TENANT, 'film-scope-run:deliver', a))?.canvasId).toBe(first?.canvasId);
+    const other = await seedCanvasFromArtifact(TENANT, 'film-scope-run:deliver', b);
+    expect(other?.canvasId).not.toBe(first?.canvasId); expect(other?.ownerSubject).toEqual(b.ownerSubject);
+  });
   it('round-trips an owning project Subject; absent ⇒ tenant-scoped as before', async () => {
     const owned = await createCanvasForTenant(TENANT, { canvasTypeId: 'canvas.app-builder', name: 'A', ownerSubject: { kind: 'project', id: 'proj-1' }, initialState: { x: 1 } });
     const back = await getCanvasForTenant(TENANT, owned.canvasId);

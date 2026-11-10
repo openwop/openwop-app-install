@@ -107,20 +107,27 @@ describe('ADR 1001 D3.2 — durable ctx.suspend keys', () => {
   it('a non-durable key keeps today\'s behaviour: the first ask is asked again', async () => {
     const runId = await start('adr1001.plain');
     await answer((await openAsk(runId)).token, { answer: 'alpha' });
-    await waitStatus(runId, (s) => s.startsWith('waiting'));
+    expect(await waitStatus(runId, (s) => s.startsWith('waiting'))).toMatch(/^waiting/);
     const second = await openAsk(runId);
     expect(second.question).toBe('B?');
     await answer(second.token, { answer: 'beta' });
-    await waitStatus(runId, (s) => s.startsWith('waiting'));
+    expect(await waitStatus(runId, (s) => s.startsWith('waiting'))).toMatch(/^waiting/);
     expect((await openAsk(runId)).question).toBe('A?');
   });
 
   it('a served answer passes the same resume scrub as a seeded one', async () => {
     const runId = await start('adr1001.durable');
     await answer((await openAsk(runId)).token, { answer: `id ${HEX}` });
-    await waitStatus(runId, (s) => s.startsWith('waiting'));
+    expect(await waitStatus(runId, (s) => s.startsWith('waiting'))).toMatch(/^waiting/);
     await answer((await openAsk(runId)).token, { answer: 'beta' });
     expect(await waitStatus(runId, (s) => ['completed', 'failed'].includes(s))).toBe('completed');
-    expect(JSON.stringify((await outputs(runId))?.['a'])).not.toContain(HEX);
+    const out = await outputs(runId);
+    // The served value IS the answer (not some other value that merely lacks HEX), scrubbed.
+    const a = out?.['a'];
+    const servedA = a !== null && typeof a === 'object' && 'answer' in a ? a.answer : undefined;
+    expect(typeof servedA).toBe('string');
+    expect(String(servedA).startsWith('id ')).toBe(true);
+    expect(String(servedA)).not.toContain(HEX);
+    expect(out?.['b']).toEqual({ answer: 'beta' });
   });
 });

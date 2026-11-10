@@ -24,6 +24,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { stripComments } from './helpers/stripComments.js';
+import { declaredPathTable } from './helpers/featureRatchetTables.js';
 
 const SRC = new URL('../src/', import.meta.url).pathname;
 
@@ -47,7 +48,7 @@ const DEFINITION = /export\s+async\s+function\s+(updateCanvasForTenant|deleteCan
 /** file → [mutator call count, the gate the file is reviewed to use]. A gate
  *  starting `system:` is a lane with no human caller to gate (a cascade, a
  *  retention sweep, a seed) or one gated upstream; its reason is the review. */
-const REVIEWED: Record<string, [number, string]> = {
+const HOST_REVIEWED: Record<string, [number, string]> = {
   'features/canvasEditorRoutes.ts': [3, "loadCanvas(tenantId, req.params.canvasId, user.userId, 'write')"],
   'host/canvasSurface.ts': [2, "assertCanvasRunAccess(scope, await load(canvasId), 'write')"],
   'host/dataBinding.ts': [1, "assertCanvasRunAccess(scope, canvas, 'write')"],
@@ -60,10 +61,11 @@ const REVIEWED: Record<string, [number, string]> = {
   'routes/uiPlugins.ts': [1, 'canvasWriteAllowed('],
   'host/collab/collabRoom.ts': [1, 'system:the room derive — the JOIN is the write gate (collabServer assertCollabWrite + the cookie-lane check, ADR 0886 D2)'],
   'features/app-builder/canvasRetention.ts': [1, 'system:retention sweep of abandoned transient canvases'],
-  'features/kicktodo-creator/candidateDeathSubscribers.ts': [1, 'system:lifecycle cascade when the owning candidate is deleted'],
   'features/projects/feature.ts': [1, 'system:the project-deletion cascade (ADR 0839 D2)'],
   'host/demoAppBuilderSeed.ts': [1, 'system:demo seed reset of its own deterministic ids'],
 };
+/** ADR 1031 P2 — plus each feature package's rows (`ratchetTables.json`, `adr0886.reviewed`). */
+const REVIEWED: Record<string, [number, string]> = { ...HOST_REVIEWED, ...declaredPathTable<[number, string]>('adr0886.reviewed') };
 
 /** file → the ordered `need` of each `loadCanvas(` call. */
 const LOAD_NEEDS: Record<string, string[]> = {
@@ -74,6 +76,7 @@ const LOAD_NEEDS: Record<string, string[]> = {
   'features/cad/routes.ts': ['read', 'read'],
   'features/slides/routes.ts': ['read'],
   'features/document-editor/routes.ts': ['read'],
+  'features/films/feature.ts': ['read', 'read'], // presenter + notes-free audience projection
 };
 
 /** SL2CD-3 — file → the number of WRITE-PREDICATE calls it makes. The mutator

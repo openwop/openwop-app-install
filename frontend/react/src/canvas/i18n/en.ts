@@ -8,6 +8,8 @@
  * type-key contract in `src/canvas/types.ts`.
  */
 export const messages = {
+  type_film: "Animated film",
+  typeHint_film: "Animated HTML with manual cues and private presenter notes.",
   // CPKU-2 — accessible Yes/No name for pack boolean fields (the ✓/— glyph is aria-hidden).
   boolYes: 'Yes',
   boolNo: 'No',

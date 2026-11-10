@@ -8,11 +8,12 @@
  *
  * Probes file (JSON array):
  *   { "id": "short-id",
- *     "lane": "backend" | "frontend",
+ *     "lane": "backend" | "frontend" | "node",
  *     "src": "<path from repo root>",
  *     "old": "<exact text — must occur EXACTLY once in src>",
  *     "new": "<replacement>",
  *     "test": "<test path relative to the lane dir>",
+ *     "cwd": "<lane dir for the node lane, from repo root; default the root>",  // node lane only
  *     "expect_red": ["<substring of a case title that must fail>", …],  // optional
  *     "env": { "NAME": "value" } }                                       // optional
  *
@@ -20,6 +21,10 @@
  * trust manifest, so every run fails `pack_untrusted` — red for the wrong
  * reason. Such probes run with OPENWOP_PACK_TRUST_ALLOW_UNSIGNED=true, and any
  * report that still mentions `pack_untrusted` is an "error", never a witness.
+ *
+ * The "node" lane runs a `node --test` file (clients/*, tools/*, skills), which the
+ * two vitest lanes cannot. It reads the TAP stream, so `expect_red` matches the
+ * test's own name, and a file that dies before any test reports its path as red.
  *
  * Output: one JSON line per probe — red cases, and `verdict`:
  *   "witnessed"  every expect_red substring matched a failing case
@@ -53,7 +58,7 @@ const probes = JSON.parse(readFileSync(args[0], 'utf8'));
 const git = (...a) => spawnSync('git', a, { cwd: ROOT, encoding: 'utf8' });
 
 function runProbe(p) {
-  if (!LANES[p.lane]) return { id: p.id, verdict: 'error', error: `unknown lane ${p.lane}` };
+  if (p.lane !== 'node' && !LANES[p.lane]) return { id: p.id, verdict: 'error', error: `unknown lane ${p.lane}` };
   if (git('diff', '--quiet', '--', p.src).status !== 0) return { id: p.id, verdict: 'error', error: 'src already dirty' };
   const srcAbs = join(ROOT, p.src);
   const text = readFileSync(srcAbs, 'utf8');
@@ -61,6 +66,7 @@ function runProbe(p) {
   if (n !== 1) return { id: p.id, verdict: 'error', error: `old text matched ${n} times` };
   try {
     writeFileSync(srcAbs, text.replace(p.old, () => p.new));
+    if (p.lane === 'node') return runNodeTest(p, outDir);
     const report = join(outDir, `probe-${p.id}.json`);
     rmSync(report, { force: true }); // never read a previous run's report
     const packEdit = /^(packs|examples)\//.test(p.src);
@@ -87,6 +93,22 @@ function runProbe(p) {
   } finally {
     restore(p.src, srcAbs, text);
   }
+}
+
+function runNodeTest(p, dir) {
+  const run = spawnSync('node', ['--test', '--test-reporter=tap', p.test],
+    { cwd: join(ROOT, p.cwd ?? '.'), encoding: 'utf8', env: { ...process.env, ...(p.env ?? {}) }, maxBuffer: 256 * 1024 * 1024, timeout: 300_000 });
+  if (run.error || run.status === null) return { id: p.id, verdict: 'error', error: `node --test did not finish (${run.error?.code ?? run.signal})` };
+  writeFileSync(join(dir, `probe-${p.id}.tap`), run.stdout);
+  const lines = run.stdout.split('\n');
+  const red = lines.flatMap((l) => l.match(/^\s*not ok \d+ - (.+)$/)?.[1] ?? []);
+  const total = lines.filter((l) => /^\s*(not )?ok \d+ - /.test(l)).length;
+  if (total === 0) return { id: p.id, verdict: 'error', error: 'node --test reported no tests' };
+  let verdict;
+  if (red.length === 0) verdict = run.status === 0 ? 'vacuous' : 'error';
+  else if (!p.expect_red?.length) verdict = 'witnessed';
+  else verdict = p.expect_red.every((s) => red.some((t) => t.includes(s))) ? 'witnessed' : 'other-red';
+  return { id: p.id, verdict, red, total };
 }
 
 // A restore that is not verified is not a restore. `git checkout` alone failed

@@ -14,6 +14,11 @@
  * `toolsRoundDigest`'s preimage reds both "served across the hint" cases; not
  * setting the hint in `runChatToolLoop` reds both threading cases; dropping it
  * in the adapter reds the BYOK threading case.
+ * Re-witnessed 2026-11-03 (w81): dropping it in the MANAGED adapter reds the
+ * managed threading case; a digest blind to messages reds both controls. The
+ * served cases also assert the decoded answer, so an empty or wrong record served
+ * with zero live calls does not pass. The control overlaps adr1002's "a replay
+ * whose request DIVERGED" (both protected; kept, human ask).
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AiToolCallRequest } from '../src/executor/types.js';
@@ -50,6 +55,9 @@ let app: Awaited<ReturnType<typeof import('../src/index.js')['createApp']>>;
 const NODE = 'agent';
 const TENANT = 'host-shared';
 
+const savedCache = process.env.OPENWOP_CONTEXT_ECONOMY_CONVERSATION_CACHE;
+const savedDsn = process.env.OPENWOP_STORAGE_DSN;
+
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   const { createApp } = await import('../src/index.js');
@@ -58,10 +66,12 @@ beforeAll(async () => {
   ({ runChatToolLoop } = await import('../src/host/agentDispatch.js'));
   app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 't', serviceVersion: '0', enableConsoleTracer: false });
   policyResolver = (app.locals.hostSuite as import('../src/host/index.js').HostAdapterSuite).providerPolicyResolver;
-});
+}, 120_000);
 afterAll(async () => {
-  await (app.locals.storage as { close: () => Promise<void> }).close();
-  delete process.env.OPENWOP_CONTEXT_ECONOMY_CONVERSATION_CACHE;
+  await (app?.locals.storage as { close: () => Promise<void> } | undefined)?.close();
+  if (savedCache === undefined) delete process.env.OPENWOP_CONTEXT_ECONOMY_CONVERSATION_CACHE;
+  else process.env.OPENWOP_CONTEXT_ECONOMY_CONVERSATION_CACHE = savedCache;
+  if (savedDsn === undefined) delete process.env.OPENWOP_STORAGE_DSN; else process.env.OPENWOP_STORAGE_DSN = savedDsn;
 });
 
 beforeEach(() => {
@@ -116,21 +126,27 @@ describe.each([
 
   it('a fork that differs ONLY by the hint is served from the source record (zero live calls)', async () => {
     beginNodeActivity(`run-src-${label}`, NODE, 1);
-    await adapterFor(`run-src-${label}`, byok).callAIWithTools(reqFor(byok));
+    const live = await adapterFor(`run-src-${label}`, byok).callAIWithTools(reqFor(byok));
     expect(provider()).toHaveBeenCalledTimes(1);
+    expect(live.content).toBe('The answer is 42.');
     provider().mockClear();
     beginNodeActivity(`run-fork-${label}`, NODE, 1);
-    await adapterFor(`run-fork-${label}`, byok, `run-src-${label}`).callAIWithTools({ ...reqFor(byok), cacheConversation: true });
+    const served = await adapterFor(`run-fork-${label}`, byok, `run-src-${label}`).callAIWithTools({ ...reqFor(byok), cacheConversation: true });
     expect(provider()).toHaveBeenCalledTimes(0);
+    // The served round is the source's recorded answer, decoded, not an empty stand-in.
+    expect(served.content).toBe('The answer is 42.');
+    expect(served.toolCalls ?? []).toEqual([]);
   });
 
   it('and the reverse: recorded WITH the hint, replayed without it, still served', async () => {
     beginNodeActivity(`run-src2-${label}`, NODE, 1);
     await adapterFor(`run-src2-${label}`, byok).callAIWithTools({ ...reqFor(byok), cacheConversation: true });
+    expect(provider()).toHaveBeenCalledTimes(1);
     provider().mockClear();
     beginNodeActivity(`run-fork2-${label}`, NODE, 1);
-    await adapterFor(`run-fork2-${label}`, byok, `run-src2-${label}`).callAIWithTools(reqFor(byok));
+    const served = await adapterFor(`run-fork2-${label}`, byok, `run-src2-${label}`).callAIWithTools(reqFor(byok));
     expect(provider()).toHaveBeenCalledTimes(0);
+    expect(served.content).toBe('The answer is 42.');
   });
 
   it('control: a fork whose MESSAGES differ misses and calls live (the digest is not blind)', async () => {
@@ -138,7 +154,9 @@ describe.each([
     await adapterFor(`run-src3-${label}`, byok).callAIWithTools(reqFor(byok));
     provider().mockClear();
     beginNodeActivity(`run-fork3-${label}`, NODE, 1);
-    await adapterFor(`run-fork3-${label}`, byok, `run-src3-${label}`).callAIWithTools({ ...reqFor(byok), messages: [{ role: 'user', content: 'A different question.' }] });
+    const out = await adapterFor(`run-fork3-${label}`, byok, `run-src3-${label}`).callAIWithTools({ ...reqFor(byok), messages: [{ role: 'user', content: 'A different question.' }] });
     expect(provider()).toHaveBeenCalledTimes(1);
+    // The live round answered the NEW question (round 1 of the script asks for the tool).
+    expect(out.toolCalls?.map((t) => t.name)).toEqual([TOOL_NAME]);
   });
 });

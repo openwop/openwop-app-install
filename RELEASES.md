@@ -48,6 +48,27 @@ upgrade is neither: list it in `breakingConfig`.
 
 ## Version log
 
+### v0.11.0 — 2026-11-09
+
+- **Required stop:** no. **Rolling-safe:** no. A 0.10.0 instance cannot resolve
+  re-keyed partner-portal tokens, so stop every 0.10.0 instance before starting
+  0.11.0 when the dealers partner portal is in use.
+- **Schema:** sqlite 52 / postgres 50 · **App migrations:** 26.
+- KickTodo leaves openwop-app. A KickTodo adopter takes its packages under its
+  own `src/adopter/features/` and attests its packs in
+  `packs/.adopter-manifest.json` in the same sync. Seven KickTodo env vars are
+  no longer read.
+- Adds channels into the main chat, SKILL.md import, animated films, designed
+  custom-domain pages, new CMS section options and persisted agent-scoped
+  embedded chat. BI metrics become per org and refuse stale definitions. Channels, skill import,
+  films and designed pages stay off by default.
+- A run whose every final step was skipped now completes. Keyless workspaces
+  run workflow AI steps on the managed tier.
+- Closes cross-tenant and cross-client paths in A2A, connections, ads and BYOK.
+  Env-key principal ids change once, and delivery-log rows older than 7 days are
+  pruned after the upgrade.
+- [CHANGELOG §0.11.0](./CHANGELOG.md#0110--2026-11-09)
+
 ### v0.10.0 — 2026-11-02
 
 - **Required stop:** no. **Rolling-safe:** yes.

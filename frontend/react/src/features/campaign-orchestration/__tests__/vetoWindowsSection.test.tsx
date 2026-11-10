@@ -9,12 +9,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, fireEvent, waitFor } from '@testing-library/react';
 
+import type { VetoWindow } from '../autonomy/autonomyClient.js';
+
 const h = vi.hoisted(() => ({ listVetoWindows: vi.fn(), castVeto: vi.fn() }));
 vi.mock('../autonomy/autonomyClient.js', async (orig) => ({ ...(await orig<Record<string, unknown>>()), listVetoWindows: h.listVetoWindows, castVeto: h.castVeto }));
 const { AutonomyDisabledError } = await import('../autonomy/autonomyClient.js');
 const { default: VetoWindowsSection } = await import('../autonomy/VetoWindowsSection.js');
 
-const win = (vetoId: string, canVeto: boolean) => ({ vetoId, actionClass: 'plan.approve', ruleId: 'plan.approve#default', deadline: '2026-10-20T16:00:00.000Z', runId: 'r1', canVeto });
+const win = (vetoId: string, canVeto: boolean): VetoWindow => ({ vetoId, actionClass: 'plan.approve', ruleId: 'plan.approve#default', deadline: '2026-10-20T16:00:00.000Z', runId: 'r1', canVeto });
 
 beforeEach(() => { h.listVetoWindows.mockReset(); h.castVeto.mockReset(); });
 afterEach(cleanup);
@@ -25,6 +27,8 @@ describe('VetoWindowsSection', () => {
     h.castVeto.mockResolvedValue(undefined);
     render(<VetoWindowsSection campaignId="c1" />);
     expect(await screen.findAllByText('Approve the plan')).toHaveLength(2);
+    // The window says when it runs (2026 holds in every test time zone for a 16:00Z deadline).
+    expect(screen.getAllByText(/^Runs at .*2026.* unless vetoed$/)).toHaveLength(2);
     const buttons = screen.getAllByRole('button', { name: 'Veto' });
     expect(buttons).toHaveLength(1);
     fireEvent.click(buttons[0]!);

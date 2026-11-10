@@ -15,7 +15,7 @@ import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import type { Scope } from '../../host/accessControlService.js';
 import { authorizeOrgScope, publicBaseUrl } from '../featureRoute.js';
 import { createDealer, listDealers, getDealer, updateDealer, deleteDealer, createOutlet, listOutlets, getOutlet, updateOutlet, deleteOutlet } from './entities/dealer.js';
-import { mintPartnerToken, resolvePartnerToken, createRegistration, listRegistrations, repairUnqueuedRegistrations, deleteDealerPrmData } from './entities/registration.js';
+import { mintPartnerToken, revokePartnerTokens, resolvePartnerToken, createRegistration, listRegistrations, repairUnqueuedRegistrations, deleteDealerPrmData } from './entities/registration.js';
 import { dealerMutated } from './emit.js';
 import { VENDOR_ROOT } from '../../middleware/protocolVersion.js';
 import { resolveToggle } from '../../host/featureToggles/service.js';
@@ -121,13 +121,28 @@ export function registerDealerRoutes(deps: RouteDeps): void {
 
   // ── PRM: partner-portal token (P2) ──
   // Mint/rotate a dealer's partner-portal capability token (internal admin).
+  // ADR 1034 D9 — a manager act (`host:dealers:manage`, was `workspace:write`): the link is a
+  // credential an outsider uses to register deals into this org's review queue. The raw
+  // token is in this response ONCE; only its hash is stored. It expires after 180 days.
   app.post(`${BASE}/dealers/:dealerId/portal-token`, async (req, res, next) => {
     try {
-      const { user, orgId, tenantId } = await authorize(req, 'workspace:write');
-      const t = await mintPartnerToken(tenantId, orgId, req.params.dealerId);
+      const { user, orgId, tenantId } = await authorize(req, 'host:dealers:manage');
+      const { raw, row } = await mintPartnerToken(tenantId, orgId, req.params.dealerId);
       dealerMutated({ entity: 'dealer', verb: 'portal-issued', tenantId, orgId, actor: user.userId, entityId: req.params.dealerId });
       // The unversioned vendor path: an issued link must outlive the ADR 0669 cut.
-      res.status(201).json({ token: t.token, url: `${publicBaseUrl(req)}${VENDOR_ROOT}/partner/${t.token}` });
+      res.status(201).json({ token: raw, url: `${publicBaseUrl(req)}${VENDOR_ROOT}/partner/${raw}`, expiresAt: row.expiresAt });
+    } catch (err) { next(err); }
+  });
+
+  // ADR 1034 D9 — revoke the dealer's partner link. Idempotent: 204 whether or not one existed.
+  app.delete(`${BASE}/dealers/:dealerId/portal-token`, async (req, res, next) => {
+    try {
+      const { user, orgId, tenantId } = await authorize(req, 'host:dealers:manage');
+      await getDealer(tenantId, orgId, req.params.dealerId); // 404 + IDOR
+      if ((await revokePartnerTokens(tenantId, orgId, req.params.dealerId)) > 0) {
+        dealerMutated({ entity: 'dealer', verb: 'portal-revoked', tenantId, orgId, actor: user.userId, entityId: req.params.dealerId });
+      }
+      res.status(204).end();
     } catch (err) { next(err); }
   });
 
@@ -191,11 +206,19 @@ export function registerDealerRoutes(deps: RouteDeps): void {
     // set). The partner is never refused for their own state; the shape is the same uniform 404.
     if (await ownerPublicRuntimeLapsed(TOGGLE_ID, tenantId)) throw new OpenwopError('not_found', 'Invalid partner link.', 404, {});
   };
+  // ADR 1034 D9 — a SUSPENDED dealer's link is dead. It used to keep showing the portal and
+  // accepting registrations, so suspending a partner did not stop them. A missing dealer is
+  // the same uniform 404 (the token outlived it), never a different message.
+  const requireActivePartnerDealer = async (t: { tenantId: string; orgId: string; dealerId: string }) => {
+    const dealer = await getDealer(t.tenantId, t.orgId, t.dealerId).catch(() => null);
+    if (!dealer || dealer.status !== 'active') throw new OpenwopError('not_found', 'Invalid partner link.', 404, {});
+    return dealer;
+  };
   app.get('/host/openwop-app/partner/:token', async (req, res, next) => {
     try {
       const t = await resolvePartnerToken(req.params.token);
       await requirePartnerFeatureEnabled(t.tenantId);
-      const dealer = await getDealer(t.tenantId, t.orgId, t.dealerId);
+      const dealer = await requireActivePartnerDealer(t);
       const [outlets, registrations] = await Promise.all([
         listOutlets(t.tenantId, t.orgId, { dealerId: t.dealerId }),
         listRegistrations(t.tenantId, t.orgId, { dealerId: t.dealerId }),
@@ -212,6 +235,7 @@ export function registerDealerRoutes(deps: RouteDeps): void {
     try {
       const t = await resolvePartnerToken(req.params.token);
       await requirePartnerFeatureEnabled(t.tenantId);
+      await requireActivePartnerDealer(t);
       const body = (req.body ?? {}) as { dealTitle?: unknown; companyName?: unknown };
       const reg = await createRegistration(t.tenantId, t.orgId, t.dealerId, body);
       dealerMutated({ entity: 'registration', verb: 'created', tenantId: t.tenantId, orgId: t.orgId, actor: `partner:${t.dealerId}`, entityId: reg.regId });

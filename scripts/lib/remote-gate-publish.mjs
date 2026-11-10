@@ -86,7 +86,7 @@ export function publishRemoteGateArtifacts({ root, requestBytes, trust,
   assert.equal(result.treeBefore, job.request.tree, 'result initial tree differs');
   assert.equal(result.treeAfter, job.request.tree, 'result final tree differs');
   assert.equal(result.exitCode, exitCode, 'result exit differs from observed command');
-  for (const [field, name] of Object.entries({ gateLog: 'gate.log', evidence: 'evidence.json', browserLedger: 'browser.tsv' })) {
+  for (const [field, name] of Object.entries({ gateLog: 'gate.log.gz', evidence: 'evidence.json', browserLedger: 'browser.tsv' })) {
     assert.equal(result.artifacts?.[field], digests[name], `${name} bytes differ`);
   }
   syncDirectory(destination);

@@ -1,8 +1,8 @@
 {
   "name": "core.openwop.workflows.destination-sync",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "kind": "workflow-chain",
-  "description": "CDP → peer-OpenWOP-host onward-sync (ADR 0289/RFC 0128), migrated from the deprecated builtin (ADR 0472 P4). chainId keeps the original id; peerIngestUrl resolves at runtime via the http node config template.",
+  "description": "CDP → peer-OpenWOP-host onward-sync (ADR 0289/RFC 0128), migrated from the deprecated builtin (ADR 0472 P4). chainId keeps the original id; peerIngestUrl is a declared parameter: prepare-onward refuses a URL that is not the sync's configured one (ADR 1024 D2.5), and the http node config template reads the same run variable.",
   "keywords": [
     "CDP"
   ],
@@ -12,7 +12,7 @@
   "chains": [
     {
       "chainId": "openwop-app.cdp.sync-to-openwop-host",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "label": "Sync CDP records to a peer host",
       "description": "Prepare the onward envelope and POST a CDP record batch to a peer OpenWOP host (purpose-labelled).",
       "parameters": {
@@ -27,20 +27,26 @@
             "type": "array",
             "description": "The CDP record batch to CDC-filter, purpose-label, and forward.",
             "default": []
+          },
+          "peerIngestUrl": {
+            "type": "string",
+            "description": "The sync's configured peer ingest URL. The run refuses (destination_mismatch) unless it equals the sync's stored peerIngestUrl."
           }
         },
         "required": [
-          "syncId"
+          "syncId",
+          "peerIngestUrl"
         ]
       },
       "dag": {
         "nodes": [
           {
             "id": "prepare-onward",
-            "typeId": "feature.destination-sync.nodes.prepare-onward@1.0.0",
+            "typeId": "feature.destination-sync.nodes.prepare-onward@1.1.0",
             "inputs": {
               "syncId": "{{params.syncId}}",
-              "records": "{{params.records}}"
+              "records": "{{params.records}}",
+              "peerIngestUrl": "{{params.peerIngestUrl}}"
             }
           },
           {

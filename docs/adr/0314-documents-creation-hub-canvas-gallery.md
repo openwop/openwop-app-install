@@ -2,6 +2,18 @@
 
 Status: implemented (2026-07-07) — P1+P2 in PR #1485 (the canvases browser follow-on rode ADR 0316 / PR #1487).
 
+## Correction (2026-11-06) — retain the creation organization in editor URLs
+
+The creation modal already receives an explicit organization and posts the new
+canvas there. Its editor navigation dropped that scope, so a multi-organization
+workspace immediately asked the person to choose the client again. The shared
+blank-canvas handoff now adds the same URL-encoded org query alongside the actual
+returned canvas ID for both first-party and pack canvas editors. Editors still
+validate that organization through their existing authorized selection and
+server access checks; this adds no authority or alternate creation path. The
+regression asserts creation scope and the resulting Campaign plan editor URL,
+with existing slide/CAD handoff assertions retaining their paths and scope.
+
 ## Context
 
 ADR 0310 shipped six first-party canvas editors (app-builder, slides, drawings,

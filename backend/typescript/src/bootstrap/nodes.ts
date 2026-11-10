@@ -9,7 +9,10 @@
  * `core.openwop.http` from the published packs.
  */
 
-import { resolveRunMemoryClient } from '../host/runClientOrg.js';
+import { resolveRunMemoryClient, runClientOrgOf } from '../host/runClientOrg.js';
+import { assertRunScopeOrg } from '../host/accessControlService.js';
+import { getAdsCampaignOwnershipChecker, isAdsOwnershipRefusal } from '../host/adsAdapter.js';
+import { OpenwopError } from '../types.js';
 import { runClientCollectionIds } from '../host/runClientKnowledge.js';
 import { APPROVAL_WAIT_KEY_PREFIX } from '../host/autonomyPolicy/waiters.js';
 import { confidenceEscalationFloor, multiAgentPhaseGates } from '../host/multiAgentPhases.js';
@@ -969,6 +972,9 @@ const subWorkflowNode: NodeModule = {
           outputMappingSkipped: result.outputMappingSkipped,
           // ADR 0964 D1 — recorded so a replay that serves this node re-applies them.
           ...(result.parentVariableWrites ? { parentVariableWrites: result.parentVariableWrites } : {}),
+          // RFC 0257 §B (ADR 1027) — the child completed and reached no terminal.
+          // A parent that must stop routes on it (`truthy` → `core.fail`).
+          ...(result.childSkippedTerminals ? { childSkippedTerminals: result.childSkippedTerminals } : {}),
         },
       };
     } catch (err) {
@@ -3383,6 +3389,11 @@ const adMetricsNode: NodeModule = {
     }
     const r = await ctx.ads.getMetrics({ platform, adAccountId, campaignId });
     if (r.outcome === 'ok') return { status: 'success', outputs: { connected: true, platform: r.platform, metrics: r.metrics } };
+    // ADR 1022 follow-up — the ownership seam's refusals keep their own code: a
+    // typed refusal, never `metrics: null` (which would read as "no data").
+    if (r.outcome === 'failed' && isAdsOwnershipRefusal(r.error)) {
+      return { status: 'failure', error: { code: r.error, message: r.error === 'ad_campaign_not_in_org' ? 'That campaign is not one of this organization\'s campaigns, so its metrics were not read.' : `Ad metrics were not read (${r.error}).` } };
+    }
     if (r.outcome === 'failed') return { status: 'failure', error: { code: 'ad_metrics_failed', message: `Ad metrics read failed (${r.error}).` } };
     // no_connection / unsupported ⇒ graceful "no data".
     return { status: 'success', outputs: { connected: false, metrics: null, ...(r.outcome === 'unsupported' ? { reason: 'platform_unsupported', platform } : {}) } };
@@ -3397,7 +3408,8 @@ const adMetricsNode: NodeModule = {
  * calls no platform API. A deliberate `dryRun:false` (plus a real `adAccountId`, behind
  * the chain's guardrail + approval gate) applies the change via ctx.ads.updateBudget
  * (the one live-spend mutation; idempotent, never unpauses). Fails SAFE: no surface /
- * budget / campaign / connection ⇒ `{applied:false}` success, never a throw.
+ * budget / campaign / connection ⇒ `{applied:false}` success, never a throw. A live
+ * change for a campaign the run's org does not own is a typed failure (Q-1, below).
  */
 const adBudgetUpdateNode: NodeModule = {
   typeId: 'core.openwop.connectors.ad-budget-update',
@@ -3420,6 +3432,42 @@ const adBudgetUpdateNode: NodeModule = {
     // Recommend (default), or a real apply is impossible without an account/budget/surface.
     if (!apply || !planned || !adAccountId || !ctx.ads?.updateBudget) {
       return { status: 'success', outputs: { applied: false, planned } };
+    }
+    // ADR 1022 follow-up (Q-1) — a LIVE change names a caller-chosen campaign, and in
+    // an agency set-up one ad-platform token reaches every client's accounts. Before
+    // the adapter call, and fail-closed with a typed error: the run's org is the
+    // client its host-written stamp names (a campaign or client run, ADR 0944 D2),
+    // else the run's workspace — the same org the adapter seam resolves, so this
+    // early refusal and the seam's backstop agree. The run's person must be able to
+    // write in that org (the ADR 0832 run-lane floor), and the campaign must be
+    // that org's (the ONE ownership predicate, registered by campaign-intel).
+    // CORRECTED (adapter seam): an unstamped run used to name its own org with
+    // `orgId`. Node config is caller-controlled, so that fallback was removed; a
+    // step that names an org other than the run's is refused.
+    const named = String(cfg.orgId ?? inputs.orgId ?? '').trim();
+    const stamp = await runClientOrgOf(ctx.tenantId, ctx.runId);
+    if (stamp && 'refused' in stamp) {
+      return { status: 'failure', error: { code: 'forbidden_scope', message: 'This run\'s client organization could not be read, so the budget was not changed.' } };
+    }
+    const orgId = stamp?.orgId ?? ctx.tenantId;
+    if (named && named !== orgId) {
+      return { status: 'failure', error: { code: 'forbidden_scope', message: 'This step names a different organization from the one this run is for, so the budget was not changed.' } };
+    }
+    try {
+      await assertRunScopeOrg({ tenantId: ctx.tenantId, actingUserId: ctx.actingUserId, orgScopeSubject: ctx.orgScopeSubject }, orgId, 'workspace:write');
+    } catch (err) {
+      if (err instanceof OpenwopError && (err.code === 'not_found' || err.code === 'forbidden_scope')) {
+        return { status: 'failure', error: { code: 'forbidden_scope', message: 'The person this run acts for cannot change budgets in that organization.' } };
+      }
+      throw err;
+    }
+    const ownsCampaign = getAdsCampaignOwnershipChecker();
+    if (!ownsCampaign) {
+      return { status: 'failure', error: { code: 'capability_not_provided', message: 'This host cannot check which organization an ad campaign belongs to, so it will not change a live budget.' } };
+    }
+    if (!(await ownsCampaign(ctx.tenantId, orgId, { platform, adAccountId, campaignId }))) {
+      // One answer for "no such campaign" and "another organization's campaign".
+      return { status: 'failure', error: { code: 'ad_campaign_not_in_org', message: 'That campaign is not one of this organization\'s campaigns, so its budget was not changed.' } };
     }
     const r = await ctx.ads.updateBudget({ platform, adAccountId, campaignId, dailyBudgetMinor: planned.dailyBudgetMinor, dryRun: false });
     if (r.outcome === 'updated') return { status: 'success', outputs: { applied: true, planned, target: r.target } };

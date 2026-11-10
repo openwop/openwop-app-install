@@ -13,8 +13,9 @@
  *
  * @see ../client/exampleDataClient.ts
  */
+import { onAuthChange } from '../client/config.js';
 import { Button } from '../ui/Button.js';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { confirm } from '../ui/confirm.js';
 import { formatNumber } from '../i18n/format.js';
@@ -105,58 +106,88 @@ export function ExampleDataPage(): JSX.Element {
   const [result, setResult] = useState<RunResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const generation = useRef(0);
+  const [hydratedGeneration, setHydratedGeneration] = useState<number | null>(null);
+
   const refresh = useCallback(async () => {
+    const captured = generation.current;
     try {
       const s = await getExampleDataStatus();
+      if (captured !== generation.current) return;
+      setHydratedGeneration(captured);
       setSteps(s.steps);
       setSeedEnabled(s.enabled);
       setSuperadmin(s.superadmin);
       setSelected((prev) => (prev.size === 0 ? new Set(s.steps.map((x) => x.id)) : prev));
       setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (captured === generation.current) setError(err instanceof Error ? err.message : String(err));
     }
   }, []);
 
-  useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => {
+    const epoch = generation;
+    const invalidate = (): void => {
+      ++epoch.current;
+      setHydratedGeneration(null);
+      setSteps(null); setSelected(new Set()); setSuperadmin(false);
+      setSeedEnabled(false); setBusy(null); setResult(null); setError(null);
+      void refresh();
+    };
+    const unsubscribe = onAuthChange(invalidate);
+    void refresh();
+    return () => { ++epoch.current; unsubscribe(); };
+  }, [refresh]);
 
-  const toggle = (id: string) => setSelected((prev) => {
-    const next = new Set(prev);
-    if (next.has(id)) next.delete(id); else next.add(id);
-    return next;
-  });
+  const toggle = (id: string): void => {
+    if (hydratedGeneration === null || hydratedGeneration !== generation.current) return;
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
 
   const onSeed = async (all: boolean) => {
+    const captured = hydratedGeneration;
+    if (captured === null || captured !== generation.current) return;
+    const isCurrent = (): boolean => captured === generation.current;
     setBusy('seed'); setError(null); setResult(null);
     const stepIds = all ? undefined : [...selected];
     try {
-      // Dry-run previews from counts (fast) — plain JSON. A real seed STREAMS so
-      // the full reseed shows live progress and never trips the timeouts (ADR 0292).
+      // Preview remains read-only JSON. The client uses same-origin JSON for
+      // only the two-record walkthrough seed; full seeds retain direct NDJSON.
       if (dryRun) {
-        setResult(await runExampleDataSeed({ ...(stepIds ? { steps: stepIds } : {}), dryRun: true }));
+        const preview = await runExampleDataSeed({ ...(stepIds ? { steps: stepIds } : {}), dryRun: true });
+        if (isCurrent()) setResult(preview);
         return;
       }
       const collected: StepResult[] = [];
       const final = await runExampleDataSeedStream({ ...(stepIds ? { steps: stepIds } : {}) }, (e) => {
-        if (e.type === 'step') { collected.push(e); setResult(liveResult(collected)); }
+        if (isCurrent() && e.type === 'step') { collected.push(e); setResult(liveResult(collected)); }
       });
+      if (!isCurrent()) return;
       setResult({ success: final.success, dryRun: false, results: collected, summary: final.summary });
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (isCurrent()) setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setBusy(null);
+      if (isCurrent()) setBusy(null);
     }
   };
 
   const onProvision = async () => {
-    if (!(await confirm({ title: t('provisionConfirm') }))) return;
+    const captured = hydratedGeneration;
+    if (captured === null || captured !== generation.current) return;
+    const isCurrent = (): boolean => captured === generation.current;
+    if (!(await confirm({ title: t('provisionConfirm') })) || !isCurrent()) return;
     setBusy('provision'); setError(null); setResult(null);
     try {
       const collected: StepResult[] = [];
       const final = await provisionDemoTenant((e) => {
-        if (e.type === 'step') { collected.push(e); setResult(liveResult(collected)); }
+        if (isCurrent() && e.type === 'step') { collected.push(e); setResult(liveResult(collected)); }
       });
+      if (!isCurrent()) return;
       setResult({ success: final.success, dryRun: false, results: collected, summary: final.summary });
       window.dispatchEvent(new Event('openwop:pinned-agents-changed'));
       await refresh();
@@ -164,16 +195,19 @@ export function ExampleDataPage(): JSX.Element {
       // Provisioning is superadmin-only — the server enforces it; surface a 403
       // as a helpful message (the AuditLogPage forbidden pattern).
       const msg = err instanceof Error ? err.message : String(err);
-      setError(/forbidden|superadmin|403/i.test(msg) ? t('provisionForbidden') : msg);
+      if (isCurrent()) setError(/forbidden|superadmin|403/i.test(msg) ? t('provisionForbidden') : msg);
     } finally {
-      setBusy(null);
+      if (isCurrent()) setBusy(null);
     }
   };
 
   const onClear = async () => {
+    const captured = hydratedGeneration;
+    if (captured === null || captured !== generation.current) return;
+    const isCurrent = (): boolean => captured === generation.current;
     const ids = [...selected];
     const label = ids.length ? ids.join(', ') : t('clearAllFallback');
-    if (!(await confirm({ title: t('clearConfirm', { label }), danger: true }))) return;
+    if (!(await confirm({ title: t('clearConfirm', { label }), danger: true })) || !isCurrent()) return;
     setBusy('clear'); setError(null); setResult(null);
     try {
       // Stream the clear so the full cascade (roster deletes, thousands of rows)
@@ -181,17 +215,18 @@ export function ExampleDataPage(): JSX.Element {
       // same path the reseed uses (ADR 0292 / ADR 0321).
       const collected: StepResult[] = [];
       const final = await clearExampleDataStream(ids.length ? { steps: ids } : {}, (e) => {
-        if (e.type === 'step') { collected.push(e); setResult(liveResult(collected)); }
+        if (isCurrent() && e.type === 'step') { collected.push(e); setResult(liveResult(collected)); }
       });
+      if (!isCurrent()) return;
       setResult({ success: final.success, dryRun: false, results: collected, summary: final.summary });
       // Clearing agents deletes roster members that may be pinned — tell the
       // sidebar to re-read so a now-dead pin drops out immediately (ADR 0023).
       window.dispatchEvent(new Event('openwop:pinned-agents-changed'));
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (isCurrent()) setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setBusy(null);
+      if (isCurrent()) setBusy(null);
     }
   };
 
@@ -245,21 +280,21 @@ export function ExampleDataPage(): JSX.Element {
           <label className="demodata-dryrun-label">
             <input type="checkbox" checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} className="u-w-auto u-flex-auto" /> {t('dryRunLabel')}
           </label>
-          <Button variant="accent-solid" disabled={busy !== null || !seedEnabled || (steps?.length ?? 0) === 0} onClick={() => void onSeed(true)}>
+          <Button variant="accent-solid" disabled={steps === null || busy !== null || !seedEnabled || (steps?.length ?? 0) === 0} onClick={() => void onSeed(true)}>
             <DatabaseIcon size={14} /> {busy === 'seed' ? t('common:loading') : t('loadAllExampleData')}
           </Button>
-          <Button variant="primary" disabled={busy !== null || !seedEnabled || selected.size === 0} onClick={() => void onSeed(false)}>
+          <Button variant="primary" disabled={steps === null || busy !== null || !seedEnabled || selected.size === 0} onClick={() => void onSeed(false)}>
             <CheckIcon size={14} /> {t('loadSelected', { n: formatNumber(selected.size) })}
           </Button>
           {superadmin ? (
-            <Button variant="primary" disabled={busy !== null || !seedEnabled} onClick={() => void onProvision()} title={t('provisionTitle')}>
+            <Button variant="primary" disabled={steps === null || busy !== null || !seedEnabled} onClick={() => void onProvision()} title={t('provisionTitle')}>
               <DatabaseIcon size={14} /> {busy === 'provision' ? t('provisioning') : t('provisionExampleData')}
             </Button>
           ) : null}
-          <Button variant="primary" disabled={busy !== null || (steps?.length ?? 0) === 0} onClick={() => void refresh()}>
+          <Button variant="primary" disabled={busy !== null} onClick={() => void refresh()}>
             <RotateCwIcon size={14} /> {t('common:refresh')}
           </Button>
-          <Button variant="secondary" disabled={busy !== null} onClick={() => void onClear()} title={t('clearTitle')}>
+          <Button variant="secondary" disabled={steps === null || busy !== null} onClick={() => void onClear()} title={t('clearTitle')}>
             <TrashIcon size={14} /> {busy === 'clear' ? t('clearing') : t('clearExampleData')}
           </Button>
         </div>

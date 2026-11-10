@@ -29,15 +29,15 @@
  * ADR 0572, not here: a build-only invariant forbids `src/` from referencing
  * it, and that guard matches the filename in ANY spelling, comments included.)
  *
- * Manifest census at generation time (814 distinct typeIds):
- *    317  side-effect
- *    301  action
- *    113  pure
- *     57  read
+ * Manifest census at generation time (760 distinct typeIds):
+ *    310  side-effect
+ *    275  action
+ *    112  pure
+ *     37  read
  *     16  streaming-output
  *     10  gate
  *
- * Floor 392 = served 324 + held 68:
+ * Floor 385 = served 317 + held 68:
  *     34  held: ai-invocation-log
  *      9  held: ai-opaque-not-logged
  *     24  held: deferred-role-semantics
@@ -380,13 +380,6 @@ export const MANIFEST_SIDE_EFFECT_FLOOR: ReadonlySet<string> = new Set([
   'feature.kb.nodes.rag',
   'feature.kb.nodes.reindex-drain',
   'feature.kb.nodes.search',
-  'feature.kicktodo.nodes.apply-revision-commands',
-  'feature.kicktodo.nodes.calendar-sync',
-  'feature.kicktodo.nodes.create-candidate',
-  'feature.kicktodo.nodes.kickbot-coach-turn',
-  'feature.kicktodo.nodes.propose-plan-change',
-  'feature.kicktodo.nodes.remind-today',
-  'feature.kicktodo.nodes.session-reminder',
   'feature.knowledge-sync.nodes.run',
   'feature.notebooks.nodes.ingest-source',
   'feature.notebooks.nodes.mcp-add-source',
@@ -728,13 +721,6 @@ export const MANIFEST_FAST_PATH_SERVED: ReadonlySet<string> = new Set([
   'feature.kb.nodes.rag',
   'feature.kb.nodes.reindex-drain',
   'feature.kb.nodes.search',
-  'feature.kicktodo.nodes.apply-revision-commands',
-  'feature.kicktodo.nodes.calendar-sync',
-  'feature.kicktodo.nodes.create-candidate',
-  'feature.kicktodo.nodes.kickbot-coach-turn',
-  'feature.kicktodo.nodes.propose-plan-change',
-  'feature.kicktodo.nodes.remind-today',
-  'feature.kicktodo.nodes.session-reminder',
   'feature.knowledge-sync.nodes.run',
   'feature.notebooks.nodes.ingest-source',
   'feature.notebooks.nodes.mcp-add-source',
@@ -1416,60 +1402,6 @@ export const MANIFEST_DECLARED_TYPE_IDS: ReadonlySet<string> = new Set([
   'feature.kb.nodes.rag',
   'feature.kb.nodes.reindex-drain',
   'feature.kb.nodes.search',
-  'feature.kicktodo.nodes.accountability-summary',
-  'feature.kicktodo.nodes.apply-missed-window',
-  'feature.kicktodo.nodes.apply-revision-commands',
-  'feature.kicktodo.nodes.calendar-sync',
-  'feature.kicktodo.nodes.catalog-for-locale',
-  'feature.kicktodo.nodes.challenge-reviews',
-  'feature.kicktodo.nodes.check-in',
-  'feature.kicktodo.nodes.checkpoint-plan',
-  'feature.kicktodo.nodes.claim-extract',
-  'feature.kicktodo.nodes.claim-verify',
-  'feature.kicktodo.nodes.coach-caseload',
-  'feature.kicktodo.nodes.create-candidate',
-  'feature.kicktodo.nodes.creator-analytics',
-  'feature.kicktodo.nodes.creator-profile',
-  'feature.kicktodo.nodes.decompose',
-  'feature.kicktodo.nodes.engagement-summary',
-  'feature.kicktodo.nodes.enrich-plan-revision',
-  'feature.kicktodo.nodes.enroll',
-  'feature.kicktodo.nodes.entitlement-check',
-  'feature.kicktodo.nodes.evaluate-progress',
-  'feature.kicktodo.nodes.evidence-graph',
-  'feature.kicktodo.nodes.freeze-evidence',
-  'feature.kicktodo.nodes.get-candidate',
-  'feature.kicktodo.nodes.get-candidate-plan',
-  'feature.kicktodo.nodes.get-enrollment',
-  'feature.kicktodo.nodes.kickbot-coach-turn',
-  'feature.kicktodo.nodes.lesson-batch-build',
-  'feature.kicktodo.nodes.lesson-batch-preview',
-  'feature.kicktodo.nodes.lesson-media',
-  'feature.kicktodo.nodes.lesson-media-persist',
-  'feature.kicktodo.nodes.lifecycle-status',
-  'feature.kicktodo.nodes.list-challenges',
-  'feature.kicktodo.nodes.list-circles',
-  'feature.kicktodo.nodes.list-consents',
-  'feature.kicktodo.nodes.materialize-today',
-  'feature.kicktodo.nodes.org-catalog',
-  'feature.kicktodo.nodes.outcome-metrics',
-  'feature.kicktodo.nodes.plan-generate',
-  'feature.kicktodo.nodes.plan-validate',
-  'feature.kicktodo.nodes.progress',
-  'feature.kicktodo.nodes.propose-plan-change',
-  'feature.kicktodo.nodes.referral-code',
-  'feature.kicktodo.nodes.remind-today',
-  'feature.kicktodo.nodes.replan-clarify',
-  'feature.kicktodo.nodes.research-frame',
-  'feature.kicktodo.nodes.seat-availability',
-  'feature.kicktodo.nodes.session-reminder',
-  'feature.kicktodo.nodes.set-schedule-preference',
-  'feature.kicktodo.nodes.sim-collect',
-  'feature.kicktodo.nodes.source-normalize',
-  'feature.kicktodo.nodes.submit-publication',
-  'feature.kicktodo.nodes.substitute',
-  'feature.kicktodo.nodes.today',
-  'feature.kicktodo.nodes.verifier-quality',
   'feature.knowledge-sync.nodes.run',
   'feature.marketplace.nodes.listings',
   'feature.marketplace.nodes.search',

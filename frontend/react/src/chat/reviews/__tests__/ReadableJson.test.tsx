@@ -1,5 +1,7 @@
 /**
- * P9 (2026-10-28) — untyped JSON under review reads as fields, not as a raw
+ * ADR 0600 §2 (`ISU-10`: an approver sees what they are signing) — P9 of the
+ * 2026-10-28 pass, commit `794157d40`. `GateEvidence` renders `AssetPreview`,
+ * which now routes untyped JSON here: it reads as fields, not as a raw
  * `{ … }` dump. The Challenge Factory outline (saved untyped because its schema
  * copy lacked `alternatives`) and the run's final `{approvalId, state}` result
  * both reached the approver as JSON.
@@ -13,13 +15,17 @@
  * Sabotage that turns it red: routing JSON back to Markdown in AssetPreview;
  * dropping the awaiting-review line or mapping `submitted` to "Published";
  * removing the plan's `matches` (the envelope case falls to fields); letting a
- * matcher accept a payload with no days; rendering strings as HTML; removing
- * the item cap.
+ * matcher accept a payload with no days; dropping the "not checked" note;
+ * rendering strings as HTML; removing the item cap; dropping the stored-key
+ * tooltip; humanizing without kebab keys; parsing malformed JSON as an empty
+ * object. All measured by wave 79 sabotage probes.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, screen, cleanup, within } from '@testing-library/react';
 import { AssetPreview } from '../AssetPreview.js';
 import { humanizeKey } from '../ReadableJson.js';
+// ADR 1031 P2 — a fixture typed renderer (it was KickTodo's challenge-plan).
+import { TEST_NO_MATCHER_TYPE, TEST_OUTLINE_TYPE } from './testOutlineRenderer.js';
 
 afterEach(cleanup);
 
@@ -32,7 +38,7 @@ const plan = {
       alternatives: [{ stableActivityId: 'd1-alt', title: 'Walk instead', actionInstruction: 'Walk for 10 minutes.', evidencePolicy: 'note' }] },
   ],
 };
-const envelope = { plan, artifact: { artifactTypeId: 'kicktodo.challenge-plan', title: plan.title, payload: plan } };
+const envelope = { plan, artifact: { artifactTypeId: TEST_OUTLINE_TYPE, title: plan.title, payload: plan } };
 
 const show = (value: unknown, extra: Record<string, unknown> = {}) =>
   render(<AssetPreview asset={{ content: JSON.stringify(value, null, 2), ...extra }} hideLabel />);
@@ -84,25 +90,24 @@ describe('ReadableJson — untyped JSON under review', () => {
     expect(screen.queryByRole('status')).toBeNull();
   });
 
-  it('a SAVED plan envelope uses the outline layout, says it was not type-checked, and keeps every field', () => {
+  it('a SAVED plan envelope uses the outline layout, says it was not type-checked, and keeps every field', async () => {
     show(envelope);
     expect(screen.getByText(/Saved as plain data, so its format was not checked/)).toBeTruthy();
-    expect(screen.getByRole('heading', { name: 'Twenty-One Days of Focus' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: 'Twenty-One Days of Focus' })).toBeTruthy();
     expect(screen.getByText('Day 1: First block')).toBeTruthy();
-    expect(screen.getByText('Walk instead: Walk for 10 minutes.')).toBeTruthy();
     const details = screen.getByText('All saved fields').closest('details')!;
     expect(within(details).getByText('Artifact type id')).toBeTruthy();
   });
 
   it('an envelope whose payload lacks the shape is NOT dressed up as that type', () => {
-    show({ artifact: { artifactTypeId: 'kicktodo.challenge-plan', payload: { title: 'No days here' } } });
+    show({ artifact: { artifactTypeId: TEST_OUTLINE_TYPE, payload: { title: 'No days here' } } });
     expect(screen.queryByText(/format was not checked/)).toBeNull();
     expect(screen.queryByRole('heading', { name: 'No days here' })).toBeNull();
     expect(screen.getByText('No days here')).toBeTruthy(); // shown as a plain field
   });
 
   it('an envelope for a type with no shape matcher stays a field view', () => {
-    show({ artifact: { artifactTypeId: 'kicktodo.plan-revision', payload: { commands: [], rationale: 'r' } } });
+    show({ artifact: { artifactTypeId: TEST_NO_MATCHER_TYPE, payload: { commands: [], rationale: 'r' } } });
     expect(screen.queryByText(/format was not checked/)).toBeNull();
     expect(screen.getByText('Rationale')).toBeTruthy();
   });

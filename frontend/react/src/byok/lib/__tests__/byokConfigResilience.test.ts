@@ -343,6 +343,12 @@ describe('ADR 0517 — setConfig is server-first', () => {
 });
 
 describe('ADR 0517 fix A/B — ref selection', () => {
+  it('adopts Keys page provider and colon-labeled refs without guessing hyphen providers', () => {
+    expect(refsForProvider(['google:team', 'google', 'google-vertex', 'googlex:team', 'byok:google-vertex:team'], 'google')).toEqual(['google:team', 'google']);
+    expect(preferredRefForProvider(['anthropic:team'], 'anthropic')).toBe('anthropic:team');
+    expect(preferredRefForProvider(['google:team', 'byok:google'], 'google')).toBe('byok:google');
+  });
+
   it('prefers the deterministic ref over historical timestamped ones', () => {
     expect(preferredRefForProvider(['byok:google:1782080112882', 'byok:google'], 'google')).toBe('byok:google');
   });

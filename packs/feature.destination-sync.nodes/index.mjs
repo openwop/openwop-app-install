@@ -65,7 +65,7 @@ export async function prepare(ctx) {
   return { status: 'success', outputs: r };
 }
 
-/** prepare-onward (ADR 0289 / RFC 0128 G4): { syncId, records } → { envelopes,
+/** prepare-onward (ADR 0289 / RFC 0128 G4): { syncId, records, peerIngestUrl } → { envelopes,
  *  onwardBody, peerIngestUrl, count, dropped, nextCursor?, connectionId? }. Mirrors
  *  `prepare` but drives the `openwop-host` egress path: the surface builds the onward
  *  OpenWOP envelopes (each carrying the re-emitted `permittedPurposes`), and the node
@@ -79,12 +79,17 @@ export async function prepareOnward(ctx) {
   const syncId = typeof i.syncId === 'string' ? i.syncId : '';
   const records = Array.isArray(i.records) ? i.records : [];
   if (!syncId) return { status: 'failed', error: { code: 'validation_error', message: 'syncId is required.' } };
-  const r = await ds.prepareOnward({ syncId, records });
+  // ADR 1024 D2.5 — the URL the downstream http node will POST to. The surface refuses
+  // unless it is the stored sync's own peerIngestUrl.
+  const peerIngestUrl = typeof i.peerIngestUrl === 'string' ? i.peerIngestUrl : '';
+  const r = await ds.prepareOnward({ syncId, records, peerIngestUrl });
   if (r && r.error) {
     const messages = {
       purpose_propagation_disabled: 'Purpose propagation is disabled — the RFC 0128 flag is off (honest-off until witnessed).',
       sync_not_found: 'destination sync not found.',
-      not_openwop_host: "destination sync is not an 'openwop-host' sync (needs destinationKind='openwop-host' + peerIngestUrl).",
+      not_openwop_host: "destination sync is not an 'openwop-host' sync.",
+      not_configured: 'this openwop-host sync has no peerIngestUrl configured.',
+      destination_mismatch: "the run's peerIngestUrl is not this sync's configured peer ingest URL; egress only goes where the sync is configured to send.",
     };
     return { status: 'failed', error: { code: r.error, message: messages[r.error] ?? 'onward preparation failed.' } };
   }

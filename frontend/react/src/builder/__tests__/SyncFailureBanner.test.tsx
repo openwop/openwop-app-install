@@ -46,6 +46,14 @@ afterEach(() => {
 beforeEach(() => vi.mocked(announce).mockClear());
 
 describe('SyncFailureBanner — screen-reader announcement (WFMU-1 + sibling)', () => {
+  it('announces editor metadata refusal through the existing failed-save banner', () => {
+    setSync('failed', undefined, 'builder_editor_metadata_conflict');
+    const { container } = render(<SyncFailureBanner />);
+    const detail = 'Existing workflow editor metadata has an incompatible format. Your local draft is retained; correct the imported metadata before saving.';
+    expect(container.querySelector('p')?.textContent).toBe(detail);
+    expect(vi.mocked(announce)).toHaveBeenCalledWith(`${TITLE} ${detail}`, { assertive: true });
+  });
+
   it('the 409 workflow_room_live WARNING announces POLITELY, with the SAME text it renders', () => {
     setSync('failed', 409, 'workflow_room_live');
     const { container } = render(<SyncFailureBanner />);

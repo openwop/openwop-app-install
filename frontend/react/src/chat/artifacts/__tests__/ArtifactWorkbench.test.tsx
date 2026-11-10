@@ -4,6 +4,8 @@
  * error. `artifactClient` is mocked so this is a pure component test.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+// ADR 1031 P2 — a fixture typed renderer (it was a product's outline type).
+import { TEST_OUTLINE_TYPE } from '../../reviews/__tests__/testOutlineRenderer.js';
 import { render, screen, cleanup, fireEvent } from '@testing-library/react';
 
 vi.mock('../artifactClient.js', () => ({
@@ -104,7 +106,7 @@ describe('ArtifactWorkbench (ART-2)', () => {
   it('a typed review artifact with no workbench renderer uses its review layout', async () => {
     const plan = { title: 'Twenty-One Days of Focus', promise: 'p', audience: 'a', outcomes: [], achievements: [],
       days: [{ day: 1, stableActivityId: 'd1', title: 'First block', actionInstruction: 'Focus.', userFacingWhy: '', achievementIds: [], evidencePolicy: 'note', claimRefs: [] }] };
-    mockGet.mockResolvedValueOnce({ ...ART, artifactTypeId: 'kicktodo.challenge-plan', kind: 'data', format: 'application/json' });
+    mockGet.mockResolvedValueOnce({ ...ART, artifactTypeId: TEST_OUTLINE_TYPE, kind: 'data', format: 'application/json' });
     mockRevs.mockResolvedValueOnce([REV]);
     mockRev.mockResolvedValueOnce({ ...REV, content: JSON.stringify(plan) });
     render(<ArtifactWorkbench artifactId="run-event:r:n" onClose={() => {}} />);

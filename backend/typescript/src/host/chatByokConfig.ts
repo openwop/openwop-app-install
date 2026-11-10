@@ -26,7 +26,8 @@
 
 import { DurableCollection } from './hostExtPersistence.js';
 import { OpenwopError } from '../types.js';
-import { listSecretRefs, resolveSecret, type SecretScope } from '../byok/secretResolver.js';
+import { listSecretRefs, type SecretScope } from '../byok/secretResolver.js';
+import { resolveUserNamedSecret } from '../byok/userNamedSecret.js';
 import { registerCredentialRefConsumer } from './credentialRefRegistry.js';
 import { createLogger } from '../observability/logger.js';
 import { managedProviderIdFromRef, managedUnderlyingProvider } from '../providers/managedProvider.js';
@@ -147,7 +148,7 @@ export async function setChatByokConfig(
     if (!refs.includes(input.credentialRef)) {
       throw new OpenwopError('validation_error', 'credentialRef is not a stored BYOK secret for this workspace.', 400, { field: 'credentialRef' });
     }
-    if (!(await resolveSecret(input.credentialRef, scope))) {
+    if (!(await resolveUserNamedSecret(input.credentialRef, scope))) {
       throw new OpenwopError('validation_error', 'credentialRef does not currently resolve to a usable key.', 400, { field: 'credentialRef' });
     }
   }
@@ -213,24 +214,23 @@ export async function isChatByokConfigUsable(scope: SecretScope, config: ChatByo
   if (config.provider === COPILOT_PROVIDER_ID) {
     return copilotSubscriptionConfigured() && (await resolveSubscriptionCredential(config.credentialRef, scope.tenantId)) !== null;
   }
-  return (await resolveSecret(config.credentialRef, scope)) !== null;
+  return (await resolveUserNamedSecret(config.credentialRef, scope)) !== null;
 }
 
 /**
  * The stored refs that belong to `provider`, newest-plausible LAST.
  *
- * This is the ADOPTION seam. Refs are minted `byok:<provider>` (deterministic, since
- * ADR 0517) but five weeks of history left `byok:<provider>:<epoch-ms>` rows behind, so
- * both shapes are matched. The boundary check is exact-or-colon-delimited so
- * `byok:google` never captures a hypothetical `byok:google-vertex`.
+ * This is the ADOPTION seam. Match deterministic/historical wizard refs
+ * (`byok:<provider>[:<suffix>]`) and Keys-page refs (`<provider>[:<label>]`).
+ * Exact-or-colon boundaries preserve Google versus google-vertex isolation;
+ * ambiguous hyphen labels remain outside automatic chat adoption.
  *
- * Sorted so a caller taking the LAST element gets the most recently minted timestamped
- * ref; the bare deterministic ref sorts first and is superseded by any timestamped one
- * only when the timestamped one is what the user actually last stored. Callers that want
- * the canonical ref should prefer an exact `byok:<provider>` match — see the SPA's
- * `preferredRefForProvider`.
+ * Sorting is retained for existing callers. The SPA prefers exact byok:<provider>
+ * before reverse lexical ordering; this helper does not change a saved binding.
+ * Names only: actual binding still checks existence/resolution in caller scope.
  */
 export function refsForProvider(refs: readonly string[], provider: string): string[] {
   const base = `byok:${provider}`;
-  return refs.filter((r) => r === base || r.startsWith(`${base}:`)).sort();
+  return refs.filter((r) => r === base || r.startsWith(`${base}:`)
+    || r === provider || r.startsWith(`${provider}:`)).sort();
 }

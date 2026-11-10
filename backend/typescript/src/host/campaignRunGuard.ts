@@ -20,7 +20,7 @@ import type { Storage } from '../storage/storage.js';
 import type { RunRecord } from '../types.js';
 import { resolveRunDefinition } from './resolveRunDefinition.js';
 import { APPROVAL_WAIT_KEY_PREFIX } from './autonomyPolicy/waiters.js';
-import { APPROVAL_GATE_TYPE_IDS } from './approvalGateTypeIds.js';
+import { isApprovalGateTypeId } from './approvalGateTypeIds.js';
 import type { InterruptRecord } from '../types.js';
 
 type Catalog = Parameters<typeof resolveRunDefinition>[1];
@@ -60,8 +60,9 @@ export async function isCampaignRun(storage: Pick<Storage, 'getRun'>, hostSuite:
 
 /**
  * Is this interrupt a GATE (an approval to give), whatever `kind` the node
- * suspended with? `kind: 'approval'`, or the node's type is a registered approval
- * gate type (`core.chat.approvalGate` and friends suspend with their own reason).
+ * suspended with? `kind: 'approval'`, or the node's type is an approval gate: a host
+ * gate type or a pack node declared `role:"gate"` (`isApprovalGateTypeId`;
+ * `core.chat.approvalGate` and friends suspend with their own reason).
  */
 export async function isApprovalGate(storage: Pick<Storage, 'getRun'>, hostSuite: { workflowCatalog: Catalog }, interrupt: Pick<InterruptRecord, 'kind' | 'runId' | 'nodeId'> & Partial<Pick<InterruptRecord, 'data'>>): Promise<boolean> {
   if (interrupt.kind === 'approval') return true;
@@ -71,5 +72,5 @@ export async function isApprovalGate(storage: Pick<Storage, 'getRun'>, hostSuite
   if (!run) return true;
   const resolved = await resolveRunDefinition(run, hostSuite.workflowCatalog).catch(() => null);
   const typeId = resolved?.definition.nodes.find((n) => n.nodeId === interrupt.nodeId)?.typeId;
-  return typeof typeId !== 'string' || APPROVAL_GATE_TYPE_IDS.has(typeId.replace(/@.*$/, ''));
+  return typeof typeId !== 'string' || isApprovalGateTypeId(typeId);
 }

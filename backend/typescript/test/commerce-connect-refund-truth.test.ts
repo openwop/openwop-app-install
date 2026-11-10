@@ -42,7 +42,7 @@ import { listExceptions, __resetExceptionSources } from '../src/host/exceptionPr
 
 /** Only this feature's sources are registered per case, so a peer feature's rows
  *  can never make an assertion here pass or fail for the wrong reason. */
-const collectExceptions = async (tenantId: string) => (await listExceptions(tenantId)).rows;
+const collectExceptions = async (tenantId: string) => (await listExceptions(tenantId, { degradedHref: '/admin/exceptions-test' })).rows;
 import { registerCommerceConnectExceptionSources, REFUND_CONFIRMATION_SLA_MS } from '../src/features/commerce-connect/exceptionSources.js';
 
 const SELLER = 'user:refund-seller';

@@ -1,24 +1,35 @@
 /**
- * Notification surface (PR #146 + follow-up).
+ * Notification surface (PR #146 + follow-up, ADR 0050, ADR 0074).
  *
  * Covers:
  *   1. Storage round-trip (insert → list → mark-read → archive → delete)
  *      against the sqlite memory backend.
- *   2. REST routes mounted under `/host/openwop-app/notifications/*` —
- *      includes the tenant-ownership regression that PR #146 missed
- *      (mutateStatus didn't check tenancy, so a leaked id could mutate
- *      another tenant's row).
+ *   2. REST routes mounted under `/host/openwop-app/notifications/*`: the
+ *      status lifecycle and the 404 for an unknown id, through the wildcard
+ *      dev token. That token skips `assertTenantOwnership`, so the
+ *      cross-tenant refusal PR #146 missed is NOT exercised here (tracker row
+ *      TST-EBS-GAP). `adr0816-notifications-security` covers the same-tenant
+ *      recipient refusal; the storage tenant filter is covered below.
  *   3. The notify helper sanitizes BYOK key shapes before persisting,
  *      defending the SR-1 redaction invariant on the notification
  *      surface (an upstream's 401 string that echoes the rejected
  *      key MUST NOT land in plaintext in the notifications table).
  *   4. `deleteAllTenantData` cascades notifications (was a gap —
  *      account-delete left orphan rows).
+ *
+ * `ensureNotificationEmitterInstalled` swaps the process-wide backend, and the helper
+ * cases point it at a store they then close, so the route block re-installs the app's.
+ *
+ * Red when (sabotage-witnessed): the list loses its tenant, role or archived filter or its
+ * order; mark-all crosses a tenant or a role; the cascade skips the table; a notify helper
+ * skips redaction; `signal()` persists or does not fan out; a route reports a read, a list
+ * or a delete that did not happen.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
+import type { Storage } from '../src/storage/storage.js';
 import { createApp } from '../src/index.js';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
 import {
@@ -33,6 +44,7 @@ import type { NotificationRecord, RunRecord } from '../src/types.js';
 
 let server: http.Server;
 let BASE: string;
+let appStorage: Storage;
 const TOKEN = 'dev-token';
 
 beforeAll(async () => {
@@ -45,6 +57,7 @@ beforeAll(async () => {
     serviceVersion: '0.0.1',
     enableConsoleTracer: false,
   });
+  appStorage = app.locals.storage;
   await new Promise<void>((res) => {
     server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
@@ -66,9 +79,6 @@ async function jsonFetch<T = unknown>(
       ...(init.headers ?? {}),
     },
   });
-  if (res.status === 204) {
-    return { status: 204, body: undefined as unknown as T };
-  }
   return { status: res.status, body: (await res.json()) as T };
 }
 
@@ -236,10 +246,12 @@ describe('storage: notification round-trip (sqlite memory)', () => {
 });
 
 describe('routes: /host/openwop-app/notifications', () => {
+  beforeEach(() => { ensureNotificationEmitterInstalled(appStorage); });
+
   it('lists notifications for the caller and returns an empty list when none exist', async () => {
     const r = await jsonFetch<ListResponse>('/host/openwop-app/notifications');
     expect(r.status).toBe(200);
-    expect(Array.isArray(r.body.notifications)).toBe(true);
+    expect(r.body.notifications).toEqual([]);
   });
 
   it('mark-read / archive / delete walk through the full status lifecycle', async () => {
@@ -268,11 +280,15 @@ describe('routes: /host/openwop-app/notifications', () => {
     );
     expect(archived.body.status).toBe('archived');
 
+    const listed = async (): Promise<string[]> => (await jsonFetch<ListResponse>('/host/openwop-app/notifications?tenantId=demo&includeArchived=true')).body.notifications.map((row) => row.notificationId);
+    expect(await listed()).toContain(n.notificationId);
+
     const del = await jsonFetch<{ deleted: boolean }>(
       `/host/openwop-app/notifications/${n.notificationId}`,
       { method: 'DELETE' },
     );
     expect(del.body.deleted).toBe(true);
+    expect(await listed()).not.toContain(n.notificationId);
   });
 
   it('mark-read returns 404 for an unknown id', async () => {
@@ -283,10 +299,9 @@ describe('routes: /host/openwop-app/notifications', () => {
     expect(r.status).toBe(404);
   });
 
-  // The Bearer-auth test harness gives wildcard `tenants: ['*']`, so a
-  // direct same-process tenant-isolation test is hard to wire here.
-  // Instead exercise the storage-layer tenant filter: a row owned by
-  // tenant A doesn't surface to a `listNotifications({ tenantId: 'B' })`.
+  // The storage-layer tenant filter only: a row owned by tenant A doesn't
+  // surface to `listNotifications({ tenantId: 'B' })`. See the header for
+  // what the wildcard dev token leaves out at the route.
   it('listNotifications filters by tenant', async () => {
     const storage = openSqliteStorage(':memory:');
     const now = new Date().toISOString();

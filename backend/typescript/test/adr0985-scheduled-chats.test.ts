@@ -6,9 +6,10 @@
  * Each refusal is paired with the accept that proves the door is not simply shut.
  *
  *   D1  the target is asked BEFORE the model is paid. A schedule whose conversation
- *       its person can no longer post to (deleted, not visible, an archived
- *       channel) started a run and paid a managed-key model call on every fire,
- *       then failed `conversation_write_refused` and stayed armed forever.
+ *       its person can no longer post to (deleted, not visible; an archived
+ *       channel is `adr0879-channels-security`'s case, same gate) started a run and
+ *       paid a managed-key model call on every fire, then failed
+ *       `conversation_write_refused` and stayed armed forever.
  *   D2  the cadence floor holds on the USE lane. "At most hourly" was checked only
  *       by the chat tool at create; the org create route took `*\/5 * * * *`, and a
  *       generic scheduler PATCH re-cadenced a tool job below the floor.
@@ -17,6 +18,13 @@
  *   D4  the list reads the job, not a copy of it: `enabled`, a missing job and the
  *       last skip come from the scheduler row.
  *   D5  pause/resume says which, and an erased creator's schedule is not resumed.
+ *   D6  schedules created from chat are listed and managed by their owner, and arming
+ *       one needs `workspace:write`.
+ *
+ * Measured sabotage (wave 77, each red): every gate input (acting user, creator,
+ * personal tenant), each refusal door, the hourly floor at 30 minutes and at 2 hours,
+ * the reserved prefix, the list's job status, both erasure checks, the owner predicate,
+ * and the durable-caller check on `mine`.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -26,7 +34,7 @@ import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 import type { StartRunDeps } from '../src/host/runStarter.js';
 import type { HostAdapterSuite } from '../src/host/index.js';
 import type { Storage } from '../src/storage/storage.js';
-import { deleteJob, eraseSubjectSchedules, getJob, registerJob, setJobEnabled, updateJob } from '../src/host/schedulingService.js';
+import { deleteJob, eraseSubjectSchedules, getJob, JobErasedError, registerJob, setJobEnabled, updateJob } from '../src/host/schedulingService.js';
 import { fireJob, processDueSchedules } from '../src/host/scheduleDaemon.js';
 import { ensureConversationMeta } from '../src/host/conversationStore.js';
 import {
@@ -34,6 +42,7 @@ import {
 } from '../src/features/scheduled-agent-chats/scheduledChatService.js';
 import { SCHEDULE_FOLLOWUP_TOOL_ID, SCHEDULE_RECURRING_TOOL_ID } from '../src/features/scheduled-agent-chats/agentTools.js';
 import { createAgentToolProvider } from '../src/host/agentToolProvider.js';
+import { COOKIE_TTL_SECONDS, signSession } from '../src/middleware/cookieSession.js';
 import { SCHEDULED_CHAT_TURN_WORKFLOW_ID } from '../src/features/scheduled-agent-chats/scheduledChatTurnWorkflow.js';
 
 let BASE: string; let server: http.Server; let storage: Storage; let deps: StartRunDeps;
@@ -48,13 +57,13 @@ beforeAll(async () => {
   storage = app.locals.storage as Storage;
   deps = { storage, hostSuite: app.locals.hostSuite as HostAdapterSuite };
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-});
+}, 120_000);
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 interface ResBody { user?: { userId: string }; chat?: { enabled?: boolean }; schedules?: Array<{ jobId: string; kind: string; prompt: string; enabled: boolean; spent?: boolean; lastSkip?: { reason: string } }>; schedule?: { enabled: boolean }; error?: string; message?: string; code?: string; details?: Record<string, unknown> }
 interface Res { status: number; body: ResBody }
-function client() {
-  let cookie = '';
+function client(initialCookie = '') {
+  let cookie = initialCookie;
   return async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
@@ -144,6 +153,8 @@ describe('D1 — the target is asked before the model is paid', () => {
     const ok = await createScheduledChat(o.tenant, { orgId: o.tenant }, o.userId, { agentId: 'iris', prompt: 'p', conversationId: mine, cronExpr: '0 9 * * *' });
     const outcome = await fireJob(deps, (await getJob(`schedchat-${ok.chatId}`))!, { trigger: 'manual', applyBudget: false });
     expect(outcome).toHaveProperty('runId');
+    // The reader the refusal cases rely on does see a fired run.
+    expect(await firedRuns(`schedchat-${ok.chatId}`)).toBe(1);
   });
 });
 
@@ -193,8 +204,8 @@ describe('D1 — the person behind the job (architect H2)', () => {
 describe('D2 — the cadence floor holds on the use lane', () => {
   it('create refuses a cadence finer than hourly; an hourly one is accepted', async () => {
     const o = await owner();
-    await expect(createScheduledChat(o.tenant, { orgId: o.tenant }, o.userId, { agentId: 'iris', prompt: 'p', conversationId: 'c', cronExpr: '*/5 * * * *' }))
-      .rejects.toMatchObject({ code: 'validation_error', details: { field: 'cronExpr', code: 'cadence_too_frequent' } });
+    await expect(createScheduledChat(o.tenant, { orgId: o.tenant }, o.userId, { agentId: 'iris', prompt: 'p', conversationId: 'c', cronExpr: '*/30 * * * *' }))
+      .rejects.toMatchObject({ code: 'validation_error', message: 'Scheduled chats can run at most once an hour — use a coarser schedule (hourly, daily, weekly).', details: { field: 'cronExpr', code: 'cadence_too_frequent' } });
     await expect(createScheduledChat(o.tenant, { orgId: o.tenant }, o.userId, { agentId: 'iris', prompt: 'p', conversationId: 'c', cronExpr: '0 * * * *' })).resolves.toHaveProperty('chatId');
   });
 
@@ -202,7 +213,7 @@ describe('D2 — the cadence floor holds on the use lane', () => {
     const o = await owner();
     const conv = await conversation(o.tenant, o.userId);
     const jobId = await toolJob(o.tenant, o.userId, conv);
-    // The generic scheduler PATCH (the owner's Schedules tab) can change a cadence.
+    // The backstop: a row that predates the floor. The scheduler route refuses this (below).
     await updateJob(jobId, { cronExpr: '* * * * *' });
     expect(await fireJob(deps, (await getJob(jobId))!, { trigger: 'manual', applyBudget: false })).toEqual({ skipped: 'cadence-too-frequent' });
     expect(await firedRuns(jobId)).toBe(0);
@@ -213,8 +224,10 @@ describe('D2 — the cadence floor holds on the use lane', () => {
     const jobId = await toolJob(o.tenant, o.userId, await conversation(o.tenant, o.userId));
     const fine = await o.c('PATCH', JOB(jobId), { cronExpr: '*/10 * * * *' });
     expect(fine.status, JSON.stringify(fine.body)).toBe(400);
+    expect(fine.body.details).toMatchObject({ code: 'cadence_too_frequent' });
     expect((await getJob(jobId))!.cronExpr).toBe('0 9 * * *');
     expect((await o.c('PATCH', JOB(jobId), { cronExpr: '0 * * * *' })).status).toBe(200);
+    expect((await getJob(jobId))!.cronExpr).toBe('0 * * * *');
   });
 });
 
@@ -227,6 +240,7 @@ describe('D3 — the generic scheduler route does not re-arm a feature-owned job
     await setScheduledChatEnabled(o.tenant, { orgId: o.tenant }, chat.chatId, false);
     const reEnable = await o.c('PATCH', JOB(jobId), { enabled: true });
     expect(reEnable.status, JSON.stringify(reEnable.body)).toBe(409);
+    expect(reEnable.body.details).toMatchObject({ managedBy: 'scheduled-chat' });
     expect((await getJob(jobId))!.enabled).toBe(false);
     const reCadence = await o.c('PATCH', JOB(jobId), { cronExpr: '0 10 * * *' });
     expect(reCadence.status).toBe(409);
@@ -234,10 +248,14 @@ describe('D3 — the generic scheduler route does not re-arm a feature-owned job
     // The 409 names its real owner (it said "standing goal" for every prefix).
     expect(reCadence.body.details).toMatchObject({ managedBy: 'scheduled-chat' });
     // "Run now" on the paused job is the feature's resume to make, not this door's.
-    expect((await o.c('POST', `${JOB(jobId)}/trigger`)).status).toBe(409);
+    const runNow = await o.c('POST', `${JOB(jobId)}/trigger`);
+    expect(runNow.status).toBe(409);
+    expect(runNow.body.details).toMatchObject({ managedBy: 'scheduled-chat' });
     // Resume through the feature: allowed.
     await setScheduledChatEnabled(o.tenant, { orgId: o.tenant }, chat.chatId, true);
+    expect((await getJob(jobId))!.enabled).toBe(true);
     expect((await o.c('PATCH', JOB(jobId), { enabled: false })).status).toBe(200);
+    expect((await getJob(jobId))!.enabled).toBe(false);
   });
 
   it('a chat tool job\'s `tool` marker cannot be rewritten through the scheduler route (review M2)', async () => {
@@ -274,6 +292,7 @@ describe('D5 — pause/resume says which; an erased creator is not resumed', () 
     await setScheduledChatEnabled(o.tenant, { orgId: o.tenant }, chat.chatId, false);
     const r = await o.c('POST', ORG(o.tenant, `/${chat.chatId}/pause`), {});
     expect(r.status, JSON.stringify(r.body)).toBe(400);
+    expect(r.body.details).toMatchObject({ field: 'enabled' });
     expect((await getJob(`schedchat-${chat.chatId}`))!.enabled).toBe(false);
     const ok = await o.c('POST', ORG(o.tenant, `/${chat.chatId}/pause`), { enabled: true });
     expect(ok.status, JSON.stringify(ok.body)).toBe(200);
@@ -285,7 +304,7 @@ describe('D5 — pause/resume says which; an erased creator is not resumed', () 
     const conv = await conversation(o.tenant, o.userId);
     const chat = await createScheduledChat(o.tenant, { orgId: o.tenant }, o.userId, { agentId: 'iris', prompt: 'p', conversationId: conv, cronExpr: '0 9 * * *' });
     await eraseScheduledChatsSubject(o.tenant, o.userId);
-    await expect(setScheduledChatEnabled(o.tenant, { orgId: o.tenant }, chat.chatId, true)).rejects.toMatchObject({ code: 'conflict' });
+    await expect(setScheduledChatEnabled(o.tenant, { orgId: o.tenant }, chat.chatId, true)).rejects.toMatchObject({ code: 'conflict', details: { code: 'creator_erased' } });
     expect((await getJob(`schedchat-${chat.chatId}`))!.enabled).toBe(false);
   });
 
@@ -297,7 +316,7 @@ describe('D5 — pause/resume says which; an erased creator is not resumed', () 
     await eraseSubjectSchedules(o.tenant, o.userId);
     expect((await getJob(jobId))!.enabled).toBe(false);
     await expect(setScheduledChatEnabled(o.tenant, { orgId: o.tenant }, chat.chatId, true)).rejects.toMatchObject({ code: 'conflict', details: { code: 'creator_erased' } });
-    await expect(setJobEnabled(jobId, true)).rejects.toThrow();
+    await expect(setJobEnabled(jobId, true)).rejects.toBeInstanceOf(JobErasedError);
     expect((await getJob(jobId))!.enabled).toBe(false);
   });
 
@@ -326,8 +345,10 @@ describe('D6 — schedules created from chat are listed and managed by their own
     expect(mine.body.schedules![0]).toMatchObject({ kind: 'recurring', prompt: 't', enabled: true });
     // Another member of the same workspace neither sees nor touches it.
     expect((await editor.c('GET', MINE())).body.schedules).toEqual([]);
-    expect((await editor.c('POST', MINE(`/${encodeURIComponent(jobId)}/pause`), { enabled: false })).status).toBe(404);
-    expect((await editor.c('DELETE', MINE(`/${encodeURIComponent(jobId)}`))).status).toBe(404);
+    for (const refused of [await editor.c('POST', MINE(`/${encodeURIComponent(jobId)}/pause`), { enabled: false }), await editor.c('DELETE', MINE(`/${encodeURIComponent(jobId)}`))]) {
+      expect(refused.status).toBe(404);
+      expect(refused.body.message).toBe('Scheduled chat not found.');
+    }
     expect((await getJob(jobId))!.enabled).toBe(true);
   });
 
@@ -353,6 +374,7 @@ describe('D6 — schedules created from chat are listed and managed by their own
     expect((await viewer.c('POST', path, { enabled: false })).status).toBe(200);
     const resume = await viewer.c('POST', path, { enabled: true });
     expect(resume.status, JSON.stringify(resume.body)).toBe(403);
+    expect(resume.body.error).toBe('forbidden_scope');
     expect((await getJob(jobId))!.enabled).toBe(false);
   });
 
@@ -387,6 +409,15 @@ describe('D6 — schedules created from chat are listed and managed by their own
     const r = await anon('GET', MINE());
     expect(r.status).toBe(200);
     expect(r.body.schedules).toEqual([]);
+    // A real anonymous session that does own a job: an anonymous caller is not durable,
+    // so the job is not theirs to list (the chat tools refuse to mint one, ADR 0985 D6).
+    const sid = `s985anon${n++}`;
+    const iat = Math.floor(Date.now() / 1000);
+    const session = client(`__session=${signSession({ sid, tenantId: `anon:${sid}`, tier: 'anon', iat, exp: iat + COOKIE_TTL_SECONDS })}`);
+    await toolJob(`anon:${sid}`, `session:${sid}`, 'conv-anon-owned');
+    const mine = await session('GET', MINE());
+    expect(mine.status, JSON.stringify(mine.body)).toBe(200);
+    expect(mine.body.schedules).toEqual([]);
   });
 });
 
@@ -431,13 +462,20 @@ describe('D6 — the org create route refuses a conversation that does not exist
     expect(absent.body.message).toMatch(/Conversation not found/);
     const ok = await o.c('POST', ORG(o.tenant), { agentId: AGENT, prompt: 'p', conversationId: await conversation(o.tenant, o.userId), cronExpr: '0 9 * * *' });
     expect(ok.status, JSON.stringify(ok.body)).toBe(201);
-    // D5 (grade-code SC2CD-7) — a resume re-asks whether the agent exists.
+  });
+
+  it('D5 (grade-code SC2CD-7): a resume re-asks whether the agent exists', async () => {
+    const o = await owner();
     const ghost = await createScheduledChat(o.tenant, { orgId: o.tenant }, o.userId, { agentId: 's985.ghost', prompt: 'p', conversationId: await conversation(o.tenant, o.userId), cronExpr: '0 9 * * *' });
     await setScheduledChatEnabled(o.tenant, { orgId: o.tenant }, ghost.chatId, false);
     const resume = await o.c('POST', ORG(o.tenant, `/${ghost.chatId}/pause`), { enabled: true });
     expect(resume.status, JSON.stringify(resume.body)).toBe(409);
     expect(resume.body.details).toMatchObject({ code: 'agent_missing' });
-    // D4 — the list names the agent by its persona.
+  });
+
+  it('D4: the list names the agent by its persona', async () => {
+    const o = await owner();
+    await createScheduledChat(o.tenant, { orgId: o.tenant }, o.userId, { agentId: AGENT, prompt: 'p', conversationId: await conversation(o.tenant, o.userId), cronExpr: '0 9 * * *' });
     expect((await listScheduledChatsWithStatus(o.tenant, { orgId: o.tenant })).find((r) => r.agentId === AGENT)!.agentName).toBe('Digest Agent');
   });
 });

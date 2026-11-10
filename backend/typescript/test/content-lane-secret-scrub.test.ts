@@ -99,7 +99,7 @@ describe('every migrated content path: kept byte for byte, or a typed refusal', 
     const titles = (await listPages(T, O)).map((pg) => pg.title);
     expect(titles).toContain(`Release ${HASH}`);
     expect(titles.filter((t) => t.startsWith('Key '))).toEqual([]);
-    const canonical = `https://kicktodo.example/blog/plans-that-adapt-without-erasing-progress-${HASH}`;
+    const canonical = `https://acme.example/blog/plans-that-adapt-without-erasing-progress-${HASH}`;
     const seo = await putSeo(T, O, page.pageId, 'u', { canonicalUrl: canonical, metaDescription: `ref ${HASH}` });
     expect(seo).toMatchObject({ canonicalUrl: canonical, metaDescription: `ref ${HASH}` });
     await refused(putSeo(T, O, page.pageId, 'u', { ogTitle: KEY }), 'ogTitle');

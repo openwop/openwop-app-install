@@ -62,7 +62,8 @@ function discoverCatalogs(locale) {
   }
   // feature: src/features/<id>/i18n/<locale>.ts  +  area: src/<area>/i18n/<locale>.ts.
   // walk() matches basenames, so collect all .ts then match the full path.
-  const featRe = new RegExp(`^features/([^/]+)/i18n/${locale}\\.ts$`);
+  // ADR 1031 — `adopter/features/<id>/i18n/` catalogs are feature catalogs too.
+  const featRe = new RegExp(`^(?:adopter/)?features/([^/]+)/i18n/${locale}\\.ts$`);
   const areaRe = new RegExp(`^([^/]+)/i18n/${locale}\\.ts$`);
   for (const file of walk(SRC, ['.ts'])) {
     const rel = relative(SRC, file).replace(/\\/g, '/');

@@ -153,7 +153,7 @@ describe('ADR 0721 — the acting subject reaches the managed meter', () => {
   });
 
   it('BEHAVIOURAL: a real call site forwards the subject it was given', async () => {
-    await llmExtractFacts('host-kicktodo', ['some conversation'], { actingSubject: 'user:alice' });
+    await llmExtractFacts('host-acme', ['some conversation'], { actingSubject: 'user:alice' });
     expect(vi.mocked(dispatchManagedChat)).toHaveBeenCalledTimes(1);
     expect(
       vi.mocked(dispatchManagedChat).mock.calls[0]![0]!.actingSubject,
@@ -164,7 +164,7 @@ describe('ADR 0721 — the acting subject reaches the managed meter', () => {
   it('BEHAVIOURAL: no subject means no field — the anonymous lane must stay byte-identical', async () => {
     // A fix that invented a placeholder subject would silently create per-caller
     // rows for the anonymous widget and a DSAR surface for a person who does not exist.
-    await llmExtractFacts('host-kicktodo', ['some conversation']);
+    await llmExtractFacts('host-acme', ['some conversation']);
     // Guarded: without this a regression that stopped dispatching at all would red with a
     // TypeError instead of the assertion message, i.e. the right colour for the wrong reason.
     expect(vi.mocked(dispatchManagedChat)).toHaveBeenCalledTimes(1);

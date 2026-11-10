@@ -14,7 +14,7 @@
  * chunk (`settleLazy`) before asserting it never mounted.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, fireEvent, within, act } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, within, act, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 import type { PaywallFunnel, Subscription, TokenBalance, AiCreditMeter } from '../billingClient.js';
@@ -89,7 +89,9 @@ describe('BillingPage — paywall funnel (superadmin)', () => {
     mFunnel.mockResolvedValue(FUNNEL);
     at();
     expect(await screen.findByRole('heading', { name: 'Paywall funnel' })).toBeTruthy();
-    expect(mFunnel).toHaveBeenCalledWith(7);
+    // The heading can commit before the panel's mount effect sends the read, so
+    // wait for the call (train 407 red under gate load; 3/3 alone).
+    await waitFor(() => expect(mFunnel).toHaveBeenCalledWith(7));
     const crm = (await screen.findByRole('rowheader', { name: 'crm' })).closest('tr')!;
     expect(within(crm).getByText('20%')).toBeTruthy();
     expect(within(crm).getByText('50%')).toBeTruthy();
@@ -105,7 +107,7 @@ describe('BillingPage — paywall funnel (superadmin)', () => {
     at();
     await screen.findByRole('heading', { name: 'Paywall funnel' });
     fireEvent.click(screen.getByRole('button', { name: '30 days' }));
-    expect(mFunnel).toHaveBeenLastCalledWith(30);
+    await waitFor(() => expect(mFunnel).toHaveBeenLastCalledWith(30));
   });
 
   it('switching to 90 days re-reads the window', async () => {
@@ -113,7 +115,7 @@ describe('BillingPage — paywall funnel (superadmin)', () => {
     at();
     await screen.findByRole('heading', { name: 'Paywall funnel' });
     fireEvent.click(screen.getByRole('button', { name: '90 days' }));
-    expect(mFunnel).toHaveBeenLastCalledWith(90);
+    await waitFor(() => expect(mFunnel).toHaveBeenLastCalledWith(90));
   });
 
   it('shows "This week vs last week": the change, "new" with nothing before, and churn by bundle', async () => {

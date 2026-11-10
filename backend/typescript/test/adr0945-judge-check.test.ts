@@ -12,6 +12,14 @@
  *    judge stops the run inside the two-calls-per-case budget.
  * Breaks if a foreign ref is accepted, the chosen model is ignored, a ciOnly
  * case reaches a real model, a wrong judge passes, or a failure keeps spending.
+ *
+ * The foreign-ref refusal is held three times (the `listSecretRefs` membership
+ * check, then two scoped `resolveSecret` reads); the asserted message pins the
+ * first. Sabotage-witnessed (w78): membership, provider list and modality
+ * checks dropped; the model untrimmed; another key dispatched; ciOnly cases
+ * sent; a different budget; the judge's own answer ignored; no stop after a
+ * failure; an invalid judge read as unavailable; a timeout misnamed; the
+ * provider's message kept.
  */
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -38,14 +46,16 @@ describe('a caller-chosen BYOK spec', () => {
     initHostExtPersistence(await openStorage('memory://'));
     sent.length = 0;
   });
-  afterAll(async () => { await clearAllSecrets(); process.env.OPENWOP_BYOK_EPHEMERAL = ''; });
+  afterAll(async () => { await clearAllSecrets(); delete process.env.OPENWOP_BYOK_EPHEMERAL; });
 
   it('refuses a ref from another tenant, an unknown provider, and a provider without image input', async () => {
     await setSecret('theirs', 'KEY-B', { tenantId: 'tnt:other' });
     await setSecret('mine', 'KEY-A', { tenantId: T });
-    await expect(resolveHeadlessAiForSpec({ tenantId: T }, { provider: 'anthropic', model: 'm', credentialRef: 'theirs' }, 'image')).rejects.toMatchObject({ httpStatus: 400 });
-    await expect(resolveHeadlessAiForSpec({ tenantId: T }, { provider: 'cohere', model: 'm', credentialRef: 'mine' }, 'image')).rejects.toMatchObject({ httpStatus: 400 });
-    await expect(resolveHeadlessAiForSpec({ tenantId: T }, { provider: 'anthropic', model: 'm', credentialRef: 'mine' }, 'audio')).rejects.toMatchObject({ httpStatus: 422 });
+    // The foreign ref meets the membership check first. Two later scoped key reads
+    // also refuse it with a 400, so only the message names the check that fired.
+    await expect(resolveHeadlessAiForSpec({ tenantId: T }, { provider: 'anthropic', model: 'm', credentialRef: 'theirs' }, 'image')).rejects.toMatchObject({ code: 'validation_error', httpStatus: 400, message: 'credentialRef is not a stored BYOK secret for this workspace.', details: { field: 'credentialRef' } });
+    await expect(resolveHeadlessAiForSpec({ tenantId: T }, { provider: 'cohere', model: 'm', credentialRef: 'mine' }, 'image')).rejects.toMatchObject({ code: 'validation_error', httpStatus: 400, message: 'provider MUST be one of: anthropic, openai, google.', details: { field: 'provider' } });
+    await expect(resolveHeadlessAiForSpec({ tenantId: T }, { provider: 'anthropic', model: 'm', credentialRef: 'mine' }, 'audio')).rejects.toMatchObject({ code: 'validation_error', httpStatus: 422, message: 'anthropic does not accept audio input here.', details: { field: 'provider' } });
     expect(sent).toEqual([]);
   });
 

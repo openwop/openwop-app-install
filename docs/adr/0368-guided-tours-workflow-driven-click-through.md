@@ -111,6 +111,38 @@ Pause/resume/reload fall out for free: an unresolved interrupt IS the paused
 state; the run is durable; the player re-attaches by `runId` (kept in
 `sessionStorage`) after a reload and continues from the open interrupt.
 
+**Correction — waiting HITL continuation ownership (2026-11-07,
+WALK-PAUSE-HITL-1):** the durable interrupt preserves the server's unresolved
+work, but an in-memory pause/resume also needs the current client step and its
+original interrupt data. The earlier WT-1 player correction called a helper
+that retained data only when already paused, immediately after entering
+`waiting-user` while not paused. A later pause therefore retained nothing;
+ordinary-mode diagnostic evidence received `starting` instead of
+`waiting-user` on resume. The Campaign Studio reference tour's brief-name
+step uses this manual HITL path and its existing "I did it" confirmation.
+
+The player retains the live waiting continuation under its run and node,
+invalidates superseded work, and clears it on successful resolution, step
+advance, teardown or run replacement. Resuming the same unresolved step preserves
+its identity so a pending resolution still clears it; a new interrupt delivery
+has a new identity and cannot be cleared by the older completion. The pause-only helper for asynchronous
+checkpoint/element work keeps its original predicate. Pausing detaches the
+automatic completion listener; an old callback cannot confirm while paused or
+after resume, and resume attaches a fresh listener. A separate perform generation
+invalidates prior listeners/async work without replacing the logical interrupt
+identity that an in-flight resolution owns. Fetch and stream callbacks
+from a replaced run cannot drive or tear down the current run. No pause/resume
+automatically confirms a step: manual confirmation and completion signals still
+use the existing interrupt resolver and its 404/410 tolerance (ADR 0378).
+
+This is host frontend state repair, with no new workflow, server authority,
+protocol field, status or capability; no new RFC is required. The existing
+expected-failure body becomes an ordinary regression, with additional current
+step/run and listener lifecycle controls. The root ordinary witness is retained
+in `corrected23-pinned-two-unwrapped-r0.log` (history `df0050815`, tree
+`407d85de52b818611a5ee8fe6c9b4d00446ac9ef`); fixed-source diagnostics, compilers,
+build and full gate remain **NOT RUN** at this source checkpoint.
+
 ### The UI action registry (chassis seam — the anti-fragility decision)
 
 Workflow payloads never contain CSS selectors. Features register **semantic

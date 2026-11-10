@@ -3,7 +3,7 @@
  *
  * Service-level tests can't observe the route's caller-resolution
  * (`req.userId ?? req.principal?.principalId`), which is exactly where the IDOR fix
- * lives. Two API keys map to two distinct `bearer:<prefix>` principals that SHARE the
+ * lives. Two API keys map to two distinct `bearer:<id>` principals that SHARE the
  * `default` tenant (api-key path sets no req.tenantId), so this exercises a real
  * within-tenant IDOR: one principal must NOT be able to read or self-add to another
  * principal's private channel, and the owner (an api-key principal, so `req.userId` is
@@ -21,6 +21,7 @@ import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import { getAgentRegistry } from '../src/executor/agentRegistry.js';
+import { envKeyPrincipalId } from '../src/middleware/envKeyPrincipal.js';
 
 const OWNER_KEY = 'ownerkey-aaaaaaaa';
 const OTHER_KEY = 'otherkey-bbbbbbbb';
@@ -94,7 +95,7 @@ describe('channel management authz (route-level, CHN-1/CHN-2)', () => {
     expect((await call('GET', `${CH}/${id}`, OTHER_KEY)).status).toBe(404);
 
     // CHN-1: a different principal cannot self-add (the IDOR), nor manage.
-    expect((await call('POST', `${CH}/${id}/members`, OTHER_KEY, { userId: 'bearer:otherkey' })).status).toBe(404);
+    expect((await call('POST', `${CH}/${id}/members`, OTHER_KEY, { userId: envKeyPrincipalId(OTHER_KEY) })).status).toBe(404);
     expect((await call('PATCH', `${CH}/${id}`, OTHER_KEY, { name: 'hijacked' })).status).toBe(404);
     // ...and neither denied write landed: the roster is still the owner alone,
     // and the name is the owner's rename.

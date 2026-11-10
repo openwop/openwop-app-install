@@ -116,6 +116,7 @@ describe('CDP W1.1 prepare-onward over the REAL surface (flag gate)', () => {
     const surface = buildDestinationSyncSurface({ tenantId: TENANT });
     const out: NodeResult = await prepareOnward(nodeCtx({
       syncId,
+      peerIngestUrl: 'https://peer.example/host/openwop-app/trigger-bridge/ingest', // ADR 1024 D2.5
       records: [
         { email: 'keep@x.com', permittedPurposes: ['marketing', 'analytics'] },
         { email: 'drop@x.com', permittedPurposes: [] }, // [] fail-closed → dropped
@@ -149,16 +150,18 @@ describe('CDP W1.1 built-in workflow registration', () => {
     expect(egress!.typeId).toBe('core.openwop.http.fetch');
 
     // Egress is the sanctioned http node (ADR 0262 #3): POST, url resolved at RUN time
-    // from the dispatch-seeded `peerIngestUrl` via the config template (not a declared
-    // param — the executor's config resolver honors `{{inputs.*}}` against the run bag).
+    // from the `peerIngestUrl` run variable via the config template (config cannot read
+    // an output port; the executor's config resolver honors `{{inputs.*}}` against the bag).
     expect(egress!.config).toMatchObject({ method: 'POST', url: '{{inputs.peerIngestUrl}}' });
 
     // body ← prepare-onward.onwardBody over the graph edge (cross-node data-flow).
     const edge = wf!.edges!.find((e) => bare(e.sourceNodeId) === 'prepare-onward' && bare(e.targetNodeId) === 'egress');
     expect(edge).toMatchObject({ sourceOutput: 'onwardBody', targetInput: 'body' });
 
-    // The authoring params that feed node inputs (peerIngestUrl rides config at runtime).
+    // The authoring params that feed node inputs. ADR 1024 D2.5: peerIngestUrl is now a
+    // declared param, bound into prepare-onward (which refuses a URL that is not the
+    // sync's own) AND read by the http node's config template from the same run variable.
     const varNames = (wf!.variables ?? []).map((v) => v.name).sort();
-    expect(varNames).toEqual(['records', 'syncId']);
+    expect(varNames).toEqual(['peerIngestUrl', 'records', 'syncId']);
   });
 });

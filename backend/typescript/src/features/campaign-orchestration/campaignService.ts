@@ -303,6 +303,12 @@ export function buildCampaignFromBrief(brief: CampaignBrief): Omit<MarketingCamp
  *  prior ignition (the REST adapter, the seeds) creates the row the same way. */
 export async function finalizeFromBrief(tenantId: string, brief: CampaignBrief, createdBy: string, opts?: { productionPlanId?: string; expectedCampaignId?: string }): Promise<MarketingCampaign> {
   if (brief.tenantId !== tenantId) throw new OpenwopError('not_found', 'Campaign not found.', 404, { reason: 'campaign_not_found' });
+  // Both REST and workflow finalization use this writer. A stored kernel can
+  // survive a brief edit for review/history, but cannot finalize new messaging
+  // until a kernel generated from the current context has been approved.
+  if (brief.kernelStale) {
+    throw new OpenwopError('conflict', 'This brief has a stale messaging kernel. Generate and approve a fresh kernel before finalizing.', 409, { reason: 'kernel_stale', briefId: brief.id });
+  }
   const payload = buildCampaignFromBrief(brief);
   const ensured = opts?.expectedCampaignId !== undefined
     ? await getCampaign(tenantId, opts.expectedCampaignId)

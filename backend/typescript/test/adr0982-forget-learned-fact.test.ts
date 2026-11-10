@@ -12,6 +12,8 @@
  *
  * Witnessed (row 57 sabotage, see the PR): dropping the route's tombstone write reds case 1;
  * tombstoning regardless of source reds case 2; letting the tombstone gate a typed add reds case 3.
+ * Also witnessed: dropping the scrub or the trailing-punctuation strip from `normalizeFactText`, and
+ * dropping the `forgotten` gate in `extractionOp`.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import express from 'express';
@@ -41,9 +43,9 @@ beforeAll(async () => {
   app.use(express.json());
   app.use((req, _res, next) => {
     const sub = req.header('x-sub') ?? 'none';
-    (req as { principal?: unknown }).principal = { principalId: `oidc:${sub}`, tenants: ['*'], token: 't' };
-    (req as { personalTenant?: string }).personalTenant = `user:${sub}-home`;
-    (req as { tenantId?: string }).tenantId = `user:${sub}-home`;
+    req.principal = { principalId: `oidc:${sub}`, tenants: ['*'], token: 't' };
+    req.personalTenant = `user:${sub}-home`;
+    req.tenantId = `user:${sub}-home`;
     next();
   });
   registerProfileMemoryRoutes({ app } as never);
@@ -75,7 +77,7 @@ describe('ADR 0982 D6 — "forget" sticks', () => {
     expect(await extractConversationMemory(await p.run(), ['I use deploy key sk-abcdefghijklmnop for staging'], facts(raw))).toMatchObject({ status: 'written', written: 1 });
     const [learned] = await listSubjectNotes(p.home, personSubject(p.userId));
     expect(learned?.content, 'precondition: the stored note was scrubbed').not.toContain('sk-abcdefghijklmnop');
-    await fetch(`${base}/${learned!.id}`, { method: 'DELETE', headers: { 'x-sub': 'fg-scrub' } });
+    expect((await fetch(`${base}/${learned!.id}`, { method: 'DELETE', headers: { 'x-sub': 'fg-scrub' } })).status).toBe(204);
     expect(await extractConversationMemory(await p.run(), ['I use deploy key sk-abcdefghijklmnop for staging'], facts(raw))).toMatchObject({ status: 'nothing-new', suppressed: 1 });
   });
 
@@ -91,7 +93,7 @@ describe('ADR 0982 D6 — "forget" sticks', () => {
     await setExtractionGrant(p.home, p.userId, true, p.userId);
     await extractConversationMemory(await p.run(), ['I keep bees'], facts('Keeps bees'));
     const [learned] = await listSubjectNotes(p.home, personSubject(p.userId));
-    await fetch(`${base}/${learned!.id}`, { method: 'DELETE', headers: { 'x-sub': 'fg-3' } });
+    expect((await fetch(`${base}/${learned!.id}`, { method: 'DELETE', headers: { 'x-sub': 'fg-3' } })).status).toBe(204);
     const add = await fetch(base, { method: 'POST', headers: { 'x-sub': 'fg-3', 'content-type': 'application/json' }, body: JSON.stringify({ content: 'Keeps bees' }) });
     expect(add.status).toBe(201);
     const notes = await listSubjectNotes(p.home, personSubject(p.userId));

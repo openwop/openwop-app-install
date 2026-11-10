@@ -71,6 +71,8 @@ A single `requireByokManage(req)` in `routes/byok.ts` gates EVERY BYOK write:
    is the single-principal demo sandbox branch, which grants OWNER on `default`
    to a non-member (USERS-19; `requireTenantScope.test.ts:88` pins the denial).
 
+> **CORRECTED 2026-11-05 (ADR 1045, TST-FUD-GC-1):** an env key's principal id is now `bearer:<16 hex of sha256(key)>`, not `bearer:<first 8 chars>`; the 8-char form made two keys sharing a prefix one principal (one budget, one audit identity, and an operator-issuer check that let a surviving key vouch for a removed one). Legacy 8-char ids in stored rows are honoured as operator issuers only when exactly one configured key has that prefix. See ADR 1045 § "Env-key principal collision".
+
 The ONLY widening against `requireTenantScope` is item 4's second spelling —
 the defect. It throws the same `403 forbidden_scope` body, so the SPA's
 `ApiError.status` mapping is unchanged.
@@ -118,6 +120,30 @@ their prefix FROM this module, so the list and the refs cannot disagree, and
 
 `auth:` (`auth:workload-identity-subject-salt`) is deliberately NOT listed: ADR
 0556 §D makes "write the ref" its tenant-admin rotation mechanism.
+
+> **CORRECTED 2026-11-03 — D2 covered the Keys and vault ROUTES, not the RUN lane.**
+> `prepareRunSecrets` (`executor.ts`) resolved every ref a workflow named
+> (`node.config.credentialRefs`, `configurable.credentialRefs`) straight into
+> `ctx.secrets`, and nothing refused an owned prefix there. A workflow author could
+> name a colleague's `connection:<id>` and read the raw credential, past
+> `connections:use` and the broker. Witnessed on unmodified main through
+> `POST /host/openwop-app/workflows` + `POST /runs`; prod had 0 definitions with
+> `credentialRefs` and 0 runs naming a `connection:` ref (measured read-only). The
+> HTTP run-start lane was already closed (the v2 `configurable` is closed; ADR 0712
+> refuses a provider-less `ai.credentialRef`); the in-process starters were not.
+>
+> Fixed on the same list, so the sites cannot drift: `refNamespaces.ts` adds a
+> `USER_NAMEABLE` `Record` over the SAME prefix keys (a new owner forces the
+> decision) and `reservedCredentialRefOwner`. Every lane that resolves a ref a USER
+> named (the run lane, chat/voice/image/widget bindings, headless AI, deferred
+> sensitive variables) goes through ONE door, `byok/userNamedSecret.ts`
+> `resolveUserNamedSecret`, which refuses with `403 credential_ref_reserved`. User-
+> nameable: `subscription:` (a run's AI credential, RFC 0121) and `managed:` (a
+> sentinel). Refused: `connection:`, `connection-inbound:`, `compat-key:` (minted and
+> used only by its endpoint row), `pm-peer:`, `email-webhook:`. A second ratchet
+> (`credential-ref-reserved-prefixes.test.ts`) classifies every `resolveSecret(`
+> caller as host-built or routes it through the door. The Keys and vault routes keep
+> `systemOwnedRefOwner` (refuse ALL owned prefixes) on the same list.
 
 Enforcement: a ratchet test enumerates every non-test `setSecret(` call site
 and fails when a FILE not in its classified map appears (each entry names the

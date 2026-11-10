@@ -9,12 +9,17 @@
  * this restores the operator's real name. The system site is the operator's
  * own marketing site and only superadmins author there, so naming an
  * allowlisted operator exposes nobody else's profile. Everyone else, and
- * every other org, keeps "no name we cannot resolve in-tenant".
+ * every other org, keeps "no name we cannot resolve in-tenant" (ADR 0593 §C9
+ * forbids a raw principal on a public surface).
  *
- * Sabotage-witnessed: with the operator lookup removed from
- * `resolveAuthorNames`, the first case goes red (no authorName); with the
- * allowlist check removed from the users feature's operator resolver, the
- * second case goes red (the non-operator is named).
+ * Sabotage-witnessed (w77): with the operator lookup removed from
+ * `resolveAuthorNames`, or with either public reader not resolving authors, the
+ * first case goes red; with the allowlist check removed from the users feature's
+ * operator resolver, the second case goes red (the non-operator is named);
+ * printing the seam's humanized fallback reds the second and third. The lookup's
+ * system-site condition has two terms (tenant and org). Org ids are unique across
+ * tenants, so neither can be isolated over HTTP; one edit removing both reds the
+ * third case.
  */
 
 import type { Server } from 'node:http';
@@ -58,7 +63,7 @@ async function login(displayName: string): Promise<LoggedIn> {
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
-    for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
+    for (const ck of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
     const out: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
     return { status: res.status, body: out as T };
   };

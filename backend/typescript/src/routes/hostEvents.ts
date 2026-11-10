@@ -18,6 +18,9 @@ import { startWorkflowRun } from '../host/runStarter.js';
 import { resolveTenantWorkflow } from '../host/resolveLaunchDefinition.js';
 import { deliverHostExtEvent } from './webhooks.js';
 import {
+  ORG_CARRYING_EVENT_TYPES,
+  eventTriggerOrgOf,
+  eventTypeCarriesOrg,
   createHostEventBinding,
   deleteHostEventBinding,
   initHostEventDispatcher,
@@ -90,6 +93,17 @@ export function registerHostEventRoutes(app: Express, deps: Deps): void {
       // ADR 0823 — "can't execute" includes "another tenant owns it": the same 422.
       const wf = await resolveTenantWorkflow(hostSuite.workflowCatalog, tenantId, workflowId);
       if (!wf) throw new OpenwopError('workflow_not_found', `Workflow not found: ${workflowId}`, 422, { workflowId });
+      // fl2-86 / #5562 — an org-bound workflow (a client's journey) starts only for an event
+      // naming its org, so binding it to an event that never names one would be a trigger
+      // that never fires. Refused here, where the operator can see why.
+      if (!eventTypeCarriesOrg(eventType) && (await eventTriggerOrgOf(tenantId, wf.definition))) {
+        throw new OpenwopError(
+          'validation_error',
+          `This workflow belongs to one client, and ${eventType} never says which client it is about, so it would never start. Bind it to an event that names the client: ${ORG_CARRYING_EVENT_TYPES.join(', ')}.`,
+          422,
+          { reason: 'journey_event_has_no_org', eventType, orgCarryingEventTypes: [...ORG_CARRYING_EVENT_TYPES] },
+        );
+      }
       if ((await listHostEventBindings(tenantId)).length >= MAX_BINDINGS_PER_TENANT) {
         throw new OpenwopError('validation_error', 'Host-event binding cap reached for this tenant.', 409, { max: MAX_BINDINGS_PER_TENANT });
       }

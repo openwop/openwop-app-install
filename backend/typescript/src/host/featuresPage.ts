@@ -31,9 +31,11 @@ const log = createLogger('host.featuresPage');
 const FEATURES_PAGE_ID = 'page:host-site-features';
 const FEATURES_SLUG = 'features';
 const SYSTEM_ACTOR = 'system';
-/** Bump when featurePages.json changes — a redeploy then refreshes the live page
- *  IF it has never been human-edited (see `doEnsure`). */
-const SEED_VERSION = 7;
+/** Bump when the seeded sections change (featurePages.json OR `buildSections`) —
+ *  a redeploy then refreshes the live page IF it has never been human-edited
+ *  (see `doEnsure`). `seed-content-version-ratchet.test.ts` reds a content
+ *  change without a bump. 8: How it works as a flow, stats count up (ADR 1038). */
+export const SEED_VERSION = 8;
 
 // ── Content model (the brand-authorable JSON shape) ─────────────────────────
 
@@ -88,7 +90,9 @@ function buildSections(): Section[] {
       data: {
         eyebrow: content.howItWorks.eyebrow,
         heading: content.howItWorks.heading,
-        layout: 'steps',
+        // ADR 1038 D8 — a process, so a flow: steps joined by a line. No states:
+        // these describe how the product works, not anyone's live progress.
+        layout: 'flow',
         columns: content.howItWorks.steps.map((s) => ({ title: s.title, text: s.text })),
       },
     });
@@ -110,14 +114,15 @@ function buildSections(): Section[] {
     sections.push({
       sectionId: 'f-stats',
       type: 'columns',
-      data: { layout: 'stats', columns: content.stats.map((s) => ({ title: s.value, text: s.label })) },
+      // ADR 1038 D3 — whole-number figures count up as they arrive.
+      data: { layout: 'stats', count: true, columns: content.stats.map((s) => ({ title: s.value, text: s.label })) },
     });
   }
   sections.push({ sectionId: 'f-cta', type: 'cta', data: { ...content.cta } });
   return sections;
 }
 
-const FEATURE_SECTIONS: Section[] = buildSections();
+export const FEATURE_SECTIONS: Section[] = buildSections();
 
 const seedMarker = new DurableCollection<{ id: 'seed'; version: number }>('features-page-seed', (m) => m.id);
 

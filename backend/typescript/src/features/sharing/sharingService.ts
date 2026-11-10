@@ -9,6 +9,7 @@
  * @see docs/adr/0013-sharing.md
  */
 
+import { designSectionMarkdown } from '../cms/designSections.js';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { createLogger } from '../../observability/logger.js';
 import { hashToken, isTokenHash, mintToken } from '../../host/capabilityToken.js';
@@ -1588,6 +1589,7 @@ function cmsSectionsToMarkdown(sections: Section[]): string {
           ...(str('eyebrow') ? [`*${str('eyebrow')}*`, ''] : []),
           ...(str('heading') ? [`# ${str('heading')}`, ''] : []),
           ...(str('subheading') ? [str('subheading')] : []),
+          ...(str('body') ? ['', str('body')] : []), // ADR 1066 D2
         ].join('\n'));
         break;
       case 'richText':
@@ -1661,6 +1663,12 @@ function cmsSectionsToMarkdown(sections: Section[]): string {
         // Media tokens have no public URL on this surface — render the words.
         if (str('caption') || str('alt')) parts.push(`*${str('caption') || str('alt')}*`);
         break;
+      case 'statusTable': case 'dateCalc': case 'conversation': case 'featureIndex': case 'decisionTree': case 'scheduleSim': {
+        // ADR 1080 — the design section types, through the same markdown projection.
+        const md = designSectionMarkdown(s.type, d, head().join('\n'));
+        if (md) parts.push(md);
+        break;
+      }
       case 'productGrid':
       case 'form':
       case 'entityList':

@@ -12,7 +12,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createLogger } from '../observability/logger.js';
 import { assertNoRetentionHold } from './retentionHold.js';
-import { EXPECTED_SUBJECT_ERASERS } from './subjectEraserManifest.js';
+import { expectedSubjectErasers } from './subjectEraserManifest.js';
 
 const log = createLogger('host.subjectErasure');
 
@@ -176,7 +176,7 @@ export function missingSubjectErasers(): string[] {
   // that makes it, rather than inferred from a green suite.
   if (syntheticRegistry) return [];
   const live = new Set(registeredSubjectEraserIds());
-  return [...EXPECTED_SUBJECT_ERASERS].filter((id) => !live.has(id)).sort();
+  return [...expectedSubjectErasers()].filter((id) => !live.has(id)).sort();
 }
 
 /** True once a test seam has emptied the registry — see `missingSubjectErasers`. */

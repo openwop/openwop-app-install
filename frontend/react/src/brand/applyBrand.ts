@@ -51,6 +51,8 @@ export interface PublicBrandIdentity {
     contrastLevel?: 'standard' | 'medium' | 'high';
     radius?: 'sm' | 'md' | 'lg';
     density?: 'compact' | 'comfortable';
+    /** ADR 1029 D6 — the public pages' motion preset. */
+    motion?: 'calm' | 'lively' | 'subtle';
     override?: { light?: Record<string, string>; dark?: Record<string, string> };
   };
   domains?: { primaryDomain?: string; homeUrl?: string; repoUrl?: string };
@@ -180,7 +182,7 @@ const SAFE_TOKEN_VALUE = /^[^;{}<>]+$/;
 /** Does this identity carry generative theme inputs (ADR 0171), vs only the legacy
  *  ADR 0170 closed-key colors / mode? */
 export function hasGenerativeTheme(theme: PublicBrandIdentity['theme']): boolean {
-  return !!(theme && (theme.accentSeed || theme.neutralSeed || theme.secondarySeed || theme.contrastLevel || theme.radius || theme.override));
+  return !!(theme && (theme.accentSeed || theme.neutralSeed || theme.secondarySeed || theme.contrastLevel || theme.radius || theme.motion || theme.override));
 }
 
 /** Map the persisted theme inputs → the generator's `ThemeInputs` (type-only import,
@@ -193,6 +195,7 @@ export function toThemeInputs(theme: PublicBrandIdentity['theme']): ThemeInputs 
     ...(theme?.contrastLevel ? { contrastLevel: theme.contrastLevel } : {}),
     ...(theme?.radius ? { radius: theme.radius } : {}),
     ...(theme?.density ? { density: theme.density } : {}),
+    ...(theme?.motion ? { motion: theme.motion } : {}),
   };
 }
 
@@ -258,6 +261,7 @@ export function hydrateBrandSingleton(identity: PublicBrandIdentity): void {
   if (identity.wordmark) brand.brandMark = identity.wordmark;
   if (identity.tagline) brand.tagline = identity.tagline;
   if (identity.footerText !== undefined) brand.footerText = identity.footerText;
+  if (identity.chromePolicy?.customCopyright !== undefined) brand.customCopyright = identity.chromePolicy.customCopyright; // ADR 1062 D5
   if (identity.instanceName) brand.instanceName = identity.instanceName;
   if (identity.assistantName) brand.assistantName = identity.assistantName;
   if (identity.logo?.markSrc) {

@@ -10,6 +10,16 @@
  * placeholder) writes no summary and no `memory.written`; a real run still does.
  *
  * P1–P3 were RED on `dfafc439b` (the round-2 baseline probes).
+ *
+ * Double guard, by design: in a person's own `user:` tenant `runPayloadAccess` answers
+ * `personal`, else `no-presence`, else `admin`, because that tenant's owner holds
+ * `host:members:manage`. Removing one arm stays green; the personal case's witness
+ * removes all three in one edit.
+ *
+ * Red when (sabotage-witnessed): the ledger admits every row; the single-row read or
+ * the delete skips `admits`; the delete scope check goes; the filter runs after the
+ * limit; the summary or the node write loses its owner stamp; `toMemoryEntry` or the
+ * single-row route serves the stamp; a fabricated run writes its summary.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -36,7 +46,7 @@ beforeAll(async () => {
   storage = app.locals.storage;
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   for (const id of ['users']) { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); }
-});
+}, 120_000);
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 interface Res<T = unknown> { status: number; body: T }
@@ -80,11 +90,13 @@ async function sharedWorkspace(): Promise<{ owner: Client; join: (role: string) 
 async function runAndSettle(c: Client, text: string, workflowId = 'openwop-app.uppercase'): Promise<string> {
   const r = await c.post<{ runId: string }>('/runs', { workflowId, inputs: { text, query: text } });
   expect(r.status, JSON.stringify(r.body)).toBeLessThan(300);
-  for (let i = 0; i < 100; i++) {
+  let settled = false;
+  for (let i = 0; i < 100 && !settled; i++) {
     const s = await c.get<{ status?: string }>(`/runs/${encodeURIComponent(r.body.runId)}`);
-    if (['completed', 'failed', 'cancelled'].includes(s.body?.status ?? '')) break;
-    await new Promise((res) => setTimeout(res, 50));
+    settled = ['completed', 'failed', 'cancelled'].includes(s.body?.status ?? '');
+    if (!settled) await new Promise((res) => setTimeout(res, 50));
   }
+  if (!settled) throw new Error(`run ${r.body.runId} never settled`);
   const raw = r.body.runId.slice(r.body.runId.lastIndexOf('/') + 1);
   wireOf.set(raw, r.body.runId);
   return raw;
@@ -103,8 +115,10 @@ describe('ADR 0979 D1 — the ledger follows the run-payload rule', () => {
     const runId = await runAndSettle(owner, 'owner private output row56');
     const ownList = await owner.get<MemList>('/host/openwop-app/memory');
     expect(ids(ownList.body), 'precondition: the run summary exists').toContain(summaryId(runId));
+    expect(ownList.body.entries.find((e) => e.id === summaryId(runId))?.content, 'precondition: the row holds the output').toContain('OWNER PRIVATE OUTPUT ROW56');
     const list = await viewer.get<MemList>('/host/openwop-app/memory');
     expect(list.status).toBe(200);
+    expect(ids(list.body)).not.toContain(summaryId(runId));
     expect(JSON.stringify(list.body)).not.toContain('OWNER PRIVATE OUTPUT ROW56');
     expect(list.body.visibility).toBe('own-runs');
     expect(list.body.canDelete).toBe(false);

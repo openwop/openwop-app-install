@@ -28,6 +28,7 @@ const CALL = /\b(appendChatMessageLive|appendChatMessage|publishChatMessageAppen
 /** file → { calls, gate }. `calls` counts every match of CALL outside `src/storage/`
  *  and outside the function definitions themselves. */
 const SANCTIONED: Record<string, { calls: number; gate: string }> = {
+  'features/channel-ingress/ingress.ts': { calls: 1, gate: 'appendChatMessageOnce writes only into the channel thread\'s own session, created by ensureThread for the paired owner at ingest in the thread\'s tenant (ADR 1042 D7/D11): the inbound text and the settled reply' },
   'features/channels/channelService.ts': { calls: 1, gate: 'postChannelMessage: canAccessChannel + requireChannelWrite + postingPolicy (ADR 0879 D1/D8)' },
   'host/agentRunnerNode.ts': { calls: 1, gate: 'authorizeRunConversationWrite with agentId (ADR 0879 D7)' },
   'host/chatSurface.ts': { calls: 2, gate: 'sendMessage: authorizeRunConversationWrite (D7); emitCard writes only the per-tenant activity session' },

@@ -2,7 +2,7 @@
  * ADR 0984 — RFC 0252: an eval task takes its fixtures from a recorded run.
  * The host is booted the way production runs (conformance nodes OFF, the
  * ADR 0898 eval-fixture opt-in ON), with the three scenario fixtures registered
- * as the suite ships them and the RFC 0252 wire switch forced on.
+ * as the suite ships them. The RFC 0252 wire switch reads the vendored schemas.
  *
  *   source-replayed  the replay's counter outcomes equal the source's, no miss,
  *                    `eval.started.fixtureRuns` echoes the map, and the live
@@ -10,9 +10,13 @@
  *   drift            the missed `inc P` fails closed: miss 1, failed, and the
  *                    probe's `read P` is unchanged;
  *   source-refused / -uniform
- *                    an unknown id, another tenant's bound id and a malformed id
- *                    get the same 400, with no id in it (a run that never
- *                    invoked the agent is the derivation unit case);
+ *                    an unknown id, a real usable run of another tenant (under its
+ *                    own segment and under the caller's) and a malformed id get
+ *                    the same 400, with no id in it (a run that never invoked the
+ *                    agent is the derivation unit case). The foreign row is held
+ *                    twice: the wire segment, then `src.tenantId`, which is what
+ *                    stops a wildcard operator. The id is held twice too: the
+ *                    refusal names none, and the error sanitiser masks hex ids;
  *   fields-refused   a key naming no task, a target task that carries its own
  *                    fixtures, `fixtureRuns` without `mode: "eval"`, an empty map;
  *   wire             the derived entries never reach a run read, and the facet
@@ -22,11 +26,11 @@
  *                    `fixtureErrors`: each unusable; delegates are excluded;
  *                    an error becomes `isError` when `fixtureErrors` is on.
  *
- * Sabotage (2026-10-26, each red, then restored): derived fixtures not applied
- * reds source-replayed (the probe sees +2); a read error escaping the uniform
- * refusal reds §C; dropping the own-fixtures check, or the non-eval refusal,
- * reds §B; accepting a success without `outcome` reds "not held"; dropping the
- * invocation check reds "never invoked".
+ * Sabotage (2026-10-26, re-measured wave 77, each red, then restored): derived
+ * fixtures not applied reds source-replayed (the probe sees +2); a read error
+ * escaping the uniform refusal reds §C; dropping the own-fixtures check, the
+ * non-eval refusal or the capability refusal reds §B; accepting a success without
+ * `outcome` reds "not held"; dropping the invocation check reds "never invoked".
  */
 import { vi } from 'vitest';
 
@@ -45,9 +49,11 @@ import { COUNTER_TOOL } from '../src/host/evals/evalCounter.js';
 import { evalSuiteCapability, resetRfc0252WireCache } from '../src/host/evals/evalCapability.js';
 import { deriveFromRun } from '../src/host/evals/recordedFixtures.js';
 import { getEventLog } from '../src/executor/eventLog.js';
+import type { Storage } from '../src/storage/storage.js';
 import type { RunRecord } from '../src/types.js';
 
 let server: Server;
+let storage: Storage;
 let base = '';
 const V2 = { Authorization: 'Bearer dev-token', 'Content-Type': 'application/json', 'OpenWOP-Version': '2' };
 
@@ -61,9 +67,10 @@ beforeAll(async () => {
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   process.env.OPENWOP_TEST_SEAM_ENABLED = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  storage = app.locals.storage as Storage;
   server = await new Promise<Server>((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-}, 60_000);
+}, 120_000);
 afterAll(async () => {
   delete process.env.OPENWOP_ENABLE_CONFORMANCE_NODES;
   delete process.env.OPENWOP_CONFORMANCE_EVAL_FIXTURES;
@@ -79,12 +86,13 @@ async function send(method: string, path: string, body?: unknown): Promise<Reply
   return { status: res.status, json, text };
 }
 async function waitTerminal(runId: string): Promise<string> {
-  for (let i = 0; i < 400; i += 1) {
-    const status = String(((await send('GET', `/runs/${runId}`)).json as { status?: string }).status ?? '');
-    if (['completed', 'failed', 'cancelled'].includes(status)) return status;
-    await new Promise((res) => setTimeout(res, 25));
-  }
-  throw new Error(`run ${runId} never settled`);
+  let status = '';
+  // A run has no settle hook to await: poll its status until terminal.
+  await vi.waitFor(async () => {
+    status = String(((await send('GET', `/runs/${runId}`)).json as { status?: string }).status ?? '');
+    expect(['completed', 'failed', 'cancelled']).toContain(status);
+  }, { timeout: 10_000, interval: 25 });
+  return status;
 }
 type Ev = { type: string; sequence: number; payload: Record<string, unknown> };
 const create = (id: string, extra: Record<string, unknown> = {}) =>
@@ -104,6 +112,21 @@ async function runFixture(id: string, extra: Record<string, unknown> = {}) {
   return { runId, counter, started, task };
 }
 const count = (o: unknown): number => (o as { count: number }).count;
+const UNUSABLE = 'A fixtureRuns source run is not usable for this eval.';
+const runOf = (status: RunRecord['status'], tenantId = 't'): RunRecord => ({
+  runId: `src-${randomUUID()}`, workflowId: 'wf-recorded', tenantId, status, inputs: {}, metadata: {}, configurable: {},
+  createdAt: '2026-10-26T00:00:00.000Z', updatedAt: '2026-10-26T00:00:00.000Z',
+});
+const put = (runId: string, type: string, payload: Record<string, unknown>) => getEventLog().append({ runId, type, payload });
+/** A real, terminal, fully recorded run in `tenantId`: usable, but for its tenant. */
+async function seedUsableSource(tenantId: string): Promise<string> {
+  const run = runOf('completed', tenantId);
+  await storage.insertRun(run);
+  await put(run.runId, 'agent.invocation.started', { invocationId: 'i', agentId: SCRIPTED_AGENT_ID });
+  await put(run.runId, 'agent.toolCalled', { agentId: SCRIPTED_AGENT_ID, toolName: 'x', callId: 'c1', inputs: { a: 1 } });
+  await put(run.runId, 'agent.toolReturned', { agentId: SCRIPTED_AGENT_ID, toolName: 'x', callId: 'c1', status: 'ok', outcome: { v: 1 } });
+  return run.runId;
+}
 /** The error code, from either envelope shape (`error: "<code>"` or `error: {code}`). */
 const codeOf = (r: Reply): unknown => (typeof r.json['error'] === 'string' ? r.json['error'] : (r.json['error'] as { code?: unknown } | undefined)?.code);
 
@@ -120,7 +143,7 @@ describe('RFC 0252 — the scenario legs, host side, in the suite order', () => 
     expect(replay.started['fixtureRuns']).toEqual({ record: source1.runId });
     expect((replay.started['vendor'] as Record<string, Record<string, unknown>> | undefined)?.['openwop-app']?.['fixtureRuns']).toBeUndefined();
     expect(replay.counter).toEqual(source1.counter);
-    expect(replay.task['fixtureMissCount'] ?? 0).toBe(0);
+    expect(replay.task['fixtureMissCount']).toBe(0);
     expect(replay.task['passed']).toBe(true);
 
     const drift = await runFixture(DRIFT, { fixtureRuns: { record: source1.runId } });
@@ -136,6 +159,10 @@ describe('RFC 0252 — the scenario legs, host side, in the suite order', () => 
   it('the derived entries never reach a run read', async () => {
     const source = await runFixture(SOURCE);
     const replay = await runFixture(REPLAY, { fixtureRuns: { record: source.runId } });
+    // They exist, in the reserved metadata, so the read below has something to leak.
+    const stored = await storage.getRun(replay.runId.split('/').pop()!);
+    const held = stored?.metadata['eval'] as { recordedFixtures?: Record<string, unknown[]> } | undefined;
+    expect(held?.recordedFixtures?.['record']).toHaveLength(3);
     const read = await send('GET', `/runs/${replay.runId}`);
     expect(read.status).toBe(200);
     expect(read.text).not.toMatch(/recordedFixtures|toolResponses/);
@@ -148,24 +175,32 @@ describe('RFC 0252 §C — one refusal for every unusable source, without the id
     const bare = source.runId.split('/').pop()!;
     const [r, unknown] = [await create(REPLAY, { fixtureRuns: { record: bare } }), await create(REPLAY, { fixtureRuns: { record: `${source.runId.split('/')[0]}/${randomUUID().replace(/-/g, '')}` } })];
     for (const x of [r, unknown]) expect(x.status, x.text.slice(0, 300)).toBe(400);
-    expect(codeOf(r)).toBe(codeOf(unknown));
-    expect(r.json['message']).toEqual(unknown.json['message']);
+    for (const x of [r, unknown]) {
+      expect(codeOf(x)).toBe('validation_error');
+      expect(x.json['message']).toBe(UNUSABLE);
+    }
     expect(r.text).not.toContain(bare);
   });
 
   it('an unknown id, another tenant\'s bound id and a malformed id answer alike (no invocation: the unit case below)', async () => {
-    const unknown = `default/${randomUUID()}`;
-    const foreign = `tenant-b/${randomUUID()}`;
-    const replies = [
-      await create(REPLAY, { fixtureRuns: { record: unknown } }),
-      await create(REPLAY, { fixtureRuns: { record: foreign } }),
-      await create(REPLAY, { fixtureRuns: { record: 'not-a-run' } }),
-    ];
-    for (const [r, id] of [[replies[0]!, unknown], [replies[1]!, foreign], [replies[2]!, 'not-a-run']] as const) {
+    const source = await runFixture(SOURCE);
+    const segment = source.runId.split('/')[0]!;
+    const callerTenant = (await storage.getRun(source.runId.split('/').pop()!))!.tenantId;
+    const foreignRun = await seedUsableSource('tenant-b');
+    // Positive control: the same recorded shape in the caller's own tenant is taken.
+    const ownRun = await create(REPLAY, { fixtureRuns: { record: `${segment}/${await seedUsableSource(callerTenant)}` } });
+    expect(ownRun.status, ownRun.text).toBe(201);
+    await waitTerminal(String(ownRun.json['runId']));
+
+    const ids = [`${segment}/${randomUUID()}`, `tenant-b/${foreignRun}`, `${segment}/${foreignRun}`, 'not-a-run'];
+    const replies: Reply[] = [];
+    for (const id of ids) replies.push(await create(REPLAY, { fixtureRuns: { record: id } }));
+    replies.forEach((r, i) => {
       expect(r.status, r.text).toBe(400);
       expect(codeOf(r)).toBe('validation_error');
-      expect(r.text).not.toContain(id.split('/').pop()!);
-    }
+      expect(r.json['message']).toBe(UNUSABLE);
+      expect(r.text).not.toContain(ids[i]!.split('/').pop()!);
+    });
     const bodies = replies.map((r) => JSON.stringify({ ...r.json, requestId: undefined }));
     expect(new Set(bodies).size).toBe(1);
   });
@@ -174,15 +209,17 @@ describe('RFC 0252 §C — one refusal for every unusable source, without the id
 describe('RFC 0252 §B — request refusals', () => {
   it('a key naming no task, a task with its own fixtures, no mode, and an empty map are each 400 validation_error', async () => {
     const source = await runFixture(SOURCE);
-    const cases = [
-      await create(REPLAY, { fixtureRuns: { nope: source.runId } }),
-      await create(SOURCE, { fixtureRuns: { record: source.runId } }),
-      await create(REPLAY, { fixtureRuns: {} }),
-      await send('POST', '/runs', { workflowId: 'anything', fixtureRuns: { record: source.runId } }),
+    // All four share a status and a code, so the message says which refusal answered.
+    const cases: Array<[Reply, string]> = [
+      [await create(REPLAY, { fixtureRuns: { nope: source.runId } }), 'A fixtureRuns key is not a task of this suite.'],
+      [await create(SOURCE, { fixtureRuns: { record: source.runId } }), 'A task named in fixtureRuns must not carry its own toolResponses or onMiss.'],
+      [await create(REPLAY, { fixtureRuns: {} }), 'fixtureRuns needs at least one task.'],
+      [await send('POST', '/runs', { workflowId: 'anything', fixtureRuns: { record: source.runId } }), 'fixtureRuns applies only to mode "eval".'],
     ];
-    for (const r of cases) {
+    for (const [r, message] of cases) {
       expect(r.status, r.text).toBe(400);
       expect(codeOf(r)).toBe('validation_error');
+      expect(r.json['message']).toBe(message);
     }
   });
 
@@ -195,7 +232,8 @@ describe('RFC 0252 §B — request refusals', () => {
       expect(evalSuiteCapability().recordedFixtures).toBeUndefined();
       const r = await create(REPLAY, { fixtureRuns: { record: 'x' } });
       expect(r.status).toBe(400);
-      expect(r.text).toMatch(/fixtureRuns/);
+      // Exact: the unusable-source refusal is also a 400 that names fixtureRuns.
+      expect(r.json['message']).toBe('This host does not advertise agents.evalSuite.recordedFixtures.');
     } finally {
       resetRfc0252WireCache();
     }
@@ -203,10 +241,8 @@ describe('RFC 0252 §B — request refusals', () => {
 });
 
 describe('RFC 0252 §C/§D — derivation (unit)', () => {
-  const runOf = (status: string): RunRecord => ({ runId: `src-${randomUUID()}`, tenantId: 't', status } as RunRecord);
-  const put = (runId: string, type: string, payload: Record<string, unknown>) => getEventLog().append({ runId, type, payload });
   const A = SCRIPTED_AGENT_ID;
-  async function recorded(status = 'completed') {
+  async function recorded(status: RunRecord['status'] = 'completed') {
     const run = runOf(status);
     await put(run.runId, 'agent.invocation.started', { invocationId: 'i', agentId: A });
     await put(run.runId, 'agent.toolCalled', { agentId: A, toolName: 'x', callId: 'c1', inputs: { a: 1 } });
@@ -217,7 +253,12 @@ describe('RFC 0252 §C/§D — derivation (unit)', () => {
 
   it('derives exact entries in sequence order, excluding delegates', async () => {
     const run = await recorded();
-    expect(await deriveFromRun(run, A, { allowErrors: false })).toEqual([{ tool: 'x', args: { a: 1 }, argsMatch: 'exact', response: { v: 1 } }]);
+    await put(run.runId, 'agent.toolCalled', { agentId: A, toolName: 'x2', callId: 'c1b', inputs: { a: 2 } });
+    await put(run.runId, 'agent.toolReturned', { agentId: A, toolName: 'x2', callId: 'c1b', status: 'ok', outcome: { v: 2 } });
+    expect(await deriveFromRun(run, A, { allowErrors: false })).toEqual([
+      { tool: 'x', args: { a: 1 }, argsMatch: 'exact', response: { v: 1 } },
+      { tool: 'x2', args: { a: 2 }, argsMatch: 'exact', response: { v: 2 } },
+    ]);
   });
 
   it('a run that is not terminal, or never invoked the agent, is unusable', async () => {

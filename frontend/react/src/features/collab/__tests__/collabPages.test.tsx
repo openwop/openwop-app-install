@@ -8,12 +8,28 @@
  *   - ADR 0958 P3: a campaign grant with `upload` shows "Send files"; sending
  *     needs files, the release answer and the attestation, posts the rights, and
  *     lists the outcome with the agency's reason; a view-only grant has no form.
+ *
+ * Sabotage-witnessed (w77): mapping a failed read to an empty list reds "a failed
+ * read"; answering every grant failure as gone, or none of them, reds "a granted
+ * item"; dropping the accept-time 404 reds the dead-invite case; removing the upload
+ * action or campaign check reds the view-only case; removing any one send check, or
+ * the release answer, reds the form case.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 
-const h = vi.hoisted(() => ({ listShared: vi.fn(), getGrant: vi.fn(), acceptInvite: vi.fn(), readInvite: vi.fn(), listIntakes: vi.fn(), sendIntake: vi.fn(), withdrawIntake: vi.fn() }));
+import type * as C from '../collabClient.js';
+
+const h = vi.hoisted(() => ({
+  listShared: vi.fn<typeof C.listShared>(),
+  getGrant: vi.fn<typeof C.getGrant>(),
+  acceptInvite: vi.fn<typeof C.acceptInvite>(),
+  readInvite: vi.fn<typeof C.readInvite>(),
+  listIntakes: vi.fn<typeof C.listIntakes>(),
+  sendIntake: vi.fn<typeof C.sendIntake>(),
+  withdrawIntake: vi.fn<typeof C.withdrawIntake>(),
+}));
 vi.mock('../collabClient.js', async (orig) => ({ ...(await orig<Record<string, unknown>>()), ...h }));
 
 import { CollabAcceptPage, CollabGrantPage, CollabHomePage } from '../CollabPages.js';
@@ -36,10 +52,11 @@ afterEach(cleanup);
 
 describe('Shared with me', () => {
   it('lists grants with the client and a link to each', async () => {
-    h.listShared.mockResolvedValue([{ grantId: 'cgr_1', resourceKind: 'creative-brief', title: 'Hero bottle shot', clientName: 'Northwind', actions: ['view'], expiresAt: '2026-11-19T00:00:00Z' }]);
+    h.listShared.mockResolvedValue([{ grantId: 'cgr_1', resourceKind: 'creative-brief', title: 'Hero bottle shot', clientName: 'Northwind', actions: ['view'], expiresAt: '2026-11-19T12:00:00Z' }]);
     at('/collab');
     expect(await screen.findByText('Hero bottle shot')).toBeTruthy();
     expect(screen.getByText('For Northwind')).toBeTruthy();
+    expect(screen.getByText('Access until Nov 19, 2026')).toBeTruthy(); // midday, so no local zone moves the day
     expect(screen.getByRole('link', { name: /Hero bottle shot/ }).getAttribute('href')).toBe('/collab/cgr_1');
   });
 
@@ -63,6 +80,12 @@ describe('a granted item', () => {
     h.getGrant.mockRejectedValueOnce(new CollabError('Not found.', 404));
     at('/collab/cgr_3');
     expect(await screen.findByText('You no longer have access')).toBeTruthy();
+    cleanup();
+    // A failed read is not lost access.
+    h.getGrant.mockRejectedValueOnce(new CollabError('boom', 500));
+    at('/collab/cgr_4');
+    expect(await screen.findByText('Couldn’t load this')).toBeTruthy();
+    expect(screen.queryByText('You no longer have access')).toBeNull();
   });
 });
 
@@ -88,6 +111,13 @@ describe('accepting an invite', () => {
     h.readInvite.mockRejectedValueOnce(Object.assign(new Error('gone'), { kind: 'gone' }));
     at('/collab/accept/dead');
     expect(await screen.findByText('This invitation is no longer valid')).toBeTruthy();
+    cleanup();
+    // Dead by the time it is accepted, too.
+    h.readInvite.mockResolvedValue({ collaboratorKind: 'vendor', displayName: 'Pixel' });
+    h.acceptInvite.mockRejectedValueOnce(new CollabError('Not found.', 404));
+    at('/collab/accept/used');
+    fireEvent.click(await screen.findByRole('button', { name: 'Accept invitation' }));
+    expect(await screen.findByText('This invitation is no longer valid')).toBeTruthy();
   });
 });
 
@@ -98,6 +128,13 @@ describe('sending files (ADR 0958 P3)', () => {
     h.getGrant.mockResolvedValueOnce(grant(['view']));
     at('/collab/cgr_u');
     expect(await screen.findByText('Sell')).toBeTruthy();
+    expect(screen.queryByText('Send files')).toBeNull();
+    expect(h.listIntakes).not.toHaveBeenCalled();
+    cleanup();
+    // Upload applies to a campaign: a brief grant carrying the action has no form.
+    h.getGrant.mockResolvedValueOnce({ ...grant(['view', 'upload']), grant: { ...grant(['view', 'upload']).grant, resourceKind: 'creative-brief' }, resource: { kind: 'creative_brief', markdown: 'The brief body' } });
+    at('/collab/cgr_u');
+    expect(await screen.findByText('The brief body')).toBeTruthy();
     expect(screen.queryByText('Send files')).toBeNull();
     expect(h.listIntakes).not.toHaveBeenCalled();
   });
@@ -119,13 +156,13 @@ describe('sending files (ADR 0958 P3)', () => {
     expect(await screen.findByText('Confirm that you have the right to supply these files.')).toBeTruthy();
     expect(h.sendIntake).not.toHaveBeenCalled();
     fireEvent.click(screen.getByLabelText(/I have the right to supply/));
-    h.sendIntake.mockResolvedValueOnce({ intakeId: 'i2' });
+    h.sendIntake.mockResolvedValueOnce({ intakeId: 'i2', status: 'submitted', submittedAt: '2026-10-21T00:00:00Z', files: [], rights: { license: 'work-for-hire', modelReleases: true } });
     h.listIntakes.mockResolvedValueOnce([]);
     fireEvent.click(send);
     await waitFor(() => expect(h.sendIntake).toHaveBeenCalledTimes(1));
     const [gid, files, rights] = h.sendIntake.mock.calls[0]!;
     expect(gid).toBe('cgr_u');
-    expect((files as File[]).map((f) => f.name)).toEqual(['hero.png']);
+    expect(files.map((f) => f.name)).toEqual(['hero.png']);
     expect(rights).toEqual({ license: 'work-for-hire', modelReleases: true, attest: true });
     expect(await screen.findByText('Sent. The agency will review the files.')).toBeTruthy();
   });

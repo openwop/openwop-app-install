@@ -56,6 +56,25 @@ CreativeBrief {
    rather than wiring it — one owner, our signing pipeline, no orphaned vendor namespace. Recorded
    as a correction: the pilot pack was a migration experiment, not a foundation.
 
+## Correction (2026-11-06) — one title in creative PDF exports (CB-PDF-1)
+
+The shared document PDF renderer intentionally uses its `title` option for both
+PDF metadata and a visible heading. The creative projection also emitted its
+own H1, so the authenticated PDF printed the same title twice consecutively.
+The creative producer now omits only its Markdown H1 through an optional
+`includeTitle: false`; the projection defaults to including it, preserving
+self-contained shared Markdown. The renderer still receives the real title,
+and all internal body content, mood-board notes and metadata remain governed
+by the existing audience policy. The generic renderer and other document
+exports remain unchanged. This is feature-local formatting on an existing host
+export seam; there is no new wire field, API, capability or RFC requirement.
+
+The actual HTTP export regression parses PDF text and metadata through the
+existing patched PDF.js seam and checks one visible title, metadata Title and
+representative authored/internal content. The public sharing regression keeps
+its H1 and internal-note exclusions. Full release qualification remains the
+canonical gate and deployed acceptance process.
+
 ## Phases
 
 | Phase | Ships | Gaps |

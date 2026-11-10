@@ -8,7 +8,8 @@
 import { isListedSuperadmin } from '../../host/superadmin.js';
 import type { Request, Response } from 'express';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
-import { requireFeatureEnabled, tenantOf, requireString, publicBaseUrl, requireTenantScope } from '../featureRoute.js';
+import { requireFeatureEnabled, tenantOf, toggleSubjectOf, requireString, publicBaseUrl, requireTenantScope } from '../featureRoute.js';
+import { resolveToggle } from '../../host/featureToggles/service.js';
 import { isAnonTenantId, callerSubject } from '../../host/requestSubject.js';
 import { describeAiCreditMeter } from './aiCreditMeter.js';
 import { requireSuperadmin } from '../../host/superadmin.js';
@@ -152,6 +153,16 @@ export function registerBillingRoutes(deps: RouteDeps): void {
 
   app.get(`${BASE}/entitlements`, async (req, res, next) => {
     try {
+      // Billing OFF is an ANSWER here, not an absent surface: every feature is
+      // unrestricted (`resolveEntitlements(…, false)`). The SPA reads this on every
+      // signed-in load, so a 404 put a red console line on each page view of a
+      // host that simply does not sell plans. Every other billing route keeps the
+      // toggle's 404 (that surface really does not exist for the caller).
+      const toggle = await resolveToggle('billing', toggleSubjectOf(req));
+      if (!toggle?.enabled) {
+        res.json(await resolveEntitlements(tenantOf(req), false));
+        return;
+      }
       const assignment = await requireFeatureEnabled(req, 'billing', 'Billing');
       const ent = await resolveEntitlements(tenantOf(req), assignment.enabled);
       // What the SPA locks is this list, so it must agree with the route gate:

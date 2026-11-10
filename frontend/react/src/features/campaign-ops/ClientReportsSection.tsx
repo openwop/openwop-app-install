@@ -43,7 +43,7 @@ function noteText(note: string, computedAt: string, t: TFn): string {
   return known.includes(kind) ? t(`reportsNote_${kind.replace(/-/g, '_')}`, { value }) : note;
 }
 
-const METRIC_NAMES = new Set(['spend', 'revenue', 'impressions', 'clicks', 'conversions', 'ctr', 'cvr', 'cpc', 'cpa', 'roas', 'unattributedConversions', 'uniqueClicks', 'opens', 'uniqueOpens', 'unsubscribes', 'unsubscribesUnenforced']);
+const METRIC_NAMES = new Set(['spend', 'revenue', 'reportedRevenueRecordCount', 'impressions', 'clicks', 'conversions', 'ctr', 'cvr', 'cpc', 'cpa', 'roas', 'unattributedConversions', 'uniqueClicks', 'opens', 'uniqueOpens', 'unsubscribes', 'unsubscribesUnenforced']);
 const SOURCE_KEYS: Record<string, string> = {
   'campaign-connectors.kpiSummary': 'reportsSource_kpi', 'campaign-intel.buildAttribution': 'reportsSource_attribution', 'email.engagementStats': 'reportsSource_email',
 };

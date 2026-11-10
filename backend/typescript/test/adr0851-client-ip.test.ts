@@ -13,7 +13,7 @@
  * returns the leftmost entry (unit cases AND the #4516 burst), when an untrusted socket
  * peer is treated as a proxy, when K_SERVICE is ignored, when a Google front-end range
  * is dropped or a GCP customer range is added, when the `private` defaults knob is
- * ignored, when `ip:port` is not normalised, or when another module reads `req.ip`.
+ * ignored, when a forged custom-domain LB entry is skipped past the real caller, when `ip:port` is not normalised, or when another module reads `req.ip`.
  */
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import express, { type Request } from 'express';
@@ -36,7 +36,7 @@ function fakeReq(xff: string | undefined, peer = '127.0.0.1'): Request {
   return req;
 }
 
-const ENV_KEYS = ['K_SERVICE', 'OPENWOP_TRUSTED_PROXY_CIDRS', 'OPENWOP_TRUSTED_PROXY_DEFAULTS'] as const;
+const ENV_KEYS = ['K_SERVICE', 'OPENWOP_TRUSTED_PROXY_CIDRS', 'OPENWOP_TRUSTED_PROXY_DEFAULTS', 'OPENWOP_CUSTOM_DOMAIN_LB_IP'] as const;
 const saved: Record<string, string | undefined> = {};
 beforeEach(() => { for (const k of ENV_KEYS) { saved[k] = process.env[k]; delete process.env[k]; } });
 afterEach(() => { for (const k of ENV_KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; } });
@@ -101,6 +101,19 @@ describe('ADR 0851 — clientIp', () => {
     expect(overlaps).toEqual([]);
     // And through the real predicate, one address from every cloud.json prefix.
     expect(cloud.prefixes.filter((c) => isTrustedProxy(c.split('/')[0]!))).toEqual([]);
+  });
+
+  it('a forged custom-domain LB address cannot pick the client on the other doors (ADR 1015 pilot)', () => {
+    // Trusting the LB (ADR 0906) skips it only when it sits right of every unread
+    // hop. On the direct and Firebase doors the platform appends the real caller
+    // after whatever the caller wrote, so the walk stops there first.
+    const LB = '34.149.148.86';
+    process.env.OPENWOP_CUSTOM_DOMAIN_LB_IP = LB;
+    process.env.K_SERVICE = 'openwop-app-backend';
+    expect(clientIp(fakeReq(`6.6.6.6, ${LB}, ${CLIENT}`, '169.254.1.1'))).toBe(CLIENT);
+    expect(clientIp(fakeReq(`${LB}, ${CLIENT}`, '169.254.1.1'))).toBe(CLIENT);
+    expect(clientIp(fakeReq(`6.6.6.6, ${LB}, ${LB}, ${CLIENT}`, '169.254.1.1'))).toBe(CLIENT);
+    expect(clientIp(fakeReq(`6.6.6.6, ${LB}, ${CLIENT}, ${HOSTING_EGRESS}`, '169.254.1.1'))).toBe(CLIENT);
   });
 
   it('every hop trusted → the farthest one (a Google crawler on the direct door)', () => {

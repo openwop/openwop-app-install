@@ -91,6 +91,43 @@ async function ownerWithOrg() {
 }
 
 describe('creative-briefs lifecycle', () => {
+  it('PDF export prints the title once while keeping metadata and complete internal content (CB-PDF-1)', async () => {
+    const { c, orgId } = await ownerWithOrg();
+    const title = 'Distinctive creative export heading';
+    const created = await c.post(CB(orgId, '/briefs'), {
+      title, sceneDescription: 'Private scene specification.', composition: 'A focused composition.',
+      directions: [{ label: 'Small next step', rationale: 'Keep the action achievable.' }],
+    });
+    expect(created.status).toBe(201);
+    const id = created.body.briefId;
+    const gap = await c.post(CB(orgId, `/briefs/${id}/moodboard`), { product: 'Unavailable QA product' });
+    expect(gap.body.needsAssetNote).toBeTruthy();
+    if (typeof gap.body.needsAssetNote !== 'string') throw new Error('Expected actual internal asset note');
+    const pdf = await c.post(CB(orgId, `/briefs/${id}/pdf`), {});
+    expect(pdf.status).toBe(200);
+    if (!pdf.pdf) throw new Error('Expected actual PDF response bytes');
+    const { loadUnpdf } = await import('../src/features/kb/kbService.js');
+    const { getResolvedPDFJS } = await loadUnpdf();
+    const { getDocument } = await getResolvedPDFJS();
+    const task = getDocument({ data: new Uint8Array(pdf.pdf), isEvalSupported: false, useSystemFonts: true });
+    const document = await task.promise;
+    try {
+      const pages: string[] = [];
+      for (let n = 1; n <= document.numPages; n++) {
+        const page = await document.getPage(n);
+        const content = await page.getTextContent();
+        pages.push(content.items.map((item) => 'str' in item ? item.str : '').join(' '));
+      }
+      const text = pages.join(' ').replace(/\s+/g, ' ');
+      const metadata = await document.getMetadata();
+      expect(metadata.info).toMatchObject({ Title: title });
+      for (const value of ['Private scene specification.', 'A focused composition.', 'Small next step', 'Keep the action achievable.', `Version: ${gap.body.version}`, gap.body.needsAssetNote]) {
+        expect(text).toContain(value);
+      }
+      expect(text.split(title).length - 1, 'one visible heading; metadata is checked separately').toBe(1);
+    } finally { await task.destroy(); }
+  });
+
   it('creates, edits (version bump + approved-demotion), transitions, diffs, exports PDF', async () => {
     const { c, orgId } = await ownerWithOrg();
     const created = await c.post(CB(orgId, '/briefs'), {
@@ -270,6 +307,7 @@ describe('creative-briefs lifecycle', () => {
     const shared = await c.get(`/host/openwop-app/shared/${mint.body.token}`);
     expect(shared.status).toBe(200);
     const md = shared.body.resource.markdown;
+    expect(md.startsWith('# Public brief\n')).toBe(true); // shared projection keeps its own title
     expect(md).toContain('Warehouse hero.png'); // resolvable asset renders by NAME
     expect(md).not.toContain('masset:'); // raw/dead asset ids never print
     expect(md).not.toContain('plan a shoot'); // internal needsAssetNote omitted

@@ -61,12 +61,19 @@ export function registerWebinarFormsSink(): void {
         const contact = pickContact((submission.values ?? {}) as Record<string, unknown>);
         if (!contact) return undefined;
 
-        // Record the LOCAL registration (contact + activity) — always.
-        await ingestWebinarEvent(form.tenantId, binding.orgId, event.connectionId, {
+        // Record the LOCAL registration (contact + activity) FIRST. ADR 1054 D3 (grade-code
+        // #7): a registration this workspace did not record (an ERASED person, no usable
+        // email, a storage error) is never sent to Zoom or queued — the same gate as the
+        // workflow surface.
+        const recorded = await ingestWebinarEvent(form.tenantId, binding.orgId, event.connectionId, {
           provider: event.provider, providerEventId: event.providerEventId, phase: 'registered',
           participantEmail: contact.email, ...(contact.name ? { participantName: contact.name } : {}),
           ...(event.title ? { title: event.title } : {}),
         });
+        if (recorded !== 'recorded' && recorded !== 'duplicate') {
+          log.info('webinar sink — registration not recorded, not pushed', { formId: form.formId, outcome: recorded });
+          return undefined;
+        }
 
         // Best-effort provider push (no-ops without a resolvable credential — see header).
         // R2 WB-SP-2 — a skipped/failed push is QUEUED, not just logged: the sink
@@ -76,7 +83,7 @@ export function registerWebinarFormsSink(): void {
         try {
           const deps = { storage: hostExtStorage(), tenantId: form.tenantId, runId: `hostext:webinar-sink:${form.formId}`, orgId: binding.orgId };
           const [first, ...rest] = (contact.name ?? '').split(' ');
-          const push = await makeWebinarAdapter(deps).registerRegistrant(event.providerEventId, { email: contact.email, ...(first ? { firstName: first } : {}), ...(rest.length ? { lastName: rest.join(' ') } : {}) });
+          const push = await makeWebinarAdapter(deps, event.connectionId).registerRegistrant(event.providerEventId, { email: contact.email, ...(first ? { firstName: first } : {}), ...(rest.length ? { lastName: rest.join(' ') } : {}) });
           if (!push.ok) {
             log.info('webinar registrant push skipped — queued for operator dispatch', { formId: form.formId, reason: push.error });
             await enqueuePendingPush({ tenantId: form.tenantId, orgId: binding.orgId, eventId: binding.eventId, providerEventId: event.providerEventId, email: contact.email, ...(contact.name ? { name: contact.name } : {}) });

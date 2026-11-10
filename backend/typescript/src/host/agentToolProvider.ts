@@ -25,6 +25,8 @@ import type { AgentToolDef, ExecuteAgentTool, ResolveAgentTool } from './agentDi
 import { getNodeRegistry } from '../executor/nodeRegistry.js';
 import { featureAccessRefusal } from './workflowFeatureGate.js';
 import { toolError, untrustedToolError } from './agentToolKit.js';
+import { featureHostContributionsRecorded, featureProjectedComputeNodes, reserveHostValues } from './featureContributions.js';
+import { nodeRoleMap } from './nodeCatalogBuilder.js';
 import type { NodeContext } from '../executor/types.js';
 import { createSandboxRunner } from './sandboxAdapter.js';
 import { getAgentProfile } from './agentProfileService.js';
@@ -149,6 +151,14 @@ export interface BuiltinTool {
  * the meta-workflows instead; projecting them here would fork the egress path (ADR 0001).
  * An explicit allowlist (not a heuristic) — the bigquery node doesn't declare its connector
  * requirement, so a "no requires" heuristic would wrongly project it.
+ *
+ * ADR 1031 round 3 — this list holds the HOST's projections. A feature, first-party
+ * or an adopter's, projects its own pure nodes by declaration
+ * (`hostContributions.projectableComputeNodes`). They are materialized once, at
+ * composition, by `registerDeclaredComputeProjections`. A declaration is add-only:
+ *  - a typeId here, or any tool name already registered, is a boot error;
+ *  - a declared tool is gated on the DECLARING feature's toggle and plan;
+ *  - it refuses at call time unless its manifest says `role:"pure"`.
  */
 export const PROJECTABLE_COMPUTE_NODE_TYPE_IDS: readonly string[] = [
   'feature.insights-suite.nodes.variance-compute',
@@ -164,6 +174,7 @@ export const PROJECTABLE_COMPUTE_NODE_TYPE_IDS: readonly string[] = [
   'feature.crm.nodes.segment-vocabulary',
   'feature.crm.nodes.validate-segment',
 ];
+reserveHostValues('projected compute node', PROJECTABLE_COMPUTE_NODE_TYPE_IDS);
 
 /**
  * ADR 0604 (TOCC-2) — the projected compute nodes whose OUTPUT is a closed
@@ -193,12 +204,17 @@ export function computeNodeOwningFeature(typeId: string): string | null {
   return m ? m[1]! : null;
 }
 
-function computeNodeTool(typeId: string, effect: BuiltinTool['effect']): BuiltinTool {
+/** A FEATURE-declared projection (ADR 1031 round 3): its owner is the declaring
+ *  feature, and its manifest role is re-checked on every call. */
+interface DeclaredProjection { featureId: string; schemaCarrying: boolean }
+
+function computeNodeTool(typeId: string, effect: BuiltinTool['effect'], declared?: DeclaredProjection): BuiltinTool {
+  const schemaCarrying = declared ? declared.schemaCarrying : SCHEMA_CARRYING_PROJECTED_TYPE_IDS.has(typeId);
   return {
     // RFC 0137 §F1 — a compute node returns whatever its inputs produced; the caller supplies them
     contentTrust: 'untrusted',
     effect,
-    ...(SCHEMA_CARRYING_PROJECTED_TYPE_IDS.has(typeId) ? { schemaCarrying: true as const } : {}),
+    ...(schemaCarrying ? { schemaCarrying: true as const } : {}),
     def: {
       name: `openwop:${typeId}`,
       description: `Run the ${typeId} compute node — pure, deterministic, no external calls. Pass the node's inputs as the tool arguments.`,
@@ -210,7 +226,17 @@ function computeNodeTool(typeId: string, effect: BuiltinTool['effect']): Builtin
       // ADR 0820 §7 / G7 — a projected FEATURE node is that feature's product:
       // toggle + plan, the typed refusals every feature tool uses. A feature with
       // no toggle (always-on) resolves null ⇒ served. Fail-closed on a read error.
-      const featureId = computeNodeOwningFeature(typeId);
+      // ADR 1031 round 3 — a declared projection runs only while its manifest says
+      // it is pure. The host's own list is pinned by agent-allowlist-resolution.test.ts.
+      // A feature declaration has no such pin, so it is checked here, first
+      // and failing closed, before any toggle read.
+      if (declared) {
+        let role: string | undefined;
+        try { role = nodeRoleMap().get(typeId); } catch { role = undefined; }
+        if (role !== 'pure') return toolError('node_not_projectable', 'This node is not declared as a pure compute node, so it cannot run as a tool.');
+      }
+      // ADR 1031 round 3 — a declared projection belongs to the feature that declared it.
+      const featureId = declared ? declared.featureId : computeNodeOwningFeature(typeId);
       if (featureId) {
         const refusal = await featureAccessRefusal(featureId, scope.tenantId, scope.actingUserId ? { userId: scope.actingUserId } : {});
         if (refusal === 'plan') return toolError('not_entitled', `${featureId} is not included in this workspace's plan.`);
@@ -697,6 +723,31 @@ export function declaredSafeModeApprovals(): Map<string, string | undefined> {
 
 export function registerFeatureAgentTool(tool: BuiltinTool): void {
   (BUILTINS as Map<string, BuiltinTool>).set(tool.def.name, tool);
+}
+
+let declaredProjectionsRegistered = false;
+
+/**
+ * ADR 1031 round 3 — materialize every composed feature's
+ * `hostContributions.projectableComputeNodes` as a live agent tool. It is called
+ * once, by the registry, right after `recordFeatureHostContributions`, and that
+ * call is what freezes the set. It is add-only: a typeId whose tool name is
+ * already registered is a boot error, whether a host projection, a builtin or a
+ * feature tool registered it. It never replaces a tool. Returns the tool names it
+ * added.
+ */
+export function registerDeclaredComputeProjections(): string[] {
+  if (declaredProjectionsRegistered) throw new Error('declared compute projections were registered twice (ADR 1031 round 3)');
+  if (!featureHostContributionsRecorded()) throw new Error('declared compute projections need the recorded feature contributions first (ADR 1031 round 3)');
+  declaredProjectionsRegistered = true;
+  const added: string[] = [];
+  for (const { typeId, featureId, schemaCarrying } of featureProjectedComputeNodes()) {
+    const tool = computeNodeTool(typeId, 'read', { featureId, schemaCarrying });
+    if (BUILTINS.has(tool.def.name)) throw new Error(`'${featureId}' declares projected compute node '${typeId}', but tool '${tool.def.name}' is already registered; a declaration may add a tool, never replace one (ADR 1031 round 3)`);
+    (BUILTINS as Map<string, BuiltinTool>).set(tool.def.name, tool);
+    added.push(tool.def.name);
+  }
+  return added;
 }
 
 /**

@@ -18,6 +18,7 @@ import { emitHostEvent } from '../../host/hostEventDispatcher.js';
 import { listWatchedSegments, resolveSegmentMembers } from '../crm/segmentsService.js';
 import { createLogger } from '../../observability/logger.js';
 import { tenantFeatureCheck } from '../../host/tenantFeatureGate.js';
+import { isErasureTombstoned } from '../consent/consentService.js';
 
 const log = createLogger('cdp.segmentEntryDaemon');
 const DEFAULT_INTERVAL_MS = 60_000;
@@ -36,6 +37,56 @@ interface SnapshotRow {
 
 const snapshots = new DurableCollection<SnapshotRow>('cdp:segment-snapshot', (r) => r.key, undefined, (r) => r.tenantId);
 const snapKey = (tenantId: string, segmentId: string): string => `${tenantId}::${segmentId}`;
+
+/**
+ * ADR 1024 D5.3 (`CDP2WF-8`) — the DSAR eraser for `cdp:segment-snapshot`.
+ *
+ * A snapshot's `memberIds` lists the contact ids that were in a watched segment at the
+ * last pass. It is personal data (who belongs to which audience) and no eraser or purger
+ * reached it: the store self-heals only while its segment stays watched, and an
+ * unwatched segment's snapshot sat there until tenant deletion. The id is REMOVED from
+ * every snapshot of the tenant (CAS per row; the snapshot itself is the segment's and is
+ * kept). The subject key arrives already expanded by the seam (email → contactId and its
+ * merged-away contacts), so an exact id match is the whole rule.
+ *
+ * An erased contact that still matches the segment is kept OUT of later passes by
+ * `withoutErased` below (the erasure tombstone), so the id does not come back and no
+ * `crm.segment.entered` fires for it.
+ */
+export async function eraseSegmentSnapshotSubject(tenantId: string, subjectKey: string): Promise<void> {
+  if (!tenantId || !subjectKey) return; // fail-closed — never a tenant-wide sweep
+  // Member ids are CRM contact ids (`crm:`-prefixed, `contactsService.createContact`); any
+  // other key shape (an email, a session, a userId) matches nothing, so skip the scan.
+  if (!subjectKey.startsWith('crm:')) return;
+  let touched = 0;
+  for (const row of await snapshots.listForTenantIndexed(tenantId)) {
+    if (row.tenantId !== tenantId || !row.memberIds.includes(subjectKey)) continue;
+    let cur: SnapshotRow | null = row;
+    for (let attempt = 0; attempt < 5 && cur && cur.memberIds.includes(subjectKey); attempt++) {
+      if (await snapshots.compareAndSwap(cur, { ...cur, memberIds: cur.memberIds.filter((id) => id !== subjectKey) })) { touched++; cur = null; break; }
+      cur = await snapshots.get(row.key);
+    }
+    // Only a row that STILL holds the id after the retries is a failure (a concurrent
+    // removal is success, not a lost race).
+    if (cur && cur.memberIds.includes(subjectKey)) throw new Error('segment snapshot erasure lost every CAS; retry the erasure');
+  }
+  if (touched) log.info('cdp_segment_snapshot_member_erased', { tenantId, snapshots: touched });
+}
+
+/** ADR 1024 D5.3 (closing grade H1) — the ids a pass may record and emit. An erased
+ *  contact keeps an anonymised row, so a segment rule that does not test the address can
+ *  still match it: without this the next pass put the id straight back into the snapshot
+ *  (undoing the erasure) and emitted `crm.segment.entered`, which could enrol the erased
+ *  person in a journey again. Only ids NOT in the prior snapshot are checked (an erased id
+ *  was removed from it, so it is always among them); a reseed checks every id once. */
+async function withoutErased(tenantId: string, ids: readonly string[], prior: readonly string[] | null): Promise<string[]> {
+  const known = new Set(prior ?? []);
+  const out: string[] = [];
+  for (const id of ids) {
+    if (known.has(id) || !(await isErasureTombstoned(tenantId, id))) out.push(id);
+  }
+  return out;
+}
 
 /** Pure diff: contactIds present now but not in the prior snapshot. `prev === null`
  *  (first observation) returns [] — seed, never fire for the existing population. */
@@ -73,8 +124,8 @@ export async function sweepSegmentEntries(storage: Storage, now: number = Date.n
       // `.claimed` (W35-CDP-CLAIM-1: `!claim` never skipped, and every instance emitted).
       if (!claim.claimed) continue;
       const members = await resolveSegmentMembers(seg.tenantId, seg.segmentId);
-      const currentIds = members.map((c) => c.contactId);
       const prior = await snapshots.get(snapKey(seg.tenantId, seg.segmentId));
+      const currentIds = await withoutErased(seg.tenantId, members.map((c) => c.contactId), prior ? prior.memberIds : null);
       const fresh = prior && now - Date.parse(prior.at) <= SNAPSHOT_RESEED_AFTER_MS ? prior : null;
       const newEntrants = computeNewEntrants(fresh ? fresh.memberIds : null, currentIds);
       for (const contactId of newEntrants) {

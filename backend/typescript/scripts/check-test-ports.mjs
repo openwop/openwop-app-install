@@ -38,9 +38,13 @@ const ROOT = join(__dirname, '..');
 
 /** Every file this gate reads, as `<label>` → absolute path. */
 const scanned = [
-  ...readdirSync(join(ROOT, 'test'))
+  // Recursive (ADR 1031 P2): feature-owned suites live in subdirectories
+  // (`test/kicktodo/`, an adopter's `test/adopter/`), and a top-level-only scan
+  // would silently stop guarding them.
+  ...readdirSync(join(ROOT, 'test'), { recursive: true })
+    .map(String)
     .filter((f) => f.endsWith('.test.ts'))
-    .map((f) => [`test/${f}`, join(ROOT, 'test', f)]),
+    .map((f) => [`test/${f.split('\\').join('/')}`, join(ROOT, 'test', f)]),
   ...readdirSync(join(ROOT, 'conformance'))
     .filter((f) => f.endsWith('.ts'))
     .map((f) => [`conformance/${f}`, join(ROOT, 'conformance', f)]),

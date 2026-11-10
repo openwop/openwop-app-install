@@ -9,6 +9,8 @@
  *   - failed    → muted-danger row with the error summary + an
  *                 "Open run" link to /runs/:runId for full diagnostics.
  *   - cancelled → muted row noting the cancellation + "Open run" link.
+ *   - completed with `skippedTerminals` (RFC 0257) → muted row, "no final
+ *                 step ran", naming the skipped terminals + "Open run".
  *
  * Architecture decision: derive, don't persist (Option B). All data
  * comes from the existing `WorkflowRunState` snapshot — no new BE
@@ -98,6 +100,26 @@ export function WorkflowCompletionCard({ run, onPreviewArtifact, onOpenArtifact 
     return (
       <CompletionShell tone="muted" iconKind="ban" title={translate('workflowCancelled')}>
         <Meta items={[stepCount, elapsed]} />
+        {run.runId && (
+          <Actions>
+            <OpenRunLink runId={run.runId} unavailable={unavailable} />
+          </Actions>
+        )}
+      </CompletionShell>
+    );
+  }
+
+  // RFC 0257 (ADR 1027 P3) — completed, but no final step ran: every terminal
+  // was skipped by its conditions. Not a plain success (R1, "silent success"):
+  // there is no deliverable to View, so say so and name the skipped steps.
+  if (run.skippedTerminals && run.skippedTerminals.length > 0) {
+    const skipped = run.skippedTerminals.map((id) => run.nodeNames[id] ?? id).join(', ');
+    return (
+      <CompletionShell tone="muted" iconKind="alert" title={translate('workflowCompletedNoFinalStep')}>
+        <Meta items={[stepCount, elapsed]} />
+        <div className="muted wfcomplete-error" data-testid="wfcomplete-no-final-step">
+          {translate('noFinalStepRan', { steps: skipped })}
+        </div>
         {run.runId && (
           <Actions>
             <OpenRunLink runId={run.runId} unavailable={unavailable} />

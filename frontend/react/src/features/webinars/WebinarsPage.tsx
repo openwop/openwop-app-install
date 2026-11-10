@@ -21,17 +21,23 @@ import { OrgSelectionState } from '../../ui/OrgSelectionState.js';
 import { useFeatureAccess } from '../../featureToggles/FeatureAccessContext.js';
 import { CalendarIcon, LinkIcon, RotateCwIcon } from '../../ui/icons/index.js';
 import { formatDateTime } from '../../i18n/format.js';
-import { listOrgs, listWebinarEvents, createWebinarEvent, bindWebinarForm, syncWebinarEvent, pushWebinarRegistrants, type MarketingEvent, type OrgRef } from './webinarsClient.js';
+import { listOrgs, listWebinarEvents, createWebinarEvent, bindWebinarForm, syncWebinarEvent, pushWebinarRegistrants, WebinarsApiError, type MarketingEvent, type OrgRef } from './webinarsClient.js';
 // WEB-G1 — the forms feature OWNS its list; read it rather than making the
 // operator carry an opaque id (the ADR 0206 B4 cross-feature READ precedent this
 // codebase already uses for media pickers).
 import { listForms, type FormDef } from '../forms/formsClient.js';
+import { QueuedRegistrants } from './QueuedRegistrants.js';
 
-/** R2 WB-SP-7 — map broker enums to operator copy (unknowns pass through). */
+/** R2 WB-SP-7 — map broker enums to operator copy. ADR 1054 review (WEB86-2): every
+ *  queued reason gets words; an unknown code is named inside a sentence, never alone. */
 function connectorReason(t: TFnLocal, raw: string): string {
   if (raw === 'no_connection') return t('reasonNoConnection');
   if (raw.startsWith('zoom_401') || raw.startsWith('zoom_403')) return t('reasonUnauthorized');
-  return raw;
+  if (raw.startsWith('zoom_429')) return t('reasonRateLimited');
+  if (/^zoom_5\d\d/.test(raw) || raw === 'request_failed') return t('reasonZoomUnavailable');
+  if (raw === 'zoom_no_registrant_id') return t('reasonNoRegistrantId');
+  if (raw === 'event_in_other_org') return t('reasonOtherClient');
+  return t('reasonGeneric', { code: raw || '—' });
 }
 type TFnLocal = ReturnType<typeof useTranslation>['t'];
 
@@ -58,6 +64,7 @@ export function WebinarsPage(): JSX.Element {
   const [syncing, setSyncing] = useState('');
 
   const [providerEventId, setProviderEventId] = useState('');
+  const [idError, setIdError] = useState('');
   const [title, setTitle] = useState('');
   const [bindingFor, setBindingFor] = useState('');
   const [bindFormId, setBindFormId] = useState('');
@@ -84,6 +91,10 @@ export function WebinarsPage(): JSX.Element {
   }, [orgId]);
 
   useEffect(() => { setEvents(null); void load(); }, [load]);
+  // WEB86-15 — a 409 from one organization is not about the next one.
+  useEffect(() => { setIdError(''); }, [orgId]);
+  const [queuedFor, setQueuedFor] = useState('');
+  const [pushRound, setPushRound] = useState(0);
   useEffect(() => {
     if (!orgId) return;
     let live = true;
@@ -99,9 +110,14 @@ export function WebinarsPage(): JSX.Element {
     try {
       const ev = await createWebinarEvent(orgId, { providerEventId: providerEventId.trim(), ...(title.trim() ? { title: title.trim() } : {}) });
       toast.success(t('eventCreated'));
-      setProviderEventId(''); setTitle('');
+      setProviderEventId(''); setTitle(''); setIdError('');
       setEvents((cur) => (cur ? [{ ...ev, counts: ev.counts ?? { registrantCount: 0, attendeeCount: 0, noShowCount: 0 } }, ...cur.filter((e) => e.eventId !== ev.eventId)] : [ev]));
-    } catch (e) { toast.error(e instanceof Error ? e.message : t('actionFailed')); }
+    } catch (e) {
+      // ADR 1054 D1 — another organization of this workspace tracks this Zoom webinar. The
+      // field says so (it is the input to change), not only a toast that disappears.
+      if (e instanceof WebinarsApiError && e.reason === 'event_in_other_org') setIdError(t('reasonOtherClient'));
+      else toast.error(e instanceof Error ? e.message : t('actionFailed'));
+    }
     finally { setBusy(false); }
   };
 
@@ -115,12 +131,15 @@ export function WebinarsPage(): JSX.Element {
     setSyncing(event.eventId);
     try {
       const out = await syncWebinarEvent(orgId, event.eventId);
+      // review Minor 3 — a PARTIAL walk is not a full success: "0 no-shows" is
+      // a claim the incomplete data cannot support. Checked FIRST (WEB86-1): a cut-off
+      // registrant walk with no attendees is partial, not "report still empty".
+      if (out.outcome === 'synced' && out.partial) toast.info(t('syncPartial', { attendees: out.attendees ?? 0 }));
+      // An upcoming webinar has no attendance yet; the sync brought its registrations in.
+      else if (out.outcome === 'synced' && (out.attendees ?? 0) === 0 && event.startsAt && new Date(event.startsAt).getTime() > Date.now()) toast.success(t('syncUpcoming', { count: out.registrants ?? 0 }));
       // R2 WB-SP-8 — "Synced: 0 attended" right after a webinar is Zoom's
       // report LAG, not a result; say so instead of claiming success.
-      if (out.outcome === 'synced' && (out.attendees ?? 0) === 0) toast.info(t('syncEmptyReport'));
-      // review Minor 3 — a PARTIAL walk is not a full success: "0 no-shows" is
-      // a claim the incomplete data cannot support.
-      else if (out.outcome === 'synced' && out.partial) toast.info(t('syncPartial', { attendees: out.attendees ?? 0 }));
+      else if (out.outcome === 'synced' && (out.attendees ?? 0) === 0) toast.info(t('syncEmptyReport'));
       else if (out.outcome === 'synced') toast.success(t('syncDone', { attendees: out.attendees ?? 0, noShows: out.noShows ?? 0 }));
       else if (out.outcome === 'cooldown') toast.info(t('syncCooldown'));
       // R2 WB-SP-7 — a raw broker enum ("no_connection", "zoom_401: …") is a
@@ -138,8 +157,11 @@ export function WebinarsPage(): JSX.Element {
       const out = await pushWebinarRegistrants(orgId, event.eventId);
       // sent 0 with failures is NOT a success (the CC-SP-6/M2 lesson).
       if (out.pushed > 0 && out.failed === 0) toast.success(t('pushDone', { count: out.pushed }));
-      else if (out.pushed > 0) toast.info(t('pushPartial', { pushed: out.pushed, failed: out.failed }));
-      else toast.error(t('pushFailed', { reason: connectorReason(t, out.failures[0]?.reason ?? '') }));
+      else if (out.pushed > 0) toast.info(t('pushPartial', { pushed: out.pushed, failed: out.failed, reason: connectorReason(t, out.failures[0]?.reason ?? '') }));
+      else if (out.failed > 0) toast.error(t('pushFailed', { reason: connectorReason(t, out.failures[0]?.reason ?? '') }));
+      // A count from another tab was stale: the queue was already empty (WEB86-5).
+      else toast.info(t('pushNothingQueued'));
+      setPushRound((n) => n + 1);
       await load();
     } catch (e) { toast.error(e instanceof Error ? e.message : t('actionFailed')); }
     finally { setPushing(''); }
@@ -185,8 +207,8 @@ export function WebinarsPage(): JSX.Element {
         <div className="u-flex u-gap-3 u-flex-wrap">
           {/* The webinar id is the provider's own — say where to find it now that
               there is a help slot. */}
-          <TextField label={t('fieldWebinarId')} help={t('fieldWebinarIdHelp')} value={providerEventId}
-            onChange={(e) => setProviderEventId(e.target.value)} placeholder={t('webinarIdPlaceholder')} required />
+          <TextField label={t('fieldWebinarId')} help={t('fieldWebinarIdHelp')} value={providerEventId} error={idError || undefined}
+            onChange={(e) => { setProviderEventId(e.target.value); setIdError(''); }} placeholder={t('webinarIdPlaceholder')} required />
           <TextField className="u-flex-1" label={t('fieldTitle')} value={title}
             onChange={(e) => setTitle(e.target.value)} placeholder={t('titlePlaceholder')} />
         </div>
@@ -237,15 +259,23 @@ export function WebinarsPage(): JSX.Element {
                 {ev.connectionId ? (
                   <span className="chip chip--muted" title={ev.connectionId}>{t('connectionVia', { id: ev.connectionId.slice(0, 8) })}</span>
                 ) : null}
-                {/* R3 WB-SP-9 remainder — connectionId was fetched and never
-                    shown: which Zoom connection this event syncs through is a
-                    routing fact the operator needs when several exist. Absent
-                    = the org's default connection (say so, don't fabricate). */}
-
                 {/* R2 WB-SP-2 — registrations the sink could not push to Zoom:
                     these people have NO join link until an operator acts. */}
                 {(ev.pendingPushCount ?? 0) > 0 ? <span className="chip chip--warning">{t('pendingPush', { count: ev.pendingPushCount ?? 0 })}</span> : null}
               </div>
+              {/* WEB86-9 — what the chip means and what the button does. */}
+              {(ev.pendingPushCount ?? 0) > 0 ? <p className="u-m-0 u-fs-12 u-text-muted">{t('pendingPushHint')}</p> : null}
+              {/* WEB86-14 — who is waiting, why, and the way out. */}
+              {(ev.pendingPushCount ?? 0) > 0 ? (
+                <div className="u-grid u-gap-2">
+                  <div>
+                    <Button variant="quiet" size="sm" aria-expanded={queuedFor === ev.eventId} onClick={() => setQueuedFor(queuedFor === ev.eventId ? '' : ev.eventId)}>
+                      {queuedFor === ev.eventId ? t('queuedHide') : t('queuedShow')}
+                    </Button>
+                  </div>
+                  {queuedFor === ev.eventId ? <QueuedRegistrants orgId={orgId} eventId={ev.eventId} describeReason={(raw) => connectorReason(t, raw)} onChanged={() => void load()} refreshKey={pushRound} /> : null}
+                </div>
+              ) : null}
               <div className="action-bar">
                 <Button variant="quiet" onClick={() => { setBindingFor(bindingFor === ev.eventId ? '' : ev.eventId); setBindFormId(''); }} aria-expanded={bindingFor === ev.eventId}>{ev.formId ? t('rebindForm') : t('bindForm')}</Button>
                 <Button variant="secondary" disabled={syncing === ev.eventId} aria-busy={syncing === ev.eventId} onClick={() => void sync(ev)}>

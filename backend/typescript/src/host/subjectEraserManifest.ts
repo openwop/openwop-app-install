@@ -280,8 +280,36 @@
  *    + `eraseRouterConfigSubject` — `modelrouter:config.updatedBy` names the person
  *      who last saved the workspace's routing rules, and had no eraser. The config
  *      is the workspace's and is kept; `updatedBy` is tombstoned.
+ *  +2 (2026-11-02, ADR 1024 D5.3/D5.4, feature loop row 73):
+ *    + `eraseSegmentSnapshotSubject` — `cdp:segment-snapshot.memberIds` lists who was
+ *      in each watched segment at the last pass; the id is removed, the snapshot kept.
+ *    + `eraseJourneyEnrollmentSubject` — `campaign-journeys:enrollment` rows record that
+ *      a person went through a journey; deleted (every key shape). Was RECORDED_DEBT.
+ */
+/*
+ *  +2 (2026-11-03, ADR 1042 D8):
+ *    + `eraseChannelIngressSubject` — the channel core's approved senders, pending
+ *      senders, threads (with the main-chat conversation each created) and owed
+ *      replies; matched on the OWNER's key forms or EXACTLY on an external
+ *      person's `senderId`/`chatId`. All deleted.
+ *    + `eraseRelayOwnerSubject` — `messaging:relay-owner`, a device's owner. Deleted.
+ */
+import { featureSubjectErasers } from './featureContributions.js';
+
+/*
+ *  +1 (2026-11-04, ADR 1043 RELAY-LOG-RETENTION-1):
+ *    + `eraseRelayDeliveryLogSubject` — the SQL table `messaging_delivery_log`,
+ *      whose `conversation_id` is the chat id of the person a relay or connector
+ *      talked to. Rows whose `conversation_id` EQUALS the key are deleted, in the
+ *      tenant. The device owner's rows go through `eraseRelayOwnerSubject`.
+ *  Widened, no new id (2026-11-04, same item): `eraseRelayOwnerSubject` now also
+ *    deletes `messaging:inbound-claim` rows: the owner's devices' claims and the
+ *    claims whose conversation id EQUALS the key. It is that store's one eraser.
  */
 export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
+  'eraseChannelIngressSubject', // ADR 1042 D8
+  'eraseRelayOwnerSubject', // ADR 1042 D8
+  'eraseRelayDeliveryLogSubject', // ADR 1043 RELAY-LOG-RETENTION-1
   'eraseExperimentFirstExposures',
   'commentsEraser',
   'consentSubjectEraser',
@@ -295,7 +323,6 @@ export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'eraseAssistantSubject',
   'eraseBuilderPairSubject',
   'eraseBrandSubject',
-  'eraseCalendarMcpForSubject',
   'eraseCampaignOpsSubject',
   'eraseSocialPublishingSubject', // ADR 0953 P0
 
@@ -309,26 +336,22 @@ export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'eraseCmsSubject',
   'eraseCommerce',
   'eraseCommerceConnectSubject',
-  'eraseCommunitySubject',
   'eraseCompensation',
   'eraseCampaignConversions', // ADR 0907 D8 (placed here, out of order, to stay clear of a neighbour's line)
   'eraseComputerUseSubject',
   'eraseConversationToolApprovalsSubject',
-  'eraseCreatorSubject',
   'eraseCrmSubject',
   'eraseLeadIntelSubject', // ADR0954 P4: frozen qualification text and visitor submissions on closed CRM primaries
   'eraseCrmTaskAssignees',
   'eraseCsmSubject',
   'eraseDashboard',
   'eraseDocumentSubject',
-  'eraseEngagementSubject',
   'eraseEntitiesSubject',
   'eraseEnvironmentsSubject',
   'eraseExtractionGrants',
   'eraseFormsSubject',
   // ADR 0908 D7 — a person's standing goals.
   'eraseGoalsForSubject',
-  'eraseIntegrationsSubject',
   'eraseIntentLedgerSubject',
   'eraseKbSubject',
   'eraseKnowledgeSyncSubject',
@@ -355,6 +378,7 @@ export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'eraseSubjectAnswers',
   'eraseSubjectApplyGrants',
   'eraseSubjectAttestations',
+  'eraseSubjectBiMetrics', // ADR 1052 D13 — bi:metric createdBy re-attributed
   'eraseSubjectConnections',
   'eraseSubjectCampaignDays',
   'eraseSubjectCanvas',
@@ -388,6 +412,7 @@ export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'eraseSubjectReadState',
   'eraseSubjectRunnerDispatches',
   'eraseSubjectSchedules',
+  'eraseSubjectSiteBrand',
   'eraseSubjectSteering',
   'eraseSubjectStrategy',
   'eraseSubjectTerritories',
@@ -407,15 +432,10 @@ export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'eraseTeamsDelivery',
   'eraseTutorialProgressForSubject',
   'eraseWalkthroughProgressForSubject',
-  'eraseWearableLinksForSubject',
-  'eraseWearableLivenessForSubject',
   'eraseWhatsAppSubject',
   // ADR 0888 D1 — a person's opt-in to one workspace's profile directory.
   'eraseWorkspaceShare',
   'identityLinkEraser',
-  'kicktodoAccountabilityEraser',
-  'kicktodoCommerceEraser',
-  'kicktodoCoreEraser',
   'profileEraser',
   'userEraser',
   'eraseSubjectVoiceSessions',
@@ -423,4 +443,13 @@ export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'eraseArenaRaterSubject',
   // ADR 0464 correction 2026-10-26 (DSAR-DBL) — a manual-test run's verdicts + notes.
   'eraseManualTestRunsSubject',
+  // ADR 1024 D5.3/D5.4 — segment snapshot members; journey enrollments.
+  'eraseSegmentSnapshotSubject',
+  'eraseJourneyEnrollmentSubject',
 ]);
+
+/** ADR 1031 P2 — the host manifest plus every composed feature's declared
+ *  `hostContributions.subjectErasers` (KickTodo's three). */
+export function expectedSubjectErasers(): Set<string> {
+  return new Set([...EXPECTED_SUBJECT_ERASERS, ...featureSubjectErasers()]);
+}

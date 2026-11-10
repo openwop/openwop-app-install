@@ -207,7 +207,7 @@ describe('ADR 0860 D2 — the beacon applies the region-aware default with no te
 });
 
 describe('ADR 0860 D4 — the posture route', () => {
-  it('returns the regime only, never cached, and 404s like the rest of the lane', async () => {
+  it('returns the regime only, never cached, and answers `{ regime: null }` (not a 404) where no posture applies', async () => {
     const T = 'user:adr0860-posture';
     const { orgId } = await ownerWithOrg(T);
     const unknown = await pub.get(`/host/openwop-app/public-consent/${orgId}/posture`);
@@ -218,7 +218,24 @@ describe('ADR 0860 D4 — the posture route', () => {
       expect((await pub.get(`/host/openwop-app/public-consent/${orgId}/posture`, geo('US', 'USNY'))).body).toEqual({ regime: 'opt-out' });
       expect((await pub.get(`/host/openwop-app/public-consent/${orgId}/posture`, geo('FR'))).body).toEqual({ regime: 'opt-in' });
     });
-    expect((await pub.get('/host/openwop-app/public-consent/org-nope/posture')).status).toBe(404);
+    // No posture here (unknown org, or the consent toggle OFF below): an answer,
+    // not a 404, so a site without a banner logs no console error on every visit.
+    // Uniform across both causes, so it reveals nothing the 404 did not.
+    const nope = await pub.get('/host/openwop-app/public-consent/org-nope/posture');
+    expect(nope.status).toBe(200);
+    expect(nope.body).toEqual({ regime: null });
+    expect(nope.headers.get('cache-control')).toContain('no-store');
+    const d = getToggleDefault('consent')!;
+    await saveConfig({ ...d, status: 'off' }, 'test');
+    try {
+      const off = await pub.get(`/host/openwop-app/public-consent/${orgId}/posture`);
+      expect(off.status).toBe(200);
+      expect(off.body).toEqual({ regime: null });
+      // The rest of the lane keeps its uniform 404 while the toggle is OFF.
+      expect((await pub.get(`/host/openwop-app/public-consent/${orgId}/vk-any`)).status).toBe(404);
+    } finally {
+      await saveConfig({ ...d, status: 'on' }, 'test');
+    }
   });
 });
 

@@ -7,6 +7,12 @@
  * risk on the primary store). Verifies: index maintained on put/delete/CAS, cross-tenant
  * isolation, one-time backfill of pre-index rows, stale-marker self-heal, and that the
  * primary key scheme is unchanged (a plain `get(id)` still works).
+ *
+ * Two things in the subject hide its own writers from a read: the first indexed read
+ * BACKFILLS every row, and a read drops a stale marker. So a case about a marker write
+ * seals the backfill first, and reads the marker key, not the list. Double guard: a read
+ * is scoped by `idxPrefix` and each row's tenant is re-checked; widening the prefix shows
+ * up as the re-check deleting the other tenant's markers.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -47,7 +53,8 @@ describe('GOV-1 — DurableCollection tenant index', () => {
     expect((await c.listForTenantIndexed('tA'))[0].v).toBe(2);
 
     await c.delete('a');
-    expect(await c.listForTenantIndexed('tA')).toEqual([]); // marker cleaned
+    expect(await storage.kvGet('hostextidx:test:indexed:tA:a')).toBeNull(); // marker cleaned by the delete, not by a read
+    expect(await c.listForTenantIndexed('tA')).toEqual([]);
     expect(await c.get('a')).toBeNull();
   });
 
@@ -61,6 +68,7 @@ describe('GOV-1 — DurableCollection tenant index', () => {
     const c = indexed();
     expect(ids(await c.listForTenantIndexed('tA'))).toEqual(['l1']); // backfilled
     expect(ids(await c.listForTenantIndexed('tB'))).toEqual(['l2']);
+    expect(await storage.kvGet('hostextidxmeta:test:indexed:backfilled')).toBe('1'); // one time: sealed
     // A row added AFTER backfill is indexed live (not via another backfill).
     await c.put({ id: 'l3', tenantId: 'tA', v: 3 });
     expect(ids(await c.listForTenantIndexed('tA'))).toEqual(['l1', 'l3']);
@@ -78,8 +86,10 @@ describe('GOV-1 — DurableCollection tenant index', () => {
 
   it('maintains the index through compareAndSwap', async () => {
     const c = indexed();
+    await c.listForTenantIndexed('tA'); // seal the backfill: it would index the row by itself
     const created = { id: 'a', tenantId: 'tA', v: 1 };
     expect(await c.compareAndSwap(null, created)).toBe(true); // insert-if-absent
+    expect(await storage.kvGet('hostextidx:test:indexed:tA:a')).toBe('a');
     expect(ids(await c.listForTenantIndexed('tA'))).toEqual(['a']);
     expect(await c.compareAndSwap(created, { id: 'a', tenantId: 'tA', v: 2 })).toBe(true);
     expect((await c.listForTenantIndexed('tA'))[0].v).toBe(2);
@@ -109,6 +119,13 @@ describe('GOV-1 — DurableCollection tenant index', () => {
     // Failed swap on a genuinely-ABSENT row leaves no orphan marker behind.
     expect(await c.compareAndSwap({ id: 'zz', tenantId: 'tA', v: 0 }, { id: 'zz', tenantId: 'tA', v: 1 })).toBe(false);
     expect(await storage.kvGet('hostextidx:test:indexed:tA:zz')).toBeNull();
+    // A bare-id marker reads the same whichever row wrote it; a projecting one shows the repair.
+    const p = projected();
+    await p.listForTenantProjected('tA'); // seal the backfill: it rewrites markers from the row
+    const stored = { id: 'p', tenantId: 'tA', v: 1, blob: 'b' };
+    await p.put(stored);
+    expect(await p.compareAndSwap({ ...stored, v: 99 }, { ...stored, v: 2 })).toBe(false);
+    expect(await p.listForTenantProjected('tA')).toEqual([{ id: 'p', v: 1 }]);
   });
 
   // GC-CV-11 — projected tenant index: the marker carries an identity projection
@@ -129,12 +146,19 @@ describe('GOV-1 — DurableCollection tenant index', () => {
     // The projection carries the identity fields but NOT the blob.
     expect(rows.every((r) => r.v !== undefined && r.blob === undefined)).toBe(true);
     expect((await c.listForTenantProjected('tB')).map((r) => r.id)).toEqual(['z']);
+    // The point of the projection: a listing decodes no primary row.
+    const reads = vi.spyOn(storage, 'kvGet');
+    try {
+      await c.listForTenantProjected('tA');
+      expect(reads.mock.calls.map(([key]) => key).filter((key) => key.startsWith('hostext:test:projected:'))).toEqual([]);
+    } finally { reads.mockRestore(); }
   });
 
   it('projected read self-heals a legacy bare-id marker (written before the projection)', async () => {
     // A legacy writer (no projection) leaves bare-id markers; the same backend
     // read through the projecting collection upgrades them on first read.
     const legacyProj = new DurableCollection<BlobRow>('test:projected', (r) => r.id, undefined, (r) => r.tenantId);
+    await legacyProj.ensureTenantIndex(); // sealed: a backfill would upgrade the marker before the read path sees it
     await legacyProj.put({ id: 'a', tenantId: 'tA', v: 5, blob: 'big' });
     const marker0 = await storage.kvGet('hostextidx:test:projected:tA:a');
     expect(marker0).toBe('a'); // bare id, no projection

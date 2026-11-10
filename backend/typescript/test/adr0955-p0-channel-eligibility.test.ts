@@ -13,6 +13,13 @@
  *  - `checkEngagement` back on `listEngagement`                              → "no tenant scan"
  *  - erasure leg 4 without the `#` keyspace                                  → "erasure"
  *  - the journey view dropping `topicOrgId`                                  → "client-less workspace"
+ * Re-measured in wave 84 (24 of 25 probes red; the 25th, the backfill, was vacuous until the
+ * legacy row was added): also the client SMS grant, E.164, the topic
+ * check, transactional consent and unsubscribe, the any-sender read, the unreadable store,
+ * the run-tag stamp and the run person's scope, the legacy group incumbent, client_required
+ * and not-a-client, the route's org scope, the legacy verb's consent channel, the closed
+ * reason set and the node's `to` output. The legacy engagement row below makes the
+ * contact-index backfill reachable.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -37,6 +44,10 @@ import { enroll, checkEligibility, checkEngagement, listEnrollments, __clearEnro
 import { buildCampaignJourneysSurface } from '../src/features/campaign-journeys/surface.js';
 import { mintToken, recordOpen, recordClick } from '../src/features/email/engagementService.js';
 import * as pack from '../../../packs/feature.campaign-journeys.nodes/index.mjs';
+import type { EngagementEvent } from '../src/features/email/engagementService.js';
+
+/** The product's own engagement collection (same name and key), for a pre-index legacy row. */
+const legacyEngagement = new DurableCollection<EngagementEvent>('email:engagement', (e) => `${e.tenantId}::${e.id}`);
 
 let server: http.Server;
 let BASE = '';
@@ -73,11 +84,13 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-const phone = () => `+1415555${String(Math.floor(Math.random() * 9000) + 1000)}`;
+// A counter, not Math.random: two cases drawing the same number would share suppression rows.
+let phoneSeq = 0;
+const phone = () => `+1415555${String(1000 + phoneSeq++)}`;
 
 async function stampedRun(metadata: Record<string, unknown>): Promise<string> {
   const runId = `run-j0955-${randomBytes(4).toString('hex')}`;
-  await hostExtStorage().insertRun({ runId, workflowId: 'w', tenantId: TENANT, status: 'pending', inputs: null, metadata, configurable: {}, createdAt: 'x', updatedAt: 'x' });
+  await hostExtStorage().insertRun({ runId, workflowId: 'w', tenantId: TENANT, status: 'pending', inputs: null, metadata, configurable: {}, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' });
   return runId;
 }
 
@@ -179,7 +192,7 @@ describe('ADR 0955 D2 (J2) — suppression by channel and sender', () => {
     await recordClientChannelConsent({ tenantId: TENANT, orgId: orgA, subjectKey: c.contactId, channel: 'sms', granted: true, source: 'test' });
     const real = DurableCollection.prototype.get;
     const failing = vi.spyOn(DurableCollection.prototype, 'get').mockImplementation(async function (this: DurableCollection<unknown>, id: string) {
-      if ((this as unknown as { name: string }).name === 'crm:suppression') throw new Error('kv down');
+      if (this['name'] === 'crm:suppression') throw new Error('kv down');
       return real.call(this, id);
     });
     try {
@@ -221,7 +234,8 @@ describe('ADR 0955 D1 (J9) — every enrollment names its client', () => {
 
   it('checks the person behind the run against the client', async () => {
     const s = buildCampaignJourneysSurface({ tenantId: TENANT, actingUserId: operatorUserId });
-    await expect(s.enroll!({ journeyId: 'welcome', contactId: 'ct-3', orgId: orgB })).rejects.toBeTruthy(); // no row on B
+    // No member row on B: the run's person is refused by the org scope check itself.
+    await expect(s.enroll!({ journeyId: 'welcome', contactId: 'ct-3', orgId: orgB })).rejects.toMatchObject({ code: 'forbidden_scope' });
     expect(await s.enroll!({ journeyId: 'welcome', contactId: 'ct-3', orgId: orgA })).toMatchObject({ enrolled: true });
   });
 
@@ -279,29 +293,56 @@ describe('ADR 0955 D1 (J9) — every enrollment names its client', () => {
       const r = await fetch(`${BASE}/host/openwop-app/campaign-journeys${path}`, { method, headers: { cookie, 'content-type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}) });
       return { status: r.status, body: await r.json().catch(() => null) as Record<string, unknown> | null };
     };
-    expect((await call('GET', '/enrollments')).status).toBe(400); // client_required
-    expect((await call('GET', `/enrollments?orgId=${orgB}`)).status).toBe(403); // no row on B
+    // A row on A, so the list below cannot pass by being empty (other cases clear enrollments).
+    expect((await enroll(TENANT, 'welcome', 'ct-route', undefined, { orgId: orgA })).enrolled).toBe(true);
+    const none = await call('GET', '/enrollments');
+    expect(none.status).toBe(400);
+    expect(none.body).toMatchObject({ error: 'validation_error', details: { reason: 'client_required' } });
+    const onB = await call('GET', `/enrollments?orgId=${orgB}`); // no member row on B
+    expect(onB.status).toBe(403);
+    expect(onB.body).toMatchObject({ error: 'forbidden_scope' });
     const a = await call('GET', `/enrollments?orgId=${orgA}`);
     expect(a.status, JSON.stringify(a.body)).toBe(200);
-    expect((a.body!.enrollments as Array<{ orgId?: string }>).every((e) => e.orgId === orgA)).toBe(true);
-    expect((await call('DELETE', '/enrollments', { orgId: orgB, journeyId: 'welcome', contactId: 'ct-9' })).status).toBe(403);
+    const rows = a.body!.enrollments as Array<{ orgId?: string; contactId: string }>;
+    expect(rows.map((e) => e.contactId)).toContain('ct-route');
+    expect(rows.filter((e) => e.orgId !== orgA)).toEqual([]);
+    // The workspace root is the agency's own house account, never an all-client
+    // listing. This operator is only a root viewer and cannot read client B.
+    expect((await enroll(TENANT, 'house-welcome', 'ct-house', undefined, { orgId: TENANT })).enrolled).toBe(true);
+    expect((await enroll(TENANT, 'client-welcome', 'ct-private-b', undefined, { orgId: orgB })).enrolled).toBe(true);
+    const house = await call('GET', `/enrollments?orgId=${TENANT}`);
+    expect(house.status, JSON.stringify(house.body)).toBe(200);
+    if (!house.body) throw new Error('The workspace enrollment response must have a JSON body.');
+    const houseRows = house.body.enrollments as Array<{ orgId?: string; contactId: string }>;
+    expect(houseRows.map((e) => e.contactId)).toContain('ct-house');
+    expect(houseRows.filter((e) => e.orgId)).toEqual([]);
+    expect(houseRows.map((e) => e.contactId)).not.toContain('ct-private-b');
+    const del = await call('DELETE', '/enrollments', { orgId: orgB, journeyId: 'welcome', contactId: 'ct-9' });
+    expect(del.status).toBe(403);
+    expect(del.body).toMatchObject({ error: 'forbidden_scope' });
   });
 });
 
 describe('ADR 0955 P0 (J8) — engagement is read per contact', () => {
   it('counts the contact’s opens and clicks, legacy rows included, with no tenant scan after the backfill', async () => {
     const T = `user:adr0955-eng-${randomBytes(3).toString('hex')}`;
+    // A legacy event: written before the per-contact index existed, so only the backfill finds it.
+    await legacyEngagement.put({ id: 'ev-legacy', tenantId: T, campaignId: 'cmp-legacy', contactId: 'ct-e', kind: 'opened', at: '2026-01-01T00:00:00.000Z' });
     const open = await mintToken({ tenantId: T, campaignId: 'cmp-1', contactId: 'ct-e', kind: 'open' });
     await recordOpen(open);
-    expect(await checkEngagement(T, 'ct-e')).toMatchObject({ opened: true, openCount: 1 });
+    expect(await checkEngagement(T, 'ct-e')).toMatchObject({ opened: true, openCount: 2 });
     const click = await mintToken({ tenantId: T, campaignId: 'cmp-2', contactId: 'ct-e', kind: 'click', url: 'https://example.test/x' });
     await recordClick(click);
     await recordOpen(await mintToken({ tenantId: T, campaignId: 'cmp-1', contactId: 'ct-other', kind: 'open' }));
     const scans = vi.spyOn(DurableCollection.prototype, 'listByPrefix');
     try {
-      expect(await checkEngagement(T, 'ct-e')).toEqual({ opened: true, clicked: true, openCount: 1, clickCount: 1 });
+      expect(await checkEngagement(T, 'ct-e')).toEqual({ opened: true, clicked: true, openCount: 2, clickCount: 1 });
+      expect(await checkEngagement(T, 'ct-e', 'cmp-legacy')).toEqual({ opened: true, clicked: false, openCount: 1, clickCount: 0 });
       expect(await checkEngagement(T, 'ct-e', 'cmp-2')).toEqual({ opened: false, clicked: true, openCount: 0, clickCount: 1 });
-      const tenantScans = scans.mock.calls.filter((call, i) => (scans.mock.contexts[i] as { name?: string }).name === 'email:engagement' && call[0] === `${T}::`);
+      const tenantScans = scans.mock.calls.filter((call, i) => {
+        const ctx: unknown = scans.mock.contexts[i];
+        return ctx instanceof DurableCollection && ctx['name'] === 'email:engagement' && call[0] === `${T}::`;
+      });
       expect(tenantScans).toHaveLength(0);
     } finally { scans.mockRestore(); }
   });

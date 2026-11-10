@@ -663,9 +663,8 @@ export function WorkflowsDashboard() {
           />
         ) : chains.length > 0 ? (
           (() => {
-            // Day-1 UX P6 — "Start here": templates the host DERIVED as needing
-            // zero connections lead the gallery (a guaranteed first win). Older
-            // backends (no requirements block) render the flat gallery as before.
+            // ADR 1065 — only audited no-account templates get this grouping.
+            // Unknown/older metadata stays browseable without a success promise.
             const startHere = visibleChains.filter(runsWithZeroConnections);
             const rest = visibleChains.filter((c) => !runsWithZeroConnections(c));
             if (startHere.length === 0) {

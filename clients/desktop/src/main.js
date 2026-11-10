@@ -235,13 +235,34 @@ function buildMenu() {
 //      (README § Electron 44 notes), and only a signed build can show one.
 // Screenshots land beside the JSON report in OPENWOP_SHELL_SELFTEST_DIR (or
 // the cwd) so a human can eyeball light/dark rendering.
+function waitForSelfTestLoad(win) {
+  return new Promise((resolve, reject) => {
+    const contents = win.webContents;
+    const finish = (error) => {
+      clearTimeout(timer);
+      contents.removeListener('did-finish-load', loaded);
+      contents.removeListener('did-fail-load', failed);
+      if (error) reject(error); else resolve();
+    };
+    const loaded = () => finish();
+    const failed = (_event, code, description, _url, isMainFrame) => {
+      if (isMainFrame !== false) finish(new Error(`load failed: ${code} ${description}`));
+    };
+    const timer = setTimeout(() => finish(new Error('self-test navigation timed out')), 20_000);
+    contents.once('did-finish-load', loaded);
+    contents.on('did-fail-load', failed);
+  });
+}
+
 async function runSelfTest() {
   const { writeFileSync } = require('node:fs');
   const outDir = process.env.OPENWOP_SHELL_SELFTEST_DIR || process.cwd();
   const host = process.env.OPENWOP_SHELL_SELFTEST_HOST
     || BRANDING.lockedHost || BRANDING.demoHost || 'https://app.openwop.dev';
   const report = {
-    setupBridges: false, setupBranded: false, hostSaved: false, remoteBridge: null, notify: null, host,
+    setupBridges: false, setupBranded: false, hostSaved: false, remoteBridge: null,
+    remoteRepointDenied: false, notify: null, host,
+    runtime: { electron: process.versions.electron, chromium: process.versions.chrome, node: process.versions.node },
     branding: { productName: BRANDING.productName, mode: BRANDING.mode, lockedHost: BRANDING.lockedHost },
   };
   let exitCode = 1;
@@ -254,14 +275,10 @@ async function runSelfTest() {
       report.setupBranded = 'skipped (lockedHost)';
       report.hostSaved = 'skipped (lockedHost)';
       win = createWindow();
-      const loaded = new Promise((res, rej) => {
-        win.webContents.once('did-finish-load', res);
-        win.webContents.once('did-fail-load', (_e, code, desc) => rej(new Error(`load failed: ${code} ${desc}`)));
-      });
-      await loaded;
+      await waitForSelfTestLoad(win);
     } else {
       win = createWindow();
-      await new Promise((res) => win.webContents.once('did-finish-load', res));
+      await waitForSelfTestLoad(win);
       report.setupBridges = await win.webContents.executeJavaScript(
         "Boolean(window.openwopSetup && window.openwopNative && window.openwopNative.kind === 'electron')",
       );
@@ -274,24 +291,32 @@ async function runSelfTest() {
       );
       writeFileSync(path.join(outDir, 'selftest-setup.png'), (await win.webContents.capturePage()).toPNG());
 
-      // Drive the REAL save path (validation + persistence), then load the host.
-      const next = selectHost(readSettings(SETTINGS_PATH()), host);
-      if (next) {
-        writeSettings(SETTINGS_PATH(), next);
-        report.hostSaved = true;
-        const loaded = new Promise((res, rej) => {
-          win.webContents.once('did-finish-load', res);
-          win.webContents.once('did-fail-load', (_e, code, desc) => rej(new Error(`load failed: ${code} ${desc}`)));
-        });
-        win.loadURL(next.host);
-        await loaded;
-      }
+      // Exercise the renderer preload -> ipcMain -> persistence/navigation path.
+      // Calling writeSettings/loadURL here made a broken IPC handler pass green.
+      const expected = selectHost(readSettings(SETTINGS_PATH()), host);
+      if (!expected) throw new Error('invalid self-test host');
+      await Promise.all([
+        waitForSelfTestLoad(win),
+        win.webContents.executeJavaScript(`void window.openwopSetup.saveHost(${JSON.stringify(host)})`),
+      ]);
+      report.hostSaved = readSettings(SETTINGS_PATH()).host === expected.host
+        && new URL(win.webContents.getURL()).origin === expected.host;
     }
     // Give the SPA a beat to paint before probing + capturing.
     await new Promise((res) => setTimeout(res, 4000));
     report.remoteBridge = await win.webContents.executeJavaScript(
       "window.openwopNative ? String(window.openwopNative.kind) : null",
     );
+    // The same bridge is visible remotely, but its file-origin authority must
+    // be enforced by the real main-process handler, not by renderer convention.
+    const previousHost = readSettings(SETTINGS_PATH()).host;
+    const previousOrigin = new URL(win.webContents.getURL()).origin;
+    const denied = await win.webContents.executeJavaScript(
+      "window.openwopSetup.saveHost('http://127.0.0.1:1')",
+    );
+    report.remoteRepointDenied = denied?.ok === false
+      && readSettings(SETTINGS_PATH()).host === previousHost
+      && new URL(win.webContents.getURL()).origin === previousOrigin;
     writeFileSync(path.join(outDir, 'selftest-app.png'), (await win.webContents.capturePage()).toPNG());
     if (report.remoteBridge === 'electron') {
       lastNotifyFailure = null;
@@ -303,7 +328,7 @@ async function runSelfTest() {
     const setupOk = BRANDING.lockedHost
       ? true
       : report.setupBridges === true && report.setupBranded === true && report.hostSaved === true;
-    exitCode = setupOk && report.remoteBridge === 'electron' ? 0 : 1;
+    exitCode = setupOk && report.remoteBridge === 'electron' && report.remoteRepointDenied ? 0 : 1;
   } catch (err) {
     report.error = err instanceof Error ? err.message : String(err);
   }

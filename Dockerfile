@@ -68,6 +68,9 @@ RUN npm ci --include=dev
 
 COPY backend/typescript/tsconfig.json backend/typescript/vitest.config.ts ./
 COPY backend/typescript/src ./src
+# The builder flattens backend/typescript into /app; preserve root-relative
+# imports of the neutral server/browser contracts before bundling.
+COPY contracts /contracts
 # `npm run build` = `node scripts/build.mjs` since ADR 0366 P1b — the builder
 # needs the build script itself (a missing COPY here fails the image build).
 COPY backend/typescript/scripts ./scripts

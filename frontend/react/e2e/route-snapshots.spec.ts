@@ -1,7 +1,12 @@
 import { test, expect, type Page } from '@playwright/test';
+import { assertVisualRenderer, pinnedConnectOptions } from './support/visualGuard.js';
 import { API } from './support/session.js';
 import { serveFontsLocally } from './support/localFonts.js';
 import { serveFilmLocally } from './support/localFilm.js';
+
+// The visual specs render in the pinned image's browser when OPENWOP_E2E_PINNED_WS
+// names it (ADR 0863 D9 P5). Worker-scoped, so it sits at file level.
+test.use(pinnedConnectOptions());
 
 /**
  * Critical-route visual snapshots (ADR 0510 Phase 2, DSA-031 — route half).
@@ -94,19 +99,11 @@ async function loginWithBoundKey(page: Page, theme: string): Promise<void> {
 
 test.describe('critical-route visual snapshots (ci:full)', () => {
   test.describe.configure({ timeout: 120_000 });
-  // Baselines are platform-suffixed and only -darwin is committed (this
-  // repo's merge gate is a macOS box). On any other platform fail with the
+  // Baselines exist for a local browser on darwin and for the version-pinned
+  // Playwright image's browser (ADR 0863 D9 P5). Any other renderer fails with the
   // remedy named, BEFORE a pixel compare that could only mislead — and never
-  // silently skip (the ci.sh browser-lane rule).
-  test.beforeAll(() => {
-    if (process.platform !== 'darwin') {
-      throw new Error(
-        'route-snapshot baselines exist only for darwin. Generate a committed baseline set for this platform ' +
-        'from a PINNED environment (e.g. the mcr.microsoft.com/playwright image) — do NOT run --update-snapshots ad hoc; ' +
-        'an unreviewed baseline makes the visual gate certify whatever this machine happens to render.',
-      );
-    }
-  });
+  // silently skips (the ci.sh browser-lane rule).
+  test.beforeAll(({ browser }) => assertVisualRenderer(browser, 'route snapshots'));
   test.use({ viewport: { width: 1280, height: 900 } });
 
   for (const { route, name, anonymous, boundKey } of ROUTES) {

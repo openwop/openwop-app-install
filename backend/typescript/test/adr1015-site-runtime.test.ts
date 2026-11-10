@@ -13,6 +13,21 @@
  *
  * Red on the old code: no CSP, no script, `/_rt/` unrouted, and both lanes were
  * the guard's 404 on every customer host.
+ *
+ * Sabotage-checked (w83 probes): the CSP header dropped or weakened (the policy is
+ * pinned here as a literal, never read from the module that sets it); the toggle
+ * or the host kill switch ignored; a file outside the manifest served; the wrong
+ * content type or no nosniff on the asset; a tagged page left on the public cache;
+ * the tag after `</body>`; a privacy attribute with no privacy page; the manifest
+ * latch caching a transient failure, or re-reading a missing manifest; beacons
+ * charged to the page bucket; the lanes dropped from the guard's prefixes; the
+ * bot prerender without the CSP, or the browser shell with it.
+ *
+ * Double guards, recorded: another org's path is refused twice in
+ * `middleware/customDomain.ts` (the miss branch, then the org pin), so a probe on
+ * either alone stays green; the w83 held pair breaks both. The `..%2F` traversal
+ * is refused by `SAFE_FILE` and by the manifest set in one function, and cannot
+ * serve anything in this fixture either way.
  */
 import http from 'node:http';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -25,13 +40,17 @@ import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { addDomain, verifyDomain, invalidateHostCache, __resetCustomDomains } from '../src/host/customDomains.js';
-import { PRERENDER_CSP, SITE_RUNTIME_TOGGLE, __resetSiteRuntimeForTests, loadRuntimeManifest } from '../src/features/publishing/siteRuntime.js';
+import { SITE_RUNTIME_TOGGLE, __resetSiteRuntimeForTests, loadRuntimeManifest } from '../src/features/publishing/siteRuntime.js';
 import { __resetShellCacheForTests } from '../src/features/publishing/routes.js';
 
 let BASE: string; let PORT = 0; let server: http.Server; let dir: string;
 const ENTRY = 'main-Ab12_c.js';
 const SCRIPT = 'console.log("site runtime");';
 const prevDir = process.env.OPENWOP_SITE_RUNTIME_DIR;
+/** ADR 1015 D7, written out: a weakened policy in the source must turn this red. */
+const PRERENDER_CSP = "default-src 'none'; script-src 'self'; connect-src 'self'; img-src 'self' https: data:; "
+  + "media-src 'self' https:; frame-src https:; style-src 'self' 'unsafe-inline'; font-src 'self' https: data:; "
+  + "base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 
 beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), 'owp-site-runtime-'));
@@ -179,8 +198,8 @@ describe('ADR 1015 — visitor runtime on a bound custom domain', () => {
     process.env.OPENWOP_CUSTOM_DOMAIN_BEACON_REQS_PER_MIN = '2';
     try {
       const beacon = (): Promise<Raw> => raw('GET', `/host/openwop-app/public-analytics/${encodeURIComponent(orgId)}/capture-config`, 'bucket.acme.test');
-      expect((await beacon()).status).not.toBe(429);
-      expect((await beacon()).status).not.toBe(429);
+      expect((await beacon()).status).toBe(200);
+      expect((await beacon()).status).toBe(200);
       expect((await beacon()).status, 'the beacon bucket is spent').toBe(429);
       // Page loads are untouched by the spent beacon bucket…
       for (let i = 0; i < 3; i++) expect((await raw('GET', `/p/${encodeURIComponent(slug)}`, 'bucket.acme.test')).status).toBe(200);
@@ -199,7 +218,7 @@ describe('ADR 1015 — visitor runtime on a bound custom domain', () => {
     const tags = scriptTags((await raw('GET', `/p/${encodeURIComponent(slug)}`, 'priv.acme.test')).body);
     expect(tags).toHaveLength(1);
     expect(tags[0]).toContain('data-owp-privacy="/p/privacy"');
-    // The earlier site in this file has no privacy page: no attribute, no dead link.
+    // A site with no privacy page: no attribute, no dead link.
     const plain = await boundSite('nopriv.acme.test');
     await setRuntime(plain.tenantId, 'on');
     const other = scriptTags((await raw('GET', `/p/${encodeURIComponent(plain.slug)}`, 'nopriv.acme.test')).body);
@@ -257,6 +276,8 @@ describe('ADR 1015 — visitor runtime on a bound custom domain', () => {
     expect(JSON.parse(posture.body)).toMatchObject({ regime: expect.any(String) });
     const capture = await raw('GET', `/host/openwop-app/public-analytics/${encodeURIComponent(orgId)}/capture-config`, 'lanes.acme.test');
     expect(guard404(capture), `analytics capture-config reached the guard: ${capture.status} ${capture.body}`).toBe(false);
+    expect(capture.status, capture.body).toBe(200);
+    expect(typeof (JSON.parse(capture.body) as { heatmaps?: unknown }).heatmaps).toBe('boolean');
 
     expect(guard404(await raw('GET', '/host/openwop-app/public-consent/other-org/posture', 'lanes.acme.test'))).toBe(true);
     expect(guard404(await raw('GET', '/host/openwop-app/public-analytics/other-org/capture-config', 'lanes.acme.test'))).toBe(true);

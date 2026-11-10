@@ -23,15 +23,20 @@
  * pinned in `adr1001-byok-replay-zero-live-calls.test.ts`; here the mock
  * program is re-served, because the mock tools round is not log-recorded.
  *
- * Sabotage-witnessed: deleting the post-cut derivation in the executor's
- * suspended branch reds 1 and 2 (the fork waits on an open card); serving every
- * parent resolution inline regardless of the cut reds 2's event count;
- * dropping `durableRoundAtCut` reds 2's divergence check; reading parent rows
- * on a branch fork reds 3; removing the divergence failure reds 4.
+ * Sabotage-witnessed (wave 81): deleting the post-cut derivation in the
+ * executor's suspended branch reds 1 and 2 (the fork waits on an open card);
+ * serving every parent resolution inline regardless of the cut reds 1 and 2;
+ * dropping `durableRoundAtCut` reds 2's divergence check; treating a branch as
+ * a replay in the executor's suspended branch reds 3's first leg, and in
+ * `parentResolutionForKey` (the inline durable lookup) reds 3's second leg.
+ * Recorded double guard for that second leg: over HTTP a branch fork cut after
+ * round 1 never re-executes the node (ADR 0751 re-creates the source's card),
+ * so the lookup's own `forkMode` check is read directly on the real records;
+ * swapping the asked-in-source discriminator reds 4 or 5.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { getSetCookies } from './headerCookies.js';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
@@ -41,6 +46,9 @@ import { __clearAgentIdentityCache } from '../src/host/agentIdentity.js';
 import { programMock, resetMockPrograms } from '../src/providers/dispatchMock.js';
 import { bareRunId } from './support/bareRunId.js';
 import { ASK_USER_TOOL } from '../src/host/clarificationLift.js';
+import { hostExtStorage } from '../src/host/hostExtPersistence.js';
+import { parentResolutionForKey } from '../src/executor/forkReplayResolutions.js';
+import type { RunRecord } from '../src/types.js';
 
 let BASE = '';
 let server: http.Server;
@@ -86,14 +94,14 @@ const ask = (id: string, question: string): { toolCalls: Array<{ name: string; i
 const R1 = ask('dates', 'Which dates?');
 const R2 = ask('budget', 'What budget?');
 
+/** Bounded below the case timeout (15 s), so a stuck fork fails here, named. */
 async function waitStatus(c: Client, runId: string, pred: (s: string) => boolean): Promise<string> {
-  const t0 = Date.now();
-  for (;;) {
-    const s = (await c.get<{ status?: string }>(`/runs/${encodeURIComponent(runId)}`)).body?.status ?? '';
-    if (pred(s)) return s;
-    if (Date.now() - t0 > 20_000) throw new Error(`run ${runId} stuck at ${s}`);
-    await new Promise((r) => setTimeout(r, 50));
-  }
+  let s = '';
+  await vi.waitFor(async () => {
+    s = (await c.get<{ status?: string }>(`/runs/${encodeURIComponent(runId)}`)).body?.status ?? '';
+    if (!pred(s)) throw new Error(`run ${runId} stuck at ${s}`);
+  }, { timeout: 6_000, interval: 25 });
+  return s;
 }
 const terminal = (s: string): boolean => ['completed', 'failed', 'cancelled'].includes(s);
 const settled = (s: string): boolean => s.startsWith('waiting') || terminal(s);
@@ -168,6 +176,32 @@ describe('ADR 1001 D3.5 — forks of a run that asked clarifications', () => {
     expect(await waitStatus(c, f, settled)).toMatch(/^waiting/);
     const [open] = await openInterrupts(c, f);
     expect(open?.data).toMatchObject({ profile: 'openwop-agent-clarification', round: 1, questions: [{ id: 'dates' }] });
+    // Inner guard: the parent's round-1 answer is in a later branch fork's
+    // prefix, yet the branch must not be served it. Over HTTP the agent node
+    // never re-executes on a branch fork cut after round 1 (ADR 0751: the fork
+    // re-creates the SOURCE's open card instead, asserted here), so the inline
+    // durable lookup's own guard (`parentResolutionForKey` refuses a non-replay
+    // fork) is read directly, on the real fork record and the real stored rows,
+    // with a replay-mode positive control on the same record.
+    const srcRun = (await events(c, runId)).filter((e) => e.nodeId === 'run');
+    const resolved1 = srcRun.filter((e) => e.type === 'interrupt.resolved')[0];
+    const requested1 = srcRun.filter((e) => e.type === 'interrupt.requested')[0];
+    const restarted = srcRun.find((e) => e.type === 'node.started' && e.sequence > (resolved1?.sequence ?? Infinity));
+    if (!resolved1 || !requested1 || !restarted) throw new Error('the source did not record round 1 and a restart');
+    programMock('run', [R1, R2, { content: 'UNUSED' }]);
+    const f2 = await fork(c, runId, { mode: 'branch', fromSeq: restarted.sequence + 1 });
+    expect(await waitStatus(c, f2, settled)).toMatch(/^waiting/);
+    const [open2] = await openInterrupts(c, f2);
+    expect(open2?.data).toMatchObject({ round: 1, questions: [{ id: 'dates' }] });
+    // The store keys a run by its bare id (the wire id carries the tenant).
+    const branchRun = await hostExtStorage().getRun(bareRunId(f2));
+    if (!branchRun) throw new Error('the branch fork has no run record');
+    expect(branchRun.forkMode).toBe('branch');
+    const key = String((requested1.payload as { key?: unknown } | undefined)?.key);
+    const resumeKey = key.slice(key.indexOf(':run:') + ':run:'.length);
+    const lookup = (run: RunRecord) => parentResolutionForKey({ storage: hostExtStorage(), run, nodeId: 'run', resumeKey });
+    expect((await lookup({ ...branchRun, forkMode: 'replay' }))?.inPrefix, 'control: a replay at this cut is served round 1 inline').toBe(true);
+    expect(await lookup(branchRun), 'a branch never reads the parent\'s answer').toBeNull();
   });
 
   it('a replay whose agent asks something the source never asked fails instead of asking a person', async () => {
@@ -177,7 +211,7 @@ describe('ADR 1001 D3.5 — forks of a run that asked clarifications', () => {
     expect(await waitStatus(c, f, terminal)).toBe('failed');
     expect(await openInterrupts(c, f)).toEqual([]);
     const failed = (await events(c, f)).filter((e) => e.type === 'node.failed' && e.nodeId === 'run').at(-1);
-    expect(String((failed?.payload as { error?: { code?: string } } | undefined)?.error?.code)).toContain('replay_diverged_at_clarification');
+    expect((failed?.payload as { error?: { code?: string } } | undefined)?.error?.code).toBe('openwop-app.replay_diverged_at_clarification');
   });
 
   it('a replay that reaches a question the source has not answered yet fails instead of waiting for a person', async () => {
@@ -194,17 +228,15 @@ describe('ADR 1001 D3.5 — forks of a run that asked clarifications', () => {
     expect((await c.post(`/runs/${encodeURIComponent(runId)}/interrupts/run`, { resumeValue: { answers: [{ id: 'dates', answer: 'May' }] } })).status).toBeLessThan(300);
     // Round 2 open in the source (polled on the card's read, not the status:
     // the run can be back to waiting before a status poll ever sees it run).
-    for (let i = 0; ; i += 1) {
+    await vi.waitFor(async () => {
       const [open] = await openInterrupts(c, runId);
-      if (open?.data.round === 2) break;
-      if (i > 300) throw new Error('round 2 never opened in the source');
-      await new Promise((r) => setTimeout(r, 50));
-    }
+      expect(open?.data.round, 'round 2 open in the source').toBe(2);
+    }, { timeout: 6_000, interval: 25 });
     programMock('run', [R1, R2]);
     const f = await fork(c, runId, { mode: 'replay', fromSeq: 0 });
     expect(await waitStatus(c, f, terminal)).toBe('failed');
     expect(await openInterrupts(c, f)).toEqual([]);
     const failed = (await events(c, f)).filter((e) => e.type === 'node.failed' && e.nodeId === 'run').at(-1);
-    expect(String((failed?.payload as { error?: { code?: string } } | undefined)?.error?.code)).toContain('replay_source_unanswered');
+    expect((failed?.payload as { error?: { code?: string } } | undefined)?.error?.code).toBe('openwop-app.replay_source_unanswered');
   });
 });

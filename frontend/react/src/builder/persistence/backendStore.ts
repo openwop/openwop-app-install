@@ -73,6 +73,8 @@ export interface ChainTemplate {
      *  pinned (grade-ux U-1). Optional: an older backend omits it. */
     pinMismatches?: PinMismatch[];
     connections: Array<{ ref: string; providerId: string; providerInstalled: boolean }>;
+    /** Host advisory usage; an older backend/pack is unknown, never none. */
+    connectionUsage?: 'uses' | 'none' | 'unknown';
     /** Human-approval gates in the chain — the pre-flight trust line (P12/F2). */
     approvalGateCount?: number;
     /** How many steps the chain draws (ADR 0773 P11). Optional: an older backend omits it. */
@@ -234,7 +236,7 @@ export async function loadWorkflowWithHead(id: string): Promise<{ workflow: Save
         version: local?.version ?? '1.0.0',
         nodes: d.nodes,
         edges: d.edges,
-        ...(d.defaultInputs ? { defaultInputs: d.defaultInputs } : {}),
+        defaultInputs: d.defaultInputs, // raw blank is an authoritative editor value
         ...(d.inputSchema ? { inputSchema: d.inputSchema } : {}),
         // Coupled to node `inputs` — deferred-mode `{type:'variable'}` refs
         // inside them resolve against the bag seeded from `variables[]`, and
@@ -459,13 +461,14 @@ export async function instantiateChain(
 }
 
 /** True when the host DERIVED this template's requirements and they are empty —
- *  no connection bindings, no uninstalled node types, no node installed at a
+ *  explicitly no Connections usage, no uninstalled node types, no node installed at a
  *  version other than the one it pinned (day-1 UX P6: the gallery
- *  "Start here" promise). Distinct from the preload predicate below ("no
+ *  "Start here" account guidance). Distinct from the preload predicate below ("no
  *  required params" = instantiable blind); absent requirements (older backend)
  *  honestly reads false, never overpromises. */
 export function runsWithZeroConnections(c: ChainTemplate): boolean {
   return c.requirements != null
+    && c.requirements.connectionUsage === 'none'
     && c.requirements.connections.length === 0
     && c.requirements.missingNodeTypeIds.length === 0
     && (c.requirements.pinMismatches ?? []).length === 0;

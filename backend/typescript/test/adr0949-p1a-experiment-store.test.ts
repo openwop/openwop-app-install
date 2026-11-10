@@ -10,17 +10,18 @@
  *   3. A legacy `cms:pageexperiment` row is migrated on first read of its org and
  *      read from the engine after; after the per-org marker, a page read never
  *      scans a collection (the old hot-path `list()` is gone).
- *   4. Every write is mirrored to the legacy collection (deploy-rollback safety)
- *      and a delete removes both copies.
- *   5. Subject erasure reaches the engine store and the mirror.
+ *   4. Writes land in the engine only (ADR 0949 P2c contracted the P1a mirror),
+ *      and a delete removes the engine row.
+ *   5. Subject erasure reaches the engine store and any legacy row not yet
+ *      contracted.
  *
- * Sabotage (run 2026-10-20): hashing on a different scope reds 1; dropping the
- * marker write reds 3's scan pin; dropping the mirror write reds 4; erasing
- * only the mirror reds 5; an `orgId` field on the marker reds the org-delete
- * case (found by the wide sweep: `campaign-ops-demo-seed` could not delete its
- * demo orgs).
+ * Sabotage measured (wave 75, each red, then restored): a changed salt or arm
+ * order in the engine mapping reds 1 and 2; dropping the import or the marker
+ * write reds 3; a write reaching the legacy collection reds 4; erasing only one
+ * store reds 5; an `orgId` field on the marker reds the org-delete case (found
+ * by the wide sweep: `campaign-ops-demo-seed` could not delete its demo orgs).
  */
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import { DurableCollection } from '../src/host/hostExtPersistence.js';
 import { assignWeightedVariant } from '../src/host/variantAssignment.js';
@@ -37,8 +38,7 @@ let n = 0;
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-});
-afterAll(() => { vi.restoreAllMocks(); });
+}, 120_000);
 
 const exp = (over: Partial<PageExperiment> = {}): PageExperiment => ({
   experimentId: `pexp:fixture-${n++}`, tenantId: 't-p1a', orgId: 'o-p1a', pageId: 'pg-1', name: 'Hero', status: 'running',
@@ -109,7 +109,9 @@ describe('ADR 0949 P1a — 3/4/5. store of record, migration, mirror, erasure', 
     const page = await createPage({ tenantId, orgId, title: 'LP', createdBy: 'u-1', sections: [{ type: 'hero', data: { heading: 'Hi' } }] });
     const created = await createExperiment({ tenantId, orgId, pageId: page.pageId, name: 'Hero', variants: [{ key: 'control', versionId: null, weight: 50 }, { key: 'B', versionId: null, weight: 50 }], createdBy: 'u-1' });
     expect(await legacy.get(created.experimentId)).toBeNull();
-    expect(fromEngineExperiment(await getExperimentRow(tenantId, orgId, created.experimentId) as NonNullable<Awaited<ReturnType<typeof getExperimentRow>>>)).toEqual(created);
+    const row = await getExperimentRow(tenantId, orgId, created.experimentId);
+    if (!row) throw new Error('The engine row is missing.');
+    expect(fromEngineExperiment(row)).toEqual(created);
     expect((await listExperiments(tenantId, orgId, page.pageId)).map((e) => e.experimentId)).toEqual([created.experimentId]);
     expect(await deleteExperiment(tenantId, orgId, page.pageId, created.experimentId, 'u-1')).toBe(true);
     expect(await legacy.get(created.experimentId)).toBeNull();

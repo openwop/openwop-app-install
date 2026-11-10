@@ -2,8 +2,10 @@
  * ADR 0952 D6 (P7) — the product feed card.
  *
  *  - a failed read is a stated failure, never an "off" feed presented as saved;
- *  - the signed URL shows only while the feed is on;
- *  - rotating asks first (the old URL dies at once) and calls nothing on cancel;
+ *  - the signed URL shows only while the server sends one (it sends none while the
+ *    feed is off; the card does not decide this from `enabled`);
+ *  - rotating asks first (the old URL dies at once), calls nothing on cancel, and
+ *    then shows the new URL;
  *  - a push that is not verified says so, never "0 sent" as if it ran;
  *  - the push buttons stay disabled until the target id is saved.
  *
@@ -12,7 +14,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react';
-import type { CatalogFeed } from '../campaignConnectorsClient.js';
+import type { CatalogFeed, CatalogPushResult } from '../campaignConnectorsClient.js';
 
 const getCatalogFeed = vi.fn();
 const saveCatalogFeed = vi.fn();
@@ -69,12 +71,14 @@ describe('CatalogFeedCard (ADR 0952 D6)', () => {
     expect(rotateCatalogFeed).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: /replace url/i }));
     await waitFor(() => expect(rotateCatalogFeed).toHaveBeenCalledWith('org-1'));
+    await waitFor(() => expect((screen.getByLabelText(/feed url/i) as HTMLInputElement).value).toBe('https://app.example/host/openwop-app/public/org-1/catalog/feed.xml?v=2&sig=abc'));
   });
 
   it('push stays disabled until the id is saved, and an unverified push says so', async () => {
     getCatalogFeed.mockResolvedValue(feed({ enabled: true, feedUrl: URL1 }));
     saveCatalogFeed.mockResolvedValue(feed({ enabled: true, feedUrl: URL1, metaCatalogId: '777' }));
-    pushCatalogFeed.mockResolvedValue({ outcome: 'unsupported' });
+    const unverified: CatalogPushResult = { outcome: 'unsupported' };
+    pushCatalogFeed.mockResolvedValue(unverified);
     render(<CatalogFeedCard orgId="org-1" />);
     const send = await screen.findByRole('button', { name: /send to meta/i });
     expect((send as HTMLButtonElement).disabled).toBe(true);

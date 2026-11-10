@@ -11,6 +11,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { DurableCollection, hostExtStorage } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
+import { isValidUploadDate } from '../../host/videoUploadDate.js';
 // Same-feature sibling (cms/). Used only inside `deletePage` (call-time), so the
 // pageExperiments→cms import cycle stays runtime-safe — never referenced at module init.
 import { listExperiments, deleteExperiment, erasePageExperimentSubject, findRunningExperiment } from './pageExperimentsService.js';
@@ -42,6 +43,8 @@ import type { SubjectEraseReport } from '../../host/subjectErasure.js';
 import { eraseContentLanguageSettingsSubject } from '../../host/contentLocales.js';
 import { createLogger } from '../../observability/logger.js';
 import { isFragmentHref, isInternalHref } from '../../host/internalHref.js';
+import { cleanAllHeroArt, ITEM_BASE_KEYS } from './heroArt.js';
+import { buildDesignSectionData, cleanHeroQueue, cleanRichTextCard, DESIGN_SECTION_TYPES, type DesignSectionType } from './designSections.js';
 
 const log = createLogger('feature.cms');
 
@@ -62,7 +65,7 @@ const MAX = {
   slugChars: 64,  // ADR 0748 — `slugify`'s own cap, stated so the protocol 400 can name it
   slug: 40,       // a short opaque token, e.g. a card `icon` slug (ADR 0027)
   sections: 50,
-  columns: 12,
+  columns: 16, // ADR 1080 D11 — was 12
   compareCols: 8,   // named products/families a `comparison` matrix may span (ADR 0485)
   compareRows: 24,  // capability rows a `comparison` matrix may hold (ADR 0485)
   faqItems: 20,     // Q/A pairs a `faq` section may hold (UX_UPGRADE-site R2-G10)
@@ -76,37 +79,120 @@ const MAX = {
   heroNote: 200,    // fine print under the hero CTAs (D3)
   sectionNote: 280, // a footnote under a `columns` grid (D4)
   badge: 40,        // a short card badge (D4)
-  itemMeta: 40,     // a `list` row's right-aligned meta, e.g. "12 min" (D4)
+  itemMeta: 80,     // a `list` row's right-aligned meta, e.g. "12 min" (D4); also a bento inset card's detail line (ADR 1032)
   listItems: 8,     // rows a `list`-layout card may hold (D4)
+  toggles: 6,       // ADR 1032 — switches a `rows` section's try-it panel may hold
+  diagramNodes: 8,  // ADR 1068 D2 — boxes a `rows` section's workflow diagram may hold
   planText: 80,     // every hero `plan` string except `lines[].text` (D3)
   planLine: 160,    // one hero `plan` line's text (D3)
   planLines: 3,
   planChips: 5,
+  activityItems: 6,   // rows an activity card may hold (ADR 1029 D5)
+  activityText: 80,   // an activity card's title, a row's actor and meta (ADR 1029 D5)
+  activityAction: 160, // one activity row's action text (ADR 1029 D5)
   chatText: 120,    // every `chat` string except a message body (D5)
   chatMessage: 400, // one `chat` message's text (D5)
   chatMessages: 6,
+  // ADR 1047 — the `features` card layout and the hero `hub` picture.
+  featureTags: 6,       // labelled status pills one feature card may hold
+  featureTag: 60,       // one pill's label
+  featureMore: 2000,    // a card's "How you use it" disclosure body (markdown)
+  hubSpokes: 8,         // places around the hub's centre
+  hubText: 40,          // the centre label/eyebrow and each spoke's label
+  hubIndex: 8,          // a spoke's short index, e.g. "01"
+  flowNodes: 6,         // nodes in a flow (ADR 1038 D8): six fit one row at desktop width
+  flowLabel: 40,        // a node's label and status word
+  flowText: 120,        // a node's line of text
+  flowCaption: 80,      // the hero flow's accessible caption
   perOrgPages: 2000,
 } as const;
 
 /** Section layout for `columns` — how the public renderer lays the items out. */
-const COLUMN_LAYOUTS = ['cards', 'steps', 'stats', 'showcase', 'rows', 'prompts', 'dives', 'ruled', 'progress', 'list', 'tiles', 'panels'] as const;
+const COLUMN_LAYOUTS = ['cards', 'steps', 'stats', 'showcase', 'rows', 'prompts', 'dives', 'ruled', 'progress', 'list', 'tiles', 'panels', 'timeline', 'bento', 'marquee', 'features', 'flow', 'incidents', 'board', 'gallery'] as const; // ADR 1063 D3 — incidents; P2d — board; P2e — gallery
 /** Optional hero art direction. Absent preserves the original workflow motif. */
-const HERO_VISUALS = ['workflow', 'journey', 'run', 'film', 'image', 'none', 'plan'] as const;
+const HERO_VISUALS = ['workflow', 'journey', 'run', 'film', 'image', 'none', 'plan', 'activity', 'hub', 'flow', 'receipt', 'apps', 'versus', 'fanout', 'phone', 'wall', 'tally', 'log', 'queue'] as const; // ADR 1080 D7 — queue
+/** ADR 1047 — a feature card pill's state. Presentation of authored text: the
+ *  pill's `label` is the words; the state's legend words render beside it. */
+const FEATURE_TAG_STATES = ['now', 'soon'] as const;
+/** ADR 1029 D5 — the styling state of an activity row. Presentation only: the
+ *  row's `status` is authored text, so it localizes and reaches crawlers. */
+const ACTIVITY_STATES = ['done', 'waiting', 'approved', 'flagged'] as const;
+/** ADR 1067 D3 — an activity card's look. Absent = the approval list (ADR 1029 D5). */
+const ACTIVITY_STYLES = ['checklist'] as const;
+/** ADR 1038 D8 — a flow node's styling state. The words are the node's own
+ *  `status`; the state only picks the mark's shape and colour. */
+const FLOW_STATES = ['idle', 'done', 'waiting'] as const;
 /** ADR 0920 D1 — a full-bleed section band, painted from tokens only. */
 const SECTION_TONES = ['default', 'muted', 'inverse', 'accent'] as const;
 /** ADR 0920 D2 — heading left / lede right on wide screens. */
 const SECTION_HEADS = ['stacked', 'split'] as const;
+/** ADR 1068 D3 — a section head's size: `sm` is the 44px clamp (absent: the default). */
+const SECTION_HEAD_SIZES = ['sm'] as const;
 /** ADR 0920 D3 — an icon on the hero's second CTA. */
 const HERO_CTA_ICONS = ['play'] as const;
+/** ADR 1066 D1 — where a hero's picture sits. Absent = beside the copy (the
+ *  grid); `below` = after the copy, the full width of the shell. */
+// ADR 1080 D6 — `band`, `card` and `panel` place a photo hero's picture.
+const HERO_PLACEMENTS = ['below', 'band', 'card', 'panel'] as const;
+/** ADR 1072 D2 — a gallery's arrangement. Absent = the even grid. */
+const GALLERY_LAYOUTS = ['lead'] as const;
+/** ADR 1073 D2 — where a timeline's head and picture sit. Absent = head on top, picture beside the rail. */
+const TIMELINE_SHOT_SIDES = ['start'] as const;
+/** ADR 1073 D3 — a timeline's rail markers. Absent = dots. */
+const TIMELINE_MARKERS = ['badge'] as const;
+/** ADR 1069 D2 — how a columns footnote is drawn. Absent = a quiet line under the grid. */
+const COLUMN_NOTE_STYLES = ['callout'] as const;
+/** ADR 1063 P2c + ADR 1070 D1 — a column item's own tone: a dark tile or a muted one. */
+const COLUMN_ITEM_TONES = ['inverse', 'mist'] as const;
+/** ADR 1070 D3 — where a bento tile's picture sits. Absent = at its foot. */
+const COLUMN_IMAGE_POSITIONS = ['top'] as const;
+/** ADR 1029 D2 — how a section moves as it scrolls into view. Absent keeps the
+ *  page-load rise; `none` opts out of all motion. Presentation, not content: kept
+ *  on the base layer only, and never on `fields` (the protocol's open body). */
+/** ADR 1038 D6 adds `slide-start`, `slide-end` (from the reading start or end) and `zoom`. */
+export const SECTION_MOTIONS = ['none', 'reveal', 'stagger', 'rise', 'slide-start', 'slide-end', 'zoom'] as const;
+/** ADR 1038 D1 — whether the hero's card plays once on load. Presentation, like
+ *  `motion`: base layer only, so an overlay (which replaces `activity` whole,
+ *  RFC 0103 §C) can never drop or change it, and it never moves a digest. */
+export const HERO_PLAYS = ['still', 'once'] as const;
+/** ADR 1038 D2 — how the hero heading's `*emphasized*` words are marked: the
+ *  clay accent (absent, today's look), or a line or wash drawn once on load.
+ *  Presentation: base layer only, like `motion` and `play`. */
+export const HERO_EMPHASES = ['accent', 'strike', 'underline', 'highlight'] as const;
+
+/**
+ * Build a section's cleaned field set (see `buildTypedSectionData`), plus the
+ * ADR 1029 `motion`, ADR 1038 hero `play`/`emphasis` and stats `count` presentation fields on the base layer. Here rather than in
+ * `validateSection` so every lane that builds base data (pages, shared sections)
+ * keeps it; a locale overlay never carries it, so the base value stands.
+ */
+function buildSectionData(type: SectionType, d: Record<string, unknown>, partial: boolean): Record<string, unknown> {
+  const data = buildTypedSectionData(type, d, partial);
+  if (partial || type === 'fields') return data;
+  const motion = pickEnum(SECTION_MOTIONS, d.motion);
+  // Only the activity card plays today; a leftover `play` on another visual would be
+  // invisible in the editor and start playing again on a switch back, so it is dropped.
+  const play = type === 'hero' && data.visual === 'activity' ? pickEnum(HERO_PLAYS, d.play) : undefined;
+  const emphasis = type === 'hero' ? pickEnum(HERO_EMPHASES, d.emphasis) : undefined;
+  // ADR 1038 D3 — a stats band's figures count up as they arrive. Only the stats
+  // layout has figures, so a leftover flag on another layout is dropped.
+  const count = type === 'columns' && data.layout === 'stats' && d.count === true ? true : undefined;
+  return defined({ ...data, motion, play, emphasis, count });
+}
 /** ADR 0920 D4 — a small drawing in place of a card icon (`panels`). */
 const COLUMN_ART = ['full-week', 'feed', 'solo'] as const;
 /** ADR 0920 D4 — `steps` numeral style. */
 const STEP_NUMBERS = ['circle'] as const;
+/** ADR 1032 — an `image` section's frame: a plain figure, or browser chrome (a
+ *  window bar with an address label) around a product screenshot. */
+const IMAGE_FRAMES = ['browser'] as const;
 /** ADR 0920 D5 — a `richText` picture beside the copy. */
-const RICH_TEXT_VISUALS = ['chat'] as const;
+const RICH_TEXT_VISUALS = ['chat', 'image', 'card'] as const; // ADR 1080 D8 — card
+/** ADR 1080 D5 — which side of the copy a richText picture sits on. */
+const RICH_TEXT_SIDES = ['start'] as const;
 const CHAT_FROM = ['person', 'guide'] as const;
 /** ADR 0920 D6 — `cta` alignment. */
-const CTA_ALIGNS = ['center', 'start'] as const;
+const CTA_ALIGNS = ['center', 'start', 'split'] as const; // ADR 1062 D4 — `split`: copy at the start, button at the end (stacks when narrow)
 
 /** A value from a CLOSED set, or undefined — an unknown value is DROPPED, never
  *  thrown (ADR 0920: presentation options degrade to the stock look). */
@@ -166,6 +252,95 @@ function cleanHeroPlan(v: unknown): Record<string, unknown> | undefined {
 }
 
 /**
+ * ADR 1029 D5 — the hero's activity (approval) card. CLOSED: `title` ≤ 80; up to
+ * six `items`, each an `actor` (≤ 80) and an `action` (≤ 160), with an optional
+ * `meta` and `status` (≤ 80, authored text) and a closed styling `state`. A row
+ * with no action is dropped. Inert text only: no links. Undefined when no row
+ * survives. ADR 1038 D1 adds a `result` line (≤ 80) that lands last when the
+ * hero plays its card (the hero-level `play`, base layer only).
+ */
+function cleanActivity(v: unknown): Record<string, unknown> | undefined {
+  const a = asObject(v);
+  if (!a) return undefined;
+  const t = (x: unknown): string | undefined => optionalCleanContent(x, MAX.activityText, 'activity');
+  const items = (Array.isArray(a.items) ? a.items : []).slice(0, MAX.activityItems).map((i) => {
+    const ii = asObject(i) ?? {};
+    return defined({
+      actor: t(ii.actor),
+      action: optionalCleanContent(ii.action, MAX.activityAction, 'action'),
+      meta: t(ii.meta),
+      status: t(ii.status),
+      state: pickEnum(ACTIVITY_STATES, ii.state),
+      // ADR 1067 D3 — a row's icon slug (the column icon set; unknown slugs draw no glyph).
+      icon: optionalCleanString(ii.icon, MAX.slug),
+    });
+  }).filter((i) => i.action !== undefined);
+  if (items.length === 0) return undefined;
+  // ADR 1067 D3 — the checklist look, and the words in its browser bar.
+  return defined({ title: t(a.title), items, result: t(a.result), style: pickEnum(ACTIVITY_STYLES, a.style), barLabel: t(a.barLabel) });
+}
+
+/**
+ * ADR 1047 — the hero's hub picture: one centre and the places around it.
+ * CLOSED: `center.label` (required, ≤ 40), an optional `center.eyebrow` (≤ 40)
+ * and an optional centre picture (`center.imageToken`, an opaque media
+ * reference, which always carries its `alt`, like ADR 1037); 2–8 `spokes`, each
+ * a `label` (≤ 40), an optional `index` (≤ 8) and an optional `icon` slug (the
+ * column icon set; unknown slugs render no glyph). A spoke with no label is
+ * dropped. Inert text only. Undefined unless a centre label and at least two
+ * spokes survive. Distinct from ADR-1038 D8 `flow` (a directed graph with a
+ * gate): a hub is strictly radial, one centre, no edges between places.
+ */
+function cleanHub(v: unknown): Record<string, unknown> | undefined {
+  const h = asObject(v);
+  if (!h) return undefined;
+  const t = (x: unknown): string | undefined => optionalCleanContent(x, MAX.hubText, 'hub');
+  const c = asObject(h.center) ?? {};
+  const label = t(c.label);
+  const imageToken = cleanOpaqueToken(c.imageToken, MAX.token) || undefined;
+  const alt = optionalCleanContent(c.alt, MAX.alt, 'alt');
+  if (imageToken && !alt) {
+    throw new OpenwopError('validation_error', 'hub.center.alt is required when hub.center.imageToken is set.', 400, {});
+  }
+  const spokes = (Array.isArray(h.spokes) ? h.spokes : []).slice(0, MAX.hubSpokes).map((sp) => {
+    const ss = asObject(sp) ?? {};
+    return defined({ label: t(ss.label), index: optionalCleanContent(ss.index, MAX.hubIndex, 'index'), icon: optionalCleanString(ss.icon, MAX.slug) });
+  }).filter((sp) => sp.label !== undefined);
+  if (!label || spokes.length < 2) return undefined;
+  return { center: defined({ eyebrow: t(c.eyebrow), label, ...(imageToken ? { imageToken, alt } : {}) }), spokes };
+}
+
+/**
+ * ADR 1038 D8 — the hero's flow picture: a short process, in order. CLOSED: an
+ * optional `label` (≤ 80, the figure's caption); up to six `nodes`, each a
+ * `label` (≤ 40), an optional `text` (≤ 120) and `status` word (≤ 40, the
+ * author's own, so the state is never colour alone) and a closed styling
+ * `state`. Inert text only. Undefined when there are no nodes; it shows only
+ * with two labelled nodes.
+ * Content, like the activity card: an overlay replaces it whole (RFC 0103 §C).
+ */
+function cleanFlow(v: unknown): Record<string, unknown> | undefined {
+  const f = asObject(v);
+  if (!f) return undefined;
+  // A node with no label is KEPT (as an empty label), so a step being written
+  // survives the editor's autosave round trip; renderers show only labelled
+  // nodes, and only when two are labelled.
+  const nodes = (Array.isArray(f.nodes) ? f.nodes : []).slice(0, MAX.flowNodes).map((n) => {
+    const nn = asObject(n) ?? {};
+    return defined({
+      label: optionalCleanContent(nn.label, MAX.flowLabel, 'label') ?? '',
+      text: optionalCleanContent(nn.text, MAX.flowText, 'text'),
+      status: optionalCleanContent(nn.status, MAX.flowLabel, 'status'),
+      state: pickEnum(FLOW_STATES, nn.state),
+    });
+  });
+  if (nodes.length === 0) return undefined;
+  // ADR 1064 P3c — a numbered rail, and marks that light in turn (a loop with
+  // a pause control). Only `true` is kept.
+  return defined({ label: optionalCleanContent(f.label, MAX.flowCaption, 'label'), nodes, numbered: f.numbered === true ? true : undefined, run: f.run === true ? true : undefined });
+}
+
+/**
  * ADR 0920 D5 — a `richText` conversation picture. CLOSED: `title`, `subtitle`,
  * `badge`, `placeholder` and every `proposal` string ≤ 120; each
  * `messages[].text` ≤ 400; `messages` ≤ 6, each needs a known `from`
@@ -197,8 +372,9 @@ function cleanChat(v: unknown): Record<string, unknown> | undefined {
 export type PageStatus = 'draft' | 'in_review' | 'published' | 'archived';
 export const PAGE_STATUSES: PageStatus[] = ['draft', 'in_review', 'published', 'archived'];
 
-export type SectionType = 'hero' | 'richText' | 'image' | 'cta' | 'columns' | 'productGrid' | 'form' | 'pricing' | 'entityList' | 'entityDetail' | 'comparison' | 'faq' | 'quotes' | 'fields' | 'video';
-export const SECTION_TYPES: SectionType[] = ['hero', 'richText', 'image', 'cta', 'columns', 'productGrid', 'form', 'pricing', 'entityList', 'entityDetail', 'comparison', 'faq', 'quotes', 'fields', 'video'];
+export type SectionType = 'hero' | 'richText' | 'image' | 'cta' | 'columns' | 'productGrid' | 'form' | 'pricing' | 'entityList' | 'entityDetail' | 'comparison' | 'faq' | 'quotes' | 'fields' | 'video' | DesignSectionType;
+// ADR 1080 — statusTable, dateCalc, conversation and featureIndex (features/cms/designSections.ts).
+export const SECTION_TYPES: SectionType[] = ['hero', 'richText', 'image', 'cta', 'columns', 'productGrid', 'form', 'pricing', 'entityList', 'entityDetail', 'comparison', 'faq', 'quotes', 'fields', 'video', ...DESIGN_SECTION_TYPES];
 
 /** ADR 0748 — a `fields` section's key grammar and ceiling (the protocol's open
  *  section body, held as flat named text fields). */
@@ -336,6 +512,11 @@ export interface Page {
   /** Ordering key within the docs nav tree (ADR 0392); a slash path allows
    *  grouping later (`getting-started/10`). Only meaningful when collection='docs'. */
   docsNav?: string;
+  /** ADR 1049 — where this page sits in the PUBLIC SITE navigation (the public
+   *  shell's menu + footer). Absent = today's ADR 0486 placement (curated
+   *  Product slugs, every other page under Pages). Base-locale display text,
+   *  like `title` in the nav list. Validated by {@link cleanSiteNav}. */
+  siteNav?: PageSiteNav;
   version: number;
   publishedVersion?: number;
   /** ADR 0859 D2 — which submission this is: bumped ONLY by `submit` from `draft`,
@@ -549,6 +730,83 @@ function nowIso(): string {
 
 // ── Content sanitization ─────────────────────────────────────────────────────
 
+/** ADR 1064 — the form card's person: a name, a short note ("Read by a person,
+ *  not a bot") and an optional picture with required alt text. Null when it
+ *  has neither a name nor a note. */
+function cleanFormPerson(raw: unknown): { name?: string; note?: string; imageToken?: string; alt?: string } | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const p = raw as Record<string, unknown>;
+  const name = optionalCleanContent(p.name, MAX.label, 'person.name');
+  const note = optionalCleanContent(p.note, MAX.label, 'person.note');
+  const imageToken = cleanOpaqueToken(p.imageToken, MAX.token);
+  const alt = optionalCleanContent(p.alt, MAX.alt, 'person.alt');
+  if (imageToken && !alt) throw new OpenwopError('validation_error', 'form.person.alt is required when form.person.imageToken is set.', 400, {});
+  if (!name && !note) return undefined;
+  return { ...(name ? { name } : {}), ...(note ? { note } : {}), ...(imageToken ? { imageToken, alt } : {}) };
+}
+
+const CHIP_CORNERS = ['tl', 'tr', 'bl', 'br'] as const;
+/** ADR 1064 P3f(d) — the hero picture's annotation chips: up to four, each a
+ *  short text (≤ 40) at a closed corner. A chip without text or a corner is
+ *  dropped; a fifth is refused. Decoration: the hero copy carries the words. */
+function heroImageChips(raw: unknown): { chips?: Array<{ text: string; at: string }> } {
+  if (!Array.isArray(raw)) return {};
+  if (raw.length > 4) throw new OpenwopError('validation_error', 'hero.chips holds at most 4 chips.', 400, { field: 'chips' });
+  const chips = raw.map((c) => {
+    const cc = asObject(c) ?? {};
+    const text = optionalCleanContent(cc.text, 40, 'chips.text');
+    const at = pickEnum(CHIP_CORNERS, cc.at);
+    return text && at ? { text, at: at as string } : null;
+  }).filter((c): c is { text: string; at: string } => c !== null);
+  return chips.length > 0 ? { chips } : {};
+}
+
+/** ADR 1064 P3f — a `timeline` section's picture beside the rail: an opaque
+ *  media token with required alt text and an optional browser-frame label.
+ *  Nothing on any other layout. */
+/** ADR 1071 D1 — a columns section's headline number: a whole number 0–9,999,999
+ *  and its words (≤ the badge cap). Both or nothing. */
+function cleanSectionStat(v: unknown): { value: number; label: string } | undefined {
+  const o = asObject(v);
+  if (!o) return undefined;
+  const value = typeof o.value === 'number' && Number.isInteger(o.value) && o.value >= 0 && o.value <= 9_999_999 ? o.value : undefined;
+  const label = optionalCleanContent(o.label, MAX.badge, 'stat');
+  return value !== undefined && label ? { value, label } : undefined;
+}
+
+/** ADR 1074 D1 — a richText's screenshot: a token, its alt (required with it),
+ *  the frame's window-bar label and a caption. */
+function richTextShot(d: Record<string, unknown>): Record<string, string> {
+  const imageToken = cleanOpaqueToken(d.imageToken, MAX.token);
+  if (!imageToken) return {};
+  const alt = optionalCleanContent(d.alt, MAX.alt, 'alt');
+  if (!alt) throw new OpenwopError('validation_error', 'richText.alt is required when it has an imageToken.', 400, {});
+  const frameUrl = optionalCleanContent(d.frameUrl, MAX.label, 'frameUrl');
+  const caption = optionalCleanContent(d.caption, MAX.caption, 'caption');
+  return { imageToken, alt, ...(frameUrl ? { frameUrl } : {}), ...(caption ? { caption } : {}) };
+}
+
+/** ADR 1080 D12 — a photo beside a `card` form. Alt text is required with a token. */
+function formPicture(d: Record<string, unknown>): Record<string, string> {
+  if (d.layout !== 'card') return {};
+  const imageToken = cleanOpaqueToken(d.imageToken, MAX.token);
+  if (!imageToken) return {};
+  const alt = optionalCleanContent(d.alt, MAX.alt, 'alt');
+  if (!alt) throw new OpenwopError('validation_error', 'form.alt is required when it has an imageToken.', 400, {});
+  return { imageToken, alt };
+}
+
+function timelineShot(layout: string, d: Record<string, unknown>, featureHead = false): Record<string, string> {
+  // ADR 1071 D1 — a section with a headline stat may carry the same picture, beside its head.
+  if (layout !== 'timeline' && !featureHead) return {};
+  const imageToken = cleanOpaqueToken(d.imageToken, MAX.token);
+  if (!imageToken) return {};
+  const alt = optionalCleanContent(d.alt, MAX.alt, 'alt');
+  if (!alt) throw new OpenwopError('validation_error', layout === 'timeline' ? 'columns.alt is required when a timeline has an imageToken.' : 'columns.alt is required when a section with a stat has an imageToken.', 400, {});
+  const frameUrl = optionalCleanContent(d.frameUrl, MAX.label, 'frameUrl');
+  return { imageToken, alt, ...(frameUrl ? { frameUrl } : {}) };
+}
+
 /** A CTA target: a same-page fragment (`#faq`, ADR 0920 D6), an internal app path (`/agents`) — a single leading slash, NOT
  *  `//` or `/\` (both normalize to a protocol-relative EXTERNAL URL in a browser →
  *  open-redirect shape) — OR an EXPLICIT-scheme http(s)/mailto URL. `safeUrl`
@@ -570,10 +828,11 @@ function safeLink(v: unknown, max: number): string {
 
 /** ADR 0843 — a `video` section's play-button length: `m:ss` (minutes may run
  *  to three digits). The prerender turns it into an ISO 8601 `PT#M#S`. */
+/** A `comparison` section's optional `style` (absent = the mark matrix). */
+export const COMPARISON_STYLES: ReadonlySet<string> = new Set(['text']);
 export const VIDEO_LENGTH_RE = /^\d{1,3}:[0-5]\d$/;
 /** ADR 0843 — the hosts a `youtubeUrl` may name (the link reads "Watch on YouTube"). */
 const YOUTUBE_HOSTS = new Set(['youtube.com', 'www.youtube.com', 'm.youtube.com', 'youtu.be']);
-const UPLOAD_DATE_RE = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
 
 /**
  * ADR 0843 — a media URL a `video` section loads or links: https ONLY (never
@@ -603,6 +862,88 @@ function httpsMediaUrl(v: unknown, field: string, partial: boolean, hosts?: Read
   return u;
 }
 
+/** ADR 1032 — a `video` section's second film. Absent, or an empty object, is
+ *  no second film. On the base every field the first film requires is required
+ *  here too (the pair is two real films, never a half-filled card); an overlay
+ *  (`partial`) may carry only the translatable text. */
+function cleanSecondFilm(raw: unknown, partial: boolean): Record<string, string> | undefined {
+  const f = asObject(raw);
+  if (!f || Object.keys(f).length === 0) return undefined;
+  const src = httpsMediaUrl(f.src, 'film2.src', partial);
+  const poster = httpsMediaUrl(f.poster, 'film2.poster', partial);
+  const captions = httpsMediaUrl(f.captions, 'film2.captions', partial);
+  const youtubeUrl = httpsMediaUrl(f.youtubeUrl, 'film2.youtubeUrl', partial, YOUTUBE_HOSTS);
+  const title = optionalCleanContent(f.title, MAX.title, 'film2.title');
+  const description = optionalCleanContent(f.description, MAX.videoDescription, 'film2.description');
+  // ADR 1068 D1 — the play chip's own words and a visible caption (see the first film).
+  const chipLabel = optionalCleanContent(f.chipLabel, MAX.label, 'film2.chipLabel');
+  const caption = optionalCleanContent(f.caption, MAX.caption, 'film2.caption');
+  const lengthRaw = typeof f.length === 'string' ? f.length.trim() : '';
+  const length = VIDEO_LENGTH_RE.test(lengthRaw) ? lengthRaw : undefined;
+  // The second film's VideoObject needs its own uploadDate (Google treats it as
+  // required), held to the first film's uploadDate rule.
+  const uploadRaw = typeof f.uploadDate === 'string' ? f.uploadDate.trim() : '';
+  const uploadDate = isValidUploadDate(uploadRaw) ? uploadRaw : undefined;
+  if (uploadRaw && !uploadDate) throw new OpenwopError('validation_error', 'video.film2.uploadDate must be YYYY-MM-DD or an ISO 8601 datetime with a timezone.', 400, { field: 'film2.uploadDate' });
+  if (!partial) {
+    if (!src) throw new OpenwopError('validation_error', 'video.film2.src is required (an https:// URL to the video file).', 400, { field: 'film2.src' });
+    if (!poster) throw new OpenwopError('validation_error', 'video.film2.poster is required (an https:// URL to the poster image).', 400, { field: 'film2.poster' });
+    if (!title) throw new OpenwopError('validation_error', 'video.film2.title is required.', 400, { field: 'film2.title' });
+    if (!description) throw new OpenwopError('validation_error', 'video.film2.description is required.', 400, { field: 'film2.description' });
+    if (!length) throw new OpenwopError('validation_error', 'video.film2.length is required as m:ss (e.g. 1:57).', 400, { field: 'film2.length' });
+  }
+  const out: Record<string, string> = {
+    ...(title ? { title } : {}),
+    ...(description ? { description } : {}),
+    ...(chipLabel ? { chipLabel } : {}),
+    ...(caption ? { caption } : {}),
+    ...(src ? { src } : {}),
+    ...(poster ? { poster } : {}),
+    ...(captions ? { captions } : {}),
+    ...(length ? { length } : {}),
+    ...(youtubeUrl ? { youtubeUrl } : {}),
+    ...(uploadDate ? { uploadDate } : {}),
+  };
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/** ADR 1032 — a `rows` section's try-it panel: a title and up to six labelled
+ *  switches with a starting position. Presentation only: flipping one changes
+ *  nothing anywhere, so it carries text and booleans and nothing else. */
+function cleanToggles(raw: unknown): { title?: string; items: { label: string; on?: true }[] } | undefined {
+  const t = asObject(raw);
+  if (!t) return undefined;
+  const items = (Array.isArray(t.items) ? t.items : []).slice(0, MAX.toggles).map((it) => {
+    const ii = asObject(it) ?? {};
+    const label = typeof ii.label === 'string' ? cleanContent(ii.label, MAX.label, 'label') : '';
+    return { label, ...(ii.on === true ? { on: true as const } : {}) };
+  }).filter((it) => it.label.length > 0);
+  if (items.length === 0) return undefined;
+  const title = optionalCleanContent(t.title, MAX.label, 'toggles.title');
+  return { ...(title ? { title } : {}), items };
+}
+
+/** ADR 1068 D2 — a `rows` section's workflow diagram: up to eight boxes in
+ *  order (a mono label, one line of text), at most ONE flagged `waiting` (the
+ *  step that waits for a person; a later flag is dropped), and a caption.
+ *  Presentation only: text and one boolean. Fewer than two boxes is no diagram. */
+function cleanDiagram(raw: unknown): { nodes: { label: string; text?: string; waiting?: true }[]; caption?: string } | undefined {
+  const g = asObject(raw);
+  if (!g) return undefined;
+  let waitingSeen = false;
+  const nodes = (Array.isArray(g.nodes) ? g.nodes : []).slice(0, MAX.diagramNodes).map((n) => {
+    const nn = asObject(n) ?? {};
+    const label = typeof nn.label === 'string' ? cleanContent(nn.label, MAX.eyebrow, 'diagram.label') : '';
+    const text = optionalCleanContent(nn.text, MAX.label, 'diagram.text');
+    const waiting = nn.waiting === true && !waitingSeen;
+    if (waiting) waitingSeen = true;
+    return { label, ...(text ? { text } : {}), ...(waiting ? { waiting: true as const } : {}) };
+  }).filter((n) => n.label.length > 0);
+  if (nodes.length < 2) return undefined;
+  const caption = optionalCleanContent(g.caption, MAX.caption, 'diagram.caption');
+  return { nodes, ...(caption ? { caption } : {}) };
+}
+
 /**
  * Build a section's cleaned field set from a raw object. `partial: false` (the
  * base `data`) enforces required fields; `partial: true` (a per-locale overlay,
@@ -610,7 +951,7 @@ function httpsMediaUrl(v: unknown, field: string, partial: boolean, hosts?: Read
  * but cleans/bounds/safe-links every field IDENTICALLY, so a localization can
  * never become a stored-XSS or open-redirect vector that the base couldn't.
  */
-function buildSectionData(type: SectionType, d: Record<string, unknown>, partial: boolean): Record<string, unknown> {
+function buildTypedSectionData(type: SectionType, d: Record<string, unknown>, partial: boolean): Record<string, unknown> {
   // Optional `eyebrow`/`heading` shared by the marketing blocks (ADR 0027).
   const opt = (k: 'eyebrow' | 'heading' | 'lede', max: number): Record<string, string> => {
     const v = optionalCleanContent(d[k], max, k);
@@ -625,7 +966,8 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
   };
   const headStyle = (): Record<string, string> => {
     const v = pickEnum(SECTION_HEADS, d.head);
-    return v ? { head: v } : {};
+    const size = pickEnum(SECTION_HEAD_SIZES, d.headSize);
+    return { ...(v ? { head: v } : {}), ...(size ? { headSize: size } : {}) };
   };
   switch (type) {
     case 'hero': {
@@ -638,22 +980,43 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
         : undefined;
       // ADR 0920 D3 — the example plan card, fine print, and the 2nd-CTA icon.
       const plan = cleanHeroPlan(d.plan);
+      // ADR 1029 D5 — the activity (approval) card, the `plan` card's sibling.
+      const activity = cleanActivity(d.activity);
+      // ADR 1047 — the hub picture (centre + places), content like the activity card.
+      const hub = cleanHub(d.hub);
+      // ADR 1038 D8 — the flow picture, content like the activity card.
+      const flow = cleanFlow(d.flow);
+      // ADR 1060 — the illustrated visuals (receipt, …), each closed by its spec.
+      const art = cleanAllHeroArt(d);
       const note = optionalCleanContent(d.note, MAX.heroNote, 'note');
       const ctaIcon2 = pickEnum(HERO_CTA_ICONS, d.ctaIcon2);
+      // ADR 1066 D1/D2 — the picture's placement, and a second, quieter paragraph.
+      const placement = pickEnum(HERO_PLACEMENTS, d.placement);
+      const body = optionalCleanContent(d.body, MAX.text, 'body');
       return {
         ...opt('eyebrow', MAX.eyebrow),
         ...(heading ? { heading } : {}),
         ...(optionalCleanContent(d.subheading, MAX.text, 'subheading') ? { subheading: optionalCleanContent(d.subheading, MAX.text, 'subheading') } : {}),
+        ...(body ? { body } : {}),
+        ...(placement ? { placement } : {}),
         // Opaque media REFERENCE — charset-validated, NOT secret-scrubbed
         // (cleanString redacts 40+-char blobs, destroying serve tokens; ADR 0206).
         ...(cleanOpaqueToken(d.imageToken, MAX.token) ? { imageToken: cleanOpaqueToken(d.imageToken, MAX.token) } : {}),
         ...(optionalCleanContent(d.alt, MAX.alt, 'alt') ? { alt: optionalCleanContent(d.alt, MAX.alt, 'alt') } : {}),
         ...(visual ? { visual } : {}),
+        // ADR 1064 P3f(d) — up to four short notes pinned to the picture's corners.
+        ...heroImageChips(d.chips),
         ...(cta1 ? { ctaLabel: cta1, ctaUrl: safeLink(d.ctaUrl, MAX.url) } : {}),
         ...(cta2 ? { ctaLabel2: cta2, ctaUrl2: safeLink(d.ctaUrl2, MAX.url) } : {}),
         ...(ctaIcon2 ? { ctaIcon2 } : {}),
         ...(note ? { note } : {}),
         ...(plan ? { plan } : {}),
+        ...(activity ? { activity } : {}),
+        ...(hub ? { hub } : {}),
+        ...(flow ? { flow } : {}),
+        ...art,
+        // ADR 1080 D7 — the queue picture.
+        ...(cleanHeroQueue(d.queue) ? { queue: cleanHeroQueue(d.queue) } : {}),
       };
     }
     case 'productGrid': {
@@ -685,11 +1048,26 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
       const formId = cleanOpaqueToken(d.formId, 128);
       if (!partial && !formId) throw new OpenwopError('validation_error', 'form.formId is required (which form to render).', 400, {});
       const formOrgId = optionalCleanString(d.orgId, 120);
+      // ADR 1064 — `layout: 'card'`: the copy beside the form, which sits in a
+      // card; an optional `person` (who reads the message) heads the card. A
+      // person picture always carries its alt text; anything else is dropped.
+      const person = d.layout === 'card' ? cleanFormPerson(d.person) : undefined;
+      // ADR 1068 D3 — a short note under the form card ("Read by a person.
+      // We answer within a day.").
+      // An overlay names no layout, so it keeps the note's words (the base decides whether it shows).
+      const formNote = partial || d.layout === 'card' ? optionalCleanContent(d.note, MAX.sectionNote, 'note') : undefined;
       return {
         ...opt('eyebrow', MAX.eyebrow),
         ...opt('heading', MAX.heading),
+        ...opt('lede', MAX.lede),
         ...(formId ? { formId } : {}),
         ...(formOrgId ? { orgId: formOrgId } : {}),
+        ...(d.layout === 'card' ? { layout: 'card' } : {}),
+        ...(person ? { person } : {}),
+        ...(formNote ? { note: formNote } : {}),
+        // ADR 1080 D12 — a photo beside the form card, and the button's words.
+        ...formPicture(d),
+        ...(optionalCleanContent(d.submitLabel, MAX.badge, 'submitLabel') ? { submitLabel: optionalCleanContent(d.submitLabel, MAX.badge, 'submitLabel') } : {}),
       };
     }
     case 'entityList': {
@@ -757,6 +1135,9 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
       // ADR 0920 D5 — the conversation picture beside the copy.
       const rtVisual = pickEnum(RICH_TEXT_VISUALS, d.visual);
       const chat = cleanChat(d.chat);
+      // ADR 1074 D1 — the screenshot beside the copy (`visual: 'image'`), always
+      // in a browser frame. Kept like `chat` when the author switches visuals.
+      const rtShot = richTextShot(d);
       return {
         ...opt('eyebrow', MAX.eyebrow),
         ...opt('heading', MAX.heading),
@@ -765,16 +1146,34 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
         ...headStyle(),
         ...(rtVisual ? { visual: rtVisual } : {}),
         ...(chat ? { chat } : {}),
+        ...rtShot,
+        // ADR 1080 D5/D8 — the picture on the copy's start side, and the card picture.
+        ...(pickEnum(RICH_TEXT_SIDES, d.side) ? { side: pickEnum(RICH_TEXT_SIDES, d.side) } : {}),
+        ...(cleanRichTextCard(d.card, safeLink) ? { card: cleanRichTextCard(d.card, safeLink) } : {}),
+        // ADR 1064 P3f — inline code spans render as <cite> source pills.
+        ...(d.sources === true ? { sources: true } : {}),
+        // ADR 1073 D1 — a pull quote under the heading (plain text, like a testimonial).
+        ...(optionalCleanContent(d.quote, MAX.caption, 'quote') ? { quote: optionalCleanContent(d.quote, MAX.caption, 'quote') } : {}),
       };
     }
     case 'image': {
       // Opaque media REFERENCE — charset-validated, NOT secret-scrubbed (see hero).
       const token = cleanOpaqueToken(d.token, MAX.token);
       if (!partial && !token) throw new OpenwopError('validation_error', 'image.token is required.', 400, {});
+      // ADR 1032 — an optional head over the figure, and a browser frame whose
+      // address label is plain text (a label, never a link).
+      const frame = pickEnum(IMAGE_FRAMES, d.frame);
+      const frameUrl = optionalCleanContent(d.frameUrl, MAX.label, 'frameUrl');
       return {
+        ...opt('eyebrow', MAX.eyebrow),
+        ...opt('heading', MAX.heading),
+        ...opt('lede', MAX.lede),
+        ...(frame ? { frame } : {}),
+        ...(frameUrl ? { frameUrl } : {}),
         ...(token ? { token } : {}),
         ...(optionalCleanContent(d.alt, MAX.alt, 'alt') ? { alt: optionalCleanContent(d.alt, MAX.alt, 'alt') } : {}),
         ...(optionalCleanContent(d.caption, MAX.caption, 'caption') ? { caption: optionalCleanContent(d.caption, MAX.caption, 'caption') } : {}),
+        ...tone(), // ADR 1050 D5 — the same band as the other sections
       };
     }
     case 'cta': {
@@ -789,13 +1188,15 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
         ...(!partial || has('url') ? { url: safeLink(d.url, MAX.url) } : {}),
         ...tone(),
         ...(align ? { align } : {}),
+        // ADR 1062 D4 — a short line under the button ("No card needed").
+        ...(optionalCleanContent(d.note, MAX.caption, 'note') ? { note: optionalCleanContent(d.note, MAX.caption, 'note') } : {}),
       };
     }
     case 'columns': {
       const cols = Array.isArray(d.columns) ? d.columns : [];
       const layout = COLUMN_LAYOUTS.includes(d.layout as typeof COLUMN_LAYOUTS[number]) ? (d.layout as string) : 'cards';
       const mapped = cols.slice(0, MAX.columns).map((c) => {
-        const cc = c as { title?: unknown; text?: unknown; href?: unknown; icon?: unknown; optional?: unknown; eyebrow?: unknown; progress?: unknown; badge?: unknown; future?: unknown; art?: unknown; items?: unknown };
+        const cc = c as { status?: unknown; state?: unknown; title?: unknown; text?: unknown; href?: unknown; icon?: unknown; optional?: unknown; eyebrow?: unknown; progress?: unknown; badge?: unknown; future?: unknown; partial?: unknown; count?: unknown; tone?: unknown; gauge?: unknown; art?: unknown; items?: unknown; wide?: unknown; imageToken?: unknown; alt?: unknown; frameUrl?: unknown; highlight?: unknown; callout?: unknown; tags?: unknown; more?: unknown; unit?: unknown; ctaLabel?: unknown; ctaUrl?: unknown; tall?: unknown; countLabel?: unknown; imagePosition?: unknown; tag?: unknown };
         const title = optionalCleanContent(cc.title, MAX.label, 'title');
         // Optional per-card link target → the whole card renders as a link
         // (cards layout, #414). `safeLink` guards open-redirect / non-http(s).
@@ -813,8 +1214,41 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
         const items = (Array.isArray(cc.items) ? cc.items : []).slice(0, MAX.listItems).map((it) => {
           const ii = asObject(it) ?? {};
           const meta = optionalCleanContent(ii.meta, MAX.itemMeta, 'meta');
-          return { label: typeof ii.label === 'string' ? cleanContent(ii.label, MAX.label, 'label') : '', ...(meta ? { meta } : {}) };
+          // ADR 1071 D3 — a short note on the row's other side ("your-app.com").
+          const aside = optionalCleanContent(ii.aside, MAX.itemMeta, 'aside');
+          return { label: typeof ii.label === 'string' ? cleanContent(ii.label, MAX.label, 'label') : '', ...(meta ? { meta } : {}), ...(aside ? { aside } : {}) };
         }).filter((it) => it.label.length > 0);
+        // ADR 1037 — a picture on the item (a bento tile's foot, a marquee app
+        // card). An opaque media REFERENCE like `image.token` (charset-checked,
+        // never secret-scrubbed). A picture always carries its alt text: an
+        // image without one is refused, never published unlabelled. `frameUrl`
+        // is the ADR 1032 browser frame's plain-text address label (never a link).
+        const imageToken = cleanOpaqueToken(cc.imageToken, MAX.token);
+        const itemAlt = optionalCleanContent(cc.alt, MAX.alt, 'alt');
+        if (imageToken && !itemAlt) {
+          throw new OpenwopError('validation_error', 'columns[].alt is required when columns[].imageToken is set.', 400, {});
+        }
+        const frameUrl = imageToken ? optionalCleanContent(cc.frameUrl, MAX.label, 'frameUrl') : undefined;
+        // ADR 1047 — a feature card's callout ("The problem it solves"), its
+        // status pills, and its folded "How you use it". Kept on any layout (a
+        // locale overlay may not name one); only `features` draws them. A
+        // callout or disclosure needs its text; a pill needs its label.
+        const co = asObject(cc.callout) ?? {};
+        const calloutText = optionalCleanContent(co.text, MAX.lede, 'callout');
+        const callout = calloutText ? defined({ label: optionalCleanContent(co.label, MAX.eyebrow, 'callout'), text: calloutText }) : undefined;
+        const tags = (Array.isArray(cc.tags) ? cc.tags : []).slice(0, MAX.featureTags).map((tg) => {
+          const tt = asObject(tg) ?? {};
+          return defined({ label: optionalCleanContent(tt.label, MAX.featureTag, 'tag'), state: pickEnum(FEATURE_TAG_STATES, tt.state) });
+        }).filter((tg) => tg.label !== undefined);
+        const mo = asObject(cc.more) ?? {};
+        const moreText = optionalCleanContent(mo.text, MAX.featureMore, 'more');
+        const more = moreText ? defined({ label: optionalCleanContent(mo.label, MAX.label, 'more'), text: moreText }) : undefined;
+        // ADR 1038 D8 — a flow node's status word and styling state.
+        // On the base layer they are kept only on a flow (an overlay names no
+        // layout, so it keeps them and the base sync corrects the state).
+        const flowItem = partial || layout === 'flow';
+        const status = flowItem ? optionalCleanContent(cc.status, MAX.flowLabel, 'status') : undefined;
+        const state = flowItem ? pickEnum(FLOW_STATES, cc.state) : undefined;
         return {
           ...(title ? { title } : {}),
           text: cleanContent(cc.text, MAX.text, 'text'),
@@ -825,12 +1259,58 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
           ...(progress !== undefined ? { progress } : {}),
           ...(badge ? { badge } : {}),
           ...(cc.future === true ? { future: true } : {}),
+          // A status list's middle state ("partly there"). `future` wins if both are set.
+          ...(cc.partial === true && cc.future !== true ? { partial: true } : {}),
+          // ADR 1029 D5 — a `bento` tile two columns wide.
+          ...(cc.wide === true ? { wide: true } : {}),
+          // ADR 1070 D1 — a bento tile two rows tall.
+          ...(cc.tall === true ? { tall: true } : {}),
+          // ADR 1063 P2c — a tile's headline number (counts up from 0) and a
+          // dark tile. An integer 0–9,999,999; anything else is dropped.
+          ...(typeof cc.count === 'number' && Number.isInteger(cc.count) && cc.count >= 0 && cc.count <= 9_999_999 ? { count: cc.count } : {}),
+          // ADR 1070 D1 — `mist` joins `inverse`: a muted tile.
+          ...(pickEnum(COLUMN_ITEM_TONES, cc.tone) ? { tone: pickEnum(COLUMN_ITEM_TONES, cc.tone) } : {}),
+          // ADR 1070 D2 — the words under a tile's headline number ("features, already built").
+          ...(optionalCleanContent(cc.countLabel, MAX.badge, 'countLabel') ? { countLabel: optionalCleanContent(cc.countLabel, MAX.badge, 'countLabel') } : {}),
+          // ADR 1070 D3 — a bento tile's picture at its top instead of its foot.
+          ...(pickEnum(COLUMN_IMAGE_POSITIONS, cc.imagePosition) ? { imagePosition: pickEnum(COLUMN_IMAGE_POSITIONS, cc.imagePosition) } : {}),
+          // ADR 1064 P3d — a card's ring gauge: its words ("415/415"), the
+          // ring's fill from the item's own `progress`. Content, never computed.
+          ...(optionalCleanContent(cc.gauge, MAX.badge, 'gauge') ? { gauge: optionalCleanContent(cc.gauge, MAX.badge, 'gauge') } : {}),
           ...(art ? { art } : {}),
           ...(items.length > 0 ? { items } : {}),
+          ...(imageToken ? { imageToken, alt: itemAlt } : {}),
+          ...(frameUrl ? { frameUrl } : {}),
+          // ADR 1037 — the item the section singles out (a featured plan, a
+          // standout tile). Presentation only.
+          ...(cc.highlight === true ? { highlight: true } : {}),
+          // ADR 1069 D1 — a plan card's price unit ("a month, per app") and its
+          // own button. The link is guarded like every other; no label, no link.
+          ...(optionalCleanContent(cc.unit, MAX.badge, 'unit') ? { unit: optionalCleanContent(cc.unit, MAX.badge, 'unit') } : {}),
+          ...(optionalCleanContent(cc.ctaLabel, MAX.label, 'ctaLabel') ? { ctaLabel: optionalCleanContent(cc.ctaLabel, MAX.label, 'ctaLabel'), ctaUrl: safeLink(cc.ctaUrl, MAX.url) } : {}),
+          ...(callout ? { callout } : {}),
+          ...(tags.length > 0 ? { tags } : {}),
+          ...(more ? { more } : {}),
+          ...(status ? { status } : {}),
+          ...(state ? { state } : {}),
+          // ADR 1080 D9 — a short mono tag over a gallery caption ("Powder room").
+          ...(optionalCleanContent(cc.tag, MAX.badge, 'tag') ? { tag: optionalCleanContent(cc.tag, MAX.badge, 'tag') } : {}),
         };
       });
+      // ADR 1038 D8 — a flow holds at most six nodes; refuse rather than cut an
+      // author's seventh step silently (a longer process is a timeline).
+      if (!partial && layout === 'flow' && cols.length > MAX.flowNodes) {
+        throw new OpenwopError('validation_error', `columns: a flow holds at most ${MAX.flowNodes} steps; use the timeline layout for a longer process.`, 400, {});
+      }
       const colNote = optionalCleanContent(d.note, MAX.sectionNote, 'note');
+      const sectionStat = cleanSectionStat(d.stat);
       const numbers = pickEnum(STEP_NUMBERS, d.numbers);
+      const toggles = cleanToggles(d.toggles);
+      const diagram = layout === 'rows' ? cleanDiagram(d.diagram) : undefined;
+      // ADR 1047 — the words each pill state means ("Available now", "Rolling
+      // out"), shown as a legend over a `features` grid and read with each pill.
+      const lg = asObject(d.tagLegend) ?? {};
+      const tagLegend = defined({ now: optionalCleanContent(lg.now, MAX.badge, 'tagLegend'), soon: optionalCleanContent(lg.soon, MAX.badge, 'tagLegend') });
       return {
         ...opt('eyebrow', MAX.eyebrow),
         ...opt('heading', MAX.heading),
@@ -838,7 +1318,30 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
         ...(!partial || has('layout') ? { layout } : {}),
         ...(!partial || has('columns') ? { columns: mapped } : {}),
         ...(colNote ? { note: colNote } : {}),
+        // ADR 1069 D2 — the footnote as a boxed callout.
+        ...(colNote && pickEnum(COLUMN_NOTE_STYLES, d.noteStyle) ? { noteStyle: pickEnum(COLUMN_NOTE_STYLES, d.noteStyle) } : {}),
         ...(numbers ? { numbers } : {}),
+        ...(toggles ? { toggles } : {}),
+        ...(diagram ? { diagram } : {}),
+        ...(Object.keys(tagLegend).length > 0 ? { tagLegend } : {}),
+        // ADR 1064 P3b — status filter chips over a `tiles` grid.
+        ...(d.filter === true ? { filter: true } : {}),
+        // ADR 1072 D1 — steps drawn as boxed cards with an arrow between them.
+        ...(layout === 'steps' && d.cards === true ? { cards: true } : {}),
+        // ADR 1072 D2 — a gallery led by one tall picture, the rest stacked beside it.
+        ...(layout === 'gallery' && pickEnum(GALLERY_LAYOUTS, d.galleryLayout) ? { galleryLayout: pickEnum(GALLERY_LAYOUTS, d.galleryLayout) } : {}),
+        // ADR 1080 D9 — a gallery that runs edge to edge.
+        ...(layout === 'gallery' && d.bleed === true ? { bleed: true } : {}),
+        // ADR 1064 P3c — a flow's marks light in turn (a loop with a pause control).
+        ...(layout === 'flow' && d.run === true ? { run: true } : {}),
+        // ADR 1064 P3f — a timeline's picture beside the rail (alt required).
+        // ADR 1071 D1 — the section's headline number, and its picture beside the head.
+        ...(sectionStat ? { stat: sectionStat } : {}),
+        ...timelineShot(layout, d, sectionStat !== undefined),
+        // ADR 1073 D2 — a timeline's head and picture on the start side, the rail beside them.
+        ...(layout === 'timeline' && pickEnum(TIMELINE_SHOT_SIDES, d.shotSide) ? { shotSide: pickEnum(TIMELINE_SHOT_SIDES, d.shotSide) } : {}),
+        // ADR 1073 D3 — numbered badges on the rail instead of dots.
+        ...(layout === 'timeline' && pickEnum(TIMELINE_MARKERS, d.markers) ? { markers: pickEnum(TIMELINE_MARKERS, d.markers) } : {}),
         ...tone(),
         ...headStyle(),
       };
@@ -895,6 +1398,15 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
       const highlightColumn = hcRaw !== undefined && hcRaw >= 0 && hcRaw < columns.length ? hcRaw : undefined;
       const legend = optionalCleanContent(d.legend, MAX.text, 'legend');
       const note = optionalCleanContent(d.note, MAX.text, 'note');
+      // How the matrix reads. Absent: a MARK matrix (✓ / ~ / ✗ glyphs, the site
+      // default). 'text': a TEXT matrix whose cells are sentences (the compare
+      // page): roomier cells, mono row heads, a mono footnote. A closed set; an
+      // unknown value is refused on the base and dropped from an overlay.
+      const styleRaw = typeof d.style === 'string' ? d.style.trim() : '';
+      const style = COMPARISON_STYLES.has(styleRaw) ? styleRaw : undefined;
+      if (styleRaw && !style && !partial) {
+        throw new OpenwopError('validation_error', `comparison.style must be one of: ${[...COMPARISON_STYLES].join(', ')}.`, 400, { field: 'style' });
+      }
       return {
         ...opt('eyebrow', MAX.eyebrow),
         ...opt('heading', MAX.heading),
@@ -904,6 +1416,7 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
         ...(!partial || has('columns') ? { columns } : {}),
         ...(!partial || has('rows') ? { rows } : {}),
         ...(highlightColumn !== undefined ? { highlightColumn } : {}),
+        ...(style ? { style } : {}),
       };
     }
     case 'faq': {
@@ -926,15 +1439,28 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
       if (!partial && items.length === 0) {
         throw new OpenwopError('validation_error', 'faq.items needs at least one question with an answer.', 400, {});
       }
+      // ADR 1063 D2 — two columns on wide screens, the first answer open, and
+      // an optional picture under the head. A picture always carries its alt
+      // text (the columns rule): an image without one is refused.
+      const faqImage = cleanOpaqueToken(d.imageToken, MAX.token);
+      const faqAlt = optionalCleanContent(d.alt, MAX.alt, 'alt');
+      if (faqImage && !faqAlt) throw new OpenwopError('validation_error', 'faq.alt is required when faq.imageToken is set.', 400, {});
+      const faqFrame = faqImage ? optionalCleanContent(d.frameUrl, MAX.label, 'frameUrl') : undefined;
       return {
         ...opt('eyebrow', MAX.eyebrow),
         ...opt('heading', MAX.heading),
         ...opt('lede', MAX.lede),
         ...(!partial || has('items') ? { items } : {}),
+        ...(d.columns === 2 ? { columns: 2 } : {}),
+        ...(d.openFirst === true ? { openFirst: true } : {}),
+        ...(faqImage ? { imageToken: faqImage, alt: faqAlt, ...(faqFrame ? { frameUrl: faqFrame } : {}) } : {}),
         ...tone(),
         ...headStyle(),
       };
     }
+    case 'statusTable': case 'dateCalc': case 'conversation': case 'featureIndex': case 'decisionTree': case 'scheduleSim':
+      // ADR 1080 D1–D4, D15, D16.
+      return { ...opt('eyebrow', MAX.eyebrow), ...opt('heading', MAX.heading), ...opt('lede', MAX.lede), ...tone(), ...headStyle(), ...buildDesignSectionData(type, d, partial) };
     case 'quotes': {
       // R2-G10 — attributed social proof (testimonials). Every 2026 leader puts
       // quantified, ATTRIBUTED quotes near the hero; the fields push authors
@@ -960,6 +1486,8 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
         ...opt('heading', MAX.heading),
         ...opt('lede', MAX.lede),
         ...(!partial || has('items') ? { items } : {}),
+        // ADR 1064 P3f — one large quote on the accent colour.
+        ...(d.style === 'pull' ? { style: 'pull' } : {}),
         ...tone(),
       };
     }
@@ -974,17 +1502,26 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
       const youtubeUrl = httpsMediaUrl(d.youtubeUrl, 'youtubeUrl', partial, YOUTUBE_HOSTS);
       const title = optionalCleanContent(d.title, MAX.title, 'title');
       const description = optionalCleanContent(d.description, MAX.videoDescription, 'description');
+      // ADR 1068 D1 — `chipLabel` is the corner play chip's visible words ("Watch
+      // the tour"), so `title` can stay the film's name for screen readers and the
+      // VideoObject; `caption` is a visible line under the film, also with the chip.
+      const chipLabel = optionalCleanContent(d.chipLabel, MAX.label, 'chipLabel');
+      const caption = optionalCleanContent(d.caption, MAX.caption, 'caption');
       const lengthRaw = typeof d.length === 'string' ? d.length.trim() : '';
       const length = VIDEO_LENGTH_RE.test(lengthRaw) ? lengthRaw : undefined;
       const uploadRaw = typeof d.uploadDate === 'string' ? d.uploadDate.trim() : '';
-      const uploadDate = UPLOAD_DATE_RE.test(uploadRaw) ? uploadRaw : undefined;
+      const uploadDate = isValidUploadDate(uploadRaw) ? uploadRaw : undefined;
+      // ADR 1032 — an optional second film beside the first, held to the same
+      // rules, and a footnote under the pair.
+      const film2 = cleanSecondFilm(d.film2, partial);
+      const videoNote = optionalCleanContent(d.note, MAX.sectionNote, 'note');
       if (!partial) {
         if (!src) throw new OpenwopError('validation_error', 'video.src is required (an https:// URL to the video file).', 400, { field: 'src' });
         if (!poster) throw new OpenwopError('validation_error', 'video.poster is required (an https:// URL to the poster image).', 400, { field: 'poster' });
         if (!title) throw new OpenwopError('validation_error', 'video.title is required.', 400, { field: 'title' });
         if (!description) throw new OpenwopError('validation_error', 'video.description is required (what the film shows, for screen readers and search).', 400, { field: 'description' });
         if (!length) throw new OpenwopError('validation_error', 'video.length is required as m:ss (e.g. 1:57).', 400, { field: 'length' });
-        if (uploadRaw && !uploadDate) throw new OpenwopError('validation_error', 'video.uploadDate must be YYYY-MM-DD.', 400, { field: 'uploadDate' });
+        if (uploadRaw && !uploadDate) throw new OpenwopError('validation_error', 'video.uploadDate must be YYYY-MM-DD or an ISO 8601 datetime with a timezone.', 400, { field: 'uploadDate' });
       }
       return {
         ...opt('eyebrow', MAX.eyebrow),
@@ -992,12 +1529,18 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
         ...opt('lede', MAX.lede),
         ...(title ? { title } : {}),
         ...(description ? { description } : {}),
+        ...(chipLabel ? { chipLabel } : {}),
+        ...(caption ? { caption } : {}),
         ...(src ? { src } : {}),
         ...(poster ? { poster } : {}),
         ...(captions ? { captions } : {}),
         ...(length ? { length } : {}),
         ...(uploadDate ? { uploadDate } : {}),
         ...(youtubeUrl ? { youtubeUrl } : {}),
+        ...(film2 ? { film2 } : {}),
+        ...(videoNote ? { note: videoNote } : {}),
+        // ADR 1063 P2b — the play control as a bottom-left chip (title + length).
+        ...(d.chip === 'corner' ? { chip: 'corner' } : {}),
         ...tone(),
         ...headStyle(),
       };
@@ -1053,7 +1596,60 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
  * type system found four. A caller with genuinely no page tenant passes `undefined`
  * explicitly and says why.
  */
-function validateLocalizations(type: SectionType, raw: unknown, baseLocale: string, pageTenantId: string | undefined): Record<string, Record<string, unknown>> | undefined {
+/**
+ * ADR 1038 D8 (architect review; corrected by the P8 code review and the grading
+ * pass) — every list item's styling `state` comes from the base, never from an
+ * overlay.
+ *
+ * An overlay replaces a nested list whole (RFC 0103 §C), so it carries a copy of
+ * each item's state taken when it was written: a model asked to translate VALUES
+ * translates the enum too ("waiting" → "en attente", which the cleaner drops),
+ * a translator can pick another, and a later base edit never reaches it. `state`
+ * is presentation, never prose. This runs on the RAW overlay, before the cleaner
+ * drops unlabelled items, so positions still match the base; a list whose length
+ * differs from the base's is left alone rather than guessed at. Runs on every
+ * write (`validateLocalizations`, the AI translate and rewrite lanes, the agent
+ * surface), never at serve time: `resolveSection` is the RFC 0103 §C merge every
+ * host must share byte for byte. Returns a copy.
+ */
+export function restoreItemStates(base: unknown, overlay: Record<string, unknown>): Record<string, unknown> {
+  const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+  const copy = structuredClone(overlay);
+  const walk = (b: unknown, o: unknown): void => {
+    if (Array.isArray(b) && Array.isArray(o)) {
+      if (b.length !== o.length) return;
+      o.forEach((item, i) => {
+        const bi = b[i];
+        if (!isObj(item) || !isObj(bi)) return;
+        // ADR 1060 widens `state` to every presentation key (ITEM_BASE_KEYS).
+        for (const key of ITEM_BASE_KEYS) {
+          if (typeof bi[key] === 'string' || typeof bi[key] === 'number') item[key] = bi[key];
+          else delete item[key];
+        }
+        walk(bi, item);
+      });
+      return;
+    }
+    if (isObj(b) && isObj(o)) for (const k of Object.keys(o)) if (Object.hasOwn(b, k)) walk(b[k], o[k]);
+  };
+  walk(base, copy);
+  return copy;
+}
+
+/** An overlay with every list item's `state` removed, for comparing two overlays'
+ *  authored content: a state synced from the base is not an author's edit, so it
+ *  must not re-stamp an outdated translation as current (ADR 0861 D6). */
+function withoutItemStates(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map((item) => {
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) return withoutItemStates(item);
+    const rest = Object.fromEntries(Object.entries(item as Record<string, unknown>).filter(([k]) => !(ITEM_BASE_KEYS as readonly string[]).includes(k)));
+    return withoutItemStates(rest);
+  });
+  if (typeof v === 'object' && v !== null) return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, withoutItemStates(x)]));
+  return v;
+}
+
+function validateLocalizations(type: SectionType, raw: unknown, baseLocale: string, pageTenantId: string | undefined, baseData?: Record<string, unknown>): Record<string, Record<string, unknown>> | undefined {
   if (raw === undefined || raw === null) return undefined;
   if (typeof raw !== 'object' || Array.isArray(raw)) {
     throw new OpenwopError('validation_error', 'section.localizations must be an object.', 400, {});
@@ -1073,7 +1669,9 @@ function validateLocalizations(type: SectionType, raw: unknown, baseLocale: stri
     // inherits the base (the common case, still legal); one that names it must name this
     // page's. Parity, deliberately: a rule stricter than the one it mirrors is its own hazard.
     assertSectionTenant(type, overlay as Record<string, unknown>, pageTenantId);
-    out[locale] = buildSectionData(type, overlay as Record<string, unknown>, true);
+    // ADR 1038 D8 — list-item states follow the base (see restoreItemStates).
+    const raw = baseData ? restoreItemStates(baseData, overlay as Record<string, unknown>) : (overlay as Record<string, unknown>);
+    out[locale] = buildSectionData(type, raw, true);
   }
   return out;
 }
@@ -1111,7 +1709,7 @@ export function validateSection(raw: unknown, baseLocale = 'en', pageTenantId?: 
   const d = (typeof r.data === 'object' && r.data !== null ? r.data : {}) as Record<string, unknown>;
   assertSectionTenant(type, d, pageTenantId); // ADR 0593 §C9 (CMSA-12)
   const data = buildSectionData(type, d, false);
-  const localizations = validateLocalizations(type, r.localizations, baseLocale, pageTenantId);
+  const localizations = validateLocalizations(type, r.localizations, baseLocale, pageTenantId, data);
   const hasLoc = !!localizations && Object.keys(localizations).length > 0;
   const aiDrafted = cleanAiDrafted(r.aiDrafted, hasLoc ? localizations : undefined);
   const sourceDigest = cleanSourceDigest(r.sourceDigest, hasLoc ? localizations : undefined);
@@ -1205,7 +1803,9 @@ export function stampSourceDigests<S extends Pick<Section, 'sectionId' | 'data' 
     const digests: Record<string, string> = {};
     for (const [locale, overlay] of Object.entries(s.localizations)) {
       const confirming = confirm?.sectionId === s.sectionId && confirm.locale === locale;
-      const unchanged = !!old?.localizations?.[locale] && JSON.stringify(old.localizations[locale]) === JSON.stringify(overlay);
+      // Item states are synced from the base (ADR 1038 D8), not authored, so they
+      // are left out of "did the author change this overlay".
+      const unchanged = !!old?.localizations?.[locale] && JSON.stringify(withoutItemStates(old.localizations[locale])) === JSON.stringify(withoutItemStates(overlay));
       if (!confirming && unchanged) {
         const carried = old?.sourceDigest?.[locale];
         if (carried) digests[locale] = carried;
@@ -1327,6 +1927,123 @@ export function cleanPageTags(raw: unknown): string[] {
   return cleanTagList(raw, { maxTags: MAX.tags, maxLen: MAX.tag });
 }
 
+/** ADR 1049 — the closed set of public-site nav groups a page may join. */
+export const SITE_NAV_GROUPS = ['product', 'audience', 'trust', 'company', 'legal'] as const;
+export type SiteNavGroup = (typeof SITE_NAV_GROUPS)[number];
+
+/** ADR 1049 — a page's public-site nav placement (every field optional). */
+export interface PageSiteNav {
+  group?: SiteNavGroup;
+  /** Short menu label overriding the page title (≤ 40). */
+  label?: string;
+  /** One-line blurb under the label in the mega menu (≤ 90). */
+  description?: string;
+  /** Integer 0–999; lower sorts first within the group. */
+  order?: number;
+  /** Promote into the header's always-visible primary nav. */
+  primary?: boolean;
+  /** ADR 1056 — make this page the grouped footer's call to action: the
+   *  button label (≤ 40) under the brand column. The first page (group, then
+   *  order) that sets it wins. */
+  cta?: string;
+  /** ADR 1056 — also list this page among the grouped footer's bottom-bar
+   *  utility links (it stays in its group column too). */
+  utility?: boolean;
+  /** ADR 1062 D2 — feature this page as the mega menu's card: a short eyebrow
+   *  ("New film"), a title, a meta line ("3:57") and an optional `href` (a
+   *  `#fragment` on this page or a safe internal path; default: the page). The
+   *  first published page (home included) that sets it wins. */
+  featured?: SiteNavFeatured;
+}
+
+export interface SiteNavFeatured { eyebrow?: string; title: string; meta?: string; href?: string }
+
+const SITE_NAV_MAX = { label: 40, description: 90, cta: 40, order: 999, featuredEyebrow: 30, featuredTitle: 60, featuredMeta: 20, featuredHref: 200 } as const;
+
+/** ADR 1062 D2 — validate `siteNav.featured`. A title is required; `href` is a
+ *  same-page fragment or a safe internal path, never an external URL (the card
+ *  sits in the site's own navigation). Anything else is a 400, never coerced. */
+function cleanSiteNavFeatured(raw: unknown): SiteNavFeatured | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new OpenwopError('validation_error', '`siteNav.featured` must be an object.', 400, { field: 'siteNav.featured' });
+  }
+  const f = raw as Record<string, unknown>;
+  const text = (k: 'eyebrow' | 'title' | 'meta', max: number): string | undefined => {
+    const v = f[k];
+    if (v === undefined || v === null) return undefined;
+    if (typeof v !== 'string') throw new OpenwopError('validation_error', `\`siteNav.featured.${k}\` must be a string.`, 400, { field: `siteNav.featured.${k}` });
+    return optionalCleanContent(v, max, `siteNav.featured.${k}`) || undefined;
+  };
+  const title = text('title', SITE_NAV_MAX.featuredTitle);
+  if (!title) throw new OpenwopError('validation_error', '`siteNav.featured.title` is required.', 400, { field: 'siteNav.featured.title' });
+  const eyebrow = text('eyebrow', SITE_NAV_MAX.featuredEyebrow);
+  const meta = text('meta', SITE_NAV_MAX.featuredMeta);
+  let href: string | undefined;
+  if (f.href !== undefined && f.href !== null && f.href !== '') {
+    const h = typeof f.href === 'string' ? f.href.trim() : '';
+    if (!h || h.length > SITE_NAV_MAX.featuredHref || !(isFragmentHref(h) || isInternalHref(h))) {
+      throw new OpenwopError('validation_error', '`siteNav.featured.href` must be a `#fragment` or an internal path.', 400, { field: 'siteNav.featured.href' });
+    }
+    href = h;
+  }
+  return { ...(eyebrow ? { eyebrow } : {}), title, ...(meta ? { meta } : {}), ...(href ? { href } : {}) };
+}
+
+/** ADR 1049 — validate a `siteNav` value. Unknown keys are dropped; strings are
+ *  trimmed + capped through the CONTENT lane (published text, never rewritten —
+ *  a credential-shaped token is a refusal); a bad `group`, a non-integer or
+ *  out-of-range `order`, or a non-boolean `primary` is a 400 (never coerced);
+ *  an object with nothing left is `undefined` (absent = ADR 0486 placement). */
+export function cleanSiteNav(raw: unknown): PageSiteNav | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new OpenwopError('validation_error', '`siteNav` must be an object.', 400, { field: 'siteNav' });
+  }
+  const r = raw as Record<string, unknown>;
+  const out: PageSiteNav = {};
+  if (r.group !== undefined && r.group !== null && r.group !== '') {
+    if (typeof r.group !== 'string' || !(SITE_NAV_GROUPS as readonly string[]).includes(r.group)) {
+      throw new OpenwopError('validation_error', `\`siteNav.group\` must be one of ${SITE_NAV_GROUPS.join(', ')}.`, 400, { field: 'siteNav.group', allowed: [...SITE_NAV_GROUPS] });
+    }
+    out.group = r.group as SiteNavGroup;
+  }
+  if (r.label !== undefined && r.label !== null) {
+    if (typeof r.label !== 'string') throw new OpenwopError('validation_error', '`siteNav.label` must be a string.', 400, { field: 'siteNav.label' });
+    const label = optionalCleanContent(r.label, SITE_NAV_MAX.label, 'siteNav.label');
+    if (label) out.label = label;
+  }
+  if (r.description !== undefined && r.description !== null) {
+    if (typeof r.description !== 'string') throw new OpenwopError('validation_error', '`siteNav.description` must be a string.', 400, { field: 'siteNav.description' });
+    const description = optionalCleanContent(r.description, SITE_NAV_MAX.description, 'siteNav.description');
+    if (description) out.description = description;
+  }
+  if (r.order !== undefined && r.order !== null) {
+    if (typeof r.order !== 'number' || !Number.isInteger(r.order) || r.order < 0 || r.order > SITE_NAV_MAX.order) {
+      throw new OpenwopError('validation_error', `\`siteNav.order\` must be an integer from 0 to ${SITE_NAV_MAX.order}.`, 400, { field: 'siteNav.order' });
+    }
+    out.order = r.order;
+  }
+  if (r.primary !== undefined && r.primary !== null) {
+    if (typeof r.primary !== 'boolean') throw new OpenwopError('validation_error', '`siteNav.primary` must be a boolean.', 400, { field: 'siteNav.primary' });
+    if (r.primary) out.primary = true;
+  }
+  // ADR 1056 — the footer CTA label and the bottom-bar utility flag, held to
+  // the same rules as `label` and `primary`.
+  if (r.cta !== undefined && r.cta !== null) {
+    if (typeof r.cta !== 'string') throw new OpenwopError('validation_error', '`siteNav.cta` must be a string.', 400, { field: 'siteNav.cta' });
+    const cta = optionalCleanContent(r.cta, SITE_NAV_MAX.cta, 'siteNav.cta');
+    if (cta) out.cta = cta;
+  }
+  if (r.utility !== undefined && r.utility !== null) {
+    if (typeof r.utility !== 'boolean') throw new OpenwopError('validation_error', '`siteNav.utility` must be a boolean.', 400, { field: 'siteNav.utility' });
+    if (r.utility) out.utility = true;
+  }
+  const featured = cleanSiteNavFeatured(r.featured); // ADR 1062 D2
+  if (featured) out.featured = featured;
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 /** ADR 0391 — validate the optional post facets. `kind` is a closed enum;
  *  `authorId` an opaque principal token; `category` slugified (it is a URL
  *  segment on the public archive). Invalid values are a 400, never coerced. */
@@ -1359,7 +2076,7 @@ async function slugSet(tenantId: string, orgId: string, exceptPageId?: string): 
   return new Set(all.filter((p) => p.pageId !== exceptPageId).map((p) => p.slug));
 }
 
-export async function createPage(input: { tenantId: string; orgId: string; title: string; slug?: string; sections?: unknown; tags?: unknown; createdBy: string; pageId?: string; baseLocale?: string; kind?: unknown; authorId?: unknown; category?: unknown; collection?: 'docs'; docsNav?: string; createOnly?: boolean }): Promise<Page> {
+export async function createPage(input: { tenantId: string; orgId: string; title: string; slug?: string; sections?: unknown; tags?: unknown; createdBy: string; pageId?: string; baseLocale?: string; kind?: unknown; authorId?: unknown; category?: unknown; collection?: 'docs'; docsNav?: string; siteNav?: unknown; createOnly?: boolean }): Promise<Page> {
   // A FIXED pageId (host-level seeds, ADR 0027) makes creation idempotent: if the
   // row already exists, return it — so a concurrent cross-instance first-boot seed
   // converges on ONE page instead of a `home` + `home-2` duplicate.
@@ -1390,6 +2107,7 @@ export async function createPage(input: { tenantId: string; orgId: string; title
   const ts = nowIso();
   const tags = cleanPageTags(input.tags);
   const facets = cleanPostFacets(input);
+  const siteNav = cleanSiteNav(input.siteNav); // ADR 1049
   const page: Page = {
     pageId: input.pageId ?? `page:${randomUUID()}`,
     tenantId: input.tenantId,
@@ -1402,6 +2120,7 @@ export async function createPage(input: { tenantId: string; orgId: string; title
     ...facets,
     ...(input.collection === 'docs' ? { collection: 'docs' as const } : {}),
     ...(input.collection === 'docs' && typeof input.docsNav === 'string' && input.docsNav ? { docsNav: cleanString(input.docsNav, MAX.slug, '') } : {}),
+    ...(siteNav ? { siteNav } : {}),
     version: 1,
     createdBy: input.createdBy,
     updatedBy: input.createdBy,
@@ -1429,7 +2148,7 @@ export async function updatePage(
   tenantId: string,
   orgId: string,
   pageId: string,
-  patch: { title?: string; slug?: string; sections?: unknown; tags?: unknown; baseLocale?: string; kind?: unknown; authorId?: unknown; category?: unknown; docsNav?: string },
+  patch: { title?: string; slug?: string; sections?: unknown; tags?: unknown; baseLocale?: string; kind?: unknown; authorId?: unknown; category?: unknown; docsNav?: string; siteNav?: unknown },
   updatedBy: string,
   // ADR 0592 §1 (CMSL-1) — OPTIONAL optimistic-concurrency pin, enforced HERE
   // (the service read is the authoritative one, so every caller that sends the
@@ -1486,6 +2205,12 @@ export async function updatePage(
   if (patch.docsNav !== undefined && p.collection === 'docs') {
     const nav = cleanString(patch.docsNav, MAX.slug, '');
     if (nav) next.docsNav = nav; else delete next.docsNav;
+  }
+  // ADR 1049 — public-site nav placement; explicit null (or an object that
+  // cleans to nothing) clears it, like `category`.
+  if (patch.siteNav !== undefined) {
+    const siteNav = cleanSiteNav(patch.siteNav);
+    if (siteNav) next.siteNav = siteNav; else delete next.siteNav;
   }
   // ADR 0836 D3 — a pending scheduled publish was set against `p.version`.
   let scheduleCleared = false;
@@ -1832,6 +2557,12 @@ export function collectMediaTokens(sections: readonly Section[]): string[] {
   const grab = (d: Record<string, unknown>): void => {
     for (const key of ['imageToken', 'token'] as const) {
       const v = d[key];
+      if (typeof v === 'string' && v.length > 0) tokens.add(v);
+    }
+    // ADR 1080 — pictures nested in cards, gallery columns and the richText card,
+    // so the media "used by" graph sees them too.
+    for (const nested of [...(Array.isArray(d.columns) ? d.columns : []), d.card, d.person]) {
+      const v = typeof nested === 'object' && nested !== null ? (nested as { imageToken?: unknown }).imageToken : undefined;
       if (typeof v === 'string' && v.length > 0) tokens.add(v);
     }
   };
@@ -2586,7 +3317,7 @@ export async function createSharedSection(
   // section is served everywhere it is used — the same defect as the page lane, wider.
   assertSectionTenant(type, d, tenantId);
   const data = buildSectionData(type, d, false);
-  const localizations = validateLocalizations(type, input.localizations, baseLocale, tenantId);
+  const localizations = validateLocalizations(type, input.localizations, baseLocale, tenantId, data);
   const ts = nowIso();
   const row: SharedSection = {
     sharedSectionId: `shsec:${randomUUID()}`,
@@ -2625,8 +3356,9 @@ export async function updateSharedSection(
     assertSectionTenant(cur.type, d, tenantId); // ADR 0668 D1 — see createSharedSection
     next.data = buildSectionData(cur.type, d, false);
   }
-  if (patch.localizations !== undefined) {
-    const loc = validateLocalizations(cur.type, patch.localizations, baseLocale, tenantId);
+  if (patch.localizations !== undefined || (patch.data !== undefined && next.localizations)) {
+    // A base edit re-syncs the stored overlays' item states too (ADR 1038 D8).
+    const loc = validateLocalizations(cur.type, patch.localizations !== undefined ? patch.localizations : next.localizations, baseLocale, tenantId, next.data);
     if (loc && Object.keys(loc).length > 0) next.localizations = loc;
     else delete next.localizations;
   }

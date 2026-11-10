@@ -169,6 +169,8 @@ The predicate judges the actor by **provenance**, the way the request gate does:
   surface (ADR 0775 D7). The first draft said it "matches every feature surface", which was
   false (architect **L2**).
 
+> **CORRECTED 2026-11-05 (ADR 1045, TST-FUD-GC-1):** an env key's principal id is now `bearer:<16 hex of sha256(key)>`, not `bearer:<first 8 chars>`; the 8-char form made two keys sharing a prefix one principal (one budget, one audit identity, and an operator-issuer check that let a surviving key vouch for a removed one). Legacy 8-char ids in stored rows are honoured as operator issuers only when exactly one configured key has that prefix. See ADR 1045 § "Env-key principal collision".
+
 `/draft` additionally stamps `personalTenant` from the request onto the run, as `POST /v1/runs`
 does, so a solo user's authoring run carries its owner stamp.
 
@@ -304,7 +306,7 @@ This was an independent adversarial pass. Its findings changed the decision:
 | # | Sev | Finding | Disposition |
 |---|---|---|---|
 | B1 | Blocker | `propose` / `compose-and-run` were a missed door. A Viewer refused on `persist` gets steered to them, and they also create `wf.sub` / `wf.cadence` ids | D3 covers both. `compose-and-run` is gated when a person is behind the turn. `propose` is **deliberately not role-gated**: the reviewer's premise was that it is a write door, but it can only create a request an approver must decide. **Corrected while implementing:** gating it broke the ADR 0473 headless and auto-approval suites, which is how the disposition surfaced |
-| B2 | Blocker | The env-key `/draft` run's actor is `bearer:<8>` and not actorless, so the surface check would refuse it after the LLM spend | `bearer:` operator branch in the one predicate (D1) |
+| B2 | Blocker | The env-key `/draft` run's actor is `bearer:<8>` and not actorless (CORRECTED 2026-11-05, ADR 1045 TST-FUD-GC-1: the id is now `bearer:<16 hex of sha256(key)>`), so the surface check would refuse it after the LLM spend | `bearer:` operator branch in the one predicate (D1) |
 | H1 | High | Existing squats survive as co-ownership, so "owners may write" keeps a model door open | D3 overwrite rule for deterministic origins; victim side is R3 |
 | M1 | Med | The personal short-circuit trusted the tenant's shape, not the actor | Request-stamped `personalTenant` threaded in-run |
 | M2 | Med | D4 diff base and canonicalization wrong; History presence unproven | Fresh CAS read vs stored def, canonical compare, `inHistory`, `createdBy` |

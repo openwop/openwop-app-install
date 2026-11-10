@@ -7,9 +7,12 @@ import { authedHeaders, config, fetchOpts } from '../../client/config.js';
 export type AdPlatform = 'google' | 'meta' | 'linkedin' | 'tiktok' | 'x' | 'pinterest' | 'snapchat' | 'reddit' | 'youtube';
 
 export interface ImportResult { imported: number; deduped: number; invalid: number; issues: Array<{ row: number; severity: 'error' | 'warning'; message: string }> }
+/** PERF-4 / ADR 0907: counts mean revenue was reported, including measured zero
+ * and zero-spend rows. New servers always emit counts; absent older-server
+ * fields retain legacy numeric rendering, not inferred availability. */
 export interface KpiSummary {
-  totals: { spend: number; impressions: number; clicks: number; conversions: number; revenue: number; ctr: number; cpc: number; cvr: number; cpa: number; roas: number };
-  byPlatform: Array<{ platform: AdPlatform; spend: number; impressions: number; clicks: number; conversions: number; revenue: number; roas: number }>;
+  totals: { spend: number; impressions: number; clicks: number; conversions: number; revenue: number; ctr: number; cpc: number; cvr: number; cpa: number; roas: number; reportedRevenueRecordCount?: number };
+  byPlatform: Array<{ platform: AdPlatform; spend: number; impressions: number; clicks: number; conversions: number; revenue: number; roas: number; reportedRevenueRecordCount?: number }>;
   recordCount: number;
   dateRange: { start: string; end: string } | null;
   /** CMPUX-15: display currency (campaign budget currency, or the unanimous

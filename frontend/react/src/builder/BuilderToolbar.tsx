@@ -39,6 +39,7 @@ interface BuilderToolbarProps {
   onNewWorkflow(): void;
   onValidate(): void;
   onRun(): void;
+  onRunOptions?(): void;
   /** ADR 0476 — pre-run cost hint ("~$0.02/run"); null hides it (fail-soft). */
   /** `unavailable` marks the READ-FAILED arm, which must not read as a price
    *  (UX-BLD-2) — it styles as a warning chip, never the muted cost chip. */
@@ -63,7 +64,7 @@ interface BuilderToolbarProps {
 export function BuilderToolbar({
   name, workflowId, canUndo, canRedo, running,  draft, onSaveDraft,
   undo, redo, onExport, onOpenHistory, onExportChainPack, onPublishToRegistry, onImportFile,
-  onNewWorkflow, onValidate, onRun,  runEstimate, heatmapOn, onToggleHeatmap, onOpenEvals,
+  onNewWorkflow, onValidate, onRun, onRunOptions, runEstimate, heatmapOn, onToggleHeatmap, onOpenEvals,
   costHeatmapOn, onToggleCostHeatmap,
   publish, onPublishChanges, collab, onToggleCollab,
 }: BuilderToolbarProps) {
@@ -74,6 +75,7 @@ export function BuilderToolbar({
   // Share ▾ — collapses Export / Export chain pack / Publish / Import into the
   // shared accessible Menu primitive (DS-8: roving focus + focus return).
   const shareItems: MenuEntry[] = [
+    ...(onRunOptions ? [{ id: 'run-options', label: t('runOptions'), disabled: running, onSelect: onRunOptions }] : []),
     // ADR 0474 — revision history lives beside the other whole-workflow verbs.
     { id: 'history', label: t('historyMenu'), title: t('historyMenuTitle'), onSelect: onOpenHistory },
     // ADR 0477 — the workflow's evaluation suites.

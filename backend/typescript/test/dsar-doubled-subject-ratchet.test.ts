@@ -117,7 +117,10 @@ const ALL_TRUE: Residue = {
   readState: true, reaction: true, feedback: true, dmKey: true, participant: true,
   chatAuthor: true, arenaRater: true, projectMember: true, memory: true, knowledge: true, manualRun: true,
 };
-const ALL_FALSE: Residue = Object.fromEntries(Object.keys(ALL_TRUE).map((k) => [k, false])) as unknown as Residue;
+const ALL_FALSE: Residue = {
+  readState: false, reaction: false, feedback: false, dmKey: false, participant: false,
+  chatAuthor: false, arenaRater: false, projectMember: false, memory: false, knowledge: false, manualRun: false,
+};
 
 describe('ADR 0464 DSAR-DBL — a `user:user:<hash>` row is erased in every subject-bearing store', () => {
   it('the subject key forms contain the doubled spelling, and only of the key and the scope', () => {
@@ -161,8 +164,10 @@ describe('ADR 0464 DSAR-DBL — a `user:user:<hash>` row is erased in every subj
 // (negative). Sabotage-witnessed 2026-10-26: re-adding `user:`+raw reddens the first
 // negative case; dropping the two `userRef` arms reddens all five "its userRef" positives.
 // The second negative case (an `agent:X` row survives erasing `user:X`) is a guard the
-// bridge never touched, so no sabotage of this change can redden it; it is here for
-// symmetry.
+// bridge never touched, so no sabotage of THAT change reddens it.
+// CORRECTED 2026-11-03 (grade-tests wave 78): it is not unfailable. Adding an
+// `agent:<raw>` arm to `subjectKeyForms` (the mirror-image bridge) reddens it, and only
+// it; it guards that direction, not mere symmetry.
 
 async function seedBridgeRow(ref: string, tag: string): Promise<void> {
   const at = '2026-10-26T00:00:00.000Z';

@@ -21,7 +21,7 @@
  *     "opaque-idp"` (`subjectLinkService.ts` SUBJECT_LINK_KEY), issuer = the
  *     IdP entityID the SCIM trust root is bound to.
  *   - `apikey:<keyId>` (ADR 0270 delegation)  → lane `api-key`, kind `workload`.
- *   - `bearer:<prefix>` (`OPENWOP_API_KEYS`)  → lane `api-key`, kind `workload`.
+ *   - `bearer:<id>` (`OPENWOP_API_KEYS`)      → lane `api-key`, kind `workload`.
  *   - test-seam principal                     → lane `api-key`, kind `workload`.
  *   - a durable `user:<id>` cookie session and an anonymous cookie session have
  *     NO lane in the RFC 0165 enum (the host is its own credential authority;

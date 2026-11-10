@@ -31,8 +31,15 @@ import {
   type PendingApproval,
 } from '../../host/approvalService.js';
 import { resolveEffectiveAccess } from '../../host/accessControlService.js';
-import { approveStatement, getStatementRaw } from './entities/statement.js';
+import { approveStatement, getStatementRaw, sameSubject, findDealConflicts, releaseStatementClaims } from './entities/statement.js';
+import { pinMatches } from './pin.js';
+import { formatStatementTotal } from './proposalText.js';
 import { commissionMutated } from './emit.js';
+
+/** The note a review card is closed with when its statement's deals were already paid on
+ *  another statement of the plan (ADR 1034 D4). The statements list reads it back to tell
+ *  the console to offer Recompute, so it is one constant, not a string matched by prefix. */
+export const DEAL_CONFLICT_NOTE = 'Superseded: some deals on this statement are already on an approved statement of this plan. Recompute it so they are left off.';
 
 async function decideCommissionStatement(
   tenantId: string,
@@ -53,7 +60,8 @@ async function decideCommissionStatement(
     throw new OpenwopError('forbidden_scope', 'Missing required scope: host:commissions:manage', 403, { requiredScope: 'host:commissions:manage' });
   }
 
-  const { statementId, total: pinnedTotal, currency: pinnedCurrency } = approval.commissionStatement;
+  const pin = approval.commissionStatement;
+  const { statementId, total: pinnedTotal, currency: pinnedCurrency } = pin;
   const live = await getStatementRaw(tenantId, approval.orgId, statementId);
   if (!live) {
     // R2 COM2-M5 — the statement is GONE (its plan was deleted, which cascades drafts).
@@ -75,8 +83,11 @@ async function decideCommissionStatement(
   // saw. The app already has this pin (`reviewProjection.ts`: "lets the card detect edits
   // … and send the hash it displayed back with the approve", with a 409 `proposal_stale`);
   // this surface simply never used it, on the one card that authorises a payment.
-  if (outcome === 'approved' && (live.total !== pinnedTotal || live.currency !== pinnedCurrency)) {
-    throw new OpenwopError('conflict', `This statement changed after it was submitted (it now reads ${live.total} ${live.currency}, the review card says ${pinnedTotal} ${pinnedCurrency}). Re-submit it so the approver sees what they are approving.`, 409, {
+  //
+  // ADR 1034 D5 — the pin now also covers the attainment and the lines (`pin.ts`), so a
+  // change to what DROVE the total is stale too, not only a change to the total.
+  if (outcome === 'approved' && !pinMatches(pin, live)) {
+    throw new OpenwopError('conflict', `This statement changed after it was submitted (it now reads ${formatStatementTotal(live.total, live.currency)}, the review card says ${formatStatementTotal(pinnedTotal, pinnedCurrency)}${live.total === pinnedTotal ? ', and what it was computed from changed' : ''}). Re-submit it so the approver sees what they are approving.`, 409, {
       statementId, pinned: { total: pinnedTotal, currency: pinnedCurrency }, live: { total: live.total, currency: live.currency },
     });
   }
@@ -93,8 +104,26 @@ async function decideCommissionStatement(
   // closes, and choosing that trade is the operator's call, not mine. What this pass
   // does is make the fact RECORDABLE: `submittedBy` is now on the row, so an operator
   // who wants the rule can enforce it, and an auditor can see when one person did both.
-  if (outcome === 'approved' && live.subjectId === decidedBy) {
+  // ADR 1034 D8 — matched across subject spellings (a raw `===` let a deal `owner` stored
+  // as `user:<id>` approve its own payout as `<id>`).
+  if (outcome === 'approved' && sameSubject(live.subjectId, decidedBy)) {
     throw new OpenwopError('forbidden_scope', 'You cannot approve your own commission statement.', 403, { statementId });
+  }
+
+  // ADR 1034 D4 — a deal another statement of this plan already committed can never pass.
+  // Checked BEFORE the approval CAS, so the card is closed as superseded instead of being
+  // reopened by the compensation path below into a card no approve can ever clear (the
+  // COM2-M5 dead end, architect B4). A race that slips past this is caught again inside
+  // `approveStatement`, and the reopened card's next attempt lands here.
+  if (outcome === 'approved') {
+    const conflicts = await findDealConflicts(live);
+    if (conflicts.length > 0) {
+      await resolveApproval(approvalId, { status: 'rejected', note: DEAL_CONFLICT_NOTE, decidedBy });
+      await releaseStatementClaims(tenantId, statementId);
+      throw new OpenwopError('conflict', `${conflicts.length} deal(s) on this statement were already paid on another statement of the same plan. The review has been closed; recompute the statement and submit it again.`, 409, {
+        reason: 'deal_already_committed', statementId, deals: conflicts.slice(0, 20),
+      });
+    }
   }
 
   // Resolve-before-apply (CAS-gated side effect + compensation, ADR 0066 HIGH-1).
@@ -102,11 +131,17 @@ async function decideCommissionStatement(
   if (!lock) return null;
   if (!lock.changed) return { approval: lock.approval, changed: false };
 
-  // A reject leaves the statement draft — no approval, no accrual, nothing to apply.
-  if (outcome === 'rejected') return { approval: lock.approval, changed: true };
+  // A reject leaves the statement draft — no approval, no accrual. ADR 1034 D4: it also
+  // frees any deal claims an earlier failed approval attempt left bound to it, so a
+  // rejected statement does not keep its deals from another statement of the plan.
+  if (outcome === 'rejected') {
+    if (live.status === 'draft') await releaseStatementClaims(tenantId, statementId);
+    return { approval: lock.approval, changed: true };
+  }
 
   try {
-    const stmt = await approveStatement(tenantId, approval.orgId, statementId, decidedBy);
+    // ADR 1034 D4 (architect B3) — approve EXACTLY the row the pin was checked against.
+    const stmt = await approveStatement(tenantId, approval.orgId, statementId, decidedBy, live);
     commissionMutated({ entity: 'statement', verb: 'approved', tenantId, orgId: approval.orgId, actor: decidedBy, entityId: stmt.statementId });
   } catch (err) {
     await reopenApproval(approvalId);

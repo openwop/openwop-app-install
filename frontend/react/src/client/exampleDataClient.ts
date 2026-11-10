@@ -6,12 +6,37 @@
  * step the backend reports, so adding a future demo data type needs no frontend
  * change. Raw fetch (host extension, not in the SDK), mirroring workforcesClient.
  */
-import { authedHeaders, config, fetchOpts } from './config.js';
+import { authedHeaders, config, fetchOpts, onAuthChange } from './config.js';
+
+import { listMyWorkspaces } from './workspaceClient.js';
 
 const base = `${config.baseUrl}/host/openwop-app/example-data`;
 // Streaming seeds hit Cloud Run DIRECTLY (like SSE) — the Firebase `/api` rewrite
 // caps ~60s and buffers, which is exactly what breaks the full reseed. ADR 0292.
 const streamBase = `${config.sseBaseUrl}/host/openwop-app/example-data`;
+
+/** Capture host workspace intent before any asynchronous write preparation.
+ * The ID is only an assertion; the server retains all tenant/role authority. */
+export async function withExampleDataScope<T>(
+  run: (scope: { expectedTenantId: string; signal: AbortSignal; assertCurrent: () => void }) => Promise<T>,
+): Promise<T> {
+  const controller = new AbortController();
+  let changed = false;
+  const unsubscribe = onAuthChange(() => { changed = true; controller.abort(); });
+  const assertCurrent = (): void => {
+    if (changed) throw new Error('The workspace changed. Review the selected example data and try again.');
+  };
+  try {
+    const workspace = await listMyWorkspaces({ rememberTenant: false });
+    assertCurrent();
+    if (typeof workspace.active !== 'string' || !workspace.active) throw new Error('The active workspace could not be confirmed. Reload and try again.');
+    const result = await run({ expectedTenantId: workspace.active, signal: controller.signal, assertCurrent });
+    assertCurrent();
+    return result;
+  } finally {
+    unsubscribe();
+  }
+}
 
 export type SeedAction = 'created' | 'skipped' | 'error' | 'cleared';
 
@@ -70,13 +95,19 @@ export async function getExampleDataStatus(): Promise<ExampleDataStatus> {
 }
 
 /** Seed the given steps (all when omitted). `dryRun` previews without writing. */
-export async function runExampleDataSeed(opts: { steps?: string[]; dryRun?: boolean } = {}): Promise<RunResult> {
+async function seedJson(opts: { steps?: string[]; dryRun?: boolean }, scope?: { expectedTenantId: string; signal: AbortSignal }): Promise<RunResult> {
   const res = await fetch(`${base}/run`, fetchOpts({
     method: 'POST',
     headers: { ...authedHeaders(), 'content-type': 'application/json' },
-    body: JSON.stringify(opts),
+    body: JSON.stringify({ ...opts, ...(scope ? { expectedTenantId: scope.expectedTenantId } : {}) }),
+    ...(scope ? { signal: scope.signal } : {}),
   }));
   return asJson<RunResult>(res, 'runExampleDataSeed');
+}
+
+export async function runExampleDataSeed(opts: { steps?: string[]; dryRun?: boolean } = {}): Promise<RunResult> {
+  if (opts.dryRun === true) return seedJson(opts);
+  return withExampleDataScope((scope) => seedJson(opts, scope));
 }
 
 /** Provision result attached to a demo-provision stream (DG-SEED-7). */
@@ -103,42 +134,47 @@ async function streamSeed(
   body: Record<string, unknown>,
   onEvent: (e: SeedStreamEvent) => void,
 ): Promise<{ success: boolean; summary: RunResult['summary']; provision?: DemoProvision }> {
-  const res = await fetch(`${streamBase}/${path}`, fetchOpts({
-    method: 'POST',
-    headers: { ...authedHeaders(), 'content-type': 'application/json', accept: 'application/x-ndjson' },
-    body: JSON.stringify(body),
-  }));
-  if (!res.ok || !res.body) {
-    // Surface a useful error (the batch budget covers the non-stream fallback too).
-    await asJson(res, `seed:${path}`);
-    throw new Error(`seed:${path} returned ${res.status}`);
-  }
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let summary: { success: boolean; summary: RunResult['summary']; provision?: DemoProvision } | null = null;
-  const dispatch = (line: string): void => {
-    const trimmed = line.trim();
-    if (!trimmed) return;
-    let evt: SeedStreamEvent;
-    try { evt = JSON.parse(trimmed) as SeedStreamEvent; } catch { return; }
-    onEvent(evt);
-    if (evt.type === 'summary') summary = { success: evt.success, summary: evt.summary, ...(evt.provision ? { provision: evt.provision } : {}) };
-  };
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let nl = buffer.indexOf('\n');
-    while (nl !== -1) {
-      dispatch(buffer.slice(0, nl));
-      buffer = buffer.slice(nl + 1);
-      nl = buffer.indexOf('\n');
+  return withExampleDataScope(async (scope) => {
+    const res = await fetch(`${streamBase}/${path}`, fetchOpts({
+      method: 'POST',
+      headers: { ...authedHeaders(), 'content-type': 'application/json', accept: 'application/x-ndjson' },
+      body: JSON.stringify({ ...body, expectedTenantId: scope.expectedTenantId }),
+      signal: scope.signal,
+    }));
+    if (!res.ok || !res.body) {
+      // Surface a useful error (the batch budget covers the non-stream fallback too).
+      await asJson(res, `seed:${path}`);
+      throw new Error(`seed:${path} returned ${res.status}`);
     }
-  }
-  if (buffer.trim()) dispatch(buffer);
-  if (!summary) throw new Error(`seed:${path} stream ended without a summary`);
-  return summary;
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let summary: { success: boolean; summary: RunResult['summary']; provision?: DemoProvision } | null = null;
+    const dispatch = (line: string): void => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      let evt: SeedStreamEvent;
+      try { evt = JSON.parse(trimmed) as SeedStreamEvent; } catch { return; }
+      scope.assertCurrent();
+      onEvent(evt);
+      if (evt.type === 'summary') summary = { success: evt.success, summary: evt.summary, ...(evt.provision ? { provision: evt.provision } : {}) };
+    };
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let nl = buffer.indexOf('\n');
+      while (nl !== -1) {
+        dispatch(buffer.slice(0, nl));
+        buffer = buffer.slice(nl + 1);
+        nl = buffer.indexOf('\n');
+      }
+    }
+    if (buffer.trim()) dispatch(buffer);
+    if (!summary) throw new Error(`seed:${path} stream ended without a summary`);
+    scope.assertCurrent();
+    return summary;
+  });
 }
 
 /** Seed the given steps (all when omitted), streaming per-step progress. */
@@ -146,6 +182,22 @@ export async function runExampleDataSeedStream(
   opts: { steps?: string[] },
   onEvent: (e: SeedStreamEvent) => void,
 ): Promise<{ success: boolean; summary: RunResult['summary'] }> {
+  // Only this bounded two-record seed can use the cookie-bearing JSON path.
+  // Full/mixed seeds retain the direct transport and its long-stream budget.
+  if (opts.steps?.length === 1 && opts.steps[0] === 'demo-walkthroughs') {
+    return withExampleDataScope(async (scope) => {
+      const result = await seedJson(opts, scope);
+      scope.assertCurrent();
+      for (const step of result.results) {
+        scope.assertCurrent();
+        onEvent({ type: 'step', ...step });
+      }
+      scope.assertCurrent();
+      const final = { success: result.success, summary: result.summary };
+      onEvent({ type: 'summary', ...final });
+      return final;
+    });
+  }
   return streamSeed('run', { steps: opts.steps }, onEvent);
 }
 
@@ -160,12 +212,15 @@ export async function provisionDemoTenant(
 /** Clear the given steps (all when omitted) — removes demo entities only.
  *  Non-streaming JSON fallback (curl/tests); the UI uses the streaming variant. */
 export async function clearExampleData(opts: { steps?: string[] } = {}): Promise<RunResult> {
-  const res = await fetch(`${base}/clear`, fetchOpts({
-    method: 'POST',
-    headers: { ...authedHeaders(), 'content-type': 'application/json' },
-    body: JSON.stringify(opts),
-  }));
-  return asJson<RunResult>(res, 'clearExampleData');
+  return withExampleDataScope(async (scope) => {
+    const res = await fetch(`${base}/clear`, fetchOpts({
+      method: 'POST',
+      headers: { ...authedHeaders(), 'content-type': 'application/json' },
+      body: JSON.stringify({ ...opts, expectedTenantId: scope.expectedTenantId }),
+      signal: scope.signal,
+    }));
+    return asJson<RunResult>(res, 'clearExampleData');
+  });
 }
 
 /** Clear the given steps (all when omitted), streaming per-step progress from

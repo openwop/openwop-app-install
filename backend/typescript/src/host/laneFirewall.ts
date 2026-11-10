@@ -41,6 +41,9 @@ export interface LaneFirewallInput {
   approvedTools?: ReadonlySet<string>;
   /** Approvals that answered only a `baseline` ask (ledger rows, voice's one-shot card). */
   approvedBaselineTools?: ReadonlySet<string>;
+  /** ADR 1042 (security review H2) — see `FirewallHookOptions.singleUseApprovals`. */
+  singleUseApprovals?: boolean;
+  onApprovalSpent?: (toolName: string) => void;
   /** The governance-log `resource` (a conversation id, run id, session). */
   resource?: string;
   /** Dedupe shadow would-blocks per run/session rather than per hook (voice builds a
@@ -100,6 +103,8 @@ export async function buildLaneFirewall(input: LaneFirewallInput): Promise<LaneF
     bypassApproval: input.bypass === true,
     ...(input.approvedTools ? { approvedTools: input.approvedTools } : {}),
     ...(input.approvedBaselineTools ? { approvedBaselineTools: input.approvedBaselineTools } : {}),
+    ...(input.singleUseApprovals ? { singleUseApprovals: true } : {}),
+    ...(input.onApprovalSpent ? { onApprovalSpent: input.onApprovalSpent } : {}),
     ...(shadowLogged ? { shadowLogged } : {}),
     onUnclassified: (toolName) => log.debug('firewall_unclassified_tool', { toolName, unknownToolPolicy, lane }),
     // ADR 0397 Phase 1 / ADR 0834 D1 — every narrowing verdict, every lane. Fire-and-

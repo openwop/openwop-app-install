@@ -32,6 +32,10 @@ export type FieldType = 'text' | 'email' | 'number' | 'textarea' | 'select' | 'c
  *  workaround was to force a guest COUNT into a bounded select. */
 export const FIELD_TYPES: readonly FieldType[] = ['text', 'email', 'number', 'textarea', 'select', 'checkbox'];
 
+/** ADR 0951 D2 — what a field collects, for behavior capture. Closed vocabulary. */
+export type FieldSensitivity = 'payment' | 'health' | 'credential';
+export const FIELD_SENSITIVITIES: readonly FieldSensitivity[] = ['payment', 'health', 'credential'];
+
 export interface FormField {
   key: string;
   label: string;
@@ -54,6 +58,10 @@ export interface FormField {
    *  visibility"): the workflow edge-condition grammar over `fields.<key>` of an
    *  earlier field. Hidden ⇒ not required, and its value is not kept. */
   when?: FieldWhen;
+  /** ADR 0951 D2 — authored; absent means "ordinary". The public renderer stamps
+   *  it on the control as `data-owx-sensitivity`, and session recording never
+   *  records a page carrying one (`replayCapture.NEVER_RECORD_SELECTOR`). */
+  sensitivity?: FieldSensitivity;
 }
 
 export type FormStatus = 'draft' | 'published';
@@ -466,6 +474,14 @@ function sanitizeFields(input: unknown): FormField[] {
     const description = typeof f.description === 'string' ? f.description.trim().slice(0, MAX_DESCRIPTION) : '';
     if (description) field.description = description;
     if (f.when !== undefined && f.when !== null) field.when = sanitizeWhen(f.when, i, key, new Set(earlier));
+    // ADR 0951 D2 — an unknown value is an authoring error, not silently dropped:
+    // a mistyped "helth" would otherwise leave a health form recordable.
+    if (f.sensitivity !== undefined && f.sensitivity !== null && f.sensitivity !== '') {
+      if (!FIELD_SENSITIVITIES.includes(f.sensitivity as FieldSensitivity)) {
+        throw new OpenwopError('validation_error', `fields[${i}].sensitivity MUST be one of: ${FIELD_SENSITIVITIES.join(', ')}.`, 400, { field: key });
+      }
+      field.sensitivity = f.sensitivity as FieldSensitivity;
+    }
     earlier.push(key);
     return field;
   });

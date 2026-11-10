@@ -31,6 +31,7 @@ import {
 import { buildAssistantSurface } from '../src/features/assistant/surface.js';
 import { contentHashOf as actionContentHashOf } from '../src/features/assistant/actionApproval.js';
 import { upsertOAuthConnection } from '../src/features/connections/connectionsService.js';
+import { envKeyPrincipalId } from '../src/middleware/envKeyPrincipal.js';
 
 describe('Assistant feature (sqlite memory app)', () => {
   let server: http.Server;
@@ -98,8 +99,8 @@ describe('Assistant feature (sqlite memory app)', () => {
     // The pre-dispatch credential check refuses an approver with no send-capable
     // Google connection (assistant-send-credential-precheck.test.ts), and the
     // route returns the row AFTER that check, so the approver needs one here.
-    // `bearer:dev-toke` is the principal the dev-token API key resolves to.
-    await upsertOAuthConnection({ tenantId: 'default', provider: 'google', userId: 'bearer:dev-toke', tokens: { accessToken: 'at-fake', refreshToken: 'rt-fake', scopes: ['https://www.googleapis.com/auth/gmail.send'], expiresAt: new Date(Date.now() + 3_600_000).toISOString() } as never });
+    // `envKeyPrincipalId('dev-token')` is the principal the dev-token API key resolves to.
+    await upsertOAuthConnection({ tenantId: 'default', provider: 'google', userId: envKeyPrincipalId('dev-token'), tokens: { accessToken: 'at-fake', refreshToken: 'rt-fake', scopes: ['https://www.googleapis.com/auth/gmail.send'], expiresAt: new Date(Date.now() + 3_600_000).toISOString() } as never });
     const surf = buildAssistantSurface({ tenantId: 'default' });
     const enq = (await surf.enqueueAction({ kind: 'email.send', draft: 'Hi there', payload: { to: 'a@b.com' } })) as {
       pendingAction: { actionId: string; status: string };

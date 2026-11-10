@@ -121,6 +121,24 @@ describe('the operator has every feature on their own host', () => {
   });
 });
 
+describe('billing OFF is an answer on the entitlement read, not a 404', () => {
+  it('serves the unrestricted billing-off entitlements; the rest of billing keeps its 404', async () => {
+    // Control: billing ON narrows this customer's plan, so '*' below is the OFF branch.
+    expect(Array.isArray(((await (await get(customer, ENTITLEMENTS)).json()) as { allowedFeatures: unknown }).allowedFeatures)).toBe(true);
+    const d = getToggleDefault('billing')!;
+    await saveConfig({ ...d, status: 'off' }, 'test');
+    try {
+      const res = await get(customer, ENTITLEMENTS);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ plan: 'free', allowedFeatures: '*', limits: {} });
+      // Only the entitlement read changed: a real billing surface still does not exist.
+      expect((await get(customer, '/host/openwop-app/billing/subscription')).status).toBe(404);
+    } finally {
+      await saveConfig({ ...d, status: 'on' }, 'test');
+    }
+  });
+});
+
 describe('only the allowlist grants it', () => {
   it('the dev-open switch does NOT un-paywall an ordinary tenant', async () => {
     process.env.OPENWOP_FEATURE_TOGGLES_DEV_OPEN = 'true';

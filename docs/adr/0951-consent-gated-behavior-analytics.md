@@ -152,6 +152,16 @@ regulated regions (Q2).
   - **pages never recorded:** commerce checkout and account pages, any page whose CMS
     page has `behaviorCapture: 'off'`, and any page carrying a form with a `health`
     field.
+
+  > **CORRECTED 2026-11-02 — the forms field landed after P2, and stricter.** P2 shipped
+  > the recorder's `[data-owx-sensitivity]` refusal with nothing emitting the attribute.
+  > `FormField.sensitivity` (`payment` | `health` | `credential`, closed vocabulary; an
+  > unknown value is a `validation_error`) now does: the public renderer stamps it on the
+  > control, and `NEVER_RECORD_SELECTOR` keeps the WHOLE page unrecorded for any of the
+  > three, not only `health`. Fields are not marked by default: forms has no payment or
+  > password input type, and those controls are already refused by `type`/`autocomplete`.
+  > Tests: `adr0951-p2-forms-field-sensitivity.test.ts`,
+  > `forms/__tests__/fieldSensitivityReplay.test.tsx`.
 - **Server re-check (defense in depth, never the primary control):** the ingest
   scans each chunk for Luhn-valid card numbers, email addresses, phone numbers and
   SSN patterns. A hit drops the whole chunk and increments `replay_chunk_rejected` with

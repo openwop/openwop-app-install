@@ -13,6 +13,11 @@
  * The workflow list lives at /builder (WorkflowsDashboard).
  */
 
+import type { RunConfigurable } from '@openwop/openwop';
+import type { RunVariable } from '../workflows/workflowsClient.js';
+import { RunInputsDialog, isCredentialRefVariable } from '../ui/RunInputsForm.js';
+import { onAuthChange } from '../client/config.js';
+import { catalogEntry } from './palette/catalogRegistry.js';
 import { Button } from '../ui/Button.js';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
@@ -74,7 +79,7 @@ import { HistoryDrawer } from './HistoryDrawer.js';
 import { EvalsDrawer } from './EvalsDrawer.js';
 import { loadWorkflowWithHead as loadBackendWorkflowForRestore } from './persistence/backendStore.js';
 import { RemovedReferencedNodesNotice } from './RemovedReferencedNodesNotice.js';
-import { definitionMetadataFor } from './persistence/definitionMetadata.js';
+import { definitionMetadataFor, stripBuilderOwnedKeys } from './persistence/definitionMetadata.js';
 import { DebugSessionBanner } from './DebugSessionBanner.js';
 import { loadDebugSessionFromServer, prefillDebugSessionFromRun } from './debugSession.js';
 import { fetchFleetStats, fetchWorkflowEstimate, type WorkflowCostEstimate } from '../workflows/fleetInsightsClient.js';
@@ -88,6 +93,11 @@ import { probeWorkflowCollabAvailable, useWorkflowCollabSession, type WorkflowCo
 import { useWorkflowCollabPresence } from './collab/useWorkflowCollabPresence.js';
 import { collabGuestSuffix, presenceSelfName } from '../canvas/useCollabPresence.js';
 import { useAuth } from '../auth/useAuth.js';
+
+function launchFingerprint(snapshot: SavedWorkflow): string {
+  const { createdAt: _created, updatedAt: _updated, ...content } = snapshot;
+  return JSON.stringify(content);
+}
 
 interface Props {
   onNewWorkflow(): void;
@@ -134,6 +144,12 @@ export function BuilderShell({ onNewWorkflow }: Props) {
   useEffect(() => { setGreenRun(false); }, [workflowId]);
 
   const [running, setRunning] = useState(false);
+  const launchIdentity = useRef(0);
+  const [runOptions, setRunOptions] = useState<{ identity: number; force: boolean; snapshot: string; inputs: Record<string, unknown>; variables: RunVariable[] } | null>(null);
+  useEffect(() => onAuthChange(() => {
+    launchIdentity.current += 1;
+    setRunOptions(null);
+  }), []);
   const runInFlight = useRef(false);
   const [error, setError] = useState<string | null>(null);
   // ADR 0483 (B5) — the large-canvas advisory: past the 200-node perf budget,
@@ -667,7 +683,7 @@ export function BuilderShell({ onNewWorkflow }: Props) {
     );
   }
 
-  async function onRun(force = false) {
+  async function onRun(force = false, chosen?: { inputs: Record<string, unknown>; configurable?: RunConfigurable; snapshot: string }, showOptions = false) {
     // ADR 0770 D6 (`WBWF-13`) — re-entrancy guard, set SYNCHRONOUSLY. `running`
     // is state, so it only disabled the button after the connection lookup
     // below resolved; a double-click inside that await registered the workflow
@@ -675,13 +691,14 @@ export function BuilderShell({ onNewWorkflow }: Props) {
     if (runInFlight.current) return;
     runInFlight.current = true;
     try {
-      await runOnce(force);
+      await runOnce(force, chosen, showOptions);
     } finally {
       runInFlight.current = false;
     }
   }
 
-  async function runOnce(force: boolean) {
+  async function runOnce(force: boolean, chosen?: { inputs: Record<string, unknown>; configurable?: RunConfigurable; snapshot: string }, showOptions = false) {
+    const identity = launchIdentity.current;
     setError(null);
     setValidateOk(null);
     const snap0 = useBuilderStore.getState().snapshot();
@@ -730,6 +747,21 @@ export function BuilderShell({ onNewWorkflow }: Props) {
           throw new Error(t('defaultInputsInvalidJson'));
         }
       }
+      const variables: RunVariable[] = Array.isArray(def.variables) ? def.variables.filter(v =>
+        v !== null && typeof v === 'object' && typeof v.name === 'string').map(v => ({ ...v, required: v.required === true })) : [];
+      // Convenience detection only; explicit Run options also covers indirect/custom AI.
+      const mayUseAi = snap.nodes.some(n => {
+        const entry = catalogEntry(n.kind);
+        return entry?.category === 'ai' || entry?.requiresHostSurfaces?.includes('host.aiProviders')
+          || [n.config, n.inputs].some(fields => fields && (typeof fields.provider === 'string' || typeof fields.model === 'string'));
+      }) || variables.some(isCredentialRefVariable);
+      if (!chosen && (showOptions || mayUseAi)) {
+        if (identity === launchIdentity.current) setRunOptions({ identity, force, snapshot: launchFingerprint(snap), inputs, variables });
+        return;
+      }
+      if (chosen && chosen.snapshot !== launchFingerprint(snap)) throw new Error(t('runOptionsChanged'));
+      if (chosen) inputs = chosen.inputs;
+      if (identity !== launchIdentity.current) return;
       // ADR 0440 P1 — carry the definition metadata; the route replaces the
       // definition wholesale, so registering without it erases it.
       // ADR 0481 (code-H4) — while a collab room is live, the room is the
@@ -745,6 +777,7 @@ export function BuilderShell({ onNewWorkflow }: Props) {
         // ADR 0770 D5 — register against the loaded head (read inside the
         // serialized write turn, WBCD-5); adopt the new one.
         const registered = await enqueueBuilderWrite(() => {
+          if (identity !== launchIdentity.current || (chosen && chosen.snapshot !== launchFingerprint(useBuilderStore.getState().snapshot()))) throw new Error(t('runOptionsChanged'));
           const base = useBuilderStore.getState().baseRevision;
           // ADR 0789 — inside the write turn: a fork an earlier queued save
           // adopted re-targets this register, and an untouched canvas says so.
@@ -771,7 +804,8 @@ export function BuilderShell({ onNewWorkflow }: Props) {
       // ADR 0474 P1b — the builder's Run is a DRAFT run: it executes the head
       // just registered above, not the published revision (the host-local
       // metadata convention; production launches resolve published).
-      const res = await createRun({ workflowId: runWorkflowId, inputs, metadata: { launch: 'draft' } });
+      if (identity !== launchIdentity.current) return;
+      const res = await createRun({ workflowId: runWorkflowId, inputs, ...(chosen?.configurable ? { configurable: chosen.configurable } : {}), metadata: { launch: 'draft' } });
       // Stay on the canvas and paint the run live, rather than navigating
       // straight to the text event log. The banner offers a jump to the
       // full run detail for the timeline / reasoning / inspector views.
@@ -895,7 +929,7 @@ export function BuilderShell({ onNewWorkflow }: Props) {
         // Canonical WorkflowDefinition (an `examples/*` pipeline, a
         // chain-pack composition, or this builder's own chain-pack
         // export) — convert typeIds back to builder kinds.
-        const { name, nodes, edges, defaultInputs, inputSchema, variables, configurableSchema } =
+        const { name, nodes, edges, defaultInputs, inputSchema, variables, configurableSchema, metadata } =
           fromCanonicalDefinition(raw);
         imported = {
           id,
@@ -904,6 +938,9 @@ export function BuilderShell({ onNewWorkflow }: Props) {
           nodes,
           edges,
           defaultInputs,
+          // Keep editor defaults and unknown siblings; the imported name and
+          // lifecycle remain owned by this new SavedWorkflow.
+          ...(metadata ? { metadata: stripBuilderOwnedKeys(metadata) } : {}),
           // ADR 0523 — carry the def-level half. Node `inputs` already rode
           // through here (deserialize reads them), so omitting these produced
           // exactly the asymmetry the ADR forbids: preserved `{type:'variable'}`
@@ -971,6 +1008,7 @@ export function BuilderShell({ onNewWorkflow }: Props) {
           onNewWorkflow={onNewWorkflow}
           onValidate={onValidate}
           onRun={() => onRun()}
+          onRunOptions={() => onRun(false, undefined, true)}
           draft={lifecycle?.transient ? { canSave: greenRun } : null}
           onSaveDraft={() => { void onSaveDraft(); }}
           publish={!lifecycle?.transient && publishPending ? { canPublish: true } : null}
@@ -1078,6 +1116,16 @@ export function BuilderShell({ onNewWorkflow }: Props) {
         {publishHelp && (
           <PublishHelpBanner publishHelp={publishHelp} onClose={() => setPublishHelp(null)} />
         )}
+        {runOptions && <RunInputsDialog workflowName={name} variables={runOptions.variables} initialInputs={runOptions.inputs} aiKeyOption
+          busy={running} onCancel={() => setRunOptions(null)} onRun={(inputs, configurable) => {
+            const request = runOptions;
+            setRunOptions(null);
+            if (request.identity !== launchIdentity.current || launchFingerprint(useBuilderStore.getState().snapshot()) !== request.snapshot) {
+              setError(t('runOptionsChanged'));
+              return;
+            }
+            void onRun(request.force, { inputs, snapshot: request.snapshot, ...(configurable ? { configurable } : {}) });
+          }} />}
         {preflight && (
           <PreflightBanner
             preflight={preflight}

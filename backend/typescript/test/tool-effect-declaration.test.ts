@@ -7,7 +7,10 @@
  *
  * Floors MEASURED 2026-10-23 after createApp: 211 tools, 63 write, 148 read
  * (9 projected compute tools). Each floor is the measured value minus a small
- * margin. Wave 61: "every pure compute tool is 'read'" was claimed but not
+ * margin. RE-MEASURED 2026-11-05 for ADR 1031 P3 (KickTodo leaves this repo):
+ * 220 → 205 tools, 67 → 63 write, 153 → 142 read; every one of the 15 removed
+ * ids is `openwop:kicktodo.*` (4 write, 11 read), none added — the inventory is
+ * in PR #5512. Floors keep the original margins: 205−4, 63−2, 142−5. Wave 61: "every pure compute tool is 'read'" was claimed but not
  * asserted (probe ed-compute vacuous); it is now asserted per projected id.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -33,12 +36,12 @@ const KNOWN: Record<string, 'read' | 'write'> = {
 describe('tool effect declaration (ADR 0784)', () => {
   it('every registered tool declares read or write, every pure compute tool is read, and both kinds exist', () => {
     const ids = builtinAgentToolIds();
-    expect(ids.length).toBeGreaterThanOrEqual(207);
+    expect(ids.length).toBeGreaterThanOrEqual(201);
     const bad = ids.filter((id) => !['read', 'write'].includes(builtinAgentTool(id)?.effect as string));
     expect(bad).toEqual([]);
     const writes = ids.filter((id) => builtinAgentTool(id)!.effect === 'write').length;
     expect(writes).toBeGreaterThanOrEqual(61);
-    expect(ids.length - writes).toBeGreaterThanOrEqual(143);
+    expect(ids.length - writes).toBeGreaterThanOrEqual(137);
     // Every projected compute node (named `openwop:<typeId>`, the way
     // computeNodeTool names it) is registered and is a READ.
     expect(PROJECTABLE_COMPUTE_NODE_TYPE_IDS.length).toBeGreaterThan(0);

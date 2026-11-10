@@ -16,7 +16,8 @@ import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import type { Scope } from '../../host/accessControlService.js';
 import { authorizeOrgScope } from '../featureRoute.js';
-import { createTerritoryTransitionApproval, findPendingTerritoryTransitionApproval } from '../../host/approvalService.js';
+import { createTerritoryTransitionApproval } from '../../host/approvalService.js';
+import { transitionProposalText } from './modelTransitionApproval.js';
 import {
   createType,
   listTypes,
@@ -41,6 +42,20 @@ const LABEL = 'Territories';
 
 /** Toggle + org-scoped RBAC gate (the shared `authorizeOrgScope`). */
 const authorize = (req: Request, scope: Scope) => authorizeOrgScope(req, { toggleId: TOGGLE_ID, label: LABEL }, scope);
+
+/**
+ * ADR 1034 D5 — a write that feeds quota attainment, on the org's ACTIVE model, is a
+ * manager write. Attainment drives commission accelerators (ADR 0280), and every one of
+ * these writes moves it: a quota or rep split directly, a territory re-parent by changing
+ * which rows roll up, a rule by changing which deals land where. At `workspace:write` a rep
+ * could lower their own split and fire the top accelerator on their own statement. A
+ * PLANNING model is a draft that pays nobody, so it stays at `workspace:write`.
+ */
+async function authorizeModelWrite(req: Request, modelId: string): Promise<Awaited<ReturnType<typeof authorize>>> {
+  const auth = await authorize(req, 'workspace:write');
+  if ((await getActiveModelId(auth.tenantId, auth.orgId)) === modelId) return authorize(req, 'host:territories:manage');
+  return auth;
+}
 
 export function registerTerritoryRoutes(deps: RouteDeps): void {
   const { app } = deps;
@@ -112,10 +127,10 @@ export function registerTerritoryRoutes(deps: RouteDeps): void {
   // the shared reviews inbox (idempotent per model) and return `202 { review }`;
   // the model changes state ONLY when a manager claims the review, whose decision
   // core dispatches to this feature's gate handler (`modelTransitionApproval.ts`).
-  // No HTTP route activates/archives a model without the gate. (The ctx.features
-  // workflow surface can still apply transitions — that is the ADR 0208 governed
-  // lane, where the approval gate lives in the CHAIN; author chains with a
-  // core.approvalGate before the transition node.)
+  // No HTTP route activates/archives a model without the gate, and since ADR 1034 D1
+  // neither does the ctx.features workflow surface: it queues the same review. (This
+  // comment used to say the surface could still apply a transition if a chain author put
+  // a core.approvalGate before it — a convention nothing enforced.)
   for (const transition of ['activate', 'archive'] as const) {
     app.post(`${BASE}/models/:modelId/${transition}`, async (req, res, next) => {
       try {
@@ -125,17 +140,15 @@ export function registerTerritoryRoutes(deps: RouteDeps): void {
         // Fail-fast on an illegal transition (mirrors activateModel/archiveModel)
         // so we never queue a review that can only ever fail on apply.
         if (transition === 'activate' && model.state === 'archived') {
-          throw new OpenwopError('validation_error', 'An archived model cannot be re-activated; clone it into a new planning model.', 409, { modelId });
+          throw new OpenwopError('validation_error', 'An archived model cannot be re-activated; create a new planning model instead.', 409, { modelId });
         }
         if (transition === 'archive' && model.state === 'archived') {
           throw new OpenwopError('conflict', 'This model is already archived.', 409, { modelId });
         }
-        const existing = await findPendingTerritoryTransitionApproval(tenantId, modelId);
-        const review = existing ?? await createTerritoryTransitionApproval({
-          tenantId, orgId, modelId, transition,
-          proposal: transition === 'activate'
-            ? `Activate territory model “${model.name}” (org-wide record visibility change)`
-            : `Archive territory model “${model.name}”`,
+        // ADR 1034 D1 — find-or-create in ONE race-safe call that matches the transition
+        // (a pending card for the OTHER transition is a 409, never handed back as this one).
+        const review = await createTerritoryTransitionApproval({
+          tenantId, orgId, modelId, transition, proposal: transitionProposalText(model.name, transition),
         });
         res.status(202).json({ review: { approvalId: review.approvalId, status: review.status } });
       } catch (err) {
@@ -177,7 +190,7 @@ export function registerTerritoryRoutes(deps: RouteDeps): void {
 
   app.post(`${BASE}/models/:modelId/territories`, async (req, res, next) => {
     try {
-      const { user, orgId, tenantId } = await authorize(req, 'workspace:write');
+      const { user, orgId, tenantId } = await authorizeModelWrite(req, req.params.modelId);
       const territory = await createTerritory(tenantId, orgId, req.params.modelId, (req.body ?? {}) as Record<string, unknown>, user.userId);
       res.status(201).json(territory);
     } catch (err) {
@@ -187,7 +200,7 @@ export function registerTerritoryRoutes(deps: RouteDeps): void {
 
   app.patch(`${BASE}/models/:modelId/territories/:territoryId`, async (req, res, next) => {
     try {
-      const { user, orgId, tenantId } = await authorize(req, 'workspace:write');
+      const { user, orgId, tenantId } = await authorizeModelWrite(req, req.params.modelId);
       await getTerritory(tenantId, orgId, req.params.modelId, req.params.territoryId); // 404 before mutate
       const territory = await updateTerritory(tenantId, orgId, req.params.modelId, req.params.territoryId, (req.body ?? {}) as Record<string, unknown>, user.userId);
       res.json(territory);
@@ -208,7 +221,7 @@ export function registerTerritoryRoutes(deps: RouteDeps): void {
 
   app.post(`${BASE}/models/:modelId/rules`, async (req, res, next) => {
     try {
-      const { user, orgId, tenantId } = await authorize(req, 'workspace:write');
+      const { user, orgId, tenantId } = await authorizeModelWrite(req, req.params.modelId);
       const rule = await createRule(tenantId, orgId, req.params.modelId, (req.body ?? {}) as Record<string, unknown>);
       territoryMutated({ entity: 'rule', verb: 'created', tenantId, orgId, actor: user.userId, entityId: rule.ruleId, changed: [req.params.modelId] });
       res.status(201).json(rule);
@@ -219,7 +232,7 @@ export function registerTerritoryRoutes(deps: RouteDeps): void {
 
   app.delete(`${BASE}/models/:modelId/rules/:ruleId`, async (req, res, next) => {
     try {
-      const { user, orgId, tenantId } = await authorize(req, 'workspace:write');
+      const { user, orgId, tenantId } = await authorizeModelWrite(req, req.params.modelId);
       await deleteRule(tenantId, orgId, req.params.modelId, req.params.ruleId);
       territoryMutated({ entity: 'rule', verb: 'deleted', tenantId, orgId, actor: user.userId, entityId: req.params.ruleId, changed: [req.params.modelId] });
       res.status(204).end();
@@ -267,7 +280,7 @@ export function registerTerritoryRoutes(deps: RouteDeps): void {
   // Upsert a territory's quota for a period (idempotent PUT → 200).
   app.put(`${BASE}/models/:modelId/territories/:territoryId/quota`, async (req, res, next) => {
     try {
-      const { user, orgId, tenantId } = await authorize(req, 'workspace:write');
+      const { user, orgId, tenantId } = await authorizeModelWrite(req, req.params.modelId);
       const quota = await setQuota(tenantId, orgId, req.params.modelId, req.params.territoryId, (req.body ?? {}) as Record<string, unknown>);
       territoryMutated({ entity: 'quota', verb: 'set', tenantId, orgId, actor: user.userId, entityId: quota.quotaId, changed: [req.params.territoryId] });
       res.json(quota);
@@ -278,7 +291,7 @@ export function registerTerritoryRoutes(deps: RouteDeps): void {
 
   app.delete(`${BASE}/models/:modelId/territories/:territoryId/quota`, async (req, res, next) => {
     try {
-      const { user, orgId, tenantId } = await authorize(req, 'workspace:write');
+      const { user, orgId, tenantId } = await authorizeModelWrite(req, req.params.modelId);
       const period = typeof req.query.period === 'string' ? req.query.period : '';
       if (!/^\d{4}-(Q[1-4]|(0[1-9]|1[0-2]))$/.test(period)) throw new OpenwopError('validation_error', 'A valid `period` (YYYY-Qn or YYYY-MM) query param is required.', 400, {});
       await deleteQuota(tenantId, orgId, req.params.modelId, req.params.territoryId, period);

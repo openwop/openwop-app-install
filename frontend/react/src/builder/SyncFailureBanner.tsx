@@ -16,6 +16,7 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useBuilderStore, overwriteWithCanvas } from './store/builderStore.js';
+import { BUILDER_EDITOR_METADATA_CONFLICT } from './persistence/editorMetadata.js';
 import { HEAD_MOVED_REASON, loadWorkflowWithHead } from './persistence/backendStore.js';
 import { Notice } from '../ui/Notice.js';
 import { Button } from '../ui/Button.js';
@@ -92,7 +93,8 @@ export function SyncFailureBanner(): JSX.Element | null {
   // ADR 0770 D1 — a viewer's save is refused `forbidden_scope`: signing in again
   // would not help, and saying so would send them in a loop.
   const detail =
-    status === 403 && reason === 'forbidden_scope' ? t('syncFailedReadOnly')
+    reason === BUILDER_EDITOR_METADATA_CONFLICT ? t('defaultInputsMetadataConflict')
+    : status === 403 && reason === 'forbidden_scope' ? t('syncFailedReadOnly')
     : status === 401 || status === 403 ? t('syncFailedAuth')
       : status === 429 ? t('syncFailedRateLimited')
         : t('syncFailedServer');

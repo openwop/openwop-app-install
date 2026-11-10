@@ -15,9 +15,12 @@
  * at a local server, and each case asserts its live control first so a refusal
  * cannot pass by the path simply not being reached.
  *
+ * The page-fetch case also has its live control: a fetch of the local server
+ * succeeds live, and the replay refusal carries `replay_source_missing`.
+ *
  * Sabotage-witnessed (2026-10-28): moving either compose/propose guard back
  * after `registerTransientDraft` reds its case; dropping any `ReplayEffectError`
- * rethrow in `webResearchSurface.ts` reds the host-key or native case; dropping
+ * rethrow in `webResearchSurface.ts` reds the host-key, native or page-fetch case; dropping
  * the native-leg guard in `headlessAi.ts` reds the native case.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -145,12 +148,15 @@ describe('ai.research.web — a refused egress on replay is a typed refusal, nev
       expect(searchHits).toBe(hitsBefore + 1);
 
       const err = await replaying(() => wr().search({ query: 'venues' })).catch((e: unknown) => e);
-      expect(err).toBeInstanceOf(ReplayEffectError);
-      expect((err as ReplayEffectError).code).toBe('replay_source_missing');
+      if (!(err instanceof ReplayEffectError)) throw new Error(`expected ReplayEffectError, got ${String(err)}`);
+      expect(err.code).toBe('replay_source_missing');
       expect(searchHits).toBe(hitsBefore + 1);
 
       // The composed op (search + fetch) the agent tool calls refuses the same way.
-      await expect(replaying(() => wr().research({ query: 'venues' }))).rejects.toBeInstanceOf(ReplayEffectError);
+      const composed = await replaying(() => wr().research({ query: 'venues' })).catch((e: unknown) => e);
+      if (!(composed instanceof ReplayEffectError)) throw new Error(`expected ReplayEffectError, got ${String(composed)}`);
+      expect(composed.code).toBe('replay_source_missing');
+      expect(searchHits).toBe(hitsBefore + 1);
     } finally {
       delete process.env.OPENWOP_WEBSEARCH_API_KEY;
       delete process.env.OPENWOP_WEBSEARCH_BASE_URL;
@@ -158,8 +164,17 @@ describe('ai.research.web — a refused egress on replay is a typed refusal, nev
   });
 
   it('a page fetch refused on replay propagates instead of becoming a status-0 page', async () => {
-    const err = await replaying(() => wr().fetchBatch({ urls: ['https://example.com/a'] })).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(ReplayEffectError);
+    // Live control on the local server (OPENWOP_WEBHOOK_ALLOW_PRIVATE is set), so
+    // the refusal below is the replay guard, not an unreachable page.
+    const hitsBefore = searchHits;
+    const ok = await live(() => wr().fetchBatch({ urls: [searchUrl] }));
+    expect(ok.pages.map((p) => p.status)).toEqual([200]);
+    expect(searchHits).toBe(hitsBefore + 1);
+
+    const err = await replaying(() => wr().fetchBatch({ urls: [searchUrl] })).catch((e: unknown) => e);
+    if (!(err instanceof ReplayEffectError)) throw new Error(`expected ReplayEffectError, got ${JSON.stringify(err)}`);
+    expect(err.code).toBe('replay_source_missing');
+    expect(searchHits).toBe(hitsBefore + 1);
   });
 
   it('NATIVE leg (no host key): live makes one model call; a replay makes ZERO and refuses typed', async () => {
@@ -173,7 +188,8 @@ describe('ai.research.web — a refused egress on replay is a typed refusal, nev
 
       dispatchChatMock.mockClear();
       const err = await replaying(() => wr().search({ query: 'venues' })).catch((e: unknown) => e);
-      expect(err).toBeInstanceOf(ReplayEffectError);
+      if (!(err instanceof ReplayEffectError)) throw new Error(`expected ReplayEffectError, got ${JSON.stringify(err)}`);
+      expect(err.code).toBe('replay_source_missing');
       expect(dispatchChatMock).not.toHaveBeenCalled();
     } finally {
       await clearHeadlessAiDefault(TENANT);

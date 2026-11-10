@@ -118,8 +118,8 @@ describe('agent-pack toolAllowlist entries resolve to real conversational tools 
       `toolAllowlist entries that resolve to NOTHING at dispatch (silently dropped — the agent is toothless):\n${failures.join('\n')}`,
     ).toEqual([]);
     // Non-vacuity: the scan really read the agent corpus (measured 112 / 309).
-    expect(agentCount).toBeGreaterThanOrEqual(112);
-    expect(entryCount).toBeGreaterThanOrEqual(309);
+    expect(agentCount).toBeGreaterThanOrEqual(102); // 103 after the KickTodo agent pack left (ADR 1031 P3)
+    expect(entryCount).toBeGreaterThanOrEqual(294); // 295 after the KickTodo agent pack left (ADR 1031 P3)
   });
 
   it('exemptions stay honest: every exempted entry still exists as a declared node', () => {
@@ -132,7 +132,7 @@ describe('agent-pack toolAllowlist entries resolve to real conversational tools 
       for (const n of manifest.nodes ?? []) if (n.typeId) declared.add(`openwop:${n.typeId}`);
     }
     // The case asserts even while RUN_ONLY_EXEMPTIONS is empty (measured 812).
-    expect(declared.size).toBeGreaterThanOrEqual(812);
+    expect(declared.size).toBeGreaterThanOrEqual(759); // 760 after the KickTodo node pack left (ADR 1031 P3)
     for (const [agentId, { entries }] of Object.entries(RUN_ONLY_EXEMPTIONS)) {
       for (const entry of entries) {
         expect(declared.has(entry), `${agentId} exemption ${entry} is not a declared node typeId`).toBe(true);

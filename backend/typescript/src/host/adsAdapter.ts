@@ -36,6 +36,7 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { campaignForRun } from './campaignRefs.js';
+import { runClientStamp } from './runClientOrg.js';
 import { canonicalJSON } from './jcs.js';
 import { createLogger } from '../observability/logger.js';
 import { stampConnectionUse } from './connectionInjection.js';
@@ -453,6 +454,64 @@ export function setAdsCapChecker(fn: AdsCapChecker | null): void { capChecker = 
 export type AdsCapIncreaseChecker = (tenantId: string, target: { platform: AdPlatform; adAccountId: string; campaignId: string; orgId?: string; orgVerified?: boolean }, toDailyMinor: number) => Promise<{ capId: string; reason: string } | null>;
 let capIncreaseChecker: AdsCapIncreaseChecker | null = null;
 export function setAdsCapIncreaseChecker(fn: AdsCapIncreaseChecker | null): void { capIncreaseChecker = fn; }
+
+/** ADR 1022 follow-up (Q-1) — does platform campaign X belong to client org O?
+ *  The ONE predicate is campaign-intel's `orgOwnsAdCampaign` (adOwnership.ts),
+ *  which the recommendation-apply route already calls; the feature registers it
+ *  here because core cannot import the campaigns feature (the `capIncreaseChecker`
+ *  precedent). `updateBudget` and `setDeliveryStatus` ask it on every call (the
+ *  seam below), so every door meets it: the core node, the feature routes, and
+ *  a pack calling `ctx.ads` directly. Unregistered (the feature not loaded)
+ *  means every budget or delivery change is refused. */
+export type AdsCampaignOwnershipChecker = (tenantId: string, orgId: string, target: { platform: AdPlatform; adAccountId: string; campaignId: string }) => Promise<boolean>;
+let campaignOwnershipChecker: AdsCampaignOwnershipChecker | null = null;
+export function setAdsCampaignOwnershipChecker(fn: AdsCampaignOwnershipChecker | null): void { campaignOwnershipChecker = fn; }
+export function getAdsCampaignOwnershipChecker(): AdsCampaignOwnershipChecker | null { return campaignOwnershipChecker; }
+
+/** Why the ownership seam refused a budget or delivery change (`null` = allowed). */
+export type AdsOwnershipRefusal = 'ad_campaign_not_in_org' | 'capability_not_provided' | 'forbidden_scope';
+const OWNERSHIP_REFUSALS: ReadonlySet<string> = new Set<AdsOwnershipRefusal>(['ad_campaign_not_in_org', 'capability_not_provided', 'forbidden_scope']);
+/** Did an adapter result's `error` come from the ownership seam? */
+export function isAdsOwnershipRefusal(error: unknown): error is AdsOwnershipRefusal {
+  return typeof error === 'string' && OWNERSHIP_REFUSALS.has(error);
+}
+
+/** ADR 1022 follow-up (adapter seam) — the org a budget or delivery change acts
+ *  for, from inputs a caller cannot choose: a stored run's host-written client
+ *  stamp (ADR 0944 D2) wins; a run without one, and a route lane (a synthetic
+ *  `hostext:*` run id with no stored run), use `deps.orgId`, which the executor
+ *  sets to `run.tenantId` and each feature route sets to the org it authorized.
+ *  Node config and call args never reach this, so a pack cannot pick its org.
+ *  A route that names a client org other than its run's stamp is refused. */
+async function adsActingOrg(deps: BrokeredEgressDeps): Promise<{ orgId: string } | { refused: AdsOwnershipRefusal }> {
+  let run: Awaited<ReturnType<BrokeredEgressDeps['storage']['getRun']>>;
+  try { run = await deps.storage.getRun(deps.runId); } catch { return { refused: 'forbidden_scope' }; }
+  if (run) {
+    if (run.tenantId !== deps.tenantId) return { refused: 'forbidden_scope' };
+    const stamp = runClientStamp(run.metadata as Record<string, unknown> | undefined);
+    if (stamp && 'refused' in stamp) return { refused: 'forbidden_scope' };
+    if (stamp) {
+      if (deps.orgId && deps.orgId !== deps.tenantId && deps.orgId !== stamp.orgId) return { refused: 'forbidden_scope' };
+      return { orgId: stamp.orgId };
+    }
+  }
+  return deps.orgId ? { orgId: deps.orgId } : { refused: 'forbidden_scope' };
+}
+
+/** The seam both write doors call before anything else: the campaign must be the
+ *  acting org's, by the ONE predicate. One answer for a missing campaign and
+ *  another org's. Fails closed: no checker, or a checker that throws, refuses. */
+async function adsOwnershipRefusal(deps: BrokeredEgressDeps, target: { platform: AdPlatform; adAccountId: string; campaignId: string }): Promise<AdsOwnershipRefusal | null> {
+  const acting = await adsActingOrg(deps);
+  if ('refused' in acting) return acting.refused;
+  const owns = campaignOwnershipChecker;
+  if (!owns) return 'capability_not_provided';
+  try {
+    return (await owns(deps.tenantId, acting.orgId, { platform: target.platform, adAccountId: target.adAccountId, campaignId: target.campaignId })) ? null : 'ad_campaign_not_in_org';
+  } catch {
+    return 'capability_not_provided';
+  }
+}
 
 /** ADR 1022 D1 — the ONE "does this dispatch belong to org O" rule (was a
  *  private copy in spend caps). A row stamped with its campaign (ADR 0941 P2)
@@ -1764,7 +1823,7 @@ export type SetDeliveryStatusResult =
   | { outcome: 'preview'; platform: AdPlatform; status: DeliveryStatus; plan: AdPlanStep[] }
   | { outcome: 'requires_approval'; approvalId: string }
   | { outcome: 'refused'; error: 'policy_unreadable' | 'policy_disabled' | 'autonomy_blocked' | 'circuit_open' | 'cap_exceeded' | 'cap_unenforceable'
-      | 'launch_outcome_unknown' | 'launch_approval_missing' | 'launch_approval_changed' | 'launch_claim_unreadable'; capId?: string }
+      | 'launch_outcome_unknown' | 'launch_approval_missing' | 'launch_approval_changed' | 'launch_claim_unreadable' | AdsOwnershipRefusal; capId?: string }
   | { outcome: 'no_connection' }
   | { outcome: 'unsupported'; platform: AdPlatform; reason?: 'not_sandbox_verified' }
   | { outcome: 'failed'; error: string };
@@ -2235,6 +2294,9 @@ export function makeAdsAdapter(deps: BrokeredEgressDeps): AdsAdapter {
     },
     async updateBudget(args) {
       if (!Number.isSafeInteger(args.dailyBudgetMinor) || args.dailyBudgetMinor < 0) return { outcome: 'failed', error: 'invalid_budget' };
+      // ADR 1022 follow-up — ownership first, dry run or not: every door meets it.
+      const notOwned = await adsOwnershipRefusal(deps, args);
+      if (notOwned) return { outcome: 'failed', error: notOwned };
       let effective = args;
       let notice: EnforceVerdict | undefined;
       // ADR 1022 D5 — caps first, dry run or not, before the spend gate opens an
@@ -2293,6 +2355,10 @@ export function makeAdsAdapter(deps: BrokeredEgressDeps): AdsAdapter {
       // Google, TikTok and LinkedIn ids are numeric and go into queries / paths:
       // a non-numeric id is refused, never stripped into a different campaign.
       if (args.platform !== 'meta' && !/^[0-9]+$/.test(args.campaignId)) return { outcome: 'failed', error: 'invalid_ids' };
+      // ADR 1022 follow-up — ownership first, for a pause as much as a launch, and
+      // for a preview: only the acting org's campaigns are addressable here.
+      const notOwned = await adsOwnershipRefusal(deps, args);
+      if (notOwned) return { outcome: 'refused', error: notOwned };
       // Dry run: the exact write, no call, no gate (a preview starts no spend).
       if (args.dryRun) {
         const acct = args.adAccountId.replace(/[^0-9]/g, '');
@@ -2435,6 +2501,10 @@ export function makeAdsAdapter(deps: BrokeredEgressDeps): AdsAdapter {
       return out;
     },
     async getMetrics(args) {
+      // ADR 1022 follow-up — the read door meets the same ownership seam as the
+      // write doors: another org's campaign (or none) is refused before any call.
+      const notOwned = await adsOwnershipRefusal(deps, args);
+      if (notOwned) return { outcome: 'failed', error: notOwned };
       if (args.platform === 'meta') return metaMetrics(deps, args);
       if (args.platform === 'google') return googleMetrics(deps, args);
       return { outcome: 'unsupported', platform: args.platform };

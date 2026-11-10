@@ -16,7 +16,7 @@
 import { randomUUID } from 'node:crypto';
 import { AiProviderError, CREDENTIAL_PROVIDERS, createAiProvidersAdapter } from '../../aiProviders/aiProvidersHost.js';
 import { explicitRefNamesOtherProvider } from '../../aiProviders/credentialRefLadder.js';
-import { resolveSecret } from '../../byok/secretResolver.js';
+import { resolveUserNamedSecret } from '../../byok/userNamedSecret.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { OpenwopError } from '../../types.js';
 import { tenantOf, optionalString } from '../featureRoute.js';
@@ -43,7 +43,7 @@ const DEFAULT_VOICE_ID = 'default';
 async function secretsFor(tenantId: string, provider: string | undefined, credentialRef: string | undefined): Promise<Record<string, string>> {
   if (!provider || !credentialRef) return {};
   if (explicitRefNamesOtherProvider(provider, credentialRef, CREDENTIAL_PROVIDERS) !== null) return {};
-  const value = await resolveSecret(credentialRef, { tenantId });
+  const value = await resolveUserNamedSecret(credentialRef, { tenantId });
   return value ? { [credentialRef]: value } : {};
 }
 

@@ -12,6 +12,17 @@
  *  - skip `enforceCampaignAction` in smsAdapter → red (no decision audited; no grant needed);
  *  - drop the client floor seam registration → red (a preview client's spend proceeds to approval);
  *  - skip `resumeAwaitingRunsSafely` on approve → red (the waiting run never resumes).
+ *
+ * Added sabotage (w86 probes, each alone, all red): drop the `aut:` frozen-policy
+ * namespacing → the two-person case reuses the one-person approval; skip the
+ * waiting-run requester check → the second run's admin decides (the submitters
+ * list does NOT carry that admin, so this is the only guard for that case); skip
+ * the eligible-approver throw → the editor decides; let an unbound run ask, or a
+ * blocked decision proceed; drop the client-not-live floor; skip the reject-lane
+ * resume or the reconcile resume; bypass the SMS chokepoint, its covering-grant
+ * check or the grant's content-hash match; drop the content hash from the catalog
+ * spend key; suspend inside (or never) in the publish-ad-variants and catalog
+ * push nodes.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -22,7 +33,7 @@ import type { HostAdapterSuite } from '../src/host/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createMember, createOrg } from '../src/host/accessControlService.js';
-import { makeAdsAdapter } from '../src/host/adsAdapter.js';
+import { __putDispatchRecordForTests, makeAdsAdapter } from '../src/host/adsAdapter.js';
 import { makeSmsAdapter } from '../src/host/smsAdapter.js';
 import { pushCatalogItems } from '../src/host/catalogPushAdapter.js';
 import { getChain, expandChain } from '../src/host/workflowChainPackLoader.js';
@@ -45,9 +56,10 @@ import { stampCampaignRun } from '../src/features/campaign-orchestration/campaig
 import { createClient, updateClient } from '../src/features/campaign-ops/clientService.js';
 import type { MarketingCampaign } from '../src/features/campaign-orchestration/types.js';
 import {
-  AUTONOMY_TOGGLE, FORK_POSTURE_KEY, getBinding, presetRules, savePolicy, type ActionRule,
+  AUTONOMY_TOGGLE, FORK_POSTURE_KEY, contentHashOf, getBinding, presetRules, savePolicy, type ActionRule,
   reconcileApprovalWaits,
 } from '../src/host/autonomyPolicy/index.js';
+import { getEventLog } from '../src/executor/eventLog.js';
 import { issueApiKey } from '../src/features/developer-keys/apiKeyService.js';
 import { opaquePrincipal } from '../src/host/runOwner.js';
 import type { WorkflowDefinition } from '../src/executor/types.js';
@@ -62,7 +74,7 @@ let hits = 0;
 let orgId: string;
 let campaign: MarketingCampaign;
 let n = 0;
-const deps = { storage: null as unknown as Storage, hostSuite: null as unknown as HostAdapterSuite };
+let deps: { storage: Storage; hostSuite: HostAdapterSuite };
 
 async function setToggle(id: string, on: boolean): Promise<void> {
   const d = getToggleDefault(id);
@@ -74,7 +86,7 @@ async function setToggle(id: string, on: boolean): Promise<void> {
 async function campaignRun(extraMeta: Record<string, unknown> = {}, extra: Partial<RunRecord> = {}): Promise<RunRecord> {
   const now = new Date().toISOString();
   const run: RunRecord = {
-    runId: `r-p3-${n++}-${Math.random().toString(36).slice(2, 8)}`, workflowId: 'wf.p3', tenantId: T, status: 'pending', inputs: {},
+    runId: `r-p3-${n++}`, workflowId: 'wf.p3', tenantId: T, status: 'pending', inputs: {},
     metadata: { campaignOrchestration: stampCampaignRun(campaign, { role: 'optimizer' }), actingUserId: 'u1', ...extraMeta },
     configurable: {}, createdAt: now, updatedAt: now, ...extra,
   };
@@ -103,7 +115,7 @@ beforeAll(async () => {
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   storage = app.locals.storage as Storage;
   hostSuite = app.locals.hostSuite as HostAdapterSuite;
-  deps.storage = storage; deps.hostSuite = hostSuite;
+  deps = { storage, hostSuite };
   await __resetConnectionsStore();
   srv = http.createServer((req, res) => { hits++; req.resume(); res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ id: 'x', results: [{ customer: { currencyCode: 'USD' }, resourceName: 'customers/1/campaignBudgets/1', campaign: { campaignBudget: 'customers/1/campaignBudgets/1' } }] })); });
   await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
@@ -120,6 +132,9 @@ beforeAll(async () => {
   await updateClient(T, orgId, { mode: 'live' });
   const brief = await createBrief(T, orgId, 'u-owner', { name: 'Spring launch', channels: [{ type: 'email_sequence', enabled: true, config: {} }] });
   campaign = (await ensureDraftCampaign(T, brief, 'u-owner')).campaign;
+  // The budget node refuses a campaign its run's org does not own: seed the
+  // dispatch row the launch of platform campaign 9 would have written.
+  await __putDispatchRecordForTests({ tenantId: T, platform: 'google', platformCampaignId: '9', platformAdSetId: 'as-9', platformAdId: 'ad-9', adAccountId: '1234567890', createdAt: new Date().toISOString(), campaignId: campaign.id, orgId });
 });
 afterAll(async () => {
   delete process.env.OPENWOP_GOOGLE_ADS_API_BASE;
@@ -185,7 +200,8 @@ describe('ADR 0942 P3 — ads: the policy decides a campaign run\'s spend', () =
     expect((await ads(run.runId).updateBudget(budget(30_000))).outcome).toBe('updated');
     const bigger = await ads(run.runId).updateBudget(budget(45_000));
     expect(bigger).toMatchObject({ outcome: 'requires_approval', autonomy: true });
-    if (bigger.outcome === 'requires_approval') expect(bigger.approvalId).not.toBe(first.approvalId);
+    if (bigger.outcome !== 'requires_approval') throw new Error('expected a new approval');
+    expect(bigger.approvalId).not.toBe(first.approvalId);
   });
 
   it('a branch fork does not reuse its source\'s spend approval (D10.4)', async () => {
@@ -218,12 +234,13 @@ describe('ADR 0942 P3 — ads: the policy decides a campaign run\'s spend', () =
 
   it('a policy-blocked class fails typed, and the decision is audited', async () => {
     await setCampaignPolicy(presetRules('guarded@1').map((x) => (x.actionClass === 'ads.budget' ? { actionClass: 'ads.budget', default: { outcome: 'blocked', reason: 'No budget moves this quarter' } } : x)));
-    const run = await campaignRun();
-    hits = 0;
-    expect(await ads(run.runId).updateBudget(budget(1_000))).toEqual({ outcome: 'failed', error: 'autonomy_blocked' });
-    expect(hits).toBe(0);
-    expect((await autonomyAudits()).at(-1)).toMatchObject({ actionClass: 'ads.budget', outcome: 'blocked', runId: run.runId, campaignId: campaign.id });
-    await setCampaignPolicy('guarded@1');
+    try {
+      const run = await campaignRun();
+      hits = 0;
+      expect(await ads(run.runId).updateBudget(budget(1_000))).toEqual({ outcome: 'failed', error: 'autonomy_blocked' });
+      expect(hits).toBe(0);
+      expect((await autonomyAudits()).at(-1)).toMatchObject({ actionClass: 'ads.budget', outcome: 'blocked', runId: run.runId, campaignId: campaign.id });
+    } finally { await setCampaignPolicy('guarded@1'); }
   });
 
   it('a preview client is blocked at the chokepoint (the client floor)', async () => {
@@ -240,22 +257,26 @@ describe('ADR 0942 P3 — ads: the policy decides a campaign run\'s spend', () =
   it('a non-campaign run keeps today\'s gate: no threshold, no ask', async () => {
     const now = new Date().toISOString();
     await storage.insertRun({ runId: 'r-p3-plain', workflowId: 'w', tenantId: T, status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: now, updatedAt: now });
-    const plain = await ads('r-p3-plain').updateBudget(budget(50_000));
+    // An unstamped run acts for its workspace, so it moves the workspace's own
+    // campaign: client A's campaign 9 is refused at the adapter's ownership seam.
+    await __putDispatchRecordForTests({ tenantId: T, platform: 'google', platformCampaignId: '19', platformAdSetId: 'as-19', platformAdId: 'ad-19', adAccountId: '1234567890', createdAt: now, campaignId: 'mc-workspace', orgId: T });
+    const plain = await ads('r-p3-plain').updateBudget({ ...budget(50_000), campaignId: '19' });
     expect(plain, JSON.stringify(plain)).toMatchObject({ outcome: 'updated' });
   });
 
   it('a spend row without policy approvers keeps today\'s decide rules (any approver, even the proposer)', async () => {
     const row = await createCampaignSpendApproval({ tenantId: T, spendKind: 'budget', platform: 'google', adAccountId: 'a', dailyBudgetMinor: 1, spendIdemKey: `legacy-${n++}`, proposal: 'legacy' });
-    await expect(decide(row.approvalId, 'u-editor')).resolves.toBeDefined();
+    await decide(row.approvalId, 'u-editor');
+    expect(await getApproval(row.approvalId)).toMatchObject({ status: 'approved', decidedBy: 'u-editor' });
   });
 });
 
 describe('ADR 0942 P3 — a campaign run WAITS on its spend approval and resumes', () => {
   it('recovers an approval decided before the executor could persist the wait', async () => {
-    const def = {
-      workflowId: 'wf.p3.early-decision', name: 'early decision', version: '1.0.0',
+    const def: WorkflowDefinition = {
+      workflowId: 'wf.p3.early-decision',
       nodes: [{ nodeId: 'budget', typeId: 'core.openwop.connectors.ad-budget-update', config: { platform: 'google', adAccountId: '1234567890', campaignId: '9', dailyBudgetMinor: 36_201, dryRun: false } }], edges: [],
-    } as unknown as WorkflowDefinition;
+    };
     registerHostWorkflow(def);
     const run = await campaignRun({}, { workflowId: def.workflowId });
     const original = storage.insertInterrupt.bind(storage);
@@ -275,15 +296,15 @@ describe('ADR 0942 P3 — a campaign run WAITS on its spend approval and resumes
     expect(await reconcileApprovalWaits(storage, hostSuite)).toBeGreaterThanOrEqual(1);
     await __awaitRunResumeChainForTests(run.runId);
     expect((await storage.getRun(run.runId))?.status).toBe('completed');
-    expect(hits).toBeGreaterThan(0);
+    expect(hits).toBe(3); // the resumed move: currency read, budget lookup, mutate
     expect(await reconcileApprovalWaits(storage, hostSuite)).toBe(0);
   });
   it('the budget node suspends, the decision resumes it, and the move applies', async () => {
-    const def = {
-      workflowId: 'wf.p3.budget', name: 'wf.p3.budget', version: '1.0.0',
+    const def: WorkflowDefinition = {
+      workflowId: 'wf.p3.budget',
       nodes: [{ nodeId: 'budget', typeId: 'core.openwop.connectors.ad-budget-update', config: { platform: 'google', adAccountId: '1234567890', campaignId: '9', dailyBudgetMinor: 33_000, dryRun: false } }],
       edges: [],
-    } as unknown as WorkflowDefinition;
+    };
     registerHostWorkflow(def);
     const run = await campaignRun({}, { workflowId: 'wf.p3.budget' });
     const status = (await executeRun(storage, run, def)).status;
@@ -296,15 +317,15 @@ describe('ADR 0942 P3 — a campaign run WAITS on its spend approval and resumes
     await decide(approvalId, 'u-admin-2');
     await __awaitRunResumeChainForTests(run.runId);
     expect((await storage.getRun(run.runId))?.status).toBe('completed');
-    expect(hits).toBeGreaterThan(0);
+    expect(hits).toBe(3); // currency read, budget lookup, mutate
   });
 
   it('a rejection resumes the run and fails the step', async () => {
-    const def = {
-      workflowId: 'wf.p3.budget2', name: 'wf.p3.budget2', version: '1.0.0',
+    const def: WorkflowDefinition = {
+      workflowId: 'wf.p3.budget2',
       nodes: [{ nodeId: 'budget', typeId: 'core.openwop.connectors.ad-budget-update', config: { platform: 'google', adAccountId: '1234567890', campaignId: '9', dailyBudgetMinor: 34_000, dryRun: false } }],
       edges: [],
-    } as unknown as WorkflowDefinition;
+    };
     registerHostWorkflow(def);
     const run = await campaignRun({}, { workflowId: 'wf.p3.budget2' });
     await executeRun(storage, run, def);
@@ -313,7 +334,9 @@ describe('ADR 0942 P3 — a campaign run WAITS on its spend approval and resumes
     if (!approvalId) throw new Error('expected the node to wait on an approval');
     await rejectApproval(deps, { tenantId: T, decidedBy: 'u-admin-2' }, approvalId);
     await __awaitRunResumeChainForTests(run.runId);
-    expect((await storage.getRun(run.runId))?.status).toBe('failed');
+    expect(await getApproval(approvalId)).toMatchObject({ status: 'rejected', decidedBy: 'u-admin-2' });
+    // The step fails on the rejection itself, not on an unrelated error.
+    expect(await storage.getRun(run.runId)).toMatchObject({ status: 'failed', error: { code: 'ad_budget_update_failed', message: 'Budget update failed (spend_approval_rejected).' } });
   });
 });
 
@@ -322,18 +345,18 @@ describe('ADR 0942 P3 — sms.send (interrupt lane): audit and the covering gran
 
   it('an auto send is audited (and then reaches the provider step)', async () => {
     await setCampaignPolicy(presetRules('guarded@1').map((x) => (x.actionClass === 'sms.send' ? { actionClass: 'sms.send', default: { outcome: 'auto' } } : x)));
-    const run = await campaignRun();
-    const out = await sms(run.runId);
-    expect(out.error).toBe('sms_not_connected'); // past the gate: no Twilio connection in this test
-    expect((await autonomyAudits()).at(-1)).toMatchObject({ actionClass: 'sms.send', outcome: 'auto', runId: run.runId, lane: 'interrupt' });
-    await setCampaignPolicy('guarded@1');
+    try {
+      const run = await campaignRun();
+      const out = await sms(run.runId);
+      expect(out.error).toBe('sms_not_connected'); // past the gate: no Twilio connection in this test
+      expect((await autonomyAudits()).at(-1)).toMatchObject({ actionClass: 'sms.send', outcome: 'auto', runId: run.runId, lane: 'interrupt' });
+    } finally { await setCampaignPolicy('guarded@1'); }
   });
 
   it('approve without a covering grant is refused; an approved gate for the same content covers it', async () => {
     const run = await campaignRun();
     expect((await sms(run.runId)).error).toBe('autonomy_approval_required');
     // An approved autonomy gate for sms.send in THIS run, on the same content.
-    const { contentHashOf } = await import('../src/host/autonomyPolicy/index.js');
     const interruptId = `int-p3-${n++}`;
     const now = new Date().toISOString();
     await storage.insertInterrupt({
@@ -341,7 +364,6 @@ describe('ADR 0942 P3 — sms.send (interrupt lane): audit and the covering gran
       data: { autonomy: { actionClass: 'sms.send', facts: { audienceSize: 1 }, contentHash: contentHashOf('Your spring launch is live') } },
     });
     await storage.resolveInterrupt(interruptId, { action: 'approve' }, now);
-    const { getEventLog } = await import('../src/executor/eventLog.js');
     await getEventLog().append({ runId: run.runId, type: 'interrupt.resolved', payload: { interruptId, kind: 'approval', decision: 'accepted', action: 'accept' } });
     expect((await sms(run.runId)).error).toBe('sms_not_connected');
     // Different content is not covered.
@@ -357,7 +379,6 @@ describe('ADR 0942 P3 — sms.send (interrupt lane): audit and the covering gran
       data: { autonomy: { actionClass: 'sms.send', facts: { audienceSize: 1 } } },
     });
     await storage.resolveInterrupt(interruptId, { action: 'approve' }, now);
-    const { getEventLog } = await import('../src/executor/eventLog.js');
     await getEventLog().append({ runId: run.runId, type: 'interrupt.resolved', payload: { interruptId, kind: 'approval', decision: 'accepted', action: 'accept' } });
     expect((await sms(run.runId)).error).toBe('autonomy_approval_required');
   });
@@ -422,11 +443,12 @@ describe('ADR 0942 × ADR 0952 P7 — a catalog push is ads.publish, on the Pend
     expect(await push(run.runId)).toMatchObject({ outcome: 'requires_approval', approvalId: first.approvalId });
     await decide(first.approvalId, 'u-admin-2');
     expect((await push(run.runId)).outcome).toBe('pushed');
-    expect(hits).toBeGreaterThan(before);
+    expect(hits - before).toBe(1); // ONE items_batch
     const after = hits;
     const other = await push(run.runId, [{ ...item, price: '99.00 USD' }]);
     expect(other.outcome).toBe('requires_approval');
-    expect(other.outcome === 'requires_approval' && other.approvalId).not.toBe(first.approvalId);
+    if (other.outcome !== 'requires_approval') throw new Error('expected a new approval');
+    expect(other.approvalId).not.toBe(first.approvalId);
     expect(hits).toBe(after);
   });
 
@@ -436,7 +458,7 @@ describe('ADR 0942 × ADR 0952 P7 — a catalog push is ads.publish, on the Pend
       const run = await campaignRun();
       const before = hits;
       expect((await push(run.runId, [{ ...item, id: 'sku-auto' }])).outcome).toBe('pushed');
-      expect(hits).toBeGreaterThan(before);
+      expect(hits - before).toBe(1); // ONE items_batch
       expect((await autonomyAudits()).at(-1)).toMatchObject({ actionClass: 'ads.publish', outcome: 'auto', runId: run.runId });
     } finally { await setCampaignPolicy('guarded@1'); }
   });

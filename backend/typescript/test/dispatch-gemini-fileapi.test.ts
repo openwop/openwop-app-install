@@ -17,7 +17,7 @@ const realFetch = global.fetch;
 afterEach(() => { global.fetch = realFetch; });
 
 function sse(text: string): Response {
-  return new Response(`data: {"candidates":[{"content":{"parts":[{"text":${JSON.stringify(text)}}]}}]}\n\n`, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  return new Response(`data: {"candidates":[{"content":{"parts":[{"text":${JSON.stringify(text)}}]},"finishReason":"STOP"}]}\n\n`, { status: 200, headers: { 'content-type': 'text/event-stream' } });
 }
 const urlOf = (input: Parameters<typeof fetch>[0]): string => typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
 

@@ -65,9 +65,20 @@ describe('the real releases.json', () => {
       const plan = planUpgrade(real, '0.1.0', to);
       expect(plan.steps.length, to).toBe(1);
       expect(plan.steps[0]!.stopOldBinary, to).toBe(true);
-      expect(plan.steps[0]!.stopOldBinaryBecause, to).toEqual([expect.stringMatching(/^0\.2\.0: /)]);
     }
-    expect(planUpgrade(real, '0.2.0').steps[0]!.stopOldBinary).toBe(false);
+    expect(planUpgrade(real, '0.1.0', '0.2.0').steps[0]!.stopOldBinaryBecause).toEqual([expect.stringMatching(/^0\.2\.0: /)]);
+    // Skipping past 0.2.0 still carries its reason, beside one per later not-rolling-safe release crossed.
+    const crossedUnsafe = real.releases
+      .filter((r) => !r.rollingSafe && compareVersions(r.version, '0.1.0') > 0 && compareVersions(r.version, real.latest) <= 0)
+      .map((r) => r.version)
+      .sort(compareVersions);
+    const because = planUpgrade(real, '0.1.0', real.latest).steps[0]!.stopOldBinaryBecause;
+    expect(because.map((b) => b.split(':')[0]).sort(compareVersions)).toEqual(crossedUnsafe);
+    expect(because).toEqual(expect.arrayContaining([expect.stringMatching(/^0\.2\.0: /)]));
+    // From 0.2.0 on, the old binary must stop only when a later not-rolling-safe release is crossed.
+    const after020 = real.releases.map((r) => r.version).filter((v) => compareVersions(v, '0.2.0') > 0).sort(compareVersions)[0]!;
+    expect(planUpgrade(real, '0.2.0', after020).steps[0]!.stopOldBinary).toBe(false);
+    expect(planUpgrade(real, '0.2.0').steps.some((s) => s.stopOldBinary)).toBe(crossedUnsafe.some((v) => v !== '0.2.0'));
   });
 
   it('every supported source → target pair plans completely', () => {

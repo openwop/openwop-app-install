@@ -11,8 +11,10 @@
  * from the submitted checkout. Environment is the runner's, fixed and closed.
  */
 import { execFileSync, spawn } from 'node:child_process';
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, createReadStream, createWriteStream, existsSync, openSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { constants } from 'node:os';
+import { pipeline } from 'node:stream/promises';
+import { createGzip } from 'node:zlib';
 import { join } from 'node:path';
 import { sha256 } from './lib/remote-gate-result.mjs';
 
@@ -20,6 +22,8 @@ const [requestPath, repo, out] = process.argv.slice(2);
 if (!requestPath || !repo || !out) { console.error('usage: remote-gate-gate.mjs <request.json> <checkout> <artifacts-dir>'); process.exit(2); }
 const requestBytes = readFileSync(requestPath);
 const request = JSON.parse(requestBytes.toString('utf8'));
+// The log is written plain while the gate runs, then gzipped into the artifact: a
+// full gate logs ~250 MB, which outran the relay on fetch (shadow 12, 2026-11-02).
 const logPath = join(out, 'gate.log');
 const log = openSync(logPath, 'wx', 0o600);
 const say = text => { writeFileSync(log, `${new Date().toISOString()} ${text}\n`); };
@@ -69,6 +73,8 @@ const treeAfter = git(['rev-parse', 'HEAD^{tree}']).trim();
 const dirtyAfter = !clean();
 say(`gate exit ${exitCode}; tree ${treeAfter === treeBefore ? 'unchanged' : 'CHANGED'}; ${dirtyAfter ? 'DIRTY' : 'clean'}`);
 closeSync(log);
+await pipeline(createReadStream(logPath), createGzip({ level: 6 }), createWriteStream(join(out, 'gate.log.gz'), { flags: 'wx', mode: 0o600 }));
+unlinkSync(logPath);
 const digest = name => sha256(readFileSync(join(out, name)));
 const result = {
   version: 1, id: request.id, requestSha256: sha256(requestBytes),
@@ -78,7 +84,7 @@ const result = {
   // The runner passes a fixed environment with no lane-skip variable; this lists
   // none because none can be set, not because it inspected the lanes.
   disabledLanes: [], startedAt, finishedAt,
-  artifacts: { gateLog: digest('gate.log'), evidence: digest('evidence.json'), browserLedger: digest('browser.tsv') },
+  artifacts: { gateLog: digest('gate.log.gz'), evidence: digest('evidence.json'), browserLedger: digest('browser.tsv') },
 };
 writeFileSync(join(out, 'result.json'), JSON.stringify(result) + '\n', { flag: 'wx', mode: 0o600 });
 process.exit(exitCode);

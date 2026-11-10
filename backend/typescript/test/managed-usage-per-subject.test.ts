@@ -22,7 +22,7 @@ import {
   GLOBAL_USAGE_BUCKET,
 } from '../src/providers/managedUsageScope.js';
 
-const WS = 'host-kicktodo';          // a declared default workspace (multi-principal)
+const WS = 'host-acme';          // a deployment default workspace (multi-principal)
 const WS2 = 'ws:11111111-2222-3333-4444-555555555555';
 const A = 'user:aaaaaaaaaaaaaaaa';
 const B = 'user:bbbbbbbbbbbbbbbb';
@@ -75,7 +75,7 @@ describe('ADR 0693 — the cases that must NOT change', () => {
   });
 
   it('no real tenant shape can collide with the reserved namespace', () => {
-    for (const t of ['user:x', 'anon:x', 'ws:x', 'host-kicktodo', 'host-site', 'default']) {
+    for (const t of ['user:x', 'anon:x', 'ws:x', 'host-acme', 'host-site', 'default']) {
       expect(isReservedUsageBucket(t), `${t} must not read as reserved`).toBe(false);
     }
     expect(isReservedUsageBucket(GLOBAL_USAGE_BUCKET)).toBe(true);

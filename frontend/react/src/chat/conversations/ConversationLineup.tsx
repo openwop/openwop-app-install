@@ -8,6 +8,7 @@
  * deck). Presentational: the parent wires the callbacks.
  */
 
+import { useId } from 'react';
 import { useTranslation } from 'react-i18next';
 import { AgentAvatar } from '../../agents/AgentAvatar.js';
 import { roleThemeForAgentId } from '../../agents/roleTheme.js';
@@ -88,6 +89,11 @@ function ParticipantRow({
   // while its settled turn is being VOICED (the live boardroom, ADR 0304), it
   // yields to "speaking…" — speaking outranks thinking (the floor is audible).
   const name = slugToName(row.slug);
+  const contextId = useId();
+  const context = row.persona.trim();
+  const showContext = row.agentId !== DEFAULT_ASSISTANT_ID
+    && context.length > 0 && context.toLowerCase() !== name.trim().toLowerCase();
+  const describedBy = compact && showContext ? contextId : undefined;
   const roleTheme = roleThemeForAgentId(row.agentId);
   const live = isThinking || isSpeaking;
   if (compact) {
@@ -100,10 +106,14 @@ function ParticipantRow({
             onClick={onSwitch}
             aria-pressed={isCurrent}
             aria-label={t('switchToPersona', { persona: name })}
+            aria-describedby={describedBy}
             className="convlineup-chip__switch"
           >
             <AgentAvatar persona={name} roleTheme={roleTheme} size={20} showBadge={false} alt="" {...((live || isCurrent) ? { ring: 'var(--clay)' } : {})} />
-            <span className="convlineup-chip__name u-truncate">{name}</span>
+            <span className="u-flex u-flex-col u-min-w-0 u-text-left">
+              <span className="convlineup-chip__name u-truncate">{name}</span>
+              {showContext ? <span id={contextId} className="u-fs-11 muted u-truncate" title={context}>{context}</span> : null}
+            </span>
             {isSpeaking ? (
               <span role="status" aria-live="polite" aria-label={t('speakingLabel')} title={t('speakingLabel')}>
                 <Volume2Icon size={12} />
@@ -119,6 +129,7 @@ function ParticipantRow({
               type="button"
               onClick={onRemove}
               aria-label={t('removeFromConversation', { persona: name })}
+              aria-describedby={describedBy}
               title={t('removeFromConversationTitle')}
               className="convlineup-chip__remove"
             >

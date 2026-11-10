@@ -17,15 +17,22 @@
  * The undefined-skip (`node-packs.md`: never overwrite a parent variable from an
  * undefined child source) is pinned on the fold.
  *
+ * Mapped secret boundary (recovery correction 2026-10-25): a key only the child resolved
+ * never reaches the child's or parent's durable bag, the parent's events or a replay;
+ * each holds the redaction marker. The evidence an old-shape replay reads is the
+ * DURABLE bag: never a warm cache, and corrupt or unreadable evidence fails closed.
+ *
  * BORN RED: without the `sideEffecting` flag, the replay fork starts a new child and
- * the counters move.
+ * the counters move. Measured sabotage (wave 77, each red): dropping the flag, the
+ * re-apply, the recorded writes, the fold's undefined skip, the seal or the durable
+ * strip; reading the warm cache; arming a branch fork as a replay.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { bootPlanningApp, makeClient, enableToggle, uniqEmail, type Client } from './planningHarness.js';
+import { bootPlanningApp, makeClient, enableToggle, uniqEmail, type Client, type Res } from './planningHarness.js';
 import { registerWorkflow } from '../src/host/workflowsRegistry.js';
 import { getNodeRegistry } from '../src/executor/nodeRegistry.js';
 import { tryDurableStorage } from '../src/host/durable/durableStore.js';
-import { seedRunVariables, setRunVariable, snapshotRunVariables } from '../src/host/variablesRuntime.js';
+import { seedRunVariables, snapshotRunVariables } from '../src/host/variablesRuntime.js';
 import { applyServedSubWorkflow } from '../src/executor/subWorkflowReplay.js';
 import { foldChildOutputMapping } from '../src/executor/subWorkflowDispatcher.js';
 import { bareRunId } from './support/bareRunId.js';
@@ -57,15 +64,25 @@ beforeAll(async () => {
       return { status: 'success', outputs: {} };
     },
   });
-});
+}, 120_000);
 afterAll(async () => { await close(); });
 
 const TERMINAL = ['completed', 'failed', 'cancelled'];
 async function settle(c: Client, runId: string): Promise<string> {
   let s = '';
   // A run has no settle hook to await: poll its status until terminal.
-  await vi.waitFor(async () => { s = (await c.get(`/runs/${runId}`)).body?.status ?? ''; expect(TERMINAL).toContain(s); }, { timeout: 5000, interval: 25 });
+  await vi.waitFor(async () => {
+    const read: Res<{ status?: string }> = await c.get(`/runs/${runId}`);
+    s = read.body.status ?? '';
+    expect(TERMINAL).toContain(s);
+  }, { timeout: 20_000, interval: 25 });
   return s;
+}
+/** A run id from a create or fork reply, after its status is checked. */
+async function runIdOf(reply: Promise<Res<{ runId: string }>>): Promise<string> {
+  const r = await reply;
+  expect(r.status, JSON.stringify(r.body)).toBe(201);
+  return r.body.runId;
 }
 
 describe('ADR 0964 D1 — a replay fork of a parent serves its sub-workflow', () => {
@@ -84,25 +101,20 @@ describe('ADR 0964 D1 — a replay fork of a parent serves its sub-workflow', ()
     ], edges: [] });
 
     const storage = tryDurableStorage()!;
-    const started = await c.post('/runs', { workflowId: parent, inputs: {} });
-    expect(started.status, JSON.stringify(started.body)).toBe(201);
-    const runId = started.body.runId as string;
+    const runId = await runIdOf(c.post('/runs', { workflowId: parent, inputs: {} }));
     expect(await settle(c, runId)).toBe('completed');
     expect(counts).toEqual({ effect: 1, pure: 1 });
     expect(await storage.listRunsByParent(bareRunId(runId))).toHaveLength(1);
     expect(snapshotRunVariables(bareRunId(runId))?.seen).toBe('from-the-child');
 
-    const replay = await c.post(`/runs/${runId}:fork`, { mode: 'replay' });
-    expect(replay.status, JSON.stringify(replay.body)).toBe(201);
-    const forkId = replay.body.runId as string;
+    const forkId = await runIdOf(c.post(`/runs/${runId}:fork`, { mode: 'replay' }));
     expect(await settle(c, forkId), 'served, never re-dispatched').toBe('completed');
     expect(counts, 'a replay fork fired the child\'s nodes again').toEqual({ effect: 1, pure: 1 });
     expect(await storage.listRunsByParent(bareRunId(forkId)), 'a replay fork started a child run').toHaveLength(0);
     expect(snapshotRunVariables(bareRunId(forkId))?.seen, 'the served node must re-apply its outputMapping').toBe('from-the-child');
+    expect(snapshotRunVariables(bareRunId(forkId)), 'the fork\'s bag is the source\'s').toEqual(snapshotRunVariables(bareRunId(runId)));
 
-    const branch = await c.post(`/runs/${runId}:fork`, { mode: 'branch', fromSeq: 0 });
-    expect(branch.status, JSON.stringify(branch.body)).toBe(201);
-    const branchId = branch.body.runId as string;
+    const branchId = await runIdOf(c.post(`/runs/${runId}:fork`, { mode: 'branch', fromSeq: 0 }));
     expect(await settle(c, branchId)).toBe('completed');
     expect(await storage.listRunsByParent(bareRunId(branchId)), 'a branch is a new execution').toHaveLength(1);
     expect(counts).toEqual({ effect: 2, pure: 2 });
@@ -118,9 +130,7 @@ describe('ADR 0964 D1 — mapped child-secret boundary', () => {
     const parent = `test.d1.secret-parent.${k}`;
     registerWorkflow({ workflowId: child, variables: [{ name: 'out' }], nodes: [{ nodeId: 'secret', typeId: 'test.adr0964.secret', config: {} }], edges: [] });
     registerWorkflow({ workflowId: parent, nodes: [{ nodeId: 'sub', typeId: 'core.subWorkflow', config: { workflowId: child, outputMapping: { seen: 'out' } } }], edges: [] });
-    const started = await c.post('/runs', { workflowId: parent, inputs: {} });
-    expect(started.status, JSON.stringify(started.body)).toBe(201);
-    const publicRunId = started.body.runId as string;
+    const publicRunId = await runIdOf(c.post('/runs', { workflowId: parent, inputs: {} }));
     const runId = bareRunId(publicRunId);
     expect(await settle(c, publicRunId)).toBe('completed');
     const storage = tryDurableStorage();
@@ -130,20 +140,28 @@ describe('ADR 0964 D1 — mapped child-secret boundary', () => {
     const childRunId = children[0]?.runId;
     if (!childRunId) throw new Error('Child missing');
     expect(getRunSecrets(childRunId)).toEqual({});
-    expect(String(await storage.kvGet(`runvars:${childRunId}`))).not.toContain(CHILD_SECRET);
+    // A durable bag that was never written would pass a bare `not.toContain`.
+    const durableBag = async (id: string): Promise<string> => {
+      let raw: string | null = null;
+      await vi.waitFor(async () => { raw = await storage.kvGet(`runvars:${id}`); expect(raw).toBeTruthy(); });
+      return raw ?? '';
+    };
+    const childBag = await durableBag(childRunId);
+    expect(childBag).not.toContain(CHILD_SECRET);
+    expect(childBag).toContain('<<redacted:child-provider>>');
     const recorded = JSON.stringify(await storage.listEvents(runId));
     expect(recorded).not.toContain(CHILD_SECRET);
     expect(recorded).toContain('<<redacted:child-provider>>');
-    expect(String(await storage.kvGet(`runvars:${runId}`))).not.toContain(CHILD_SECRET);
-    const replay = await c.post(`/runs/${publicRunId}:fork`, { mode: 'replay' });
-    expect(replay.status, JSON.stringify(replay.body)).toBe(201);
-    const publicForkId = replay.body.runId as string;
+    const parentBag = await durableBag(runId);
+    expect(parentBag).not.toContain(CHILD_SECRET);
+    expect(parentBag).toContain('<<redacted:child-provider>>');
+    const publicForkId = await runIdOf(c.post(`/runs/${publicRunId}:fork`, { mode: 'replay' }));
     const forkId = bareRunId(publicForkId);
     expect(await settle(c, publicForkId)).toBe('completed');
     expect(await storage.listRunsByParent(forkId)).toHaveLength(0);
     expect(JSON.stringify(snapshotRunVariables(forkId))).not.toContain(CHILD_SECRET);
     expect(snapshotRunVariables(forkId)?.seen).toEqual({ nested: 'credential: <<redacted:child-provider>>' });
-  });
+  }, 30_000);
 });
 
 describe('ADR 0964 D1 — serving rules', () => {
@@ -201,7 +219,10 @@ describe('ADR 0964 D1 — serving rules', () => {
   });
 
   it('an old-shape source rebuilds the writes from the source child\'s bag; a missing bag fails closed', async () => {
+    const storage = tryDurableStorage();
+    if (!storage) throw new Error('Planning storage missing');
     seedRunVariables('run-d1-child', [{ name: 'out' }], { out: 'old-run-value' });
+    await vi.waitFor(async () => expect(await storage.kvGet('runvars:run-d1-child')).toBeTruthy());
     seedRunVariables('run-d1-b', [], {});
     await applyServedSubWorkflow('run-d1-b', { outputMapping: { seen: 'out', gone: 'absent' } }, { childRunId: 'run-d1-child', childStatus: 'completed' });
     expect(snapshotRunVariables('run-d1-b')).toMatchObject({ seen: 'old-run-value' });
@@ -218,6 +239,5 @@ describe('ADR 0964 D1 — serving rules', () => {
     const writes = foldChildOutputMapping('run-d1-c', { keep: 'missing', got: 'present' }, { present: 1 });
     expect(writes).toEqual({ got: 1 });
     expect(snapshotRunVariables('run-d1-c')).toMatchObject({ keep: 'parent-value', got: 1 });
-    setRunVariable('run-d1-c', 'keep', 'parent-value');
   });
 });

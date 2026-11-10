@@ -28,6 +28,8 @@ import { registerReadStateErasure } from './conversationReadState.js';
 import { registerMessageFeedbackErasure } from './messageFeedbackStore.js';
 import { registerReactionsErasure } from './messageReactionsStore.js';
 import { registerChatPostErasure } from './chatPostErasure.js';
+import { registerRelayOwnerErasure } from '../messaging/relayOwner.js';
+import { registerRelayDeliveryLogLifecycle } from '../messaging/deliveryLogRetention.js';
 import { registerSubjectKnowledgeErasure } from './subjectKnowledge.js';
 import { registerSubjectMemoryErasure } from './subjectMemory.js';
 import { registerSelfHostedRunnerErasure } from './selfHostedRunner.js';
@@ -49,6 +51,7 @@ import { registerWorkflowBudgetErasure } from './workflowBudgets.js';
 import { registerApplyGrantErasure } from './applyGrant.js';
 import { registerSubjectLinkErasure } from './auth/subjectLinkService.js';
 import { registerAutonomyPolicyErasure } from './autonomyPolicy/erasure.js';
+import { registerSiteBrandErasure } from './siteBrand.js';
 
 /** Register every host-owned store's DSAR subject-eraser (idempotent). */
 export function registerHostSubjectErasers(): void {
@@ -91,7 +94,10 @@ export function registerHostSubjectErasers(): void {
   registerToolBoundaryErasure(); // ADR 0889 D9 — captured tool calls mentioning the subject are deleted
   registerEmailPrefErasure(); // ADR 0478 — email prefs DELETED (the row IS the subject's address)
   registerWorkflowBudgetErasure(); // ADR 0482 — budget attribution (`updatedBy` redacted)
+  registerSiteBrandErasure(); // ADR 1030 P2 — site-brand pointer attribution (`updatedBy` redacted)
   registerApplyGrantErasure(); // WF-CONS-2 — was the ONE host eraser registering at module scope, outside this list
   registerAutonomyPolicyErasure(); // ADR 0942 — autonomy policy/binding attribution (`createdBy`/`updatedBy` redacted)
   registerSubjectLinkErasure(); // ADR 0464 §2.1 / RFC 0159 — the SCIM⟷SAML subject-link deny store (row IS the opaque externalId; DELETED)
+  registerRelayOwnerErasure(); // ADR 1042 D8 — a relay device's owner row (DELETED; the device then fails empty)
+  registerRelayDeliveryLogLifecycle(); // ADR 1043 RELAY-LOG-RETENTION-1 — delivery-log rows for a contact id (DELETED) + its 7-day age-out
 }

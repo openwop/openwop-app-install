@@ -67,18 +67,11 @@ export function ApprovalCard({ runId, nodeId, data, onResolved }: Props) {
 
   async function send(action: string) {
     if (inFlight.current) return;
-    // ADR 0600 §7 (`ISU-12`) — REJECT is the irreversible verb and it was one
-    // unconfirmed click straight to the network. It fails the run (a rejected
-    // `core.approvalGate` appends `run.failed` with `approval_rejected` and
-    // never resolves the suspend), discarding whatever the run already spent —
-    // a warehouse query, an LLM call, and this person's attention. Run DELETION
-    // on the very next surface over already confirms; this did not. Approve is
-    // deliberately NOT gated: it continues a run the user asked for, and a
-    // confirm on the common path is the kind of friction people learn to click
-    // through, which would weaken this one.
-    // ADR 0894 — a browser-action gate's reject ends the browser SESSION, not
-    // the run (the decide node records the denial and the run completes), so
-    // the generic "fail the run" copy would misdescribe it.
+    // ADR 0600 §7 / rejection-copy correction — confirmation records a
+    // rejection, not a predicted run outcome. core.chat.approvalGate can return
+    // approved:false into a normal branch; a native gate's failure can also be
+    // handled by RFC 0223 routing. Keep confirmation and its payload unchanged.
+    // Browser-action rejection retains its specific session-ending copy.
     const browserGate = isBrowserActionGate(data);
     if (action === 'reject' && !(await confirm({
       title: t(browserGate ? 'cuRejectConfirmTitle' : 'rejectConfirmTitle'),

@@ -12,11 +12,12 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import type { MemoryNote } from '../profileMemoryClient.js';
 
 const confirmSpy = vi.hoisted(() => vi.fn(async (_opts: { title: string; body: string; danger?: boolean }) => false));
 vi.mock('../../../ui/confirm.js', () => ({ confirm: confirmSpy }));
 
-const notes = vi.hoisted(() => ({ list: [] as Array<Record<string, unknown>> }));
+const notes = vi.hoisted(() => ({ list: [] as MemoryNote[] }));
 vi.mock('../profileMemoryClient.js', () => ({
   listMemoriesWithRecall: vi.fn(async () => ({ notes: notes.list })),
   listMemories: vi.fn(async () => notes.list),
@@ -27,7 +28,7 @@ vi.mock('../memoryExtractionClient.js', () => ({ getExtractionGrant: vi.fn(async
 
 import { ProfileMemoryTab } from '../ProfileMemoryTab.js';
 
-const note = (source: 'user' | 'auto-extract') => ({
+const note = (source: 'user' | 'auto-extract'): MemoryNote => ({
   id: `n-${source}`, content: `a ${source} note`, contentTrust: source === 'auto-extract' ? 'untrusted' : 'trusted', source, createdAt: '2026-10-26T00:00:00.000Z',
 });
 const bodyOfLastConfirm = (): string => confirmSpy.mock.calls.at(-1)?.[0].body ?? '';
@@ -41,7 +42,6 @@ describe('Personal Memory delete confirm', () => {
     fireEvent.click(await screen.findByRole('button', { name: /remove/i }));
     await waitFor(() => expect(confirmSpy).toHaveBeenCalled());
     expect(bodyOfLastConfirm()).toBe('Remove this learned fact? It will no longer be recalled, and it will not be learned again in the same words.');
-    expect(bodyOfLastConfirm()).not.toMatch(/removeLearnedConfirmBody/);
   });
 
   it('a typed note keeps the generic confirm, which names no agent', async () => {

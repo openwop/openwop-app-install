@@ -2,6 +2,29 @@
 
 Status: **implemented** — P0–P7 shipped 2026-07-25; **D1 §Correction 2026-07-26** repaired the kernel mint + registered the phase chains (both halves of D1 had shipped dead; see the correction note under D1). Tenant EDIT and per-locale read-back remain unshipped and are no longer claimed. ADR 0489's anchor exemptions are now 3, not 59.
 
+## Correction — optional Campaign sample launch readiness (2026-11-07)
+
+ADR 0435 intentionally makes the current five-step Campaign Studio sample
+explicitly seeded example data, not a boot-time tenant fixture. The tutorial's
+Show me control previously checked only feature access plus the authored id and
+could therefore POST a nonexistent workflow and fail404. The legacy
+`tour.campaign-studio.first-brief` alias is not a substitute for the current
+`walkthrough.campaign-studio.first-brief` sample.
+
+For this known optional sample only, an explicit click now reads the existing
+same-origin authorized workflow API before requesting the existing player. A
+not-found offers Guided walkthrough setup; other read failures offer retry,
+never pretend the sample is absent. No automatic seed, workflow replacement,
+canonical-definition comparison or generic tutorial catalog fan-out is added.
+Existing edited tours remain eligible, and the player's waiting-run reattach
+behavior stays intact. Auth/workspace generation changes and unmount invalidate
+pending reads synchronously before they can launch. Example-data streaming
+workspace propagation is a separate issue; this readiness change does not claim
+to fix its mutation transport or seed any data.
+
+Source-authored regression cases require original/fixed execution and subsequent
+canonical qualification before this correction is described as shipped.
+
 ## Implementation record
 
 | Phase | Status | Evidence |

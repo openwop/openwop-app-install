@@ -301,6 +301,7 @@ export const messages = {
   emailReviewAudience: 'To {{audience}}',
   emailReviewEstimate_one: 'About {{n}} recipient (estimate)',
   emailReviewEstimate_other: 'About {{n}} recipients (estimate)',
+  emailReviewMissing: "This review is out of date and can't be approved. Ask the submitter to submit it again.",
   approvalEmailStale: 'This campaign changed after it was submitted. Ask the submitter to submit it for review again.',
   approvalEmailClosed: 'This review was closed automatically: the campaign is no longer under this review.',
   approvalsCreativeReviewGroup: "AI creative to review before publishing",
@@ -311,4 +312,8 @@ export const messages = {
   approvalsFunnelPublishHelp: "Approving publishes this funnel and makes its offers available for purchase. Its step pages must already be published.",
   approvalsFunnelPublishApprove: "Approve & publish",
   toastApprovedFunnelPublish: "Approved — the funnel is now published.",
+  approvalsWarehouseLoadGroup: "Warehouse load approvals",
+  approvalsWarehouseLoadAsk_one: "Load {{count}} customer row into {{dataset}}.{{table}}",
+  approvalsWarehouseLoadAsk_other: "Load {{count}} customer rows into {{dataset}}.{{table}}",
+  toastApprovedWarehouseLoad: "Approved. Run the sync again to load these rows.",
 } as const;

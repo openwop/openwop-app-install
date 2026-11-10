@@ -108,7 +108,7 @@ describe('campaign-journeys.segment-winback — expansion validity (server-free)
     // which enforces core.dispatch capability gating (fanOutPolicy/joinMode/
     // onChildFailure MUST be advertised). A throw here would mean the chain wires
     // a mode this host does not honor.
-    const expanded = expandChain(found!.chain, { params: { childWorkflowId: 'wf.stub.child', fromAddress: 'news@acme.test', orgId: 'o1' } });
+    const expanded = expandChain(found!.chain, { params: { childWorkflowId: 'wf.stub.child', senderEmail: 'news@acme.test', orgId: 'o1', segmentId: 'seg-1' } });
 
     const byType = (t: string) => expanded.nodes.find((nd) => nd.typeId === t);
     const segment = byType('feature.campaign-journeys.nodes.segment-members');
@@ -122,7 +122,8 @@ describe('campaign-journeys.segment-winback — expansion validity (server-free)
     // childWorkflowId + shared params are all in config; contactId per member arrives
     // on the segment→plan edge at run time.
     expect((plan!.config as Record<string, unknown>).childWorkflowId).toBe('wf.stub.child');
-    expect((plan!.config as Record<string, unknown>).fromAddress).toBe('news@acme.test');
+    // ADR 1024 D6.4 — forwarded under the name re-engage-contact declares (was `fromAddress`).
+    expect((plan!.config as Record<string, unknown>).senderEmail).toBe('news@acme.test');
     expect((plan!.config as Record<string, unknown>).subject).toBe('We saved your spot'); // default applied
     // The dispatch node is a parallel wait-all/collect fan-out.
     expect((dispatch!.config as Record<string, unknown>).fanOutPolicy).toBe('parallel');
@@ -169,10 +170,10 @@ describe('campaign-journeys.segment-winback — live fan-out over a real segment
 
     // 3) install the segment-winback chain bound to the stub child + shared params.
     const found = getChain('campaign-journeys.segment-winback');
-    const expanded = expandChain(found!.chain, { params: { childWorkflowId, fromAddress: 'news@acme.test', orgId } });
+    const expanded = expandChain(found!.chain, { params: { childWorkflowId, senderEmail: 'news@acme.test', orgId, segmentId } });
     registerWorkflow(expanded);
 
-    // 4) run it — segmentId rides the run inputs (the segment-members source node).
+    // 4) run it — segmentId is a declared param since ADR 1024 D6.4 (it also rides the inputs).
     const create = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: { segmentId } });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
     const parentRunId = (create.body as { runId: string }).runId;
@@ -194,7 +195,7 @@ describe('campaign-journeys.segment-winback — live fan-out over a real segment
       const echo = childEvents.find((e) => e.type === 'node.completed' && e.nodeId?.endsWith('echo'));
       expect(echo, `child ${childRunId} should have a completed echo node`).toBeTruthy();
       const out = echo!.payload!.outputs as Record<string, unknown>;
-      expect(out.fromAddress, 'shared param forwarded to child').toBe('news@acme.test');
+      expect(out.senderEmail, 'shared param forwarded to child under the child\'s own name').toBe('news@acme.test');
       expect(out.orgId).toBe(orgId);
       childContactIds.add(out.contactId as string);
     }

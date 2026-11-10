@@ -301,6 +301,7 @@ export const messages = {
   emailReviewAudience: 'À {{audience}}',
   emailReviewEstimate_one: 'Environ {{n}} destinataire (estimation)',
   emailReviewEstimate_other: 'Environ {{n}} destinataires (estimation)',
+  emailReviewMissing: "Cette revue est obsolète et ne peut pas être approuvée. Demandez à la personne qui l’a soumise de la soumettre à nouveau.",
   approvalEmailStale: 'Cette campagne a changé après sa soumission. Demandez à la personne qui l’a soumise de la soumettre à nouveau.',
   approvalEmailClosed: 'Cette revue a été fermée automatiquement : la campagne n’est plus concernée par cette revue.',
   approvalsCreativeReviewGroup: "Créations IA à relire avant publication",
@@ -311,4 +312,8 @@ export const messages = {
   approvalsFunnelPublishHelp: "L’approbation publie cet entonnoir et rend ses offres disponibles à l’achat. Les pages de ses étapes doivent déjà être publiées.",
   approvalsFunnelPublishApprove: "Approuver et publier",
   toastApprovedFunnelPublish: "Approuvé : l’entonnoir est maintenant publié.",
+  approvalsWarehouseLoadGroup: "Approbations de chargements dans l’entrepôt",
+  approvalsWarehouseLoadAsk_one: "Charger {{count}} ligne client dans {{dataset}}.{{table}}",
+  approvalsWarehouseLoadAsk_other: "Charger {{count}} lignes clients dans {{dataset}}.{{table}}",
+  toastApprovedWarehouseLoad: "Approuvé. Relancez la synchronisation pour charger ces lignes.",
 } as const;

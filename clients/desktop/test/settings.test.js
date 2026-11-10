@@ -1,3 +1,12 @@
+// ADR 0181 / ADR 0181 Phase E — persisted desktop settings. `selectHost` is the
+// validation in front of the saved origin, and `localServer.command` is what
+// main.js SPAWNS, so a malformed block must read as "not configured" and never
+// half-parse. Not in `npm run ci`: run `npm test` in clients/desktop.
+//
+// Sabotage that turns it red (each probed): missing/corrupt tolerance, origin
+// normalising, dedupe, ordering, the cap, the invalid-input refusal, localServer
+// surviving a host switch, each validation of command, probeUrl and origin.
+
 'use strict';
 const { test, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
@@ -49,8 +58,7 @@ test('recent list is capped at 8', () => {
 // ADR 0181 Phase E — the optional localServer config round-trips validated and
 // survives host switches; malformed blocks read as "not configured".
 test('localServer config: validated passthrough + preserved by selectHost', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'owp-desk-'));
-  const p = join(dir, 'settings.json');
+  const p = path;
   writeFileSync(p, JSON.stringify({
     host: 'http://localhost:8000',
     localServer: { command: ['node', 'lib/index.js'], probeUrl: 'http://localhost:8000/api/readiness', origin: 'http://localhost:8000' },
@@ -68,5 +76,8 @@ test('localServer config: validated passthrough + preserved by selectHost', () =
   assert.equal(readSettings(p).localServer, undefined); // malformed ⇒ not configured
 
   writeFileSync(p, JSON.stringify({ localServer: { command: ['node'], probeUrl: 'ftp://nope' } }));
-  assert.equal(readSettings(p).localServer?.probeUrl, undefined); // non-http probe dropped
+  assert.deepEqual(readSettings(p).localServer, { command: ['node'] }); // non-http probe dropped, block kept
+
+  writeFileSync(p, JSON.stringify({ localServer: { command: [' node ', 7, ''], probeUrl: 'http://x/ready', origin: 'ftp://nope' } }));
+  assert.deepEqual(readSettings(p).localServer, { command: ['node'], probeUrl: 'http://x/ready' }); // bad items and origin dropped
 });

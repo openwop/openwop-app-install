@@ -19,7 +19,7 @@ import type { RunVariable } from '../../workflows/workflowsClient.js';
 
 afterEach(cleanup);
 
-const DEFERRED = 'kicktodo_challenge_factory_a2ec352bceed_credentialRef';
+const DEFERRED = 'example_factory_a2ec352bceed_credentialRef';
 
 describe('credential-ref variables', () => {
   it('recognises the authored name through the RFC 0124 deferred prefix, and nothing else', () => {

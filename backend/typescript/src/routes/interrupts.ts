@@ -1196,8 +1196,8 @@ export function isCancelCascade(interrupt: InterruptRecord): boolean {
  *  - anything else (an anon cookie, an `apikey:`): no identity, so a quorum or
  *    ACL gate fails closed — never the raw `session:<sid>` (C5).
  */
-const reviewerMemo = new WeakMap<Request, Promise<{ subjectRef: string; resolvedBy?: RunSubjectV2 } | { capabilityToken: boolean }>>();
-export function reviewerOf(req: Request): Promise<{ subjectRef: string; resolvedBy?: RunSubjectV2 } | { capabilityToken: boolean }> {
+const reviewerMemo = new WeakMap<Request, Promise<{ subjectRef: string; resolvedBy?: RunSubjectV2 } | { capabilityToken: boolean; resolvedBy?: RunSubjectV2 }>>();
+export function reviewerOf(req: Request): Promise<{ subjectRef: string; resolvedBy?: RunSubjectV2 } | { capabilityToken: boolean; resolvedBy?: RunSubjectV2 }> {
   // Once per request (grade-code `APCD-9`): `resolveCallerUser` can write (the
   // canonical-user fold), and the inbox read calls this for `canDecide`.
   let hit = reviewerMemo.get(req);
@@ -1208,7 +1208,7 @@ export function reviewerOf(req: Request): Promise<{ subjectRef: string; resolved
   return hit;
 }
 
-async function deriveReviewer(req: Request): Promise<{ subjectRef: string; resolvedBy?: RunSubjectV2 } | { capabilityToken: boolean }> {
+async function deriveReviewer(req: Request): Promise<{ subjectRef: string; resolvedBy?: RunSubjectV2 } | { capabilityToken: boolean; resolvedBy?: RunSubjectV2 }> {
   // ADR 0932 — the Subject that resolved, from the SAME mapping the run owner
   // stamp uses, so `resolvedBy` and `run.started.owner.subject` agree.
   const resolvedBy = requestSubjectV2(req, tenantOf(req));
@@ -1220,7 +1220,16 @@ async function deriveReviewer(req: Request): Promise<{ subjectRef: string; resol
     }
   }
   if (req.userId) return { subjectRef: req.userId, ...(resolvedBy ? { resolvedBy } : {}) };
-  return { capabilityToken: req.principal?.principalId?.startsWith('bearer:') ?? false };
+  // ADR 1040 D6 row 1 — an env API key (the operator credential behind
+  // `bearer:<8>`) IS an identity: record the workload Subject the run-owner
+  // stamp already uses for this lane. The `capabilityToken` lane flag is
+  // unchanged, so every token-lane branch behaves exactly as before. Any other
+  // caller here (an anon cookie, an unresolved subject) records nothing.
+  const capabilityToken = req.principal?.principalId?.startsWith('bearer:') ?? false;
+  // Only when the request names its tenant: a `*` env key has no `req.tenantId`,
+  // and a Subject stamped with the fallback tenant would be valid and FALSE.
+  const envKey = capabilityToken && req.principal?.auth?.kind === 'env-key' && typeof req.tenantId === 'string';
+  return { capabilityToken, ...(envKey && resolvedBy ? { resolvedBy } : {}) };
 }
 
 /**

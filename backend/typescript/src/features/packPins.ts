@@ -23,6 +23,10 @@
  * agree.
  */
 import type { PackRef } from './types.js';
+// ADR 1031 — pins for an ADOPTER's packs (`src/adopter/packPins.ts`), re-exported
+// by the gitignored generated module; `{}` in openwop-app itself. Kept OUT of the
+// literal below so an adopter never edits this upstream-owned file.
+import { ADOPTER_PACK_PINS } from './adopterPackPins.generated.js';
 
 export const PACK_PINS = {
   'core.openwop.hitl': '1.0.1',
@@ -35,14 +39,14 @@ export const PACK_PINS = {
   'feature.app-builder.artifact-types': '1.1.1',
   'feature.app-builder.nodes': '1.10.1',
   'feature.assistant.nodes': '2.1.0',
-  'feature.bi.nodes': '1.0.1',
+  'feature.bi.nodes': '1.1.0',
   'feature.brand.nodes': '1.4.0',
   'feature.cad.nodes': '1.6.1',
   'feature.campaign-brief.nodes': '1.7.0',
   'feature.campaign-channels.nodes': '1.19.0',
   'feature.campaign-connectors.nodes': '1.7.0',
   'feature.campaign-intel.nodes': '1.8.0',
-  'feature.campaign-journeys.nodes': '1.9.0',
+  'feature.campaign-journeys.nodes': '1.10.0',
   'feature.campaign-orchestration.nodes': '1.8.0',
   'feature.campaign-ops.nodes': '1.4.0',
   'feature.campaign-autopilot.nodes': '1.2.0',
@@ -61,8 +65,8 @@ export const PACK_PINS = {
   'feature.creative-video.nodes': '1.3.0',
   'feature.crm.nodes': '1.15.0',
   'feature.csm.nodes': '1.5.0',
-  'feature.dealers.nodes': '1.0.1',
-  'feature.destination-sync.nodes': '1.0.1',
+  'feature.dealers.nodes': '1.1.0',
+  'feature.destination-sync.nodes': '1.1.0',
   'feature.discovery.nodes': '1.0.1',
   'feature.docs.nodes': '1.0.1',
   'feature.documents.nodes': '1.4.0',
@@ -77,7 +81,6 @@ export const PACK_PINS = {
   'feature.interactive-artifacts.nodes': '1.0.2',
   'feature.job-search.nodes': '1.1.1',
   'feature.kb.nodes': '1.3.0',
-  'feature.kicktodo.nodes': '1.39.0',
   'feature.marketplace.nodes': '1.1.1',
   'feature.media.nodes': '1.0.1',
   'feature.notebooks.nodes': '1.1.1',
@@ -93,11 +96,11 @@ export const PACK_PINS = {
   'feature.service-desk.nodes': '1.1.0',
   'feature.slides.nodes': '1.1.3',
   'feature.strategy.nodes': '1.3.2',
-  'feature.territories.nodes': '1.2.1',
+  'feature.territories.nodes': '1.3.0',
   'feature.tool-output-compaction.nodes': '1.2.2',
   'feature.users.nodes': '1.0.2',
   'feature.walkthroughs.nodes': '1.0.1',
-  'feature.webinars.nodes': '1.0.2',
+  'feature.webinars.nodes': '1.1.0',
   'feature.whatsapp.nodes': '1.0.1',
   'feature.work-selection.nodes': '1.0.1',
   'feature.workflow-author.nodes': '1.1.0',
@@ -132,7 +135,6 @@ export const PACK_PINS = {
   'vendor.openwop-app.insights-suite.agents': '1.1.2',
   'vendor.openwop-app.interactive-artifacts.agents': '1.0.3',
   'vendor.openwop-app.kb.agents': '1.0.3',
-  'vendor.openwop-app.kicktodo.agents': '1.9.4',
   'vendor.openwop-app.marketplace.agents': '1.0.3',
   'vendor.openwop-app.notebooks.agents': '1.0.2',
   'vendor.openwop-app.podcasts.agents': '1.0.2',
@@ -163,9 +165,19 @@ export function pinResolutionCount(): number { return resolutions; }
  *  not at boot. */
 export function pinnedPackRef(name: string): PackRef {
   resolutions += 1;
-  const version = (PACK_PINS as Readonly<Record<string, string>>)[name];
-  if (version === undefined) throw new Error(`pack_pin_missing: ${name} is a requiredPacks name with no entry in features/packPins.ts`);
+  const own = (PACK_PINS as Readonly<Record<string, string>>)[name];
+  const adopter = Object.hasOwn(ADOPTER_PACK_PINS, name) ? ADOPTER_PACK_PINS[name] : undefined;
+  // ADR 1031 — an adopter pins only ITS OWN packs. Re-pinning an upstream pack
+  // would fork its version silently per deployment; refuse it by name.
+  if (own !== undefined && adopter !== undefined) throw new Error(`pack_pin_conflict: ${name} is pinned by features/packPins.ts AND src/adopter/packPins.ts — an adopter may pin only its own packs`);
+  const version = own ?? adopter;
+  if (version === undefined) throw new Error(`pack_pin_missing: ${name} is a requiredPacks name with no entry in features/packPins.ts (or src/adopter/packPins.ts for an adopter's pack)`);
   return { name, version };
+}
+
+/** ADR 1031 — pack names pinned by both this file and the adopter's pin file (must be empty). */
+export function adopterPackPinConflicts(): string[] {
+  return Object.keys(ADOPTER_PACK_PINS).filter((n) => Object.hasOwn(PACK_PINS, n)).sort();
 }
 
 /** A feature's required packs with their pins, in declaration order. */

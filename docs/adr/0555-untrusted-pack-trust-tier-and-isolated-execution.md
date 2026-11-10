@@ -4,6 +4,14 @@ Status: Accepted — P0 implemented 2026-08-12 (`be62a115e`, #3179; preceded by 
 
 Date: 2026-08-11
 
+> **CORRECTION (2026-11-03) — ADR 1048 adds a fifth tier, `adopter`.** A
+> white-label adopter attests its own packs in `packs/.adopter-manifest.json`:
+> the same digest rule, read from the same code-anchored `packs/` directory (no
+> env var moves it), evaluated only AFTER the steward check, and rejected whole on
+> any shadowing of a steward key, protocol namespace, name/directory mismatch or
+> disagreement with `ADOPTER_PACK_PINS`. "Attestation by repo" now reaches the
+> adopter's repo; no first-party verdict can change.
+
 Composes: ADR 0114/0146 sandbox adapters, ADR 0367 pinned pack signatures, ADR
 0397 capability firewall, ADR 0531 effect guard, pack loaders and Operations.
 Protocol gate: RFC 0035 must be Accepted before the protocol sandbox capability

@@ -8,7 +8,6 @@
  * `t(key, { defaultValue: englishFallback })`.
  */
 export const messages = {
-  siteNavLabel: 'KickTodo',
   siteNavMore: 'More',
   siteNavMoreLabel: 'More destinations',
   siteNavCurrent: '{{label}} page',
@@ -154,10 +153,6 @@ export const messages = {
   entitiesHint: 'User-defined content types',
   environmentsLabel: 'Environments',
   environmentsHint: 'Config promotion & rollback',
-  kicktodoTrustLabel: 'KickTodo Trust',
-  kicktodoTrustHint: 'KickTodo trust & operations console',
-  kicktodoSafetyLabel: 'KickTodo Safety',
-  kicktodoSafetyHint: 'KickTodo safety & approvals queue',
   documentsLabel: 'Documents',
   documentsHint: 'Business documents + templates (SOW, PRD, RFP, agendas)',
   emailLabel: 'Email',

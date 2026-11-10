@@ -78,6 +78,13 @@ describe('brand identity facet (ADR 0170) — sanitization', () => {
     });
   });
 
+  it('keeps the ADR 1029 D6 motion preset only as a known value', async () => {
+    const ok = await createBrand(TENANT, ORG, 'u1', { name: 'Lively', identity: { theme: { motion: 'lively' } } });
+    expect(ok.identity?.theme).toEqual({ motion: 'lively' });
+    const bad = await createBrand(TENANT, ORG, 'u1', { name: 'Wild', identity: { theme: { motion: 'bouncy' } } });
+    expect(bad.identity?.theme).toBeUndefined();
+  });
+
   it('drops invalid theme seeds + out-of-enum scalars', async () => {
     const b = await createBrand(TENANT, ORG, 'u1', {
       name: 'Bad',

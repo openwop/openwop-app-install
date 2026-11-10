@@ -12,7 +12,7 @@
 import type { BackendFeature } from '../types.js';
 import { registerCustomDomainsRoutes } from './routes.js';
 import { startCustomDomainSweep } from '../../host/customDomainSweep.js';
-import { SITE_RUNTIME_TOGGLE } from '../../host/boundSite.js';
+import { DESIGNED_PAGES_TOGGLE, SITE_RUNTIME_TOGGLE } from '../../host/boundSite.js';
 
 export const customDomainsFeature: BackendFeature = {
   id: 'custom-domains',
@@ -34,6 +34,15 @@ export const customDomainsFeature: BackendFeature = {
     status: 'off',
     bucketUnit: 'tenant',
     salt: SITE_RUNTIME_TOGGLE,
+  }, {
+    // ADR 1030 D4 — the designed look on your own domain. CSS only: no script.
+    id: DESIGNED_PAGES_TOGGLE,
+    label: 'Designed pages on custom domains',
+    description: 'Give the pages served from your own domain the designed look (typography, cards, motion) instead of plain text. A stylesheet only; no script runs.',
+    category: 'Marketing',
+    status: 'off',
+    bucketUnit: 'tenant',
+    salt: DESIGNED_PAGES_TOGGLE,
   }],
   toggleDefault: {
     id: 'custom-domains',

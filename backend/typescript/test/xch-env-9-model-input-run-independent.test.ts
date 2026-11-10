@@ -26,8 +26,16 @@
  *
  * Witnessed: red on 8da0849a5's `agentDispatch.ts` (the schema.request round
  * carries the runId), green with the XCH-ENV-9 echo fix. ADR 1007 deleted that
- * round, so the script moved to the ask, repair and tool rounds: putting the
- * runId into the ask-repair message reds round 2 of both tool-path cases.
+ * round, so the script moved to the ask, repair and tool rounds. Sabotage-witnessed
+ * (wave 82): the runId in the ask-repair message, or in the tool-result message,
+ * reds both tool-path cases; the runId in the agent's task text reds all three;
+ * sending the D3 hint on round 1 too reds the lever-on case.
+ *
+ * The scripted tool-path turn is exactly 4 model requests (bad ask; repair →
+ * clarification; resumed answer → lookup; lookup result → final answer) and the
+ * plain path exactly 1, so a lever or change that drops a round reds the count.
+ * `waitStatus` polls the run with `vi.waitFor` (a run settle has no hook to
+ * await), bounded at 10 s with a named failure.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -116,18 +124,25 @@ beforeEach(() => {
   return () => fetchSpy.mockRestore();
 });
 
-async function api<T>(path: string, body?: unknown): Promise<{ status: number; body: T }> {
+async function api(path: string, body?: unknown): Promise<{ status: number; body: unknown }> {
   const res = await fetch(`${BASE}${path}`, { method: body === undefined ? 'GET' : 'POST', headers: H, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-  return { status: res.status, body: await res.json().catch(() => undefined) as T };
+  const parsed: unknown = await res.json().catch(() => undefined);
+  return { status: res.status, body: parsed };
 }
+/** A string field of a JSON body, or '' when absent. */
+function str(body: unknown, key: string): string {
+  const v: unknown = typeof body === 'object' && body !== null ? Reflect.get(body, key) : undefined;
+  return typeof v === 'string' ? v : '';
+}
+/** Run settle: no hook to await, so poll the real condition. Bounded at 10 s,
+ *  under the 15 s case timeout, so a stuck run fails naming its state instead of
+ *  timing out the case. */
 async function waitStatus(runId: string, pred: (s: string) => boolean): Promise<string> {
-  const t0 = Date.now();
-  for (;;) {
-    const s = (await api<{ status?: string }>(`/runs/${encodeURIComponent(runId)}`)).body?.status ?? '';
-    if (pred(s)) return s;
-    if (Date.now() - t0 > 20_000) throw new Error(`run ${runId} stuck at ${s}`);
-    await new Promise((r) => setTimeout(r, 50));
-  }
+  return vi.waitFor(async () => {
+    const s = str((await api(`/runs/${encodeURIComponent(runId)}`)).body, 'status');
+    if (!pred(s)) throw new Error(`run ${runId} stuck at ${s}`);
+    return s;
+  }, { timeout: 10_000, interval: 50 });
 }
 const terminal = (s: string): boolean => ['completed', 'failed', 'cancelled'].includes(s);
 
@@ -135,13 +150,14 @@ const terminal = (s: string): boolean => ['completed', 'failed', 'cancelled'].in
  *  Returns the runId and the requests the provider stub received for it. */
 async function runTurn(agentId: string, offerTools: string[], answers: Array<[string, string]>, sink: string[]) {
   const before = sink.length;
-  const created = await api<{ runId: string }>('/runs', {
+  const created = await api('/runs', {
     workflowId: 'openwop-app.agent-mention',
     inputs: { agentId, task: 'plan a trip', provider: 'anthropic', model, credentialRef: REF, offerTools },
     configurable: { version: 1, ai: { credentialRef: REF } },
   });
   expect(created.status, JSON.stringify(created.body)).toBe(201);
-  const runId = created.body.runId;
+  const runId = str(created.body, 'runId');
+  expect(runId, 'the run was created with an id').not.toBe('');
   for (const [id, value] of answers) {
     expect(await waitStatus(runId, (s) => s.startsWith('waiting') || terminal(s))).toMatch(/^waiting/);
     const r = await api(`/runs/${encodeURIComponent(runId)}/interrupts/run`, { resumeValue: { answers: [{ id, answer: value }] } });
@@ -171,7 +187,7 @@ describe('model input is run-independent (the ADR 1002 replay invariant)', () =>
     const b = await runTurn(TOOL_AGENT, [TOOL], [['dates', 'May']], toolRequests);
     // The scripted turn reached every round: the repair, the clarification,
     // the tool and the answer.
-    expect(a.requests.length).toBeGreaterThanOrEqual(4);
+    expect(a.requests.length).toBe(4);
     expect(a.requests.some((r) => r.includes(LOOKUP_ANSWERED))).toBe(true);
     expect(a.requests.some((r) => r.includes('refused your question'))).toBe(true);
     expect(a.requests.some((r) => r.includes('dates (Which dates?)'))).toBe(true);
@@ -190,7 +206,10 @@ describe('model input is run-independent (the ADR 1002 replay invariant)', () =>
       const a = await runTurn(TOOL_AGENT, [TOOL], [['dates', 'May']], toolRequests);
       const aHints = toolHints.slice(hintsBefore);
       const b = await runTurn(TOOL_AGENT, [TOOL], [['dates', 'May']], toolRequests);
-      expect(a.requests.length).toBeGreaterThanOrEqual(3);
+      expect(a.requests.length).toBe(4);
+      expect(a.requests.some((r) => r.includes(LOOKUP_ANSWERED))).toBe(true);
+      expect(a.requests.some((r) => r.includes('refused your question'))).toBe(true);
+      expect(a.requests.some((r) => r.includes('dates (Which dates?)'))).toBe(true);
       expectRunIndependent(a, b);
       // The first round of a dispatch never carries the hint; a later round of
       // the same dispatch does.
@@ -205,7 +224,7 @@ describe('model input is run-independent (the ADR 1002 replay invariant)', () =>
     await setClarification(false);
     const a = await runTurn(PLAIN_AGENT, [], [], plainRequests);
     const b = await runTurn(PLAIN_AGENT, [], [], plainRequests);
-    expect(a.requests.length).toBeGreaterThanOrEqual(1);
+    expect(a.requests.length).toBe(1);
     expectRunIndependent(a, b);
   });
 });

@@ -25,3 +25,9 @@ export function toggleCatalog(): Map<string, string>;
 
 /** ADR 0820 §4 — sub-toggle id (a toggle id that is not a feature id) → its parent feature. */
 export function subToggleParents(registered?: Set<string>): Map<string, string>;
+
+/** ADR 1031 — feature ids an adopter registers under `src/adopter/features/<id>/` (empty upstream). */
+export function adopterFeatureIds(): Set<string>;
+
+/** ADR 1031 — closure violations from adopter features (always included) whose deps `excluded` drops. */
+export function adopterClosureViolations(excluded: Set<string>, edges?: Record<string, string[]>): string[];

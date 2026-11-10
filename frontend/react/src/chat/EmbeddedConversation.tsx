@@ -1,7 +1,9 @@
 /**
  * EmbeddedConversation — the one AI chat, embedded slimmed into another surface
- * (ADR 0073 Phase 3). Owns its OWN ephemeral session (`useChatSession({ persist:
- * false })` — task-scoped, never touches the user's main chat session/index),
+ * (ADR 0073 Phase 3). Owns its OWN session — ephemeral by default
+ * (`useChatSession({ persist: false })`, task-scoped, never touches the user's
+ * main chat session/index), or persisted and agent-stamped with `persist` /
+ * `conversationId` (ADR 1040 D1, detached from the main chat's slot),
  * scopes it to a given agent, and renders the slimmed <ConversationView> (no
  * header, no rails, no progress panel). The first consumer is the workflow
  * builder's "Create with AI", scoped to the Workflow Architect.
@@ -19,11 +21,12 @@ import { useTranslation } from 'react-i18next';
 import { EyeIcon } from '../ui/icons/index.js';
 import { Notice } from '../ui/Notice.js';
 import { setConversationFocus } from '../client/chatSessionsClient.js';
-import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { ToolLabelsContext, type ToolLabels } from './lib/toolLabels.js';
 import { useChatSession, type ContentPart } from './hooks/useChatSession.js';
 import { useAgentMentions } from './lib/agentMentions.js';
 import { useScopeToAgent } from './activeAgents/useScopeToAgent.js';
-import { ConversationView } from './ConversationView.js';
+import { ConversationView, type EmptyStateActions } from './ConversationView.js';
 // Lazy for the same entry-weight reason as ChatSidebar (the strip pulls the
 // full review-card tree; embeds shouldn't pay it until reviews exist).
 const ConversationReviewsStrip = lazy(() =>
@@ -49,19 +52,17 @@ export interface EmbedToolActivity {
  *  `reason` is shown above the composer; it is never sent half-prepared. */
 export type EmbedBeforeSend = (conversationId: string, conversationRunId?: string) => Promise<{ ok: true } | { ok: false; reason: string }>;
 
-export function EmbeddedConversation({
-  agentId, config, tenantId = 'demo', onReconfigureBYOK, renderEmptyState, onTurnSettled,
-  contextLabel, density = 'dock', beforeSend, onConversationId, onToolActivity, prompt, stopSignal, focus,
-}: {
+export interface EmbeddedConversationProps {
   /** Agent to scope this conversation to (e.g. the Workflow Architect). */
   agentId: string;
   /** A valid BYOK config — the host surface gates on it before rendering this. */
   config: BYOKActiveConfig;
   tenantId?: string;
   onReconfigureBYOK: () => void;
-  /** Context-aware empty state (e.g. a workflow-authoring welcome). Receives the
-   *  composer-seed callback so example prompts dispatch a real turn. */
-  renderEmptyState?: (onPick: (text: string) => void) => ReactNode;
+  /** Context-aware empty state (e.g. a workflow-authoring welcome). The first
+   *  argument SENDS a real turn; ADR 1040 D3 adds `actions.fill`, which only
+   *  seeds the composer. */
+  renderEmptyState?: (onPick: (text: string) => void, actions: EmptyStateActions) => ReactNode;
   /** ADR 0596 — fired once each time a turn finishes (sending true → false).
    *  The embed does NOT hand the consumer the turn's content: `agent.toolReturned`
    *  (RFC 0064) carries `{toolName, status, durationMs}` and NO result payload, so
@@ -87,13 +88,76 @@ export function EmbeddedConversation({
   /** ADR 0773 G-05e — bump to stop the in-flight turn from outside (a builder
    *  "Stop" on its progress strip). The same `cancel` the composer's stop uses. */
   stopSignal?: number;
-  focus?: { kind: 'canvas'; id: string; label: ReactNode };
-}): JSX.Element {
+  /** ADR 1040 D4 — `kind` is any REGISTERED focus kind (`canvas`, or a
+   *  feature's `<featureId>.<entity>`); the server refuses an unregistered one. */
+  focus?: { kind: string; id: string; label: ReactNode };
+  /** ADR 1040 D1 — save this conversation like any chat (listed, reopenable)
+   *  instead of keeping it ephemeral. Default false. */
+  persist?: boolean;
+  /** ADR 1040 D1 — open this existing conversation. Implies `persist`. An id the
+   *  embed itself reported through `onConversationId` is an echo and is ignored
+   *  (no remount); a different id opens that conversation; going back to
+   *  `undefined` starts a fresh one. */
+  conversationId?: string;
+  /** ADR 1040 D3 — the composer's placeholder (already localized) and its
+   *  leading modifier chips (build them from `ui/` Chip/Button primitives with
+   *  accessible names; the slot adds none). */
+  composerPlaceholder?: string;
+  composerModifiers?: ReactNode;
+  /** ADR 1040 D3 — hide the "Continue in full chat" exit. */
+  hideContinueInFullChat?: boolean;
+  /** ADR 1040 D3 — display names for tool rows in the turn receipt (display
+   *  only). Keep them distinct: the raw id is then only in the row's tooltip. */
+  toolLabels?: ToolLabels;
+}
+
+/**
+ * ADR 1040 D1 — the outer shell freezes WHICH conversation is open. The session
+ * hook decides its mode (ephemeral / detached / backend-keyed) from the id it is
+ * given, so that id must not move under a live session: a consumer that echoes
+ * the embed's own minted id back (URL sync) would otherwise flip a fresh embed
+ * into backend-keyed mode, 404 on a row that does not exist yet and re-key in a
+ * loop. Only a genuinely different `conversationId` remounts the session.
+ */
+export function EmbeddedConversation(props: EmbeddedConversationProps): JSX.Element {
+  const { conversationId, onConversationId } = props;
+  const lastReported = useRef<string | null>(null);
+  const [opened, setOpened] = useState<{ id: string | undefined; epoch: number }>(() => ({ id: conversationId, epoch: 0 }));
+  // The previous PROP value, not a "first run" flag: StrictMode runs this effect
+  // twice on mount with refs kept, and a flag would read the second run as a
+  // change and remount a brand-new session (grade-code M1).
+  const prevProp = useRef(conversationId);
+  useEffect(() => {
+    if (prevProp.current === conversationId) return;
+    prevProp.current = conversationId;
+    // The id the session holds right now, echoed back: nothing to open.
+    if (conversationId !== undefined && conversationId === lastReported.current) return;
+    setOpened((o) => ({ id: conversationId, epoch: o.epoch + 1 }));
+  }, [conversationId]);
+  const report = useCallback((id: string) => {
+    lastReported.current = id;
+    onConversationId?.(id);
+  }, [onConversationId]);
+  // Keyed on the agent too: the session's stamp and scoping belong to one agent.
+  return <EmbeddedSession key={`${props.agentId}:${opened.epoch}`} {...props} openedId={opened.id} onConversationId={report} />;
+}
+
+function EmbeddedSession({
+  agentId, config, tenantId = 'demo', onReconfigureBYOK, renderEmptyState, onTurnSettled,
+  contextLabel, density = 'dock', beforeSend, onConversationId, onToolActivity, prompt, stopSignal, focus,
+  persist = false, openedId, composerPlaceholder, composerModifiers, hideContinueInFullChat = false, toolLabels,
+}: EmbeddedConversationProps & { openedId: string | undefined }): JSX.Element {
   const { t } = useTranslation('chat');
+  // ADR 1040 D1/D2 — persisted embeds are DETACHED (never the main chat's slot)
+  // and name their agent on the row they create. `openedId` is frozen per mount.
+  const persisted = persist || openedId !== undefined;
+  const participants = useMemo(() => [`agent:${agentId}`], [agentId]);
   const {
-    session, isSending, error, send, cancel, reset, resolveInterrupt, runWorkflowMention,
+    session, isSending, isHydrating, error, send, cancel, reset, resolveInterrupt, runWorkflowMention,
     regenerate, setFeedback, hasOlderMessages, isLoadingEarlier, loadEarlierMessages, activeAgents,
-  } = useChatSession({ persist: false });
+  } = useChatSession(persisted
+    ? { persist: true, detached: true, participants, ...(openedId !== undefined ? { sessionId: openedId } : {}) }
+    : { persist: false });
   const { entries: agentEntries, isLoading: agentsLoading } = useAgentMentions();
   // ADR 0777 — bind this conversation to the entity beside it. The label says
   // "this …" ONLY after the server accepted (it verified the caller may read the
@@ -203,6 +267,7 @@ export function EmbeddedConversation({
   }, [prompt, isSending, promptReady, onUserSubmit]);
 
   return (
+    <ToolLabelsContext.Provider value={toolLabels ?? null}>
     <div className={`u-flex u-flex-col u-flex-1 u-minh-0 embed-conv embed-conv--${density}`}>
       {shownLabel !== undefined ? (
         <p className="embed-context-strip">
@@ -244,15 +309,24 @@ export function EmbeddedConversation({
         hasOlderMessages={hasOlderMessages}
         isLoadingEarlier={isLoadingEarlier}
         onLoadEarlier={loadEarlierMessages}
+        // ADR 1040 (grade-ux UXG-1) — a reopened conversation shows the loading
+        // state while it hydrates, not the empty state of a new chat.
+        isHydrating={isHydrating}
         composerCompact={density === 'pocket'}
+        {...(composerPlaceholder !== undefined ? { composerPlaceholder } : {})}
+        {...(composerModifiers !== undefined ? { composerModifiers } : {})}
         // ADR 0768 P4 — the one handoff to the full chat (promote on click).
-        footerSlot={(
-          <>
-            {gateError ? <Notice variant="warning" announce={gateError}>{gateError}</Notice> : null}
-            <ContinueInFullChat session={session} agentId={agentId} disabled={isSending} />
-          </>
-        )}
+        // ADR 1040 D3 — a page that IS this agent's full experience may hide it.
+        {...((gateError || !hideContinueInFullChat) ? {
+          footerSlot: (
+            <>
+              {gateError ? <Notice variant="warning" announce={gateError}>{gateError}</Notice> : null}
+              {hideContinueInFullChat ? null : <ContinueInFullChat session={session} agentId={agentId} disabled={isSending} />}
+            </>
+          ),
+        } : {})}
       />
     </div>
+    </ToolLabelsContext.Provider>
   );
 }

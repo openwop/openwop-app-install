@@ -632,6 +632,7 @@ async function fetchBoxBytes(deps: KnowledgeFetchDeps, ref: string, maxBytes: nu
   if (dl.outcome === 'host_not_allowed') throw new OpenwopError('validation_error', 'Resolved Box URL is not an allowed host.', 400, {});
   if (dl.outcome === 'insecure_base') throw new OpenwopError('validation_error', 'Box URL must be https.', 400, {});
   if (dl.outcome === 'request_failed') throw new OpenwopError('internal_error', 'Could not reach Box.', 502, { provider: 'box' });
+  if (dl.outcome === 'instance_refused') throw new OpenwopError(dl.error, 'The Box connection is not bound to this instance.', 403, { provider: 'box' });
   const location = dl.res.headers.get('location');
   if (!location) throw new OpenwopError('internal_error', `Box content did not return a download location (HTTP ${dl.res.status}).`, 502, { ref });
   const bytes = await fetchGuardedBytes(location, 'Box', maxBytes, { tenantId: deps.tenantId });
@@ -1081,6 +1082,9 @@ function failClosed(r: Awaited<ReturnType<typeof brokeredFetch>>, provider: stri
   }
   if (r.outcome === 'insecure_base') {
     throw new OpenwopError('validation_error', 'Source URL must be https.', 400, { provider });
+  }
+  if (r.outcome === 'instance_refused') {
+    throw new OpenwopError(r.error, `Your ${providerLabel(provider)} connection is not bound to this instance. Set its data source on the Connections page.`, 403, { provider });
   }
   if (r.outcome === 'request_failed') {
     throw new OpenwopError('internal_error', `Could not reach ${providerLabel(provider)} (${r.timedOut ? 'timed out' : 'request failed'}).`, 502, { provider });

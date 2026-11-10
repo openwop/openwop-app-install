@@ -11,7 +11,7 @@
  * markup + i18n key (`pipelinePickerLabel`).
  */
 import { Button } from '../../ui/Button.js';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { formatNumber, formatPercent } from '../../i18n/format.js';
@@ -34,52 +34,84 @@ interface Props {
 }
 
 export function ReportsTab({ orgId }: Props): JSX.Element {
+  // Catalog, selection, metrics and errors belong to one org lifetime. A reset
+  // effect alone admits a new-org/old-pipeline request before its state lands.
+  return <OrgReportsTab key={orgId} orgId={orgId} />;
+}
+
+function OrgReportsTab({ orgId }: Props): JSX.Element {
   const { t } = useTranslation('crm');
   const { t: tc } = useTranslation('common');
   const [pipelines, setPipelines] = useState<Pipeline[] | null>(null);
   const [pipelineId, setPipelineId] = useState('');
   const [report, setReport] = useState<PipelineReport | null>(null);
-  // CRM-UX-13 — TWO flags, one per read, because the recovery differs: a
-  // pipelines failure must not let the report read fire against a picker
-  // that was never resolved, and the ONE Retry must re-read BOTH (the old
-  // Retry re-ran only the report, so a failed pipelines list stayed failed
-  // forever behind a button that claimed otherwise). Neither holds the
-  // transport string: the card renders the canonical shared copy, and the
-  // server's words go to `console.warn` and nowhere else.
   const [pipelinesFailed, setPipelinesFailed] = useState(false);
   const [reportFailed, setReportFailed] = useState(false);
+  const [retry, setRetry] = useState(0);
+  const catalogSequence = useRef(0);
+  const reportSequence = useRef(0);
 
   const loadPipelines = useCallback(() => {
-    // UNKNOWN (`null`) for the whole read, never a stale list: the skeleton
-    // below is gated on `null`, so a Retry shows loading, not the failed card
-    // AND a picker it is about to replace.
+    // Invalidate immediately, including already-queued promise continuations.
+    // ONE Retry still re-reads BOTH reads; UNKNOWN is never an empty answer.
+    catalogSequence.current += 1;
+    reportSequence.current += 1;
     setPipelines(null);
+    setReport(null);
     setPipelinesFailed(false);
     setReportFailed(false);
-    if (!orgId) return;
-    void listPipelines(orgId)
-      .then((p) => {
-        setPipelines(p);
-        setPipelineId((cur) => (p.some((x) => x.pipelineId === cur) ? cur : (p[0]?.pipelineId ?? '')));
-      })
-      .catch((e) => { console.warn('[crm] pipelines read failed:', e); setPipelines([]); setPipelinesFailed(true); });
-  }, [orgId]);
-  useEffect(() => { setPipelineId(''); loadPipelines(); }, [loadPipelines]);
+    setRetry((value) => value + 1);
+  }, []);
 
-  // Gate on `pipelines !== null` so the initial mount does ONE fetch (with the
-  // resolved pipelineId), not two — an unguarded effect would fire once with
-  // pipelineId still '' and again once listPipelines resolves it, doubling
-  // the report fetch on every tab open (ADR 0210 §3: one fetch, no fan-out).
-  // A failed pipelines read does NOT fire it either: the report would be for
-  // a pipeline the picker cannot name, and its success would clear the card.
-  const load = useCallback(() => {
-    if (!orgId || pipelines === null || pipelinesFailed) return;
-    setReportFailed(false);
-    void getPipelineReport(orgId, pipelineId || undefined)
-      .then(setReport)
-      .catch((e) => { console.warn('[crm] pipeline report read failed:', e); setReportFailed(true); });
+  useEffect(() => {
+    const sequence = ++catalogSequence.current;
+    if (orgId) {
+      void listPipelines(orgId).then((rows) => {
+        if (catalogSequence.current !== sequence) return;
+        setPipelines(rows);
+        setPipelineId((current) => rows.some((p) => p.pipelineId === current) ? current : (rows[0]?.pipelineId ?? ''));
+        setPipelinesFailed(false);
+      }).catch((e) => {
+        if (catalogSequence.current !== sequence) return;
+        console.warn('[crm] pipelines read failed:', e);
+        setPipelines([]);
+        setPipelinesFailed(true);
+      });
+    }
+    // Each StrictMode setup owns a fresh sequence; cleanup invalidates only
+    // responses, so the following setup remains live.
+    return () => { catalogSequence.current += 1; };
+  }, [orgId, retry]);
+
+  useEffect(() => {
+    const sequence = ++reportSequence.current;
+    if (orgId && pipelines !== null && !pipelinesFailed) {
+      // An empty successful catalog retains the existing default-report read.
+      // A nonempty catalog must own the selected pipeline before admission.
+      if (pipelines.length === 0 || pipelines.some((p) => p.pipelineId === pipelineId)) {
+        setReport(null);
+        setReportFailed(false);
+        void getPipelineReport(orgId, pipelineId || undefined).then((next) => {
+          if (reportSequence.current !== sequence) return;
+          setReport(next);
+          setReportFailed(false);
+        }).catch((e) => {
+          if (reportSequence.current !== sequence) return;
+          console.warn('[crm] pipeline report read failed:', e);
+          setReport(null);
+          setReportFailed(true);
+        });
+      }
+    }
+    return () => { reportSequence.current += 1; };
   }, [orgId, pipelineId, pipelines, pipelinesFailed]);
-  useEffect(() => { setReport(null); load(); }, [load]);
+  const selectPipeline = (next: string): void => {
+    if (next === pipelineId) return;
+    reportSequence.current += 1;
+    setReport(null);
+    setReportFailed(false);
+    setPipelineId(next);
+  };
   const error = pipelinesFailed || reportFailed;
 
   const stageNameById = useMemo(() => {
@@ -190,7 +222,7 @@ export function ReportsTab({ orgId }: Props): JSX.Element {
     <div className="action-bar">
       <label className="u-iflex u-items-center u-gap-2">
         <span className="u-label-sm">{t('pipelinePickerLabel')}</span>
-        <select value={pipelineId} onChange={(e) => setPipelineId(e.target.value)} className="u-w-auto">
+        <select value={pipelineId} onChange={(e) => selectPipeline(e.target.value)} className="u-w-auto">
           {pipelines.map((p) => <option key={p.pipelineId} value={p.pipelineId}>{p.name}</option>)}
         </select>
       </label>
@@ -205,7 +237,7 @@ export function ReportsTab({ orgId }: Props): JSX.Element {
       {/* CRM-UX-13 — the canonical announced failed-read card + Retry (the bar
           every other CRM surface met under CRM-UX-4), never a bare Notice
           carrying the transport's raw string. Retry re-reads the pipelines,
-          which re-mints `load` and so re-reads the report — BOTH, one press. */}
+          whose accepted catalog triggers the report effect — BOTH, one press. */}
       {error ? (
         <StateCard
           announce

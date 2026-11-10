@@ -16,7 +16,7 @@
  * the host's own callers (device pairing, the demo seed, the conformance seam),
  * which declare their own scopes and lifetimes.
  */
-import { DELEGABLE_HOST_SCOPES, MANAGEMENT_SCOPES, PROTOCOL_SCOPES } from '../../host/accessControlService.js';
+import { DELEGABLE_HOST_SCOPES, PROTOCOL_SCOPES, managementScopes } from '../../host/accessControlService.js';
 import { DEPLOY_KEY_SCOPES, PROPOSAL_KEY_SCOPES, SCOPES_SUPPORTED } from '../../host/protocolAuthorization.js';
 import { OpenwopError } from '../../types.js';
 
@@ -25,9 +25,11 @@ import { OpenwopError } from '../../types.js';
  *  proposal scopes are mintable before the wire switches on (ADR 0972 D9), so the
  *  evidence cut's low-scope key can carry them on either side of the pin. The RFC
  *  0082 deploy scopes likewise (ADR 1005 D6). */
-export const MINTABLE_KEY_SCOPES: readonly string[] = [
-  ...new Set<string>([...PROTOCOL_SCOPES, ...MANAGEMENT_SCOPES, ...DELEGABLE_HOST_SCOPES, ...SCOPES_SUPPORTED, ...PROPOSAL_KEY_SCOPES, ...DEPLOY_KEY_SCOPES, '*']),
-];
+/** ADR 1031 P2 — computed at call time: feature-registered management scopes
+ *  (`managementScopes()`) are recorded at composition, after this module loads. */
+export function mintableKeyScopes(): string[] {
+  return [...new Set<string>([...PROTOCOL_SCOPES, ...managementScopes(), ...DELEGABLE_HOST_SCOPES, ...SCOPES_SUPPORTED, ...PROPOSAL_KEY_SCOPES, ...DEPLOY_KEY_SCOPES, '*'])];
+}
 
 /**
  * A feature whose routes verify a key against a scope grammar of their own
@@ -38,7 +40,7 @@ const scopePatterns: RegExp[] = [];
 export function registerMintableScopePattern(pattern: RegExp): void {
   if (!scopePatterns.some((p) => p.source === pattern.source)) scopePatterns.push(pattern);
 }
-const isMintable = (s: string): boolean => MINTABLE_KEY_SCOPES.includes(s) || scopePatterns.some((p) => p.test(s));
+const isMintable = (s: string): boolean => mintableKeyScopes().includes(s) || scopePatterns.some((p) => p.test(s));
 
 const DAY_MS = 86_400_000;
 
@@ -83,7 +85,7 @@ export function requireMintableScopes(raw: unknown): string[] {
       'validation_error',
       `Unknown scope(s): ${unknown.map(String).join(', ')}. A key is limited to exactly the scopes it declares, so a scope nothing checks would mint a key that can do nothing.`,
       400,
-      { field: 'scopes', code: 'unknown_scope', unknown: unknown.map(String), allowed: MINTABLE_KEY_SCOPES },
+      { field: 'scopes', code: 'unknown_scope', unknown: unknown.map(String), allowed: mintableKeyScopes() },
     );
   }
   return [...new Set((raw as string[]).map((s) => s.trim()))];

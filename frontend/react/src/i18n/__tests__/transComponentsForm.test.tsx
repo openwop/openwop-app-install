@@ -1,5 +1,5 @@
 /**
- * `<Trans components>` must be an ARRAY when the string uses numbered tags.
+ * `<Trans components>` must be an ARRAY when the string uses numbered tags (#5396).
  *
  * Under react-i18next 16.6.6 the OBJECT form with numeric keys,
  * `components={{ 0: <strong /> }}`, renders the `<0>` element's text with no
@@ -28,7 +28,20 @@
  *   - reverting NotFoundPage to `components={{ 0: <code /> }}` reds the 404 case;
  *   - reverting CliPage's cliSourceBody to the object form reds the link case;
  *   - dropping the `\s*` from the ratchet pattern lets the multi-line
- *     `components={{\n  0: …` shape through (the pattern-shape case reds).
+ *     `components={{\n  0: …` shape through (the pattern-shape case reds);
+ *   - a scan that reads no files reds the "not vacuous" case.
+ * (Re-measured in /grade-tests wave 80: each of these reds its case, and each
+ * reverted call site also reds the ratchet.)
+ *
+ * What the ratchet does NOT enforce (human ask, wave 80): it matches only an
+ * object whose FIRST key is numeric. A mixed object such as
+ * `components={{ link: <a />, 0: <b /> }}` also fails `isComponentsMap` and
+ * would drop `<0>`, but passes the scan. Its non-vacuity floor is `> 20` files
+ * against 32 measured at `0a3da6141`. Neither is changed here.
+ *
+ * The first four cases pin react-i18next itself: no in-repo sabotage reaches
+ * them, and case 1 going red after a library upgrade is the signal that the
+ * ratchet could relax.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';

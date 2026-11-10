@@ -899,6 +899,21 @@ export function FormDetailPage(): JSX.Element {
               aria-label={t('fieldDescriptionAria', { label: f.label || f.key || String(i + 1) })}
             />
             <CharCount value={f.description ?? ''} max={CAPS.description} />
+            {/* ADR 0951 D2 — what the field collects. A page with a sensitive
+                field is never session-recorded. */}
+            <label className="u-label-sm">{t('fieldSensitivity')}
+              <select
+                value={f.sensitivity ?? ''}
+                onChange={(e) => patchField(i, { sensitivity: (e.target.value || undefined) as FormField['sensitivity'] })}
+                aria-label={t('fieldSensitivityAria', { label: f.label || f.key || String(i + 1) })}
+                className="u-w-auto"
+              >
+                <option value="">{t('fieldSensitivityNone')}</option>
+                <option value="payment">{t('fieldSensitivityPayment')}</option>
+                <option value="credential">{t('fieldSensitivityCredential')}</option>
+                <option value="health">{t('fieldSensitivityHealth')}</option>
+              </select>
+            </label>
           </div>
         ))}
         <div className="u-flex u-justify-start">

@@ -61,24 +61,32 @@ export function CampaignIntelPage(): JSX.Element {
   const [goalBudget, setGoalBudget] = useState('');
   const [goalConversions, setGoalConversions] = useState('');
   const [goalDays, setGoalDays] = useState('90');
-  const [plan, setPlan] = useState<BudgetPlanDto | null>(null);
-  const [planBusy, setPlanBusy] = useState(false);
-  // CS-UX-1: the planner's failure is surfaced inline (and cleared on the next
-  // attempt) instead of silently blanking the result.
-  const [planError, setPlanError] = useState<string | null>(null);
+  // PERF-3: results, errors and pending work belong to one client/request.
+  // Scope the rendered state as well as guarding asynchronous commits: an
+  // effect-only reset would briefly label the old client's plan as the new one.
+  const [planner, setPlanner] = useState<{
+    orgId: string; plan: BudgetPlanDto | null; busy: boolean; error: string | null;
+  } | null>(null);
+  const planSeq = useRef(0);
+  const activePlanOrg = useRef('');
   const runPlan = async (): Promise<void> => {
     if (!orgId) return;
-    setPlanBusy(true);
-    setPlanError(null);
+    const requestedOrg = orgId;
+    const seq = ++planSeq.current;
+    const ownsRequest = (): boolean => seq === planSeq.current && requestedOrg === activePlanOrg.current;
+    setPlanner((current) => ({ orgId: requestedOrg, plan: current?.orgId === requestedOrg ? current.plan : null, busy: true, error: null }));
     try {
-      const r = await planBudget(orgId, {
+      const r = await planBudget(requestedOrg, {
         totalBudgetMinor: Math.round(Number(goalBudget) * 100),
         targetConversions: Math.floor(Number(goalConversions)),
         horizonDays: Math.floor(Number(goalDays)) || 90,
       });
-      setPlan(r.plan);
-    } catch (e) { setPlan(null); setPlanError(e instanceof Error && e.message ? e.message : t('planFailed')); }
-    finally { setPlanBusy(false); }
+      if (ownsRequest()) setPlanner((current) => current ? { ...current, plan: r.plan } : current);
+    } catch (e) {
+      if (ownsRequest()) setPlanner((current) => current ? { ...current, plan: null, error: e instanceof Error && e.message ? e.message : t('planFailed') } : current);
+    } finally {
+      if (ownsRequest()) setPlanner((current) => current ? { ...current, busy: false } : current);
+    }
   };
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -87,6 +95,17 @@ export function CampaignIntelPage(): JSX.Element {
   // Deep-link spine (Phase 3): a campaign.pacing notification lands here with
   // ?org=&campaign= — honor the org one-shot and scroll to + highlight the row.
   const [orgId, setOrgId] = useState(() => searchParams.get('org') ?? '');
+  activePlanOrg.current = orgId;
+  const plan = planner?.orgId === orgId ? planner.plan : null;
+  const planBusy = planner?.orgId === orgId && planner.busy;
+  const planError = planner?.orgId === orgId ? planner.error : null;
+  useEffect(() => {
+    const sequence = planSeq;
+    ++sequence.current;
+    setPlanner(null);
+    setGoalBudget(''); setGoalConversions(''); setGoalDays('90');
+    return () => { ++sequence.current; };
+  }, [orgId]);
   const focusCampaign = searchParams.get('campaign');
   // ADR 0952 D4 — an alert's staged action and the cap it is about.
   const stagedAction = searchParams.get('stage');

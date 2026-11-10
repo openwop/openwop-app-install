@@ -18,20 +18,18 @@
  *
  * @see docs/adr/0280-sales-commissions.md
  *
- * CFP Phase-4 review: the write methods below are the ADR 0208 governed-WORKFLOW
- * lane — the HITL gate lives in the CHAIN (author a core.approvalGate before the
- * transition node); they do NOT mint the shared page/inbox approval row. The HTTP
- * routes are the gated interactive lane.
+ * CFP Phase-4 review said the write methods were the governed-WORKFLOW lane with the
+ * gate "in the CHAIN". CORRECTED by R2 COM2-M3 (and ADR 1034 for the sibling features):
+ * `approveStatement` submits the shared review card; it never approves.
  */
 
 import { surfaceStr as str, surfaceOptStr as optStr, type FeatureSurface } from '../../host/featureSurfaces.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { OpenwopError } from '../../types.js';
 import { resolveEffectiveAccess } from '../../host/accessControlService.js';
-import { commissionProposalText } from './proposalText.js';
-import { listPlans } from './entities/plan.js';
-import { listStatements, computeStatement, getStatementRaw, recordStatementSubmitter } from './entities/statement.js';
-import { createCommissionStatementApproval, findPendingCommissionStatementApproval, resolveApproval } from '../../host/approvalService.js';
+import { listPlans, plansVisibleTo } from './entities/plan.js';
+import { listStatements, computeStatement, getStatementRaw } from './entities/statement.js';
+import { submitStatementForReview } from './pin.js';
 
 export function buildCommissionSurface(scope: BundleScope): FeatureSurface {
   const tenantId = scope.tenantId;
@@ -54,7 +52,11 @@ export function buildCommissionSurface(scope: BundleScope): FeatureSurface {
 
   return {
     // ── Reads ──
-    listPlans: async (args) => ({ plans: await listPlans(tenantId, str(args.orgId)) }),
+    listPlans: async (args) => {
+      const orgId = str(args.orgId);
+      // ADR 1034 D11 — the route's visibility (one helper): team plans + the owner's own.
+      return { plans: plansVisibleTo(await listPlans(tenantId, orgId), await hasManage(orgId), viewer) };
+    },
     listStatements: async (args) => {
       const orgId = str(args.orgId);
       const statements = await listStatements(
@@ -93,22 +95,8 @@ export function buildCommissionSurface(scope: BundleScope): FeatureSurface {
       const statement = await getStatementRaw(tenantId, orgId, statementId);
       if (!statement) throw new OpenwopError('not_found', 'Statement not found.', 404, { statementId });
       if (statement.status !== 'draft') throw new OpenwopError('conflict', `Only a draft statement can be submitted for approval (this one is ${statement.status}).`, 409, { statementId, status: statement.status });
-      // R2 review — same re-pin rule as the HTTP route, and the same submitter stamp:
-      // a chain-submitted statement had no `submittedBy` at all, so the auditability the
-      // tracker offers in place of the separation-of-duties gate was missing on one of
-      // the two lanes.
-      if (viewer) await recordStatementSubmitter(tenantId, orgId, statementId, viewer);
-      const found = await findPendingCommissionStatementApproval(tenantId, statementId);
-      const pin = found?.commissionStatement;
-      if (found && pin && (pin.total !== statement.total || pin.currency !== statement.currency)) {
-        await resolveApproval(found.approvalId, { status: 'rejected', note: 'Superseded: the statement was recomputed before it was approved.' });
-      }
-      const existing = (found && pin && pin.total === statement.total && pin.currency === statement.currency) ? found : null;
-      const review = existing ?? await createCommissionStatementApproval({
-        tenantId, orgId, statementId,
-        subjectId: statement.subjectId, period: statement.period, total: statement.total, currency: statement.currency,
-        proposal: await commissionProposalText({ tenantId, orgId, subjectId: statement.subjectId, period: statement.period, total: statement.total, currency: statement.currency }),
-      });
+      // ADR 1034 D5 — the ONE submit path, shared with the HTTP route (`pin.ts`).
+      const review = await submitStatementForReview(tenantId, orgId, statement, viewer);
       return { success: true, submittedForReview: true, review: { approvalId: review.approvalId, status: review.status } };
     },
   };

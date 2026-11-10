@@ -11,31 +11,41 @@ import type { MetricDef } from './metricTypes.js';
 
 const EPOCH = '1970-01-01T00:00:00.000Z';
 
-type SystemMetricSpec = Omit<MetricDef, 'tenantId' | 'createdBy' | 'createdAt' | 'updatedAt' | 'system'>;
+/** ADR 1052 D14 — "open" is neither won nor lost. A deal written before statuses
+ *  existed has no `deal_status` and is open (`crm/entities/deals.ts` `projectDeal`),
+ *  which `neq` keeps and an `eq 'open'` would have dropped. */
+const OPEN_DEALS = [
+  { key: 'deal_status', op: 'neq' as const, value: 'won' },
+  { key: 'deal_status', op: 'neq' as const, value: 'lost' },
+];
+
+type SystemMetricSpec = Omit<MetricDef, 'tenantId' | 'orgId' | 'createdBy' | 'createdAt' | 'updatedAt' | 'system'>;
 
 const SPECS: SystemMetricSpec[] = [
   {
     metricId: 'sys-deal-count',
     title: 'Open deals',
-    description: 'Count of CRM deals (all stages).',
+    description: 'Count of open CRM deals (won and lost deals excluded).',
     entityType: 'crm.deal',
     aggregate: 'count',
+    filters: OPEN_DEALS,
     groupBy: 'stage_id',
   },
   {
     metricId: 'sys-pipeline-value',
     title: 'Pipeline value',
-    description: 'Sum of deal amounts across the pipeline.',
+    description: 'Sum of open deal amounts (won and lost deals excluded).',
     entityType: 'crm.deal',
     aggregate: 'sum',
     field: 'amount',
+    filters: OPEN_DEALS,
     groupBy: 'stage_id',
     timeField: 'close_date',
   },
   {
     metricId: 'sys-avg-deal-size',
     title: 'Average deal size',
-    description: 'Average deal amount.',
+    description: 'Average deal amount (all deals, any status).',
     entityType: 'crm.deal',
     aggregate: 'avg',
     field: 'amount',

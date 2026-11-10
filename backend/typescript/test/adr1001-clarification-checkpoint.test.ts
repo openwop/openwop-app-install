@@ -7,53 +7,38 @@
  * write an unbounded row. Retiring with the run on both delete paths and both
  * adapters is `adr1001-checkpoint-run-cascade.test.ts`.
  *
+ * The store takes a `Storage` and never reads the run row, so this drives it on
+ * a memory storage with per-case ids (no app boot).
+ *
+ * Node scope is a DOUBLE GUARD in `clarificationCheckpoint.ts`: the `kvList`
+ * prefix carries the encoded nodeId AND `parse` re-checks `cp.nodeId`. Removing
+ * either alone stays green; removing both reds case 1's `agent:2` leg. Tenant
+ * scope has one guard (`parse`). Rounds 1/2/10 pin the zero-padded key order.
+ *
  * Sabotage: removing the tenant check in `parse` reds case 1's cross-tenant
- * leg; removing the size cap reds case 2.
+ * leg; dropping the zero padding in the key reds case 1's newest-round leg;
+ * removing the node check in `parse` together with the nodeId in the prefix
+ * reds case 1's other-node leg; removing the size cap reds case 2.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { AddressInfo } from 'node:net';
-import http from 'node:http';
-import { createApp } from '../src/index.js';
-import { getNodeRegistry } from '../src/executor/nodeRegistry.js';
-import { hostExtStorage } from '../src/host/hostExtPersistence.js';
+import { beforeAll, describe, expect, it } from 'vitest';
+import { openStorage } from '../src/storage/index.js';
+import type { Storage } from '../src/storage/storage.js';
 import {
   CLARIFICATION_CHECKPOINT_MAX_BYTES,
   latestClarificationCheckpoint,
   saveClarificationCheckpoint,
   type ClarificationCheckpoint,
 } from '../src/host/clarificationCheckpoint.js';
-import { bareRunId } from './support/bareRunId.js';
 
-let server: http.Server;
-let BASE = '';
-const H = { 'content-type': 'application/json', authorization: 'Bearer dev-token', 'OpenWOP-Version': '2' };
+const TENANT = 'org:adr1001-ckpt';
+let s: Storage;
+let n = 0;
+const runIdFor = (): string => `run-ckpt-${n++}`;
 
 beforeAll(async () => {
-  process.env.OPENWOP_STORAGE_DSN = 'memory://';
-  process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
-  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  getNodeRegistry().register({ typeId: 'adr1001.noop', version: '1.0.0', async execute() { return { status: 'success', outputs: {} }; } });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-}, 120_000);
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+  s = await openStorage('memory://');
+});
 
-async function api<T = Record<string, unknown>>(path: string, init: RequestInit = {}): Promise<{ status: number; body: T }> {
-  const res = await fetch(`${BASE}${path}`, { ...init, headers: { ...H, ...(init.headers ?? {}) } });
-  const text = await res.text();
-  return { status: res.status, body: (text ? JSON.parse(text) : {}) as T };
-}
-let n = 0;
-async function finishedRun(): Promise<{ runId: string; tenantId: string }> {
-  const workflowId = `adr1001.ckpt.${Date.now()}-${n++}`;
-  expect((await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({ workflowId, nodes: [{ nodeId: 'n', typeId: 'adr1001.noop' }], edges: [] }) })).status).toBeLessThan(300);
-  const { body } = await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId }) });
-  for (let i = 0; i < 300; i++) {
-    const run = await hostExtStorage().getRun(bareRunId(body.runId));
-    if (run && ['completed', 'failed'].includes(run.status)) return { runId: run.runId, tenantId: run.tenantId };
-    await new Promise((r) => setTimeout(r, 20));
-  }
-  throw new Error('run did not finish');
-}
 function cp(runId: string, tenantId: string, round: number, extra: Partial<ClarificationCheckpoint> = {}): ClarificationCheckpoint {
   return {
     v: 1, tenantId, runId, nodeId: 'agent:1', round,
@@ -66,18 +51,17 @@ function cp(runId: string, tenantId: string, round: number, extra: Partial<Clari
 
 describe('ADR 1001 D3.1 — clarification checkpoints', () => {
   it('reads back the newest round, only for the run, node and tenant that wrote it', async () => {
-    const { runId, tenantId } = await finishedRun();
-    const s = hostExtStorage();
-    for (const r of [1, 2, 10]) expect(await saveClarificationCheckpoint(s, cp(runId, tenantId, r))).toEqual({ ok: true });
-    expect((await latestClarificationCheckpoint(s, { tenantId, runId, nodeId: 'agent:1' }))?.round).toBe(10);
-    expect(await latestClarificationCheckpoint(s, { tenantId, runId, nodeId: 'agent:2' })).toBeNull();
+    const runId = runIdFor();
+    for (const r of [1, 2, 10]) expect(await saveClarificationCheckpoint(s, cp(runId, TENANT, r))).toEqual({ ok: true });
+    expect((await latestClarificationCheckpoint(s, { tenantId: TENANT, runId, nodeId: 'agent:1' }))?.round).toBe(10);
+    expect(await latestClarificationCheckpoint(s, { tenantId: TENANT, runId, nodeId: 'agent:2' })).toBeNull();
     expect(await latestClarificationCheckpoint(s, { tenantId: 'other-tenant', runId, nodeId: 'agent:1' })).toBeNull();
   });
 
   it('refuses a checkpoint over the size cap instead of writing it', async () => {
-    const { runId, tenantId } = await finishedRun();
-    const big = cp(runId, tenantId, 1, { transcriptTail: [{ role: 'assistant', content: 'x'.repeat(CLARIFICATION_CHECKPOINT_MAX_BYTES) }] });
-    expect(await saveClarificationCheckpoint(hostExtStorage(), big)).toEqual({ ok: false, reason: 'too_large' });
-    expect(await latestClarificationCheckpoint(hostExtStorage(), { tenantId, runId, nodeId: 'agent:1' })).toBeNull();
+    const runId = runIdFor();
+    const big = cp(runId, TENANT, 1, { transcriptTail: [{ role: 'assistant', content: 'x'.repeat(CLARIFICATION_CHECKPOINT_MAX_BYTES) }] });
+    expect(await saveClarificationCheckpoint(s, big)).toEqual({ ok: false, reason: 'too_large' });
+    expect(await latestClarificationCheckpoint(s, { tenantId: TENANT, runId, nodeId: 'agent:1' })).toBeNull();
   });
 });

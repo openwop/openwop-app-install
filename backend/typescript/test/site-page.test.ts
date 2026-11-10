@@ -150,17 +150,17 @@ describe('front-page collapse — super admin drives the CMS route family on hos
   it('writes + reads SEO metadata for the reserved host-site page', async () => {
     const id = await homeId();
     const saved = await seo('PUT', id, {
-      metaTitle: 'KickTodo — One meaningful action today',
+      metaTitle: 'Acme — One meaningful action today',
       metaDescription: 'Choose a guided challenge and take the next useful step.',
-      canonicalUrl: 'https://kicktodo.com/',
+      canonicalUrl: 'https://acme.example/',
       noindex: false,
     });
     expect(saved.status).toBe(200);
-    expect((await j<{ seo: { metaTitle?: string } }>(saved)).seo.metaTitle).toBe('KickTodo — One meaningful action today');
+    expect((await j<{ seo: { metaTitle?: string } }>(saved)).seo.metaTitle).toBe('Acme — One meaningful action today');
 
     const read = await seo('GET', id);
     expect(read.status).toBe(200);
-    expect((await j<{ seo: { canonicalUrl?: string } }>(read)).seo.canonicalUrl).toBe('https://kicktodo.com/');
+    expect((await j<{ seo: { canonicalUrl?: string } }>(read)).seo.canonicalUrl).toBe('https://acme.example/');
   });
 
   it('a malformed edit 400s WITHOUT taking the live homepage offline', async () => {

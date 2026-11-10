@@ -206,10 +206,13 @@ describe('WF-JS-2 — career.apply to the gate, through the expanded chain', () 
     });
     // The guard node SUCCEEDS (its output is the verdict); the equals-condition
     // edge does not fire, so the session node — the chain's only terminal —
-    // never runs, and the executor fails the run rather than completing with
-    // nothing produced. Failing CLOSED is the designed outcome for a fabricated
-    // rewrite: the substance pinned here is that the browser is never reached.
-    expect(status).toBe('failed');
+    // never runs. Under RFC 0257 (ADR 1027) a run with no failed node COMPLETES
+    // and says it reached no terminal (`skippedTerminals`); before it, this host
+    // failed it. The substance pinned here is unchanged: the browser is never reached.
+    expect(status).toBe('completed');
+    const completed = (await storage.listEvents(run.runId, { contract: 1 })).find((e) => e.type === 'run.completed');
+    const skipped = (completed?.payload as { skippedTerminals?: string[] } | undefined)?.skippedTerminals ?? [];
+    expect(skipped.some((id) => id.endsWith('_session')), 'the declined session is named as the skipped terminal').toBe(true);
     expect((await sessions.listByPrefix(`${T}:`)).length, 'a failed guard must never reach the browser').toBe(0);
     // …and it failed BECAUSE the guard ran and said no, not for an earlier reason.
     const guardVerdicts = (await storage.listEvents(run.runId))

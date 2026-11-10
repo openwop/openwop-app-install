@@ -44,7 +44,7 @@ vi.mock('../src/host/governanceService.js', async (orig) => {
 
 import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
-import { makeAdsAdapter, setAdsCapChecker, type SetDeliveryStatusArgs } from '../src/host/adsAdapter.js';
+import { makeAdsAdapter, setAdsCampaignOwnershipChecker, setAdsCapChecker, type SetDeliveryStatusArgs } from '../src/host/adsAdapter.js';
 import { checkLaunchAgainstCaps } from '../src/features/campaign-intel/spendCaps.js';
 import { setGovernancePolicy } from '../src/host/governanceService.js';
 import { getApproval, resolveApproval } from '../src/host/approvalService.js';
@@ -76,6 +76,10 @@ beforeAll(async () => {
   process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true';
   process.env.OPENWOP_GOOGLE_ADS_DEVELOPER_TOKEN = 'DEV';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  // This file tests the platform write path. Which org owns a campaign is the
+  // adapter seam's question, with its own witnesses (adr1022-ads-ownership-seam):
+  // here every campaign counts as the acting org's.
+  setAdsCampaignOwnershipChecker(async () => true);
   storage = app.locals.storage;
   await __resetConnectionsStore();
   srv = http.createServer((req, res) => {
@@ -255,7 +259,9 @@ describe('ADR 0952 P0 — setDeliveryStatus', () => {
     gov.fail = false;
     const T2 = 'deliv-t2';
     await createSecretConnection({ tenantId: T2, provider: 'meta-ads', kind: 'bearer', secret: 'TOK', scope: 'user', userId: 'u1' });
-    const a2 = makeAdsAdapter({ storage, tenantId: T2, runId: 'deliv-run', actingUserId: 'u1', orgId: T2 });
+    // Its own run id: tenant T's 'deliv-run' is not a run of T2, and the ownership
+    // seam refuses a run read across tenants (forbidden_scope).
+    const a2 = makeAdsAdapter({ storage, tenantId: T2, runId: 'deliv-run-t2', actingUserId: 'u1', orgId: T2 });
     await setGovernancePolicy(T2, { actionPolicy: { 'ads.launch': 'disabled' } }, 'test');
     expect(await a2.setDeliveryStatus(meta('105', 'active'))).toEqual({ outcome: 'refused', error: 'policy_disabled' });
     await setGovernancePolicy(T2, { actionPolicy: { 'ads.launch': 'draft-only' } }, 'test');

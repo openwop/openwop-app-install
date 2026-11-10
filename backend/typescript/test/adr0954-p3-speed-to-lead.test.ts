@@ -5,8 +5,18 @@
  * concurrent rungs, client scope and a reroute whose committed child loses its
  * acknowledgement before a newer manual routing round. Durable inbox failure,
  * erasure and restart interleavings live in adr0954-sla-delivery-cas.test.ts.
+ *
+ * Sabotage measured (wave 75, each red, then restored): the owner check on a
+ * touch; the booking leg; the rung CAS; the agency-lead access check; a reroute
+ * that keeps the clock; the settings merge and the null clear; the previous-owner
+ * skip; business hours; a deadline read from the clock; the zone and hours checks;
+ * the route's client scope. The stale-round refusal is a double guard: `fireSlaRung`
+ * compares the epoch, and `finishNotice` compares it again before anything is sent.
+ *
+ * Every case starts from the same settings (the `beforeEach`): a case that saves
+ * business hours or an agency lead must not reach the next one.
  */
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
 import type http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -74,7 +84,7 @@ const newLead = async (orgId: string, name: string): Promise<string> => {
   return c.contactId;
 };
 /** Every SLA source is an actual admitted routing run with frozen metadata. */
-const routed = async (contactId: string, _label: string): Promise<{ epoch: number; chosen: string | null; runId: string }> => {
+const routed = async (contactId: string): Promise<{ epoch: number; chosen: string | null; runId: string }> => {
   const started = await call<{ runId: string; routingEpoch: number }>('admin', 'POST', `/${orgA}/leads/${contactId}/route`);
   expect(started.status, started.raw).toBe(202);
   const { runId, routingEpoch: epoch } = started.body;
@@ -132,6 +142,9 @@ beforeAll(async () => {
     const meta = (n.metadata ?? {}) as { kind?: string; rung?: number; contactId?: string };
     if (meta.kind === 'crm.lead.sla') slaNotices.push({ to: n.recipientUserId!, rung: meta.rung!, contactId: meta.contactId! });
   });
+}, 120_000);
+beforeEach(async () => {
+  await saveSlaSettings(TENANT, orgA, { agencyLead: admin, escalation: 'escalate', timezone: null, weeklyHours: null }, admin);
 });
 afterAll(async () => { vi.restoreAllMocks(); await new Promise<void>((res) => server.close(() => res())); });
 
@@ -149,9 +162,16 @@ describe('ADR 0954 D6 — the deadline', () => {
 
   it('is computed only from the recorded decision (the same inputs give the same instants)', async () => {
     const sla = { firstTouchMinutes: 30, assignedAt: '2026-10-20T10:00:00.000Z' };
-    const a = await slaDeadline({ inputs: { sla } });
-    await new Promise((r) => setTimeout(r, 5));
-    const b = await slaDeadline({ inputs: { sla } });
+    // Two different clocks, Date only: the deadline must not read either.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    let a: Awaited<ReturnType<typeof slaDeadline>>;
+    let b: Awaited<ReturnType<typeof slaDeadline>>;
+    try {
+      vi.setSystemTime(new Date('2026-10-20T10:01:00.000Z'));
+      a = await slaDeadline({ inputs: { sla } });
+      vi.setSystemTime(new Date('2026-10-22T16:30:00.000Z'));
+      b = await slaDeadline({ inputs: { sla } });
+    } finally { vi.useRealTimers(); }
     expect(a).toEqual(b);
     expect(a.outputs).toMatchObject({ hasSla: true, slaDeadline: '2026-10-20T10:30:00.000Z', slaEscalateAt: '2026-10-20T11:00:00.000Z', slaReportAt: '2026-10-20T11:30:00.000Z' });
     expect((await slaDeadline({ inputs: { sla: null } })).outputs).toEqual({ hasSla: false });
@@ -162,7 +182,7 @@ describe('ADR 0954 D6 — rungs', () => {
   it('each rung records one durable inbox row per round under concurrent executions', async () => {
     await saveSlaSettings(TENANT, orgA, { agencyLead: admin }, admin);
     const contactId = await newLead(orgA, 'Once');
-    const { epoch, chosen, runId } = await routed(contactId, 'once');
+    const { epoch, chosen, runId } = await routed(contactId);
     expect(chosen).toBe(o1);
     const before = slaNotices.length;
     const [x, y] = await Promise.all([1, 2].map(() => fireSlaRung({ tenantId: TENANT, orgId: orgA, contactId, routingEpoch: epoch, rung: 1, runId })));
@@ -176,14 +196,14 @@ describe('ADR 0954 D6 — rungs', () => {
 
   it('an owner activity or a booking stops the clock; another person’s activity does not', async () => {
     const a = await newLead(orgA, 'Touched');
-    const ra = await routed(a, 'touch-a');
+    const ra = await routed(a);
     await createActivity({ tenantId: TENANT, orgId: orgA, kind: 'note', body: 'Their call', contactId: a, createdBy: other, validators: makeLinkValidators(TENANT, orgA) });
     expect((await checkFirstTouch(TENANT, orgA, a, ra.epoch)).touched).toBe(false);
     await createActivity({ tenantId: TENANT, orgId: orgA, kind: 'call', body: 'Called', contactId: a, createdBy: o1, validators: makeLinkValidators(TENANT, orgA) });
     expect((await checkFirstTouch(TENANT, orgA, a, ra.epoch)).touched).toBe(true);
 
     const b = await newLead(orgA, 'Booked');
-    const rb = await routed(b, 'touch-b');
+    const rb = await routed(b);
     const slot = Date.now() + 7 * 86_400_000;
     const now = new Date().toISOString();
     await claimBooking({ bookingId: bookingIdFor('booking-link:sl', slot), tenantId: TENANT, orgId: orgA, bookingLinkId: 'booking-link:sl', slotStartUtcMs: slot, durationMin: 30, status: 'confirmed', inviteeName: 'B', inviteeEmail: 'b@example.test', contactId: b, createdAt: now, updatedAt: now });
@@ -192,9 +212,10 @@ describe('ADR 0954 D6 — rungs', () => {
 
   it('a newer routing round supersedes an old clock', async () => {
     const contactId = await newLead(orgA, 'Superseded');
-    const first = await routed(contactId, 'sup-1');
-    await routed(contactId, 'sup-2');
+    const first = await routed(contactId);
+    await routed(contactId);
     expect((await fireSlaRung({ tenantId: TENANT, orgId: orgA, contactId, routingEpoch: first.epoch, rung: 1, runId: first.runId })).outcome).toBe('superseded');
+    expect(slaNotices.filter((n) => n.contactId === contactId)).toEqual([]);
   });
 
   it('rung 2 re-routes away from the previous owner when the client opted in, as a new round with its own clock', async () => {
@@ -203,7 +224,7 @@ describe('ADR 0954 D6 — rungs', () => {
     await saveSlaSettings(TENANT, orgA, { escalation: 'reroute' }, admin);
     try {
       const contactId = await newLead(orgA, 'Reroute');
-      const r = await routed(contactId, 'rr');
+      const r = await routed(contactId);
       const out = await fireSlaRung({ tenantId: TENANT, orgId: orgA, contactId, routingEpoch: r.epoch, rung: 2, runId: r.runId });
       expect(out).toEqual({ outcome: 'rerouted', fired: true });
       expect(clockContinues(out.outcome)).toBe(false);
@@ -239,7 +260,7 @@ describe('ADR 0954 D6 — rungs', () => {
     const storage = hostExtStorage();
     try {
       const contactId = await newLead(orgA, 'ChildRecovery');
-      const source = await routed(contactId, 'source');
+      const source = await routed(contactId);
       const insert = storage.insertRun.bind(storage); const get = storage.getRun.bind(storage);
       let childId: string | undefined; let uncertain: string | undefined;
       const getFault = vi.spyOn(storage, 'getRun').mockImplementation(async (id) => {
@@ -261,7 +282,7 @@ describe('ADR 0954 D6 — rungs', () => {
       const decision = await until(() => getRoutingDecision(TENANT, orgA, contactId, source.epoch + 1), 'recovered child assignment');
       expect(decision.runId).toBe(childId); expect(decision.chosen).not.toBe(source.chosen);
       await openTimer(childId!);
-      const human = await routed(contactId, 'newer-manual'); expect(human.epoch).toBe(source.epoch + 2);
+      const human = await routed(contactId); expect(human.epoch).toBe(source.epoch + 2);
       expect(await fireSlaRung({ tenantId: TENANT, orgId: orgA, contactId, routingEpoch: source.epoch, rung: 2, runId: source.runId })).toEqual({ outcome: 'rerouted', fired: false });
       expect(await getRoutingDecision(TENANT, orgA, contactId, human.epoch + 1)).toBeNull();
       const runs = await storage.listRuns({ tenantId: TENANT, workflowId: 'crm-ops.route-lead' });
@@ -276,7 +297,7 @@ describe('ADR 0954 D6 — rungs', () => {
     await saveSlaSettings(TENANT, orgA, { agencyLead: onlyB }, admin);
     try {
       const contactId = await newLead(orgA, 'NoAccess');
-      const r = await routed(contactId, 'na');
+      const r = await routed(contactId);
       const before = slaNotices.length;
       expect((await fireSlaRung({ tenantId: TENANT, orgId: orgA, contactId, routingEpoch: r.epoch, rung: 3, runId: r.runId })).outcome).toBe('report-unaddressed');
       expect(slaNotices.length).toBe(before);
@@ -348,12 +369,18 @@ describe('ADR 0954 D6 — the chain', () => {
   });
 
   it('the settings routes are client-scoped and validated', async () => {
-    expect((await call('admin', 'PUT', `/${orgA}/leads/sla-settings`, { timezone: 'Mars/Olympus' })).status).toBe(422);
-    expect((await call('admin', 'PUT', `/${orgA}/leads/sla-settings`, { weeklyHours: [{ day: 1, start: '09:00', end: '17:00' }] })).status).toBe(422);
+    const zone = await call<{ details?: { field?: string } }>('admin', 'PUT', `/${orgA}/leads/sla-settings`, { timezone: 'Mars/Olympus' });
+    expect(zone.status).toBe(422);
+    expect(zone.body.details?.field).toBe('timezone');
+    const hours = await call<{ details?: { field?: string } }>('admin', 'PUT', `/${orgA}/leads/sla-settings`, { weeklyHours: [{ day: 1, start: '09:00', end: '17:00' }] });
+    expect(hours.status).toBe(422);
+    expect(hours.body.details?.field).toBe('weeklyHours');
     const ok = await call<{ settings: { escalation: string } }>('admin', 'PUT', `/${orgA}/leads/sla-settings`, { timezone: 'America/New_York', weeklyHours: [{ day: 1, start: '09:00', end: '17:00' }], agencyLead: admin });
     expect(ok.status, ok.raw).toBe(200);
     expect(ok.body.settings.escalation).toBe('escalate');
-    expect((await call('onlyB', 'GET', `/${orgA}/leads/sla-settings`)).status).toBe(404);
-    expect((await call('onlyB', 'PUT', `/${orgA}/leads/sla-settings`, {})).status).toBe(404);
+    for (const refused of [await call('onlyB', 'GET', `/${orgA}/leads/sla-settings`), await call('onlyB', 'PUT', `/${orgA}/leads/sla-settings`, {})]) {
+      expect(refused.status).toBe(404);
+      expect(refused.raw).toContain('Client not found.');
+    }
   });
 });

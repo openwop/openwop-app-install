@@ -21,7 +21,15 @@
  *   - tenant teardown removes the log, and the cursor is then refused;
  *   - discovery advertises `hostEvents.replay` only with the wire on.
  *
- * Sabotage-witnessed: see the ADR 0973 P1 record.
+ * Sabotage-witnessed (re-measured w78), each red alone: the log accepting an
+ * ephemeral event; a longer or a shorter retention floor; no 409 for an
+ * unresolvable cursor; replay not reading the log; no ADR 0988 D1 lookup; no
+ * id dedupe at the hand-off; the route, the append or the advertisement
+ * ignoring the wire switch; an oversized event not read back by reference.
+ * Recorded, not probed: a foreign tenant's real id is refused structurally
+ * (the index key is tenant-namespaced, and the row's tenant is re-checked);
+ * the log's own tenant purge hook is backed by the generic tenant content scan,
+ * so removing the hook alone stays green.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -141,14 +149,14 @@ describe('the switch (ADR 0973 D8)', () => {
       await until(() => s.text().includes(id('0ff2')));
       s.close();
       expect(await resolveHostEventCursor(T, id('0ff2'))).toBeNull();
-      expect('replay' in ((buildV2Advertisement(CONFIG).hostEvents ?? {}) as Record<string, unknown>)).toBe(false);
+      expect(Object.keys(buildV2Advertisement(CONFIG).hostEvents ?? {})).not.toContain('replay');
     } finally {
       resetRfc0250WireCache(true);
     }
   });
 });
 
-const CONFIG = { port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false } as AppConfig;
+const CONFIG: AppConfig = { port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false };
 
 describe('resume (RFC 0250 RESUME, ADR 0973 D4)', () => {
   it('resume-backlog: after D1 → exactly D2, D3, then D4 live; no ephemeral, cursor never re-emitted', async () => {
@@ -249,12 +257,14 @@ describe('the uniform refusal (RFC 0250 REFUSAL, ADR 0973 D5)', () => {
     expect(body.details).toBeUndefined();
     expect(refusals[0]!.text()).not.toContain('dead');
 
-    // Unauthenticated, naming A's REAL id: the scope check's own 401 (RFC 0250
-    // §C: auth failures keep their answer), or the uniform 409. Never a stream.
+    // Unauthenticated, naming A's REAL id: RFC 0250 §C lets auth failures keep
+    // their answer. On this host the protocol scope check runs before the cursor
+    // is looked at, so it is that 401, never a stream and never A's replay.
     const anon = await openStream({ replay: true, lastEventId: id('d1') });
-    expect([401, 409]).toContain(anon.status);
+    expect(anon.status).toBe(401);
     expect(anon.contentType).not.toContain('text/event-stream');
-    if (anon.status === 409) expect(anon.text()).toBe(refusals[0]!.text());
+    expect((JSON.parse(anon.text()) as { error?: string }).error).toBe('unauthenticated');
+    expect(anon.text()).not.toContain(id('d1'));
   });
 
   it('the log refuses an ephemeral event itself, not only through fanOutHostEvent (MUST 2)', async () => {
@@ -270,6 +280,8 @@ describe('the uniform refusal (RFC 0250 REFUSAL, ADR 0973 D5)', () => {
     expect(await resolveHostEventCursor(T, id('e1'))).not.toBeNull();
     const later = Date.now() + HOST_EVENT_REPLAY_MIN_RETENTION_SECONDS * 1000;
     expect(await resolveHostEventCursor(T, id('e1'), later)).toBeNull();
+    // A minute short of the floor it still resumes (a shortened floor reds here).
+    expect(await resolveHostEventCursor(T, id('e1'), later - 60_000)).not.toBeNull();
   });
 
   it('legacy-unchanged: without replay=required an unknown cursor still opens the stream', async () => {

@@ -38,7 +38,7 @@ let BASE: string;
 let server: http.Server;
 let n = 0;
 
-const PROBED = ['crm', 'cms', 'documents', 'email', 'commerce', 'forms', 'kb', 'campaign-brief', 'campaign-intel', 'kicktodo-organizations'] as const;
+const PROBED = ['crm', 'cms', 'documents', 'email', 'commerce', 'forms', 'kb', 'campaign-brief', 'campaign-intel'] as const;
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -181,15 +181,6 @@ describe('what the floor refuses beyond a foreign org', () => {
     await expect(s.crm!.listCompanies!({ orgId: null })).resolves.toMatchObject({ companies: expect.any(Array) });
   });
 
-  it('a method whose door needs more than membership asks that scope (kicktodo-organizations.report)', async () => {
-    const f = await fixture();
-    const member = surfaces({ tenantId: f.tenantId, runId: 'r1', actingUserId: f.memberId });
-    await expect(member['kicktodo-organizations']!.report!({ orgId: f.orgA })).rejects.toMatchObject(FORBIDDEN);
-    await expect(member['kicktodo-organizations']!.catalog!({ orgId: f.orgA })).resolves.toHaveProperty('catalog');
-    const owner = surfaces({ tenantId: f.tenantId, runId: 'r1', actingUserId: f.ownerId });
-    await expect(owner['kicktodo-organizations']!.report!({ orgId: f.orgA })).resolves.toHaveProperty('cells');
-  });
-
   it('the floor and the method read the same orgId (an accessor cannot answer each differently)', async () => {
     const f = await fixture();
     const s = surfaces({ tenantId: f.tenantId, runId: 'r1', actingUserId: f.memberId });
@@ -227,11 +218,12 @@ describe('positive controls (a floor that blocks everyone is a wall)', () => {
     await expect(s['campaign-brief']!.listBriefs!({})).resolves.toMatchObject({ briefs: expect.any(Array) });
   });
 
-  it('KB keeps its tenant-scoped namespaces readable by name (`_team`, `_kickbot`)', async () => {
+  // ADR 1031 round 3 — a feature-declared namespace (KickTodo's `_kickbot`) is pinned
+  // by its owner: test/kicktodo/kicktodo-kb-namespace.test.ts.
+  it('KB keeps its tenant-scoped namespace readable by name (`_team`)', async () => {
     const f = await fixture();
     const s = surfaces({ tenantId: f.tenantId, runId: 'r1', actingUserId: f.memberId });
     await expect(s.kb!.listCollections!({ orgId: '_team' })).resolves.toMatchObject({ collections: expect.any(Array) });
-    await expect(s.kb!.listCollections!({ orgId: '_kickbot' })).resolves.toMatchObject({ collections: expect.any(Array) });
     await expect(s.kb!.listCollections!({ orgId: '_unlisted' })).rejects.toMatchObject(NOT_FOUND);
   });
 });

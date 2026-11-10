@@ -46,7 +46,11 @@ for (const id of ['job-search', 'crm', 'consent']) await enableToggle(id);
 // (demo-crm + demo-job-search seeders — /example-data/seed is the agent seed).
 const org = await ctx.request.post(`${API}/orgs`, { data: { name: 'Verify Co' } });
 console.log('org', org.status());
-const run = await ctx.request.post(`${API}/example-data/run`, { data: {} });
+const scopeResponse = await ctx.request.get(`${API}/me/workspaces`);
+if (!scopeResponse.ok()) throw new Error('Cannot confirm workspace for example-data verification');
+const scope = await scopeResponse.json();
+if (typeof scope.active !== 'string' || !scope.active) throw new Error('Active workspace is unavailable');
+const run = await ctx.request.post(`${API}/example-data/run`, { data: { expectedTenantId: scope.active } });
 console.log('example-data run', run.status(), (await run.text()).slice(0, 200));
 
 const routes = [

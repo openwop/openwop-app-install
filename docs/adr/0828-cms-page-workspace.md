@@ -9,6 +9,22 @@ ADR 0206 (versions, the media picker), ADR 0592 (localization and the
 translator surface), ADR 0813 (the launch post), ADR 0817 (the public site's
 media library).
 
+
+> **Correction (2026-11-07, CMS-SCOPE-EMPTY-1 / CMS-HERO-AUTOSAVE-1).**
+> Org-language settings mount only for a nonempty selected org, keyed by that org;
+> their own read effect also withholds all language/grant/member reads for an
+> empty selection and invalidates late previous-org responses. A collapsed
+> disclosure still mounts React children, so collapsing it was not a read guard.
+> Newly inserted Hero sections remain genuinely blank local edits. Draft autosave
+> waits while a non-reference Hero has no heading and explains that changes are
+> not saved; entering a heading resumes the ordinary versioned save. Explicit
+> Save and all server validation, publication/scheduling and conflict rules stay
+> unchanged. No placeholder heading is fabricated and no error is suppressed.
+> This narrowly handles the observed incomplete Hero, not every possible server
+> validation error. Existing persistent error toasts keep their global policy.
+> Regressions are source-authored NOT RUN at this checkpoint; no build, canonical
+> gate, deployment or live fix qualification is claimed.
+
 ## Context
 
 The page editor split work across three views. Public showed the rendered page

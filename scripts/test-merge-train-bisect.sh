@@ -26,6 +26,7 @@ setup() {
   mkdir -p scripts/lib backend/typescript frontend/react
   cp "$ROOT/scripts/merge-train.sh" scripts/
   cp "$ROOT/scripts/lib/train-lock.sh" scripts/lib/
+  cp "$ROOT/scripts/lib/remote-gate-train.sh" scripts/lib/
   if [ "${2:-0}" = 1 ]; then
     cp "$ROOT/scripts/release-freeze.sh" scripts/
   else
@@ -112,7 +113,7 @@ FAKE
   cat > "$TMP/bin/npm" <<'FAKE'
 #!/usr/bin/env bash
 case "$*" in
-  ci*) mkdir -p node_modules; touch node_modules/.package-lock.json ;;
+  ci*) mkdir -p node_modules; touch node_modules/.package-lock.json; echo "ci $PWD" >> "$FAKE_DIR/installs" ;;
   "run ci")
     echo "fake gate on $(git rev-parse --short HEAD)" >> "$FAKE_DIR/gates"
     [ ! -f BREAK ] || exit 1
@@ -159,6 +160,22 @@ gates=$(wc -l < "$TMP/fake/gates" | tr -d ' ')
 # Every merge kept the invariant: main's tree is the tree that was gated.
 grep -q 'is NOT the gated tree' "$TMP/out" && bad "a merge landed an ungated tree" || ok "every merge landed a gated tree"
 
+echo "▶ merge-train, root dependencies (missing, unchanged, changed)"
+# The root installed only when node_modules was MISSING, so a root devDependency
+# (#5586, tracegate-ci) never reached a train worktree that already had one.
+setup
+( cd "$TMP/repo" && echo '{"v":1}' > package-lock.json && G add package-lock.json && G commit -qm "root lock" && G push -q origin main
+  G checkout -q -b pr5 main && echo '{"v":2}' > package-lock.json && G add package-lock.json && G commit -qm pr5 && G push -q origin pr5
+  G checkout -q main ) >/dev/null 2>&1
+rc=$(run_train 1)
+[ "$rc" = 0 ] && grep -q 'repo-train$' "$TMP/fake/installs" && ok "a train with no root node_modules installs the root" || bad "no root install on first train (rc $rc): $(cat "$TMP/fake/installs" 2>/dev/null)"
+: > "$TMP/fake/installs"; sleep 1.1
+rc=$(run_train 2)
+[ "$rc" = 0 ] && ! grep -q 'repo-train$' "$TMP/fake/installs" && ok "  ...a rebuild that rewrites the same root lockfile does not reinstall" || bad "root reinstalled on an unchanged lockfile (rc $rc)"
+: > "$TMP/fake/installs"; sleep 1.1
+rc=$(run_train 5)
+[ "$rc" = 0 ] && grep -q 'repo-train$' "$TMP/fake/installs" && ok "  ...a PR that changes the root lockfile reinstalls the root" || bad "a changed root lockfile was NOT reinstalled (rc $rc): $(cat "$TMP/fake/installs" 2>/dev/null)"
+
 echo "▶ merge-train --no-bisect"
 setup
 rc=$(run_train --no-bisect 1 2 3 4)
@@ -203,6 +220,99 @@ rc=$(OPENWOP_FREEZE_HOLDER=fixture FAKE_FREEZE=1 FAKE_MOVE_HEAD_AT_MERGE=1 run_t
 [ "$rc" = 1 ] && [ -f "$TMP/fake/head-refused-1" ] && ok "the helper forwards the head precondition" || bad "the helper lost the head precondition (exit $rc)"
 case "$(landed)" in *f1.txt*|*head-moved*) bad "the helper merged an untested head";; *) ok "the helper also leaves main unchanged";; esac
 grep -q 'enforcement=active' "$TMP/fake/freeze-updates" && ok "the isolated helper restores its fixture ruleset after refusal" || bad "the fixture ruleset was not restored"
+
+echo "▶ merge-train, a car that cannot be merged says WHY (git's own reason)"
+# No git identity (a fresh machine, the remote gate VM before 2026-11-02): the
+# train's local merge fails, and merge-train used to call that "does not merge
+# cleanly ... Rebase it". useConfigOnly makes git refuse a guessed identity on
+# every machine, so this case cannot pass on a host whose hostname yields one.
+setup
+rc=$(env -u EMAIL -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL \
+  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=user.useConfigOnly GIT_CONFIG_VALUE_0=true \
+  bash -c "$(declare -f run_train); TMP='$TMP'; run_train --dry-run 1")
+[ "$rc" = 1 ] && ok "a train whose merge git refuses exits 1" || bad "no-identity exit $rc (want 1)"
+grep -q 'did not merge onto main.*git said:.*\(email\|identity\|who you are\)' "$TMP/out" \
+  && ok "...and prints git's own reason (no identity), not a guess" || bad "git's reason missing: $(tail -3 "$TMP/out")"
+grep -q 'Rebase it' "$TMP/out" && bad "...but still told the author to rebase a car with no conflict" || ok "...and does not say 'Rebase it' when nothing conflicts"
+
+# A real conflict keeps the rebase advice.
+setup
+( cd "$TMP/repo" && G checkout -q -b pr5 main && echo conflict > f1.txt && G add -A && G commit -qm pr5 && G push -q origin pr5 && G checkout -q main )
+rc=$(run_train --dry-run 1 5)
+[ "$rc" = 1 ] && grep -q '#5 did not merge onto main.*CONFLICT' "$TMP/out" && grep -q 'Rebase it' "$TMP/out" \
+  && ok "a real conflict names it and keeps 'Rebase it'" || bad "conflict report: rc $rc, $(tail -3 "$TMP/out")"
+
+# ── ADR 0863 D9 P6: remote first ─────────────────────────────────────────────
+# A fake PINNED controller (<config>/install/<policy>/remote-gate.mjs) scripts the
+# remote outcome; the fake `npm run ci` counts every LOCAL gate.
+remote_setup() {
+  local conf="$TMP/ociconf"; rm -rf "$conf"; mkdir -p "$conf/install/p0"
+  printf '{"policySha256":"p0"}\n' > "$conf/runner.json"
+  cat > "$conf/install/p0/remote-gate.mjs" <<'FAKE'
+import { execFileSync } from 'node:child_process';
+import { appendFileSync, writeFileSync } from 'node:fs';
+const a = process.argv.slice(2); const arg = n => a[a.indexOf(n) + 1];
+const repo = arg('--repo'); const mode = process.env.FAKE_REMOTE || 'green';
+appendFileSync(process.env.FAKE_DIR + '/remote-calls', mode + '\n');
+const commit = execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+const tree = execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD^{tree}'], { encoding: 'utf8' }).trim();
+const out = o => { console.log(JSON.stringify(o)); };
+if (mode === 'green' || mode === 'tamper') {
+  writeFileSync(arg('--accept-out'), JSON.stringify({ requestId: 'r1', commit, tree: mode === 'tamper' ? '0'.repeat(40) : tree }));
+  out({ verdict: 'green', id: 'r1', accepted: { requestId: 'r1', commit, tree } }); process.exit(0);
+}
+if (mode === 'red') { out({ verdict: 'red', id: 'r2', reason: 'remote gate failed', log: '/tmp/fake-remote.log' }); process.exit(1); }
+out({ verdict: 'fallback', reason: mode === 'busy' ? 'worker busy' : 'remote gate disabled (fallback-test)' }); process.exit(3);
+FAKE
+}
+remote_train() { OPENWOP_REMOTE_GATE=1 OPENWOP_CI_CONFIG_DIR="$TMP/ociconf" run_train "$@"; }
+gates_local() { [ -f "$TMP/fake/gates" ] && wc -l < "$TMP/fake/gates" | tr -d ' ' || echo 0; }
+
+echo "▶ merge-train remote-first: green on the remote gate merges with no local gate"
+setup; remote_setup
+rc=$(FAKE_REMOTE=green remote_train 1 2 4)
+[ "$rc" = 0 ] && ok "a remote-green train exits 0" || bad "remote green exit $rc: $(tail -4 "$TMP/out")"
+case "$(landed)" in *f1.txt*f2.txt*f4.txt*) ok "...and its PRs landed";; *) bad "remote green did not land: $(landed)";; esac
+[ "$(gates_local)" = 0 ] && ok "...without any local gate" || bad "a local gate ran after a remote green ($(gates_local))"
+grep -q 'gate ran on: remote openwop-ci-gate' "$TMP/out" && ok "...and the log says where it ran" || bad "no 'gate ran on: remote' line"
+common="$(cd "$TMP/repo" && cd "$(git rev-parse --git-common-dir)" && pwd)"
+if find "$TMP/repo-train" -name 'train-*.json' -not -path '*/node_modules/*' | grep -q . ; then bad "an acceptance record sits INSIDE the train worktree"
+elif ls "$common"/remote-gate/train-*.json >/dev/null 2>&1; then ok "...and the acceptance record lives in the git common dir, outside the train worktree"
+else bad "no acceptance record in $common/remote-gate"; fi
+
+echo "▶ merge-train remote-first: a remote red is final (no local gate, no bisection)"
+setup; remote_setup
+rc=$(FAKE_REMOTE=red remote_train 1 2 4)
+[ "$rc" = 1 ] && ok "a remote-red train exits 1" || bad "remote red exit $rc"
+[ "$(gates_local)" = 0 ] && ok "...with no local second chance (no bisection halves)" || bad "a remote red was re-gated locally ($(gates_local) gates)"
+case "$(landed)" in *f1.txt*|*f2.txt*|*f4.txt*) bad "something landed after a remote red";; *) ok "...and nothing landed";; esac
+grep -q 'RED on the remote gate' "$TMP/out" && ok "...and it says the red was the remote gate's" || bad "remote red not named"
+
+echo "▶ merge-train remote-first: a busy VM falls back to the local gate at once"
+setup; remote_setup
+rc=$(FAKE_REMOTE=busy remote_train 1 2 4)
+[ "$rc" = 0 ] && [ "$(gates_local)" = 1 ] && ok "busy → one local gate decided, and the train landed" || bad "busy fallback: rc $rc, $(gates_local) local gates"
+grep -q 'remote fallback: busy (held by' "$TMP/out" && ok "...and the log says busy, naming the holder (or that it is unknown)" || bad "busy fallback not reported: $(grep -i fallback "$TMP/out")"
+
+echo "▶ merge-train remote-first: the disabled flag (the real-fallback drill) gates locally"
+setup; remote_setup
+rc=$(FAKE_REMOTE=disabled remote_train 1 2 4)
+[ "$rc" = 0 ] && [ "$(gates_local)" = 1 ] && grep -q 'remote fallback: remote gate disabled' "$TMP/out" \
+  && ok "a disabled VM is a fallback, and the local gate decides" || bad "disabled fallback: rc $rc, $(gates_local) local gates"
+
+echo "▶ merge-train remote-first: an acceptance record that does not match the train refuses the merge"
+setup; remote_setup
+rc=$(FAKE_REMOTE=tamper remote_train 1 2 4)
+[ "$rc" = 1 ] && grep -q 'does not match this train (tree)' "$TMP/out" && ok "a mismatched record refuses the merge" || bad "tampered record: rc $rc, $(tail -3 "$TMP/out")"
+case "$(landed)" in *f1.txt*|*f2.txt*|*f4.txt*) bad "a train with a mismatched acceptance record landed";; *) ok "...and nothing landed";; esac
+
+echo "▶ merge-train remote-first: no pinned controller is a fallback; off by default"
+setup; remote_setup; rm -rf "$TMP/ociconf/install"
+rc=$(FAKE_REMOTE=green remote_train 1 2 4)
+[ "$rc" = 0 ] && [ "$(gates_local)" = 1 ] && grep -q 'remote fallback: no pinned controller' "$TMP/out" && ok "no pinned install → local gate" || bad "missing install: rc $rc"
+setup; remote_setup
+rc=$(FAKE_REMOTE=green OPENWOP_CI_CONFIG_DIR="$TMP/ociconf" run_train 1 2 4)
+[ ! -e "$TMP/fake/remote-calls" ] && [ "$(gates_local)" = 1 ] && ok "without OPENWOP_REMOTE_GATE=1 the remote gate is never called" || bad "the remote gate ran while switched off"
 
 echo
 echo "== merge-train bisect: $pass passed, $fail failed =="

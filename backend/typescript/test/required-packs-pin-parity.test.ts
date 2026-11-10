@@ -63,8 +63,9 @@ function nodeBindings(f: BackendFeature): VariantBinding[] {
 
 describe('requiredPacks pin ↔ pack.json version parity (every backend feature)', () => {
   const pinned = BACKEND_FEATURES.filter((f) => (f.requiredPacks ?? []).length > 0);
-  // Floor = measured 77 minus a margin (never a multiple of 10).
-  it('finds the pinned corpus (non-empty)', () => { expect(pinned.length).toBeGreaterThanOrEqual(73); });
+  // Floor = measured 77 minus a margin (never a multiple of 10); 72 measured after the
+  // KickTodo packages left (ADR 1031 P3).
+  it('finds the pinned corpus (non-empty)', () => { expect(pinned.length).toBeGreaterThanOrEqual(71); });
 
   it.each(pinned.map((f) => [f.id, f] as const))('%s: every requiredPacks pin matches disk', (_id, f) => {
     for (const ref of featureRequiredPacks(f)) {

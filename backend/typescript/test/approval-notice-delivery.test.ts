@@ -4,6 +4,12 @@
  * This calls the delivery helper; emitter notification filtering is a separate seam.
  * A render-only golden cannot detect a lost voter binding, wrong connection scope,
  * a duplicated delivery or a notice sent to an erased/held recipient.
+ *
+ * Sabotage-witnessed (grade-tests wave 78): skipping the membership re-check reds the
+ * offboarded case; mailing a disabled pref, or dropping the egress guard's erasure or
+ * suppression leg, reds the refused-recipients case (each recipient is asserted on its
+ * own, so the failure names the guard); dropping the idempotency key or signing the
+ * links for another voter reds the first case; hard-wiring `smtp` reds the Postmark case.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SmtpDialOptions, SmtpMessage } from '../src/host/smtpSend.js';
@@ -65,10 +71,10 @@ describe('approval notice delivery through tenant SMTP', () => {
   });
   beforeEach(() => { capture.options.length = 0; capture.messages.length = 0; });
 
-  async function recipient(id: string, enabled = true): Promise<string> {
-    await createMember({ tenantId, orgId: tenantId, subject: id, displayName: id });
+  async function recipient(id: string, enabled = true): Promise<{ userId: string; memberId: string }> {
+    const member = await createMember({ tenantId, orgId: tenantId, subject: id, displayName: id });
     await setEmailApprovalPref({ tenantId, userId: id, email: `${id}@notices.example`, enabled });
-    return id;
+    return { userId: id, memberId: member.memberId };
   }
   const input = (recipientUserId: string, notificationId: string, interruptToken?: string) => ({
     tenantId, recipientUserId, notificationId, title: 'Approve the release', message: 'A release is waiting.',
@@ -77,7 +83,7 @@ describe('approval notice delivery through tenant SMTP', () => {
   const links = (message: SmtpMessage): URL[] => [...(message.text ?? '').matchAll(/https:\/\/[^\s]+/g)].map(([url]) => new URL(url));
 
   it('sends the addressed notice with valid recipient-bound decide links and deduplicates a replay', async () => {
-    const userId = await recipient('eligible');
+    const { userId } = await recipient('eligible');
     const request = input(userId, 'eligible-notice', 'capability/with?characters');
     await deliverApprovalEmail(storage, request);
     expect(capture.options).toHaveLength(1);
@@ -106,9 +112,8 @@ describe('approval notice delivery through tenant SMTP', () => {
   });
 
   it('offboarded recipients receive only an authenticated inbox link, with no capability token', async () => {
-    const userId = await recipient('offboarded');
-    const member = await createMember({ tenantId, orgId: tenantId, subject: userId, displayName: userId });
-    await deleteMember(member.memberId);
+    const { userId, memberId } = await recipient('offboarded');
+    await deleteMember(memberId);
     await deliverApprovalEmail(storage, input(userId, 'offboarded-notice', 'never-expose-this-token'));
     expect(capture.messages).toHaveLength(1);
     expect(links(capture.messages[0]!)).toEqual([new URL('https://notices.example/inbox')]);
@@ -116,21 +121,22 @@ describe('approval notice delivery through tenant SMTP', () => {
   });
 
   it('approval-store notices are link-out only even for a current opted-in member', async () => {
-    const userId = await recipient('reviewer');
+    const { userId } = await recipient('reviewer');
     await deliverApprovalEmail(storage, input(userId, 'review-notice'));
     expect(capture.messages).toHaveLength(1);
     expect(links(capture.messages[0]!)).toEqual([new URL('https://notices.example/inbox')]);
   });
 
   it('disabled, erased and hard-held recipients never reach SMTP or reserve a send', async () => {
-    const disabled = await recipient('disabled', false);
-    const erased = await recipient('erased');
-    const held = await recipient('held');
+    const disabled = (await recipient('disabled', false)).userId;
+    const erased = (await recipient('erased')).userId;
+    const held = (await recipient('held')).userId;
     await deleteSubject(tenantId, 'erased@notices.example');
     await addSuppression(tenantId, 'held@notices.example', 'complaint', 'test', 'provider');
     for (const userId of [disabled, erased, held]) {
       await deliverApprovalEmail(storage, input(userId, `refused-${userId}`, 'refused-capability'));
-      expect(await priorSend(`${tenantId}:notify-email:refused-${userId}:${userId}`)).toBeNull();
+      expect(capture.messages.map((m) => m.to), `${userId} reached SMTP`).toEqual([]);
+      expect(await priorSend(`${tenantId}:notify-email:refused-${userId}:${userId}`), `${userId} reserved a send`).toBeNull();
     }
     expect(capture.options).toHaveLength(0);
     expect(capture.messages).toHaveLength(0);

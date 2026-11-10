@@ -1,5 +1,5 @@
 import { Button } from '../ui/Button.js';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { scrollBehavior } from '../ui/motion.js';
 import { useParams, useNavigate, useSearchParams, Link } from 'react-router-dom';
 import type { RunSnapshot, RunEventDoc, StreamMode } from '@openwop/openwop';
@@ -33,6 +33,7 @@ import { formatDateTime } from '../i18n/format.js';
 import { useTranslation } from 'react-i18next';
 import { confirm } from '../ui/confirm.js';
 import { isInterruptResolvedEvent } from '../chat/lib/interruptResolvedEvent';
+import { skippedTerminalsFromEvents } from '../chat/lib/skippedTerminals.js';
 import { readHandoffNote } from './handoffNote.js';
 import { HandoffNoteCard } from './HandoffNoteCard.js';
 
@@ -107,11 +108,21 @@ function RunDetailView() {
     if (runId && runTerminal) void getRunRetention(runId).then(setRetentionRead).catch(() => setRetentionRead('failed'));
   }, [runId, runTerminal]);
   const [events, setEvents] = useState<RunEventDoc[]>([]);
+  // Mirror every event replacement synchronously, so SSE dedupe does not depend
+  // on React rendering or on replaying a state updater containing side effects.
+  const currentEvents = useRef<RunEventDoc[]>([]);
+  const replaceEvents = useCallback((next: RunEventDoc[]): void => {
+    currentEvents.current = next;
+    setEvents(next);
+  }, []);
   // ADR 0600 §1 (`ISU-24`) — the event views branch on `events.length === 0` to
   // render "No events yet", a positive claim about the RUN. `[]` is also what a
   // still-in-flight read and a THROWN read look like from here, so the outcome
   // of the read travels with the array instead of being inferred from it.
   const [eventsRead, setEventsRead] = useState<EventReadState>('loading');
+  // RFC 0257 (ADR 1027 P3) — a completed run that reached no terminal node.
+  // Read off the recorded `run.completed` payload, never derived from the graph.
+  const skippedTerminals = useMemo(() => skippedTerminalsFromEvents(events), [events]);
   const [activeInterrupt, setActiveInterrupt] = useState<OpenInterrupt | null>(null);
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   const [annotationsFailed, setAnnotationsFailed] = useState(false);
@@ -119,7 +130,45 @@ function RunDetailView() {
   // UX_UPGRADE-runs P2 — a failed post-event refresh must not read as a fresh
   // view. The SSE feed keeps flowing, but the snapshot/log the panels render is
   // now stale; say so and offer a retry instead of silently under-reporting.
-  const [refreshFailed, setRefreshFailed] = useState(false);
+  const [snapshotRefreshFailed, setSnapshotRefreshFailed] = useState(false);
+  const [logRefreshFailed, setLogRefreshFailed] = useState(false);
+  const refreshFailed = snapshotRefreshFailed || logRefreshFailed;
+  // Refresh ownership is per resource and per latest request. Cleanup invalidates
+  // old callbacks, including a StrictMode cleanup/setup on the same mounted view.
+  const refreshRequests = useRef({ active: false, snapshot: 0, log: 0 });
+  useEffect(() => {
+    const requests = refreshRequests.current;
+    requests.active = true;
+    return () => { requests.active = false; ++requests.snapshot; ++requests.log; };
+  }, []);
+
+  const refreshSnapshot = useCallback(async (): Promise<void> => {
+    const requests = refreshRequests.current;
+    if (!requests.active || !runId) return;
+    const request = ++requests.snapshot;
+    try {
+      const next = await getRun(runId);
+      if (!requests.active || request !== requests.snapshot) return;
+      setSnapshot(next);
+      setSnapshotRefreshFailed(false);
+    } catch {
+      if (requests.active && request === requests.snapshot) setSnapshotRefreshFailed(true);
+    }
+  }, [runId]);
+
+  const refreshLog = useCallback(async (): Promise<void> => {
+    const requests = refreshRequests.current;
+    if (!requests.active || !runId) return;
+    const request = ++requests.log;
+    try {
+      const next = await pollEvents(runId, 0);
+      if (!requests.active || request !== requests.log) return;
+      replaceEvents([...next.events]);
+      setLogRefreshFailed(false);
+    } catch {
+      if (requests.active && request === requests.log) setLogRefreshFailed(true);
+    }
+  }, [runId, replaceEvents]);
   const [eventView, setEventView] = useState<'timeline' | 'log'>('timeline');
   const [streamMode, setStreamMode] = useState<StreamMode>('updates');
   // §A4 playhead — the timeline-selected sequence drives the step inspector.
@@ -176,7 +225,7 @@ function RunDetailView() {
         const snap = await getRun(runId);
         if (!cancelled) setSnapshot(snap);
         const polled = await pollEvents(runId, 0);
-        if (!cancelled) { setEvents([...polled.events]); setEventsRead('ready'); }
+        if (!cancelled) { replaceEvents([...polled.events]); setEventsRead('ready'); }
         await refreshInterrupts();
         if (!cancelled) await refreshAnnotations();
       } catch (err) {
@@ -189,7 +238,7 @@ function RunDetailView() {
     return () => {
       cancelled = true;
     };
-  }, [runId, loadNonce, refreshInterrupts, refreshAnnotations]);
+  }, [runId, loadNonce, refreshInterrupts, refreshAnnotations, replaceEvents]);
 
   // Hash-driven node deep-link: `/runs/<id>#node-<nodeId>` sets the
   // playhead to the matching `node.completed` event's sequence and
@@ -228,6 +277,7 @@ function RunDetailView() {
   // Subscribe to live SSE events.
   useEffect(() => {
     if (!runId) return;
+    let live = true;
     const sub = subscribeToRun(runId, {
       modes: [streamMode],
       // Run-watching can be long and idle between nodes (HITL waits,
@@ -238,37 +288,29 @@ function RunDetailView() {
       idleTimeoutMs: 5 * 60_000,
       absoluteTimeoutMs: 30 * 60_000,
       onEvent: (ev) => {
-        setEvents((prev) => {
-          // Dedupe by sequence; events arriving out-of-order keep monotone order.
-          if (prev.some((e) => e.sequence === ev.sequence)) return prev;
-          const next = [...prev, ev].sort((a, b) => a.sequence - b.sequence);
-          // Refresh snapshot whenever a terminal or transition event arrives.
-          if (
-            ['run.completed', 'run.failed', 'run.cancelled', 'node.suspended'].includes(ev.type) || isInterruptResolvedEvent(ev.type)
-          ) {
-            getRun(runId).then((s) => { setSnapshot(s); setRefreshFailed(false); }).catch(() => setRefreshFailed(true));
-          }
-          // On terminal events, re-poll the full event log via REST. The
-          // SSE stream may not carry every event family the panels read
-          // (cost / reasoning / handoff); the authoritative log backfills
-          // anything the live stream missed so the panels are complete.
-          if (['run.completed', 'run.failed', 'run.cancelled'].includes(ev.type)) {
-            pollEvents(runId, 0)
-              .then((p) => setEvents([...p.events]))
-              .catch(() => setRefreshFailed(true));
-          }
-          // Interrupt-related transitions trigger an authenticated refetch
-          // because the public event payload no longer carries the resume token.
-          if (ev.type === 'node.suspended' || isInterruptResolvedEvent(ev.type)) {
-            refreshInterrupts();
-          }
-          return next;
-        });
+        if (!live) return;
+        // Dedupe against the latest local log before issuing any request. No
+        // network work lives in a React updater that StrictMode may replay.
+        if (currentEvents.current.some((event) => event.sequence === ev.sequence)) return;
+        replaceEvents([...currentEvents.current, ev].sort((a, b) => a.sequence - b.sequence));
+        if (
+          ['run.completed', 'run.failed', 'run.cancelled', 'node.suspended'].includes(ev.type) || isInterruptResolvedEvent(ev.type)
+        ) {
+          void refreshSnapshot();
+        }
+        // The authoritative REST log backfills event families not carried by SSE.
+        if (['run.completed', 'run.failed', 'run.cancelled'].includes(ev.type)) {
+          void refreshLog();
+        }
+        // Public events omit resume tokens; retain the authenticated read.
+        if (ev.type === 'node.suspended' || isInterruptResolvedEvent(ev.type)) {
+          refreshInterrupts();
+        }
       },
-      onError: () => setError(t('eventStreamConnError')),
+      onError: () => { if (live) setError(t('eventStreamConnError')); },
     });
-    return () => sub.close();
-  }, [runId, refreshInterrupts, streamMode, t]);
+    return () => { live = false; sub.close(); };
+  }, [runId, refreshInterrupts, refreshSnapshot, refreshLog, replaceEvents, streamMode, t]);
 
   // ADR 0772 (`RRUX-4`) — cancel is irreversible (a cancelled run cannot be
   // resumed), so it asks first, and is disabled while the request is in flight.
@@ -419,8 +461,16 @@ function RunDetailView() {
             <p className="rundetail-eyebrow">{t('runLabel')}</p>
             <h1 id="rundetail-heading" className="rundetail-title"><code>{runId}</code></h1>
           </div>
-          {snapshot && <StatusBadge status={snapshot.status} />}
+          {snapshot && (snapshot.status === 'completed' && skippedTerminals
+            // Not a plain success (RFC 0257 R1): the warning tone and its own label.
+            ? <StatusBadge status="waiting-approval" label={t('statusCompletedNoFinalStep')} />
+            : <StatusBadge status={snapshot.status} />)}
         </div>
+        {snapshot?.status === 'completed' && skippedTerminals && (
+          <Notice variant="warning">
+            {t('noFinalStepRanNotice', { steps: skippedTerminals.join(', ') })}
+          </Notice>
+        )}
 
         {error && <Notice variant="error">{error}</Notice>}
         {refreshFailed && (
@@ -430,9 +480,8 @@ function RunDetailView() {
               variant="secondary" size="sm"
               onClick={() => {
                 if (!runId) return;
-                setRefreshFailed(false);
-                getRun(runId).then(setSnapshot).catch(() => setRefreshFailed(true));
-                pollEvents(runId, 0).then((p) => setEvents([...p.events])).catch(() => setRefreshFailed(true));
+                void refreshSnapshot();
+                void refreshLog();
               }}
             >
               {tCommon('retry')}
@@ -620,6 +669,7 @@ function RunDetailView() {
 
       <RunAnalyticsPanel
         events={events}
+        snapshot={snapshot}
         annotations={annotations}
         annotationsUnavailable={annotationsFailed}
         eventsUnavailable={eventsRead === 'failed'}

@@ -87,7 +87,7 @@ separate `<620px` mobile disclosure. Two problems:
 
 | Piece | Location |
 |---|---|
-| List endpoint + service | `features/publishing/routes.ts` (`GET …/public/:orgId/pages`), `publishingService.ts` (`listPublicNavPages`) |
+| List endpoint + service | `features/publishing/routes.ts` (`GET …/public/:orgId/pages`), `publishingService.ts` (`listPublicNavPages`; renamed `listPublicNav` by ADR 1062, which also returns the featured card) |
 | Grouped nav model + hamburger | `chrome/PublicShell.tsx` (`usePublicNav`, `usePublishedPages`, `PublicMenu`) |
 | Header layout + menu styles | `styles/global.css` (`.public-shell-actions`, `.public-menu*`) |
 | i18n (navFeatures/navMenu/navGroupProduct/navGroupPages) | `i18n/locales/*/chrome.ts` ×4 |

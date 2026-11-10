@@ -27,6 +27,10 @@ import { createHash } from 'node:crypto';
 import type { RunStatus } from '../types.js';
 import { DurableCollection } from './hostExtPersistence.js';
 import { assertEgressUrlAllowed, EgressUrlRejectedError } from './webhookEgressGuard.js';
+import { openPushAuthorization, pushCredentialAad, sealPushAuthorization } from './a2aPushCredential.js';
+import { createLogger } from '../observability/logger.js';
+
+const log = createLogger('host.a2aTaskStore');
 
 /**
  * The A2A v0.3 JSON-RPC wire form of `TaskState` (lowercase-hyphen — the
@@ -57,8 +61,36 @@ export interface A2aPushConfig {
   url: string;
   /** OPTIONAL — a truncated/salted digest of the caller's push-auth token
    *  (NEVER the raw token; the SR-1 rule of RFC 0083's `secretFingerprint`).
-   *  The A2A push HMAC details stay inside the A2A layer. */
+   *  A2A 1.0.1 §4.3.3 defines no push signing (RFC 0214 Editorial); the
+   *  credential a push carries is {@link sealedAuthorization}. */
   tokenFingerprint?: string;
+  /**
+   * RFC 0214 §A — the destination credential the client registered, as the
+   * `Authorization` value a delivery to `url` carries, SEALED
+   * (`a2aPushCredential.ts`). Never returned to a caller ({@link publicPushConfig}),
+   * never logged, and dropped when the task reaches a terminal state.
+   */
+  sealedAuthorization?: string;
+}
+
+/** What a registration supplies: the target plus the PLAINTEXT credential, which
+ *  {@link setA2aTaskPushConfig} seals before anything is persisted. */
+export interface A2aPushRegistration {
+  url: string;
+  tokenFingerprint?: string;
+  /** The `Authorization` value (`pushAuthorizationFrom`), plaintext, in memory only. */
+  authorization?: string;
+}
+
+/** The push config as a caller may see it: the target, never the credential. */
+export function publicPushConfig(cfg: A2aPushConfig): { url: string; tokenFingerprint?: string } {
+  return { url: cfg.url, ...(cfg.tokenFingerprint !== undefined ? { tokenFingerprint: cfg.tokenFingerprint } : {}) };
+}
+
+/** A record with its push credential removed — what a caller-facing read returns. */
+export function publicTaskRecord(rec: A2aTaskRecord): A2aTaskRecord {
+  if (!rec.pushConfig) return rec;
+  return { ...rec, pushConfig: publicPushConfig(rec.pushConfig) };
 }
 
 /**
@@ -413,8 +445,31 @@ export function assertPushUrlAllowed(url: string): void {
 }
 
 
+/**
+ * One delivery's target: the registered URL and, when the client registered
+ * one, the opened `Authorization` value (RFC 0214 §A). Lives only for the call.
+ */
+export interface A2aPushTarget {
+  url: string;
+  authorization?: string;
+}
+
+/**
+ * What a delivery attempt came to. Carries no credential and no URL, so it is
+ * safe to log and to hand back. `redirect` is a 3xx, which RFC 0214 §B and
+ * `interop.md` §"A2A push delivery" make a failed delivery.
+ */
+export interface A2aPushOutcome {
+  delivered: boolean;
+  status?: number;
+  reason?: 'redirect' | 'http_status' | 'network' | 'egress_denied';
+}
+
 /** A pluggable push sink so the firing path is testable without real egress. */
-export type A2aPushSink = (config: A2aPushConfig, event: Record<string, unknown>) => void | Promise<void>;
+export type A2aPushSink = (
+  target: A2aPushTarget,
+  event: Record<string, unknown>,
+) => void | A2aPushOutcome | Promise<void | A2aPushOutcome>;
 
 let pushSink: A2aPushSink | null = null;
 /** Wire the push delivery sink (best-effort; never throws into the caller). */
@@ -428,18 +483,47 @@ export function setA2aPushSink(sink: A2aPushSink | null): void {
  * `TaskStatusUpdateEvent` carrying the same content-free projection as the
  * persisted record (SR-1 — no run-internal content). Push delivery is
  * best-effort; a sink failure never fails the state transition.
+ *
+ * RFC 0214 §A: the push carries the registered destination credential, and the
+ * credential is discarded once the task is terminal — the record written for a
+ * terminal state never holds it, and that state's push (the final one) is
+ * attempted with the value opened before the write.
  */
 export async function upsertA2aTask(
   next: Omit<A2aTaskRecord, 'updatedAt'> & { updatedAt?: string },
 ): Promise<A2aTaskRecord> {
   if (next.pushConfig) assertPushUrlAllowed(next.pushConfig.url);
+  const terminal = isTerminalTaskState(next.state);
+  const sealed = next.pushConfig?.sealedAuthorization;
   const rec: A2aTaskRecord = { ...next, updatedAt: next.updatedAt ?? new Date().toISOString() };
+  if (terminal && rec.pushConfig && sealed !== undefined) rec.pushConfig = publicPushConfig(rec.pushConfig);
   await tasks.put(rec);
   if (rec.pushConfig && pushSink && PUSH_TRANSITION_STATES.has(rec.state)) {
+    // Logged fields name the task, state and outcome only: never the URL (a
+    // client may put a secret in its query) and never the credential.
     try {
-      await pushSink(rec.pushConfig, taskStatusUpdateEvent(rec, isTerminalTaskState(rec.state)));
-    } catch {
+      const authorization = sealed !== undefined
+        ? await openPushAuthorization(sealed, pushCredentialAad(rec.tenantId, rec.taskId))
+        : undefined;
+      const outcome = await pushSink(
+        { url: rec.pushConfig.url, ...(authorization !== undefined ? { authorization } : {}) },
+        taskStatusUpdateEvent(rec, terminal),
+      );
+      if (outcome && !outcome.delivered) {
+        log.warn('a2a_push_delivery_failed', {
+          taskId: rec.taskId,
+          state: rec.state,
+          reason: outcome.reason ?? 'unknown',
+          ...(outcome.status !== undefined ? { status: outcome.status } : {}),
+        });
+      }
+    } catch (e) {
       /* best-effort push — a delivery failure does not roll back the durable state */
+      log.warn('a2a_push_delivery_failed', {
+        taskId: rec.taskId,
+        state: rec.state,
+        reason: e instanceof Error ? e.name : 'unknown',
+      });
     }
   }
   return rec;
@@ -447,14 +531,27 @@ export async function upsertA2aTask(
 
 /**
  * Register/replace the push-config for an existing durable Task (RFC 0100 §4).
- * Validates the URL through the SSRF guard before persisting. Returns the
- * updated record, or null when the Task does not exist.
+ * Validates the URL through the SSRF guard before persisting, and seals the
+ * registered credential (RFC 0214 §A) before it reaches the store. A
+ * registration on a task that is already terminal keeps no credential: no push
+ * is owed, so there is nothing to carry it to. Returns the updated record, or
+ * null when the Task does not exist.
  */
-export async function setA2aTaskPushConfig(taskId: string, config: A2aPushConfig): Promise<A2aTaskRecord | null> {
+export async function setA2aTaskPushConfig(taskId: string, config: A2aPushRegistration): Promise<A2aTaskRecord | null> {
   assertPushUrlAllowed(config.url);
   const existing = await tasks.get(taskId);
   if (!existing) return null;
-  const rec: A2aTaskRecord = { ...existing, pushConfig: config, updatedAt: new Date().toISOString() };
+  const pushConfig: A2aPushConfig = {
+    url: config.url,
+    ...(config.tokenFingerprint !== undefined ? { tokenFingerprint: config.tokenFingerprint } : {}),
+  };
+  if (config.authorization !== undefined && !isTerminalTaskState(existing.state)) {
+    pushConfig.sealedAuthorization = await sealPushAuthorization(
+      config.authorization,
+      pushCredentialAad(existing.tenantId, taskId),
+    );
+  }
+  const rec: A2aTaskRecord = { ...existing, pushConfig, updatedAt: new Date().toISOString() };
   await tasks.put(rec);
   return rec;
 }

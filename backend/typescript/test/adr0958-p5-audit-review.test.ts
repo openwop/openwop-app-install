@@ -23,6 +23,9 @@
  *   - gate the route on `workspace:read` → the viewer case red;
  *   - read serially again → the cost case red (peak 1);
  *   - one Promise.all over the whole tail → the cost case red (peak > 50).
+ * Added w78: the route's own bound is observed through a pass-through wrapper
+ * on `listChainTail` (the scan size the review asks for), so passing anything
+ * but `AUDIT_REVIEW_MAX_SCAN` reds case 1; before, only the constant was pinned.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -38,6 +41,19 @@ import { finalizeFromBrief } from '../src/features/campaign-orchestration/campai
 import { eraseSubject } from '../src/host/subjectErasure.js';
 import { revokeGrant, setCollaboratorStatus, AUDIT_REVIEW_MAX_SCAN, type CollaboratorGrant, type ExternalCollaborator } from '../src/host/externalCollaborators.js';
 import { listChainTail, getAuditHead, CHAIN_TAIL_BATCH } from '../src/host/auditChainService.js';
+
+// Pass-through: records each (tenantId, maxScan) the audit review asks for.
+const tailCalls = vi.hoisted(() => [] as Array<{ tenantId: string; maxScan: number }>);
+vi.mock('../src/host/auditChainService.js', async (orig) => {
+  const real = await orig<typeof import('../src/host/auditChainService.js')>();
+  return {
+    ...real,
+    listChainTail: async (tenantId: string, maxScan: number) => {
+      tailCalls.push({ tenantId, maxScan });
+      return real.listChainTail(tenantId, maxScan);
+    },
+  };
+});
 
 let BASE: string;
 let server: http.Server;
@@ -74,9 +90,9 @@ function client() {
   return { get: <T>(p: string) => call<T>('GET', p), post: <T>(p: string, b?: unknown) => call<T>('POST', p, b), put: <T>(p: string, b?: unknown) => call<T>('PUT', p, b), patch: <T>(p: string, b?: unknown) => call<T>('PATCH', p, b), del: <T>(p: string) => call<T>('DELETE', p) };
 }
 
-
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('IHDR-fixture-bytes-0001')]);
-const pngNo = (i: number): Buffer => Buffer.concat([PNG, Buffer.from(`-${i}-${Math.random()}`)]);
+let seq = 0; // unique, deterministic bytes and emails
+const pngNo = (i: number): Buffer => Buffer.concat([PNG, Buffer.from(`-${i}`)]);
 const RIGHTS = { license: 'work-for-hire', modelReleases: true, credit: 'Dana Studio', attest: true };
 
 let n = 0;
@@ -106,7 +122,7 @@ async function setup() {
 /** A vendor who signed in and accepted, with a grant to upload. */
 async function acceptedVendor(s: Awaited<ReturnType<typeof setup>>) {
   const vendor = client();
-  const v = await vendor.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: `photographer-au-${n}-${Math.random().toString(36).slice(2)}@studio.test` });
+  const v = await vendor.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: `photographer-au-${n}-${seq++}@studio.test` });
   const userId = v.body.user.userId;
   const email = (await getUser(userId))?.email ?? '';
   const inv = await s.invite(email);
@@ -115,7 +131,7 @@ async function acceptedVendor(s: Awaited<ReturnType<typeof setup>>) {
   const grant = await s.grantFor(inv.body.collaborator.collaboratorId);
   const upload = (name: string, note?: string) => vendor.post<{ intake: { intakeId: string; files: Array<{ fileId: string }> } }>(
     `/host/openwop-app/collab/grants/${grant.grantId}/intakes`,
-    { files: [{ name, contentType: 'image/png', contentBase64: pngNo(Math.random()).toString('base64') }], rights: RIGHTS, ...(note ? { note } : {}) },
+    { files: [{ name, contentType: 'image/png', contentBase64: pngNo(seq++).toString('base64') }], rights: RIGHTS, ...(note ? { note } : {}) },
   );
   return { vendor, userId, email, collaborator: inv.body.collaborator, grant, upload };
 }
@@ -126,7 +142,7 @@ type AuditEvent = { seq: number; action: string; collaboratorId?: string; grantI
 describe('ADR 0958 P5 — the collaboration audit review', () => {
   it('lists the client’s events newest first with live names, and nothing from another client', async () => {
     const s = await setup();
-    const other = await s.invite(`other-client-${n}@studio.test`.replace('@', `-${Math.random().toString(36).slice(2)}@`));
+    const other = await s.invite(`other-client-${n}-${seq++}@studio.test`);
     expect(other.status).toBe(201);
     const v = await acceptedVendor(s);
     const up = await v.upload('dana-audit.png');
@@ -138,8 +154,11 @@ describe('ADR 0958 P5 — the collaboration audit review', () => {
     const o2 = await s.admin.post<{ collaborator: ExternalCollaborator }>(`/host/openwop-app/campaign-ops/clients/${s.otherOrgId}/collaborators`, { kind: 'vendor', email: `elsewhere-${n}@studio.test`, displayName: 'Elsewhere Ltd' });
     expect(o2.status, o2.raw).toBe(201);
 
+    tailCalls.length = 0;
     const r = await s.admin.get<{ events: AuditEvent[]; truncated: boolean }>(`${s.C}/audit`);
     expect(r.status, r.raw).toBe(200);
+    // The route asks for the bounded tail of THIS tenant's chain, 1,000 entries.
+    expect(tailCalls).toEqual([{ tenantId: s.tenantId, maxScan: 1_000 }]);
     const mine = r.body.events.filter((e) => e.collaboratorId === v.collaborator.collaboratorId).map((e) => e.action);
     expect(mine).toEqual(['collaborator.suspend', 'grant.revoke', 'intake.accept', 'intake.submit', 'grant.create', 'collaborator.accept', 'collaborator.invite']);
     const seqs = r.body.events.map((e) => e.seq);
@@ -166,7 +185,10 @@ describe('ADR 0958 P5 — the collaboration audit review', () => {
   it('only an agency member who manages the client may read it; dark with the toggle off', async () => {
     const s = await setup();
     const v = await acceptedVendor(s);
-    expect((await v.vendor.get(`${s.C}/audit`)).status).toBeGreaterThanOrEqual(403);
+    // The vendor's session is its own home tenant: the client there reads as none.
+    const asVendor = await v.vendor.get<{ error: string; message: string }>(`${s.C}/audit`);
+    expect(asVendor.status).toBe(404);
+    expect(asVendor.body).toMatchObject({ error: 'not_found', message: 'Client not found.' });
     const viewer = client();
     const vl = await viewer.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: `viewer-au-${n}@agency.test` });
     await createMember({ orgId: s.tenantId, tenantId: s.tenantId, displayName: 'Viewer', subject: vl.body.user.userId, roles: ['viewer'] });
@@ -178,11 +200,14 @@ describe('ADR 0958 P5 — the collaboration audit review', () => {
     expect((await viewer.get(s.A)).status).toBe(200);
     const vr = await viewer.get<{ error?: string }>(`${s.C}/audit`);
     expect(vr.status).toBe(403);
+    expect(vr.body.error).toBe('forbidden_scope');
     expect(vr.raw).not.toMatch(/not enabled/i);
     expect(vr.raw).not.toContain('collaborator.');
     await setToggle('campaign-ops.external-collab', false);
     try {
-      expect((await s.admin.get(`${s.C}/audit`)).status).toBe(404);
+      const dark = await s.admin.get<{ error: string; message: string }>(`${s.C}/audit`);
+      expect(dark.status).toBe(404);
+      expect(dark.body).toMatchObject({ error: 'not_found', message: 'External collaborators is not enabled for this tenant.' });
     } finally { await setToggle('campaign-ops.external-collab', true); }
   });
 
@@ -208,11 +233,13 @@ describe('ADR 0958 P5 — the collaboration audit review', () => {
     expect(head).toBeGreaterThan(CHAIN_TAIL_BATCH);
     const original = DurableCollection.prototype.get;
     let reads = 0; let inFlight = 0; let peak = 0;
-    const spy = vi.spyOn(DurableCollection.prototype, 'get').mockImplementation(async function (this: unknown, id: string) {
-      if ((this as { name: string }).name !== 'cdp:audit-chain') return original.call(this as never, id);
+    // The collection's private `name` is read without a cast. Each read yields once
+    // (setImmediate) before resolving, so reads issued together overlap.
+    const spy = vi.spyOn(DurableCollection.prototype, 'get').mockImplementation(async function (this: DurableCollection<unknown>, id: string) {
+      if (Reflect.get(this, 'name') !== 'cdp:audit-chain') return original.call(this, id);
       reads += 1; inFlight += 1; peak = Math.max(peak, inFlight);
-      try { await new Promise((r) => setTimeout(r, 1)); return await original.call(this as never, id); } finally { inFlight -= 1; }
-    } as never);
+      try { await new Promise((r) => setImmediate(r)); return await original.call(this, id); } finally { inFlight -= 1; }
+    });
     try {
       const tail = await listChainTail(s.tenantId, head + 1);
       expect(tail.entries).toHaveLength(head + 1);

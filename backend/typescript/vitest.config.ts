@@ -1,4 +1,10 @@
 import { defineConfig } from 'vitest/config';
+// ADR 1031 — generate the adopter-feature registry module (gitignored) at config
+// load, so a bare `vitest run` (Tracegate, the gate, an editor) never compiles
+// against a missing or stale one. A no-op write when nothing changed.
+import { generateAdopterFeatures } from './scripts/gen-adopter-features.mjs';
+
+generateAdopterFeatures();
 
 export default defineConfig({
   test: {

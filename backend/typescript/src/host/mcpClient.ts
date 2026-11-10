@@ -656,6 +656,7 @@ export function makeMcpClient(deps: McpClientDeps): {
     }
     // 3b. Per-user credential (ADR 0024).
     const cred = await resolveConnectionCredential({
+      egress: { fixedEndpoint: 'the MCP server URL from the provider manifest' },
       tenantId: deps.tenantId,
       provider: serverId,
       ...(deps.actingUserId ? { actingUserId: deps.actingUserId } : {}),

@@ -375,6 +375,60 @@ test.describe('mobile chat — quick access never covers the session banner', ()
 });
 
 /**
+ * ADR 0139 mobile drawer — off-canvas positioning alone must not leave the
+ * closed rail in sequential keyboard navigation. This needs real CSS/browser
+ * focus behavior; jsdom and a style-string assertion cannot prove it.
+ */
+test.describe('mobile shell — closed drawer keyboard exclusion', () => {
+  test('closed More skips the rail; opening traps focus, Escape restores it, and desktop stays usable', async ({ page }) => {
+    await loginPersonal(page.request, 'drawer-focus@e2e.test');
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto('/chat');
+    const quickAccess = page.getByRole('navigation', { name: 'Workspace quick access' });
+    const more = quickAccess.getByRole('button', { name: 'More' });
+    const sidebar = page.locator('#app-primary-navigation');
+    const brand = sidebar.locator('.app-sidebar-brand');
+    await expect(more).toBeVisible({ timeout: 60_000 });
+    await expect(more).toHaveAttribute('aria-expanded', 'false');
+
+    // This exact next Tab reached the translated, invisible brand before the fix.
+    await more.focus();
+    await page.keyboard.press('Tab');
+    expect(await sidebar.evaluate((el) => el.contains(document.activeElement))).toBe(false);
+    await expect(page.locator(':focus')).toBeInViewport();
+
+    await more.focus();
+    await page.keyboard.press('Enter');
+    await expect(more).toHaveAttribute('aria-expanded', 'true');
+    await expect(sidebar).toBeVisible();
+    await expect(brand).toBeFocused();
+    await page.keyboard.press('Shift+Tab');
+    await expect.poll(() => sidebar.evaluate((el) => el.contains(document.activeElement))).toBe(true);
+    await page.keyboard.press('Tab');
+    await expect(brand).toBeFocused();
+
+    await page.keyboard.press('Escape');
+    await expect(more).toHaveAttribute('aria-expanded', 'false');
+    await expect(more).toBeFocused();
+    // No animation delay: the first Tab after closing must already skip the rail.
+    await page.keyboard.press('Tab');
+    expect(await sidebar.evaluate((el) => el.contains(document.activeElement))).toBe(false);
+    await expect(page.locator(':focus')).toBeInViewport();
+
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await expect(quickAccess).not.toBeVisible();
+    await expect(sidebar).toBeVisible();
+    await expect(brand).toBeVisible();
+    await brand.focus();
+    await expect(brand).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect.poll(() => sidebar.evaluate((el) => el.contains(document.activeElement))).toBe(true);
+    await page.keyboard.press('Shift+Tab');
+    await expect(brand).toBeFocused();
+  });
+});
+
+/**
  * DSA-026 (ADR 0510 Phase 7) — ≤860px the admin rail is a compact disclosure,
  * never a wrapping link cloud. The row names the current destination; sections
  * expand on demand and close on navigation.

@@ -28,6 +28,13 @@ export function PublicPreviewFrame({ children, title, onDocument }: {
     // Mirror the light/dark theme (the live front page is token-driven, so it
     // follows whichever theme the root carries) — cheap, runs on every sync.
     doc.documentElement.className = document.documentElement.className;
+    // ADR 1038 D6 — the page's writing direction and the in-app "Reduce motion"
+    // setting live on the root as attributes, not classes; mirror them so the
+    // preview slides the way the live page does and stays still when asked.
+    for (const attr of ['dir', 'data-reduce-motion']) {
+      const v = document.documentElement.getAttribute(attr);
+      if (v === null) doc.documentElement.removeAttribute(attr); else doc.documentElement.setAttribute(attr, v);
+    }
     doc.documentElement.style.colorScheme = getComputedStyle(document.documentElement).colorScheme;
     // Clone the parent's stylesheets + fonts into the iframe head ONCE so tokens
     // + `.fp-*` rules resolve exactly as on the live site (Vite ships <style> in
@@ -54,7 +61,7 @@ export function PublicPreviewFrame({ children, title, onDocument }: {
   // Re-clone the stylesheets when the operator flips the app theme.
   useEffect(() => {
     const obs = new MutationObserver(sync);
-    obs.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+    obs.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'dir', 'data-reduce-motion'] });
     return () => obs.disconnect();
   }, [sync]);
 

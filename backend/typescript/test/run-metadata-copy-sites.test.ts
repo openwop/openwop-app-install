@@ -192,6 +192,16 @@ const CLASSIFIED: Record<string, { source: MetadataSource; why: string }> = {
       'from the DELIVERY, not from a run. Its run reads back the row for the driver response.',
   },
 
+  'features/channel-ingress/ingress.ts': {
+    source: 'FRESH',
+    why:
+      'ADR 1042 D7 — the channel conversation run composes chatSessionId + channelIngress {lane, scope} + ' +
+      '`trustBoundary: "untrusted"` from the THREAD, plus the host launchResolved stamp. The run it loads is ' +
+      "the thread's previous conversation run, read only to see whether it is still open; when it has ended, " +
+      'its metadata is deliberately NOT carried over (the scope and owner come from the thread, and a new ' +
+      'channel run must not inherit an old run\'s decisions).',
+  },
+
   // ── Fresh creators that never load a run ──────────────────────────────
   'host/runStarter.ts': {
     source: 'FRESH',

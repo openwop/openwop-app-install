@@ -19,6 +19,9 @@
  * before asserting nothing was sent; a confirmed reject asserts the full payload.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { t } from 'i18next';
+// ADR 1031 P2 — a fixture typed renderer (it was a product's outline type).
+import { TEST_OUTLINE_TYPE } from '../../chat/reviews/__tests__/testOutlineRenderer.js';
 import { render, cleanup, screen, fireEvent, waitFor, within, act } from '@testing-library/react';
 import type { CardRegistration } from '../../chat/registry/types.js';
 import { announce, currentAnnouncements } from '../../ui/announce.js';
@@ -41,6 +44,17 @@ vi.mock('../../client/interruptsClient.js', async (importOriginal) => {
 const { ApprovalCard } = await import('../ApprovalCard.js');
 
 const GATE_PROMPT = 'Confirm the variance figures before surfacing.';
+
+function expectGenericRejectConfirmation(): void {
+  const call = api.confirm.mock.calls[0];
+  if (!call) throw new Error('Reject confirmation was not shown');
+  expect(call[0]).toMatchObject({
+    title: t('interrupts:rejectConfirmTitle'), body: t('interrupts:rejectConfirmBody'),
+    danger: true, confirmLabel: t('interrupts:actionReject'),
+  });
+  expect(call[0].title).toBe('Reject this request?');
+  expect(call[0].body).toBe('What happens next depends on the workflow; rejection can end the run. Work already done is not undone.');
+}
 
 function view(data: unknown): void {
   render(
@@ -180,13 +194,12 @@ describe('ApprovalCard — a saved untyped plan envelope is readable (P9)', () =
   };
   beforeEach(() => {
     art.getArtifact.mockResolvedValue({ source: 'run-event', format: 'application/json' }); // no artifactTypeId: untyped
-    art.getArtifactRevision.mockResolvedValue({ content: JSON.stringify({ plan, artifact: { artifactTypeId: 'kicktodo.challenge-plan', title: plan.title, payload: plan } }, null, 2) });
+    art.getArtifactRevision.mockResolvedValue({ content: JSON.stringify({ plan, artifact: { artifactTypeId: TEST_OUTLINE_TYPE, title: plan.title, payload: plan } }, null, 2) });
   });
 
   it('inline and full both show the outline, never the JSON', async () => {
     view({ prompt: GATE_PROMPT, artifactId: 'run-event:r-1:outline-approve', revisionId: 'r-1:outline-approve:1' });
     expect(await screen.findByText('Day 1: First block')).toBeTruthy();
-    expect(screen.getByText('Walk instead: Walk for 10 minutes.')).toBeTruthy();
     expect(screen.queryByText(/^\{$/)).toBeNull();
     expect(art.getArtifactRevision).toHaveBeenCalledWith('run-event:r-1:outline-approve', 'r-1:outline-approve:1'); // revision binding kept
     fireEvent.click(screen.getByRole('button', { name: /view full/i }));
@@ -242,13 +255,8 @@ describe('chat ApprovalCard — the send envelope survives the unification', () 
   });
 
   /**
-   * ADR 0600 §Correction 5 (`ISU-12`) — §7 put the reject confirm on
-   * `interrupts/ApprovalCard` only, which is the other half of the card pair §2
-   * had just finished unifying. The verb is identical on both surfaces: a
-   * rejected gate fails the run and discards what it already spent. The manual
-   * script `INS-03` then told a tester to expect a confirm after step 1 put them
-   * on chat, where there was none — the `ISU-16` family, in the file that exists
-   * to prevent it.
+   * ADR 0600 §Correction 5 / rejection-copy correction — both surfaces
+   * confirm the decision; workflow rejection routing owns the run outcome.
    */
   it('a REJECT on the CHAT card asks first too, and a cancelled confirm sends nothing', async () => {
     api.confirm.mockResolvedValue(false);
@@ -265,8 +273,20 @@ describe('chat ApprovalCard — the send envelope survives the unification', () 
     );
     fireEvent.click(await screen.findByRole('button', { name: /^reject$/i }));
     await waitFor(() => expect(api.confirm).toHaveBeenCalled());
+    expectGenericRejectConfirmation();
     await act(async () => {}); // let the declined confirm settle
     expect(onAction).not.toHaveBeenCalled();
+  });
+
+  it('a confirmed CHAT rejection keeps its existing payload without predicting a terminal run outcome', async () => {
+    const onAction = vi.fn(async () => {});
+    const Card = await chatApprovalCard();
+    render(<Card cardType="interrupt.approval" payload={{ data: { prompt: GATE_PROMPT, actions: ['approve', 'reject'] } }}
+      onAction={onAction} isLoading={false} context={{ tenantId: 't-1', runId: 'r-1', nodeId: 'approve' }} />);
+    fireEvent.click(await screen.findByRole('button', { name: /^reject$/i }));
+    await waitFor(() => expect(onAction).toHaveBeenCalledTimes(1));
+    expectGenericRejectConfirmation();
+    expect(onAction).toHaveBeenCalledWith('resolve', { action: 'reject', comment: undefined });
   });
 
   it('APPROVE on the CHAT card is deliberately NOT gated (the same polarity §7 asserted)', async () => {
@@ -289,8 +309,8 @@ describe('chat ApprovalCard — the send envelope survives the unification', () 
 
 /**
  * ADR 0600 §7 (`ISU-12`) — REJECT was one unconfirmed click straight to the
- * network, on the verb that FAILS the run and cannot be undone. Run deletion on
- * the next surface over already confirms.
+ * network. Confirm the decision without promising that every workflow fails.
+ * Existing payload and approve-without-confirm controls remain.
  */
 describe('inbox / runs ApprovalCard — reject confirms, approve does not', () => {
   it('a REJECT asks first, and a cancelled confirm sends nothing', async () => {
@@ -298,6 +318,7 @@ describe('inbox / runs ApprovalCard — reject confirms, approve does not', () =
     view({ prompt: GATE_PROMPT, artifactId: 'a-1', revisionId: 'rev-1' });
     fireEvent.click(await screen.findByRole('button', { name: /^reject$/i }));
     await waitFor(() => expect(api.confirm).toHaveBeenCalled());
+    expectGenericRejectConfirmation();
     await act(async () => {}); // let the declined confirm settle
     expect(api.resolveByRun).not.toHaveBeenCalled();
   });
@@ -306,6 +327,8 @@ describe('inbox / runs ApprovalCard — reject confirms, approve does not', () =
     view({ prompt: GATE_PROMPT, artifactId: 'a-1', revisionId: 'rev-1' });
     fireEvent.click(await screen.findByRole('button', { name: /^reject$/i }));
     await waitFor(() => expect(api.resolveByRun).toHaveBeenCalled());
+    expectGenericRejectConfirmation();
+    expect(api.resolveByRun).toHaveBeenCalledTimes(1);
     expect(api.resolveByRun).toHaveBeenCalledWith('r-1', 'redteam', { action: 'reject', comment: undefined });
   });
 

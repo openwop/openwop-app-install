@@ -34,24 +34,24 @@ describe('chainParamsToVariables', () => {
   });
 });
 
-// Day-1 UX P6 — the "Start here" predicate: only a host-DERIVED empty
+// Day-1 UX P6 — the "Start here" predicate: only an explicitly audited account-free
 // requirements block qualifies; absence (older backend) must read false.
 
 describe('runsWithZeroConnections', () => {
   const base = { chainId: 'c', packName: 'p', label: 'L', description: 'd' };
-  it('true only for a derived-empty requirements block', () => {
-    expect(runsWithZeroConnections({ ...base, requirements: { missingNodeTypeIds: [], connections: [] } })).toBe(true);
+  it('true only for an explicitly account-free requirements block', () => {
+    expect(runsWithZeroConnections({ ...base, requirements: { missingNodeTypeIds: [], connections: [], connectionUsage: 'none' } })).toBe(true);
   });
   it('false when requirements are absent (older backend — never overpromise)', () => {
     expect(runsWithZeroConnections({ ...base })).toBe(false);
   });
   it('false when a connection or missing node is required', () => {
-    expect(runsWithZeroConnections({ ...base, requirements: { missingNodeTypeIds: [], connections: [{ ref: 'r', providerId: 'x', providerInstalled: true }] } })).toBe(false);
-    expect(runsWithZeroConnections({ ...base, requirements: { missingNodeTypeIds: ['t'], connections: [] } })).toBe(false);
+    expect(runsWithZeroConnections({ ...base, requirements: { connectionUsage: 'none', missingNodeTypeIds: [], connections: [{ ref: 'r', providerId: 'x', providerInstalled: true }] } })).toBe(false);
+    expect(runsWithZeroConnections({ ...base, requirements: { connectionUsage: 'none', missingNodeTypeIds: ['t'], connections: [] } })).toBe(false);
   });
   it('false when a node is installed at a version other than the one pinned (ADR 0766 D3 / grade-ux U-1)', () => {
     expect(runsWithZeroConnections({ ...base, requirements: {
-      missingNodeTypeIds: [], connections: [],
+      connectionUsage: 'none', missingNodeTypeIds: [], connections: [],
       pinMismatches: [{ typeId: 't', label: 'T', pinned: '1.0.0', installed: '1.1.0' }],
     } })).toBe(false);
   });

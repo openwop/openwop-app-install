@@ -36,7 +36,7 @@ import { claimIgnition, ignitionKey, recordIgnitionRun } from '../src/host/ignit
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createOrg, createMember } from '../src/host/accessControlService.js';
-import { createBrief, setKernel, updateBrief } from '../src/features/campaign-brief/briefService.js';
+import { createBrief, setKernel, updateBrief, validateBrief } from '../src/features/campaign-brief/briefService.js';
 
 /** ADR 1020 — research.run argues an APPROVED, current kernel, so its fixtures carry one. */
 const KERNEL = { headline: 'Pick faster', supportingStatement: 'Save hours', proofPoints: ['40%'], primaryCta: 'Demo', secondaryCta: '', tone: 'direct', channelTones: {}, sourceDocIds: [], generatedAt: '2026-10-31T00:00:00Z' };
@@ -143,6 +143,74 @@ describe('CFP-1 — reads: toggle honesty + empty-without-acting-user', () => {
     const verdict = JSON.parse(out.content) as { valid: boolean; issues: Array<{ field: string }>; enabledChannels: string[] };
     expect(verdict).toMatchObject({ valid: false, enabledChannels: [] });
     expect(verdict.issues.map((i) => i.field)).toEqual(expect.arrayContaining(['personaIds', 'messaging.primaryValueProp', 'channels']));
+  });
+});
+
+describe('campaign brief tool monetary grounding', () => {
+  async function readBudget(budget?: { totalMinor?: number; currency?: string; perChannel?: { ad_variants?: number; landing_page?: number } }) {
+    const brief = await createBrief(TENANT, orgId, 'u-1', { name: 'Money grounding', ...(budget ? { budget } : {}) });
+    const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: CAMPAIGN_BRIEF_GET_TOOL_ID, input: { briefId: brief.id } });
+    expect(out.isError).toBeFalsy();
+    const parsed = JSON.parse(out.content);
+    // Presentation must not reinterpret the durable/raw contract or validation.
+    expect(parsed.brief.budget).toEqual(brief.budget ?? null);
+    expect(parsed.validation).toEqual(validateBrief(brief));
+    return parsed;
+  }
+
+  it.each([
+    { currency: 'USD', totalMinor: 30000, major: '300.00' },
+    { currency: 'JPY', totalMinor: 30000, major: '30000' },
+    { currency: 'KWD', totalMinor: 30000, major: '30.000' },
+    { currency: 'USD', totalMinor: 0, major: '0.00' },
+    { currency: 'KWD', totalMinor: 1, major: '0.001' },
+    { currency: 'USD', totalMinor: Number.MAX_SAFE_INTEGER, major: '90071992547409.91' },
+  ])('grounds $currency $totalMinor minor as $major major without rounding', async ({ currency, totalMinor, major }) => {
+    const parsed = await readBudget({ currency, totalMinor });
+    expect(parsed.budgetPresentation).toEqual({ unit: 'major_currency_units', currency, minorUnitExponent: currency === 'JPY' ? 0 : currency === 'KWD' ? 3 : 2, total: { status: 'available', major }, perChannel: {} });
+  });
+
+  it('keeps an absent budget absent without inventing money', async () => {
+    expect((await readBudget()).budgetPresentation).toBeNull();
+  });
+
+  it('presents allocations independently without inventing a missing total or channel', async () => {
+    const parsed = await readBudget({ currency: 'KWD', perChannel: { ad_variants: 1234, landing_page: 0 } });
+    expect(parsed.budgetPresentation).toEqual({ unit: 'major_currency_units', currency: 'KWD', minorUnitExponent: 3, total: { status: 'unavailable', reason: 'amount_missing' }, perChannel: { ad_variants: { status: 'available', major: '1.234' }, landing_page: { status: 'available', major: '0.000' } } });
+  });
+
+  it.each([
+    { label: 'absent', budget: { totalMinor: 30000 }, currency: null, reason: 'currency_missing' },
+    { label: 'blank', budget: { totalMinor: 30000, currency: '' }, currency: null, reason: 'currency_missing' },
+    { label: 'unsupported', budget: { totalMinor: 30000, currency: 'ZZZ' }, currency: 'ZZZ', reason: 'unsupported_currency' },
+  ])('refuses to guess the $label currency', async ({ budget, currency, reason }) => {
+    const parsed = await readBudget(budget);
+    expect(parsed.budgetPresentation).toEqual({ unit: 'major_currency_units', currency, minorUnitExponent: null, total: { status: 'unavailable', reason }, perChannel: {} });
+  });
+
+  it('does not claim exact major amounts for unsafe stored integers', async () => {
+    const parsed = await readBudget({ currency: 'USD', totalMinor: Number.MAX_SAFE_INTEGER + 1, perChannel: { ad_variants: Number.MAX_SAFE_INTEGER + 1 } });
+    expect(parsed.budgetPresentation).toEqual({
+      unit: 'major_currency_units', currency: 'USD', minorUnitExponent: 2,
+      total: { status: 'unavailable', reason: 'invalid_amount' },
+      perChannel: { ad_variants: { status: 'unavailable', reason: 'invalid_amount' } },
+    });
+  });
+
+  it('never adds presentation to a denied or actorless read', async () => {
+    const brief = await createBrief(TENANT, orgId, 'u-1', { name: 'Private money', budget: { currency: 'USD', totalMinor: 30000 } });
+    for (const scope of [{ actingUserId: 'stranger' }, {}]) {
+      const out = await provider(scope).executeTool({ name: CAMPAIGN_BRIEF_GET_TOOL_ID, input: { briefId: brief.id } });
+      expect(JSON.parse(out.content)).toMatchObject({ brief: null });
+      expect(JSON.parse(out.content)).not.toHaveProperty('budgetPresentation');
+    }
+    await setToggle('off');
+    try {
+      const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: CAMPAIGN_BRIEF_GET_TOOL_ID, input: { briefId: brief.id } });
+      expect(out.isError).toBe(true);
+      expect(JSON.parse(out.content)).toMatchObject({ error: 'feature_disabled' });
+      expect(JSON.parse(out.content)).not.toHaveProperty('budgetPresentation');
+    } finally { await setToggle('on'); }
   });
 });
 

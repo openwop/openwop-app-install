@@ -71,6 +71,16 @@ P5 frontend admin + statements. Each phase: `/code-review`; P5 `/ux-review`.
 ## 8. Open questions
 - Clawback on a deal that flips won→lost after payout — v1: recompute on the next period run (a negative line); real-time clawback deferred.
 - Multi-plan overlap (a rep under two plans) — v1: one active plan per assignment; revisit.
+
+> **CORRECTED 2026-11-03 (ADR 1034).** Both answers above were claims the code did not
+> keep. (1) Clawback: `computeStatement` filters `status === 'won'` and never emits a
+> negative line, and a paid statement cannot be recomputed, so a won→lost flip after
+> payout is NOT clawed back on any run; ADR 1034 D7 now refuses a won deal with a negative
+> amount rather than let it become an unreviewed partial clawback. Clawback stays deferred.
+> (2) "One active plan per assignment" was enforced nowhere, and the same deal paid twice
+> across a `YYYY-MM` and a `YYYY-Qn` statement of one plan. ADR 1034 D4 enforces the rule
+> (`plan_window_overlap`) and adds per-(plan, deal) claims so a deal pays at most once per
+> plan; different assignments may still stack, named on the review card.
 - Real **payout/payment** — deferred (external; demo-mode status only, faithful to the affiliate precedent).
 
 ## 9. Recorded non-ships

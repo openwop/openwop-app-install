@@ -13,9 +13,9 @@
  *       what the scheduler route asks (ADR 0787 D3), names the arming person on the
  *       job (ADR 0815 cascade), refuses a workflow the tenant cannot run (ADR 0823),
  *       and refuses to retarget a job a feature armed.
- *   D3  the judge reads only the goal's own evidence — the KickTodo verifier parsed
- *       the tenant out of a caller-supplied ref, so another enrollment's (or another
- *       tenant's) completed snapshot satisfied a goal.
+ *   D3  the judge reads only the goal's own evidence — probed over KickTodo's
+ *       verifier, so it lives with its owner (ADR 1031 P2):
+ *       test/kicktodo/kicktodo-goals-authority.test.ts.
  *   D4  no fixture in real workspaces — `GET /goals` seeded a demo goal into every
  *       tenant that looked, and the chat agent read it as the user's own.
  *   D5  a contributing run is a run — `POST /goals/:id/runs` took any string, and the
@@ -31,13 +31,7 @@
  * Tracker TST-BJM. Red when (probe-witnessed, w65): the workspace:write floor goes;
  * a foreign or unknown run binds; the caller's cost replaces the host-stamped one; a
  * closed goal's job fires; a breached bound does not close the goal at fire time; the
- * verifier accepts another enrollment's snapshot. The cross-tenant snapshot refusal
- * is held FOUR times in `registerKicktodoGoalVerifier` (progressService.ts): the
- * ref-tenant compare, the goal-tenant `getEnrollment`, the goal-binding check
- * (`enrollment.goalId !== goal.id` — a foreign enrollment always belongs to a foreign
- * goal) and the goal-tenant `getEvidence`. Any one alone refuses, so the cross-tenant
- * case is probed by breaking all four in one edit (w65 r3); the goal-binding check
- * alone is witnessed by the same-tenant "another enrollment's" case.
+ * verifier accepts another enrollment's snapshot (the KickTodo file).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -59,7 +53,6 @@ import { GOALS_LIST_TOOL_ID } from '../src/features/goals/agentTools.js';
 import { registerGoalVerifier } from '../src/features/goals/goalVerifiers.js';
 import { registerScheduledJobFireGate, scheduledJobFireRefusal } from '../src/host/scheduledJobFireGates.js';
 import type { ScheduledJob } from '../src/host/schedulingService.js';
-import { freezeProgressEvidence } from '../src/features/kicktodo-core/progressService.js';
 import type { Storage } from '../src/storage/storage.js';
 
 let BASE: string; let server: http.Server; let storage: Storage; let deps: StartRunDeps;
@@ -75,7 +68,7 @@ beforeAll(async () => {
   deps = { storage, hostSuite: app.locals.hostSuite as HostAdapterSuite };
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   registerGoalVerifier('g908:v', async () => ({ satisfied: true, confidence: 1, runId: 'run-g908' }));
-  for (const id of ['users', 'kicktodo-core']) {
+  for (const id of ['users']) {
     const d = getToggleDefault(id);
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
   }
@@ -177,7 +170,7 @@ describe('D2 — arming a continuation is a scheduler write', () => {
     const o = await owner();
     const viewer = await member(o.c, 'viewer');
     const id = await tenantGoal(o.tenant);
-    const r = await viewer.c('POST', G(id, '/arm'), { workflowId: 'openwop-app.kicktodo.daily-loop', cronExpr: '0 9 * * *' });
+    const r = await viewer.c('POST', G(id, '/arm'), { workflowId: WF, cronExpr: '0 9 * * *' });
     expect(r.status).toBe(403);
     expect(r.body.error).toBe('forbidden_scope');
     expect(await getJob(continuationJobId(o.tenant, id))).toBeNull();
@@ -196,63 +189,11 @@ describe('D2 — arming a continuation is a scheduler write', () => {
     const o = await owner();
     const editor = await member(o.c, 'editor');
     const id = (await editor.c('POST', G(), BOUNDED)).body.id as string;
-    const r = await editor.c('POST', G(id, '/arm'), { workflowId: 'openwop-app.kicktodo.daily-loop', cronExpr: '0 9 * * *' });
+    const r = await editor.c('POST', G(id, '/arm'), { workflowId: WF, cronExpr: '0 9 * * *' });
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     const job = await getJob(continuationJobId(o.tenant, id));
-    expect(job?.workflowId).toBe('openwop-app.kicktodo.daily-loop');
+    expect(job?.workflowId).toBe(WF);
     expect(job?.metadata?.actingUserId).toBe(editor.userId);
-  });
-});
-
-/** One-day, two-action challenge — judgeable inside the test. */
-const ONE_DAY = {
-  title: 'One-Day Reset', summary: 'Two actions, one day', outcome: 'A finished reset', durationDays: 1,
-  activities: [
-    { stableActivityId: 'a1', day: 1, title: 'First', instructions: '', evidencePolicy: 'attestation' },
-    { stableActivityId: 'a2', day: 1, title: 'Second', instructions: '', evidencePolicy: 'attestation' },
-  ],
-};
-const KT = '/host/openwop-app/kicktodo';
-async function enrollment(c: Client): Promise<{ id: string; goalId: string; cards: string[] }> {
-  const draft = (await c('POST', `${KT}/challenges`, { ...ONE_DAY, title: `Reset ${n++}` })).body as { id: string };
-  expect((await c('POST', `${KT}/challenges/${draft.id}/versions/1/publish`)).status).toBeLessThan(300);
-  const e = await c('POST', `${KT}/enrollments`, { challengeId: draft.id, challengeVersion: 1, timezone: 'UTC' });
-  expect(e.status, JSON.stringify(e.body)).toBeLessThan(300);
-  const today = (await c('GET', `${KT}/today`)).body as { enrollments: Array<{ enrollmentId: string; actions: Array<{ occurrence: { cardId: string } }> }> };
-  const cards = today.enrollments.find((x) => x.enrollmentId === e.body.id)!.actions.map((a) => a.occurrence.cardId);
-  return { id: e.body.id as string, goalId: e.body.goalId as string, cards };
-}
-async function completed(c: Client, tenant: string): Promise<{ ref: string; hash: string; goalId: string }> {
-  const e = await enrollment(c);
-  for (const cardId of e.cards) expect((await c('POST', `${KT}/check-ins`, { cardId })).status).toBeLessThan(300);
-  const s = await freezeProgressEvidence(tenant, e.id);
-  expect(s?.completedActivities).toBe(2);
-  return { ref: `${tenant}|${e.id}|${s!.id}`, hash: s!.snapshotHash, goalId: e.goalId };
-}
-
-describe('D3 — the judge reads only the goal\'s own evidence', () => {
-  it('another enrollment\'s completed snapshot does not satisfy a goal (refused, goal stays active); its own goal is satisfied', async () => {
-    const o = await owner();
-    const done = await completed(o.c, o.tenant);
-    const fresh = await enrollment(o.c);
-    const borrowed = await o.c('POST', G(fresh.goalId, '/evaluate'), { snapshotRef: done.ref, snapshotHash: done.hash });
-    expect(borrowed.status, JSON.stringify(borrowed.body)).toBeGreaterThanOrEqual(400);
-    expect(JSON.stringify(borrowed.body)).toMatch(/does not belong to this goal/);
-    expect((await getGoal(o.tenant, fresh.goalId))?.state).toBe('active');
-    const own = await o.c('POST', G(done.goalId, '/evaluate'), { snapshotRef: done.ref, snapshotHash: done.hash });
-    expect(own.status, JSON.stringify(own.body)).toBe(200);
-    expect(own.body.goal?.state).toBe('satisfied');
-  });
-
-  it('another tenant\'s snapshot is never read for a verdict', async () => {
-    const a = await owner();
-    const done = await completed(a.c, a.tenant);
-    const b = await owner();
-    const fresh = await enrollment(b.c);
-    const r = await b.c('POST', G(fresh.goalId, '/evaluate'), { snapshotRef: done.ref, snapshotHash: done.hash });
-    expect(r.status, JSON.stringify(r.body)).toBeGreaterThanOrEqual(400);
-    expect(JSON.stringify(r.body)).toMatch(/does not belong to this goal/);
-    expect((await getGoal(b.tenant, fresh.goalId))?.state).toBe('active');
   });
 });
 
@@ -354,7 +295,8 @@ describe('D9 — create is closed-world', () => {
   });
 });
 
-const WF = 'openwop-app.kicktodo.daily-loop';
+/** Any workflow this tenant can run (a first-party chain-backed builtin). */
+const WF = 'campaign-studio.campaign-orchestration';
 async function armedGoal(): Promise<{ o: Awaited<ReturnType<typeof owner>>; editor: Awaited<ReturnType<typeof member>>; id: string; jobId: string }> {
   const o = await owner();
   const editor = await member(o.c, 'editor');
@@ -421,16 +363,6 @@ describe('D2b — the scheduler route cannot write a goal\'s continuation job', 
     expect((await editor.c('POST', G(id, '/pause'))).status).toBe(200);
   });
 
-  it('a continuation a feature armed (KickTodo) is not replaced through the goal route (409)', async () => {
-    const o = await owner();
-    const e = await enrollment(o.c);
-    const jobId = continuationJobId(o.tenant, e.goalId);
-    const before = await getJob(jobId);
-    expect(before?.inputs).toBeDefined();
-    const r = await o.c('POST', G(e.goalId, '/arm'), { workflowId: WF, cronExpr: '* * * * *' });
-    expect(r.status, JSON.stringify(r.body)).toBe(409);
-    expect((await getJob(jobId))?.inputs).toEqual(before?.inputs);
-  });
 });
 
 describe('D4b — the fixture stays usable for the harness', () => {

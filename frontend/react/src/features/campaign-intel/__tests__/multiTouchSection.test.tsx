@@ -1,10 +1,14 @@
 /**
  * ADR 0956 D2 — the multi-touch section: hidden while the sub-toggle is off,
  * one model at a time plus the all-models comparison, "make default" saves
- * with the version it read, and a failed read is announced.
+ * with the version it read, and a failed read is shown in plain words.
+ *
+ * Off means the section renders NOTHING: the error Notice is a div, so "no
+ * section" would pass with the off branch removed. Sabotage: drop the
+ * FeatureDisabledError branch → the off case reds.
  */
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import '../../../i18n/index.js';
 import type { AttributionModelReport } from '../campaignIntelClient.js';
 
@@ -46,8 +50,10 @@ describe('MultiTouchSection', () => {
   it('renders nothing while the multi-touch sub-toggle is off', async () => {
     getAttributionModels.mockRejectedValue(new FeatureDisabledError('not enabled'));
     const { container } = render(<MultiTouchSection orgId="o1" />);
-    await waitFor(() => expect(getAttributionModels).toHaveBeenCalled());
-    expect(container.querySelector('section')).toBeNull();
+    // A macrotask: the read has settled. While off, nothing renders, so no signal exists.
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    expect(getAttributionModels).toHaveBeenCalledTimes(1);
+    expect(container.innerHTML).toBe('');
   });
 
   it('shows the selected model, the unmapped credit, every model compared, and the org default', async () => {

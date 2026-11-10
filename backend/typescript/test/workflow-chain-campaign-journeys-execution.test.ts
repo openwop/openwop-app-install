@@ -24,15 +24,16 @@
  *  - ADR 0655 D2: no email Connection ⇒ the approved send is a typed NODE
  *    FAILURE (`email_not_connected`), the run FAILS;
  *  - ADR 0655 D1 / JRNY-1: a SUPPRESSED contact is refused at the enroll
- *    pre-check (`not_eligible: suppressed`) — never reaches sign-off or the
- *    provider. (The send-step floor itself is witnessed by
+ *    pre-check — never reaches sign-off or the provider. Since ADR 1024 D6 the
+ *    refusal ENDS the run cleanly (`completed`, through the `not-enrolled`
+ *    terminal, `stopped: suppressed`) instead of failing it. (The send-step floor itself is witnessed by
  *    `email-egress-guard.test.ts` › 'a SUPPRESSED address is refused …, no
  *    provider call'; in this chain the enroll pre-check and the post-approval
  *    recheck both refuse before it.)
- *  - JRNY-1: a no-email contact fails at `enroll` with `openwop-app.not_eligible`
- *    (ADR 0237 preserves a node's RETURNED error code);
- *  - the enrollment guard: a second run for the same (journey, contact) fails
- *    `openwop-app.already_enrolled`;
+ *  - JRNY-1: a no-email contact stops at `enroll` (ADR 1024: `completed`,
+ *    `stopped` set, the sign-off never reached);
+ *  - the enrollment guard: a second run for the same (journey, contact) stops at
+ *    `enroll` with `stopped: already_enrolled` and never re-sends;
  *  - welcome-series: the trigger → enroll → eligibility path suspends at sign-off.
  *
  * Sabotage: replacing enroll's CAS with a put reds the enrollment-guard case;
@@ -93,7 +94,7 @@ afterAll(async () => { delete process.env.OPENWOP_SENDGRID_API_BASE; delete proc
 
 /** The union of response-body fields this file reads (each route returns a subset). */
 interface Body {
-  contactId?: string; runId?: string; orgId?: string; status?: string;
+  contactId?: string; runId?: string; orgId?: string; status?: string; workflowId?: string;
   user?: { userId?: string };
   events?: BundleEvent[];
   interrupts?: Array<{ token: string; nodeId: string }>;
@@ -161,6 +162,17 @@ function completedOutputs(events: BundleEvent[], nodeSuffix: string): Record<str
   const ev = events.find((e) => e.type === 'node.completed' && e.nodeId?.endsWith(`_${nodeSuffix}`));
   expect(ev, `expected a node.completed event for node "${nodeSuffix}": ${JSON.stringify(events.map((e) => ({ type: e.type, nodeId: e.nodeId })))}`).toBeTruthy();
   return (ev!.payload!.outputs as Record<string, unknown>) ?? {};
+}
+
+/** ADR 1024 D6 — a run that stopped at `enroll` for the person's own state: it COMPLETES
+ *  through the `not-enrolled` terminal, `enroll` records why, and nothing past it ran. */
+function expectStoppedAtEnroll(events: BundleEvent[], stopped: RegExp): void {
+  const where = JSON.stringify(events.map((e) => ({ type: e.type, nodeId: e.nodeId })));
+  expect(events.filter((e) => e.type === 'node.failed'), where).toHaveLength(0);
+  expect(completedOutputs(events, 'enroll'), where).toMatchObject({ enrolled: false });
+  expect(JSON.stringify(completedOutputs(events, 'enroll')), where).toMatch(stopped);
+  expect(events.some((e) => e.type === 'node.completed' && e.nodeId?.endsWith('_not-enrolled')), `the not-enrolled terminal ran: ${where}`).toBe(true);
+  expect(events.some((e) => e.nodeId?.endsWith('_signoff')), 'never reaches the sign-off gate').toBe(false);
 }
 
 /** Resolve the open interrupt whose nodeId ends with `nodeSuffix` via the
@@ -269,18 +281,13 @@ describe('campaign-journeys.re-engage-contact — end-to-end execution (real exe
     expect(create.status, JSON.stringify(create.body)).toBe(201);
     const runId = create.body.runId as string;
     const snap = await pollRun(owner, runId);
-    expect(snap.status, JSON.stringify(snap)).toBe('failed');
-    expect(snap.error?.code).toBe('openwop-app.not_eligible');
+    expect(snap.status, JSON.stringify(snap)).toBe('completed');
     const events = await bundleEvents(owner, runId);
-    const failed = events.filter((e) => e.type === 'node.failed');
-    expect(failed, JSON.stringify(events.map((e) => ({ type: e.type, nodeId: e.nodeId })))).toHaveLength(1);
-    expect(failed[0]?.nodeId?.endsWith('_enroll')).toBe(true);
-    expect(JSON.stringify(failed[0])).toMatch(/not eligible: suppressed/);
-    expect(events.some((e) => e.nodeId?.endsWith('_signoff')), 'never reaches the sign-off gate').toBe(false);
+    expectStoppedAtEnroll(events, /"stopped":"suppressed"/);
     expect(JSON.stringify(events)).not.toContain('email_not_connected');
   });
 
-  it('fails cleanly for an ineligible contact at the enroll pre-check — never enrolls or reaches the sign-off gate (JRNY-1)', async () => {
+  it('stops cleanly for an ineligible contact at the enroll pre-check — never enrolls or reaches the sign-off gate (JRNY-1, ADR 1024 D6)', async () => {
     const { owner, orgId } = await ownerOrg();
     const contact = await owner.post('/host/openwop-app/crm/contacts', { name: 'No Email Contact' });
     expect(contact.status, JSON.stringify(contact.body)).toBe(201);
@@ -297,23 +304,13 @@ describe('campaign-journeys.re-engage-contact — end-to-end execution (real exe
     const runId = create.body.runId as string;
 
     const snap = await pollRun(owner, runId);
-    expect(snap.status, `run should fail at the enroll pre-check: ${JSON.stringify(snap)}`).toBe('failed');
-    // ADR 0237 preserves a node's OWN returned error.code (a node that RETURNS
-    // `{status:'failed', error}`, as every `feature.campaign-journeys.nodes`
-    // function does, no longer gets masked to the generic `pack_node_error`).
-    // JRNY-1: the enroll pre-check rejects the no-email contact as not_eligible.
-    expect(snap.error?.code).toBe('openwop-app.not_eligible');
-
-    const events = await bundleEvents(owner, runId);
-    const failedEvent = events.find((e) => e.type === 'node.failed');
-    // JRNY-1: enroll now runs an eligibility pre-check BEFORE the irreversible
-    // ledger claim, so an ineligible contact fails at `enroll` (never enrolled),
-    // not at the later `gate` — and never reaches sign-off.
-    expect(failedEvent?.nodeId?.endsWith('_enroll'), `expected the enroll node to fail on the eligibility pre-check: ${JSON.stringify(events.map((e) => ({ type: e.type, nodeId: e.nodeId })))}`).toBe(true);
-    expect(events.some((e) => e.nodeId?.endsWith('_signoff')), 'the run must never reach the sign-off gate').toBe(false);
+    // ADR 1024 D6: a person with no address is a correct end of their journey, not a failed
+    // run. JRNY-1 still holds: the stop is at `enroll`, before the ledger claim.
+    expect(snap.status, `run should stop at the enroll pre-check: ${JSON.stringify(snap)}`).toBe('completed');
+    expectStoppedAtEnroll(await bundleEvents(owner, runId), /"stopped":"no_(email|address)"/);
   });
 
-  it('enrollment guard: a second run for the same (journey, contact) fails with already_enrolled', async () => {
+  it('enrollment guard: a second run for the same (journey, contact) stops at enroll with already_enrolled', async () => {
     const { owner, orgId } = await ownerOrg();
     const contact = await owner.post('/host/openwop-app/crm/contacts', { name: 'Repeat Customer', email: 'repeat@acme.test' });
     expect(contact.status, JSON.stringify(contact.body)).toBe(201);
@@ -334,18 +331,45 @@ describe('campaign-journeys.re-engage-contact — end-to-end execution (real exe
     const second = await owner.post('/runs', { workflowId: expanded.workflowId, inputs });
     expect(second.status, JSON.stringify(second.body)).toBe(201);
     const secondSnap = await pollRun(owner, second.body.runId as string);
-    expect(secondSnap.status, `second run should fail — already enrolled: ${JSON.stringify(secondSnap)}`).toBe('failed');
-    // ADR 0237: the enrollment guard's own `already_enrolled` code now
-    // propagates (was masked to `pack_node_error`).
-    expect(secondSnap.error?.code).toBe('openwop-app.already_enrolled');
-
-    const secondEvents = await bundleEvents(owner, second.body.runId as string);
-    const failedEvent = secondEvents.find((e) => e.type === 'node.failed');
-    expect(failedEvent?.nodeId?.endsWith('_enroll'), `expected the enroll node to fail on the second run: ${JSON.stringify(secondEvents.map((e) => ({ type: e.type, nodeId: e.nodeId })))}`).toBe(true);
+    // ADR 1024 D6: the guard still refuses the second enrollment (nothing re-sends); the run
+    // now ENDS there instead of failing.
+    expect(secondSnap.status, `second run should stop — already enrolled: ${JSON.stringify(secondSnap)}`).toBe('completed');
+    expectStoppedAtEnroll(await bundleEvents(owner, second.body.runId as string), /"stopped":"already_enrolled"/);
   });
 });
 
 describe('campaign-journeys.welcome-series — end-to-end execution (real executor, trigger-fed direct run-start)', () => {
+  it('a client-bound welcome reaches approval with frozen client inputs and no provider calls', async () => {
+    const { owner, orgId, tenantId, userId } = await ownerOrg();
+    const { createClient } = await import('../src/features/campaign-ops/clientService.js');
+    await createClient({ tenantId, orgId, name: 'Welcome client (synthetic)', createdBy: userId });
+    const contact = await owner.post('/host/openwop-app/crm/contacts', { name: 'Client Signup', email: 'client-signup@acme.test' });
+    expect(contact.status, JSON.stringify(contact.body)).toBe(201);
+    const contactId = String(contact.body.contactId);
+    const found = getChain('campaign-journeys.welcome-series');
+    if (!found) throw new Error('Welcome series must be loaded');
+    const params = { contactId, orgId, senderEmail: 'sender@acme.test', triggerEventName: 'host.webinar.registered' };
+    const installed = await owner.post('/host/openwop-app/workflows/from-chain', { chainId: found.chain.chainId, params });
+    expect(installed.status, JSON.stringify(installed.body)).toBe(201);
+    const workflowId = installed.body.workflowId;
+    if (!workflowId) throw new Error('From-chain must return the owned workflow id');
+    const before = sgCalls;
+    // An event-started run does not copy instantiation parameters into run inputs.
+    // The frozen chain itself must carry the client all the way to each guard.
+    const create = await owner.post('/runs', { workflowId, inputs: {} });
+    expect(create.status, JSON.stringify(create.body)).toBe(201);
+    const runId = String(create.body.runId);
+    const snap = await pollRun(owner, runId);
+    const events = await bundleEvents(owner, runId);
+    expect(sgCalls).toBe(before);
+    expect(snap.status.startsWith('waiting'), JSON.stringify({ snap, events })).toBe(true);
+    expect(completedOutputs(events, 'gate1')).toMatchObject({ eligible: true, contactId, email: 'client-signup@acme.test' });
+    const { listEnrollments } = await import('../src/features/campaign-journeys/journeyService.js');
+    expect(await listEnrollments(tenantId, 'welcome-series', orgId)).toEqual([
+      expect.objectContaining({ orgId, contactId }),
+    ]);
+  });
+
   it('walks the REAL trigger → enroll → eligibility path and suspends at the sign-off gate with real contact data', async () => {
     const { owner } = await ownerOrg();
     const contact = await owner.post('/host/openwop-app/crm/contacts', { name: 'New Signup', email: 'newsignup@acme.test' });

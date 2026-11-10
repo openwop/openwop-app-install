@@ -122,6 +122,9 @@ void i18n.use(lazyNsBackend).use(initReactI18next).init({
   ],
   interpolation: { escapeValue: false }, // React escapes
   returnNull: false,
+  // i18next >= 25 prints a vendor sponsorship notice to the console on init.
+  // A white-label public site must not ship a third party's ad in its console.
+  showSupportNotice: false,
 });
 
 i18n.on('languageChanged', syncLocale);

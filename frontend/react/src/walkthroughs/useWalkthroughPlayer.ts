@@ -62,6 +62,7 @@ export interface WalkthroughStepInfo {
 }
 
 interface ActiveWalkthrough { runId: string; walkthroughId: string }
+interface WalkthroughStepIdentity { runId: string; nodeId: string }
 const SESSION_KEY = 'openwop.walkthrough.active';
 
 /** Element-resolve retry budget: route transitions + lazy panels settle fast;
@@ -141,7 +142,9 @@ export function useWalkthroughPlayer(): WalkthroughPlayer {
   // Grade-pass — the stash carries the interrupt DATA too: resuming a paused
   // checkpoint/fill step needs `data.checkpoint`/`data.prefill`, which the
   // view alone loses (the resume-drops-prefill defect).
-  const pendingRef = useRef<{ view: WalkthroughStepView; data: Record<string, unknown> } | null>(null);
+  const pendingRef = useRef<{ runId: string; view: WalkthroughStepView; data: Record<string, unknown> } | null>(null);
+  const currentStepRef = useRef<WalkthroughStepIdentity | null>(null);
+  const performGeneration = useRef(0);
   const [hitlAuto, setHitlAuto] = useState(false);
   const [skipped, setSkipped] = useState<Array<{ nodeId: string; because: string }>>([]);
 
@@ -153,10 +156,24 @@ export function useWalkthroughPlayer(): WalkthroughPlayer {
     setHitlAuto(false);
     sessionStorage.removeItem(SESSION_KEY);
     activeRef.current = null;
+    pendingRef.current = null;
+    currentStepRef.current = null;
+    ++performGeneration.current;
+    pausedRef.current = false;
     setStep(null);
     setTarget(null);
     setSteps([]);
     setSkipped([]);
+  }, []);
+
+  const resolveWaitingStep = useCallback(async (runId: string, nodeId: string, value: unknown): Promise<void> => {
+    const current = currentStepRef.current;
+    await resolveStep(runId, nodeId, value);
+    if (current?.runId === runId && current.nodeId === nodeId && currentStepRef.current === current) {
+      pendingRef.current = null;
+      currentStepRef.current = null;
+      ++performGeneration.current;
+    }
   }, []);
 
   const resolveElement = useCallback(async (action: WalkthroughAction, live: () => boolean): Promise<HTMLElement | null> => {
@@ -169,17 +186,26 @@ export function useWalkthroughPlayer(): WalkthroughPlayer {
     return null;
   }, []);
 
-  const performStep = useCallback(async (view: WalkthroughStepView, data: Record<string, unknown>) => {
+  const performStep = useCallback(async (view: WalkthroughStepView, data: Record<string, unknown>, continuation?: WalkthroughStepIdentity) => {
     const active = activeRef.current;
     if (!active) return;
-    if (pausedRef.current) { pendingRef.current = { view, data }; return; }
+    if (continuation && (currentStepRef.current !== continuation || continuation.runId !== active.runId || continuation.nodeId !== view.nodeId)) return;
+    // Resume owns the same unresolved step: an already pending resolution must
+    // still clear it. Only a newly delivered interrupt creates a new identity.
+    const current = continuation ?? { runId: active.runId, nodeId: view.nodeId };
+    // Logical interrupt ownership survives resume; an old performer/listener
+    // must not. In particular, resuming cannot revive its completion callback.
+    const generation = ++performGeneration.current;
+    currentStepRef.current = current;
+    pendingRef.current = null; // A newly delivered step supersedes the previous continuation.
+    if (pausedRef.current) { pendingRef.current = { runId: active.runId, view, data }; return; }
     setStep(view);
     // Grade-pass liveness: stop()/teardown or a new launch invalidates THIS
     // step's in-flight work. Every await below re-checks — without it a
     // checkpoint poll or element retry finishing after Stop would click the
     // UI / flip needs-update on a walkthrough the user already quit.
-    const live = () => activeRef.current?.runId === active.runId;
-    const stash = () => { if (live() && pausedRef.current) pendingRef.current = { view, data }; };
+    const live = () => activeRef.current?.runId === active.runId && currentStepRef.current === current && performGeneration.current === generation;
+    const stash = () => { if (live() && pausedRef.current) pendingRef.current = { runId: active.runId, view, data }; };
 
     // Checkpoint (ADR 0489 D1) — THREE outcomes:
     //   pass              ⇒ resolve, continue;
@@ -240,22 +266,18 @@ export function useWalkthroughPlayer(): WalkthroughPlayer {
       // "I did it" so the step can NEVER dead-end.
       const off = action.hitlComplete
         ? action.hitlComplete(el, (value) => {
+            if (!live() || pausedRef.current) return;
             hitlOffRef.current = null;
             setHitlAuto(false);
-            void resolveStep(active.runId, view.nodeId, { acked: true, hitlValue: value });
+            void resolveWaitingStep(active.runId, view.nodeId, { acked: true, hitlValue: value });
           })
         : null;
       if (off) hitlOffRef.current = off;
       setHitlAuto(Boolean(off));
-      // §Correction (grade-code `WT-1`) — STASH SO PAUSE→RESUME CAN COME BACK.
-      // Every other branch that returns early stashes; this one did not, so a
-      // pause taken during `waiting-user` (Escape) left `pendingRef` null, and
-      // `resume()` then fell to its unconditional `setStatus('performing')`.
-      // Nothing was driving: `hitlAuto` went false, the "I did it" button
-      // disappeared, and `confirmHitl` early-returns unless status is
-      // 'waiting-user' — so the step was stranded in a permanent false
-      // 'performing' with Stop + relaunch the only exit.
-      stash();
+      // WALK-PAUSE-HITL-1: the former WT-1 correction called the pause-only
+      // stash while NOT paused, retaining nothing. Keep the live waiting step
+      // now so a later pause/resume can restore it without confirming it.
+      if (live()) pendingRef.current = { runId: active.runId, view, data };
       return;
     }
 
@@ -282,7 +304,7 @@ export function useWalkthroughPlayer(): WalkthroughPlayer {
     }
     if (!live()) return; // stopped while performing — never resolve a dead run
     await resolveStep(active.runId, view.nodeId, { acked: true, ...(view.actionId ? { actionId: view.actionId } : {}) });
-  }, [nav, resolveElement, teardown]);
+  }, [nav, resolveElement, resolveWaitingStep, teardown]);
 
   /** WALK-8 — performStep is fire-and-forget at its call sites; a non-benign
    *  failure (a real 500 from resolveStep rethrowing past the 404/410
@@ -300,14 +322,16 @@ export function useWalkthroughPlayer(): WalkthroughPlayer {
    *  failures in this file (unknown checkpoint, missing actionId, failed
    *  checkpoint). The `live()` guard matters: a step that fails because the
    *  learner navigated away or stopped is not something to interrupt them with. */
-  const guardedPerform = useCallback((view: WalkthroughStepView, data: Record<string, unknown>) => {
+  const guardedPerform = useCallback((view: WalkthroughStepView, data: Record<string, unknown>, continuation?: WalkthroughStepIdentity) => {
     // `performStep` has its own local `live()`; this is the same test rebuilt at
     // this scope — capture the run before the call and only speak if it is still
     // the run in play when the failure lands.
     const startedFor = activeRef.current?.runId;
-    void performStep(view, data).catch((err) => {
+    const work = performStep(view, data, continuation);
+    const generation = performGeneration.current;
+    void work.catch((err) => {
       console.warn('[walkthroughs] step perform failed', err);
-      if (!startedFor || activeRef.current?.runId !== startedFor) return;
+      if (!startedFor || activeRef.current?.runId !== startedFor || currentStepRef.current?.nodeId !== view.nodeId || performGeneration.current !== generation) return;
       setStatus('needs-update');
       setError(err instanceof Error ? err.message : String(err));
     });
@@ -332,8 +356,10 @@ export function useWalkthroughPlayer(): WalkthroughPlayer {
       `${config.baseUrl}/host/openwop-app/runs/${encodeURIComponent(runId)}/interrupts`,
       fetchOpts({ headers: authedHeaders() }),
     );
+    if (activeRef.current?.runId !== runId) return;
     if (!res.ok) return;
     const { interrupts } = (await res.json()) as { interrupts: Array<{ nodeId: string; kind: string; resolvedAt?: string; data?: Record<string, unknown> }> };
+    if (activeRef.current?.runId !== runId) return;
     const open = interrupts.find((i) => !i.resolvedAt && (i.kind === 'walkthrough-step' || i.kind === 'tour-step'));
     if (!open) return;
     const data = open.data ?? {};
@@ -346,6 +372,15 @@ export function useWalkthroughPlayer(): WalkthroughPlayer {
   }, [guardedPerform]);
 
   const attach = useCallback((active: ActiveWalkthrough) => {
+    if (activeRef.current && activeRef.current.runId !== active.runId) pausedRef.current = false;
+    pendingRef.current = null;
+    currentStepRef.current = null;
+    ++performGeneration.current;
+    hitlOffRef.current?.();
+    hitlOffRef.current = null;
+    setHitlAuto(false);
+    setStep(null);
+    setTarget(null);
     activeRef.current = active;
     sessionStorage.setItem(SESSION_KEY, JSON.stringify(active));
     subRef.current?.close();
@@ -354,6 +389,7 @@ export function useWalkthroughPlayer(): WalkthroughPlayer {
       idleTimeoutMs: 10 * 60_000,
       absoluteTimeoutMs: 24 * 60 * 60_000,
       onEvent: (ev) => {
+        if (activeRef.current?.runId !== active.runId) return;
         const type = ev.type as string;
         if (type === 'node.suspended' || type === 'interrupt.created') {
           const kind = ((ev as { payload?: { kind?: string } }).payload?.kind);
@@ -439,17 +475,24 @@ export function useWalkthroughPlayer(): WalkthroughPlayer {
     }
   }, [attach, recordProgress, teardown]);
 
-  const pause = useCallback(() => { pausedRef.current = true; setStatus('paused'); }, []);
+  const pause = useCallback(() => {
+    pausedRef.current = true;
+    hitlOffRef.current?.();
+    hitlOffRef.current = null;
+    setHitlAuto(false);
+    setStatus('paused');
+  }, []);
   const resume = useCallback(() => {
     pausedRef.current = false;
     const pending = pendingRef.current;
+    const current = currentStepRef.current;
     pendingRef.current = null;
-    if (pending) {
+    if (pending && current && activeRef.current?.runId === pending.runId && current.runId === pending.runId && current.nodeId === pending.view.nodeId) {
       // Re-fetch nothing: the interrupt is still open; re-perform with the
       // ORIGINAL interrupt data (checkpoint/prefill survive the pause).
       // An HITL step re-enters its own branch and lands back on 'waiting-user'.
       setStatus('performing');
-      guardedPerform(pending.view, pending.data);
+      guardedPerform(pending.view, pending.data, current);
     } else {
       // Nothing stashed ⇒ nothing to drive. Claiming 'performing' here is the
       // false-progress shape (grade-code `WT-1`): it asserts a step is being
@@ -488,9 +531,11 @@ export function useWalkthroughPlayer(): WalkthroughPlayer {
    *  other resolve (the #1886 class). No-op unless a step is waiting. */
   const confirmHitl = useCallback(async () => {
     const active = activeRef.current;
-    if (!active || status !== 'waiting-user' || !step) return;
-    await resolveStep(active.runId, step.nodeId, { acked: true });
-  }, [status, step]);
+    const current = currentStepRef.current;
+    if (!active || pausedRef.current || status !== 'waiting-user' || !step
+      || current?.runId !== active.runId || current.nodeId !== step.nodeId) return;
+    await resolveWaitingStep(active.runId, step.nodeId, { acked: true });
+  }, [resolveWaitingStep, status, step]);
 
   // ADR 0378 P2a — position derived by matching the open step's nodeId against
   // the def-ordered list; null until the def fetch lands (or if it failed).

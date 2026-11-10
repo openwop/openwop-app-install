@@ -19,6 +19,7 @@ import { CAMPAIGN_RUN_TAG_KEY, listCampaignRuns, stampCampaignRun } from '../cam
 import type { MarketingCampaign } from '../campaign-orchestration/types.js';
 import { AUTOPILOT_CHAIN_ID } from './ids.js';
 import { STAGE_RUN_PREFIX } from './stageRun.js';
+import { campaignLaunchConfigurable, resolveCampaignLaunchAi } from '../campaign-orchestration/launchAi.js';
 
 const log = createLogger('campaign-autopilot.launch');
 
@@ -42,12 +43,14 @@ export interface LaunchResult { runId: string; campaignId: string; reused: boole
 
 export async function launchAutopilot(
   deps: StartRunDeps,
-  input: { tenantId: string; campaign: MarketingCampaign; actingUserId: string },
+  input: { tenantId: string; campaign: MarketingCampaign; actingUserId: string; ai?: unknown },
 ): Promise<LaunchResult> {
   const { tenantId, campaign, actingUserId } = input;
   if (!campaign.briefId) {
     throw new OpenwopError('validation_error', 'This campaign has no brief, so the autopilot has nothing to work from.', 422, { reason: 'brief_missing' });
   }
+  // Validate even a request that will join an existing run, before reserving work.
+  const ai = await resolveCampaignLaunchAi(tenantId, input.ai);
   const key = ignitionKey('campaign-autopilot.launch', campaign.id);
   const claim = await claimIgnition(tenantId, key);
   if (!claim.claimed) {
@@ -66,6 +69,7 @@ export async function launchAutopilot(
     workflowId: AUTOPILOT_CHAIN_ID,
     // No inputs: every autopilot node reads the campaign (and its brief) from the tag.
     inputs: {},
+    ...(ai ? { configurable: campaignLaunchConfigurable(ai) } : {}),
     metadata: {
       actingUserId,
       // ADR 0941 D2b — the run tag, composed by its one writer.

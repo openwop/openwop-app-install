@@ -19,9 +19,13 @@
  *   5. race: a slow older read that fails AFTER a newer one succeeded does not put
  *      the warning back over the fresh list.
  *
- * Sabotage-witnessed: restoring the `brands === null` branch above the failure
- * branch reds case 1; dropping the `seq !== brandsSeq.current` guard in the catch
- * reds case 5; restoring the old `brandsFailed ?` card over a loaded list reds 3.
+ * Sabotage-witnessed (w77): dropping the failure branch reds cases 1, 1b and 2, and
+ * dropping its `announce` reds 1; skipping the orgs re-read reds 1c; never clearing
+ * the failure flag reds 2; restoring the old `brandsFailed ?` card over a loaded
+ * list, or blanking the list on a failed refresh, reds 3; dropping the disabled
+ * branch reds 4; dropping the `seq !== brandsSeq.current` guard in the catch reds 5.
+ * Case 5 covers the failing race only: the same guard on the success path has no
+ * case here (BRAND-RACE-GAP-1).
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor, act, within } from '@testing-library/react';

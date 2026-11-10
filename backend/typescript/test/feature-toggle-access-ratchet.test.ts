@@ -17,6 +17,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { declaredPathTable } from './helpers/featureRatchetTables.js';
 
 const SRC = join(__dirname, '..', 'src');
 
@@ -27,6 +28,9 @@ const ALLOWED: Record<string, number> = {
   'features/featureRoute.ts': 1,
   // The billing toggle read inside the entitlement verdict (billing is never sold).
   'features/billing/entitlementGuard.ts': 1,
+  // GET /billing/entitlements answers "billing off" with the unrestricted verdict
+  // (200, not the toggle's 404): billing is never sold, so there is no plan half.
+  'features/billing/routes.ts': 1,
   // The FE single-assignment read (the bulk map resolves configs directly).
   'routes/featureToggles.ts': 1,
   // ADR 0892 Phase B — the store card's "is this bundle already on here" read.
@@ -127,12 +131,13 @@ function callCount(text: string): number {
  * the pure resolver. Each bypasses `resolveOne` exactly like `resolveToggle`
  * (review L4), so their callers outside the toggle service are pinned too.
  */
-const RAW_READS_ALLOWED: Record<string, number> = {
+const HOST_RAW_READS_ALLOWED: Record<string, number> = {
   // The FE assignments map (the plan lock renders from billing, not from here).
   'routes/featureToggles.ts': 1,
   // A readiness REPORT of global state, not a gate; reports a kill as `off`.
-  'features/kicktodo-core/readinessService.ts': 1,
 };
+/** ADR 1031 P2 — plus each feature package's rows (`ratchetTables.json`, `featureToggleAccess.rawReadsAllowed`). */
+const RAW_READS_ALLOWED: Record<string, number> = { ...HOST_RAW_READS_ALLOWED, ...declaredPathTable<number>('featureToggleAccess.rawReadsAllowed') };
 
 function rawReadCount(text: string): number {
   return text

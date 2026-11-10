@@ -18,7 +18,7 @@ function operation(bytes) {
   assert(value && typeof value === 'object' && !Array.isArray(value), 'control object');
   assert.deepEqual(Object.keys(value).sort(), ['operation', 'version'], 'control fields');
   assert.equal(value.version, 1, 'control version');
-  assert(['status', 'cancel', 'fetch', 'log'].includes(value.operation), 'unknown control operation');
+  assert(['status', 'cancel', 'fetch', 'log', 'start'].includes(value.operation), 'unknown control operation');
   return value.operation;
 }
 
@@ -32,7 +32,7 @@ function operation(bytes) {
  * names are opened. The same trusted-account assumption as the journal applies;
  * this is not isolation from a malicious process using the worker's account.
  */
-export async function* remoteGateControlResponse(input, { root, spoolRoot, trust, logRoot, signal, now } = {}) {
+export async function* remoteGateControlResponse(input, { root, spoolRoot, trust, logRoot, start, signal, now } = {}) {
   const frame = await receiveRemoteGateFrame(input, { kind: 'control', root: spoolRoot, signal,
     idleTimeoutMs: 5000, totalTimeoutMs: 30000 });
   try {
@@ -54,11 +54,20 @@ export async function* remoteGateControlResponse(input, { root, spoolRoot, trust
       const job = readRemoteGateJob(jobInput);
       assert(['completed', 'failed', 'interrupted', 'cancelled'].includes(job.state), 'job is not finished');
       assert(logRoot, 'no log root configured');
-      for (const chunk of remoteGateFrame('log', { 'gate.log': join(privateRoot(logRoot), `${job.id}.log`) })) {
+      for (const chunk of remoteGateFrame('log', { 'gate.log.gz': join(privateRoot(logRoot), `${job.id}.log.gz`) })) {
         signal?.throwIfAborted();
         yield chunk;
       }
       return;
+    }
+    if (action === 'start') {
+      // Launch only an `accepted` job, through the worker's installed launcher;
+      // any other state is answered with its status and nothing is launched.
+      const job = readRemoteGateJob(jobInput);
+      if (job.state === 'accepted') {
+        assert.equal(typeof start, 'function', 'no launcher configured');
+        await start({ id: job.id });
+      }
     }
     if (action === 'cancel') requestRemoteGateCancellation(jobInput);
     const status = remoteGateJobStatus(jobInput);

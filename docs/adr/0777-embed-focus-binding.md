@@ -121,3 +121,24 @@ predicate, so the exposure is nil, but the guard makes intent explicit).
 
 None. `ConversationMeta` and `/v1/host/openwop-app/chat/*` are host-local;
 tool defaults are host behaviour; no run-event or capability change.
+
+## Correction (2026-11-03, ADR 1040 D4)
+
+Two things in this ADR are superseded by ADR 1040 D4; the reasoning above is
+kept as it was decided.
+
+- **"CANVAS only" is now "registered kinds".** `ConversationFocus.kind` is any
+  kind registered through `registerConversationFocusKind` (`host/conversationFocus.ts`);
+  `canvas` is the host's own registration of the same seam. A feature's kind is
+  `<featureId>.<entity>` and carries its own `authorize`. Workflow is still not a
+  focus: that binding stays ADR 0773's pairing context.
+- **`resolveFocusedId` is replaced by `resolveAuthorizedFocus`.** The old helper
+  returned a model-supplied explicit id unchecked and relied on each tool
+  re-checking downstream. That held for CAD (measured: a witness test passes on
+  the old code and goes red when `get-design` skips `getCanvasForCaller`), but it
+  was a trap for the next caller. The new helper runs the kind's `authorize` on
+  the explicit id or the stored focus, with the calling turn's scope, on every
+  call. A focus the caller can no longer read now resolves to nothing, so CAD's
+  `get-design` answers "no model is open" rather than `not_found` in that case.
+- The route also gained a manage gate (a participant cannot re-point or clear the
+  owner's focus) and refuses to bind a legacy session row that has no meta.

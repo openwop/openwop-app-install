@@ -50,6 +50,9 @@ export const KERNEL_METRIC_ROW_FILTER: { readonly [T in KernelMetricType]: 'crm-
 export interface MetricDef {
   metricId: string;
   tenantId: string;
+  /** ADR 1052 D0 — the org whose catalog holds this metric. Absent only on the
+   *  in-code system metrics, which every org lists. */
+  orgId?: string;
   title: string;
   description?: string;
   /** A kernel type from KERNEL_METRIC_TYPES or a published user type. */
@@ -81,6 +84,30 @@ export interface RunMetricParams {
   bucket?: TimeBucket;
 }
 
+/** ADR 1052 D1 — why a stored definition no longer fits its live type. */
+export interface MetricStale {
+  /** The definition key that no longer resolves: a field key, or `entityType`. */
+  field: string;
+}
+
+/** ADR 1052 D9 — the ONE catalog entry every lane lists (route, chat tool, run
+ *  surface): the definition plus its live verdict, never the author or tenant. */
+export interface MetricCatalogEntry {
+  metricId: string;
+  title: string;
+  description?: string;
+  entityType: string;
+  aggregate: Aggregate;
+  field?: string;
+  filters?: MetricFilter[];
+  groupBy?: string;
+  timeField?: string;
+  system: boolean;
+  /** BI84WF-12 — a pre-1052 tenant-wide metric: read-only until adopted into one org. */
+  legacy?: true;
+  stale?: MetricStale;
+}
+
 export interface MetricSeriesPoint {
   key: string;
   value: number;
@@ -97,8 +124,15 @@ export interface RunMetricResult {
   points: MetricSeriesPoint[];
   groupedBy?: string;
   bucket?: TimeBucket;
-  /** Rows this caller may read in the requested org (before the metric's own filters). */
+  /** ADR 1052 D2 — what the rows were scoped to: kernel types read one org's rows
+   *  (then the owning feature's row filter); user types are tenant-wide, as the
+   *  entities read is. */
+  scope: 'org' | 'tenant';
+  /** Rows in that scope this caller may read (before the metric's own filters). */
   totalRows: number;
-  /** ADR 0846 — the fetch hit the per-run row ceiling, so the aggregate is partial. */
-  truncated?: boolean;
+  /** ADR 1052 D3 — more than MAX_GROUPS groups existed; `droppedGroups` were left out. */
+  groupsTruncated?: true;
+  droppedGroups?: number;
+  /** ADR 1052 D4 — bucketed runs: rows whose time value is missing or not a date. */
+  undatedRows?: number;
 }

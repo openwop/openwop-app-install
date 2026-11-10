@@ -149,6 +149,7 @@ export async function sendViaSmtp(
 ): Promise<EmailSendResult> {
   const provider = 'smtp';
   const resolved = await resolveConnectionCredential({
+    egress: { fixedEndpoint: 'the SMTP server of the connection itself' },
     tenantId: deps.tenantId,
     provider,
     ...(deps.actingUserId ? { actingUserId: deps.actingUserId } : {}),

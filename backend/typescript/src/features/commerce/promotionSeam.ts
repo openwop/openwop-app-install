@@ -12,6 +12,10 @@
  *
  * Amounts are MAJOR units, matching the commerce Order convention (subtotal/total).
  */
+import { createLogger } from '../../observability/logger.js';
+
+const log = createLogger('commerce.promotion-seam');
+
 export interface AppliedPromotion {
   promotionId: string;
   /** cart_threshold | bogo | tiered | product_discount | loss_leader */
@@ -40,6 +44,9 @@ export interface OrderDiscountResult {
   /** Additional order-level discount, MAJOR units (0 = none). */
   discount: number;
   appliedPromotions: AppliedPromotion[];
+  /** ADR 1025 D1 — budget holds taken for this order (order lane only). The caller MUST
+   *  commit them with the orderId once the order row is written, or release them. */
+  holdIds?: string[];
 }
 
 type OrderDiscountHook = (ctx: OrderDiscountContext) => Promise<OrderDiscountResult>;
@@ -48,6 +55,22 @@ let hook: OrderDiscountHook | null = null;
 
 /** The promotions feature registers its `applyPromotions` here at boot. */
 export function setOrderDiscountHook(fn: OrderDiscountHook | null): void { hook = fn; }
+
+/** ADR 1025 D1 — how commerce settles the budget holds a pricing pass took. Registered by
+ *  the promotions feature with the discount hook; no-ops when it is absent. */
+type HoldHooks = { commit: (tenantId: string, holdIds: readonly string[], orderId: string) => Promise<void>; release: (tenantId: string, holdIds: readonly string[]) => Promise<void> };
+let holdHooks: HoldHooks | null = null;
+export function setOrderPromotionHoldHooks(h: HoldHooks | null): void { holdHooks = h; }
+/** Best-effort: a hold that cannot be settled expires on its own (the TTL), so a failure
+ *  here never fails an order that was already written. */
+export async function commitOrderPromotionHolds(tenantId: string, holdIds: readonly string[], orderId: string): Promise<void> {
+  if (!holdHooks || holdIds.length === 0) return;
+  await holdHooks.commit(tenantId, holdIds, orderId).catch((e) => log.warn('promotion hold commit failed — it will expire', { tenantId, orderId, error: e instanceof Error ? e.message : String(e) }));
+}
+export async function releaseOrderPromotionHolds(tenantId: string, holdIds: readonly string[]): Promise<void> {
+  if (!holdHooks || holdIds.length === 0) return;
+  await holdHooks.release(tenantId, holdIds).catch((e) => log.warn('promotion hold release failed — it will expire', { tenantId, error: e instanceof Error ? e.message : String(e) }));
+}
 
 /** Called by `createOrder`; the documented no-op when no promotions feature is wired. */
 export async function computeOrderPromotions(ctx: OrderDiscountContext): Promise<OrderDiscountResult> {

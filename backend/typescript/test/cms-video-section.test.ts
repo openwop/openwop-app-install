@@ -131,7 +131,7 @@ describe('video section — VideoObject JSON-LD', () => {
       embedUrl: 'https://www.youtube.com/embed/ABqfybP2w4k',
       url: GOOD.youtubeUrl,
     });
-    expect(videos[1]).toMatchObject({ name: 'Second', duration: 'PT1M15S', uploadDate: '2026-10-02' });
+    expect(videos[1]).toMatchObject({ name: 'Second', duration: 'PT1M15S', uploadDate: '2026-10-02T00:00:00Z' });
   });
 
   it('a page without a video section emits none', () => {
@@ -155,5 +155,39 @@ describe('video section — markdown twin', () => {
     expect(md).toContain(`**${GOOD.title}** (1:57)`);
     expect(md).toContain(GOOD.description);
     expect(md).toContain(`[Watch the video](${GOOD.src}) · [Watch on YouTube](${GOOD.youtubeUrl})`);
+  });
+});
+
+// ADR 1068 D1 — the chip's own words and a visible caption, on both films. Red
+// when: either field stops being kept (base or overlay) or capped; the caption
+// stops reaching the crawler or the markdown; the chip label leaks into them.
+describe('video section — chipLabel and caption (ADR 1068 D1)', () => {
+  const FILM2 = { title: 'Second', description: 'D2', length: '1:02', src: 'https://example.test/b.mp4', poster: 'https://example.test/b.jpg' };
+  const both = { ...GOOD, chipLabel: 'Watch the tour', caption: 'Agents, then workflows.', film2: { ...FILM2, chipLabel: 'Watch two', caption: 'The second line.' } };
+
+  it('keeps both fields on each film, and caps them', () => {
+    const d = video(both).data;
+    expect([d.chipLabel, d.caption]).toEqual(['Watch the tour', 'Agents, then workflows.']);
+    const f2 = d.film2 as Record<string, unknown>;
+    expect([f2.chipLabel, f2.caption]).toEqual(['Watch two', 'The second line.']);
+    const long = video({ ...GOOD, chipLabel: 'x'.repeat(500), caption: 'y'.repeat(900) }).data;
+    expect((long.chipLabel as string).length).toBeLessThanOrEqual(120);
+    expect((long.caption as string).length).toBeLessThanOrEqual(240);
+  });
+
+  it('carries both into a localization overlay', () => {
+    expect(sanitizeSectionOverlay('video', { chipLabel: 'Ver el recorrido', caption: 'Agentes.' })).toEqual({ chipLabel: 'Ver el recorrido', caption: 'Agentes.' });
+  });
+
+  it('puts the caption (not the chip label) in the crawler render and the markdown, for both films', () => {
+    const s = video(both);
+    const html = sectionHtml(s, { assetBase: 'https://app.example.test' })!;
+    expect(html).toContain('<p>Agents, then workflows.</p>');
+    expect(html).toContain('<p>The second line.</p>');
+    expect(html).not.toContain('Watch the tour');
+    const md = sectionMarkdown(s, 'https://app.example.test')!;
+    expect(md).toContain('Agents, then workflows.');
+    expect(md).toContain('The second line.');
+    expect(md).not.toContain('Watch the tour');
   });
 });

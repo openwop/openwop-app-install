@@ -20,13 +20,17 @@ import { slidesDefinition } from '../../features/slides/definition.js';
 
 const FRONTEND_SRC = join(process.cwd(), 'src'); // vitest runs from frontend/react
 const BACKEND_FEATURES = join(process.cwd(), '..', '..', 'backend', 'typescript', 'src', 'features');
+/** ADR 1031 P3 — an adopter's packages (`src/adopter/features/`), present only in its tree. */
+const BACKEND_ADOPTER_FEATURES = join(process.cwd(), '..', '..', 'backend', 'typescript', 'src', 'adopter', 'features');
 
-/** Every FE canvas definition module (the SOURCE OF TRUTH the chassis reads). */
-const definitionModules = import.meta.glob<Record<string, unknown>>('../../features/*/definition.tsx', { eager: true });
+/** Every FE canvas definition module (the SOURCE OF TRUTH the chassis reads), first-party
+ *  and, in an adopter's tree, its own (ADR 1031 P3) — one file green in both trees. */
+const definitionModules = import.meta.glob<Record<string, unknown>>(['../../features/*/definition.tsx', '../../adopter/features/*/definition.tsx'], { eager: true });
+const firstPartyModules = Object.fromEntries(Object.entries(definitionModules).filter(([k]) => k.startsWith('../../features/')));
 
-function feCollabKinds(): Record<string, unknown> {
+function feCollabKinds(mods: Record<string, Record<string, unknown>> = definitionModules): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  for (const mod of Object.values(definitionModules)) {
+  for (const mod of Object.values(mods)) {
     for (const exp of Object.values(mod)) {
       if (!exp || typeof exp !== 'object') continue;
       const def = exp as { canvasTypeId?: unknown; collab?: unknown };
@@ -61,7 +65,8 @@ function resolveTypeId(expr: string, file: string): string {
 /** Backend `registerCanvasEditorRoutes` calls whose TOP-LEVEL cfg says `collab: true`. */
 function backendCollabTypeIds(): string[] {
   const ids: string[] = [];
-  for (const file of walk(BACKEND_FEATURES)) {
+  const roots = [BACKEND_FEATURES, ...(existsSync(BACKEND_ADOPTER_FEATURES) ? [BACKEND_ADOPTER_FEATURES] : [])];
+  for (const file of roots.flatMap((r) => walk(r))) {
     const src = readFileSync(file, 'utf8');
     const calls = [...src.matchAll(/^( *)registerCanvasEditorRoutes\(deps, \{$/gm)];
     calls.forEach((m, i) => {
@@ -81,15 +86,13 @@ function backendCollabTypeIds(): string[] {
 
 describe('collab-capable canvas types (ADR 0359 Phase 5)', () => {
   it('pins each first-party type to its binding kind (derived from every FE definition)', () => {
-    expect(feCollabKinds()).toEqual({
+    expect(feCollabKinds(firstPartyModules)).toEqual({
       'canvas.document': 'document',           // y-prosemirror surface
       'canvas.slides': 'elements',             // frames + tree
       'canvas.app-builder': 'elements',        // frames + tree (+ graph projection)
       'canvas.drawing': 'elements',
       'canvas.cad': 'elements',
       'canvas.campaign': 'elements',
-      // ADR 0458 §2.3 — frames (single 'outline') + tree (days/children).
-      'canvas.challenge-outline': 'elements',
     });
   });
 
@@ -106,19 +109,22 @@ describe('collab-capable canvas types (ADR 0359 Phase 5)', () => {
   it('the FE collab set equals the backend `collab: true` registrations (both directions)', () => {
     expect(existsSync(BACKEND_FEATURES)).toBe(true);
     const backend = backendCollabTypeIds();
-    // Positive control on the parser: it must find real registrations.
-    expect(backend.length).toBeGreaterThanOrEqual(7);
+    // Positive control on the parser: it must find real registrations (6 first-party
+    // since canvas.challenge-outline left with KickTodo, ADR 1031 P3; an adopter adds its own).
+    expect(backend.length).toBeGreaterThanOrEqual(6);
     expect(backend.every((id) => id.startsWith('canvas.'))).toBe(true);
     expect(Object.keys(feCollabKinds()).sort()).toEqual(backend);
   });
 
   it('every elements-kind type has traits the collab shape can bind (frames or elements)', () => {
     const fe = feCollabKinds();
-    const defs = Object.values(definitionModules).flatMap((m) => Object.values(m))
+    const elementsDefs = (mods: Record<string, Record<string, unknown>>) => Object.values(mods).flatMap((m) => Object.values(m))
       .filter((d): d is { canvasTypeId: string; frames?: { key?: string }; elements?: unknown[] } =>
         !!d && typeof d === 'object' && typeof (d as { canvasTypeId?: unknown }).canvasTypeId === 'string')
       .filter((d) => fe[d.canvasTypeId] === 'elements');
-    expect(defs).toHaveLength(6);
+    const defs = elementsDefs(definitionModules); // every one is checked below, an adopter's too
+    // The exact pin is FIRST-PARTY (6 until canvas.challenge-outline left, ADR 1031 P3).
+    expect(elementsDefs(firstPartyModules)).toHaveLength(5);
     for (const def of defs) {
       const hasFrames = Boolean(def.frames?.key);
       const hasElements = Array.isArray(def.elements) && def.elements.length > 0;

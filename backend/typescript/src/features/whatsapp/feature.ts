@@ -27,6 +27,8 @@ import { onConnectionRevoked } from '../../host/connectionLifecycle.js';
 import { registerInboundObserver, registerInboundGate } from '../connections/inboundWebhooks.js';
 import { applyInboundKeyword, whatsappDispatchAllowed } from './compliance.js';
 import { registerWhatsAppRoutes } from './routes.js';
+import { sendWhatsApp } from './whatsappService.js';
+import { registerReplyTransport, type ChannelReply, type ReplyTransportResult } from '../connections/messagingOutbound.js';
 
 export const whatsappFeature: BackendFeature = {
   id: 'whatsapp',
@@ -61,6 +63,20 @@ export const whatsappFeature: BackendFeature = {
       await cleanupWhatsAppConnection(tenantId, connectionId);
     });
     registerWhatsAppRoutes(deps);
+    // ADR 1042 D4 — a channel REPLY on WhatsApp rides the one governed send
+    // (toggle, binding, STRICT explicit opt-in, the 24h window, idempotency keyed
+    // on the inbound message id). A customer who never opted in gets nothing
+    // (`consent_denied`) — a conversational reply lane is a P2c user decision.
+    const waReply = async (reply: ChannelReply): Promise<ReplyTransportResult> => {
+      if (reply.lane.kind !== 'connection') return { sent: false, error: 'wrong_lane' };
+      const r = await sendWhatsApp(
+        { storage: deps.storage, tenantId: reply.tenantId, runId: `channel-reply:${reply.inboundMessageId}`, actingUserId: reply.actingUserId },
+        { connectionId: reply.lane.connectionId, to: reply.chatId, body: reply.text.slice(0, 4096), idempotencyKey: `channel-reply:${reply.inboundMessageId}` },
+      );
+      return r.sent ? { sent: true, providerRef: r.providerSid ?? '' } : { sent: false, error: r.error };
+    };
+    registerReplyTransport('whatsapp-twilio', waReply);
+    registerReplyTransport('whatsapp-cloud', waReply);
   },
   toggleDefault: {
     id: 'whatsapp',

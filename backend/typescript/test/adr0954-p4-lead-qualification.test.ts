@@ -20,8 +20,10 @@
  * stated answers and assessments.
  *
  * Sabotage-witnessed (P4): dropping `anonHitlOnly` from the tool reds the
- * hold-only case (both legs); dropping the `readRefs` membership check reds the
- * invented-ref case; removing the repair round reds "one repair can succeed";
+ * hold-only case (both legs); dropping the evidence-ref check (`readRefs` and
+ * `liveRefs` together: on the production path `live` is filtered from what was
+ * read, so `readRefs` alone is an equivalent mutant) reds the invented-ref case;
+ * removing the repair round reds "one repair can succeed";
  * reading a qualifier signal from stated answers instead of the assessment reds
  * "the widget cannot write a grade".
  */
@@ -129,12 +131,12 @@ const newLead = async (name: string, email?: string): Promise<string> => {
 const note = async (contactId: string, body: string): Promise<string> =>
   (await createActivity({ tenantId: TENANT, orgId: orgA, kind: 'call', body, contactId, createdBy: o1, validators: makeLinkValidators(TENANT, orgA) })).activityId;
 async function settled(runId: string): Promise<{ status: string; error?: { code: string; message: string } }> {
-  for (let i = 0; i < 200; i += 1) {
+  // A run has no settle hook to await: poll its status until terminal.
+  return vi.waitFor(async () => {
     const r = await hostExtStorage().getRun(runId);
     if (r && ['completed', 'failed', 'cancelled'].includes(r.status)) return r;
-    await new Promise((res) => setTimeout(res, 25));
-  }
-  throw new Error(`run ${runId} did not settle`);
+    throw new Error(`run ${runId} did not settle`);
+  }, { timeout: 10_000, interval: 25 });
 }
 const qualify = async (contactId: string): Promise<string> => {
   const r = await call<{ runId: string }>('admin', 'POST', `/${orgA}/leads/${contactId}/qualify`);
@@ -174,7 +176,19 @@ beforeAll(async () => {
   await createMember({ tenantId: TENANT, orgId: orgB, subject: onlyB, displayName: 'onlyB', roles: ['editor'] });
   cookies.admin = cookieFor(admin, 'ws:home-admin');
   cookies.onlyB = cookieFor(onlyB, 'ws:home-only-b');
-});
+  // Here, not in the D4 describe: the D7 cases grade and qualify too, and shuffle
+  // reorders describes.
+  const m = await saveModelVersion({ tenantId: TENANT, orgId: orgA, modelId: 'qual', expectedVersion: 0, actor: admin, content: {
+    signals: [
+      { signalId: 'funnel.view', weight: 1 },
+      { signalId: 'qualifier.budget', weight: 50, values: ['large'] },
+      { signalId: 'qualifier.timeline', weight: 2, cap: 12 },
+    ],
+    bands: { A: 100, B: 50, C: 25, D: 10, E: 1 }, criteria: CRITERIA, sla: {},
+  } });
+  model = { modelId: 'qual', version: m.version };
+  await activateModel({ tenantId: TENANT, orgId: orgA, modelId: 'qual', version: m.version, actor: admin, expected: null });
+}, 120_000);
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); vi.unstubAllEnvs(); });
 // A failing case must not leave scripted replies for the next one.
 beforeEach(() => { ai.queue.length = 0; ai.calls.length = 0; ai.providerCalls = 0; });
@@ -204,19 +218,6 @@ describe('ADR 0954 D4 — closed-world validation', () => {
 });
 
 describe('ADR 0954 D4 — the qualify chain', () => {
-  beforeAll(async () => {
-    const m = await saveModelVersion({ tenantId: TENANT, orgId: orgA, modelId: 'qual', expectedVersion: 0, actor: admin, content: {
-      signals: [
-        { signalId: 'funnel.view', weight: 1 },
-        { signalId: 'qualifier.budget', weight: 50, values: ['large'] },
-        { signalId: 'qualifier.timeline', weight: 2, cap: 12 },
-      ],
-      bands: { A: 100, B: 50, C: 25, D: 10, E: 1 }, criteria: CRITERIA, sla: {},
-    } });
-    model = { modelId: 'qual', version: m.version };
-    await activateModel({ tenantId: TENANT, orgId: orgA, modelId: 'qual', version: m.version, actor: admin, expected: null });
-  });
-
   it('a grounded assessment is recorded and feeds the qualifier signals; the model never sets the grade', async () => {
     const contactId = await newLead('Grounded');
     const act = await note(contactId, 'Budget approved (large). Buying in 3 months.');
@@ -246,7 +247,7 @@ describe('ADR 0954 D4 — the qualify chain', () => {
     const runId = await qualify(contactId);
     const run = await settled(runId);
     expect(run.status).toBe('failed');
-    expect(JSON.stringify(run.error)).toContain('assessment_ungrounded');
+    expect(run.error?.code).toBe('assessment_ungrounded');
     expect(ai.calls).toHaveLength(2);
     expect(ai.calls[1]!.messages.at(-1)?.content).toContain('"activity:invented" is not in the evidence');
     expect(await getAssessmentForRun(TENANT, orgA, contactId, runId)).toBeNull();
@@ -343,8 +344,16 @@ describe('ADR 0954 D4 — the qualify chain', () => {
 
   it('the qualify route refuses a model without criteria and is client-scoped', async () => {
     const contactId = await newLead('Scoped');
-    expect((await call('onlyB', 'POST', `/${orgA}/leads/${contactId}/qualify`)).status).toBe(404);
-    expect((await call('onlyB', 'GET', `/${orgA}/leads/${contactId}/assessments/x`)).status).toBe(404);
+    const act = await note(contactId, 'Budget approved.');
+    ai.queue.push(answer(`activity:${act}`));
+    const runId = await qualify(contactId);
+    expect((await settled(runId)).status).toBe('completed');
+    const assessmentPath = `/${orgA}/leads/${contactId}/assessments/${runId}`;
+    expect((await call('admin', 'GET', assessmentPath)).status).toBe(200);
+    for (const refused of [await call('onlyB', 'POST', `/${orgA}/leads/${contactId}/qualify`), await call('onlyB', 'GET', assessmentPath)]) {
+      expect(refused.status).toBe(404);
+      expect(refused.raw).toContain('Client not found.');
+    }
     const c = await createContact({ tenantId: TENANT, name: 'B lead', email: `b-${randomBytes(3).toString('hex')}@example.test`, stage: 'lead' });
     await bindLead({ tenantId: TENANT, orgId: orgB, contactId: c.contactId, source: 'form', boundBy: admin });
     await createMember({ tenantId: TENANT, orgId: orgB, subject: admin, displayName: 'Admin', roles: ['admin'] });

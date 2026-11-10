@@ -83,11 +83,8 @@ export const SENSITIVE_APPROVAL_TOOLS: ReadonlySet<string> = new Set([
   // member to be a registered tool. New asks are DECLARED on the tool
   // (`BuiltinTool.safeModeApproval`), not added here.
   'openwop:core.openwop.http.fetch',     // off-host egress
-  // ADR 0442 Guide wave (Wave 2) — KickBot's one bounded write: logging the
-  // participant's OWN check-in commits durable, NON-reversible domain state, so
-  // it is deferred for the one-click approval card in `safe` mode. "You propose;
-  // the user decides" — nothing is recorded until they approve.
-  'openwop:kicktodo.log-checkin',        // complete today's action (own check-in)
+  // ADR 1031 P2 — KickBot's check-in tool (ADR 0442) left this name set: it
+  // DECLARES `safeModeApproval: true` on its own registration (kicktodo-core).
 ]);
 
 export function buildFirewallHook(opts: {
@@ -99,6 +96,13 @@ export function buildFirewallHook(opts: {
    *  raised by the baseline, or voice's one-shot in-session card. They satisfy a `baseline`
    *  ask only, never a tenant/platform/enforce `policy` ask. */
   approvedBaselineTools?: ReadonlySet<string>;
+  /** ADR 1042 (security review H2) — an approval satisfies ONE call: the first call it
+   *  lets through spends it (`onApprovalSpent`), and every later call of that tool in
+   *  this hook asks again. Used for channel-ingress turns, where the conversation's
+   *  default per-tool-for-the-conversation grain is too wide. Not FW2-D1: the approval
+   *  is not bound to the arguments that were shown. */
+  singleUseApprovals?: boolean;
+  onApprovalSpent?: (toolName: string) => void;
   unknownToolPolicy?: 'skip' | 'treat-as-risky';
   onUnclassified?: (toolName: string) => void;
   /** ADR 0150 — tools that need approval in `safe` mode regardless of the (opt-in) firewall
@@ -183,10 +187,21 @@ export function buildFirewallHook(opts: {
   // ADR 0834 D2 — who may satisfy an ask. A `policy` ask is satisfied ONLY by an approval a
   // human with authority gave for a policy ask (`approvedTools`); a `baseline` ask also by the
   // user's own bypass or a baseline-only approval. A `deny` is never touched by this.
+  const spent = new Set<string>();
   const satisfied = (name: string, origin: ApprovalOrigin | undefined): boolean => {
-    if (opts.approvedTools?.has(name)) return true;
-    if (origin === 'policy') return false;
-    return Boolean(opts.bypassApproval || opts.approvedBaselineTools?.has(name));
+    if (!opts.singleUseApprovals) {
+      if (opts.approvedTools?.has(name)) return true;
+      if (origin === 'policy') return false;
+      return Boolean(opts.bypassApproval || opts.approvedBaselineTools?.has(name));
+    }
+    // Single-use: a bypass still satisfies a baseline ask (never set on channel turns);
+    // a ledger approval satisfies exactly one call and is then spent.
+    if (origin !== 'policy' && opts.bypassApproval) return true;
+    const approved = Boolean(opts.approvedTools?.has(name) || (origin !== 'policy' && opts.approvedBaselineTools?.has(name)));
+    if (!approved || spent.has(name)) return false;
+    spent.add(name);
+    try { opts.onApprovalSpent?.(name); } catch { /* the in-hook spend already holds for this turn */ }
+    return true;
   };
   const finish = (name: string, v: CapabilityVerdict): CapabilityVerdict => {
     if (v.decision !== 'allow') { try { opts.onDecision?.(name, v); } catch { /* observability never decides */ } }

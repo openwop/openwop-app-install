@@ -21,6 +21,11 @@
  * Sabotage-witnessed (P0): restoring `memoryScope: agentMemoryScope(runnerIdentity.profileId)`
  * in `agentRunnerNode.ts` reds rules 1 and 2; restoring the shorthand
  * `memoryScope,` in `liveDispatchLane.ts` reds rule 2.
+ *
+ * Rule 1 is per FILE, so a dispatch added inside one of its three files passes it;
+ * rule 2 still refuses that dispatch's `memoryScope:` value in every file. The two
+ * rules together hold "never for a dispatch" (w83: the brace shorthand, a defaulted
+ * value on the run lane and a new knowledge-read subject each red their own rule).
  */
 import { describe, expect, it } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';

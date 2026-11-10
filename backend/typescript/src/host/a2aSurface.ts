@@ -13,11 +13,15 @@
  * surface normalizes inbound `status.state` to the UPPERCASE form so the pack's
  * multi-turn coordinator and reporters see the documented vocabulary.
  *
- * The SERVER-side methods (publishAgentCard / emitStatus / emitArtifact /
- * pushSend) are for a workflow exposed AS an A2A agent. The sample host is not
- * a live A2A server, so they are honest stub — they accept the call so
- * the node runs, but a production A2A host would push to the connected client's
- * stream instead. The notes on `host.a2a` advertise this.
+ * The SERVER-side methods the `core.openwop.a2a` pack can call
+ * (publishAgentCard / emitStatus / emitArtifact / pushSend) are deliberately
+ * ABSENT from this surface (ADR 1045 D3, CHAN-P6-3). They used to be stubs that
+ * reported success for actions they did not take. The live A2A server's card is
+ * generated from the routing SSoT (`a2aCard.ts`), task status is projected from
+ * the run (RFC 0100 §2), and push fires from the task store on each transition
+ * (`a2aTaskStore.ts`). With a method absent, the pack's emit/push nodes fail
+ * with `host_capability_missing` and `agent-card-publish` reports
+ * `published: false`. The `host.a2a` note says so.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -587,11 +591,7 @@ export interface A2aSurface {
     list(args: PushConfigArgs): Promise<unknown>;
     delete(args: PushConfigArgs): Promise<unknown>;
   };
-  // Server-side (workflow IS an A2A agent) — honest stub on the reference app.
-  publishAgentCard(args: { card: unknown; signed?: boolean }): Promise<void>;
-  emitStatus(event: unknown): Promise<void>;
-  emitArtifact(event: unknown): Promise<void>;
-  pushSend(args: { configId: string; event: unknown }): Promise<unknown>;
+  // No server-side (workflow IS an A2A agent) methods: ADR 1045 D3.
 }
 
 interface PushConfigArgs extends Negotiated {
@@ -601,20 +601,7 @@ interface PushConfigArgs extends Negotiated {
   pushNotificationConfig?: unknown;
 }
 
-// Per-tenant store for the server-side stubs (published agent card). Keyed by
-// tenant so a multi-tenant demo doesn't cross streams.
-const _publishedCards = new Map<string, unknown>();
-
-/** A7 — read a tenant's published agent card (set via `publishAgentCard`). The
- *  live A2A server route (`POST /v1/host/openwop-app/a2a`, RFC 0076) serves it on
- *  `agent/getCard`, falling back to a registry-synthesized card when a tenant
- *  hasn't published one. Returns undefined when none is published for the scope. */
-export function getPublishedAgentCard(tenantId: string, scopeId = ''): unknown | undefined {
-  return _publishedCards.get(`${tenantId}::${scopeId}`);
-}
-
 export function createA2aSurface(scope: BundleScope): A2aSurface {
-  const tenantKey = `${scope.tenantId}::${scope.scopeId ?? ''}`;
   /** RFC 0207 §B — a fresh child of the run's trace context for ONE outbound
    *  message, so the metadata carrier and the HTTP header name the same span
    *  and two concurrent sends stay distinguishable. */
@@ -701,22 +688,6 @@ export function createA2aSurface(scope: BundleScope): A2aSurface {
         const b = await negotiateA2aPeer(baseUrl, neg(negotiation));
         return rpc(b, methodName('deletePushConfig', b.version), { taskId, ...(configId ? { pushNotificationConfigId: configId } : {}) }, negotiation?.onCall);
       },
-    },
-
-    // ── Server-side demo stubs ───────────────────────────────────────
-    async publishAgentCard({ card }) {
-      _publishedCards.set(tenantKey, card);
-      log.info('agent card published (demo: stored in-process, not served at a live A2A endpoint)', { tenant: scope.tenantId });
-    },
-    async emitStatus() {
-      // A production A2A server pushes this onto the connected client's stream;
-      // the reference app has no inbound A2A connection, so this is a no-op.
-    },
-    async emitArtifact() {
-      // See emitStatus — no live A2A client stream on the reference app.
-    },
-    async pushSend({ configId }) {
-      return { ok: true, configId, delivered: false, note: 'demo: sample host has no live push-notification channel' };
     },
   };
 }

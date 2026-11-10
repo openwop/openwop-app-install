@@ -21,6 +21,15 @@
  * - P2 (tool lane): the wrapper executing on replay → 8 red. A replay miss
  *   executing → 4 red. Either tenant check removed → its mismatch case red.
  *   The scrub removed → the scrub case red.
+ * Re-witnessed 2026-11-03 (w81): the provider.usage re-emit removed, the model
+ * tenant check removed, a malformed record served, the 1 MB cap removed, the
+ * invocation_log rows left behind by deleteRun or by deleteAllTenantData, a digest
+ * blind to messages, and the ADR 1012 search guard removed (managed or BYOK) each
+ * red their case. The retry case is witnessed only as a held pair, because a
+ * live run never reads the log: HOLD a retry attempt (> 1) to read its own run's
+ * log as if replaying, then drop `attempt` from the cache key, and the retry is
+ * served the attempt-1 record instead of calling the provider. "a replay whose request DIVERGED" overlaps the control
+ * in context-economy-conversation-cache-replay (both protected; human ask).
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AiToolCallRequest } from '../src/executor/types.js';
@@ -86,7 +95,7 @@ beforeAll(async () => {
   app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 't', serviceVersion: '0', enableConsoleTracer: false });
   policyResolver = (app.locals.hostSuite as import('../src/host/index.js').HostAdapterSuite).providerPolicyResolver;
   storage = app.locals.storage as import('../src/storage/storage.js').Storage;
-});
+}, 120_000);
 
 afterAll(async () => {
   await (app.locals.storage as { close: () => Promise<void> }).close();
@@ -347,16 +356,18 @@ describe('ADR 1002 — live-run behaviour is unchanged', () => {
     const runId = 'run-revisit';
     const { adapter } = lane(runId);
     beginNodeActivity(runId, NODE, 1);
-    await adapter.callAIWithTools(TOOLS_REQ);
+    const first = await adapter.callAIWithTools(TOOLS_REQ);
     beginNodeActivity(runId, NODE, 1);
-    await adapter.callAIWithTools(TOOLS_REQ);
+    const second = await adapter.callAIWithTools(TOOLS_REQ);
     expect(managedRound).toHaveBeenCalledTimes(2);
+    for (const r of [first, second]) expect(r.toolCalls?.map((t) => t.name)).toEqual([TOOL_NAME, SEND_TOOL, WRITE_TOOL]);
 
     beginNodeActivity(runId, NODE, 1);
-    await adapter.callAI({ provider: 'openwop-free', model: 'openwop-free', credentialRef: 'managed:openwop-free', messages: [{ role: 'user', content: 'hi' }] });
+    const chat1 = await adapter.callAI({ provider: 'openwop-free', model: 'openwop-free', credentialRef: 'managed:openwop-free', messages: [{ role: 'user', content: 'hi' }] });
     beginNodeActivity(runId, NODE, 1);
-    await adapter.callAI({ provider: 'openwop-free', model: 'openwop-free', credentialRef: 'managed:openwop-free', messages: [{ role: 'user', content: 'hi' }] });
+    const chat2 = await adapter.callAI({ provider: 'openwop-free', model: 'openwop-free', credentialRef: 'managed:openwop-free', messages: [{ role: 'user', content: 'hi' }] });
     expect(managedChat).toHaveBeenCalledTimes(2);
+    expect([chat1.content, chat2.content]).toEqual(['managed reply', 'managed reply']);
   });
 
   it('a retry (new attempt) calls the provider again', async () => {
@@ -364,8 +375,9 @@ describe('ADR 1002 — live-run behaviour is unchanged', () => {
     beginNodeActivity(runId, NODE, 1);
     await lane(runId, { attempt: 1 }).adapter.callAIWithTools(TOOLS_REQ);
     beginNodeActivity(runId, NODE, 2);
-    await lane(runId, { attempt: 2 }).adapter.callAIWithTools(TOOLS_REQ);
+    const retried = await lane(runId, { attempt: 2 }).adapter.callAIWithTools(TOOLS_REQ);
     expect(managedRound).toHaveBeenCalledTimes(2);
+    expect(retried.toolCalls?.map((t) => t.name)).toEqual([TOOL_NAME, SEND_TOOL, WRITE_TOOL]);
   });
 });
 
@@ -405,8 +417,12 @@ describe('ADR 1002 — replay fidelity', () => {
     await lane('run-div-src').adapter.callAIWithTools(TOOLS_REQ);
     managedRound.mockClear();
     beginNodeActivity('run-div-fork', NODE, 1);
-    await lane('run-div-fork', { replayFrom: 'run-div-src' }).adapter.callAIWithTools({ ...TOOLS_REQ, messages: [{ role: 'user', content: 'A different question.' }] });
+    const diverged = await lane('run-div-fork', { replayFrom: 'run-div-src' }).adapter.callAIWithTools({ ...TOOLS_REQ, messages: [{ role: 'user', content: `${TOOL_RESULT} a different question.` }] });
     expect(managedRound).toHaveBeenCalledTimes(1);
+    // The live round answered the DIVERGED request (its history holds a tool
+    // result, so the script answers in text), not the source's recorded tool ask.
+    expect(diverged.content).toBe('The answer is 42.');
+    expect(diverged.toolCalls ?? []).toEqual([]);
   });
 });
 
@@ -542,12 +558,13 @@ describe('ADR 1002 D4 — through the REAL agent-runner node and REAL write tool
 
 describe('ADR 1012 — a provider-executed search is suppressed at dispatch', () => {
   const inReplay = <T,>(replaying: boolean, fn: () => Promise<T>): Promise<T> =>
-    runWithEffectContext({ runId: 'run-1012', replaying } as Parameters<typeof runWithEffectContext>[0], fn);
+    runWithEffectContext({ runId: 'run-1012', replaying, nodeId: NODE, tenantId: TENANT, attempt: 1 }, fn);
   const SEARCH: AiToolCallRequest = { ...TOOLS_REQ, webSearch: true };
 
   it('control: the same round dispatches on a live run', async () => {
-    await inReplay(false, () => lane('run-1012-live').adapter.callAIWithTools(SEARCH));
+    const live = await inReplay(false, () => lane('run-1012-live').adapter.callAIWithTools(SEARCH));
     expect(managedRound).toHaveBeenCalledTimes(1);
+    expect(live.toolCalls?.map((t) => t.name)).toEqual([TOOL_NAME, SEND_TOOL, WRITE_TOOL]);
   });
 
   it('a replay miss refuses the search round instead of calling the provider', async () => {
@@ -565,7 +582,8 @@ describe('ADR 1012 — a provider-executed search is suppressed at dispatch', ()
   });
 
   it('a replay round with no search is not refused here', async () => {
-    await inReplay(true, () => lane('run-1012-plain').adapter.callAIWithTools(TOOLS_REQ));
+    const plain = await inReplay(true, () => lane('run-1012-plain').adapter.callAIWithTools(TOOLS_REQ));
     expect(managedRound).toHaveBeenCalledTimes(1);
+    expect(plain.toolCalls?.map((t) => t.name)).toEqual([TOOL_NAME, SEND_TOOL, WRITE_TOOL]);
   });
 });

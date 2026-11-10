@@ -23,6 +23,7 @@ import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import { getConversationMeta } from '../src/host/conversationStore.js';
+import { envKeyPrincipalId } from '../src/middleware/envKeyPrincipal.js';
 
 let server: http.Server;
 let BASE: string;
@@ -30,7 +31,7 @@ const TENANT = 'cx-route';
 const OWNER_TOKEN = 'cx-owner-token';
 const PEER_TOKEN = 'cx-peer-token';
 /** The auth middleware's principal id for an env key: `bearer:<first 8 chars>`. */
-const OWNER_PRINCIPAL = `bearer:${OWNER_TOKEN.slice(0, 8)}`;
+const OWNER_PRINCIPAL = envKeyPrincipalId(OWNER_TOKEN);
 let sid: string;
 
 const ENV_KEYS = ['OPENWOP_STORAGE_DSN', 'OPENWOP_AUTH_DISABLE_COOKIES', 'OPENWOP_API_KEYS'] as const;

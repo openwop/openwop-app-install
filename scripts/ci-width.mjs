@@ -77,7 +77,8 @@ export function widthFor({ def, cap, d, workerMB, min }) {
     const byMem = Math.floor(d.memMB / workerMB);
     if (byMem < w) { w = byMem; why.push(`memory for ${byMem} worker(s) at ~${workerMB} MB each`); }
   }
-  const floor = Math.max(1, Math.min(min, def));
+  // A preference for minimum parallelism cannot override an explicit gate cap.
+  const floor = Math.max(1, Math.min(min, def, cap ?? Infinity));
   if (w < floor) { why.push(`floor ${floor}`); w = floor; }
   return { width: w, why };
 }

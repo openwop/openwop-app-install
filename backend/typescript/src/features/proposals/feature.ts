@@ -15,6 +15,7 @@ import { registerProposalsRoutes } from './routes.js';
 import { registerProposalsV2Routes } from './v2Routes.js';
 import { registerProposalInstaller } from './proposalsService.js';
 import { promptTemplateInstaller, rfc0249WireAvailable } from './installedPrompts.js';
+import { agentPackInstaller, rfc0253WireAvailable, workflowChainPackInstaller } from './installedPacks.js';
 import './erasure.js'; // PROPC-ERASURE-DSAR — side-effect: registers the proposals subject eraser + PII declaration at feature load
 
 export const proposalsFeature: BackendFeature = {
@@ -23,6 +24,12 @@ export const proposalsFeature: BackendFeature = {
     // ADR 0972 D9 — the installer (and with it `agents.proposals`, `clientDrafts`
     // and `readback`) exists only once the pinned suite's schemas carry RFC 0249.
     if (rfc0249WireAvailable()) registerProposalInstaller('prompt-template', promptTemplateInstaller);
+    // ADR 1033 — chain packs (P1) and agent packs (P2), once the pinned suite carries
+    // RFC 0253 (`getInstalledPack`).
+    if (rfc0249WireAvailable() && rfc0253WireAvailable()) {
+      registerProposalInstaller('workflow-chain-pack', workflowChainPackInstaller);
+      registerProposalInstaller('agent-pack', agentPackInstaller);
+    }
     registerProposalsRoutes(deps);
     registerProposalsV2Routes(deps); // RFC 0249 — 404 not_found until advertised
     registerProposalsAgentTools(); // XCH-HOLE-3 (Wave 4) — openwop:proposals.list (ADR 0308 seam)

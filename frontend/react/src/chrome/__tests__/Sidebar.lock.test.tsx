@@ -39,9 +39,9 @@ vi.mock('../../client/useEffectiveAccess.js', async (importOriginal) => ({
 }));
 vi.mock('../../brand/BrandProvider.js', () => ({
   useBrand: () => ({
-    productName: 'KickTodo',
-    instanceName: 'KickTodo',
-    markSrc: '/kicktodo-mark.svg',
+    productName: 'Acme',
+    instanceName: 'Acme',
+    markSrc: '/acme-mark.svg',
     markSrcDark: '',
   }),
 }));
@@ -55,11 +55,11 @@ afterEach(() => { lockedId = 'crm'; cleanup(); });
 describe('Sidebar — locked feature (ADR 0419)', () => {
   it('renders the resolved product identity as one unbroken wordmark', () => {
     mount();
-    const home = screen.getByRole('link', { name: 'KickTodo home' });
+    const home = screen.getByRole('link', { name: 'Acme home' });
     // The whole visible text of the brand link is the product name, once.
-    expect(home.textContent).toBe('KickTodo');
+    expect(home.textContent).toBe('Acme');
     // Logo artwork is decorative (alt=""), so it has no accessible role; read the src.
-    expect(home.querySelector('img')?.getAttribute('src')).toBe('/kicktodo-mark.svg');
+    expect(home.querySelector('img')?.getAttribute('src')).toBe('/acme-mark.svg');
   });
 
   it('a locked feature links to the store for THAT feature (which opens its bundle), not its own page', () => {

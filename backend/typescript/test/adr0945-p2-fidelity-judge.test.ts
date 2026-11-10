@@ -14,6 +14,23 @@
  * Breaks if the prompt or parser drift from the schema, the repair is dropped
  * or repeated, a mismatch stops failing, a missing judge yields pass, or the
  * mask stops following the cut-out.
+ *
+ * Stage A already fails colour-drift, logo-swap and the injection case on
+ * pixels, and stage B runs only when stage A has not failed, so those cases
+ * never reach the judge (pinned per case: the judge is not asked). The
+ * judge's own critical-mismatch rule is therefore asserted on an edit stage A
+ * passes ("a critical mismatch from the judge alone fails…"). The fixture's
+ * case ids and expectations are pinned as literals, so a fixture edit cannot
+ * move with the test. The mask case uses a cut-out at HALF the source's size,
+ * so a mask built at the cut-out's size is caught.
+ *
+ * Sabotage witnesses (probes w80g3-fj-*, 2026-11-03): the prompt's injection
+ * and not_visible rules removed; each parser refusal disabled; evidence
+ * unbounded or multi-line; the repair dropped, its error not fed back, its
+ * typed code changed, or a valid mismatch re-asked; the SOURCE labels lost; a
+ * missing judge passing; a fooled judge lifting a stage-A fail; a non-critical
+ * mismatch passing; the aspect check skipped; an unanswered provider crashing;
+ * one mask encoding for both providers.
  */
 import { mkdtempSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -70,12 +87,12 @@ async function store(b64: string, grounding?: unknown) {
 
 /** The records the edit node leaves behind: the product photo, its cut-out,
  *  and an edit of it — stamped exactly as the P0 machinery stamps them. */
-async function editScenario(candidateBody: string, candidateSize?: { w: number; h: number }) {
+async function editScenario(candidateBody: string, candidateSize?: { w: number; h: number }, cutoutSize?: { w: number; h: number }) {
   const sourceB64 = png(fixture.product, fixture.sourceBackdrop);
   const source = await store(sourceB64);
   const product = await createProduct({ tenantId: TENANT, orgId: ORG, createdBy: 'u', type: 'physical', name: 'Mug', price: 9, imageAssetTokens: [source.serveToken] });
   const src = { assetId: source.assetId, sha256: sha(sourceB64) };
-  const cutout = await store(png(fixture.product), { mode: 'edit', productId: product.productId, sources: [src], provider: 'mock', model: 'mock-image-1', op: 'background-remove' });
+  const cutout = await store(png(fixture.product, undefined, cutoutSize?.w, cutoutSize?.h), { mode: 'edit', productId: product.productId, sources: [src], provider: 'mock', model: 'mock-image-1', op: 'background-remove' });
   const candidate = await store(png(candidateBody, fixture.sceneBackdrop, candidateSize?.w, candidateSize?.h), { mode: 'edit', productId: product.productId, sources: [src], provider: 'mock', model: 'mock-image-1', op: 'inpaint' });
   return { productId: product.productId, cutout, candidate };
 }
@@ -148,16 +165,55 @@ describe('one error-fed repair', () => {
   });
 });
 
+/** Per case: whether the judge ran and what its own check said (stage B runs
+ *  only when stage A has not already failed). Literals, not derived. */
+const JUDGE_CHECK: Record<string, 'pass' | 'not_run'> = {
+  identity: 'pass',
+  'colour-drift': 'not_run',
+  'logo-swap': 'not_run',
+  'extra-part': 'pass',
+  'injection-recoloured-but-judge-says-match': 'not_run',
+};
+
 describe('eval over known-bad edits (JUDGE_EVAL_FIXTURE)', () => {
+  it('the eval covers exactly these known-bad edits, with these expectations', () => {
+    expect(fixture.cases.map((c) => [c.id, c.expect])).toEqual([
+      ['identity', 'pass'],
+      ['colour-drift', 'fail'],
+      ['logo-swap', 'fail'],
+      ['extra-part', 'not_pass'],
+      ['injection-recoloured-but-judge-says-match', 'fail'],
+    ]);
+  });
+
   for (const c of fixture.cases) {
     it(`${c.id} → ${c.expect}`, async () => {
       const s = await editScenario(c.candidate);
-      judgeImpl = scripted(reply(c.ciJudge));
+      const judge = scripted(reply(c.ciJudge));
+      judgeImpl = judge;
       const v = await checkFidelity(TENANT, ORG, s.candidate.assetId, { maskAssetId: s.cutout.assetId });
       if (c.expect === 'not_pass') expect(v.outcome, JSON.stringify(v.checks)).not.toBe('pass');
       else expect(v.outcome, JSON.stringify(v.checks)).toBe(c.expect);
+      const judgeCheck = v.checks.find((x) => x.id === 'judge');
+      if (JUDGE_CHECK[c.id] === 'not_run') {
+        // A stage-A fail is final: the judge is never asked, so it cannot lift it.
+        expect(judge.calls).toBe(0);
+        expect(judgeCheck).toBeUndefined();
+      } else {
+        expect(judge.calls).toBe(1);
+        expect(judgeCheck?.status, JSON.stringify(judgeCheck)).toBe(JUDGE_CHECK[c.id]);
+      }
     });
   }
+
+  it('a critical mismatch from the judge alone fails an edit stage A passes', async () => {
+    const s = await editScenario(fixture.cases[0].candidate); // identity: stage A passes
+    judgeImpl = scripted(reply({ logo: 'mismatch' }));
+    const v = await checkFidelity(TENANT, ORG, s.candidate.assetId, { maskAssetId: s.cutout.assetId });
+    expect(v.checks.filter((x) => x.id !== 'judge').every((x) => x.status !== 'fail'), JSON.stringify(v.checks)).toBe(true);
+    expect(v.checks.find((x) => x.id === 'judge')).toMatchObject({ status: 'fail', detail: 'The model found a mismatch on logo.' });
+    expect(v.outcome).toBe('fail');
+  });
 
   it('JUDGE ABSENT: the identity edit is needs_review, never pass', async () => {
     const s = await editScenario(fixture.cases[0].candidate);
@@ -194,7 +250,8 @@ describe('eval over known-bad edits (JUDGE_EVAL_FIXTURE)', () => {
 
 describe('protection mask', () => {
   it('is the source photo\'s size, encoded per provider (replicate: product black on white; openai: product opaque, rest clear)', async () => {
-    const s = await editScenario(fixture.cases[0].candidate);
+    // The cut-out is half the source photo's size: the mask must follow the SOURCE.
+    const s = await editScenario(fixture.cases[0].candidate, undefined, { w: 100, h: 100 });
     await setGroundingSettings(TENANT, ORG, 'u', { editModeEnabled: true }); // ADR 0945 Q1
     const rep = await protectionMask(TENANT, ORG, s.productId, s.cutout.assetId, 'replicate');
     expect(imageSize(Buffer.from(rep.maskBase64, 'base64'))).toEqual({ w: 200, h: 200 });

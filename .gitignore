@@ -95,6 +95,12 @@ backend/typescript/vendor/*.wasm
 
 # ADR 0366 — generated per-distribution registries (never committed)
 *.distribution.ts
+# ADR 1031 — generated adopter-feature registry modules (never committed; empty
+# in openwop-app, the adopter's src/adopter/ tree in a downstream)
+backend/typescript/src/features/adopterFeatures.generated.ts
+backend/typescript/src/features/adopterPackPins.generated.ts
+# ADR 1031 P2 — the generated `<feature>/styles.css` import list
+frontend/react/src/styles/features.generated.css
 
 # ADR 0509 Phase 4b — per-developer record of whether the browser lane ran.
 # Local history, not shared state; `npm run ci:e2e-report` reads it.

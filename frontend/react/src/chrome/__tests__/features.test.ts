@@ -1,6 +1,7 @@
 import { createElement } from 'react';
 import { describe, it, expect } from 'vitest';
-import { chromeFor, isAdminPath, featureFor, navItemIsActive, navGroups, WORKSPACE_NAV, ADMIN_NAV_GROUPS, NAV, GROUP_ORDER, FEATURES, type NavItem } from '../features.js';
+import { chromeFor, isAdminPath, featureFor, navItemIsActive, navGroups, WORKSPACE_NAV, ADMIN_NAV_GROUPS, NAV, GROUP_ORDER, FEATURES, HOST_GROUP_ORDER, withFeatureNavGroups, type NavItem } from '../features.js';
+import { featureNavGroups } from '../../features/registry.js';
 import type { FeatureRoute } from '../featureTypes.js';
 
 /**
@@ -89,11 +90,6 @@ describe('navItemIsActive', () => {
     expect(navItemIsActive(hub, '/keys')).toBe(true);
     expect(navItemIsActive(hub, '/connections/oauth')).toBe(true);
     expect(navItemIsActive(hub, '/models')).toBe(false);
-  });
-
-  it('marks exactly one KickTodo destination current on the safety child', () => {
-    const current = NAV.flatMap((group) => group.items).filter((item) => navItemIsActive(item, '/admin/kicktodo/safety'));
-    expect(current.map((item) => item.to)).toEqual(['/admin/kicktodo/safety']);
   });
 });
 
@@ -217,5 +213,22 @@ describe('admin information architecture', () => {
 
   it('keeps every default admin category in the shared ordering registry', () => {
     for (const group of ADMIN_NAV_GROUPS) expect(GROUP_ORDER).toContain(group.id);
+  });
+});
+
+// ADR 1031 P2 — `FrontendFeature.navGroups`. The splice runs in the entry chunk, so
+// it refuses nothing at runtime; these cases are the refusal (ADR 0916 D3 posture).
+describe('feature nav groups (ADR 1031 P2)', () => {
+  it('every shipped group anchors on a known group and introduces a NEW label', () => {
+    for (const g of featureNavGroups()) {
+      expect(HOST_GROUP_ORDER, `${g.label}: anchor '${g.after}' must be a host group`).toContain(g.after);
+      expect(HOST_GROUP_ORDER, `${g.label} is already a host group`).not.toContain(g.label);
+      expect(GROUP_ORDER.indexOf(g.label), `${g.label} sits right after ${g.after}`).toBe(GROUP_ORDER.indexOf(g.after) + 1);
+    }
+  });
+
+  it('splices after the anchor, and skips an unknown anchor or a duplicate label', () => {
+    expect(withFeatureNavGroups(['A', 'B'], [{ label: 'X', after: 'A' }])).toEqual(['A', 'X', 'B']);
+    expect(withFeatureNavGroups(['A', 'B'], [{ label: 'X', after: 'Nope' }, { label: 'B', after: 'A' }])).toEqual(['A', 'B']);
   });
 });

@@ -13,6 +13,11 @@
  *
  * Seeds stay VISIBLE (registered) but inert. Non-vacuous: both tenants must
  * actually receive schedule rows, and the signed-in rows must be archive-bound.
+ *
+ * Double guard, by data: all 13 seeded schedules bind a `tmpl.*` mock archive today, so
+ * the `anon:` half of `enabled` changes nothing alone until a non-archive seed exists.
+ * Sabotage witnessed: `enabled = true` reds all three cases; dropping the archive check
+ * reds the signed-in and heal cases; removing the heal write reds the heal case.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';

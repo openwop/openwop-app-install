@@ -28,10 +28,26 @@ export async function register(ctx) {
     return { status: 'failed', error: { code: 'validation_error', message: 'orgId, webinarId, and email are required.' } };
   }
   const out = await w.registerRegistrant({ orgId, webinarId, email, ...(str(i.name) ? { name: str(i.name) } : {}) });
-  // The local CRM `registered` activity is always recorded, but the NODE reflects
-  // the provider push outcome so a workflow's default fail branch reacts to a
-  // dropped Zoom registration (the outputs still carry the detail).
+  // The local CRM `registered` activity is recorded for a tracked webinar, but the
+  // NODE reflects the provider push outcome so a workflow's fail branch reacts to a
+  // registration Zoom did not confirm (the outputs still carry the detail).
+  // ADR 1054 D3 — distinct codes: a QUEUED registrant is safe (an operator pushes it
+  // from the Webinars page), so a workflow must not tell the person it failed for good.
   if (out && out.success === false) {
+    if (out.error === 'event_not_tracked' || out.error === 'event_in_other_org') {
+      const message = out.error === 'event_not_tracked'
+        ? 'This webinar is not tracked by this client. Add it on the Webinars page first.'
+        : 'This webinar is tracked by another client in this workspace.';
+      return { status: 'failed', error: { code: out.error, message }, outputs: out };
+    }
+    // Zoom was never called: this workspace did not record the registration (an erased
+    // person, no usable email, a storage error). Not a provider failure.
+    if (out.error === 'not_recorded') {
+      return { status: 'failed', error: { code: 'registration_not_recorded', message: 'The registration was not recorded, so it was not sent to Zoom.' }, outputs: out };
+    }
+    if (out.queued === true) {
+      return { status: 'failed', error: { code: 'provider_push_queued', message: `Zoom did not confirm the registration (${out.error || 'unknown'}); it is queued for an operator to push.` }, outputs: out };
+    }
     return { status: 'failed', error: { code: 'provider_push_failed', message: `Zoom registrant push failed: ${out.error || 'unknown'}` }, outputs: out };
   }
   return { status: 'success', outputs: out };

@@ -9,7 +9,11 @@
  * - write v(N+1) with `put` instead of `putIfAbsent` → "two concurrent revisions: one wins";
  * - resolve media with `getAssetByIdForTenant` (no org) → "a member cannot reference another org's media";
  * - derive status without `version < headVersion` → "a member edit makes v2 and supersedes v1";
- * - skip the campaign-delete hook → "deleting the campaign deletes its sets".
+ * - skip the campaign-delete hook → "deleting the campaign deletes its sets";
+ * - match a render without its asset → "resolves real render, verdict and product";
+ * - tombstone from the discovery copy → the three "subject erasure" race cases.
+ * The tenant fence on erasure is a triple guard (the tenant index, the row check,
+ * the tenant-keyed re-read), so only breaking all three reds "tombstones the author".
  */
 import http from 'node:http';
 import { createHash } from 'node:crypto';
@@ -52,11 +56,11 @@ beforeAll(async () => {
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   for (const id of TOGGLES) { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); }
-});
+}, 120_000);
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 interface Res<T> { status: number; body: T }
-interface ErrBody { error: string; message: string; details?: { reason?: string } }
+interface ErrBody { error: string; message: string; details?: { reason?: string; field?: string; feature?: string } }
 type SetRes = { variantSet: VariantSet; changed?: boolean } & Partial<ErrBody>;
 interface Client { call: <T>(m: string, p: string, b?: unknown) => Promise<Res<T>> }
 function client(): Client {
@@ -137,13 +141,17 @@ describe('ADR 0946 P0 — VariantSet routes', () => {
     const foreignProduct = await createProduct({ tenantId, orgId: otherOrg, createdBy: 'u', type: 'physical', name: 'Other mug' });
     const wrongBytesId = `fvd:wrong-bytes-${n++}`;
     await recordVerdict({ tenantId, orgId, verdictId: wrongBytesId, assetId, assetSha256: 'b'.repeat(64), productId: product.productId, mode: 'composite', sources: [], checks: [], outcome: 'pass', rulesetVersion: FIDELITY_RULESET_VERSION, checkedAt: new Date().toISOString() });
+    // The render exists and its asset is in this same set: only the render↔asset
+    // pairing can refuse the second member.
+    const renderOnOtherAsset = { conceptId: 'c1', channel: 'meta.feed', kind: 'image', ref: { mediaAssetId: otherAssetId }, renderId: render.renderId };
     for (const bad of [
-      { ...member, ref: { mediaAssetId: otherAssetId } },
-      { ...member, fidelityVerdictId: wrongBytesId },
-      { ...member, productRef: { productId: foreignProduct.productId } },
-      { ...member, productRef: { productId: product.productId, variantId: 'missing-variant' } },
+      [{ ...member, ref: { mediaAssetId: otherAssetId } }],
+      [member, renderOnOtherAsset],
+      [{ ...member, fidelityVerdictId: wrongBytesId }],
+      [{ ...member, productRef: { productId: foreignProduct.productId } }],
+      [{ ...member, productRef: { productId: product.productId, variantId: 'missing-variant' } }],
     ]) {
-      const refused = await owner.call<ErrBody>('POST', path(campaign.id), { concepts: CONCEPTS, members: [bad] });
+      const refused = await owner.call<ErrBody>('POST', path(campaign.id), { concepts: CONCEPTS, members: bad });
       expect(refused.status, JSON.stringify(refused.body)).toBe(400);
       expect(refused.body.details?.reason).toBe('variant_ref_not_found');
     }
@@ -158,6 +166,7 @@ describe('ADR 0946 P0 — VariantSet routes', () => {
     try {
       const refused = await owner.call<ErrBody>('POST', path(campaign.id), { concepts: CONCEPTS, members: [{ conceptId: 'c1', channel: 'email', kind: 'email', ref: { emailTemplateId: template.templateId, version: 1 } }] });
       expect(refused.status).toBe(403);
+      expect(refused.body).toMatchObject({ error: 'forbidden', message: 'The referenced content is unavailable for this workspace.', details: { feature: 'email' } });
     } finally { await saveConfig({ ...toggle, status: 'on' }, 'test'); }
   });
 
@@ -171,7 +180,7 @@ describe('ADR 0946 P0 — VariantSet routes', () => {
     if (!toggle) throw new Error('Creative Briefs toggle missing');
     await saveConfig({ ...toggle, status: 'off' }, 'test');
     try {
-      const refused = await owner.call<ErrBody & { details?: { feature?: string } }>('POST', path(campaign.id), { concepts: CONCEPTS, members: [{ conceptId: 'c1', channel: 'meta.feed', kind: 'image', ref: { mediaAssetId: render.mediaAssetId }, renderId: render.renderId }] });
+      const refused = await owner.call<ErrBody>('POST', path(campaign.id), { concepts: CONCEPTS, members: [{ conceptId: 'c1', channel: 'meta.feed', kind: 'image', ref: { mediaAssetId: render.mediaAssetId }, renderId: render.renderId }] });
       expect(refused.status, JSON.stringify(refused.body)).toBe(404);
       expect(refused.body.details?.feature).toBe('creative-briefs');
     } finally { await saveConfig({ ...toggle, status: 'on' }, 'test'); }
@@ -201,7 +210,7 @@ describe('ADR 0946 P0 — VariantSet routes', () => {
     const old = await owner.call<SetRes>('GET', path(campaign.id, `/${v1.setId}/versions/1`));
     expect(old.body.variantSet).toMatchObject({ version: 1, status: 'superseded', headVersion: 2, hash: v1.hash });
     // The old version's content is untouched.
-    expect((old.body.variantSet.members[0].ref as { copy: Record<string, string> }).copy.headline).toBe('Save an hour');
+    expect(old.body.variantSet.members[0]?.ref).toEqual({ copy: { headline: 'Save an hour', primaryText: 'Try it free.' } });
 
     const versions = await owner.call<{ versions: VariantSet[] }>('GET', path(campaign.id, `/${v1.setId}/versions`));
     expect(versions.body.versions.map((v) => [v.version, v.status])).toEqual([[2, 'draft'], [1, 'superseded']]);
@@ -288,20 +297,25 @@ describe('ADR 0946 P0 — VariantSet routes', () => {
 
   it('refuses invalid content with a typed 400, never a silent drop', async () => {
     const { owner, tenantId, orgId, campaign } = await setup();
-    const bad = async (body: unknown): Promise<number> => (await owner.call('POST', path(campaign.id), body)).status;
-    expect(await bad({ concepts: [] })).toBe(400);
-    expect(await bad({ concepts: [{ ...CONCEPTS[0], axes: { ...CONCEPTS[0].axes, hook: 'shock' } }] })).toBe(400);
-    expect(await bad({ concepts: [{ ...CONCEPTS[0], extra: 1 }] })).toBe(400);
-    expect(await bad({ concepts: [CONCEPTS[0], CONCEPTS[0]] })).toBe(400);
-    expect(await bad({ concepts: CONCEPTS, members: [{ ...copyMember('A'), conceptId: 'nope' }] })).toBe(400);
-    expect(await bad({ concepts: CONCEPTS, members: [{ ...copyMember('A'), contentHash: 'f'.repeat(64) }] })).toBe(400);
-    expect(await bad({ concepts: CONCEPTS, members: [{ ...copyMember('A'), kind: 'image' }] })).toBe(400);
-    expect(await bad({ concepts: CONCEPTS, members: [{ ...copyMember('A'), channel: 'Meta Feed' }] })).toBe(400);
-    expect(await bad({ concepts: CONCEPTS, members: [copyMember('A'), copyMember('B')] })).toBe(400);
+    // Each body is valid but for one property; the field proves which check refused it.
+    const bad = async (body: unknown): Promise<string | undefined> => {
+      const r = await owner.call<ErrBody>('POST', path(campaign.id), body);
+      expect(r.status, JSON.stringify(r.body)).toBe(400);
+      return r.body.details?.field;
+    };
+    expect(await bad({ concepts: [] })).toBe('concepts');
+    expect(await bad({ concepts: [{ ...CONCEPTS[0], axes: { ...CONCEPTS[0].axes, hook: 'shock' } }] })).toBe('concepts[0].axes.hook');
+    expect(await bad({ concepts: [{ ...CONCEPTS[0], extra: 1 }] })).toBe('concepts[0].extra');
+    expect(await bad({ concepts: [CONCEPTS[0], CONCEPTS[0]] })).toBe('concepts');
+    expect(await bad({ concepts: CONCEPTS, members: [{ ...copyMember('A'), conceptId: 'nope' }] })).toBe('members[0].conceptId');
+    expect(await bad({ concepts: CONCEPTS, members: [{ ...copyMember('A'), contentHash: 'f'.repeat(64) }] })).toBe('members[0].contentHash');
+    expect(await bad({ concepts: CONCEPTS, members: [{ ...copyMember('A'), kind: 'image' }] })).toBe('members[0].ref');
+    expect(await bad({ concepts: CONCEPTS, members: [{ ...copyMember('A'), channel: 'Meta Feed' }] })).toBe('members[0].channel');
+    expect(await bad({ concepts: CONCEPTS, members: [copyMember('A'), copyMember('B')] })).toBe('members');
     // An image member must reference an image.
     const doc = await createAsset({ tenantId, orgId, name: 'a.pdf', contentType: 'application/pdf', sizeBytes: 1, storageRef: 'r', serveToken: `t-${n++}`, uploadedBy: 'u' });
-    expect(await bad({ concepts: CONCEPTS, members: [{ conceptId: 'c1', channel: 'meta.feed', kind: 'image', ref: { mediaAssetId: doc.assetId } }] })).toBe(400);
-    expect(await bad({ concepts: CONCEPTS, members: [{ conceptId: 'c1', channel: 'landing', kind: 'landing', ref: { pageId: 'nope', pageVersion: 1 } }] })).toBe(400);
+    expect(await bad({ concepts: CONCEPTS, members: [{ conceptId: 'c1', channel: 'meta.feed', kind: 'image', ref: { mediaAssetId: doc.assetId } }] })).toBe('members[0].ref.mediaAssetId');
+    expect(await bad({ concepts: CONCEPTS, members: [{ conceptId: 'c1', channel: 'landing', kind: 'landing', ref: { pageId: 'nope', pageVersion: 1 } }] })).toBe('members[0].ref');
     expect((await owner.call<{ variantSets: VariantSet[] }>('GET', path(campaign.id))).body.variantSets).toEqual([]);
   });
 
@@ -312,9 +326,9 @@ describe('ADR 0946 P0 — VariantSet routes', () => {
     const login = await viewer.call<{ user: { userId: string } }>('POST', '/host/openwop-app/test/login', { email, tenantId: campaign.tenantId });
     expect(login.status).toBe(201);
     const add = await owner.call('POST', `/host/openwop-app/orgs/${orgId}/members`, { displayName: 'Viewer', subject: login.body.user.userId, roles: ['viewer'] });
-    expect(add.status, 'add viewer').toBeLessThan(300);
+    expect(add.status, 'add viewer').toBe(201);
     expect((await viewer.call('GET', path(campaign.id))).status).toBe(200);
-    expect((await viewer.call('POST', path(campaign.id), { concepts: CONCEPTS })).status).toBe(403);
+    expect(await viewer.call<ErrBody>('POST', path(campaign.id), { concepts: CONCEPTS })).toMatchObject({ status: 403, body: { error: 'forbidden_scope' } });
   });
 
   it('404s when the variant-factory sub-toggle is off, with the parent on', async () => {
@@ -372,13 +386,31 @@ describe('ADR 0946 P0 — VariantSet service', () => {
     if (!fresh) throw new Error('campaign missing');
     const content = (h: string) => ({ concepts: CONCEPTS, members: [{ memberId: 'm', conceptId: 'c1', channel: 'meta.feed', kind: 'copy' as const, ref: { copy: { headline: h } }, contentHash: h }] });
     const v1 = await createVariantSet(fresh, content('a'), 'u');
-    const results = await Promise.allSettled([
-      reviseVariantSet(fresh, v1.setId, 1, content('b'), 'u'),
-      reviseVariantSet(fresh, v1.setId, 1, content('c'), 'u'),
-    ]);
-    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
-    const lost = results.find((r) => r.status === 'rejected') as PromiseRejectedResult;
-    expect((lost.reason as { httpStatus: number }).httpStatus).toBe(409);
+    // Hold both on the head read, so each writes v2 from the same head.
+    const storage = hostExtStorage();
+    const list = storage.kvList.bind(storage);
+    let arrivals = 0;
+    let release!: () => void;
+    const bothHere = new Promise<void>((resolve) => { release = resolve; });
+    const fallback = setTimeout(release, 2000);
+    const hold = vi.spyOn(storage, 'kvList').mockImplementation(async (prefix) => {
+      const rows = await list(prefix);
+      if (prefix.includes(v1.setId) && arrivals < 2) {
+        arrivals += 1;
+        if (arrivals === 2) release();
+        await bothHere;
+      }
+      return rows;
+    });
+    try {
+      const results = await Promise.allSettled([
+        reviseVariantSet(fresh, v1.setId, 1, content('b'), 'u'),
+        reviseVariantSet(fresh, v1.setId, 1, content('c'), 'u'),
+      ]);
+      expect(arrivals).toBe(2);
+      expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+      expect(results.find((r) => r.status === 'rejected')).toMatchObject({ reason: { httpStatus: 409, details: { reason: 'variant_set_stale' } } });
+    } finally { clearTimeout(fallback); hold.mockRestore(); }
   });
 });
 

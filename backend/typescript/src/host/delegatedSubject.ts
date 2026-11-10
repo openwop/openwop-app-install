@@ -173,7 +173,11 @@ export async function notifySubjectRekeyed(fromSubject: string, toSubject: strin
 }
 
 /**
- * An operator env key's subject is `bearer:<first 8 chars>`. A delegation it
+ * An operator env key's subject is `bearer:<16 hex of sha256(key)>`
+ * (`middleware/envKeyPrincipal.ts`). CORRECTED 2026-11-05 (ADR 1045,
+ * TST-FUD-GC-1): it was `bearer:<first 8 chars>`, which merged every key sharing
+ * a prefix; legacy 8-char issuers still in stored rows match only when exactly
+ * one configured key has that prefix. A delegation it
  * issued is the tenant's own only while that key is still CONFIGURED: rotate or
  * remove it and what it minted must not stay owner. The auth middleware, which
  * owns the key map, registers the check. Unregistered ⇒ not configured.
@@ -185,14 +189,14 @@ export function registerOperatorIssuerCheck(fn: OperatorIssuerCheck): void {
   operatorIssuerCheck = fn;
 }
 
-export function isConfiguredOperatorIssuer(issuer: string): boolean {
-  return issuer.startsWith('bearer:') && operatorIssuerCheck !== undefined && operatorIssuerCheck(issuer);
-}
+// ADR 1045 TST-FUD-GC-1 review C2: the tenant-less `isConfiguredOperatorIssuer`
+// is deleted. Every reader now binds the tenant (`isConfiguredOperatorIssuerFor`):
+// an env key re-scoped between tenants must not keep its old tenant's grants.
 
 /**
  * ADR 0822 D1 (grade-code WFAC-17) — the same question, BOUND to a tenant: is a
  * key with this prefix still configured FOR `tenantId` (or for every tenant,
- * `*`)? A run actor stamped `bearer:<8>` has no delegation row to tie it to a
+ * `*`)? A run actor stamped `bearer:<id>` has no delegation row to tie it to a
  * tenant (the ADR 0795 readers get that tie from `d.tenantId`), so the bare
  * check above would answer "the tenant's own principal" in ANY tenant — a key
  * bound to A would be owner in B. Use this wherever the actor is read off a run.

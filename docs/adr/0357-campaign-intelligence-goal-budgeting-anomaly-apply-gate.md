@@ -22,6 +22,27 @@ presets (`csvImport.ts:27-36` is one generic alias table). Connectors: live read
 confirmed: analysis → `campaign-intel`; store/import/sync → `campaign-connectors`; platform I/O →
 `adsAdapter`; broker → `connections`.
 
+## PERF-3 correction — planner results belong to the selected client (2026-11-05)
+
+The goal planner's result/error/loading state survived Organization changes even
+though the overview cleared correctly. Its asynchronous request also committed
+without checking whether another client/request had taken ownership. A plan
+therefore appeared under an empty client's name until reload.
+
+Scope the existing planner state to its client and reuse the page's local
+request-generation/liveness discipline. Never render mismatched result, error or
+busy state, even before an effect clears it. Invalidate pending work on scope
+change/unmount and guard success, failure and finally; matching client IDs alone
+cannot distinguish A→B→A or older concurrent requests. Clear client-specific
+budget/target drafts and reset days to 90 on a client change. Existing analysis
+math, currency conventions, backend persistence and request contracts stay intact.
+No new feature, namespace, runtime authority or wire field is introduced.
+
+Status: isolated candidate implemented. Original component failed all 6 new
+regressions; fixed component plus existing mixed-currency coverage passed 20/20
+across 2 files on refreshed main 8c92c7f0a. Scoped lint 0, independent code/UX
+source review clear. Root-owned canonical gate and deployed retest remain due.
+
 ## Decision
 
 1. **Goal-based budget engine (CSG-INT-1).** `planBudget(goal)` in `campaign-intel`:

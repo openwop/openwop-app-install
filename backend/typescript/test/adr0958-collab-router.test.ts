@@ -165,6 +165,8 @@ describe('ADR 0958 D8 witness 1 — a collaborator session reaches nothing throu
       `/host/openwop-app/comments/orgs/${s.orgId}/comments?resourceType=creative_brief&resourceId=${s.brief.briefId}`,
     ];
     for (const p of probes) {
+      // A live route for the agency's own admin, or a refusal below proves nothing.
+      expect((await s.admin.get(p)).status, `${p} is not a served route`).toBe(200);
       const r = await s.vendor.get(p);
       expect([401, 403, 404], `${p} answered ${r.status}`).toContain(r.status);
       expect(r.raw, p).not.toContain(SECRET);

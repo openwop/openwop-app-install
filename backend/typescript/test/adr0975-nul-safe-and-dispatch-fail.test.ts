@@ -13,10 +13,15 @@
  * drops C0/DEL controls but keeps tabs and newlines as whitespace; a starter
  * dispatch that throws marks the run `failed` with a `run.failed` event.
  *
- * Red when (sabotage-witnessed): `nulSafe` stops replacing U+0000; the
- * extractor's control-character pass is removed; the starter's catch stops
- * calling `failRunClosedOnDispatchError`. (That `jsonbParam` applies `nulSafe` is
- * a one-line read, not witnessed here: the Postgres adapter needs a live database.)
+ * The fail-closed path asserted: `runStarter`'s catch → `runDispatch.failRunClosedOnDispatchError`
+ * → `executor.emitTerminalFailure`, whose ONE `run.failed` carries
+ * `error: { code: 'dispatch_failed', message: <the dispatch cause> }`.
+ *
+ * Red when (sabotage-witnessed, w78): `nulSafe` stops replacing U+0000, or replaces
+ * only the first; the extractor's control-character pass is removed; the starter's
+ * catch stops calling `failRunClosedOnDispatchError`. (That `jsonbParam` applies
+ * `nulSafe` is a one-line read, not witnessed here: the Postgres adapter needs a
+ * live database.)
  */
 import { describe, expect, it, vi } from 'vitest';
 
@@ -31,6 +36,7 @@ import { startWorkflowRun, type StartRunDeps } from '../src/host/runStarter.js';
 import { openStorage } from '../src/storage/index.js';
 import { setEventLogBackend, getEventLog } from '../src/executor/eventLog.js';
 import { setSuspendBackend } from '../src/executor/suspendManager.js';
+import type { WorkflowDefinition } from '../src/executor/types.js';
 
 describe('ADR 0975 D10 — jsonb values are NUL-safe', () => {
   it('every string, nested or in an array, has U+0000 as U+FFFD; nothing else changes', () => {
@@ -56,17 +62,18 @@ describe('ADR 0975 D10 — a starter dispatch that throws fails the run closed',
     const storage = await openStorage('memory://');
     setEventLogBackend(storage);
     setSuspendBackend(storage);
-    const deps: StartRunDeps = {
-      storage,
-      hostSuite: {
-        workflowCatalog: { getWorkflow: async (id: string) => ({ workflowId: id, definition: { workflowId: id, nodes: [{ nodeId: 'n', typeId: 'core.noop', config: {} }], edges: [] } }) },
-        providerPolicyResolver: { resolveForRun: async () => [] },
-      } as unknown as StartRunDeps['hostSuite'],
+    const definitionOf = (id: string): WorkflowDefinition => ({ workflowId: id, nodes: [{ nodeId: 'n', typeId: 'core.noop', config: {} }], edges: [] });
+    const hostSuite: StartRunDeps['hostSuite'] = {
+      workflowCatalog: { getWorkflow: async (id: string) => ({ workflowId: id, definition: definitionOf(id) }) },
+      providerPolicyResolver: { resolveForRun: async () => [] },
     };
+    const deps: StartRunDeps = { storage, hostSuite };
     const runId = await startWorkflowRun(deps, { tenantId: 't-d10', workflowId: 'wf.d10' });
     expect(runId).toBeTruthy();
     await vi.waitFor(async () => { expect((await storage.getRun(runId!))?.status).toBe('failed'); }, { timeout: 5000, interval: 50 });
     const events = await getEventLog().list(runId!, { fromSeq: -1, limit: 100 });
-    expect(events.some((e) => e.type === 'run.failed')).toBe(true);
+    const failed = events.filter((e) => e.type === 'run.failed');
+    expect(failed).toHaveLength(1);
+    expect(failed[0]!.payload).toMatchObject({ error: { code: 'dispatch_failed', message: 'unsupported Unicode escape sequence' } });
   });
 });

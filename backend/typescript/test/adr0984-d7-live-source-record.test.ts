@@ -19,9 +19,10 @@
  * who ran it"; erasure skips exact or frozen rows ⇒ "subject erasure"; a second
  * module reads the record ⇒ "only the derivation and the trial"; a trial that
  * serves fixtures is recorded ⇒ "a recorded eval run replays"; a thrown tool is
- * not recorded ⇒ "a tool that throws".
+ * not recorded ⇒ "a tool that throws"; the workflow/chat capture wrapper starts
+ * recording as-executed calls ⇒ "the workflow and chat capture wrapper".
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
@@ -81,13 +82,13 @@ async function send(method: string, path: string, body?: unknown): Promise<Reply
   try { json = JSON.parse(text) as Record<string, unknown>; } catch { /* asserted */ }
   return { status: res.status, json, text };
 }
+/** Polls the run until it is terminal: `vi.waitFor` on the real condition, no fixed sleep. */
 async function waitTerminal(runId: string): Promise<string> {
-  for (let i = 0; i < 400; i += 1) {
+  return vi.waitFor(async () => {
     const status = String(((await send('GET', `/runs/${runId}`)).json as { status?: string }).status ?? '');
-    if (['completed', 'failed', 'cancelled'].includes(status)) return status;
-    await new Promise((res) => setTimeout(res, 25));
-  }
-  throw new Error(`run ${runId} never settled`);
+    if (!['completed', 'failed', 'cancelled'].includes(status)) throw new Error(`run ${runId} not settled (${status || 'no status'})`);
+    return status;
+  }, { timeout: 10_000, interval: 25 });
 }
 const storedId = (wireId: string): string => (wireId.includes('/') ? wireId.slice(wireId.indexOf('/') + 1) : wireId);
 // A small, deterministic success: the artifact-type lookup of a name nothing registers.
@@ -186,7 +187,11 @@ describe('ADR 0984 D7 — a live eval run as an RFC 0252 source', () => {
 describe('ADR 0984 D7 — the record (unit)', () => {
   const inner = async (call: { input: Record<string, unknown> }) => ({ content: JSON.stringify({ seen: call.input }) });
   const put = (runId: string, type: string, payload: Record<string, unknown>) => getEventLog().append({ runId, type, payload });
-  const terminal = (runId: string): RunRecord => ({ runId, tenantId: TENANT, status: 'completed', metadata: { actingUserId: 'u' } } as unknown as RunRecord);
+  const AT = '2026-10-26T00:00:00.000Z';
+  const terminal = (runId: string): RunRecord => ({
+    runId, workflowId: 'eval:d7', tenantId: TENANT, status: 'completed', inputs: {},
+    metadata: { actingUserId: 'u' }, configurable: {}, createdAt: AT, updatedAt: AT,
+  });
 
   it('pairing: a reused call id pairs each return with its own call, in order; a gate answer is not a result', async () => {
     await setCaptureSetting(TENANT, AGENT, true);

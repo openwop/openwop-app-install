@@ -226,7 +226,7 @@ export function customDomainMiddleware() {
       if (!bound) { next(); return; } // not a custom domain — untouched
       whiteLabel(res);
       // ADR 1015 — record the bound site for the prerender (runtime injection).
-      markBoundSite(res, { tenantId: bound.tenantId, orgId: bound.orgId });
+      markBoundSite(res, { tenantId: bound.tenantId, orgId: bound.orgId, hostname: host });
       // Classify BEFORE charging: a path this host does not serve is the guard's
       // own 404 and is charged only to the client's miss bucket.
       const now = Date.now();

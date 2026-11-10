@@ -11,15 +11,22 @@
  *  - D5: when the counter cannot answer, the strict profile (`auth`) answers
  *    503 and the evaluation profiles fall back to a per-process window.
  *
- * Sabotage notes (each run red, 2026-10-30):
- *  - make takeShared never reach the store, so every take is per-process → red
+ * Determinism: the windows are FIXED windows (`floor(now / windowMs)`), so a
+ * case that crossed a minute (or UTC-midnight) boundary on the real clock saw
+ * its count reset mid-case. Each case freezes `Date` at 12:00:30 UTC of the
+ * current day (w80), and the settlement is awaited through the KV calls it
+ * makes (no fixed sleep).
+ *
+ * Sabotage witnesses (each reds only its named case; probes w80g3-rw-*, 2026-11-03):
+ *  - takeShared never reaches the store, so every take is per-process
  *    ("survives a lost process");
- *  - remove the >= 400 refund in the finish settlement → red ("refused request");
- *  - charge `units` instead of `units - 1` → red ("batch creator");
- *  - remove the refund of earlier windows on a refusal → red ("day refusal");
- *  - make the failure posture always `open` → red ("strict profile 503").
+ *  - the >= 400 refund removed from the finish settlement ("refused request");
+ *  - `units` charged instead of `units - 1` ("batch creator");
+ *  - the refund of earlier windows on a refusal removed ("day refusal");
+ *  - the failure posture always `open` ("strict profile 503");
+ *  - the per-process fallback that never refuses ("evaluation profile").
  */
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -43,6 +50,22 @@ const ENV_KEYS = [
 const saved: Record<string, string | undefined> = {};
 
 let storage: Storage;
+/** KV calls in flight on the storage the rate limiter uses (the settlement
+ *  after the response is fire-and-forget, so this is what a test can await). */
+let inflight = 0;
+function tracked(s: Storage): Storage {
+  return new Proxy(s, {
+    get(target, prop, receiver) {
+      const v: unknown = Reflect.get(target, prop, receiver);
+      if (typeof v !== 'function') return v;
+      if (prop !== 'kvGet' && prop !== 'kvCompareAndSwap') return v.bind(target);
+      return (...args: unknown[]) => {
+        inflight += 1;
+        return Promise.resolve(Reflect.apply(v, target, args)).finally(() => { inflight -= 1; });
+      };
+    },
+  });
+}
 
 /** A run-creation route behind the quota middleware. `?status=` picks the
  *  handler's answer; `?units=` sets a batch creator's minted-run count. */
@@ -56,7 +79,7 @@ function app(): express.Express {
   });
   a.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     const status = err instanceof OpenwopError ? err.httpStatus : 500;
-    res.status(status).json({ error: err instanceof OpenwopError ? err.code : 'internal' });
+    res.status(status).json({ error: err instanceof OpenwopError ? err.code : 'internal', details: err instanceof OpenwopError ? err.details : undefined });
   });
   return a;
 }
@@ -74,8 +97,12 @@ async function post(a: express.Express, path: string): Promise<{ status: number;
   }
 }
 
-/** The settlement runs after the response; give its CAS a moment to land. */
-const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 50));
+/** The settlement runs after the response: drain the turn, then wait until no
+ *  KV call it started is still in flight. */
+async function settle(): Promise<void> {
+  for (let i = 0; i < 5; i += 1) await new Promise((r) => setImmediate(r));
+  await vi.waitFor(() => expect(inflight).toBe(0), { timeout: 2_000, interval: 5 });
+}
 
 beforeAll(async () => {
   storage = await openSqliteStorage(join(mkdtempSync(join(tmpdir(), 'openwop-adr0987-p3b-')), 'kv.db'));
@@ -88,11 +115,18 @@ beforeEach(() => {
   for (const k of ENV_KEYS) { saved[k] = process.env[k]; delete process.env[k]; }
   process.env.OPENWOP_RATELIMIT_SESSION_RUNS_PER_MIN = '3';
   process.env.OPENWOP_RATELIMIT_SESSION_RUNS_PER_DAY = '1000';
+  // 12:00:30 UTC of the current (possibly clock-shifted) day: no case can cross
+  // a minute or a day window. Only Date is faked; timers stay real.
+  const anchor = Math.floor(Date.now() / 86_400_000) * 86_400_000 + 43_230_000;
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(anchor);
+  inflight = 0;
   __resetHostExtPersistence();
-  initHostExtPersistence(storage);
+  initHostExtPersistence(tracked(storage));
   _resetRateLimitState();
 });
 afterEach(() => {
+  vi.useRealTimers();
   for (const k of ENV_KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
 });
 
@@ -112,7 +146,9 @@ describe('ADR 0987 P3 — shared run windows', () => {
     for (let i = 0; i < 5; i += 1) expect((await post(a, '/runs?status=422')).status).toBe(422);
     await settle();
     for (let i = 0; i < 3; i += 1) expect((await post(a, '/runs')).status).toBe(201);
-    expect((await post(a, '/runs')).status).toBe(429);
+    const r = await post(a, '/runs');
+    expect(r.status).toBe(429);
+    expect(r.body.details?.reason).toBe('session_runs_per_min');
   });
 
   it('a batch creator pays one unit per minted run', async () => {
@@ -148,12 +184,15 @@ describe('ADR 0987 P3 — shared run windows', () => {
     const r = await post(app(), '/runs');
     expect(r.status).toBe(503);
     expect(r.body.error).toBe('service_unavailable');
+    expect(r.body.details?.reason).toBe('rate_limit_unavailable');
   });
 
   it('D5: the evaluation profile falls back to a per-process window', async () => {
     __resetHostExtPersistence();
     const a = app();
     for (let i = 0; i < 3; i += 1) expect((await post(a, '/runs')).status).toBe(201);
-    expect((await post(a, '/runs')).status).toBe(429);
+    const r = await post(a, '/runs');
+    expect(r.status).toBe(429);
+    expect(r.body.details?.reason).toBe('session_runs_per_min');
   });
 });

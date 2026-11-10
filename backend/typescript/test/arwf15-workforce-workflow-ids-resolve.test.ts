@@ -177,7 +177,7 @@ describe('HTTP: the migration target picker + save', () => {
 
   it('a fork of a synthetic history run is a typed not-found, never a replay onto a real graph', async () => {
     const H = { 'content-type': 'application/json', authorization: 'Bearer dev-token', 'OpenWOP-Version': '2' };
-    const seeded = await fetch(`${BASE}/host/openwop-app/example-data/run`, { method: 'POST', headers: H, body: JSON.stringify({ steps: ['workforces'] }) });
+    const seeded = await fetch(`${BASE}/host/openwop-app/example-data/run`, { method: 'POST', headers: H, body: JSON.stringify({ steps: ['workforces'], expectedTenantId: 'default' }) });
     expect(seeded.status).toBe(200);
     const list = (await (await fetch(`${BASE}/runs?limit=50`, { headers: H })).json()) as { runs: Array<{ runId: string; workflowId: string }> };
     const run = list.runs.find((r) => seeds.some((w) => w.historyWorkflowId === r.workflowId));

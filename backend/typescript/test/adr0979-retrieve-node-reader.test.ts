@@ -11,8 +11,14 @@
  *
  * D2: the fabricated-output detector, including the chain-pack `@version`
  * suffix and the rule that a node which never completed did not produce output.
+ *
+ * Red when (sabotage-witnessed): the actor is handed over as the org floor; the org
+ * floor is handed over as a subject (that grants); the last arm reads pre-authorized;
+ * the floor is preferred over the actor; the `@version` strip, the completed check or
+ * a placeholder marker goes, or `stub` is read as truthy.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { BundleScope } from '../src/host/inMemorySurfaces.js';
 
 const retrieveForAgent = vi.fn(async (..._args: unknown[]) => ({ chunks: [], hasResults: false, failedSources: [] }));
 vi.mock('../src/features/agent-knowledge/service.js', () => ({
@@ -23,7 +29,7 @@ vi.mock('../src/features/agent-knowledge/service.js', () => ({
 const { buildAgentKnowledgeSurface } = await import('../src/features/agent-knowledge/surface.js');
 const { runOutputWasFabricated } = await import('../src/host/workflowDemoAvailability.js');
 
-const callerOf = async (scope: Record<string, unknown>): Promise<unknown> => {
+const callerOf = async (scope: Pick<BundleScope, 'actingUserId' | 'orgScopeSubject'>): Promise<unknown> => {
   retrieveForAgent.mockClear();
   const surface = buildAgentKnowledgeSurface({ tenantId: 't1', runId: 'r1', ...scope }) as { retrieve: (a: unknown) => Promise<unknown> };
   await surface.retrieve({ agentId: 'host:ava', query: 'q' });
@@ -36,6 +42,8 @@ describe('ADR 0979 D3 — the retrieve node never reads as nobody', () => {
 
   it('a run with an actor reads as that actor', async () => {
     expect(await callerOf({ actingUserId: 'user:alice' })).toEqual({ subject: 'user:alice' });
+    // Both present: the actor wins, the causing member is only the actorless fallback.
+    expect(await callerOf({ actingUserId: 'user:alice', orgScopeSubject: 'user:bob' })).toEqual({ subject: 'user:alice' });
   });
 
   it('an actorless run reads as no subject, with the causing member for the org floor only', async () => {

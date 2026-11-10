@@ -178,7 +178,7 @@ describe('SecurityPanel — backup-factor recovery affordance (ADR 0389 § Corre
 
 describe('SecurityPanel — enrollment QR code (the otpauth URI carries the TOTP secret)', () => {
   const SECRET = 'JBSWY3DPEHPK3PXP';
-  const OTPAUTH = `otpauth://totp/KickTodo:a%40b.co?secret=${SECRET}&issuer=KickTodo`;
+  const OTPAUTH = `otpauth://totp/AcmeApp:a%40b.co?secret=${SECRET}&issuer=AcmeApp`;
   const PNG = 'data:image/png;base64,iVBORw0KGgo=';
 
   beforeEach(() => {
@@ -268,7 +268,7 @@ describe('SecurityPanel — enrollment QR code (the otpauth URI carries the TOTP
 
 describe('SecurityPanel — manual-key disclosure and factor naming', () => {
   const SECRET = 'JBSWY3DPEHPK3PXP';
-  const OTPAUTH = `otpauth://totp/KickTodo:a%40b.co?secret=${SECRET}&issuer=KickTodo`;
+  const OTPAUTH = `otpauth://totp/AcmeApp:a%40b.co?secret=${SECRET}&issuer=AcmeApp`;
 
   beforeEach(() => {
     mocks.getMySecurity.mockResolvedValue({ source: 'oidc', mfaSessionVerified: false });

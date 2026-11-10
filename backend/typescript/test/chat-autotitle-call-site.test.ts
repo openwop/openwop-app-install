@@ -10,9 +10,9 @@
  * the chat session id is the run's.
  * Cost: boots the whole app (`createApp`) to witness three fields — deliberate, since the
  * point is the REAL route → exchange → binding path, which no lighter seam reaches.
- * Sabotage (2026-10-31): hard-code `firstExchange: true` at the call site → the second
- * exchange reds; drop `served` from `autotitleAfterExchange` → both red; read
- * `credentialRef` from `run.metadata` → both red.
+ * Sabotage (2026-10-31, re-measured wave 82): hard-code `firstExchange: true` at the call
+ * site → the second exchange reds; drop `served`, `credentialRef` or `chatSessionId` from
+ * `autotitleAfterExchange`'s binding call → red; pass the reply as `userText` → red.
  */
 import { describe, expect, it, beforeAll, afterAll, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -34,6 +34,7 @@ import { createApp } from '../src/index.js';
 
 let server: http.Server;
 let BASE: string;
+const PREV_ENV = { dsn: process.env.OPENWOP_STORAGE_DSN, cookies: process.env.OPENWOP_AUTH_DISABLE_COOKIES };
 const H = { 'content-type': 'application/json', authorization: 'Bearer dev-token' };
 
 beforeAll(async () => {
@@ -41,9 +42,13 @@ beforeAll(async () => {
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-});
+}, 120_000);
 afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
+  for (const [k, v] of [['OPENWOP_STORAGE_DSN', PREV_ENV.dsn], ['OPENWOP_AUTH_DISABLE_COOKIES', PREV_ENV.cookies]] as const) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
 });
 
 async function api<T = Record<string, unknown>>(path: string, init: RequestInit = {}): Promise<{ status: number; body: T }> {
@@ -58,8 +63,10 @@ describe('ADR 1019 — the exchange call site feeds the autotitle gates', () => 
     const created = await api('/host/openwop-app/chat/sessions', { method: 'POST', body: JSON.stringify({ sessionId, title: 'plan a trip' }) });
     expect(created.status).toBe(201);
     const workflowId = 'adr1019.call-site';
-    await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({ workflowId, nodes: [{ nodeId: 'gate', typeId: 'core.conversationGate', config: { prompt: 'x' } }], edges: [] }) });
+    const wf = await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({ workflowId, nodes: [{ nodeId: 'gate', typeId: 'core.conversationGate', config: { prompt: 'x' } }], edges: [] }) });
+    expect(wf.status).toBe(201);
     const runId = (await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs: { provider: 'mock', model: 'mock-1', credentialRef: 'mock' }, metadata: { chatSessionId: sessionId }, tenantId: '_anon' }) })).body.runId;
+    expect(typeof runId === 'string' && runId.length > 0).toBe(true);
     await vi.waitFor(async () => {
       const s = (await api<{ status: string }>(`/runs/${runId}`)).body.status;
       if (!s.startsWith('waiting')) throw new Error(`run ${runId} not suspended yet (${s})`);

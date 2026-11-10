@@ -47,6 +47,15 @@ Memory pressure `warn` halves the cpu term, and `critical` takes the floor. A
 background lane of the gate itself counts as busy, which generalises the slot-77 cap:
 it is kept, and it is the "gate cap" in the formula.
 
+> **CORRECTION (2026-11-06):** the adaptive minimum is a preference within the
+> explicit gate cap. The original floor could raise `VITEST_MAX_WORKERS=1` to
+> two workers under `on`, even though the decision had already applied the cap.
+> Bound the floor by `min(configured minimum, default, gate cap)` so a constrained
+> gate can retain one worker while keeping measurement and adaptation enabled.
+> A regression test reproduces the old result of two for a cap of one, both on
+> a quiet machine and under critical memory pressure. No tests are removed and
+> no resource or timeout threshold is increased.
+
 **D2. Busy cores, not the load average.** MEASURED on this Mac on 2026-10-24: the load
 average read 10.3 on 8 cores while the processes used 5.6 cores between them. The
 macOS load average counts threads waiting to run. The load average is used only when

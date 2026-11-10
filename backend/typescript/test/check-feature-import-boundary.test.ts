@@ -107,11 +107,11 @@ describe('classify — one verdict per way "reachable" fails', () => {
   });
 
   it('an excludable feature is a violation that NAMES the distributions its import defeats', () => {
-    const exclusions = { frontend: new Map([['commerce', ['kicktodo', 'slim-proof']]]), backend: new Map() };
+    const exclusions = { frontend: new Map([['commerce', ['acme', 'slim-proof']]]), backend: new Map() };
     const r = classify({ imports: [hit('App.tsx', 'commerce', 23)], dirToId, backendIds, core: [], bundleOf, exclusions, allowlist: [] });
     expect(r.violations).toHaveLength(1);
     expect(r.violations[0]!.kind).toBe('excludable');
-    expect(r.violations[0]!.detail).toContain("'commerce' (bundle 'commerce') is EXCLUDED by kicktodo, slim-proof");
+    expect(r.violations[0]!.detail).toContain("'commerce' (bundle 'commerce') is EXCLUDED by acme, slim-proof");
     expect(formatReport(r)).toContain('App.tsx:23 imports features/commerce/x.js');
   });
 

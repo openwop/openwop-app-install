@@ -13,7 +13,7 @@
 import type { Request } from 'express';
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
-import { requireString, requireFeatureEnabled } from '../featureRoute.js';
+import { requireString, requireFeatureEnabled, requireTenantScope } from '../featureRoute.js';
 import {
   applyFieldMap,
   createDestinationSync,
@@ -33,16 +33,30 @@ async function requireEnabled(req: Request): Promise<void> {
   await requireFeatureEnabled(req, TOGGLE_ID, 'Destination Sync');
 }
 
+/** ADR 1024 D1 (`CDP2WF-5`) — the toggle was the ONLY check, so a workspace Viewer created,
+ *  edited and deleted syncs, including where an `openwop-host` sync egresses. Reads need
+ *  `workspace:read`; every state change, and `prepare` (its `dropped` count would tell a
+ *  reader which subjects were erased), needs `workspace:write`. The chat tools run the same
+ *  predicate (`agentTools.ts` `toolGate`). */
+async function requireRead(req: Request): Promise<void> {
+  await requireEnabled(req);
+  await requireTenantScope(req, 'workspace:read');
+}
+async function requireWrite(req: Request): Promise<void> {
+  await requireEnabled(req);
+  await requireTenantScope(req, 'workspace:write');
+}
+
 export function registerDestinationSyncRoutes({ app }: RouteDeps): void {
   const base = '/host/openwop-app/destination-sync/syncs';
 
   app.get(base, async (req, res, next) => {
-    try { await requireEnabled(req); res.json({ syncs: await listDestinationSyncs(tenantOf(req)) }); } catch (err) { next(err); }
+    try { await requireRead(req); res.json({ syncs: await listDestinationSyncs(tenantOf(req)) }); } catch (err) { next(err); }
   });
 
   app.post(base, async (req, res, next) => {
     try {
-      await requireEnabled(req);
+      await requireWrite(req);
       const b = (req.body ?? {}) as Record<string, unknown>;
       const sync = await createDestinationSync({
         tenantId: tenantOf(req),
@@ -67,7 +81,7 @@ export function registerDestinationSyncRoutes({ app }: RouteDeps): void {
 
   app.get(`${base}/:id`, async (req, res, next) => {
     try {
-      await requireEnabled(req);
+      await requireRead(req);
       const sync = await getDestinationSync(tenantOf(req), req.params.id);
       if (!sync) throw new OpenwopError('not_found', 'Sync not found.', 404, { syncId: req.params.id });
       res.json(sync);
@@ -76,7 +90,7 @@ export function registerDestinationSyncRoutes({ app }: RouteDeps): void {
 
   app.patch(`${base}/:id`, async (req, res, next) => {
     try {
-      await requireEnabled(req);
+      await requireWrite(req);
       const b = (req.body ?? {}) as Record<string, unknown>;
       const patch: { name?: string; fieldMap?: unknown; syncMode?: unknown; cursorField?: string } = {};
       if (typeof b.name === 'string') patch.name = b.name;
@@ -91,7 +105,7 @@ export function registerDestinationSyncRoutes({ app }: RouteDeps): void {
 
   app.delete(`${base}/:id`, async (req, res, next) => {
     try {
-      await requireEnabled(req);
+      await requireWrite(req);
       if (!(await deleteDestinationSync(tenantOf(req), req.params.id))) {
         throw new OpenwopError('not_found', 'Sync not found.', 404, { syncId: req.params.id });
       }
@@ -102,7 +116,7 @@ export function registerDestinationSyncRoutes({ app }: RouteDeps): void {
   // Dry-run: preview the field-mapped payload for a sample record (no send).
   app.post(`${base}/:id/dry-run`, async (req, res, next) => {
     try {
-      await requireEnabled(req);
+      await requireRead(req);
       const sync = await getDestinationSync(tenantOf(req), req.params.id);
       if (!sync) throw new OpenwopError('not_found', 'Sync not found.', 404, { syncId: req.params.id });
       const sample = ((req.body ?? {}) as { sample?: unknown }).sample;
@@ -119,12 +133,12 @@ export function registerDestinationSyncRoutes({ app }: RouteDeps): void {
   // watermark via POST /advance with the returned `nextCursor` (at-least-once).
   app.post(`${base}/:id/prepare`, async (req, res, next) => {
     try {
-      await requireEnabled(req);
+      await requireWrite(req);
       const sync = await getDestinationSync(tenantOf(req), req.params.id);
       if (!sync) throw new OpenwopError('not_found', 'Sync not found.', 404, { syncId: req.params.id });
       const records = ((req.body ?? {}) as { records?: unknown }).records;
       if (!Array.isArray(records)) throw new OpenwopError('validation_error', '`records` must be an array of objects.', 400, {});
-      res.json(prepareSyncBatch(sync, records as Record<string, unknown>[]));
+      res.json(await prepareSyncBatch(sync, records as Record<string, unknown>[]));
     } catch (err) { next(err); }
   });
 
@@ -132,7 +146,7 @@ export function registerDestinationSyncRoutes({ app }: RouteDeps): void {
   // prepare so a failed send never advances past un-delivered records.
   app.post(`${base}/:id/advance`, async (req, res, next) => {
     try {
-      await requireEnabled(req);
+      await requireWrite(req);
       const cursor = requireString((req.body as { cursor?: unknown })?.cursor, 'cursor');
       const updated = await advanceCursor(tenantOf(req), req.params.id, cursor);
       if (!updated) throw new OpenwopError('not_found', 'Sync not found.', 404, { syncId: req.params.id });

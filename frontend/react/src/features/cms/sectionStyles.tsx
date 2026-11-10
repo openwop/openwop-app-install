@@ -5,7 +5,12 @@
  * exactly as before. Pictures are REAL TEXT (crawler = human, ADR 0593 §C9) and
  * INERT: what looks like a button or a chip is a styled span, never a control.
  */
+import { useId, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Button } from '../../ui/Button.js';
+import { PauseIcon, PlayIcon } from '../../ui/icons/index.js';
+import { countableStat } from './statNumber.js';
+import { useLoopToggle } from './loopToggle.js';
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
 const obj = (v: unknown): Record<string, unknown> => (typeof v === 'object' && v !== null && !Array.isArray(v) ? v as Record<string, unknown> : {});
@@ -17,12 +22,122 @@ const TONES = ['muted', 'inverse', 'accent'] as const;
  *  absent values add nothing, so a stock section keeps its exact class list. */
 export function sectionStyleClass(d: Record<string, unknown>): string {
   const tone = TONES.find((t) => t === d.tone);
-  return `${tone ? ` fp-tone fp-tone--${tone}` : ''}${d.head === 'split' ? ' fp-split' : ''}`;
+  // ADR 1068 D3 — `headSize: 'sm'` is the smaller section-head clamp.
+  return `${tone ? ` fp-tone fp-tone--${tone}` : ''}${d.head === 'split' ? ' fp-split' : ''}${d.headSize === 'sm' ? ' fp-head--sm' : ''}`;
+}
+
+const MOTIONS = ['none', 'reveal', 'stagger', 'rise', 'slide-start', 'slide-end', 'zoom'] as const;
+
+/** ADR 1029 D2 — the scroll-motion classes for a section's `motion`. Unknown or
+ *  absent values add nothing, so the page-load rise stays the default. */
+export function sectionMotionClass(d: Record<string, unknown>): string {
+  const motion = MOTIONS.find((m) => m === d.motion);
+  return motion ? ` fp-motion fp-motion--${motion}` : '';
+}
+
+/** The hero's art directions, in the server's order: mirrors `HERO_VISUALS` in
+ *  cmsService.ts (pinned by adr1029-mirror-parity, ADR 1050 D4). */
+export const HERO_VISUALS = ['workflow', 'journey', 'run', 'film', 'image', 'none', 'plan', 'activity', 'hub', 'flow', 'receipt', 'apps', 'versus', 'fanout', 'phone', 'wall', 'tally', 'log', 'queue'] as const; // ADR 1080 D7: queue
+export type HeroVisual = typeof HERO_VISUALS[number];
+
+/** ADR 1038 D2 — mirrors the server's `HERO_EMPHASES` (pinned by adr1029-mirror-parity). */
+const HERO_EMPHASES = ['accent', 'strike', 'underline', 'highlight'] as const;
+
+/** ADR 1038 D2 — the hero's emphasis style as a section modifier (' fp-em--strike'),
+ *  '' for the default accent, so a hero that never chose keeps its exact markup. */
+export function heroEmphasisClass(d: Record<string, unknown>): string {
+  const e = HERO_EMPHASES.find((x) => x === d.emphasis);
+  return e && e !== 'accent' ? ` fp-em--${e}` : '';
 }
 
 /** A 0..1 fraction from authored data, or null when absent or not a number. */
 export function fraction(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : null;
+}
+
+/** ADR 1038 D8 — a flow step's styling state (mirrors the validator's
+ *  FLOW_STATES; pinned by adr1029-mirror-parity). The words are the step's own
+ *  `status`; the state picks the mark's shape: done is filled, waiting is a ring
+ *  with a dot, idle is dashed. */
+export const FLOW_STATES = ['idle', 'done', 'waiting'] as const;
+
+export interface FlowStep { label: string; text?: ReactNode | undefined; status?: string | undefined; state?: string | undefined }
+
+/** ADR 1038 D8 — a short process as an ordered list: each step's mark, label,
+ *  status word and line of text, joined by a connector. The list is the real
+ *  content; marks and connectors are decoration. `pulse` gives a waiting step
+ *  the D5 attention ring (the hero only: it is timed from page load, so a flow
+ *  further down would finish pulsing before anyone saw it). */
+export function FlowSteps({ steps, pulse, numbered = false }: { steps: FlowStep[]; pulse: boolean; numbered?: boolean }): JSX.Element {
+  const { t } = useTranslation('cms');
+  // A step with a state but no status word still tells a screen reader its
+  // state (the mark is aria-hidden, so it would otherwise be shape alone).
+  const word: Record<string, string> = { idle: t('flowStateWordIdle'), done: t('flowStateWordDone'), waiting: t('flowStateWordWaiting') };
+  return (
+    <ol className="fp-flow__steps">
+      {steps.map((st, i) => {
+        const state = (FLOW_STATES as readonly string[]).includes(st.state ?? '') ? st.state : undefined;
+        return (
+          <li key={i} className={`fp-flow__step${state ? ` fp-flow__step--${state}` : ''}`} style={{ '--i': i } as CSSProperties}>
+            {/* ADR 1064 P3c — a numbered rail puts the step number in its mark
+                (decoration: the list is already ordered for assistive tech). */}
+            <span className={`fp-flow__mark${pulse && state === 'waiting' ? ' fp-attention' : ''}`} aria-hidden="true">{numbered ? String(i + 1).padStart(2, '0') : null}</span>
+            <span className="fp-flow__body">
+              <strong className="fp-flow__label">{st.label}</strong>
+              {st.status ? <span className="fp-flow__status">{st.status}</span> : state ? <span className="sr-only">{word[state]}</span> : null}
+              {st.text ? <span className="fp-flow__text">{st.text}</span> : null}
+            </span>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+/**
+ * ADR 1064 P3c — the flow as a rail: numbered marks and, with `run`, each mark
+ * lighting in turn on a 7 s loop. The loop is >5 s, so it carries the shared
+ * pause control (WCAG 2.2.2), and hover or focus inside pauses it. It animates
+ * a ring only, never opacity, so with reduced motion (no animation) every step
+ * is fully shown. Without either option this is exactly the ADR 1038 D8 flow.
+ */
+export function FlowRail({ steps, pulse, numbered, run, className }: { steps: FlowStep[]; pulse: boolean; numbered: boolean; run: boolean; className: string }): JSX.Element {
+  const loop = useLoopToggle();
+  const cls = `${className}${numbered ? ' fp-flow--numbered' : ''}${run ? ' fp-flow--run' : ''}${run && loop.paused ? ' is-paused' : ''}`;
+  return (
+    <div className={cls}>
+      <FlowSteps steps={steps} pulse={pulse} numbered={numbered} />
+      {run ? loop.toggle : null}
+    </div>
+  );
+}
+
+/** ADR 1038 D8 — the hero's flow picture: an optional caption, then the steps.
+ *  Null unless two labelled steps survive (the validator's rule). */
+export function FlowFigure({ flow, row = false }: { flow: unknown; row?: boolean }): JSX.Element | null {
+  const { t } = useTranslation('cms');
+  const f = obj(flow);
+  const steps = list(f.nodes).map(obj)
+    .map((n) => ({ label: str(n.label), text: str(n.text) || undefined, status: str(n.status) || undefined, state: str(n.state) || undefined }))
+    .filter((n) => n.label);
+  const captionId = useId();
+  if (steps.length < 2) return null;
+  return (
+    <figure className={`fp-flow fp-flow--hero${row ? ' fp-flow--open' : ''}`} aria-labelledby={str(f.label) ? captionId : undefined} aria-label={str(f.label) ? undefined : t('flowFigureLabel')}>
+      {str(f.label) ? <figcaption id={captionId} className="fp-flow__caption">{str(f.label)}</figcaption> : null}
+      {/* ADR 1066 D1 — below the copy, the steps run in one row (the columns `flow` row). */}
+      <FlowRail steps={steps} pulse numbered={f.numbered === true} run={f.run === true} className={row ? 'fp-flow__rail fp-flow--row' : 'fp-flow__rail'} />
+    </figure>
+  );
+}
+
+/** ADR 1038 D3 — a stat figure that counts up. Only a whole-number title counts;
+ *  the real digits stay in the DOM, and the counting overlay is CSS (empty alt
+ *  text), so a reader or a copy never meets a mid-count number. */
+export function StatValue({ title }: { title: string }): JSX.Element {
+  const n = countableStat(title);
+  if (!n) return <>{title}</>;
+  return <>{n.prefix}<span className="fp-count" style={{ '--to': n.value } as CSSProperties}>{n.value}</span>{n.suffix}</>;
 }
 
 /** A thin progress bar. Decorative: the adjacent text always states the
@@ -82,6 +197,127 @@ export function PlanCard({ plan }: { plan: unknown }): JSX.Element | null {
         ) : null}
       </div>
     </figure>
+  );
+}
+
+const ACTIVITY_STATES = ['done', 'waiting', 'approved', 'flagged'] as const;
+
+/** ADR 1029 D5 — the hero's activity (approval) card: an ordered list of what
+ *  happened, in a figure named by its title. Every row is real, inert text; a
+ *  row's `status` is the author's own word (never colour alone) and its `state`
+ *  only styles it. The rows rise in once on load, never on scroll, never looped.
+ *
+ *  ADR 1038 D1 — with `play: 'once'` (the hero's base-layer field) each row's mark
+ *  and status pop in turn (`--i`), then a "4 of 5 done" count and a bar land and
+ *  the `result` line last. The count's digit is real text; while the card plays
+ *  the CSS draws it transparent and counts a `::after` overlay (empty alt text,
+ *  so out of the accessibility tree) up to it; no reader and no no-motion path
+ *  ever meets a mid-count number. */
+export function ActivityCard({ activity, play, iconFor }: { activity: unknown; play?: unknown; iconFor?: (slug: string) => ReactNode }): JSX.Element | null {
+  const { t } = useTranslation('cms');
+  const a = obj(activity);
+  const items = list(a.items).map(obj).filter((i) => str(i.action));
+  if (items.length === 0) return null;
+  const title = str(a.title);
+  const result = str(a.result);
+  const playing = play === 'once';
+  // ADR 1067 D3 — the checklist look: a browser bar, the count and bar on top, an icon per row.
+  const checklist = a.style === 'checklist';
+  const barLabel = checklist ? str(a.barLabel) : '';
+  const settled = items.filter((i) => i.state === 'done' || i.state === 'approved').length;
+  // The digit is spliced into the translated sentence so the overlay sits on it alone.
+  // A translation that drops `{{done}}` falls back to the plain sentence (no overlay).
+  const parts = t('activityCount', { done: '\u0000', total: items.length }).split('\u0000');
+  const countText = parts.length === 2
+    ? <>{parts[0]}<span className="fp-activity__n" style={{ '--to': settled } as CSSProperties}>{settled}</span>{parts[1]}</>
+    : t('activityCount', { done: settled, total: items.length });
+  const tally = (
+    <div className="fp-activity__tally">
+      <p className="fp-activity__count">{countText}</p>
+      <ProgressBar value={settled / items.length} />
+    </div>
+  );
+  return (
+    <figure className={`fp-activity${playing ? ' fp-activity--play' : ''}${checklist ? ' fp-activity--checklist' : ''}`} aria-label={title || t('activityFigureLabel')} style={playing ? { '--rows': items.length } as CSSProperties : undefined}>
+      {barLabel ? (
+        <p className="fp-activity__bar">
+          <span className="fp-activity__dots" aria-hidden="true"><i /><i /><i /></span>
+          <span className="fp-activity__address">{barLabel}</span>
+        </p>
+      ) : null}
+      {checklist ? (
+        <div className="fp-activity__head">
+          {title ? <p className="fp-activity__title" aria-hidden="true">{title}</p> : null}
+          {tally}
+        </div>
+      ) : title ? <p className="fp-activity__title" aria-hidden="true">{title}</p> : null}
+      <ol className="fp-activity__list">
+        {items.map((i, n) => {
+          const state = ACTIVITY_STATES.find((x) => x === i.state);
+          return (
+            <li key={n} className={`fp-activity__row${state ? ` fp-activity__row--${state}` : ''}`} style={playing ? { '--i': n } as CSSProperties : undefined}>
+              {checklist && str(i.icon) && iconFor?.(str(i.icon))
+                ? <span className="fp-activity__icon" aria-hidden="true">{iconFor(str(i.icon))}</span>
+                : <span className="fp-activity__mark" aria-hidden="true" />}
+              <span className="fp-activity__body">
+                <span className="fp-activity__line">
+                  {str(i.actor) ? <strong className="fp-activity__actor">{str(i.actor)}</strong> : null}
+                  {str(i.actor) ? ' ' : null}
+                  <span className="fp-activity__action">{str(i.action)}</span>
+                </span>
+                {str(i.meta) ? <span className="fp-activity__meta">{str(i.meta)}</span> : null}
+              </span>
+              {str(i.status) ? <span className="fp-activity__status">{str(i.status)}</span> : null}
+            </li>
+          );
+        })}
+      </ol>
+      {playing && !checklist ? tally : null}
+      {result ? <p className="fp-activity__result">{result}</p> : null}
+    </figure>
+  );
+}
+
+/** ADR 1029 D5 — a strip of names (tools, logos as words) that drifts sideways.
+ *  The first list is the real, readable one; the second is a visual copy for a
+ *  seamless loop, hidden from assistive tech and from focus. A visible button
+ *  pauses it (WCAG 2.2.2), as do hover and keyboard focus; with reduced motion
+ *  the copy is not drawn and the list wraps, still. */
+export function Marquee({ items, cards }: { items: string[]; cards?: ReactNode[] }): JSX.Element | null {
+  const { t } = useTranslation('cms');
+  const [paused, setPaused] = useState(false);
+  const copyRef = useRef<HTMLUListElement>(null);
+  // React 18 has no `inert` prop (the MermaidDiagram precedent): set it before paint.
+  useLayoutEffect(() => { copyRef.current?.setAttribute('inert', ''); });
+  if (items.length === 0 && !(cards && cards.length > 0)) return null;
+  const row = (copy: boolean): JSX.Element => (
+    <ul className="fp-marquee__list" {...(copy ? { 'aria-hidden': true, ref: copyRef } : {})}>
+      {cards && cards.length > 0
+        // ADR 1037 — app cards (picture + name + line) in place of bare names.
+        ? cards.map((card, i) => <li key={i} className="fp-marquee__item fp-marquee__item--card">{card}</li>)
+        : items.map((x, i) => <li key={i} className="fp-marquee__item">{x}</li>)}
+    </ul>
+  );
+  return (
+    <div className={`fp-marquee${paused ? ' is-paused' : ''}`}>
+      {/* ADR 1068 D1 — a card strip at rest is one row that scrolls sideways, so the
+          scroller is a named, focusable region (keyboard users can scroll it). */}
+      <div
+        className="fp-marquee__viewport"
+        {...(cards && cards.length > 0 ? { role: 'region', tabIndex: 0, 'aria-label': t('marqueeRegion') } : {})}
+      >
+        <div className="fp-marquee__track">
+          {row(false)}
+          {row(true)}
+        </div>
+      </div>
+      {/* The label says what the button will do; no aria-pressed as well, which
+          would announce a pressed "Play" (ARIA APG: change the label OR the state). */}
+      <Button variant="quiet" size="sm" className="fp-marquee__toggle" onClick={() => setPaused((p) => !p)}>
+        {paused ? <PlayIcon size={14} aria-hidden /> : <PauseIcon size={14} aria-hidden />}
+        {paused ? t('marqueePlay') : t('marqueePause')}
+      </Button>
+    </div>
   );
 }
 

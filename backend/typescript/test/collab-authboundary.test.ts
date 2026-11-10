@@ -182,9 +182,8 @@ describe('collab-capable type registry parity (ADR 0359 Phase 5)', () => {
     expect(collabCanvasType('canvas.cad')).toMatchObject({ canvasTypeId: 'canvas.cad', toggleId: 'cad' });
     expect(collabCanvasType('canvas.campaign')).toMatchObject({ canvasTypeId: 'canvas.campaign', toggleId: 'campaign-studio' });
     expect(collabCanvasType('canvas.app-builder')).toMatchObject({ canvasTypeId: 'canvas.app-builder', toggleId: 'app-builder' });
-    // ADR 0458 §2.3 — the challenge-outline authoring canvas rides the existing
-    // `kicktodo-creator` toggle (a deliberate deviation from per-type toggles).
-    expect(collabCanvasType('canvas.challenge-outline')).toMatchObject({ canvasTypeId: 'canvas.challenge-outline', toggleId: 'kicktodo-creator' });
+    // (A feature-registered type is pinned by its owner — e.g.
+    // test/kicktodo/kicktodo-canvas-registrations.test.ts, ADR 1031 P2.)
     // Pack/unknown types are ABSENT — the fail-closed v1 exclusion.
     expect(collabCanvasType('canvas.some-pack-type')).toBeUndefined();
   });

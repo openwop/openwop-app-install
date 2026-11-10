@@ -237,7 +237,7 @@ export function registerCmsRoutes(deps: RouteDeps): void {
     try {
       const { user, orgId, tenantId } = await requireCmsScope(req,'workspace:write');
       await denyIfTranslator(tenantId, orgId, user.userId); // ADR 0205 D1
-      const body = (req.body ?? {}) as { title?: unknown; slug?: unknown; sections?: unknown; tags?: unknown; kind?: unknown; authorId?: unknown; category?: unknown; collection?: unknown; docsNav?: unknown };
+      const body = (req.body ?? {}) as { title?: unknown; slug?: unknown; sections?: unknown; tags?: unknown; kind?: unknown; authorId?: unknown; category?: unknown; collection?: unknown; docsNav?: unknown; siteNav?: unknown };
       const settings = await getContentLanguageSettings(tenantId, orgId);
       const page = await createPage({
         tenantId,
@@ -252,6 +252,8 @@ export function registerCmsRoutes(deps: RouteDeps): void {
         // ADR 0392 — a docs page is authored in the docs collection.
         ...(body.collection === 'docs' ? { collection: 'docs' as const } : {}),
         ...(body.collection === 'docs' && optionalString(body.docsNav) ? { docsNav: String(body.docsNav) } : {}),
+        // ADR 1049 — public-site nav placement (validated by the service).
+        ...(body.siteNav !== undefined ? { siteNav: body.siteNav } : {}),
         createdBy: user.userId,
         baseLocale: settings.baseLocale,
       });
@@ -314,7 +316,7 @@ export function registerCmsRoutes(deps: RouteDeps): void {
       // the reasoning is at `:196-199`: this lane bumps `page.version`, so an `in_review`
       // page is caught by the approval's version pin rather than by this refusal.
       const gateRefusal = (current: Page): Promise<void> => refusePublishedEditUnderGate(tenantId, orgId, current);
-      const body = (req.body ?? {}) as { title?: unknown; slug?: unknown; sections?: unknown; tags?: unknown; kind?: unknown; authorId?: unknown; category?: unknown; expectedVersion?: unknown };
+      const body = (req.body ?? {}) as { title?: unknown; slug?: unknown; sections?: unknown; tags?: unknown; kind?: unknown; authorId?: unknown; category?: unknown; siteNav?: unknown; expectedVersion?: unknown };
       // ADR 0592 §1 (CMSL-1) — optional optimistic-concurrency pin. When sent
       // it must be a number; the mismatch 409 itself is thrown by `updatePage`
       // (the service read is the authoritative one).
@@ -331,7 +333,7 @@ export function registerCmsRoutes(deps: RouteDeps): void {
       // foreign locales are immutable (server-side diff, fail-closed).
       const grant = await getLocaleGrant(tenantId, orgId, user.userId);
       if (grant) {
-        if (body.title !== undefined || body.slug !== undefined || body.tags !== undefined || body.kind !== undefined || body.authorId !== undefined || body.category !== undefined || (body as { docsNav?: unknown }).docsNav !== undefined) {
+        if (body.title !== undefined || body.slug !== undefined || body.tags !== undefined || body.kind !== undefined || body.authorId !== undefined || body.category !== undefined || (body as { docsNav?: unknown }).docsNav !== undefined || body.siteNav !== undefined) {
           throw new OpenwopError('forbidden_scope', 'Your translator grant covers locale overlays only — title/slug/tags are immutable.', 403, { grantedLocales: grant.locales });
         }
       }
@@ -342,7 +344,7 @@ export function registerCmsRoutes(deps: RouteDeps): void {
           assertLocaleScopedSectionsPatch(current, validateSections(body.sections, settings.baseLocale), grant.locales);
         }
       };
-      const patch: { title?: string; slug?: string; sections?: unknown; tags?: unknown; baseLocale?: string; kind?: unknown; authorId?: unknown; category?: unknown; docsNav?: string } = { baseLocale: settings.baseLocale };
+      const patch: { title?: string; slug?: string; sections?: unknown; tags?: unknown; baseLocale?: string; kind?: unknown; authorId?: unknown; category?: unknown; docsNav?: string; siteNav?: unknown } = { baseLocale: settings.baseLocale };
       if (typeof body.title === 'string') patch.title = body.title;
       if (typeof body.slug === 'string') patch.slug = body.slug;
       if (body.sections !== undefined) patch.sections = body.sections;
@@ -351,6 +353,8 @@ export function registerCmsRoutes(deps: RouteDeps): void {
       if (body.authorId !== undefined) patch.authorId = resolveAuthorAlias(body.authorId, user.userId);
       if (body.category !== undefined) patch.category = body.category;
       if (typeof (body as { docsNav?: unknown }).docsNav === 'string') patch.docsNav = String((body as { docsNav?: unknown }).docsNav);
+      // ADR 1049 — `null` clears; the service validates (400 on a bad group/order).
+      if (body.siteNav !== undefined) patch.siteNav = body.siteNav;
       // ADR 0836 D3 — an admin's edit keeps (re-pins) a pending scheduled
       // publish; anyone else's cancels it, visibly, in this same write.
       const updated = await updatePage(tenantId, orgId, req.params.pageId, patch, user.userId, {

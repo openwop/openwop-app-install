@@ -8,15 +8,24 @@
  *    through a PATCH (create/PATCH must 400 with `widget_byok_required`, naming the field);
  *  - turning a widget OFF is refused (it spends nothing);
  *  - a superadmin tenant, or any tenant with its own key, is refused;
- *  - a public turn for a refused widget reaches ANY dispatch (managed fallback), claims a
- *    cap, or leaves no log line naming the reason;
+ *  - a public turn for a refused widget reaches ANY dispatch (managed fallback), or leaves
+ *    no log line naming the reason;
  *  - a BYOK widget's turn runs on the managed key instead of the tenant's own key;
  *  - a bound key that stops resolving falls back to managed, even for a superadmin.
+ *
+ * Sabotage witnessed (wave 84, each reds the named case): every tenant treated as a listed
+ * superadmin; a dead bound key falling back to managed; a managed binding served on the
+ * managed key; create skipping the resolver; PATCH asserting always / only on
+ * `enabled: true`; the public turn ignoring a refusal, or not logging it; a BYOK widget's
+ * chat or tool round taking the managed lane; either tool lane dropping the stop reason.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getSetCookies } from './headerCookies.js';
+import type { ManagedDispatchResult, ManagedToolsRoundResult } from '../src/providers/managedProvider.js';
+import type { DispatchRequest, DispatchResult } from '../src/providers/dispatch.js';
+import type { ToolsRoundRequest, ToolsRoundResult } from '../src/providers/dispatchAnthropicTools.js';
 
 const { managedCalls, byokCalls, toolRounds } = vi.hoisted(() => ({
   managedCalls: [] as Array<{ tenantId: string }>,
@@ -27,18 +36,18 @@ vi.mock('../src/providers/managedProvider.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../src/providers/managedProvider.js')>();
   return {
     ...real,
-    dispatchManagedChat: vi.fn(async (req: { tenantId: string }) => {
+    dispatchManagedChat: vi.fn(async (req: { tenantId: string }): Promise<ManagedDispatchResult> => {
       managedCalls.push({ tenantId: req.tenantId });
       return { provider: 'openwop-free', model: 'openwop-free', completion: 'managed-reply', usage: { inputTokens: 1, outputTokens: 1 } };
     }),
-    dispatchManagedToolsRound: vi.fn(async () => { toolRounds.push({ lane: 'managed' }); return { text: 'managed-round', toolUses: [], finishReason: 'length' }; }),
+    dispatchManagedToolsRound: vi.fn(async (): Promise<ManagedToolsRoundResult> => { toolRounds.push({ lane: 'managed' }); return { text: 'managed-round', toolUses: [], finishReason: 'length' }; }),
   };
 });
 vi.mock('../src/aiProviders/aiProvidersHost.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../src/aiProviders/aiProvidersHost.js')>();
   return {
     ...real,
-    toolsRoundDispatcher: (provider: string) => async (req: { apiKey: string }) => {
+    toolsRoundDispatcher: (provider: string) => async (req: ToolsRoundRequest): Promise<ToolsRoundResult> => {
       toolRounds.push({ lane: 'byok', provider, apiKey: req.apiKey });
       return { text: 'byok-round', toolUses: [], finishReason: 'content_filter' };
     },
@@ -48,9 +57,9 @@ vi.mock('../src/providers/dispatch.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../src/providers/dispatch.js')>();
   return {
     ...real,
-    dispatchChat: vi.fn(async (req: { provider: string; apiKey: string }) => {
+    dispatchChat: vi.fn(async (req: DispatchRequest): Promise<DispatchResult> => {
       byokCalls.push({ provider: req.provider, apiKey: req.apiKey });
-      return { completion: 'byok-reply', usage: { inputTokens: 1, outputTokens: 1 } };
+      return { provider: req.provider, model: req.model, completion: 'byok-reply', usage: { inputTokens: 1, outputTokens: 1 } };
     }),
   };
 });
@@ -120,6 +129,11 @@ const create = (c: Client, orgId: string): Promise<Res> => c.call('POST', widget
 const visit = (token: string, message: string): Promise<Response> =>
   fetch(`${BASE}/host/openwop-app/public/widget/message`, { method: 'POST', headers: { 'content-type': 'application/json', origin: 'https://www.acme.com' }, body: JSON.stringify({ token, message, sessionId: 'dddddddd-8888-4888-8888-dddddddddddd' }) });
 
+function expectCreated(res: Res): void {
+  expect(res.status, JSON.stringify(res.body)).toBe(201);
+  expect(res.body!.widget).toMatchObject({ widgetId: expect.any(String), token: expect.any(String), agentId: AGENT });
+}
+
 function expectByokRequired(res: Res): void {
   expect(res.status, JSON.stringify(res.body)).toBe(400);
   expect(res.body).toMatchObject({ error: 'validation_error', details: { field: 'credential', code: 'widget_byok_required' } });
@@ -159,13 +173,15 @@ describe('ADR 1018 D8 — create', () => {
   it('a superadmin tenant may create on the managed key', async () => {
     const { owner, orgId, tenantId } = await workspace();
     superadmins(tenantId);
-    expect((await create(owner, orgId)).status).toBe(201);
+    expectCreated(await create(owner, orgId));
+    expect((await owner.call('GET', widgetsPath(orgId))).body!.widgets).toHaveLength(1);
   });
 
   it('a tenant with its own key may create', async () => {
     const { owner, orgId, tenantId } = await workspace();
     await bindOwnKey(tenantId);
-    expect((await create(owner, orgId)).status).toBe(201);
+    expectCreated(await create(owner, orgId));
+    expect((await owner.call('GET', widgetsPath(orgId))).body!.widgets).toHaveLength(1);
   });
 });
 
@@ -192,10 +208,14 @@ describe('ADR 1018 D8 — PATCH', () => {
   it('a superadmin, or a tenant with its own key, may PATCH', async () => {
     const a = await delistedWidget();
     superadmins(a.tenantId);
-    expect((await a.owner.call('PATCH', `${widgetsPath(a.orgId)}/${a.widgetId}`, { businessName: 'Acme' })).status).toBe(200);
+    const pa = await a.owner.call('PATCH', `${widgetsPath(a.orgId)}/${a.widgetId}`, { businessName: 'Acme' });
+    expect(pa.status, JSON.stringify(pa.body)).toBe(200);
+    expect(pa.body!.widget).toMatchObject({ widgetId: a.widgetId, businessName: 'Acme' });
     const b = await delistedWidget();
     await bindOwnKey(b.tenantId);
-    expect((await b.owner.call('PATCH', `${widgetsPath(b.orgId)}/${b.widgetId}`, { businessName: 'Acme' })).status).toBe(200);
+    const pb = await b.owner.call('PATCH', `${widgetsPath(b.orgId)}/${b.widgetId}`, { businessName: 'Acme' });
+    expect(pb.status, JSON.stringify(pb.body)).toBe(200);
+    expect(pb.body!.widget).toMatchObject({ widgetId: b.widgetId, businessName: 'Acme' });
   });
 });
 
@@ -210,6 +230,7 @@ describe('ADR 1018 D8 — the public turn (fail-closed)', () => {
     let res: Response;
     try { res = await visit((w.body!.widget as { token: string }).token, 'hello'); } finally { spy.mockRestore(); }
     expect(res.status).toBe(503); // the embed's generic "could not respond"
+    expect(await res.json()).toMatchObject({ error: 'service_unavailable' });
     expect(managedCalls).toEqual([]);
     expect(byokCalls).toEqual([]);
     const refused = lines.filter((l) => l.includes('widget_credential_refused')).map((l) => JSON.parse(l) as Record<string, unknown>);

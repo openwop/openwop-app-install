@@ -171,6 +171,9 @@ describe('the page editor', () => {
     renderDetail();
     fireEvent.click(await within(await screen.findByTestId('public-preview', {}, { timeout: 3000 })).findByRole('button', { name: 'Add a section after “The story we were sold”' }));
     fireEvent.click(within(screen.getByRole('dialog', { name: 'Add a section' })).getByRole('button', { name: /^Hero/ }));
+    // Persist/remap a valid user-authored Hero; blank intermediate autosave has
+    // its own regression below. Every insertion/remap assertion stays intact.
+    fireEvent.change(within(screen.getByRole('group', { name: /^Editing/ })).getByRole('textbox', { name: /^Heading/ }), { target: { value: 'A real QA heading' } });
     expect(screen.queryByRole('dialog', { name: 'Add a section' })).toBeNull();
     await runAutosave();
     const sent = await waitFor(() => { expect(ui.savePage).toHaveBeenCalled(); return ui.savePage.mock.calls[0]![2] as { sections: Array<{ type: string }> }; });
@@ -183,6 +186,9 @@ describe('the page editor', () => {
     renderDetail();
     fireEvent.click(await within(await screen.findByTestId('public-preview', {}, { timeout: 3000 })).findByRole('button', { name: 'Add a section at the top' }));
     fireEvent.click(within(screen.getByRole('dialog', { name: 'Add a section' })).getByRole('button', { name: /^Hero/ }));
+    // Persist/remap a valid user-authored Hero; blank intermediate autosave has
+    // its own regression below. Every insertion/remap assertion stays intact.
+    fireEvent.change(within(screen.getByRole('group', { name: /^Editing/ })).getByRole('textbox', { name: /^Heading/ }), { target: { value: 'A real QA heading' } });
     await runAutosave();
     await waitFor(() => expect(ui.savePage).toHaveBeenCalled());
     await waitFor(() => expect(screen.getByText('All changes saved')).toBeTruthy());
@@ -370,5 +376,49 @@ describe('the Page tab', () => {
     } finally {
       ui.listVersions.mockResolvedValue([]);
     }
+  });
+});
+
+// CMS-HERO-AUTOSAVE-1: use the actual picker and form, not a prefilled section.
+describe('incomplete Hero draft autosave', () => {
+  async function addHero(): Promise<HTMLElement> {
+    renderDetail();
+    fireEvent.click(await within(await screen.findByTestId('public-preview')).findByRole('button', { name: 'Add a section at the top' }));
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Add a section' })).getByRole('button', { name: /^Hero/ }));
+    return screen.getByRole('group', { name: /^Editing/ });
+  }
+
+  it('keeps a newly inserted blank Hero local, then saves the entered heading once with the loaded version', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const editor = await addHero();
+    const heading = within(editor).getByRole('textbox', { name: /^Heading/ });
+    if (!(heading instanceof HTMLInputElement)) throw new Error('Actual Hero heading input missing');
+    expect(heading.value).toBe('');
+    await runAutosave();
+    expect(ui.savePage).not.toHaveBeenCalled();
+    expect(toast.error).not.toHaveBeenCalled();
+    expect(screen.getByText('Unsaved changes')).toBeTruthy();
+    expect(screen.getByText('Add a heading to each Hero section to enable autosave. Your changes are not saved yet.')).toBeTruthy();
+    fireEvent.change(heading, { target: { value: 'One small next step' } });
+    await runAutosave();
+    await waitFor(() => expect(ui.savePage).toHaveBeenCalledTimes(1));
+    expect(ui.savePage).toHaveBeenCalledWith('o1', 'p1', expect.objectContaining({ expectedVersion: 1, sections: expect.arrayContaining([expect.objectContaining({ type: 'hero', data: expect.objectContaining({ heading: 'One small next step' }) })]) }));
+    expect(screen.getByText('All changes saved')).toBeTruthy();
+    expect(screen.queryByText('Add a heading to each Hero section to enable autosave. Your changes are not saved yet.')).toBeNull();
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it('explicit Save still submits the invalid Hero and exposes the server validation error without claiming it saved', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    await addHero();
+    ui.savePage.mockRejectedValueOnce(new Error('hero.heading is required.'));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('hero.heading is required.'));
+    expect(ui.savePage).toHaveBeenCalledTimes(1);
+    expect(ui.savePage).toHaveBeenCalledWith('o1', 'p1', expect.objectContaining({ expectedVersion: 1, sections: expect.arrayContaining([expect.objectContaining({ type: 'hero', data: { heading: '' } })]) }));
+    expect(screen.getByText('Unsaved changes')).toBeTruthy();
+    expect(screen.queryByText('All changes saved')).toBeNull();
+    await runAutosave();
+    expect(ui.savePage).toHaveBeenCalledTimes(1);
   });
 });

@@ -5,6 +5,12 @@
  * Sabotage-witnessed: dropping the topic narrowing from `isAllowed` reds the evaluator,
  * toggle-off and send cases; dropping `topicWidening` from the preference centre reds the
  * stale re-tick case; writing rows for any posted `topic:*` field reds the closed-world case.
+ * Also witnessed: the eraser, the hold-preserving unsubscribe, the lost-CAS re-read, the
+ * identity check, the post-write tombstone re-check, the merge union and each topic-authority
+ * rule (the token's org, the survivor, the re-resolve after a merge).
+ *
+ * DOUBLE GUARD: an unreadable suppression is refused by the first read and again by the CAS
+ * plus its re-read, so that case reds only when both reads swallow the failure.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import http from 'node:http';
@@ -37,7 +43,7 @@ beforeAll(async () => {
   process.env.OPENWOP_EMAIL_LINK_BASE_URL = 'https://app.example';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-});
+}, 120_000);
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 beforeEach(async () => {
   await __resetEmailStore(); await __resetCrmStore(); await __resetConsentStore(); await __resetTopicOptOuts(); await __clearSuppressions();
@@ -74,7 +80,6 @@ describe('the evaluator: narrowing only', () => {
 
 describe('the full opt-out never blocks transactional mail (EMWF-18)', () => {
   it('an unsubscribe suppression refuses marketing but not a receipt; a bounce still refuses both', async () => {
-    await __clearSuppressions();
     await addSuppression(T, 'unsub@x.test', 'unsubscribed', 'test');
     await addSuppression(T, 'dead@x.test', 'bounced', 'test');
     const verdict = async (address: string, purpose: 'marketing' | 'transactional') =>
@@ -90,7 +95,7 @@ describe('topics + sends', () => {
     await setSenderAddress(T, ORG, 'news@acme.test', 'u1');
     const a = await createContact({ tenantId: T, name: 'A', email: 'a@x.com', stage: 'lead' });
     await createContact({ tenantId: T, name: 'B', email: 'b@x.com', stage: 'lead' });
-    for (const c of [a.contactId]) await recordConsent({ tenantId: T, subjectKey: c, categories: { marketing: true }, source: 'test' });
+    await recordConsent({ tenantId: T, subjectKey: a.contactId, categories: { marketing: true }, source: 'test' });
     const topic = await createTopic({ tenantId: T, orgId: ORG, name: 'Product updates', createdBy: 'u1' });
     await setTopicOptOut(T, ORG, a.contactId, topic.topicId, true, 'test');
     await setToggle('consent', 'off'); // B has no record; let the base allow everyone so only the topic decides
@@ -105,10 +110,11 @@ describe('topics + sends', () => {
     const preferencePath = new URL(preferenceUrl!).pathname;
     expect(await (await fetch(`${BASE}${preferencePath}`)).text()).toContain('Product updates');
     expect(sent?.stats).toMatchObject({ sent: 1, skipped: 1 });
-    await expect(createCampaign({ tenantId: T, orgId: ORG, templateId: tpl.templateId, topicId: 'etopic:nope', createdBy: 'u1' })).rejects.toMatchObject({ httpStatus: 400 });
+    await expect(createCampaign({ tenantId: T, orgId: ORG, templateId: tpl.templateId, topicId: 'etopic:nope', createdBy: 'u1' })).rejects.toMatchObject({ httpStatus: 400, details: { field: 'topicId', topicId: 'etopic:nope' } });
 
+    expect(MAX_TOPICS_PER_ORG).toBe(20);
     for (let i = (await listTopics(T, ORG)).length; i < MAX_TOPICS_PER_ORG; i++) await createTopic({ tenantId: T, orgId: ORG, name: `T${i}`, createdBy: 'u1' });
-    await expect(createTopic({ tenantId: T, orgId: ORG, name: 'one too many', createdBy: 'u1' })).rejects.toMatchObject({ httpStatus: 409 });
+    await expect(createTopic({ tenantId: T, orgId: ORG, name: 'one too many', createdBy: 'u1' })).rejects.toMatchObject({ httpStatus: 409, details: { reason: 'topic_limit', max: 20 } });
   });
 });
 
@@ -139,6 +145,11 @@ describe('the preference centre', () => {
     expect(r.status, r.text.slice(0, 300)).toBe(200);
     expect(await isTopicOptedOut(T, ORG, f.contactId, f.tp), 'unticked ⇒ opted out, even from a stale link').toBe(true);
     expect(await isTopicOptedOut(T, 'other-org', f.contactId, f.other)).toBe(false);
+    // A breach would write under the TOKEN's org, so the row list is the honest read.
+    expect(await isTopicOptedOut(T, ORG, f.contactId, f.other), 'a foreign id never gets a row').toBe(false);
+    const rows = await __hostExtStorage()!.kvList('hostext:consent:topic-optout:');
+    expect(rows.filter((row) => row.value.includes(f.other))).toEqual([]);
+    expect(rows.filter((row) => row.value.includes(f.tp))).toHaveLength(1);
   });
 
   it('re-ticking an opted-out topic is WIDENING: refused from a stale link, accepted from a fresh one', async () => {
@@ -147,6 +158,7 @@ describe('the preference centre', () => {
     await __setTokenCreatedAtForTests(f.token, new Date(Date.now() - 90 * 86_400_000).toISOString());
     const stale = await post(f.token, `email=on&topic:${encodeURIComponent(f.tp)}=on`);
     expect(stale.status).toBe(409);
+    expect(stale.text).toContain('This link is too old to turn messages back on.');
     expect(await isTopicOptedOut(T, ORG, f.contactId, f.tp)).toBe(true);
     await __setTokenCreatedAtForTests(f.token, new Date().toISOString());
     const freshPost = await post(f.token, `email=on&topic:${encodeURIComponent(f.tp)}=on`);

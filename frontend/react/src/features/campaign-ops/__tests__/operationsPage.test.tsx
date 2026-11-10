@@ -19,7 +19,7 @@
  * prefix scan disabled, or its suffix scan allowed to overlap the prefix.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render as rtlRender, cleanup, screen, fireEvent, waitFor, within } from '@testing-library/react';
+import { act, render as rtlRender, cleanup, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import type { ReactElement } from 'react';
 
@@ -48,6 +48,7 @@ vi.mock('../ClientCollaboratorsPanel.js', () => ({ ClientCollaboratorsPanel: () 
 vi.mock('../ClientMemoryPanel.js', () => ({ ClientMemoryPanel: () => null }));
 
 import { OperationsPage, stepReasonKey } from '../OperationsPage.js';
+import { fireAuthChanged } from '../../../client/config.js';
 import { splitChange } from '../ChangeDiff.js';
 import { CampaignOpsError, type ChangeRequest, type ChangeSet, type ClientAccount } from '../campaignOpsClient.js';
 
@@ -234,5 +235,85 @@ describe('helpers', () => {
       expect(((await within(review).findByLabelText('Link for Ann')) as HTMLInputElement).value).toBe('https://app.test/shared/abc');
       expect(h.approveChangeSet).not.toHaveBeenCalled();
     });
+  });
+});
+
+// Identity refresh regressions: actual inbox, controlled client/org transport timing.
+describe('Operations identity refresh', () => {
+  it('recovers a first hydrated-scope refusal after the authenticated workspace signal', async () => {
+    h.listClients.mockRejectedValueOnce(new CampaignOpsError('Campaign operations is not enabled for this tenant.', 404)).mockResolvedValueOnce({ clients: [], agencyAdmin: false });
+    render(<OperationsPage />);
+    await screen.findByText('Operations is not enabled');
+    act(() => fireAuthChanged());
+    expect(await screen.findByText('No clients yet')).toBeTruthy();
+    expect(screen.queryByText('Operations is not enabled')).toBeNull();
+  });
+
+  it.each(['success', 'refusal'] as const)('ignores a late previous-workspace client %s after the current workspace succeeds', async (kind) => {
+    let finish: (() => void) | undefined;
+    h.listClients.mockImplementationOnce(() => new Promise((resolve, reject) => { finish = () => kind === 'success' ? resolve({ clients: [client('live')], agencyAdmin: true }) : reject(new CampaignOpsError('Campaign operations is not enabled for this tenant.', 404)); }))
+      .mockResolvedValueOnce({ clients: [], agencyAdmin: false });
+    render(<OperationsPage />);
+    await waitFor(() => expect(h.listClients).toHaveBeenCalledTimes(1));
+    act(() => fireAuthChanged());
+    await screen.findByText('No clients yet');
+    if (!finish) throw new Error('Old workspace client read did not start');
+    await act(async () => finish?.());
+    expect(screen.getByText('No clients yet')).toBeTruthy();
+    expect(screen.queryByText('Operations is not enabled')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Switch back to preview' })).toBeNull();
+  });
+
+  it('clears visible previous-workspace client data while the next workspace is loading', async () => {
+    h.listClients.mockResolvedValueOnce({ clients: [client('preview')], agencyAdmin: false }).mockImplementationOnce(() => new Promise(() => {}));
+    render(<OperationsPage />);
+    await screen.findByText('Home page');
+    act(() => fireAuthChanged());
+    expect(screen.queryByText('Home page')).toBeNull();
+    expect(screen.queryByLabelText('Client')).toBeNull();
+    expect(screen.queryByText('Preview: nothing is written.')).toBeNull();
+  });
+
+  it('does not repopulate current data with a late old-workspace org read even when org IDs match', async () => {
+    let finish: ((rows: ChangeRequest[]) => void) | undefined;
+    h.listRequests.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; })).mockResolvedValueOnce([]);
+    h.listClients.mockResolvedValueOnce({ clients: [client('preview')], agencyAdmin: false }).mockResolvedValueOnce({ clients: [{ ...client('preview'), tenantId: 'next', displayName: 'New workspace client' }], agencyAdmin: false });
+    render(<OperationsPage />);
+    await waitFor(() => expect(h.listRequests).toHaveBeenCalledTimes(1));
+    act(() => fireAuthChanged());
+    await screen.findByRole('option', { name: 'New workspace client' });
+    await waitFor(() => expect(h.listRequests).toHaveBeenCalledTimes(2));
+    if (!finish) throw new Error('Old workspace org read did not start');
+    await act(async () => finish?.([{ ...request('failed'), text: 'PRIVATE OLD WORKSPACE REQUEST' }]));
+    expect(screen.queryByText('PRIVATE OLD WORKSPACE REQUEST')).toBeNull();
+    expect(screen.getByRole('option', { name: 'New workspace client' })).toBeTruthy();
+  });
+});
+
+describe('Operations explicit recovery and stale action status', () => {
+  it('retries a transient not-enabled read without changing workspace settings', async () => {
+    h.listClients.mockRejectedValueOnce(new CampaignOpsError('Campaign operations is not enabled for this tenant.', 404)).mockResolvedValueOnce({ clients: [], agencyAdmin: false });
+    render(<OperationsPage />);
+    await screen.findByText('Operations is not enabled');
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText('No clients yet')).toBeTruthy();
+    expect(h.listClients).toHaveBeenCalledTimes(2);
+  });
+  it('ignores an old child action completion status after identity changes even with the same org ID', async () => {
+    let finish: ((result: Awaited<ReturnType<Client['submitRequest']>>) => void) | undefined;
+    h.submitRequest.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    h.listClients.mockResolvedValueOnce({ clients: [client('preview')], agencyAdmin: false }).mockResolvedValueOnce({ clients: [{ ...client('preview'), tenantId: 'next', displayName: 'New workspace client' }], agencyAdmin: false });
+    render(<OperationsPage />);
+    await screen.findByLabelText('Home page');
+    fireEvent.change(screen.getByLabelText('Describe the change'), { target: { value: 'Private previous workspace change' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Submit' }));
+    await waitFor(() => expect(h.submitRequest).toHaveBeenCalledTimes(1));
+    act(() => fireAuthChanged());
+    await screen.findByRole('option', { name: 'New workspace client' });
+    if (!finish) throw new Error('Old action did not start');
+    await act(async () => finish?.({ request: request('interpreting'), duplicate: false }));
+    expect(screen.queryByText('Sent.')).toBeNull();
+    expect(screen.queryByText('Private previous workspace change')).toBeNull();
+    expect(screen.getByRole('option', { name: 'New workspace client' })).toBeTruthy();
   });
 });

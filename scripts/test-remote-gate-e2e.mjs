@@ -6,8 +6,11 @@ import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
+import { gunzipSync } from 'node:zlib';
 import { remoteGateControl, runRemoteGate } from './lib/remote-gate-controller.mjs';
 import { admitRemoteGateJob, readRemoteGateJob } from './lib/remote-gate-job.mjs';
+import { remoteGateFrame } from './lib/remote-gate-frame.mjs';
+import { prepareRemoteGateSource } from './lib/remote-gate-source.mjs';
 
 // The real worker entry, runner, supervisor, canonical gate command and
 // controller, end to end on this machine. Only `npm` and `npx` are stubs (the
@@ -55,7 +58,7 @@ process.exit(pass ? 0 : 3);
   return bin;
 }
 
-function fixture(t, { gate = 'green', workerRunner = 'fixture-runner' } = {}) {
+function fixture(t, { gate = 'green', workerRunner = 'fixture-runner', acceptedStartGraceMs } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'remote-gate-e2e-')); chmodSync(dir, 0o700);
   t.after(() => { if (!process.env.KEEP_E2E) rmSync(dir, { recursive: true, force: true }); else console.error('KEPT ' + dir); });
   const repo = privateDir(dir, 'candidate');
@@ -74,6 +77,7 @@ function fixture(t, { gate = 'green', workerRunner = 'fixture-runner' } = {}) {
     root: privateDir(dir, 'jobs'), spoolRoot: privateDir(dir, 'spool'), runnerRoot: privateDir(dir, 'runner'),
     logRoot: privateDir(dir, 'logs'), trust: { runnerId: workerRunner, policySha256 },
     node: process.execPath, installDir: SCRIPTS, launcher: 'detach', timing: FAST,
+    ...(acceptedStartGraceMs ? { acceptedStartGraceMs } : {}),
     env: { PATH: `${stubs(dir)}:/usr/bin:/bin`, STUB_GATE: gate, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' },
   };
   const configPath = join(dir, 'worker.json'); writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
@@ -104,7 +108,7 @@ test('a green remote gate is fetched and accepted by the local validator', suppo
   assert.equal(job.state, 'completed');
   assert.equal(job.details.exitCode, 0);
   assert.deepEqual(readdirSync(f.config.runnerRoot), [], 'the rebuilt checkout is removed');
-  assert(existsSync(join(f.config.logRoot, `${job.id}.log`)), 'the gate log is kept');
+  assert(existsSync(join(f.config.logRoot, `${job.id}.log.gz`)), 'the gate log is kept');
 });
 
 test('a red remote gate is red, with its exit code, and nothing is fetched', supported, async t => {
@@ -112,9 +116,9 @@ test('a red remote gate is red, with its exit code, and nothing is fetched', sup
   const logDir = privateDir(f.dir, 'kept-logs');
   const outcome = await runRemoteGate({ ...f.local, logDir });
   assert.equal(outcome.verdict, 'red');
-  assert.match(readFileSync(outcome.log, 'utf8'), /gate exit 3/, 'the red gate log comes home through the log operation');
+  assert.match(gunzipSync(readFileSync(outcome.log)).toString('utf8'), /gate exit 3/, 'the red gate log comes home (gzipped) through the log operation');
   assert.deepEqual([outcome.status.state, f.jobs()[0].details.exitCode], ['failed', 3]);
-  assert.match(readFileSync(join(f.config.logRoot, `${outcome.id}.log`), 'utf8'), /gate exit 3/);
+  assert.match(gunzipSync(readFileSync(join(f.config.logRoot, `${outcome.id}.log.gz`))).toString('utf8'), /gate exit 3/);
 });
 
 test('evidence for another commit is refused locally: fallback, never green', supported, async t => {
@@ -170,4 +174,27 @@ test('a timed-out remote gate is cancelled on the worker with verified cleanup: 
     requestBytes: readFileSync(join(f.config.root, job.id, 'request.json')) });
   assert.equal(status.code, 0, 'status still answers after the job ended');
   rmSync(status.frame.work, { recursive: true, force: true });
+});
+
+test('a submission whose reply is lost never runs, and the next admission cancels it', supported, async t => {
+  // The D9 P3 residual: a dropped connection used to leave an admitted gate
+  // RUNNING that nobody held the bytes to cancel. Admission no longer launches.
+  const f = fixture(t, { acceptedStartGraceMs: 300 });
+  const prepared = prepareRemoteGateSource({ repo: f.local.repo, outputRoot: f.local.workRoot, commit: f.local.commit,
+    main: f.local.main, trust: f.local.trust });
+  const conn = f.local.connect(); conn.stdin.on('error', () => {}); conn.stdout.resume(); // reply ignored: "lost"
+  for (const chunk of remoteGateFrame('source', { 'request.json': join(prepared.work, 'request.json'),
+    'refs.manifest': join(prepared.work, 'refs.manifest'), 'source.bundle': prepared.bundlePath })) conn.stdin.write(chunk);
+  conn.stdin.end(); assert.equal(await conn.exit, 0);
+  const [orphan] = f.jobs();
+  assert.equal(orphan.state, 'accepted');
+  await delay(1000);
+  assert.equal(f.jobs()[0].state, 'accepted', 'nothing started it');
+  assert.deepEqual(readdirSync(f.config.logRoot), [], 'no runner was launched, so no log');
+  await delay(300);
+  const outcome = await runRemoteGate(f.local);
+  assert.equal(outcome.verdict, 'green', 'the stale admission does not block the next gate');
+  const stale = f.jobs().find(j => j.id === orphan.id);
+  assert.equal(stale.state, 'cancelled', 'expired at the next admission, never launched');
+  assert.deepEqual(readdirSync(f.config.runnerRoot).filter(n => n.includes(orphan.id)), [], 'its checkout is removed');
 });

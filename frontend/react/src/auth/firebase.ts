@@ -230,6 +230,11 @@ async function ensureInitAsync(): Promise<Auth | null> {
     });
     return auth;
   })();
+  // A failed init (the lazy SDK chunk did not fetch, or initializeApp threw)
+  // must not be memoized: every later caller — the next onAuthChanged
+  // subscriber, a sign-in click — would otherwise get the same rejection for
+  // the life of the page. Drop it so the next caller retries the import.
+  initPromise.catch(() => { initPromise = null; });
   return initPromise;
 }
 
@@ -722,6 +727,13 @@ export function onAuthChanged(cb: (u: AuthUser | null) => void): () => void {
       return;
     }
     unsubscribe = authMod.onIdTokenChanged(a, (u) => cb(project(u)));
+  }, (err: unknown) => {
+    // The SDK could not load. With no handler here the subscriber was never
+    // called at all, so `useAuth().loading` never settled (the first-visit
+    // splash hang, 2026-11-05). Answer "signed out" — the only state a page
+    // without the SDK can be in — and let a later sign-in retry the import.
+    console.warn('openwop.auth: Firebase SDK failed to initialize; treating the visitor as signed out', err);
+    if (!cancelled) cb(null);
   });
   return () => {
     cancelled = true;

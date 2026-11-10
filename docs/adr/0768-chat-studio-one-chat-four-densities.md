@@ -362,3 +362,30 @@ persistence decision is host-local (host-extension routes), not wire.
 - [x] Board chip: ship it (user decision, 2026-09-28). It was never hidden — see the correction above.
 - [x] Receipt duration: state it (user decision, 2026-09-28), from the wire turn `ts` — see the correction above.
 - [x] Closed-conversation status on rail rows: **done** — waiting-on-you from the review inbox (ADR 0776 P1), running from one bounded read (ADR 0776 P2).
+
+
+### Correction — viewport ownership of pocket chrome (2026-11-08)
+
+The shared pocket's fixed-position panel and launcher originally rendered inline
+inside feature pages. A filled page-arrival animation on the enclosing feature
+section establishes a containing block even when its computed transform is an
+identity matrix. On the Funnels page, this placed the panel header and close
+button above the viewport. The main element itself need not be transformed.
+
+Both chrome pieces now use the existing `ui/ModalPortal` body-portal seam, which
+already handles this containing-block problem for other overlays. The pocket
+remains non-modal, scoped and owned by the same React component, with the ONE
+EmbeddedChatPanel and its retained conversation. Closing hides rather than
+unmounts the thread; Escape/Mod+J, focus return and feature/org lifetimes are
+unchanged. No global motion/CSS, authorization, agent, workflow wire or chat
+implementation changes are required.
+
+Unit controls verify structural placement outside the animated feature section,
+close/reopen retention, default-open focus and cleanup. Existing lifecycle
+assertions retain their intent by following the actual portal-mounted nodes
+instead of the renderer's local container. These are source-authored and NOT RUN
+at preparation. Physical viewport bounds and real pointer-close behavior require
+separate browser qualification, including default-open, reopened/scrolled and
+mobile cases; jsdom is not geometry evidence. The original live offscreen
+observation is preserved and is not classified as a provider or close-handler
+failure.

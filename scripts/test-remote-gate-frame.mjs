@@ -9,7 +9,7 @@ import { remoteGateFrame, receiveRemoteGateFrame } from './lib/remote-gate-frame
 const MAGIC = Buffer.from('OPENWOP-CI/1\n');
 const names = {
   source: ['request.json', 'refs.manifest', 'source.bundle'],
-  result: ['result.json', 'evidence.json', 'gate.log', 'browser.tsv'],
+  result: ['result.json', 'evidence.json', 'gate.log.gz', 'browser.tsv'],
 };
 function fixture(t, kind = 'source') {
   const root = mkdtempSync(join(tmpdir(), 'remote-frame-test-'));

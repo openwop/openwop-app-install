@@ -9,15 +9,17 @@ import { isAbandonedEmptyChat, selectPurgeableEmptyChats } from '../abandonedCha
 import type { ChatSessionHeader } from '../../../client/chatSessionsClient.js';
 
 const AT = '2026-10-25T00:00:00.000Z';
-type Over = { [K in keyof ChatSessionHeader]?: ChatSessionHeader[K] | undefined };
-/** A never-used chat owned by u1; an override of `undefined` REMOVES the field. */
-const own = (over: Over = {}): ChatSessionHeader => {
-  const out: Record<string, unknown> = {
+type Over = Partial<ChatSessionHeader>;
+type Dropped = 'ownerUserId' | 'type';
+/** A never-used chat owned by u1; `drop` REMOVES a field the row must not have. */
+const own = (over: Over = {}, drop: readonly Dropped[] = []): ChatSessionHeader => {
+  const out: ChatSessionHeader = {
     sessionId: 's', tenantId: 't', title: 'New chat', createdAt: AT, updatedAt: AT, messageCount: 0,
     type: 'agent', ownerUserId: 'u1', participants: [{ subjectRef: 'user:u1', role: 'owner', addedAt: AT }],
+    ...over,
   };
-  for (const [k, v] of Object.entries(over)) { if (v === undefined) delete out[k]; else out[k] = v; }
-  return out as unknown as ChatSessionHeader;
+  for (const key of drop) delete out[key];
+  return out;
 };
 
 describe('isAbandonedEmptyChat', () => {
@@ -31,13 +33,13 @@ describe('isAbandonedEmptyChat', () => {
     expect(isAbandonedEmptyChat(own({ ownerUserId: 'session:x', participants: [{ subjectRef: 'user:session:x', role: 'owner', addedAt: AT }] }))).toBe(true);
   });
 
-  it.each<[string, Over]>([
+  it.each<[string, Over, Dropped[]?]>([
     ['has messages', { messageCount: 1 }],
-    ['legacy meta-less (no owner, no participants)', { ownerUserId: undefined, participants: [] }],
-    ['no recorded owner', { ownerUserId: undefined }],
+    ['legacy meta-less (no owner, no participants)', { participants: [] }, ['ownerUserId']],
+    ['no recorded owner', {}, ['ownerUserId']],
     // The owner check is layered under the ref match; this row is the one only it catches.
-    ['no recorded owner, sole participant spelled `user:undefined`', { ownerUserId: undefined, participants: [{ subjectRef: 'user:undefined', role: 'owner', addedAt: AT }] }],
-    ['untyped (local fallback index row)', { type: undefined }],
+    ['no recorded owner, sole participant spelled `user:undefined`', { participants: [{ subjectRef: 'user:undefined', role: 'owner', addedAt: AT }] }, ['ownerUserId']],
+    ['untyped (local fallback index row)', {}, ['type']],
     ['a group', { type: 'group' }],
     ['a channel', { type: 'channel' }],
     ['a workspace chat', { type: 'workspace' }],
@@ -48,8 +50,8 @@ describe('isAbandonedEmptyChat', () => {
     ['bound to a board', { boardId: 'b1' }],
     ['bound to a project/notebook subject', { ownerSubject: { kind: 'project', id: 'p1' } }],
     ['bound to a client', { client: { orgId: 'o1', name: 'Acme' } }],
-  ])('spares a conversation that %s', (_label, over) => {
-    expect(isAbandonedEmptyChat(own(over))).toBe(false);
+  ])('spares a conversation that %s', (_label, over, drop) => {
+    expect(isAbandonedEmptyChat(own(over, drop))).toBe(false);
   });
 });
 
@@ -61,7 +63,7 @@ describe('selectPurgeableEmptyChats (the ChatSidebar one-shot purge)', () => {
       own({ sessionId: 'project', type: 'group', ownerSubject: { kind: 'project', id: 'p1' } }),
       own({ sessionId: 'notebook', type: 'group', ownerSubject: { kind: 'notebook', id: 'n1' } }),
       own({ sessionId: 'dm', participants: [{ subjectRef: 'user:u1', role: 'owner', addedAt: AT }, { subjectRef: 'agent:iris', role: 'member', addedAt: AT }] }),
-      own({ sessionId: 'legacy', ownerUserId: undefined, participants: [] }),
+      own({ sessionId: 'legacy', participants: [] }, ['ownerUserId']),
     ];
     expect(selectPurgeableEmptyChats(rows, 'active').map((r) => r.sessionId)).toEqual(['mine']);
   });

@@ -137,6 +137,11 @@ export interface WorkflowRunState {
   nodeNames: Record<string, string>;
   startedAt: string;
   outputs?: Record<string, unknown>;
+  /** RFC 0257 (ADR 1027 P3) — set only when the run COMPLETED without reaching
+   *  any terminal node: the terminals that were skipped, from `run.completed`.
+   *  The completion card then says "no final step ran" instead of a plain
+   *  success. Absent when a terminal completed. */
+  skippedTerminals?: string[];
   /** `reason` (ADR 0482) carries the machine-readable envelope reason
    *  (e.g. `workflow_budget_exhausted`) so classifiers key on data, not
    *  message text. */

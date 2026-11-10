@@ -10,10 +10,15 @@
  * the token and boundary cases; dropping the wrapper in `agentRunnerNode` reds
  * the tool case; treating every run as marked reds the token control and the
  * empty-metadata assertion.
+ *
+ * Re-probed /grade-tests w81: each refusal asserts its exact body, and the
+ * boundary case has its in-app control too. The tool case asserts the WRITER
+ * (the bit on `run.metadata`), not the reader: dropping the reader's
+ * `untrustedContext` arm reds the token cases, never the tool case, by design.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { getSetCookies } from './headerCookies.js';
 import { createApp } from '../src/index.js';
 import { getAgentRegistry } from '../src/executor/agentRegistry.js';
@@ -55,7 +60,7 @@ function client() {
   let cookie = '';
   const call = async <T,>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]!; }
+    for (const ck of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(ck); if (m?.[1]) cookie = m[1]; }
     return { status: res.status, body: (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as T };
   };
   return {
@@ -74,14 +79,13 @@ async function login(): Promise<Client> {
   await c.post('/host/openwop-app/test/login', { email: `trust-${stamp}@acme.test`, tenantId: `org:trust-${stamp}` });
   return c;
 }
+/** Run settle: no hook to await, so poll the real condition (bounded; fails naming the state). */
 async function waitStatus(c: Client, runId: string, pred: (s: string) => boolean): Promise<string> {
-  const t0 = Date.now();
-  for (;;) {
+  return vi.waitFor(async () => {
     const s = (await c.get<{ status?: string }>(`/runs/${encodeURIComponent(runId)}`)).body?.status ?? '';
-    if (pred(s)) return s;
-    if (Date.now() - t0 > 20_000) throw new Error(`run ${runId} stuck at ${s}`);
-    await new Promise((r) => setTimeout(r, 50));
-  }
+    if (!pred(s)) throw new Error(`run ${runId} stuck at ${s}`);
+    return s;
+  }, { timeout: 20_000, interval: 50 });
 }
 const terminal = (s: string): boolean => ['completed', 'failed', 'cancelled'].includes(s);
 const waiting = (s: string): boolean => s.startsWith('waiting') || terminal(s);
@@ -99,12 +103,20 @@ async function gate(c: Client): Promise<{ runId: string; open: Open & { token: s
   return { runId, open: { ...open, token: open.token } };
 }
 const accept = { resumeValue: { action: 'accept' } };
+interface Refusal { error?: string; message?: string; details?: { reason?: string } }
+/** The token lane's refusal, exactly: a 403 from any other guard carries another reason. */
+function expectSessionOnly(r: Res<Refusal>): void {
+  expect(r.status, JSON.stringify(r.body)).toBe(403);
+  expect(r.body?.error).toBe('forbidden');
+  expect(r.body?.details?.reason).toBe('approval_requires_session');
+}
 
 describe('ADR 1009 — the token lane on a run that read untrusted content', () => {
   it('control: an unmarked run resolves over the token', async () => {
     const c = await login();
     const { runId, open } = await gate(c);
-    expect((await c.anon(`/interrupts/${open.token}`, accept)).status).toBeLessThan(300);
+    const viaToken = await c.anon(`/interrupts/${open.token}`, accept);
+    expect(viaToken.status, JSON.stringify(viaToken.body)).toBe(200);
     expect(await waitStatus(c, runId, terminal)).toBe('completed');
   });
 
@@ -112,11 +124,9 @@ describe('ADR 1009 — the token lane on a run that read untrusted content', () 
     const c = await login();
     const { runId, open } = await gate(c);
     await markRunUntrustedContext(storage, bareRunId(runId));
-    const viaToken = await c.anon(`/interrupts/${open.token}`, accept);
-    expect(viaToken.status).toBe(403);
-    expect(JSON.stringify(viaToken.body)).toContain('approval_requires_session');
+    expectSessionOnly(await c.anon<Refusal>(`/interrupts/${open.token}`, accept));
     const inApp = await c.post(`/runs/${encodeURIComponent(runId)}/interrupts/${open.nodeId}`, accept);
-    expect(inApp.status, JSON.stringify(inApp.body)).toBeLessThan(300);
+    expect(inApp.status, JSON.stringify(inApp.body)).toBe(200);
     expect(await waitStatus(c, runId, terminal)).toBe('completed');
   });
 
@@ -124,7 +134,11 @@ describe('ADR 1009 — the token lane on a run that read untrusted content', () 
     const c = await login();
     const { runId, open } = await gate(c);
     await storage.mergeRunMetadata(bareRunId(runId), { trustBoundary: 'untrusted' });
-    expect((await c.anon(`/interrupts/${open.token}`, accept)).status).toBe(403);
+    expectSessionOnly(await c.anon<Refusal>(`/interrupts/${open.token}`, accept));
+    // The gate stays open to the person in the app.
+    const inApp = await c.post(`/runs/${encodeURIComponent(runId)}/interrupts/${open.nodeId}`, accept);
+    expect(inApp.status, JSON.stringify(inApp.body)).toBe(200);
+    expect(await waitStatus(c, runId, terminal)).toBe('completed');
   });
 
   it('an agent turn that ran a tool marks its run, and one that ran none does not', async () => {

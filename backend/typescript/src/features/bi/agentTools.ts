@@ -13,6 +13,7 @@ import { AGGREGATES, TIME_BUCKETS } from './metricTypes.js';
 import { projectBiCatalog } from './surface.js';
 import { runMetric } from './biService.js';
 import { resolveReadOrgScope } from '../../host/agentToolKit.js';
+import { OpenwopError } from '../../types.js';
 
 export const BI_LIST_METRICS_TOOL_ID = 'openwop:bi.list-metrics';
 export const BI_RUN_METRIC_TOOL_ID = 'openwop:bi.run-metric';
@@ -40,17 +41,28 @@ export function registerBiAgentTools(): void {
     def: {
       name: BI_LIST_METRICS_TOOL_ID,
       description:
-        'List the workspace\'s governed business metrics (the BI catalog): each entry has a metricId, title, '
-        + `entity type, and aggregate (one of: ${AGGREGATES.join(', ')}). Read-only. `
+        'List one organization\'s governed business metrics (the BI catalog): each entry has a metricId, title, '
+        + `entity type, aggregate (one of: ${AGGREGATES.join(', ')}), the measured field, its filters, and its grouping. `
+        + 'An entry marked `stale` no longer fits its entity type and cannot run until a person edits it. Read-only. '
         + 'Use a metricId with openwop:bi.run-metric to evaluate it.',
-      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      inputSchema: {
+        type: 'object',
+        properties: {
+          orgId: { type: 'string', minLength: 1, description: 'The organization whose catalog to list (optional when the workspace has one).' },
+        },
+        additionalProperties: false,
+      },
     },
-    async run(_input, scope) {
+    async run(input, scope) {
       if (!scope.actingUserId || !(await biEnabled(scope.tenantId, scope.actingUserId))) {
         return { content: JSON.stringify({ metrics: [], note: 'BI metrics unavailable for this workspace/run' }) };
       }
-      const catalog = await projectBiCatalog(scope.tenantId);
-      return { content: JSON.stringify({ metrics: catalog.metrics }) };
+      // ADR 1052 D0 — the catalog is per org: the SAME org gate the route applies.
+      const gate = await resolveReadOrgScope(scope, { featureId: 'bi', featureLabel: 'BI' }, typeof input.orgId === 'string' && input.orgId ? input.orgId : undefined);
+      if (gate.kind === 'error') return gate.result;
+      if (gate.kind === 'empty') return { content: JSON.stringify({ metrics: [], note: gate.note }) };
+      const catalog = await projectBiCatalog(scope.tenantId, gate.orgId);
+      return { content: JSON.stringify({ orgId: gate.orgId, metrics: catalog.metrics }) };
     },
   });
 
@@ -62,7 +74,10 @@ export function registerBiAgentTools(): void {
       description:
         'Evaluate ONE governed business metric by metricId (from openwop:bi.list-metrics). '
         + 'Returns grouped numeric points ({key, value, n}). Bounded params only — there is no free-form query: '
-        + `optional groupBy (a field of the metric's entity type), since/until (ISO dates over the metric's timeField), and bucket (one of: ${TIME_BUCKETS.join(', ')}).`,
+        + `optional groupBy (a field of the metric's entity type), since/until (ISO dates over the metric's timeField), and bucket (one of: ${TIME_BUCKETS.join(', ')}). `
+        + 'The result states its `scope` (org or tenant). `groupsTruncated` means only the largest groups (or the most recent buckets) are shown and `droppedGroups` were left out; '
+        + '`undatedRows` counts rows a bucketed run could not place in time. Report those, never present a partial answer as complete. '
+        + 'An error with `details.reason` `metric_stale` means the metric no longer fits its entity type (`details.field`): tell the user to edit it.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -99,8 +114,14 @@ export function registerBiAgentTools(): void {
       } catch (err) {
         // A typed validation/not-found error is USEFUL model feedback (the one
         // bounded error-fed repair) — surface the code+message, never a stack.
-        const e = err as { code?: string; message?: string };
-        return { content: JSON.stringify({ error: { code: e.code ?? 'error', message: e.message ?? 'metric run failed' } }), isError: true };
+        // ADR 1052 D10 — `details` carry the stale field / the refused param, the part
+        // the model needs to explain the refusal (never a stack, never a run id).
+        // Only a TYPED refusal is shown; anything else (storage, a bug) is generic, so
+        // no internal message reaches the model (grade-code L11).
+        // `fromThrow` — a caught error reaches the model only through the thrown-error
+        // fence (ADR 1000 / TOC2CD-14), like every sibling tool's catch.
+        if (!(err instanceof OpenwopError)) return { content: JSON.stringify({ error: { code: 'error', message: 'metric run failed' } }), isError: true, fromThrow: true };
+        return { content: JSON.stringify({ error: { code: err.code, message: err.message, ...(err.details ? { details: err.details } : {}) } }), isError: true, fromThrow: true };
       }
     },
   });

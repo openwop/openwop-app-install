@@ -10,24 +10,15 @@
  * approver-list length, deterministic keys) preserved; another subject's and
  * another tenant's data is left intact; every eraser is idempotent.
  *
- * (The `kicktodo-plan-proposal` migration is pinned byte-identical by
- * test/kicktodo-compliance-accountability.test.ts and is not re-proved here.)
+ * The SUBMISSION-kind redactors are KickTodo's and are pinned by their owner
+ * (ADR 1031 P2): test/kicktodo/kicktodo-approval-kind-erasure.test.ts.
  */
 
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
-import {
-  createChallengePublishApproval,
-  createCommunityApproval,
-  createConnectSellerApproval,
-  createContentApproval,
-  eraseApprovalSubject,
-  getApproval,
-  ERASED_SUBJECT_SENTINEL as ERASED,
-  __resetApprovalStore,
-} from '../src/host/approvalService.js';
+import { createContentApproval, eraseApprovalSubject, getApproval, ERASED_SUBJECT_SENTINEL as ERASED, __resetApprovalStore } from '../src/host/approvalService.js';
 import {
   createDelegation,
   revokeDelegation,
@@ -83,30 +74,6 @@ beforeEach(async () => {
 });
 
 describe('ADR 0464 — approvals payload-redactor registry (store-level eraser)', () => {
-  it('redacts the SUBMITTER id + proposal on their submission kinds; other subject + other tenant intact', async () => {
-    const chalA = await createChallengePublishApproval({ tenantId: T, proposal: 'ship A', candidateId: 'c1', challengeId: 'ch1', challengeVersion: 1, submittedBy: A });
-    const chalB = await createChallengePublishApproval({ tenantId: T, proposal: 'ship B', candidateId: 'c2', challengeId: 'ch2', challengeVersion: 1, submittedBy: B });
-    const commA = await createCommunityApproval({ tenantId: T, kind: 'community-profile', proposal: 'profile A', refId: 'r1', submittedBy: A });
-    const sellA = await createConnectSellerApproval({ tenantId: T, proposal: 'onboard A', submittedBy: A });
-    const chalT2 = await createChallengePublishApproval({ tenantId: T2, proposal: 'ship A', candidateId: 'c3', challengeId: 'ch3', challengeVersion: 1, submittedBy: A });
-
-    const touched = await eraseApprovalSubject(T, A);
-    expect(touched).toBe(3); // chalA, commA, sellA
-
-    const a1 = await getApproval(chalA.approvalId);
-    expect(a1?.challengePublish?.submittedBy).toBe(ERASED);
-    expect(a1?.proposal).toBe(ERASED);
-    expect(a1?.status).toBe('pending'); // still decidable — status untouched
-    expect((await getApproval(commA.approvalId))?.community?.submittedBy).toBe(ERASED);
-    expect((await getApproval(sellA.approvalId))?.connectSeller?.submittedBy).toBe(ERASED);
-
-    // B's submission + the other tenant's untouched.
-    const b1 = await getApproval(chalB.approvalId);
-    expect(b1?.challengePublish?.submittedBy).toBe(B);
-    expect(b1?.proposal).toBe('ship B');
-    expect((await getApproval(chalT2.approvalId))?.challengePublish?.submittedBy).toBe(A);
-  });
-
   it('anonymizes an APPROVER ref in place, preserving the list length (quorum shape)', async () => {
     const gate = await createContentApproval({
       tenantId: T, orgId: 'org1', pageId: 'pg1', pageTitle: 'P', proposal: 'publish P',
@@ -119,12 +86,6 @@ describe('ADR 0464 — approvals payload-redactor registry (store-level eraser)'
     expect(g?.policy?.approverRefs).toEqual([ERASED, B]); // A → sentinel, order + length kept
     expect(g?.policy?.requiredApprovals).toBe(2); // quorum threshold unchanged
     expect(g?.proposal).toBe('publish P'); // an approver's erasure never scrubs the author's proposal
-  });
-
-  it('is idempotent', async () => {
-    await createChallengePublishApproval({ tenantId: T, proposal: 'ship A', candidateId: 'c1', challengeId: 'ch1', challengeVersion: 1, submittedBy: A });
-    expect(await eraseApprovalSubject(T, A)).toBe(1);
-    expect(await eraseApprovalSubject(T, A)).toBe(0);
   });
 });
 
@@ -256,14 +217,12 @@ describe('ADR 0464 — cross-FORM matching (seed raw, erase scoped)', () => {
   const RAW = 'carla';
   const SCOPED = `user:${RAW}`;
 
-  it('approval store: raw-stored submitter + approver erased by a scoped DSAR key', async () => {
-    const sub = await createChallengePublishApproval({ tenantId: T, proposal: 'ship C', candidateId: 'c9', challengeId: 'ch9', challengeVersion: 1, submittedBy: RAW });
+  it('approval store: a raw-stored approver erased by a scoped DSAR key', async () => {
     const gate = await createContentApproval({
       tenantId: T, orgId: 'org1', pageId: 'pg9', pageTitle: 'P', proposal: 'publish P',
       policy: { requiredApprovals: 2, approverRefs: [RAW, B] },
     });
-    expect(await eraseApprovalSubject(T, SCOPED)).toBe(2);
-    expect((await getApproval(sub.approvalId))?.challengePublish?.submittedBy).toBe(ERASED);
+    expect(await eraseApprovalSubject(T, SCOPED)).toBe(1);
     expect((await getApproval(gate.approvalId))?.policy?.approverRefs).toEqual([ERASED, B]);
   });
 

@@ -1,0 +1,27 @@
+{
+  "$comment": "ADR 1029 D4 — every value or pattern this app took from a third-party source. One entry per ported piece; the notice text each license requires is in the repo-root NOTICE under 'Ported design patterns'. Patterns written from scratch after looking at a reference are not listed.",
+  "patterns": [
+    {
+      "pattern": "ease-reveal",
+      "file": "frontend/react/src/styles/foundations/tokens.css",
+      "token": "--ease-reveal",
+      "value": "cubic-bezier(0, 0, 0.3, 1)",
+      "source": "https://github.com/argyleink/open-props (src/props.easing.css, --ease-out-3)",
+      "author": "Adam Argyle",
+      "license": "MIT",
+      "retrieved": "2026-11-02",
+      "adapted": "renamed to a semantic token; used as the scroll-reveal curve"
+    },
+    {
+      "pattern": "ease-reveal (lively preset)",
+      "file": "frontend/react/src/brand/theme/generate.ts",
+      "token": "--ease-reveal",
+      "value": "cubic-bezier(0, 0, 0.1, 1)",
+      "source": "https://github.com/argyleink/open-props (src/props.easing.css, --ease-out-4)",
+      "author": "Adam Argyle",
+      "license": "MIT",
+      "retrieved": "2026-11-02",
+      "adapted": "the ADR 1029 D6 `lively` motion preset's reveal curve"
+    }
+  ]
+}

@@ -74,7 +74,9 @@ import { creativeVideoFeature } from './creative-video/routes.js';
 import { campaignIntelFeature } from './campaign-intel/routes.js';
 import { accessHubFeature } from './access-hub/routes.js';
 import { chatDeploymentFeature } from './chat-deployment/routes.js';
+import { channelIngressFeature } from './channel-ingress/routes.js';
 import { appBuilderFeature } from './app-builder/routes.js';
+import { filmsFeature } from './films/routes.js';
 import { slidesFeature } from './slides/routes.js';
 import { drawingsFeature } from './drawings/routes.js';
 import { cadFeature } from './cad/routes.js';
@@ -96,16 +98,15 @@ import { claudeCodeFeature } from './claude-code/routes.js';
 import { salesCommissionsFeature } from './sales-commissions/routes.js';
 import { dealersFeature } from './dealers/routes.js';
 import { salesMapsFeature } from './sales-maps/routes.js';
-import { kicktodoFeature } from './kicktodo/routes.js';
-import { kicktodoCirclesFeature } from './kicktodo-circles/routes.js';
-import { kicktodoEngagementFeature } from './kicktodo-engagement/routes.js';
-import { kicktodoCommunityFeature } from './kicktodo-community/routes.js';
-import { kicktodoOrgProgramsFeature } from './kicktodo-org-programs/routes.js';
-import { kicktodoStudioFeature } from './kicktodo-studio/routes.js';
-import { kicktodoAdminFeature } from './kicktodo-admin/routes.js';
-import { kicktodoMetricsFeature } from './kicktodo-metrics/routes.js';
-import { kicktodoSeatsFeature } from './kicktodo-seats/routes.js';
 import { i18n } from '../i18n/index.js';
+// ADR 1031 — the adopter seam: features an adopter repo ships under
+// `src/adopter/features/<id>/routes.tsx` (none in openwop-app), and the two
+// shared surfaces a feature contributes to without the host naming it.
+import { ADOPTER_FRONTEND_FEATURES, composeFrontendFeatures } from './adopterFeatures.js';
+import type { DashboardTileDef } from './dashboard/tileTypes.js';
+import type { ReviewArtifactRendererProps } from '../chat/reviews/reviewArtifactRenderers.js';
+import type { ReviewRequest } from '../chat/reviews/reviewClient.js';
+import type { ComponentType } from 'react';
 // ADR 0084 correction — notebooks (Sources) + podcasts are surfaced as PROJECT tabs
 // (ProjectDetailPage), not standalone top-level nav destinations. Their feature
 // modules + i18n still ship (the panels are imported by the projects feature); only
@@ -145,6 +146,77 @@ export interface FrontendFeature {
    * overwrite a host nav string; `applyFeatureNavMessages` refuses anything else.
    */
   navMessages?: Readonly<Record<string, Readonly<Record<string, string>>>>;
+  /**
+   * ADR 1031 — dashboard tiles this feature contributes. Composed after the
+   * host's own in `dashboard/allTiles.ts` (`ALL_DASHBOARD_TILES`), so a feature
+   * — first-party or adopter — adds a tile without editing that file, and a
+   * distribution that excludes the feature drops its tiles. Set
+   * `owningFeatureToggle` so the tile follows the feature's toggle, and
+   * `i18nNamespace` when the label keys live in the feature's own catalog.
+   * Keep the component `lazy(...)`: this metadata ships in the entry chunk.
+   */
+  dashboardTiles?: readonly DashboardTileDef[];
+  /**
+   * ADR 1031 — typed renderers for review assets this feature's workflows put up
+   * for approval, keyed by `artifactTypeId` (the ADR 0459 review renderer
+   * registry, which registers them on its first lookup). Wrap a `lazy(...)`
+   * component in its own `<Suspense>`: this ships in the entry chunk, and the
+   * review card has no boundary of its own.
+   */
+  reviewArtifactRenderers?: readonly FeatureReviewArtifactRenderer[];
+  /**
+   * ADR 1031 P2 — nav GROUPS this feature introduces (a `nav.group` label no host
+   * group declares), each placed directly after an existing group in the
+   * category order (`chrome/features.tsx` `GROUP_ORDER`). Without it a new group
+   * sorts after every known one. An unknown anchor or a label already in the
+   * order fails a test over the shipped features (chrome/__tests__/features.test.ts),
+   * not code here: the splice runs in the entry chunk.
+   */
+  navGroups?: readonly { label: string; after: string }[];
+  /**
+   * ADR 1031 P2 — declarations that only LAZY surfaces read (the review card, the
+   * chat run header, the Keys page, the dashboard), loaded with them instead of
+   * shipping in the entry chunk: `() => import('./extensions.js').then((m) => m.extensions)`. See
+   * `features/featureExtensions.ts`, which every such surface reads through.
+   */
+  lazyExtensions?: () => Promise<FeatureLazyExtensions>;
+}
+
+/** ADR 1031 P2 — what a feature's `lazyExtensions` module may declare. */
+export interface FeatureLazyExtensions {
+  /** As `FrontendFeature.navMessages` (same `<feature id>.` prefix rule and cap), for
+   *  nav copy ONLY a lazy surface shows (the admin rail: chrome/AdminLayout loads
+   *  these before it renders). Sidebar / site-nav copy stays on the eager
+   *  `navMessages` (ADR 0916 D3, first paint). */
+  navMessages?: Readonly<Record<string, Readonly<Record<string, string>>>>;
+  /** As `FrontendFeature.dashboardTiles`, appended after them. */
+  dashboardTiles?: readonly DashboardTileDef[];
+  /** As `FrontendFeature.reviewArtifactRenderers`, appended after them. */
+  reviewArtifactRenderers?: readonly FeatureReviewArtifactRenderer[];
+  /** A section this feature adds to every review card (ADR 0068 ReviewCard), after
+   *  the host's own. The component decides whether it applies (null otherwise). */
+  reviewCardSections?: readonly FeatureReviewCardSection[];
+  /** Display names for this feature's workflows in the chat run header, per locale
+   *  (`{ en: { '<workflowId>': 'Name' } }`). Consulted after the `chat` catalog's
+   *  `workflowNames` and before the backend's English default. */
+  chatWorkflowNames?: Readonly<Record<string, Readonly<Record<string, string>>>>;
+  /** BYOK ref prefixes a card of this feature owns: the Keys page's unscoped bucket
+   *  leaves them out (they would read as unscoped keys). */
+  cardOwnedCredentialRefPrefixes?: readonly string[];
+}
+
+/** ADR 1031 P2 — one feature-contributed review-card section. */
+export interface FeatureReviewCardSection {
+  id: string;
+  component: ComponentType<{ review: ReviewRequest; resolved: boolean }>;
+}
+
+/** ADR 1031 — one feature-contributed review renderer. */
+export interface FeatureReviewArtifactRenderer {
+  artifactTypeId: string;
+  component: ComponentType<ReviewArtifactRendererProps>;
+  /** Shape check that lets UNTYPED content render in this type's layout. */
+  matches?: (content: string) => boolean;
 }
 
 /** A feature-contributed agent-workspace tab. `labelKey` is in the `agents` i18n namespace. */
@@ -155,15 +227,11 @@ export interface AgentWorkspaceTab {
   render: (p: { agentId: string; persona: string; canWrite: boolean; onDirtyChange?: (dirty: boolean) => void }) => ReactNode;
 }
 
-/** Every frontend feature the app composes. Append a new feature here. */
-export const FRONTEND_FEATURES: FrontendFeature[] = [crmFeature, cdpFeature, csmFeature, usersFeature, profilesFeature, mediaFeature, cmsFeature, notificationsFeature, kbFeature, publishingFeature, sharingFeature, formsFeature, consentFeature, analyticsFeature, connectionsFeature, emailFeature, commentsFeature, marketplaceFeature, agentKnowledgeFeature, advisoryBoardFeature, projectsFeature, documentsFeature, priorityMatrixFeature, strategyFeature, brandFeature, campaignBriefFeature, creativeBriefsFeature, campaignOrchestrationFeature, campaignOpsFeature, collabFeature, campaignPlaybooksFeature, campaignConnectorsFeature, webinarsFeature, creativeVideoFeature, campaignIntelFeature, campaignsFeature, usageAnalyticsFeature, evalsFeature, agentDeploymentsFeature, scheduledAgentChatsFeature, channelsFeature, chatWidgetFeature, capabilityFirewallFeature, modelRouterFeature, ambientWorkGraphFeature, navigationSettingsFeature, accessHubFeature, chatDeploymentFeature, appBuilderFeature, slidesFeature, drawingsFeature, cadFeature, documentEditorFeature, campaignStudioFeature, canvasPacksFeature, productionFeature, billingFeature, commerceConnectFeature, commerceFeature, commerceUcpFeature, commerceUcpBuyerFeature, recommendationsFeature, promotionsFeature, funnelsFeature, experimentsFeature, tutorialsFeature, customDomainsFeature, discoveryFeature, manualTestsFeature, designSystemGalleryFeature, territoriesFeature, jobSearchFeature, salesCommissionsFeature, dealersFeature, salesMapsFeature, uiPluginsFeature, dashboardFeature, entitiesFeature, environmentsFeature, kicktodoFeature, kicktodoCirclesFeature,
-  kicktodoEngagementFeature,
-  kicktodoCommunityFeature, kicktodoOrgProgramsFeature,
-  kicktodoStudioFeature,
-  kicktodoAdminFeature,
-  kicktodoMetricsFeature,
-  kicktodoSeatsFeature, biFeature, serviceDeskFeature, showcaseFeature, claudeCodeFeature,
-];
+/** Every frontend feature the app composes. Append a new feature here.
+ *  ADR 1031 — an adopter's features (`src/adopter/features/<id>/routes.tsx`) are
+ *  appended after these by `composeFrontendFeatures`, which throws on a duplicate id. */
+export const FRONTEND_FEATURES: FrontendFeature[] = composeFrontendFeatures([crmFeature, cdpFeature, csmFeature, usersFeature, profilesFeature, mediaFeature, cmsFeature, notificationsFeature, kbFeature, publishingFeature, sharingFeature, formsFeature, consentFeature, analyticsFeature, connectionsFeature, emailFeature, commentsFeature, marketplaceFeature, agentKnowledgeFeature, advisoryBoardFeature, projectsFeature, documentsFeature, priorityMatrixFeature, strategyFeature, brandFeature, campaignBriefFeature, creativeBriefsFeature, campaignOrchestrationFeature, campaignOpsFeature, collabFeature, campaignPlaybooksFeature, campaignConnectorsFeature, webinarsFeature, creativeVideoFeature, campaignIntelFeature, campaignsFeature, usageAnalyticsFeature, evalsFeature, agentDeploymentsFeature, scheduledAgentChatsFeature, channelsFeature, chatWidgetFeature, capabilityFirewallFeature, modelRouterFeature, ambientWorkGraphFeature, navigationSettingsFeature, accessHubFeature, channelIngressFeature, chatDeploymentFeature, appBuilderFeature, slidesFeature, filmsFeature, drawingsFeature, cadFeature, documentEditorFeature, campaignStudioFeature, canvasPacksFeature, productionFeature, billingFeature, commerceConnectFeature, commerceFeature, commerceUcpFeature, commerceUcpBuyerFeature, recommendationsFeature, promotionsFeature, funnelsFeature, experimentsFeature, tutorialsFeature, customDomainsFeature, discoveryFeature, manualTestsFeature, designSystemGalleryFeature, territoriesFeature, jobSearchFeature, salesCommissionsFeature, dealersFeature, salesMapsFeature, uiPluginsFeature, dashboardFeature, entitiesFeature, environmentsFeature, biFeature, serviceDeskFeature, showcaseFeature, claudeCodeFeature,
+], ADOPTER_FRONTEND_FEATURES);
 
 /** ADR 0916 — merge each feature's `navMessages` into the `nav` namespace,
  *  keeping only keys under the feature's own `<id>.` prefix (so a feature can
@@ -182,6 +250,15 @@ export function applyFeatureNavMessages(
 }
 
 applyFeatureNavMessages(FRONTEND_FEATURES, (locale, messages) => i18n.addResourceBundle(locale, 'nav', messages, true, false));
+
+// ADR 1031 P2 — fetch the composed features' lazy-extension chunks off the critical
+// path, so the lazy surface that reads them (featureExtensions.ts) finds them loaded.
+setTimeout(() => { for (const f of FRONTEND_FEATURES) void f.lazyExtensions?.().catch(() => undefined); }, 0);
+
+/** ADR 1031 P2 — the nav groups the composed features introduce, in registry order. */
+export function featureNavGroups(): Array<{ label: string; after: string }> {
+  return FRONTEND_FEATURES.flatMap((f) => [...(f.navGroups ?? [])]);
+}
 
 /** Flatten every feature's routes for the manifest. */
 export function featureRoutes(): FeatureRoute[] {

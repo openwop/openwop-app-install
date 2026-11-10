@@ -96,6 +96,32 @@ describe('GraphSurface — derived-edge mode (ADR 0360 grade pass)', () => {
 });
 
 describe('GraphSurface', () => {
+  it('pointer activation on the real zoom SVG preserves selection and never captures a background pan', () => {
+    const { props } = setup({ selectedNodeId: 'home', selectedEdgeId: 'e1' });
+    const surface = screen.getByRole('group', { name: labels.surface });
+    const capture = vi.fn();
+    Object.defineProperty(surface, 'setPointerCapture', { value: capture, configurable: true });
+    const zoom = screen.getByRole('button', { name: 'Zoom in' });
+    const icon = zoom.querySelector('svg');
+    if (!icon) throw new Error('Zoom in must expose its real SVG icon target');
+    const target = icon.querySelector('path') ?? icon;
+    // Native mouse events with pointer type names retain button/coordinates in
+    // jsdom. This exercises React's actual bubbling path without a fake helper.
+    fireEvent(target, new MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 100, clientY: 100 }));
+    expect(props.onSelectNode).not.toHaveBeenCalled();
+    expect(props.onSelectEdge).not.toHaveBeenCalled();
+    expect(capture).not.toHaveBeenCalled();
+    fireEvent(target, new MouseEvent('pointerup', { bubbles: true, button: 0 }));
+    fireEvent.click(target);
+    expect(screen.getByRole('button', { name: /Zoom 120%/ })).toBeTruthy();
+    // Empty graph background still owns deselection and background pan.
+    fireEvent(surface, new MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 200, clientY: 200 }));
+    expect(props.onSelectNode).toHaveBeenCalledWith(null);
+    expect(props.onSelectEdge).toHaveBeenCalledWith('');
+    expect(capture).toHaveBeenCalledTimes(1);
+    fireEvent(surface, new MouseEvent('pointerup', { bubbles: true, button: 0 }));
+  });
+
   it('renders the shared zoom cluster — out / % menu / in, all labeled (§7.3 / CV-3)', () => {
     setup();
     const group = screen.getByRole('group', { name: 'Zoom' });

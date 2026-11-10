@@ -30,6 +30,17 @@
  * let a fault in the granter read fall through as an allow → red (fault test);
  * let the outer wrapper rethrow a fault instead of the uniform 404 → red (flaky
  * kind test); drop the onMemberAuthorityLost invalidation → red (removal test).
+ * Re-measured w78: every guard above red alone, plus the action check, the grant
+ * route's existence check, the 180-day cap, the kind's action list, the home-
+ * tenant check and the bound-user disable check. A revoked invite's accept is
+ * refused by THREE guards: the link purge when the record is revoked, accept's
+ * `status !== 'invited'` check (both in collaboration/routes.ts) and
+ * `bindCollaborator`'s own status check (host/externalCollaborators.ts). Breaking
+ * the first two together stayed green (w78, the bind check still refused). So
+ * the purge is now witnessed on its own (the link must stop resolving at once),
+ * and the accept's two status checks are a recorded cross-file double guard. Witness 2's crafted page is now THIS
+ * agency's client-B page (it was `page-b-${n - 1}`, another agency's), and the
+ * RBAC case's operator now reaches the manage check (see that case).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -45,7 +56,7 @@ import { updateClient } from '../src/features/campaign-ops/clientService.js';
 import { resolveActiveResource } from '../src/features/sharing/sharingService.js';
 import {
   checkGrantUse, registerGrantResourceKind, setCollaboratorStatus, revokeGrant, bindCollaborator,
-  eraseExternalCollaboratorSubject, getCollaborator, __resetGranterVerdictsForTests, __granterAllowCountForTests,
+  eraseExternalCollaboratorSubject, getCollaborator, listGrants, __resetGranterVerdictsForTests, __granterAllowCountForTests,
   type CollaboratorGrant, type ExternalCollaborator,
 } from '../src/host/externalCollaborators.js';
 
@@ -98,7 +109,8 @@ function client() {
 }
 
 let n = 0;
-interface Agency { tenantId: string; admin: ReturnType<typeof client>; orgA: string; orgB: string; docA: string; docB: string }
+let seq = 0; // unique, deterministic email suffixes
+interface Agency { tenantId: string; admin: ReturnType<typeof client>; orgA: string; orgB: string; docA: string; docB: string; pageA: string; pageB: string }
 async function agency(): Promise<Agency> {
   const tenantId = `ws:t-collab-${n++}`;
   const admin = client();
@@ -113,11 +125,12 @@ async function agency(): Promise<Agency> {
   }
   const [orgA = '', orgB = ''] = orgs;
   const docA = `doc-a-${n}`; const docB = `doc-b-${n}`;
+  const pageA = `page-a-${n}`; const pageB = `page-b-${n}`;
   DOCS.set(`${tenantId}::${orgA}`, new Set([docA]));
   DOCS.set(`${tenantId}::${orgB}`, new Set([docB]));
-  PAGES.set(`page-a-${n}`, docA);
-  PAGES.set(`page-b-${n}`, docB);
-  return { tenantId, admin, orgA, orgB, docA, docB };
+  PAGES.set(pageA, docA);
+  PAGES.set(pageB, docB);
+  return { tenantId, admin, orgA, orgB, docA, docB, pageA, pageB };
 }
 const C = (orgId: string): string => `/host/openwop-app/campaign-ops/clients/${orgId}/collaborators`;
 
@@ -162,7 +175,9 @@ describe('ADR 0958 D2 — accept with verified-email binding', () => {
   it('refuses an anonymous caller, another email and a self-asserted email', async () => {
     const a = await agency();
     const { token } = await invite(a, a.orgA, `exact-${n}@vendor.test`);
-    expect((await accept(client(), token)).status).toBe(401);
+    const anon = await accept(client(), token);
+    expect(anon.status).toBe(401);
+    expect(anon.body.error).toBe('sign_in_required');
     const other = await vendor(`someone-else-${n}@vendor.test`);
     const mismatch = await accept(other.http, token);
     expect(mismatch.status).toBe(403);
@@ -181,7 +196,11 @@ describe('ADR 0958 D2 — accept with verified-email binding', () => {
     const v = await vendor(`late-${n}@vendor.test`);
     const revoked = await invite(a, a.orgA, `late-${n}@vendor.test`);
     expect((await a.admin.post(`${C(a.orgA)}/${revoked.collaborator.collaboratorId}/status`, { status: 'revoked' })).status).toBe(200);
+    // Revoking kills the invite link at once (not merely refused at accept).
+    await expect(resolveActiveResource(revoked.token, 'collab_invite')).rejects.toMatchObject({ httpStatus: 404 });
     expect((await accept(v.http, revoked.token)).status).toBe(404);
+    expect(await getCollaborator(a.tenantId, a.orgA, revoked.collaborator.collaboratorId)).toMatchObject({ status: 'revoked' });
+    expect((await getCollaborator(a.tenantId, a.orgA, revoked.collaborator.collaboratorId))?.boundUserId).toBeUndefined();
     const v2 = await vendor(`toggle-${n}@vendor.test`);
     const live = await invite(a, a.orgA, `toggle-${n}@vendor.test`);
     await setToggle('campaign-ops.external-collab', false);
@@ -193,18 +212,31 @@ describe('ADR 0958 D2 — accept with verified-email binding', () => {
   });
 
   it('only an agency admin of the client invites', async () => {
+    // CORRECTED (w78): this used a workspace-keyed test login whose subject did not
+    // match the member rows, so the op could not even read the client and got the
+    // folded 404 before the manage-scope check ran (a `workspace:write` gate stayed
+    // green). The op now arrives the production way (personal login, member rows
+    // under the home userId, switch): an editor of the client, who CAN read it, so
+    // only `host:members:manage` refuses it.
     const a = await agency();
     const op = client();
-    const login = await op.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: `op-${n}@agency.test`, tenantId: a.tenantId, sharedWorkspace: true });
+    const login = await op.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: `op-${n}-${seq++}@agency.test` });
+    expect(login.status).toBe(201);
     await createMember({ tenantId: a.tenantId, orgId: a.tenantId, subject: login.body.user.userId, displayName: 'Op', roles: ['viewer'] });
     await createMember({ tenantId: a.tenantId, orgId: a.orgA, subject: login.body.user.userId, displayName: 'Op', roles: ['editor'] });
-    expect([403, 404]).toContain((await op.post(C(a.orgA), { kind: 'vendor', email: 'x@vendor.test', displayName: 'X' })).status);
+    const sw = await op.post(`/host/openwop-app/workspaces/${encodeURIComponent(a.tenantId)}/switch`);
+    expect(sw.status, JSON.stringify(sw.body)).toBe(200);
+    // Control: the editor can read the client (so the refusal below is the manage check).
+    expect((await op.get(`/host/openwop-app/campaign-ops/clients/${a.orgA}`)).status).toBe(200);
+    const r = await op.post<ErrBody>(C(a.orgA), { kind: 'vendor', email: 'x@vendor.test', displayName: 'X' });
+    expect(r.status, JSON.stringify(r.body)).toBe(403);
+    expect(r.body.error).toBe('forbidden_scope');
   });
 });
 
 describe('ADR 0958 D2 — the per-use check (witnesses 2, 3, 4)', () => {
   async function boundVendor(a: Agency, orgId: string, docId: string) {
-    const v = await vendor(`w-${n}-${Math.random()}@vendor.test`);
+    const v = await vendor(`w-${n}-${seq++}@vendor.test`);
     const email = (await getUser(v.userId))?.email ?? '';
     const { collaborator, token } = await invite(a, orgId, email);
     expect((await accept(v.http, token)).status).toBe(200);
@@ -218,10 +250,11 @@ describe('ADR 0958 D2 — the per-use check (witnesses 2, 3, 4)', () => {
     const ok = await checkGrantUse({ grantId: g.grantId, via: { userId: v.userId }, action: 'view' });
     expect(ok).toMatchObject({ tenantId: a.tenantId, orgId: a.orgA });
     await refused(checkGrantUse({ grantId: g.grantId, via: { userId: v.userId }, action: 'view', target: { kind: 'test-doc', id: a.docB } }));
-    await refused(checkGrantUse({ grantId: g.grantId, via: { userId: v.userId }, action: 'view', target: { kind: 'test-page', id: `page-b-${n - 1}` } }));
+    // A page of THIS agency's client B (it exists, under client B's doc).
+    expect(PAGES.get(a.pageB)).toBe(a.docB);
+    await refused(checkGrantUse({ grantId: g.grantId, via: { userId: v.userId }, action: 'view', target: { kind: 'test-page', id: a.pageB } }));
     // A page inside the granted doc is covered by `contains`.
-    const page = [...PAGES.entries()].find(([, doc]) => doc === a.docA)?.[0] ?? '';
-    await expect(checkGrantUse({ grantId: g.grantId, via: { userId: v.userId }, action: 'view', target: { kind: 'test-page', id: page } })).resolves.toBeTruthy();
+    await expect(checkGrantUse({ grantId: g.grantId, via: { userId: v.userId }, action: 'view', target: { kind: 'test-page', id: a.pageA } })).resolves.toBeTruthy();
     // An action the grant does not name.
     await refused(checkGrantUse({ grantId: g.grantId, via: { userId: v.userId }, action: 'comment' }));
     // Granting client A's collaborator a client-B doc is a 404 too.
@@ -296,9 +329,12 @@ describe('ADR 0958 D2 — the per-use check (witnesses 2, 3, 4)', () => {
     const v = await vendor(`limits-${n}@vendor.test`);
     const { collaborator, token } = await invite(a, a.orgA, `limits-${n}@vendor.test`);
     expect((await accept(v.http, token)).status).toBe(200);
-    expect((await a.admin.post(`${C(a.orgA)}/${collaborator.collaboratorId}/grants`, { resource: { kind: 'test-doc', id: a.docA }, actions: ['view'], expiresInDays: 365 })).status).toBe(400);
-    expect((await a.admin.post(`${C(a.orgA)}/${collaborator.collaboratorId}/grants`, { resource: { kind: 'test-doc', id: a.docA }, actions: ['decide'] })).status).toBe(400);
-    expect((await a.admin.post(`${C(a.orgA)}/${collaborator.collaboratorId}/grants`, { resource: { kind: 'nope', id: a.docA }, actions: ['view'] })).status).toBe(400);
+    const tooLong = await a.admin.post<ErrBody>(`${C(a.orgA)}/${collaborator.collaboratorId}/grants`, { resource: { kind: 'test-doc', id: a.docA }, actions: ['view'], expiresInDays: 365 });
+    expect([tooLong.status, tooLong.body.details?.field]).toEqual([400, 'expiresInDays']);
+    const badAction = await a.admin.post<ErrBody>(`${C(a.orgA)}/${collaborator.collaboratorId}/grants`, { resource: { kind: 'test-doc', id: a.docA }, actions: ['decide'] });
+    expect([badAction.status, badAction.body.details?.field]).toEqual([400, 'actions']);
+    const badKind = await a.admin.post<ErrBody>(`${C(a.orgA)}/${collaborator.collaboratorId}/grants`, { resource: { kind: 'nope', id: a.docA }, actions: ['view'] });
+    expect([badKind.status, badKind.body.details?.field]).toEqual([400, 'resource.kind']);
   });
 });
 
@@ -309,7 +345,7 @@ describe('ADR 0958 × ADR 0886/0887 — the granter and the bound user are re-ch
     // The production identity path (personal login → member rows under the HOME
     // userId → switch), so the org gate and the re-check key on the same user.
     const http = client();
-    const login = await http.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: `pm-${n}-${Math.random()}@agency.test` });
+    const login = await http.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: `pm-${n}-${seq++}@agency.test` });
     expect(login.status).toBe(201);
     const userId = login.body.user.userId;
     await createMember({ tenantId: a.tenantId, orgId: a.tenantId, subject: userId, displayName: 'PM', roles: ['viewer'] });
@@ -320,7 +356,7 @@ describe('ADR 0958 × ADR 0886/0887 — the granter and the bound user are re-ch
   }
   async function pmGrant(a: Agency) {
     const p = await pm(a);
-    const v = await vendor(`g-${n}-${Math.random()}@vendor.test`);
+    const v = await vendor(`g-${n}-${seq++}@vendor.test`);
     const email = (await getUser(v.userId))?.email ?? '';
     const { collaborator, token } = await invite(a, a.orgA, email);
     expect((await accept(v.http, token)).status).toBe(200);
@@ -370,10 +406,9 @@ describe('ADR 0958 × ADR 0886/0887 — the granter and the bound user are re-ch
     const a = await agency();
     const { p, g, use } = await pmGrant(a);
     const report = await eraseExternalCollaboratorSubject(a.tenantId, p.userId);
-    expect(report.rowsTouched).toBeGreaterThanOrEqual(1);
+    expect(report.rowsTouched).toBe(1); // the one grant the PM created, tombstoned
     __resetGranterVerdictsForTests();
     await refused(use());
-    const { listGrants } = await import('../src/host/externalCollaborators.js');
     expect((await listGrants(a.tenantId, a.orgA)).find((x) => x.grantId === g.grantId)?.createdBy).toBe('erased');
   });
 

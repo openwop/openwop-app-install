@@ -118,17 +118,21 @@ export { writeLs as __persistConfigForTest };
  *
  * Since ADR 0517 refs are minted deterministically as `byok:<provider>`, so that
  * re-storing a key OVERWRITES rather than accumulating. History left
- * `byok:<provider>:<epoch-ms>` rows behind, so both shapes are matched and the
- * newest timestamped ref wins when no canonical one exists. The boundary check is
- * exact-or-colon-delimited so `byok:google` cannot capture `byok:google-vertex`.
+ * `byok:<provider>:<epoch-ms>` rows behind; canonical preference and reverse
+ * lexical ordering of other candidates are retained. Keys-page refs
+ * (`<provider>` and `<provider>:<label>`) are also adoptable. Both namespaces
+ * use exact-or-colon boundaries, so Google never captures google-vertex.
+ * Hyphen labels remain outside automatic chat adoption: they are ambiguous
+ * with provider IDs and were never adopted by this seam.
  *
  * Mirrors `host/chatByokConfig.ts#refsForProvider` — kept in both places
  * deliberately: the server ENFORCES the binding, the client only PROPOSES one.
  */
 export function refsForProvider(refs: readonly string[], provider: string): string[] {
   const base = `byok:${provider}`;
-  const mine = refs.filter((r) => r === base || r.startsWith(`${base}:`));
-  // Canonical bare ref first, then timestamped refs newest-first.
+  const mine = refs.filter((r) => r === base || r.startsWith(`${base}:`)
+    || r === provider || r.startsWith(`${provider}:`));
+  // Preserve canonical wizard preference, then deterministic reverse lexical order.
   return [
     ...mine.filter((r) => r === base),
     ...mine.filter((r) => r !== base).sort().reverse(),

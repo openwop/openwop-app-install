@@ -65,8 +65,8 @@ import {
   purgeTenantHostExt,
 } from '../src/host/hostExtPersistence.js';
 import { stripComments } from './helpers/stripComments.js';
-
-const FEATURES_ROOT = join(__dirname, '..', 'src', 'features');
+import { featureSourceRoots } from './helpers/featureSourceRoots.js';
+import { collectFeatureRatchetDeclarations } from './helpers/featureRatchetDeclarations.js';
 
 type Bucket =
   | 'REACHABLE_ROW_TENANTID'
@@ -165,7 +165,8 @@ function hasTenantOfArg(args: readonly string[]): boolean {
 
 function parseSites(): Site[] {
   const sites: Site[] = [];
-  for (const file of walk(FEATURES_ROOT)) {
+  // ADR 1031 — an adopter's feature packages (`src/adopter/features/`) too.
+  for (const file of featureSourceRoots().flatMap((root) => walk(root))) {
     const src = stripComments(readFileSync(file, 'utf8'));
     const re = /new\s+DurableCollection\s*(?:<[^>]*>)?\s*\(/g;
     let m: RegExpExecArray | null;
@@ -213,7 +214,7 @@ function distinctNamespaces(sites: Site[]): Map<string, Site> {
 //    makes it auto-reachable ⇒ REMOVE its entry here (the no-dead-entries test
 //    enforces that). ──────────────────────────────────────────────────────────
 
-const RESIDUAL_CLASSIFICATION: Record<string, { bucket: Bucket; reason: string }> = {
+const HOST_RESIDUAL_CLASSIFICATION: Record<string, { bucket: Bucket; reason: string }> = {
   'analytics:identity-link': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type IdentityLink carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
   'analytics:replay-meta': { bucket: 'EXEMPT', reason: 'ADR 0951 P2 review #2: host-global one-time migration sentinel ({id, at}); no tenant dimension, no subject data' },
   'analytics:replay-toggle-writes': { bucket: 'EXEMPT', reason: 'ADR 0951 P2 review #1: pending replay toggle-write markers ({writeId, scope, rows, at}), mostly host-global; copies of toggle config rows, no subject data; every marker is deleted by the replay sweep once applied and past the settle window (≈1 h), so none outlives a tenant teardown by more than that' },
@@ -271,10 +272,6 @@ const RESIDUAL_CLASSIFICATION: Record<string, { bucket: Bucket; reason: string }
   'kb:embedusage': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type EmbedUsageRow carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
   'kb:reindex': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type ReindexJob carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
   'kb:veccache': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type VecCacheRow carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
-  'kicktodo-circle-index': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type { circleId: string; tenantId: string } carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
-  // kicktodo-feed-tokens / kicktodo-invites are AUTO-reachable since KickTodo wave
-  // 4C (KTX-D1) armed their `tenantOf` index; their map entries were removed.
-  'kicktodo-grantee-index': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type { granteeSubject: string; circleId: string; tenantId: string } carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
   'knowledge-sync:filestate': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type SyncFileState carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
   'navigation-settings:config': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type StoredMenuConfig carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
   // notifications:prefs is AUTO-reachable — its composite key references
@@ -295,6 +292,21 @@ const RESIDUAL_CLASSIFICATION: Record<string, { bucket: Bucket; reason: string }
  *  Each is a low-severity (no raw PII content: pointers/dedup/counts/indexes)
  *  orphan-on-teardown store fixable with a trivial `tenantOf` or a purge-hook. */
 const RECORDED_DEBT_BASELINE = 0;
+
+/** ADR 1031 P2 — the host map plus each feature package's declared
+ *  `teardownResidualClassification`. A namespace classified twice is a boot of
+ *  two owners and fails loudly rather than letting one row silently win. */
+let RESIDUAL_CLASSIFICATION: Record<string, { bucket: Bucket; reason: string }> = HOST_RESIDUAL_CLASSIFICATION;
+beforeAll(async () => {
+  const merged: Record<string, { bucket: Bucket; reason: string }> = { ...HOST_RESIDUAL_CLASSIFICATION };
+  for (const d of await collectFeatureRatchetDeclarations()) {
+    for (const [ns, row] of Object.entries(d.declarations.teardownResidualClassification ?? {})) {
+      if (ns in merged) throw new Error(`teardown store '${ns}' is classified twice (host map and ${d.srcRel})`);
+      merged[ns] = row;
+    }
+  }
+  RESIDUAL_CLASSIFICATION = merged;
+});
 
 describe('PROPC-ERASURE-RATCHET-BLINDSPOT — every feature DurableCollection is tenant-teardown-reachable or classified', () => {
   const sites = parseSites();

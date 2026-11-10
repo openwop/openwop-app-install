@@ -9,15 +9,16 @@
  * and the backend shape (`nodeId` instead of `id`).
  *
  * Each node's `typeId` is resolved to a catalog `kind`; edges that omit
- * ports inherit the node's first catalog port (canonical edges usually
- * carry no port names — see serialize.ts, which omits the default
- * `out`/`in`). Throws `CanonicalParseError` naming the offending typeIds
+ * sourceOutput retain that omission independently of the compatibility
+ * sourcePort placeholder; visible handles are projected separately (ADR 0440).
+ * Target ports retain the existing first-catalog-port behavior. Throws `CanonicalParseError` naming the offending typeIds
  * when a node kind isn't installed on this host (so the import fails
  * loudly rather than dropping nodes silently).
  */
 
 import { catalogEntryByTypeId } from '../palette/catalogRegistry.js';
 import i18n from '../../i18n/index.js';
+import { builderDefaultInputsFromMetadata } from '../persistence/editorMetadata.js';
 import type { NodeCatalogEntry } from '../palette/nodeCatalog.js';
 import type {
   BuilderEdge,
@@ -72,7 +73,7 @@ interface CanonicalDefinition {
   /** OpenWOP WorkflowDefinition carries the display name here (builder-authored
    *  defs omit it — the name lives in the SavedWorkflow/ownership record); pack-
    *  instantiated templates set `metadata.name` = the template label. */
-  metadata?: { name?: unknown };
+  metadata?: Record<string, unknown>;
   nodes?: CanonicalNode[];
   edges?: CanonicalEdge[];
   defaultInputs?: unknown;
@@ -107,6 +108,8 @@ export interface DeserializeResult {
   nodes: BuilderNode[];
   edges: BuilderEdge[];
   defaultInputs: string;
+  /** Carried for canonical file import; the import owner overlays its name. */
+  metadata?: Record<string, unknown>;
   /** Pretty-printed JSON string, or '' when the definition has none. */
   inputSchema: string;
   /** RFC 0124 variable declarations, carried verbatim (see SavedWorkflow). */
@@ -133,6 +136,8 @@ function normalizeDefaultInputs(def: CanonicalDefinition): string {
   // stringifying it into the textarea labelled "Default inputs (JSON)" showed the
   // author the wrong thing AND was the only place it survived, so a save dropped
   // it. It now round-trips as `SavedWorkflow.variables`, which is what it is.
+  const editorValue = builderDefaultInputsFromMetadata(def.metadata);
+  if (editorValue !== undefined) return editorValue;
   const candidate = def.defaultInputs;
   if (typeof candidate === 'string') return candidate;
   if (candidate && typeof candidate === 'object') {
@@ -217,12 +222,12 @@ export function fromCanonicalDefinition(input: unknown): DeserializeResult {
   const edges: BuilderEdge[] = rawEdges.map((e, i) => {
     const source = e.sourceNodeId ?? '';
     const target = e.targetNodeId ?? '';
-    const srcEntry = entryByNodeId.get(source);
     const tgtEntry = entryByNodeId.get(target);
     const edge: BuilderEdge = {
       id: e.id ?? e.edgeId ?? `e_${i}`,
       source,
-      sourcePort: e.sourceOutput ?? srcEntry?.outputs[0]?.name ?? 'out',
+      sourcePort: e.sourceOutput ?? 'out',
+      canonicalSourceOutput: e.sourceOutput ?? null,
       target,
       targetPort: e.targetInput ?? tgtEntry?.inputs[0]?.name ?? 'in',
     };
@@ -247,6 +252,8 @@ export function fromCanonicalDefinition(input: unknown): DeserializeResult {
     nodes,
     edges,
     defaultInputs: normalizeDefaultInputs(def),
+    ...(def.metadata && typeof def.metadata === 'object' && !Array.isArray(def.metadata)
+      ? { metadata: { ...def.metadata } } : {}),
     inputSchema: normalizeInputSchema(def),
     ...(def.variables !== undefined ? { variables: def.variables } : {}),
     ...(def.configurableSchema !== undefined ? { configurableSchema: def.configurableSchema } : {}),

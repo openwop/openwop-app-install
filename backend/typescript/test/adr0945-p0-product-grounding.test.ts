@@ -16,6 +16,8 @@
  * preserving it, a dedup hit drops the stamp, the generate route hashes the
  * truncated prompt, getAssetByServeToken stops checking the org, or
  * resolveProductMedia drops an unresolved token instead of refusing.
+ * DOUBLE GUARD: "a second generation never replaces it" is held by `kept` and by
+ * the early return in `stampGroundingIfAbsent`; only breaking both reds the dedup path.
  */
 import http from 'node:http';
 import { createHash } from 'node:crypto';
@@ -27,6 +29,7 @@ import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { buildHostSurfaceBundle, storeMediaAsset } from '../src/host/inMemorySurfaces.js';
+import type { FeatureSurface } from '../src/host/featureSurfaces.js';
 import { createAsset, deleteAsset, getAssetByServeToken, cleanLineage, cleanMarketing, getAsset, createCollection, deleteCollection, mergeAssetMetadataOnDedup, updateAsset, markUsed, stampGroundingIfAbsent, type MediaAsset, type MediaGrounding } from '../src/features/media/mediaService.js';
 import * as mediaStorage from '../src/features/media/mediaStorage.js';
 import { createProduct } from '../src/features/commerce/commerceService.js';
@@ -49,7 +52,7 @@ beforeAll(async () => {
     const d = getToggleDefault(id);
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
   }
-});
+}, 120_000);
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 const sha = (b64: string): string => createHash('sha256').update(Buffer.from(b64, 'base64')).digest('hex');
@@ -67,7 +70,7 @@ function client() {
   let cookie = '';
   const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
+    for (const ck of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
     return { status: res.status, body: (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as T };
   };
   return { post: <T>(p: string, b?: unknown) => call<T>('POST', p, b), patch: <T>(p: string, b?: unknown) => call<T>('PATCH', p, b) };
@@ -155,13 +158,20 @@ describe('the write-once rule and the trust boundary (D4)', () => {
 describe('the node surface stamps grounding from the HOST record (D4)', () => {
   const TENANT = `org:g945-surface-${uniq()}`;
   const ORG = 'org-s';
-  const surface = (runId: string) =>
-    buildHostSurfaceBundle({ tenantId: TENANT, runId }).features.media as Record<string, (a: Record<string, unknown>) => Promise<Record<string, unknown>>>;
+  const surface = (runId: string): FeatureSurface => {
+    const media = buildHostSurfaceBundle({ tenantId: TENANT, runId }).features.media;
+    if (!media) throw new Error('the media surface is not registered');
+    return media;
+  };
+  const assetIdOf = (v: unknown): string => {
+    if (v && typeof v === 'object' && 'assetId' in v && typeof v.assetId === 'string') return v.assetId;
+    throw new Error(`no assetId in ${JSON.stringify(v)}`);
+  };
 
   it('adapter-minted bytes get run + node, even when the node passes no lineage; a forged grounding is ignored', async () => {
     const stored = await storeMediaAsset(TENANT, { contentBase64: PHOTO_PNG, contentType: 'image/png', aiOrigin: { provider: 'replicate', model: 'flux', op: 'text-to-video', runId: 'run-a', nodeId: 'n-reel', promptHash: 'b'.repeat(64) } });
     const out = await surface('run-a').createAssetFromServeUrl!({ orgId: ORG, url: stored.url, lineage: { grounding: { mode: 'composite', productId: 'prod:lie' } } });
-    const row = await getAsset(TENANT, ORG, String(out.assetId));
+    const row = await getAsset(TENANT, ORG, assetIdOf(out));
     expect(row?.lineage?.grounding).toEqual({ mode: 'none', sources: [], promptHash: 'b'.repeat(64), provider: 'replicate', model: 'flux', op: 'text-to-video', runId: 'run-a', nodeId: 'n-reel' });
     expect(row?.lineage?.generatedBy).toBe('ai');
   });
@@ -169,7 +179,7 @@ describe('the node surface stamps grounding from the HOST record (D4)', () => {
   it('plain bytes with no AI claim get no grounding (an export is not a generation)', async () => {
     const stored = await storeMediaAsset(TENANT, { contentBase64: MOCK_PNG, contentType: 'image/png' });
     const out = await surface('run-b').createAssetFromServeUrl!({ orgId: ORG, url: stored.url });
-    expect((await getAsset(TENANT, ORG, String(out.assetId)))?.lineage?.grounding).toBeUndefined();
+    expect((await getAsset(TENANT, ORG, assetIdOf(out)))?.lineage?.grounding).toBeUndefined();
   });
 });
 
@@ -214,9 +224,7 @@ describe('media lookups (D1)', () => {
       const p = await createProduct({ tenantId: TENANT, orgId: 'org-q', createdBy: 'u', type: 'physical', name: `P ${label}`, price: 1, imageAssetTokens: [own.serveToken, bad] });
       const err = await resolveProductMedia({ tenantId: TENANT, orgId: 'org-q', productId: p.productId }).catch((e: unknown) => e);
       expect(err, label).toBeInstanceOf(OpenwopError);
-      expect((err as OpenwopError).code, label).toBe('product_media_unresolved');
-      expect((err as OpenwopError).httpStatus).toBe(422);
-      expect((err as OpenwopError).details, label).toEqual({ productId: p.productId, index: 1 });
+      expect(err, label).toMatchObject({ code: 'product_media_unresolved', httpStatus: 422, details: { productId: p.productId, index: 1 } });
     }
   });
 
@@ -224,7 +232,8 @@ describe('media lookups (D1)', () => {
     const own = await asset('org-r', PHOTO_PNG);
     const p = await createProduct({ tenantId: TENANT, orgId: 'org-r', createdBy: 'u', type: 'physical', name: 'R', price: 1, imageAssetTokens: [own.serveToken] });
     const err = await resolveProductMedia({ tenantId: TENANT, orgId: 'org-x', productId: p.productId }).catch((e: unknown) => e);
-    expect((err as OpenwopError).code).toBe('not_found');
+    expect(err).toBeInstanceOf(OpenwopError);
+    expect(err).toMatchObject({ code: 'not_found', message: 'Product not found.' });
   });
 });
 

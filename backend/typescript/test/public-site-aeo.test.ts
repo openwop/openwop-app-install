@@ -95,7 +95,7 @@ describe('ADR 0824 D1/D3 — crawler document for the system site', () => {
     const appBlock = blocks.find((b) => b['@type'] === 'SoftwareApplication');
     expect(appBlock).toMatchObject({ applicationCategory: 'DeveloperApplication', url: `${BASE}/`, isBasedOn: 'https://openwop.dev', offers: { price: '0' } });
     const video = blocks.find((b) => b['@type'] === 'VideoObject');
-    expect(video).toMatchObject({ contentUrl: HERO_FILM.contentUrl, duration: 'PT1M34S', uploadDate: '2026-10-04' });
+    expect(video).toMatchObject({ contentUrl: HERO_FILM.contentUrl, duration: 'PT1M34S', uploadDate: '2026-10-04T00:00:00Z' });
   });
 
   it('a non-home system page canonicalises to `/p/<slug>`', async () => {

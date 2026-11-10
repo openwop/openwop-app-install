@@ -22,6 +22,8 @@ import { dirname, join } from 'node:path';
 import ts from 'typescript';
 import { BACKEND_FEATURES } from '../src/features/index.js';
 import { PACK_PINS, featureRequiredPacks, pinnedPackRef } from '../src/features/packPins.js';
+import { ADOPTER_BACKEND_FEATURES } from '../src/features/adopterFeatures.generated.js';
+import { ADOPTER_PACK_PINS } from '../src/features/adopterPackPins.generated.js';
 import { registerFeaturePacks, getFeaturePacks, __resetFeaturePacks } from '../src/host/featureToggles/registry.js';
 
 const PINS_FILE = join(dirname(fileURLToPath(import.meta.url)), '../src/features/packPins.ts');
@@ -29,18 +31,22 @@ const PINS_FILE = join(dirname(fileURLToPath(import.meta.url)), '../src/features
 describe('ADR 0919 — pack pins resolved lazily', () => {
   it('descriptors declare names only (no version in any requiredPacks entry)', () => {
     const withPacks = BACKEND_FEATURES.filter((f) => (f.requiredPacks ?? []).length > 0);
-    // Floor = the measured count, wave 64 (2026-10-24, 19d13e682): 78 feature.ts
-    // files declare a non-empty `requiredPacks: [...]` (round 1 counted 79 by grep,
-    // but the 79th match is a doc comment in packPins.ts). A floor far below the
-    // truth (it was 20) lets a feature silently drop its packs.
-    expect(withPacks.length).toBeGreaterThanOrEqual(78);
+    // Floor = the measured FIRST-PARTY count: 78 at wave 64 (2026-10-24, 19d13e682),
+    // 72 once KickTodo's packages left for the adopter repo (ADR 1031 P3). Adopter
+    // features are excluded so the floor holds in openwop-app AND an adopter's tree;
+    // every adopter descriptor is still checked for names-only below. A floor far
+    // below the truth (it was 20) lets a feature silently drop its packs.
+    const adopter = new Set<unknown>(ADOPTER_BACKEND_FEATURES);
+    expect(withPacks.filter((f) => !adopter.has(f)).length).toBeGreaterThanOrEqual(72);
     const notNames = withPacks.flatMap((f) => (f.requiredPacks ?? []).filter((r) => typeof r !== 'string').map(() => f.id));
     expect(notNames).toEqual([]);
   });
 
   it('every required name resolves to its pin; an unknown name fails closed', () => {
     for (const f of BACKEND_FEATURES) {
-      for (const ref of featureRequiredPacks(f)) expect(ref.version).toBe((PACK_PINS as Record<string, string>)[ref.name]);
+      // An adopter's pack resolves from its own ADOPTER_PACK_PINS (ADR 1031); a name
+      // pinned in neither is the `pack_pin_missing` refusal below.
+      for (const ref of featureRequiredPacks(f)) expect(ref.version).toBe((PACK_PINS as Record<string, string>)[ref.name] ?? ADOPTER_PACK_PINS[ref.name]);
     }
     expect(() => pinnedPackRef('feature.never-pinned.nodes')).toThrow(/pack_pin_missing: feature\.never-pinned\.nodes/);
   });

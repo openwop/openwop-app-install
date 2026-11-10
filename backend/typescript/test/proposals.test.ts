@@ -2,7 +2,7 @@
  * Reviewable-learning proposals (RFC 0096) over HTTP, through the BEARER lane.
  *
  * Why this file exists beside `proposals-r2-probes.test.ts` (cookie sessions):
- * the caller here is the `dev-token` bearer principal (`bearer:dev-toke`,
+ * the caller here is the `dev-token` bearer principal (`envKeyPrincipalId('dev-token')`,
  * auth.ts) granted EDITOR in `default`, so it holds `workspace:read` +
  * `workspace:write` and NOT `packs:publish`. That makes it the only witness of
  * the apply route's `packs:publish` gate (`assertCanApply`, ADR 0736 / ADR 0938
@@ -25,6 +25,7 @@ import { createApp } from '../src/index.js';
 import { createMember } from '../src/host/accessControlService.js';
 import { getProposal, putProposal, registerProposalInstaller, __test, type ProposalView } from '../src/features/proposals/proposalsService.js';
 import type { Proposal, ProposalState } from '../src/features/proposals/types.js';
+import { envKeyPrincipalId } from '../src/middleware/envKeyPrincipal.js';
 
 let server: http.Server;
 let BASE: string;
@@ -44,14 +45,14 @@ beforeAll(async () => {
     server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
   // ADR 0736 — revise/reject/archive now require `workspace:write`. The bearer
-  // caller resolves to `bearer:dev-toke` (auth.ts:920) in the `default` tenant, so
+  // caller resolves to `envKeyPrincipalId('dev-token')` (auth.ts) in the `default` tenant, so
   // it is granted EDITOR here: that confers `workspace:write` and NOT
   // `packs:publish`, which keeps BOTH tests meaningful — revise proceeds, and the
   // apply test still 403s for its own stated reason (the pack-publish class), not
   // because the caller is anonymous.
   await createMember({
     orgId: 'default', tenantId: 'default', displayName: 'Dev bearer',
-    subject: 'bearer:dev-toke', roles: ['editor'],
+    subject: envKeyPrincipalId('dev-token'), roles: ['editor'],
   });
 });
 

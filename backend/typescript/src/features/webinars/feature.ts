@@ -14,7 +14,7 @@
 
 import type { BackendFeature } from '../types.js';
 import { registerWebinarsRoutes } from './routes.js';
-import { buildWebinarsSurface } from './surface.js';
+import { buildWebinarsSurface, WEBINARS_SURFACE_POLICY } from './surface.js';
 import { registerWebinarFormsSink } from './formsSubmissionSink.js';
 import { registerInboundObserver } from '../connections/inboundWebhooks.js';
 import { onFormDeleted } from '../../host/formLifecycle.js';
@@ -46,7 +46,7 @@ export const webinarsFeature: BackendFeature = {
       await deleteActivitiesForContactByPrefix(tenantId, recordId, 'act:webinar:');
     });
   },
-  surface: { id: 'webinars', build: buildWebinarsSurface },
+  surface: { id: 'webinars', build: buildWebinarsSurface, orgPolicy: WEBINARS_SURFACE_POLICY },
   requiredPacks: ['feature.webinars.nodes'],
   recommends: ['crm', 'forms', 'connections'],
   toggleDefault: {

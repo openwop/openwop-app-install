@@ -443,9 +443,11 @@ export interface RunDisposition {
   suspendedNodeId?: string;
   /** When `status === 'failed'`, the node id that triggered the failure. */
   failedNodeId?: string;
-  /** CS70WF-38 — when `status === 'failed'` because EVERY terminal node was
-   *  skipped by its conditions and no node failed: those terminals. There is no
-   *  failed node to blame, so `failedNodeId` is absent. */
+  /** RFC 0257 §A (ADR 1027) — set with `status === 'completed'` when no node
+   *  failed and EVERY terminal node was skipped (a guard that declined, a router
+   *  that matched no branch, an `any_failed` handler whose source succeeded): those
+   *  terminals. Absent whenever a terminal completed. `finalizeRun` puts them on
+   *  `run.completed` in definition order. */
   skippedTerminals?: string[];
 }
 
@@ -502,13 +504,14 @@ export function inspectDisposition(
   if (!anyTerminalCompleted) {
     const failedId = [...snapshot.nodeState.entries()].find(([, s]) => s === 'failed')?.[0];
     if (failedId !== undefined) return { done: true, status: 'failed', failedNodeId: failedId };
-    // CS70WF-38 — no node failed: every terminal was SKIPPED by its edge
-    // conditions (a guard that declined, a router whose value matched no branch).
-    // The run status stays `failed` (no spec text defines another), but it is
-    // named, with the skipped terminals, instead of blaming a node that was only
-    // skipped (whose missing error the executor reported as "unknown node failure").
+    // RFC 0257 §A (ADR 1027) — no node failed and every terminal was SKIPPED (a
+    // guard that declined, a router whose value matched no branch, an `any_failed`
+    // handler whose source succeeded). A run with no failed node is not a failed
+    // run: it COMPLETES, and says it reached no terminal. CS70WF-38 (#5443) failed
+    // it with `all_terminals_skipped`, which dead-lettered, notified and failed
+    // sub-workflow parents for a failure no node produced.
     const skipped = terminalNodes.filter((id) => snapshot.nodeState.get(id) === 'skipped');
-    if (skipped.length > 0) return { done: true, status: 'failed', skippedTerminals: skipped };
+    if (skipped.length > 0) return { done: true, status: 'completed', skippedTerminals: skipped };
     return { done: true, status: 'failed', failedNodeId: terminalNodes[0] };
   }
   return { done: true, status: 'completed' };

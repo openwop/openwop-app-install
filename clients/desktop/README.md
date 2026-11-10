@@ -45,7 +45,8 @@ npm run selftest     # exits 0/1; screenshots + selftest-report.json in ./selfte
 Launches the REAL shell against an isolated userData dir and verifies, end to
 end: the setup page renders with both preload bridges injected → the real
 `setup:save-host` IPC persists + navigates → the **remote host origin** receives
-`window.openwopNative` (`kind: 'electron'`) → a notification sent through that
+`window.openwopNative` (`kind: 'electron'`) → that remote page is refused when it
+tries to change the saved host through `setup:save-host` → a notification sent through that
 bridge, whose OS outcome is RECORDED in `notify` (`shown`, plus the OS's
 `failure` reason) but does not decide the exit code, because an unsigned macOS
 build is expected to fail it. Override the probed host with

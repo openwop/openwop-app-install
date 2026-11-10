@@ -16,8 +16,11 @@
  */
 
 import { createConnectorInvoker } from './connectorInvoker.js';
-import { resolveProviderForCapability, resolveProvidersForCapability } from '../features/connections/connectionsService.js';
+import { resolveProvidersForCapability } from '../features/connections/connectionsService.js';
+import { listProviders } from '../features/connections/providerRegistry.js';
+import { isInstanceScopedProvider } from './connectorInstancePin.js';
 import type { BrokeredEgressDeps, AuthScheme } from './brokeredEgress.js';
+import { runClientOrgOf } from './runClientOrg.js';
 
 export interface ConnectorsAdapter {
   invoke(connectorId: string, request: {
@@ -45,35 +48,72 @@ export interface ConnectorsAdapter {
   resolveAllForCapability(capability: string): Promise<string[]>;
 }
 
+/**
+ * ADR 1035 D2 — the run's client, decided HOST-side. In a client-stamped run
+ * (ADR 0944 D2), an INSTANCE-SCOPED provider (ADR 1035 D1) is served only by the
+ * client org's own connection: no user or workspace fall-through, whatever the
+ * caller passes. A pack cannot opt out, so the guard is not a property of the
+ * caller. `null` = not a client run (unchanged selection); a refusal when the
+ * stamp is unreadable or names two clients.
+ */
+async function runClient(deps: BrokeredEgressDeps): Promise<{ orgId: string } | { refused: true } | null> {
+  const stamp = await runClientOrgOf(deps.tenantId, deps.runId);
+  if (stamp && 'refused' in stamp) return { refused: true };
+  return stamp ?? null;
+}
+
+/** Skip the stamp read for a category no instance-scoped provider belongs to. */
+function getProviderCategoryHasInstanceScoped(capability: string): boolean {
+  return listProviders().some((p) => p.category === capability && isInstanceScopedProvider(p.id));
+}
+
 export function makeConnectorsAdapter(deps: BrokeredEgressDeps): ConnectorsAdapter {
   const invoker = createConnectorInvoker({ storage: deps.storage });
+  const plain = (capability: string) => resolveProvidersForCapability({
+    tenantId: deps.tenantId,
+    capability,
+    ...(deps.actingUserId ? { actingUserId: deps.actingUserId } : {}),
+    ...(deps.orgId ? { orgId: deps.orgId } : {}),
+  });
+  /** The capability's providers for this run: in a client run, the client's own
+   *  instance-scoped providers first, then the non-instance-scoped ones as before;
+   *  another org's or the workspace's instance-scoped connection never counts. */
+  const forRun = async (capability: string): Promise<string[]> => {
+    if (!getProviderCategoryHasInstanceScoped(capability)) return plain(capability);
+    const client = await runClient(deps);
+    if (client === null) return plain(capability);
+    const others = (await plain(capability)).filter((p) => !isInstanceScopedProvider(p));
+    if ('refused' in client) return others;
+    const own = await resolveProvidersForCapability({
+      tenantId: deps.tenantId, capability, orgId: client.orgId, orgOnly: true,
+      ...(deps.actingUserId ? { actingUserId: deps.actingUserId } : {}),
+    });
+    return [...own.filter((p) => isInstanceScopedProvider(p)), ...others];
+  };
   return {
-    invoke(connectorId, request) {
+    async invoke(connectorId, request) {
+      let orgId = deps.orgId;
+      let orgOnly = false;
+      if (isInstanceScopedProvider(connectorId)) {
+        const client = await runClient(deps);
+        if (client && 'refused' in client) return { ok: false, error: 'connector_client_org_unreadable' };
+        if (client) { orgId = client.orgId; orgOnly = true; }
+      }
       return invoker.invoke(connectorId, {
         context: {
           tenantId: deps.tenantId,
           runId: deps.runId,
           ...(deps.actingUserId ? { actingUserId: deps.actingUserId } : {}),
-          ...(deps.orgId ? { orgId: deps.orgId } : {}),
+          ...(orgId ? { orgId } : {}),
         },
-        request,
+        request: { ...request, ...(orgOnly ? { orgOnly: true } : {}) },
       });
     },
-    resolveForCapability(capability) {
-      return resolveProviderForCapability({
-        tenantId: deps.tenantId,
-        capability,
-        ...(deps.actingUserId ? { actingUserId: deps.actingUserId } : {}),
-        ...(deps.orgId ? { orgId: deps.orgId } : {}),
-      });
+    async resolveForCapability(capability) {
+      return (await forRun(capability))[0] ?? null;
     },
     resolveAllForCapability(capability) {
-      return resolveProvidersForCapability({
-        tenantId: deps.tenantId,
-        capability,
-        ...(deps.actingUserId ? { actingUserId: deps.actingUserId } : {}),
-        ...(deps.orgId ? { orgId: deps.orgId } : {}),
-      });
+      return forRun(capability);
     },
   };
 }

@@ -26,11 +26,12 @@ import { describe, expect, it } from 'vitest';
 import ts from 'typescript';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
+import { declaredPathTable } from './helpers/featureRatchetTables.js';
 
 const SRC = join(process.cwd(), 'src');
 
 /** Calls whose argument at `arg` becomes a host-authored error message. */
-const CALL_SINKS: ReadonlyArray<{ callee: string; arg: number; files?: readonly string[] }> = [
+const HOST_CALL_SINKS: ReadonlyArray<{ callee: string; arg: number; files?: readonly string[] }> = [
   { callee: 'toolError', arg: 1 },
   // `untrustedToolError(code, message, detail?, extra?)`: `message` is still a host
   // sentence read OUTSIDE the fence; only `detail` (arg 2) is fenced.
@@ -45,9 +46,12 @@ const CALL_SINKS: ReadonlyArray<{ callee: string; arg: number; files?: readonly 
   { callee: 'resolveDocumentsGetPreamble', arg: 1 },
   // campaign-intel `positiveInt(v, field)` — `field` is interpolated into its message.
   { callee: 'positiveInt', arg: 1, files: ['features/campaign-intel/agentTools.ts'] },
-  // kicktodo-creator `intakeInt(raw, bounds, name)` — both feed its validation message.
-  { callee: 'intakeInt', arg: 1, files: ['features/kicktodo-creator/agentTools.ts'] },
-  { callee: 'intakeInt', arg: 2, files: ['features/kicktodo-creator/agentTools.ts'] },
+];
+/** ADR 1031 P2 — plus each feature package's sinks (`ratchetTables.json`,
+ *  `toc2cd11.callSinks`: file → [{ callee, arg }], scoped to that file). */
+const CALL_SINKS: ReadonlyArray<{ callee: string; arg: number; files?: readonly string[] }> = [
+  ...HOST_CALL_SINKS,
+  ...Object.entries(declaredPathTable<Array<{ callee: string; arg: number }>>('toc2cd11.callSinks')).flatMap(([file, sinks]) => sinks.map((c) => ({ callee: c.callee, arg: c.arg, files: [file] }))),
 ];
 /** The helpers allowed to set `hostMessage: true` on a result. */
 const FLAG_SETTERS = new Set(['toolError', 'untrustedToolError']);
@@ -57,14 +61,14 @@ const PROP_SINKS = new Set(['featureLabel']);
 const SINK_PARAM = 'a parameter of a sink helper: every caller\'s argument is itself classified above';
 
 /** Reviewed non-literal operands, per file, with the reason each is host-only. */
-const HOST_OPERANDS: Record<string, Record<string, string>> = {
+const HOST_OWNED_OPERANDS: Record<string, Record<string, string>> = {
   'host/agentToolKit.ts': {
     featureLabel: SINK_PARAM,
     'opts.featureLabel': SINK_PARAM,
     "toolFailLog#message ?? 'The tool failed to complete. Try again or narrow the request.'": SINK_PARAM,
   },
   'host/agentToolProvider.ts': {
-    featureId: '`computeNodeOwningFeature(typeId)` — a host feature id from a static typeId map',
+    featureId: '`computeNodeOwningFeature(typeId)` — a host feature id from a static typeId map — or, for an ADR 1031 round 3 declared projection, the id of the composed feature that declared it',
   },
   'features/scheduled-agent-chats/agentTools.ts': { noun: SINK_PARAM },
   'features/documents/agentTools.ts': { actingUserRefusal: SINK_PARAM },
@@ -73,11 +77,6 @@ const HOST_OPERANDS: Record<string, Record<string, string>> = {
   'features/recommendations/agentTools.ts': { 'deny#message': SINK_PARAM, required: 'a `Scope` union member chosen by the host from the mode' },
   'features/cms/agentTools.ts': { "grant.locales.join(', ')": 'locales an admin granted, each validated against LOCALE_RE on write' },
   'features/funnels/agentTools.ts': { 'existing.status': 'a stored funnel status — the closed FunnelStatus union' },
-  'features/kicktodo-creator/agentTools.ts': {
-    'intakeInt#name': SINK_PARAM,
-    'intakeInt#bounds.min': 'a field of `intakeInt`\'s `bounds` parameter, itself a classified sink (an UPPER_SNAKE plan-validator constant)',
-    'intakeInt#bounds.max': 'a field of `intakeInt`\'s `bounds` parameter, itself a classified sink (an UPPER_SNAKE plan-validator constant)',
-  },
   'features/campaign-intel/agentTools.ts': { 'positiveInt#field': SINK_PARAM },
   'features/app-builder/agentTools.ts': {
     'result.message': '`renderAppBuilder` (renderCore.ts) — its literal repair sentences ("read it with the get-design tool first") and the app-builder surface\'s own OpenwopError text; 14\'s decision 2026-10-28: host repair text stays outside the fence',
@@ -87,6 +86,8 @@ const HOST_OPERANDS: Record<string, Record<string, string>> = {
   },
   'features/email/agentTools.ts': { 'campaign.status': 'a stored email campaign status — the closed campaign-status union' },
 };
+/** ADR 1031 P2 — plus each feature package's reviewed operands (`ratchetTables.json`, `toc2cd11.hostOperands`). */
+const HOST_OPERANDS: Record<string, Record<string, string>> = { ...HOST_OWNED_OPERANDS, ...declaredPathTable<Record<string, string>>('toc2cd11.hostOperands') };
 
 const UPPER = /^[A-Z][A-Z0-9_]*$/;
 

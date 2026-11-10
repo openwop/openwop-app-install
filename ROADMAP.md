@@ -1,5 +1,13 @@
 # ROADMAP.md — openwop-app feature port
 
+Shared animated films are a net-new host program tracked in
+[ADR 1075](docs/adr/1075-shared-html-film-timeline-and-presenter.md). The first
+implementation covers deterministic cue evaluation, canvas persistence, manual
+controls and a private presenter/audience split. Narration/performance tracks,
+richer timeline authoring, public release/export, remote audience sessions and
+AI authoring remain later increments; no protocol expansion is required for
+this initial host-local feature.
+
 The sequenced plan for porting key product capabilities from the **MyndHyve**
 platform into openwop-app, as toggle-gated feature packages.
 
@@ -1250,3 +1258,53 @@ recorded in the owning ADR.
 ## Competitive platform gap-closure program (ADR 0970)
 
 Status: Proposed (2026-10-24); planning only. [ADR 0970](docs/adr/0970-platform-competitive-gap-closure-program.md) and the [12-section plan](docs/plans/platform-gap-closure-2026-10-24/README.md) cover 28 audit gaps,31 categories and all 229 inventoried feature-directory rows. Extends existing owners/readiness ADRs rather than replacing them. [Coverage ledger](docs/plans/platform-gap-closure-2026-10-24/coverage.json) keeps implementation/evidence open. Strict host-event replay/resync is gated on upstream Draft RFC 0250 becoming Accepted; unrelated host repairs need no protocol hold. No new feature toggle or pack is declared by this program.
+
+## Channels and surfaces program (ADRs 1041–1045)
+
+Status: Accepted 2026-11-03 (David: "do the full implementation of all of these
+features in waves"); wave 1 done (2026-11-04); wave 2 P1 and P1b done (2026-11-05); the hosted channels (P2a–P2c) wait on accounts. [ADR 1041](docs/adr/1041-all-surfaces-channels-program.md)
+is the program record. Open items and progress are tracked in
+[`docs/steward/TODO.md` § Channels and surfaces](docs/steward/TODO.md).
+
+**Goal.** Every surface the app talks through is production grade, supported the
+way OpenClaw does it: a hosted gateway for channels with an official API, a device
+relay on the user's own machine for personal accounts, and one channel core both
+feed into the main chat.
+
+**Decisions (2026-11-03, David).**
+1. Support every surface, in waves.
+2. Reverse MyndHyve decision 6(e) for an opt-in personal device lane (WhatsApp
+   through Baileys, iMessage, Signal): the user's own machine and accounts only,
+   never operator numbers, risk shown at setup, business WhatsApp stays official.
+3. Start wave 1 now.
+4. Channel turn scope (ADR 1042 D9): "Owner full, others narrow". The owner's own
+   linked account gets full tools. Approved outsiders, groups and relay contacts
+   get only reviewed read tools (none today), with no memory. All channel text is
+   fenced as untrusted.
+5. Relay contact approvals (ADR 1043 D9, 2026-11-04): "Per-device, owner
+   approves". The device's owner approves each contact; a stranger is held pending
+   and never sent an automatic pairing message.
+6. Relay delivery-log retention (ADR 1043 RELAY-LOG-RETENTION-1, 2026-11-05): ship
+   the 7-day window, and let the first sweep delete the older production rows.
+
+Every new surface ships off by default. Accounts, secrets, spend and production
+enables stay the user's decision, recorded in each phase's ADR.
+
+| Wave | Phase | Scope | ADR | Needs from the user | State |
+|---|---|---|---|---|---|
+| 1 | P0 | Channel core: provider registry entries (Telegram, Discord, WhatsApp via Twilio), sender pairing, reply transport, inbound dedup, per-connection rate limit, ingress into main chat, channels settings page, Teams provider fix | [1042](docs/adr/1042-channel-core-ingress-and-replies.md) | nothing | merged #5543 (b595fda72) and #5558 (df995f5bc, the settings page), deployed OFF |
+| 1 | P5 | SKILL.md import into the signed marketplace; scripts refused or sandboxed | [1044](docs/adr/1044-skill-md-import.md) | nothing | deployed OFF 2026-11-03 (#5530, 94422afb8) |
+| 1 | P6 | MCP and A2A server hardening (A2A auth, tenant binding, rate limit, stubs), then production enable | [1045](docs/adr/1045-mcp-a2a-server-hardening.md) | the production enable | LIVE 2026-11-03 (#5531, #5552) |
+| 2 | P1 | Device relay to production: token lifecycle, offline marking, reconnect and watchdog, outbound retries, batching, typing, installer, live checks | [1043](docs/adr/1043-device-relay-production.md) | nothing (each user links their own accounts) | server LIVE: #5567 (a93b7d443) and P1b #5573 (4df908ae4, live 3c1ebe770, 2026-11-05); client `@openwop/cli` 2.0.0 published 2026-11-04; delivery-log retention #5589 LIVE (aaf127ac1, 2026-11-05); live check per channel waits on the user's accounts |
+| 2 | P2a | Telegram two-way | extends 0175 | a Telegram bot token | planned |
+| 2 | P2b | Slack conversational replies | extends 0175 | a Slack app | planned |
+| 2 | P2c | WhatsApp two-way customer service (official) | extends 0394 | a Meta WhatsApp Business account or Twilio sender | planned |
+| 3 | P2d | Discord free-text with a gateway worker | extends 0175 | a Discord app; approve an always-on worker | planned |
+| 3 | P2e | Teams bot | extends 0198 | an Azure Bot and Teams app | planned |
+| 3 | P2f | Google Chat | new | a Google Chat app | planned |
+| 3 | P3 | Computer use: hosted remote CDP and the user's own Chrome through the relay | amends 0418 | a hosted browser provider and its spend | planned |
+| 3 | P4 | Phone calls (Twilio Calls, TwiML, Media Streams into realtime voice), filling `ctx.voice` | new; RFC 0101 check | Twilio voice numbers and per-minute spend | planned |
+| 4 | P7 | Signed desktop app that hosts the relay; iOS node with TestFlight | amends 0181 | Apple Developer account; Windows signing certificate | planned |
+
+**Out of scope.** Running personal-messenger bridges in the cloud (ADR 1041
+alternatives), and adopting OpenClaw itself as the gateway.

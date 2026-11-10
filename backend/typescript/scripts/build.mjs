@@ -33,6 +33,14 @@ if (existsSync(genScript)) {
   process.exit(1);
 }
 
+// ADR 1031 — the adopter seam: turn `src/adopter/features/*/feature.ts` (absent
+// in openwop-app, so an empty list) into the gitignored static module the
+// registry imports. INSIDE this package so the Docker builder, which copies only
+// `backend/typescript/`, runs it too and the image carries adopter features.
+const { generateAdopterFeatures } = await import('./gen-adopter-features.mjs');
+const adopter = generateAdopterFeatures({ pkgRoot });
+if (adopter.features.length > 0) console.log(`adopter features: ${adopter.features.join(', ')}`);
+
 const REGISTRY = resolve(pkgRoot, 'src/features/index.ts');
 const GENERATED = resolve(pkgRoot, 'src/features/index.distribution.ts');
 const useDistribution = distribution !== 'default';

@@ -121,6 +121,8 @@ bypass, `:158`), a wildcard key, or an **env key** (`auth.kind === 'env-key'`, `
   change to see. That is the "moving a definition between registries moves authz" lesson: the authority
   arrives through the sub-org registry, not the root roster everyone audits.
 
+> **CORRECTED 2026-11-05 (ADR 1045, TST-FUD-GC-1):** an env key's principal id is now `bearer:<16 hex of sha256(key)>`, not `bearer:<first 8 chars>`; the 8-char form made two keys sharing a prefix one principal (one budget, one audit identity, and an operator-issuer check that let a surviving key vouch for a removed one). Legacy 8-char ids in stored rows are honoured as operator issuers only when exactly one configured key has that prefix. See ADR 1045 § "Env-key principal collision".
+
 ## Decision drivers
 
 1. **Least privilege.** Only `host:kicktodo:manage` + `host:byok:manage`, and only on system-owned

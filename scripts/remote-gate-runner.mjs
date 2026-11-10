@@ -11,6 +11,10 @@ const arg = process.argv[2];
 if (arg === '--recover') {
   for (const row of await recoverInstalledJobs({ config })) console.log(JSON.stringify(row));
 } else {
-  const { job } = await runInstalledJob({ config, id: arg });
-  console.log(JSON.stringify({ id: arg, state: job.state }));
+  const { job, result } = await runInstalledJob({ config, id: arg });
+  // The journal's details (an exit code, or the closed cleanup reasons) and the
+  // supervisor's own verdict reach the VM's journal, so an `interrupted` gate says
+  // why (shadow 7, 2026-11-02). No request content, paths or secrets.
+  console.log(JSON.stringify({ id: arg, state: job.state, details: job.details,
+    ...(result ? { exitCode: result.exitCode, owned: result.owned, cleanup: result.cleanup } : {}) }));
 }

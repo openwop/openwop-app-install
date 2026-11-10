@@ -80,8 +80,8 @@ describe('notification deep-link guard (ADR 0336)', () => {
       `Bare parent-tab actionUrl(s) drop the entity id — point at the specific entity `
         + `(a ?param=<id> or /<entity>/<id>), per ADR 0336 §2:\n  ${offenders.join('\n  ')}`,
     ).toEqual([]);
-    expect(scanned.length).toBeGreaterThanOrEqual(47);
-    expect(filesWithUrls).toBeGreaterThanOrEqual(39);
+    expect(scanned.length).toBeGreaterThanOrEqual(39); // 40 after the KickTodo packages left (ADR 1031 P3)
+    expect(filesWithUrls).toBeGreaterThanOrEqual(32); // 33 after the KickTodo packages left (ADR 1031 P3)
     expect(scanned).toContain('/campaign-brief?brief=${encodeURIComponent(brief.id)}');
   });
 });

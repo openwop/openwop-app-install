@@ -22,11 +22,47 @@ import { readFileSync, writeFileSync, readdirSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isEntryModule } from './lib/entry-module.mjs';
+// ADR 1031 — the adopter seam's backend scanner lives inside the backend package
+// (the Docker build copies only that subtree); the root tooling reuses it.
+import { adopterDependsOn } from '../backend/typescript/scripts/gen-adopter-features.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const BE_REGISTRY = join(ROOT, 'backend/typescript/src/features/index.ts');
 const FE_REGISTRY = join(ROOT, 'frontend/react/src/features/registry.ts');
 const BE_FEATURES_DIR = join(ROOT, 'backend/typescript/src/features');
+const BE_PKG = join(ROOT, 'backend/typescript');
+const FE_ADOPTER_FEATURES_DIR = join(ROOT, 'frontend/react/src/adopter/features');
+
+/**
+ * ADR 1031 — feature ids an ADOPTER repo registers from `src/adopter/features/<id>/`
+ * (backend `feature.ts`, frontend `routes.tsx`). Empty in openwop-app itself.
+ * Adopter features are NOT in either canonical registry's static imports, so a
+ * manifest cannot exclude them: they ship in every build of the adopter's repo,
+ * which is what the adopter wrote them for. They DO take part in the dependsOn
+ * closure (an adopter feature that hard-depends on an excluded feature is a
+ * closure violation like any other).
+ */
+export function adopterFeatureIds() {
+  const ids = new Set(Object.keys(adopterDependsOn(BE_PKG)));
+  if (existsSync(FE_ADOPTER_FEATURES_DIR)) {
+    for (const e of readdirSync(FE_ADOPTER_FEATURES_DIR, { withFileTypes: true })) {
+      if (e.isDirectory() && existsSync(join(FE_ADOPTER_FEATURES_DIR, e.name, 'routes.tsx'))) ids.add(e.name);
+    }
+  }
+  return ids;
+}
+
+/** ADR 1031 — closure violations contributed by adopter features (always included):
+ *  each `edges[id]` dep that `excluded` drops. Pure, for the unit test. */
+export function adopterClosureViolations(excluded, edges = adopterDependsOn(BE_PKG)) {
+  const out = [];
+  for (const [id, deps] of Object.entries(edges)) {
+    for (const dep of deps) {
+      if (excluded.has(dep)) out.push(`adopter feature '${id}' (always included) hard-depends on '${dep}' (excluded)`);
+    }
+  }
+  return out;
+}
 
 const camel = (kebab) => kebab.replace(/-([a-z0-9])/g, (_, c) => c.toUpperCase());
 const varName = (id) => `${camel(id)}Feature`;
@@ -309,7 +345,7 @@ export function checkBundleCatalog(catalogOverride) {
 /** dependsOn closure: for every INCLUDED backend feature, its hard deps must
  *  not be excluded. Parses `dependsOn: [...]` from each feature.ts (string
  *  literals only — the declared shape). */
-function checkClosure(excluded) {
+function checkClosure(excluded, { adopter = true } = {}) {
   const violations = [];
   for (const dir of readdirSync(BE_FEATURES_DIR, { withFileTypes: true })) {
     if (!dir.isDirectory() || excluded.has(dir.name)) continue;
@@ -322,7 +358,7 @@ function checkClosure(excluded) {
       if (excluded.has(dep)) violations.push(`'${dir.name}' (included) hard-depends on '${dep}' (excluded)`);
     }
   }
-  return violations;
+  return [...violations, ...(adopter ? adopterClosureViolations(excluded) : [])];
 }
 
 /** Remove each excluded feature's import line + array entry from a registry
@@ -349,7 +385,16 @@ export function generate(name, { write = true } = {}) {
   if (excluded.size === 0) {
     return { name, generated: false, reason: 'empty exclude list — the checked-in registries are the build' };
   }
-  const closure = checkClosure(excluded);
+  // ADR 1031 P3 — a `proofOnly` manifest is an upstream PROOF fixture (slim-proof),
+  // never an adopter's product build. An adopter's features ship in every build of
+  // ITS repo, so one that depends on a feature the fixture excludes (KickTodo's
+  // kicktodo-commerce on commerce) would red the adopter's gate over a build nobody
+  // makes there. Such a manifest skips the ADOPTER half of the closure only; the
+  // first-party half still holds.
+  if (manifest.proofOnly !== undefined && manifest.proofOnly !== true) {
+    throw new Error(`distribution '${name}': proofOnly must be true or absent`);
+  }
+  const closure = checkClosure(excluded, { adopter: manifest.proofOnly !== true });
   if (closure.length > 0) {
     throw new Error(`distribution '${name}' violates the dependsOn closure:\n  ${closure.join('\n  ')}`);
   }
@@ -358,6 +403,11 @@ export function generate(name, { write = true } = {}) {
   const resolved = new Set([...be.found, ...fe.found]);
   const unresolved = manifest.exclude.filter((id) => !resolved.has(id));
   if (unresolved.length > 0) {
+    const adopter = adopterFeatureIds();
+    const adopterHits = unresolved.filter((id) => adopter.has(id));
+    if (adopterHits.length > 0) {
+      throw new Error(`distribution '${name}': excluded id(s) are ADOPTER features (src/adopter/features/), which a manifest cannot exclude — remove the directory instead (ADR 1031): ${adopterHits.join(', ')}`);
+    }
     throw new Error(`distribution '${name}': excluded id(s) resolve in NEITHER registry (typo or convention drift): ${unresolved.join(', ')}`);
   }
   const banner = `// GENERATED by scripts/gen-distribution.mjs for distribution '${name}' — DO NOT EDIT, DO NOT COMMIT.\n`;

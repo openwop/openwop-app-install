@@ -8,6 +8,7 @@
 import { describe, it, expect } from 'vitest';
 import { CREATABLE_CANVAS_TYPES, canvasTypeNameKey } from '../creatableTypes.js';
 import { messages as canvasEn } from '../i18n/en.js';
+import { filmDefinition } from '../../features/films/definition.js';
 import { slidesDefinition } from '../../features/slides/definition.js';
 import { drawingsDefinition } from '../../features/drawings/definition.js';
 import { cadDefinition } from '../../features/cad/definition.js';
@@ -15,7 +16,7 @@ import { campaignStudioDefinition } from '../../features/campaign-studio/definit
 import { appBuilderDefinition } from '../../features/app-builder/definition.js';
 import { documentDefinition } from '../../features/document-editor/definition.js';
 
-const DEFINITIONS = [slidesDefinition, drawingsDefinition, cadDefinition, campaignStudioDefinition, appBuilderDefinition, documentDefinition] as const;
+const DEFINITIONS = [filmDefinition, slidesDefinition, drawingsDefinition, cadDefinition, campaignStudioDefinition, appBuilderDefinition, documentDefinition] as const;
 
 /** Every first-party canvas definition module, discovered — the hand list above
  *  could not notice a NEW definition with no gallery row (w46). */
@@ -34,9 +35,7 @@ function discoveredCanvasTypeIds(): Set<string> {
 
 /** Named, asserted exemptions — first-party types deliberately absent from the
  *  creation gallery. Adding one is a decision; it must be written here. */
-const NOT_CREATABLE: ReadonlyMap<string, string> = new Map([
-  ['canvas.challenge-outline', 'created per-candidate by the backend ensure route, never from the gallery (ADR 0458 §2.3)'],
-]);
+const NOT_CREATABLE: ReadonlyMap<string, string> = new Map<string, string>([]);
 
 describe('creatableTypes registry ↔ feature definitions', () => {
   it('pins every registry row to its real definition (id, toggle, base path, editor path)', () => {
@@ -58,7 +57,8 @@ describe('creatableTypes registry ↔ feature definitions', () => {
 
   it('every discovered first-party definition has a row, except the named exemptions', () => {
     const discovered = discoveredCanvasTypeIds();
-    // Non-vacuity floor: the glob really found the definitions (7 today).
+    expect(discovered.has(filmDefinition.canvasTypeId), 'film definition must participate in automatic discovery').toBe(true);
+    // Seven definitions including Film; the retired challenge-outline is absent.
     expect(discovered.size).toBeGreaterThanOrEqual(7);
     const rows = new Set(CREATABLE_CANVAS_TYPES.map((r) => r.canvasTypeId));
     const missing = [...discovered].filter((id) => !rows.has(id) && !NOT_CREATABLE.has(id));

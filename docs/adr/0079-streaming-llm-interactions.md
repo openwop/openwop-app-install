@@ -27,6 +27,19 @@ Every LLM dispatch in the app SHOULD stream, in two halves:
 
 Carve-out: an **internal, non-user-facing** LLM call with no progressive UI (a one-shot translation/classification/extraction) MAY stay blocking — streaming there is cheap but low-value; it is not required, only allowed. The contract is "stream wherever a human watches the reply form."
 
+### Correction — 2026-11-06: async canonical-reply gaps
+
+A terminal stream signal or higher event sequence does not establish that the
+read-side tail contains this exchange's authoritative agent reply. Tool/chunk
+progress, user-only tails and already-folded replies must not advance the
+conversation cursor or rebuild the visible transcript from prior turns. The
+shared frontend transport now requires a fresh canonical agent reply before
+that async merge. A missing reply uses the existing timeout/error recovery,
+keeping the submitted user and prior history visible rather than silently
+announcing completion and erasing the exchange. Existing legitimate agent-only
+deltas, synchronous replies and classified terminal errors retain their paths.
+This changes no event schema, provider/tool budget, authorization or replay contract.
+
 ## LLM dispatch inventory (audit)
 
 | Site | Streams today? | Decision |

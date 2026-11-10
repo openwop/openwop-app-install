@@ -5,8 +5,8 @@
  *
  * The same-pixels guarantee: identical inputs ⇒ identical bytes. Everything
  * variable is an INPUT — no wall-clock, no RNG, no locale-dependent shaping,
- * fonts from the embedded buffers only (`loadSystemFonts: false` — system
- * fonts differ per machine and are the classic determinism breaker), and layer
+ * fonts from embedded bytes via private native fontFiles only
+ * (`loadSystemFonts: false` — system fonts differ per machine), and layer
  * imagery arrives as content-hashed `data:` URIs resolved host-side by the
  * caller (never a render-time fetch — determinism + SSRF).
  *
@@ -26,21 +26,16 @@ import * as gifencNs from 'gifenc';
 // (non-analyzable) and everything on `default`. Feature-detect, don't guess.
 const { GIFEncoder, quantize, applyPalette } =
   typeof gifencNs.GIFEncoder === 'function' ? gifencNs : (gifencNs.default ?? gifencNs);
-import { Resvg, type ResvgRenderOptions } from '@resvg/resvg-js';
+import { Resvg } from '@resvg/resvg-js';
 
-/** resvg-js 2.6.2 supports `fontBuffers` in the native binding but omits it
- *  from the published typings — widen structurally (assignable because excess
- *  property checks apply only to fresh literals). Drop when upstream catches up. */
-type RenderOptionsWithFontBuffers = Omit<ResvgRenderOptions, 'font'> & {
-  font?: NonNullable<ResvgRenderOptions['font']> & { fontBuffers?: Buffer[] };
-};
-import { bundledFontBuffers, BUNDLED_FONT_FAMILIES, BUNDLED_FONTS_VERSION } from './fonts.js';
+import { withNativeFontFiles } from './nativeFonts.js';
+import { bundledFontBuffers, BUNDLED_FONTS_VERSION } from './fonts.js';
 import type { AdLayoutTemplate, AdLayerId, BrandColorToken, TemplateLayer } from './templates.js';
 
 /** Bump on ANY behavior change in this module (layout math, wrap estimator,
  *  SVG emission) or a `@resvg/resvg-js` version bump — it enters the composite
  *  render hash so an upgraded renderer never silently re-pixels old renders. */
-export const RENDERER_VERSION = `adrender-1.0.0+resvg-2.6.2+${BUNDLED_FONTS_VERSION}`;
+export const RENDERER_VERSION = `adrender-1.0.1+resvg-2.6.2+${BUNDLED_FONTS_VERSION}`;
 
 /** A host-resolved raster image for one layer slot (bytes already tenant-checked). */
 export interface ResolvedLayerImage {
@@ -332,41 +327,32 @@ export function renderAnimatedGif(input: RenderAdInput, animate: AnimateOptions)
   const { frames, fps } = clampAnimateOptions(animate);
   const delay = Math.round(1000 / fps);
   const fontBuffers = [...bundledFontBuffers(), ...(input.extraFontBuffers ?? [])];
-  const options = (): RenderOptionsWithFontBuffers => ({
-    font: { loadSystemFonts: false, fontBuffers, defaultFontFamily: BUNDLED_FONT_FAMILIES.sans },
-    fitTo: { mode: 'original' },
+  return withNativeFontFiles(fontBuffers, (font) => {
+    const enc = GIFEncoder();
+    let warnings: RenderWarning[] = [];
+    let layerBboxes: ComposedAd['layerBboxes'] = [];
+    for (let k = 0; k < frames; k++) {
+      const progress = smoothstep(k / (frames - 1));
+      const composed = composeAdSvg(input, { revealProgress: progress });
+      if (k === frames - 1) { warnings = composed.warnings; layerBboxes = composed.layerBboxes; }
+      const pngPixels = new Resvg(composed.svg, { font, fitTo: { mode: 'original' } }).render();
+      const rgba = pngPixels.pixels; // RGBA Uint8Array (width×height×4)
+      const w = pngPixels.width, h = pngPixels.height;
+      const palette = quantize(rgba, 256);
+      const index = applyPalette(rgba, palette);
+      enc.writeFrame(index, w, h, { palette, delay });
+    }
+    enc.finish();
+    return { gif: Buffer.from(enc.bytes()), warnings, layerBboxes, frames, fps };
   });
-
-  const enc = GIFEncoder();
-  let warnings: RenderWarning[] = [];
-  let layerBboxes: ComposedAd['layerBboxes'] = [];
-  for (let k = 0; k < frames; k++) {
-    const progress = smoothstep(k / (frames - 1));
-    const composed = composeAdSvg(input, { revealProgress: progress });
-    if (k === frames - 1) { warnings = composed.warnings; layerBboxes = composed.layerBboxes; }
-    const pngPixels = new Resvg(composed.svg, options()).render();
-    const rgba = pngPixels.pixels; // RGBA Uint8Array (width×height×4)
-    const w = pngPixels.width, h = pngPixels.height;
-    const palette = quantize(rgba, 256);
-    const index = applyPalette(rgba, palette);
-    enc.writeFrame(index, w, h, { palette, delay });
-  }
-  enc.finish();
-  return { gif: Buffer.from(enc.bytes()), warnings, layerBboxes, frames, fps };
 }
 
 /** Compose + rasterize. PNG only (the storable, platform-uploadable format). */
 export function renderAd(input: RenderAdInput): ComposedAd {
   const { svg, warnings, layerBboxes } = composeAdSvg(input);
-  const options: RenderOptionsWithFontBuffers = {
-    font: {
-      loadSystemFonts: false,
-      fontBuffers: [...bundledFontBuffers(), ...(input.extraFontBuffers ?? [])],
-      defaultFontFamily: BUNDLED_FONT_FAMILIES.sans,
-    },
-    fitTo: { mode: 'original' },
-  };
-  const resvg = new Resvg(svg, options);
-  const png = Buffer.from(resvg.render().asPng());
-  return { svg, png, warnings, layerBboxes };
+  return withNativeFontFiles([...bundledFontBuffers(), ...(input.extraFontBuffers ?? [])], (font) => {
+    const resvg = new Resvg(svg, { font, fitTo: { mode: 'original' } });
+    const png = Buffer.from(resvg.render().asPng());
+    return { svg, png, warnings, layerBboxes };
+  });
 }

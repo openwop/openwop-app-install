@@ -11,6 +11,7 @@
  * state resets when the selection moves to another node.
  */
 
+import { projectSourceOutput, sameSourceBinding } from '../schema/sourceOutput.js';
 import { Button } from '../../ui/Button.js';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -76,7 +77,7 @@ export function NodeConnections({ node }: { node: BuilderNode }): JSX.Element {
     (e) =>
       e.source === node.id &&
       e.target === target.node.id &&
-      e.sourcePort === sourcePort &&
+      sameSourceBinding(e, { sourcePort, canonicalSourceOutput: sourcePort }) &&
       e.targetPort === resolvedTargetPort,
   );
   // Announced via the role=status region below so SR users hear the result
@@ -95,9 +96,11 @@ export function NodeConnections({ node }: { node: BuilderNode }): JSX.Element {
       ) : (
         <ul className="u-list-none binspector-conn-list">
           {mine.map((e) => {
+            const sourceKind = nodes.find(n => n.id === e.source)?.kind;
+            const port = projectSourceOutput(e, catalogEntry(sourceKind ?? '')?.outputs ?? []).label;
             const desc = e.source === node.id
-              ? t('connectionOut', { port: e.sourcePort, node: nodeName(e.target), targetPort: e.targetPort })
-              : t('connectionIn', { targetPort: e.targetPort, node: nodeName(e.source), port: e.sourcePort });
+              ? t('connectionOut', { port, node: nodeName(e.target), targetPort: e.targetPort })
+              : t('connectionIn', { targetPort: e.targetPort, node: nodeName(e.source), port });
             return (
               <li key={e.id} className="u-flex u-items-center u-justify-between u-gap-2">
                 <span className="binspector-conn-desc">{desc}</span>

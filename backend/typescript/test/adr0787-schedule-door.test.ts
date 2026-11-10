@@ -48,7 +48,6 @@ import { registerJob, getJob, eraseSubjectSchedules, ONE_SHOT_CRON, type Schedul
 import { eraseSubject } from '../src/host/subjectErasure.js';
 import { upsertFromPrincipal, userIdFor, legacyPrincipalOf, type User } from '../src/features/users/usersService.js';
 import { DurableCollection } from '../src/host/hostExtPersistence.js';
-import { buildKicktodoReadiness } from '../src/features/kicktodo-core/readinessService.js';
 
 let BASE: string;
 let server: http.Server;
@@ -345,7 +344,7 @@ describe('ADR 0787 D6 — the door refuses a cadence that cannot fire (400, neve
   });
 });
 
-describe('ADR 0787 grade-code fixes (SCTCD-2/3/5/8/10)', () => {
+describe('ADR 0787 grade-code fixes (SCTCD-2/3/5/8; SCTCD-10 was an adopter feature\'s readiness check)', () => {
   it('SCTCD-2: an explicit-id POST cannot REPLACE a feature-configured job by the other door', async () => {
     const { tenantId, writer } = await workspace();
     const r = await registerJob({ jobId: uniq('feat2'), tenantId, cronExpr: '0 9 * * *', workflowId: 'wf.feature', configurable: { credentialRef: 'platform:managed' }, inputs: { k: 1 } });
@@ -425,23 +424,5 @@ describe('ADR 0787 grade-code fixes (SCTCD-2/3/5/8/10)', () => {
     const job = await getJob(id);
     expect(job?.enabled, 'an ambiguous principal must not be erased as this user').toBe(true);
     expect(job?.metadata?.actingUserId).toBe(principal);
-  });
-
-  it('SCTCD-10: two revisions ticking is a readiness blocker, not a detail to spot by eye', async () => {
-    const fleet = new DurableCollection<{ instanceId: string; revision: string | null; commit: string | null; startedAt: string; lastTickAt: string }>('scheduler:daemon', (r) => r.instanceId);
-    const now = new Date().toISOString();
-    await fleet.put({ instanceId: 'i-new', revision: 'rev-00800', commit: 'abc', startedAt: now, lastTickAt: now });
-    await fleet.put({ instanceId: 'i-old', revision: 'rev-00796', commit: 'def', startedAt: now, lastTickAt: now });
-    try {
-      const report = await buildKicktodoReadiness({ tenantId: 'default' });
-      // The BLOCKER itself, by name — the report is degraded for other reasons in
-      // this harness and lists the fleet anyway, so neither proves the check.
-      const blocker = report.blockers.find((b) => b.includes('revisions ticked within the hour'));
-      expect(blocker, JSON.stringify(report.blockers)).toBeDefined();
-      expect(blocker).toContain('rev-00796');
-    } finally {
-      await fleet.delete('i-new');
-      await fleet.delete('i-old');
-    }
   });
 });

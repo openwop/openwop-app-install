@@ -7,7 +7,8 @@ import { startFixtureServer, type FixtureServer } from './offlineFixtureServer';
 
 /**
  * ADR 0873 Verification 2 (offline) and 3 (deploy-across), against fixture builds in
- * which `kicktodo` declares `/guide` and `/discover` (scripts/build-offline-fixture.mjs).
+ * which the generated `offline-fixture` feature declares its two lazy screens
+ * (scripts/build-offline-fixture.mjs; ADR 1031 P2 — it was the kicktodo package).
  * Builds A and B differ in the entry chunk, so B prunes most of A's hashed files.
  *
  * Not here: the D12 legs (a `last-known` route inside and after its TTL, another
@@ -18,8 +19,8 @@ const FIXTURES = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'node_mo
 const A = join(FIXTURES, 'A');
 const B = join(FIXTURES, 'B');
 
-const DECLARED = '/guide';
-const DECLARED_LAZY = '/discover';
+const DECLARED = '/offline-fixture/start';
+const DECLARED_LAZY = '/offline-fixture/lazy';
 const UNDECLARED = '/showcase';
 
 let server: FixtureServer;
@@ -50,7 +51,7 @@ async function navigateInApp(page: Page, to: string): Promise<void> {
 
 /** Each route's own first heading (English, the default locale), so "rendered" means
  *  the route's screen and not an empty layout or an error state inside `<main>`. */
-const HEADING: Record<string, string> = { [DECLARED]: 'Your guide', [DECLARED_LAZY]: 'Discover' };
+const HEADING: Record<string, string> = { [DECLARED]: 'Offline fixture start', [DECLARED_LAZY]: 'Offline fixture lazy' };
 
 async function expectRendered(page: Page, path: string): Promise<void> {
   await expect(page).toHaveURL(new RegExp(`${path}$`));

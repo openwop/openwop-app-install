@@ -169,19 +169,19 @@ describe('ADR 0295 — binding the deployment\'s OWN origin is refused', () => {
   });
 
   it('refuses the platform origin, and says what it would have broken', async () => {
-    process.env['OPENWOP_PUBLIC_BASE_URL'] = 'https://kicktodo.com';
-    await expect(addDomain({ tenantId: 't1', orgId: 'o1', createdBy: 'u', hostname: 'kicktodo.com' }))
+    process.env['OPENWOP_PUBLIC_BASE_URL'] = 'https://acme.example';
+    await expect(addDomain({ tenantId: 't1', orgId: 'o1', createdBy: 'u', hostname: 'acme.example' }))
       .rejects.toMatchObject({ code: 'validation_error' });
     // The message must name the consequence — a bare "not allowed" sends the
     // operator looking for a permission problem they do not have.
-    await expect(addDomain({ tenantId: 't1', orgId: 'o1', createdBy: 'u', hostname: 'KickTodo.COM.' }))
+    await expect(addDomain({ tenantId: 't1', orgId: 'o1', createdBy: 'u', hostname: 'Acme.EXAMPLE.' }))
       .rejects.toThrow(/own origin/i);
   });
 
   it('still allows a SUBDOMAIN of the platform origin — that is the supported shape', async () => {
-    process.env['OPENWOP_PUBLIC_BASE_URL'] = 'https://kicktodo.com';
-    const d = await addDomain({ tenantId: 't-sub', orgId: 'o1', createdBy: 'u', hostname: 'pages.kicktodo.com' });
-    expect(d.hostname).toBe('pages.kicktodo.com');
+    process.env['OPENWOP_PUBLIC_BASE_URL'] = 'https://acme.example';
+    const d = await addDomain({ tenantId: 't-sub', orgId: 'o1', createdBy: 'u', hostname: 'pages.acme.example' });
+    expect(d.hostname).toBe('pages.acme.example');
   });
 
   it('is NOT-APPLICABLE when no public origin is configured — not fail-closed', async () => {

@@ -17,7 +17,7 @@ import { openStorage, redactDsn } from '../src/storage/index.js';
 import { readSecretEnv, resetSecretEnvWarnings } from '../src/host/secretEnv.js';
 
 describe('storage DSN diagnostics', () => {
-  const SOCKET_FORM = 'postgresql://kicktodo:pw@/kicktodo?host=/cloudsql/p:us-central1:i';
+  const SOCKET_FORM = 'postgresql://acme:pw@/acme?host=/cloudsql/p:us-central1:i';
 
   // CORRECTED 2026-09-10. This test used to demand that the libpq socket form be
   // REJECTED with "EMPTY host" + "insert a localhost placeholder". That pinned the

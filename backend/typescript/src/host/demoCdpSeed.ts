@@ -167,10 +167,10 @@ export async function seedDemoCdp(tenantId: string): Promise<{ created: number; 
     }
     if (cdcSync) {
       // Dry-run: one record labelled no-onward-use is dropped; the other passes.
-      const dry = prepareSyncBatch(cdcSync, [
+      const dry = await prepareSyncBatch(cdcSync, [
         { email: 'a@example.com', name: 'Ada', stage: 'customer', updatedAt: ago(nowMs, 1), permittedPurposes: ['analytics'] },
         { email: 'b@example.com', name: 'Bo', stage: 'lead', updatedAt: ago(nowMs, 1), permittedPurposes: [] },
-      ], { dropNoOnwardUse: true });
+      ]);
       log.info('demo_cdp_sync_dryrun', { tenantId, prepared: dry.count, dropped: dry.dropped });
     }
   } else skipped.push('destination-sync');

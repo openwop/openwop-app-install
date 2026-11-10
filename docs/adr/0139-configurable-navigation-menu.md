@@ -235,3 +235,26 @@ resolver + cookie unit tests green.
 > come from `resolveNav`. A stable **More** action opens the existing complete,
 > focus-trapped drawer. Desktop keeps the rail, and the route/wire contract is
 > unchanged.
+
+
+### Correction — 2026-11-07: closed mobile drawer leaves keyboard navigation
+
+The mobile drawer's `translateX(-100%)` removed it visually but left its links
+and buttons in sequential keyboard navigation. A real mobile QA observation
+focused the off-screen brand link immediately after the closed More button.
+The existing ≤860px CSS owner now also sets `visibility: hidden` on the closed
+rail and restores `visible` only while open. Desktop visibility and the existing
+More/Escape/focus-trap behavior are unchanged; no JavaScript breakpoint state
+or additional authentication/navigation policy is introduced.
+
+Visibility becomes hidden immediately on close. Opening retains the existing
+transform animation; closing paint disappears immediately rather than waiting
+for the slide-out transition. A delayed visibility transition would retain an
+interval of off-screen keyboard focus, so keyboard correctness takes precedence
+over that exit animation. Existing reduced-motion behavior still applies.
+
+The browser regression in `e2e/viewport.spec.ts` exercises actual Tab from closed
+More, Enter-open focus and reverse/forward wrapping, Escape/focus restoration
+with immediate closed Tab exclusion, and desktop visibility/keyboard controls.
+This is a real rendered browser oracle, not jsdom or a CSS string pin. Authored
+**NOT RUN** at source preparation; runtime qualification remains separate.

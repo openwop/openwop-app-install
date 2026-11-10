@@ -4,6 +4,11 @@
  * or has no question reaches an interrupt, or if an answer to a question the
  * interrupt never raised gets past resolve. The conformance fixtures witness the
  * same rules over HTTP; these name each branch.
+ *
+ * Red when (sabotage-witnessed, grade-tests w84 TST-FNC-1): the schema check, the
+ * no-question check, either form version's input scan, the unknown-id or no-id
+ * answer check, the clarification-kind guard or the answers-array guard is
+ * removed, or a bound form is refused.
  */
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
@@ -33,7 +38,15 @@ describe('interruptFormDefect', () => {
   });
 
   it('refuses a form that fails the schema, because it asks for a secret', () => {
-    expect(interruptFormDefect(fixture('conformance-interrupt-form-refused'))).toMatch(/fails interrupt-form\.schema\.json/);
+    const refused = fixture('conformance-interrupt-form-refused');
+    expect(interruptFormDefect(refused)).toMatch(/^data\.form fails interrupt-form\.schema\.json: /);
+    // The fixture differs from the passing one ONLY in its TextField `variant:
+    // "obscured"` (a secret input). Put the plain variant back and the same form
+    // passes, so the secret is the reason. (The message itself names the first Ajv
+    // error, `catalogVersion`, not the variant: grade-code row TST-FNC-GC1.)
+    const raw = JSON.stringify(refused);
+    expect(raw.split('"variant":"obscured"')).toHaveLength(2);
+    expect(interruptFormDefect(JSON.parse(raw.replace('"variant":"obscured"', '"variant":"shortText"')))).toBeNull();
   });
 
   it('refuses an input that is no question, naming it, in both form versions', () => {

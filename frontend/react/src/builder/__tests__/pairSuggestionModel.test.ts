@@ -9,10 +9,13 @@
  *
  * Sabotage that turns it red: every op 'pending', no inapplicable-on-dropped
  * dependency, keepOrder skipping dependencies, minted-node paths checked as
- * stale, model-named ports trusted, unknown typeIds applied, kept ops still
+ * stale, exact source bindings rewritten or projected on wrong handles,
+ * unknown typeIds applied, kept ops still
  * projected, or auto-keep taking a gate-sensitive / dependent / unselected op.
  */
 import { describe, expect, it } from 'vitest';
+import { projectSourceOutput } from '../schema/sourceOutput.js';
+import { serializeWorkflow } from '../schema/serialize.js';
 import type { BuilderEdge, BuilderNode } from '../schema/workflow.js';
 import {
   applyEditOpsToGraph, autoKeepable, keepOrder, liveOpStatuses, projectGhosts,
@@ -115,14 +118,42 @@ describe('ADR 0773 review fixes', () => {
     expect(out.nodes.find((n) => n.id === 'sg_s1_1')?.config).toMatchObject({ ms: 5 });
   });
 
-  it('CR-7: an op the builder cannot apply is reported, not silently kept; an unknown port falls back to a real one', () => {
+  it('CR-7: unappliable ops are reported; an unknown named source remains exact and visibly unresolved', () => {
     const out = applyEditOpsToGraph({ nodes, edges }, [
       { kind: 'addNode', nodeId: 'sg_x_1', typeId: 'vendor.not.in.this.catalog' },
       { kind: 'addEdge', edgeId: 'sge_x_2', sourceNodeId: 'a', targetNodeId: 'sg_x_1' },
-      { kind: 'addEdge', edgeId: 'sge_x_3', sourceNodeId: 'a', targetNodeId: 'b', sourceOutput: 'no-such-port' },
+      { kind: 'addEdge', edgeId: 'sge_x_3', sourceNodeId: 'a', targetNodeId: 'b', sourceOutput: 'no-such-port', targetInput: 'no-such-target' },
     ]);
     expect(out.applied).toEqual([false, false, true]);
     const e = out.edges.find((x) => x.id === 'sge_x_3');
-    expect(e?.sourcePort).not.toBe('no-such-port');
+    if (!e) throw new Error('Applied CR-7 edge missing');
+    // The prior fallback assertion would bless a different payload. Preserve
+    // the authored name and expose the unresolved output instead (ADR 0773).
+    expect(e.sourcePort).toBe('no-such-port');
+    expect(e.canonicalSourceOutput).toBe('no-such-port');
+    expect(e.targetPort).toBe('in'); // Existing target fallback remains.
+    const projected = projectSourceOutput(e, [{ name: 'out', type: 'any' }]);
+    expect(projected).toMatchObject({ label: 'Missing output: no-such-port', virtual: true, missing: true });
+    expect(projected.handleId).not.toBe('out');
+    const wire = serializeWorkflow({ id: 'wf.cr7', name: 'CR-7', version: '1.0.0', nodes: out.nodes, edges: out.edges, createdAt: 'now', updatedAt: 'now' });
+    expect(wire.edges.find(edge => edge.edgeId === 'sge_x_3')).toHaveProperty('sourceOutput', 'no-such-port');
   });
+  it('CR-7: explicit known source and omission retain distinct meaning and existing target fallback', () => {
+    const out = applyEditOpsToGraph({ nodes, edges }, [
+      { kind: 'addEdge', edgeId: 'named', sourceNodeId: 'a', targetNodeId: 'b', sourceOutput: 'out', targetInput: 'unknown' },
+      { kind: 'addEdge', edgeId: 'default', sourceNodeId: 'a', targetNodeId: 'b' },
+    ]);
+    expect(out.applied).toEqual([true, true]);
+    const named = out.edges.find(e => e.id === 'named');
+    const omitted = out.edges.find(e => e.id === 'default');
+    if (!named || !omitted) throw new Error('Named/default CR-7 controls missing');
+    expect(named).toMatchObject({ sourcePort: 'out', canonicalSourceOutput: 'out', targetPort: 'in' });
+    expect(omitted).toMatchObject({ sourcePort: 'out', canonicalSourceOutput: null, targetPort: 'in' });
+    expect(projectSourceOutput(named, [{ name: 'out', type: 'any' }])).toMatchObject({ handleId: 'out', label: 'out', virtual: false });
+    expect(projectSourceOutput(omitted, [{ name: 'out', type: 'any' }])).toMatchObject({ label: 'Default output', virtual: true });
+    const wire = serializeWorkflow({ id: 'wf.cr7-controls', name: 'CR-7 controls', version: '1.0.0', nodes: out.nodes, edges: out.edges, createdAt: 'now', updatedAt: 'now' });
+    expect(wire.edges.find(e => e.edgeId === 'named')).toHaveProperty('sourceOutput', 'out');
+    expect(wire.edges.find(e => e.edgeId === 'default')).not.toHaveProperty('sourceOutput');
+  });
+
 });

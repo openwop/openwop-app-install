@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { errorReasonOf } from '../../../client/classifyHttpError.js';
 import i18n from '../../../i18n/index.js';
+import { featureWorkflowName } from '../../../features/featureExtensions.js';
 import { formatNumber } from '../../../i18n/format.js';
 import { toast } from '../../../ui/toast.js';
 import { cancelRun, pollEvents } from '../../../client/runsClient.js';
@@ -174,7 +175,8 @@ export function useTurnTransport(
         // A translation for this workflow id, when the catalog has one (empty ⇒ fall
         // back to the backend's English display default).
         const localized = b.runRef.workflowId
-          ? i18n.t(`chat:workflowNames.${b.runRef.workflowId}`, { defaultValue: '' })
+          ? (i18n.t(`chat:workflowNames.${b.runRef.workflowId}`, { defaultValue: '' })
+            || featureWorkflowName(b.runRef.workflowId, i18n.language)) // ADR 1031 P2
           : '';
         const seeded = seedRunState(b.runRef, i18n.t('chat:workflowRunGeneric'), new Date().toISOString(), localized);
         // A run an agent tool ignited: the ownership index knows the step count
@@ -517,7 +519,14 @@ export function useTurnTransport(
         }
         const tail = await fetchTurns(runId, conversationCursorRef.current);
         absorbClarification(tail.clarification);
-        if (tail.lastSeq <= conversationCursorRef.current) {
+        // A newer sequence may contain only tool/chunk progress, or a replay
+        // of a reply already folded. Neither makes this exchange canonical.
+        // Keep its submitted user/progress via the existing error path instead
+        // of rebuilding the thread from prior turns and silently erasing it.
+        const hasFreshReply = tail.turns.some(
+          (turn) => turn.role === 'agent' && !conversationTurnsRef.current.has(turn.messageId),
+        );
+        if (tail.lastSeq <= conversationCursorRef.current || !hasFreshReply) {
           throw new Error(i18n.t('chat:replyTimedOut'));
         }
         conversationCursorRef.current = tail.lastSeq;
@@ -576,7 +585,10 @@ export function useTurnTransport(
       };
       // Drop the optimistic "thinking" bubble (the reply never landed) and append
       // the error bubble, keeping the user's message.
-      setSession((s) => ({ ...s, messages: [...s.messages.filter((m) => m.id !== thinkingId), errBubble] }));
+      setSession((s) => {
+        const progress = s.messages.find(m => m.id === thinkingId)?.agentEvents;
+        return { ...s, messages: [...s.messages.filter(m => m.id !== thinkingId), { ...errBubble, ...(progress ? { agentEvents: progress } : {}) }] };
+      });
     } finally {
       // Always tear down the delta stream + release the animation target.
       if (settleTimer !== undefined) clearTimeout(settleTimer);

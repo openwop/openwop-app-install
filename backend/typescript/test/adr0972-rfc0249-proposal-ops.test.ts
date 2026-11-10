@@ -143,9 +143,12 @@ describe('the advertisement (ADR 0972 D9)', () => {
   });
 
   it('agents.proposals advertises prompt-template with clientDrafts and readback', () => {
-    expect(agentsCapability().proposals).toEqual({
-      artifactKinds: ['prompt-template'], duplicationDetection: false, activation: 'direct-rbac',
-      clientDrafts: true, readback: ['prompt-template'],
+    // ADR 1033 — both pack kinds join it once RFC 0253 is vendored. Kinds list in
+    // installer-registration order, so compare them as sets.
+    const facet = agentsCapability().proposals as Record<string, unknown>;
+    const kinds = ['agent-pack', 'prompt-template', 'workflow-chain-pack'];
+    expect({ ...facet, artifactKinds: [...(facet.artifactKinds as string[])].sort(), readback: [...(facet.readback as string[])].sort() }).toEqual({
+      artifactKinds: kinds, duplicationDetection: false, activation: 'direct-rbac', clientDrafts: true, readback: kinds,
     });
   });
 

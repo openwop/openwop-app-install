@@ -9,6 +9,11 @@
  *  - the report names the provider, model and route that judged.
  * Breaks if the gate drops to members, a spec reaches another tenant's scope,
  * or a check with no judge reports success.
+ *
+ * Sabotage-witnessed (w78): the gate on `workspace:read`; no partial-spec
+ * refusal; no 422 for a missing provider; the spec resolved in another tenant
+ * or for another modality; the report naming a different provider; a body-less
+ * request sent down the spec lane.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -73,19 +78,27 @@ describe('judge check route', () => {
     const viewerId = (login.body as { user: { userId: string } }).user.userId;
     expect((await call(owner, 'POST', `/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: viewerId, roles: ['viewer'] })).status).toBe(201);
     specCalls.length = 0;
-    expect((await call(viewer, 'POST', P(), { provider: 'anthropic', model: 'm', credentialRef: 'k' })).status).toBe(403);
+    const r = await call(viewer, 'POST', P(), { provider: 'anthropic', model: 'm', credentialRef: 'k' });
+    expect(r.status).toBe(403);
+    expect(r.body.error).toBe('forbidden_scope');
     expect(specCalls).toEqual([]);
   }, 60_000);
 
   it('a partial spec is refused', async () => {
+    specCalls.length = 0;
     const r = await call(owner, 'POST', P(), { provider: 'anthropic', model: 'm' });
     expect(r.status).toBe(400);
+    expect(r.body).toMatchObject({ error: 'validation_error', message: 'Send provider, model and credentialRef together, or none of them.' });
+    expect(specCalls).toEqual([]);
   });
 
   it('with no vision provider it is an honest 422', async () => {
     ladder = null;
+    specCalls.length = 0;
     const r = await call(owner, 'POST', P(), {});
     expect(r.status).toBe(422);
+    expect(r.body).toMatchObject({ error: 'validation_error', details: { reason: 'no_vision_provider' } });
+    expect(specCalls).toEqual([]);
   });
 
   it('a named spec is resolved in this tenant, and the report names who judged', async () => {

@@ -1,8 +1,8 @@
 {
   "name": "feature.territories.nodes",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "kind": "node",
-  "description": "Sales Territory Management node pack — seven READ nodes over the ctx.features.territories surface: list territory models (+ the active model), list a model's territories (hierarchy), list its assignment rules and quotas, dry-run a model's assignment preview, and compute per-territory attainment (weighted pipeline vs quota, rolled up the hierarchy, with per-rep splits). PLUS two GOVERNED WRITE nodes (A5 — v1.1.0): activate-model and set-quota, which enforce the run OWNER's scope (host:territories:manage / workspace:write; system runs denied) and are kept OUT of the advisory agent's allowlist. NOTE (CFP-1 / D9): the app drives the governed model activation/archival through the SHARED reviews approval gate (kind: territory-model-transition), not a direct agent tool call — no built-in workflow ignites these nodes; they stay composable catalog entries for a builder-authored chain. All nodes are role:\"action\", tenant+org-guarded (CTI-1); tenantId comes from the run scope, never node args.",
+  "description": "Sales Territory Management node pack — seven READ nodes over the ctx.features.territories surface: list territory models (+ the active model), list a model's territories (hierarchy), list its assignment rules and quotas, dry-run a model's assignment preview, and compute per-territory attainment (weighted pipeline vs quota, rolled up the hierarchy, with per-rep splits). PLUS two GOVERNED WRITE nodes (A5 — v1.1.0): activate-model, which SUBMITS the activation for human review and never applies it (ADR 1034 D1, v1.3.0), and set-quota; both enforce the run OWNER's scope (host:territories:manage; workspace:write for a quota on a planning model; system runs denied) and are kept OUT of the advisory agent's allowlist. NOTE (CFP-1 / D9): the app drives the governed model activation/archival through the SHARED reviews approval gate (kind: territory-model-transition), not a direct agent tool call — no built-in workflow ignites these nodes; they stay composable catalog entries for a builder-authored chain. All nodes are role:\"action\", tenant+org-guarded (CTI-1); tenantId comes from the run scope, never node args.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "territories", "sales", "quota", "attainment", "crm"],
@@ -73,18 +73,18 @@
     },
     {
       "typeId": "feature.territories.nodes.activate-model",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "label": "Territories: Activate Model",
-      "description": "GOVERNED WRITE (ADR 0272 A5) — activates a territory model over ctx.features.territories.activateModel, changing CRM record visibility + forecasting org-wide. Enforces host:territories:manage against the RUN OWNER (system runs denied). Not in the advisory agent's allowlist. NOTE (CFP-1 / D9): no built-in workflow ignites this node — the app's actual governed activation rides the SHARED reviews approval gate (kind: territory-model-transition); this node stays a composable catalog entry. Inputs: { orgId, modelId }. Output: { success, model }.",
+      "description": "GOVERNED WRITE (ADR 0272 A5) — SUBMITS a territory model's activation for human review over ctx.features.territories.activateModel. It does NOT activate it: ADR 1034 D1 — applying it here changed CRM record visibility + forecasting org-wide with no second person and an unattributable `run:<id>` actor. A human with host:territories:manage decides in the shared Reviews inbox (kind: territory-model-transition). Enforces host:territories:manage against the RUN OWNER (system runs denied); an archived model, or a model with a pending archive review, is a 409. Not in the advisory agent's allowlist. Inputs: { orgId, modelId }. Output: { success, submittedForReview, review: { approvalId, status } }.",
       "category": "integration",
       "role": "action",
       "capabilities": ["side-effectful"]
     },
     {
       "typeId": "feature.territories.nodes.set-quota",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "label": "Territories: Set Quota",
-      "description": "GOVERNED WRITE (ADR 0272 A5) — sets a territory's per-period quota over ctx.features.territories.setQuota. Enforces workspace:write against the run owner (system runs denied). Inputs: { orgId, modelId, territoryId, period, amount, currency, repSplits? }. `currency` is REQUIRED whenever `amount` > 0 (R2 TER2-B3 — an amount with no unit cannot be compared with the deals it is measured by, and the host returns 400); a zero amount needs none. `repSplits` REPLACES the stored splits, so omit it only when you intend to clear them. Output: { success, quota }.",
+      "description": "GOVERNED WRITE (ADR 0272 A5) — sets a territory's per-period quota over ctx.features.territories.setQuota. Enforces workspace:write against the run owner on a planning model and host:territories:manage on the org's ACTIVE model (ADR 1034 D5 — the active model's quotas drive commission accelerators); system runs denied. Inputs: { orgId, modelId, territoryId, period, amount, currency, repSplits? }. `currency` is REQUIRED whenever `amount` > 0 (R2 TER2-B3 — an amount with no unit cannot be compared with the deals it is measured by, and the host returns 400); a zero amount needs none. `repSplits` REPLACES the stored splits when supplied (pass [] to clear); omit it to KEEP the stored splits (ADR 1034 D2). Output: { success, quota }.",
       "category": "integration",
       "role": "action",
       "capabilities": ["side-effectful"]

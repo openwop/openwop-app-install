@@ -76,14 +76,10 @@ describe('ADR 0145 — Models console', () => {
     expect(resolves('/model-router')?.ownerFeatureId).toBe('model-router');
   });
 
-  it('ADR 0718 — /leaderboard resolves to kicktodo-engagement, NOT to the evals leaderboard', () => {
-    // The corrected claim. ADR 0145 intended the legacy standalone routes to stay
-    // deep-link-reachable; for `/leaderboard` that promise is NOT kept, because a second
-    // feature owns the path and wins by site-tier pre-emption. Stating the truth here is
-    // the point — the previous assertion was green on the false version.
-    expect(resolves('/leaderboard')?.ownerFeatureId).toBe('kicktodo-engagement');
-    expect(resolves('/leaderboard')?.tier).toBe('site');
-  });
+  // ADR 0718 — which feature `/leaderboard` resolves to (KickTodo's engagement page,
+  // by site-tier pre-emption) is asserted with that feature:
+  // features/kicktodo/__tests__/chromeOwnership.test.ts (ADR 1031 P2).
+
 
   it('ADR 0719 (corrects ADR 0718) — the model leaderboard is reachable via a tab that ACTUALLY RENDERS', () => {
     // ADR 0718 asserted `hubTab?.hub === 'models'` here and called it "projected into the

@@ -18,15 +18,18 @@
  *  - the interrupt_gone (410) arm is owned by stepFailureIsVisible case 4;
  *  - real-clock sleeps → fake timers / the settle signal.
  *
- * WALK-PAUSE-HITL-1 (PINNED with it.fails, grade-code row): the WT-1 §Correction
+ * WALK-PAUSE-HITL-1 (historically pinned with it.fails, grade-code row): the WT-1 §Correction
  * at useWalkthroughPlayer.ts:258 calls `stash()` at the end of the HITL branch to
  * let pause → resume come back to the step — but `stash()` writes only when
  * `pausedRef.current` is ALREADY true, which it never is there. A real pause
  * during `waiting-user` (Escape / the scrim → `player.pause`) leaves `pendingRef`
  * null, `resume()` lands on 'starting', the "I did it" control (shown for
  * `waiting-user` && !hitlAuto) disappears, and `confirmHitl` early-returns: the
- * step is stranded. The it.fails case asserts the CORRECT behaviour; fix-probe
+ * step is stranded. The original it.fails case asserted the CORRECT behaviour; fix-probe
  * `w51g2-walk-pause-hitl-fix-r2` (stash the open HITL step unconditionally) flips it.
+ * Correction 2026-11-07 (ADR 0368): ordinary-mode evidence received `starting`
+ * instead of `waiting-user`. Retain the current waiting continuation and clear
+ * it on resolution/advance/teardown; the same body is now an ordinary regression.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, waitFor, act } from '@testing-library/react';
@@ -80,7 +83,7 @@ beforeEach(() => {
   __resetWalkthroughRegistryForTests();
   createRun.mockReset().mockResolvedValue({ runId: 'run-1' });
   getRun.mockReset();
-  resolveByRun.mockClear();
+  resolveByRun.mockReset().mockResolvedValue({});
   getWorkflowDefinition.mockReset().mockResolvedValue(null);
   cancelRun.mockClear();
   sessionStorage.clear();
@@ -206,7 +209,7 @@ describe('useWalkthroughPlayer', () => {
     expect(resolveByRun).not.toHaveBeenCalled();
   });
 
-  it.fails('WALK-PAUSE-HITL-1: a pause during an HITL step, then resume, still lets the user confirm the step', async () => {
+  it('WALK-PAUSE-HITL-1: a pause during an HITL step, then resume, still lets the user confirm the step', async () => {
     // A manual HITL step (no hitlComplete): the chrome's "I did it" is the only way on.
     const input = document.createElement('input');
     registerWalkthroughAction('demo.pause.hitl', { route: '/', resolve: () => input, verb: 'focus' });
@@ -227,6 +230,235 @@ describe('useWalkthroughPlayer', () => {
     // …and confirming it resolves the step.
     await act(async () => { await result.current.confirmHitl(); });
     expect(resolveByRun).toHaveBeenCalledWith('run-1', 's4', { acked: true });
+  });
+
+  it('repeated manual HITL pause/resume never confirms until the user acts', async () => {
+    const input = document.createElement('input');
+    registerWalkthroughAction('demo.repeat.hitl', { route: '/', resolve: () => input, verb: 'focus' });
+    stubInterrupts([{ nodeId: 'repeat', kind: 'walkthrough-step', data: { actionId: 'demo.repeat.hitl', hitl: true } }]);
+    const { result } = renderHook(() => useWalkthroughPlayer(), { wrapper });
+    await act(async () => { await result.current.launch('walkthrough-repeat'); });
+    await waitFor(() => expect(result.current.status).toBe('waiting-user'));
+    for (let count = 0; count < 2; count++) {
+      act(() => { result.current.pause(); });
+      act(() => { result.current.resume(); });
+      await waitFor(() => expect(result.current.status).toBe('waiting-user'));
+      expect(result.current.step?.nodeId).toBe('repeat');
+      expect(resolveByRun).not.toHaveBeenCalled();
+    }
+    await act(async () => { await result.current.confirmHitl(); });
+    expect(resolveByRun).toHaveBeenCalledTimes(1);
+    expect(resolveByRun).toHaveBeenCalledWith('run-1', 'repeat', { acked: true });
+  });
+
+  it('a retained manual confirmation cannot resolve in the same batch as pause', async () => {
+    const input = document.createElement('input');
+    registerWalkthroughAction('demo.same.batch', { route: '/', resolve: () => input, verb: 'focus' });
+    stubInterrupts([{ nodeId: 'same-batch', kind: 'walkthrough-step', data: { actionId: 'demo.same.batch', hitl: true } }]);
+    const { result } = renderHook(() => useWalkthroughPlayer(), { wrapper });
+    await act(async () => { await result.current.launch('walkthrough-same-batch'); });
+    await waitFor(() => expect(result.current.status).toBe('waiting-user'));
+    const confirm = result.current.confirmHitl;
+    await act(async () => { result.current.pause(); await confirm(); });
+    expect(resolveByRun).not.toHaveBeenCalled();
+    expect(result.current.status).toBe('paused');
+  });
+
+  it('a resolved manual step is not restored while awaiting the next interrupt', async () => {
+    const input = document.createElement('input');
+    registerWalkthroughAction('demo.resolved.hitl', { route: '/', resolve: () => input, verb: 'focus' });
+    stubInterrupts([{ nodeId: 'resolved', kind: 'walkthrough-step', data: { actionId: 'demo.resolved.hitl', hitl: true } }]);
+    const { result } = renderHook(() => useWalkthroughPlayer(), { wrapper });
+    await act(async () => { await result.current.launch('walkthrough-resolved'); });
+    await waitFor(() => expect(result.current.status).toBe('waiting-user'));
+    await act(async () => { await result.current.confirmHitl(); });
+    act(() => { result.current.pause(); });
+    await act(async () => { result.current.resume(); });
+    expect(result.current.status).toBe('starting');
+    expect(resolveByRun).toHaveBeenCalledTimes(1);
+  });
+
+  it('advancing to another node drops the previous manual continuation', async () => {
+    const input = document.createElement('input');
+    const nextButton = document.createElement('button');
+    const clicked = vi.fn();
+    nextButton.addEventListener('click', clicked);
+    registerWalkthroughAction('demo.advance.hitl', { route: '/', resolve: () => input, verb: 'focus' });
+    registerWalkthroughAction('demo.advance.click', { route: '/', resolve: () => nextButton, verb: 'click' });
+    stubInterrupts([{ nodeId: 'first', kind: 'walkthrough-step', data: { actionId: 'demo.advance.hitl', hitl: true } }]);
+    const { result } = renderHook(() => useWalkthroughPlayer(), { wrapper });
+    await act(async () => { await result.current.launch('walkthrough-advance'); });
+    await waitFor(() => expect(result.current.status).toBe('waiting-user'));
+    stubInterrupts([{ nodeId: 'next', kind: 'walkthrough-step', data: { actionId: 'demo.advance.click', hitl: false } }]);
+    if (!onEvent) throw new Error('Run subscription is missing');
+    const emit = onEvent;
+    await act(async () => { emit({ type: 'node.suspended', payload: { kind: 'walkthrough-step' } }); });
+    await waitFor(() => expect(clicked).toHaveBeenCalledTimes(1));
+    act(() => { result.current.pause(); });
+    await act(async () => { result.current.resume(); });
+    expect(result.current.status).toBe('starting');
+    expect(result.current.step?.nodeId).toBe('next');
+    expect(resolveByRun).toHaveBeenCalledTimes(1);
+    expect(resolveByRun).toHaveBeenCalledWith('run-1', 'next', { acked: true, actionId: 'demo.advance.click' });
+  });
+
+  it.each(['stop', 'terminal', 'replacement'] as const)('a %s clears paused continuation before a new run', async (end) => {
+    const input = document.createElement('input');
+    registerWalkthroughAction('demo.old.hitl', { route: '/', resolve: () => input, verb: 'focus' });
+    stubInterrupts([{ nodeId: 'old', kind: 'walkthrough-step', data: { actionId: 'demo.old.hitl', hitl: true } }]);
+    const { result } = renderHook(() => useWalkthroughPlayer(), { wrapper });
+    await act(async () => { await result.current.launch('walkthrough-old'); });
+    await waitFor(() => expect(result.current.status).toBe('waiting-user'));
+    act(() => { result.current.pause(); });
+    if (end === 'stop') await act(async () => { await result.current.stop(); });
+    else if (end === 'terminal') {
+      if (!onEvent) throw new Error('Run subscription is missing');
+      const emit = onEvent;
+      await act(async () => { emit({ type: 'run.completed' }); });
+    }
+    createRun.mockResolvedValueOnce({ runId: 'run-2' });
+    stubInterrupts([]);
+    await act(async () => { await result.current.launch('walkthrough-new'); });
+    await act(async () => { result.current.resume(); });
+    expect(result.current.status).toBe('starting');
+    expect(result.current.step).toBeNull();
+    expect(resolveByRun).not.toHaveBeenCalled();
+  });
+
+  it('an old manual resolve cannot clear the next node continuation', async () => {
+    const input = document.createElement('input');
+    registerWalkthroughAction('demo.late.resolve', { route: '/', resolve: () => input, verb: 'focus' });
+    stubInterrupts([{ nodeId: 'first', kind: 'walkthrough-step', data: { actionId: 'demo.late.resolve', hitl: true } }]);
+    let finish: (() => void) | undefined;
+    resolveByRun.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    const { result } = renderHook(() => useWalkthroughPlayer(), { wrapper });
+    await act(async () => { await result.current.launch('walkthrough-late-resolve'); });
+    await waitFor(() => expect(result.current.status).toBe('waiting-user'));
+    let confirmation: Promise<void> | undefined;
+    act(() => { confirmation = result.current.confirmHitl(); });
+    stubInterrupts([{ nodeId: 'second', kind: 'walkthrough-step', data: { actionId: 'demo.late.resolve', hitl: true } }]);
+    if (!onEvent || !finish || !confirmation) throw new Error('Deferred resolve or subscription is missing');
+    const emit = onEvent;
+    const complete = finish;
+    const pending = confirmation;
+    await act(async () => { emit({ type: 'node.suspended', payload: { kind: 'walkthrough-step' } }); });
+    await waitFor(() => expect(result.current.step?.nodeId).toBe('second'));
+    await act(async () => { complete(); await pending; });
+    act(() => { result.current.pause(); });
+    act(() => { result.current.resume(); });
+    await waitFor(() => expect(result.current.status).toBe('waiting-user'));
+    expect(result.current.step?.nodeId).toBe('second');
+    await act(async () => { await result.current.confirmHitl(); });
+    expect(resolveByRun).toHaveBeenCalledTimes(2);
+    expect(resolveByRun).toHaveBeenLastCalledWith('run-1', 'second', { acked: true });
+  });
+
+  it('a pending same-node confirmation still clears its continuation after pause/resume', async () => {
+    const input = document.createElement('input');
+    registerWalkthroughAction('demo.same.node.resolve', { route: '/', resolve: () => input, verb: 'focus' });
+    stubInterrupts([{ nodeId: 'same-node', kind: 'walkthrough-step', data: { actionId: 'demo.same.node.resolve', hitl: true } }]);
+    let finish: (() => void) | undefined;
+    resolveByRun.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    const { result } = renderHook(() => useWalkthroughPlayer(), { wrapper });
+    await act(async () => { await result.current.launch('walkthrough-same-node-resolve'); });
+    await waitFor(() => expect(result.current.status).toBe('waiting-user'));
+    let confirmation: Promise<void> | undefined;
+    act(() => { confirmation = result.current.confirmHitl(); });
+    act(() => { result.current.pause(); });
+    act(() => { result.current.resume(); });
+    await waitFor(() => expect(result.current.status).toBe('waiting-user'));
+    if (!finish || !confirmation) throw new Error('Pending confirmation is missing');
+    const complete = finish;
+    const pending = confirmation;
+    await act(async () => { complete(); await pending; });
+    act(() => { result.current.pause(); });
+    await act(async () => { result.current.resume(); });
+    expect(result.current.status).toBe('starting');
+    expect(resolveByRun).toHaveBeenCalledTimes(1);
+    expect(resolveByRun).toHaveBeenCalledWith('run-1', 'same-node', { acked: true });
+  });
+
+  it('pause detaches automatic HITL completion and resume attaches a fresh user callback', async () => {
+    const input = document.createElement('input');
+    const callbacks: Array<(value: unknown) => void> = [];
+    const detach = vi.fn();
+    registerWalkthroughAction('demo.pause.auto', {
+      route: '/', resolve: () => input, verb: 'focus',
+      hitlComplete: (_el, done) => { callbacks.push(done); return detach; },
+    });
+    stubInterrupts([{ nodeId: 'auto', kind: 'walkthrough-step', data: { actionId: 'demo.pause.auto', hitl: true } }]);
+    const { result } = renderHook(() => useWalkthroughPlayer(), { wrapper });
+    await act(async () => { await result.current.launch('walkthrough-auto-pause'); });
+    await waitFor(() => expect(result.current.hitlAuto).toBe(true));
+    const first = callbacks[0];
+    if (!first) throw new Error('Initial completion callback is missing');
+    act(() => { result.current.pause(); });
+    expect(detach).toHaveBeenCalledTimes(1);
+    await act(async () => { first('paused'); });
+    expect(resolveByRun).not.toHaveBeenCalled();
+    act(() => { result.current.resume(); });
+    await waitFor(() => expect(callbacks).toHaveLength(2));
+    const resumed = callbacks[1];
+    if (!resumed) throw new Error('Resumed completion callback is missing');
+    await act(async () => { first('stale'); });
+    expect(resolveByRun).not.toHaveBeenCalled();
+    await act(async () => { resumed('actual-user'); });
+    expect(resolveByRun).toHaveBeenCalledTimes(1);
+    expect(resolveByRun).toHaveBeenCalledWith('run-1', 'auto', { acked: true, hitlValue: 'actual-user' });
+  });
+
+  it.each(['response', 'body'] as const)('ignores an old run interrupt %s after a new launch', async (phase) => {
+    const input = document.createElement('input');
+    registerWalkthroughAction('demo.old.response', { route: '/', resolve: () => input, verb: 'focus' });
+    let finishResponse: ((value: unknown) => void) | undefined;
+    let finishBody: ((value: unknown) => void) | undefined;
+    const oldBody = { interrupts: [{ nodeId: 'old', kind: 'walkthrough-step', data: { actionId: 'demo.old.response', hitl: true } }] };
+    vi.stubGlobal('fetch', vi.fn((url: string) => {
+      if (String(url).includes('/walkthroughs/progress')) return Promise.resolve({ ok: true, json: async () => ({ progress: [] }) });
+      if (String(url).includes('/runs/run-1/interrupts')) {
+        if (phase === 'response') return new Promise((resolve) => { finishResponse = resolve; });
+        return Promise.resolve({ ok: true, json: () => new Promise((resolve) => { finishBody = resolve; }) });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({ interrupts: [] }) });
+    }));
+    const { result } = renderHook(() => useWalkthroughPlayer(), { wrapper });
+    await act(async () => { await result.current.launch('walkthrough-old-response'); });
+    createRun.mockResolvedValueOnce({ runId: 'run-2' });
+    await act(async () => { await result.current.launch('walkthrough-current'); });
+    if (phase === 'response') {
+      if (!finishResponse) throw new Error('Old response was not requested');
+      const complete = finishResponse;
+      await act(async () => { complete({ ok: true, json: async () => oldBody }); });
+    } else {
+      if (!finishBody) throw new Error('Old response body was not requested');
+      const complete = finishBody;
+      await act(async () => { complete(oldBody); });
+    }
+    expect(result.current.step).toBeNull();
+    expect(result.current.status).toBe('starting');
+    expect(resolveByRun).not.toHaveBeenCalled();
+  });
+
+  it('a closed old subscription cannot tear down the new run continuation', async () => {
+    const input = document.createElement('input');
+    registerWalkthroughAction('demo.current.hitl', { route: '/', resolve: () => input, verb: 'focus' });
+    stubInterrupts([{ nodeId: 'old', kind: 'walkthrough-step', data: { actionId: 'demo.current.hitl', hitl: true } }]);
+    const { result } = renderHook(() => useWalkthroughPlayer(), { wrapper });
+    await act(async () => { await result.current.launch('walkthrough-old-subscription'); });
+    await waitFor(() => expect(result.current.status).toBe('waiting-user'));
+    if (!onEvent) throw new Error('Old subscription is missing');
+    const oldEvent = onEvent;
+    createRun.mockResolvedValueOnce({ runId: 'run-2' });
+    stubInterrupts([{ nodeId: 'current', kind: 'walkthrough-step', data: { actionId: 'demo.current.hitl', hitl: true } }]);
+    await act(async () => { await result.current.launch('walkthrough-current-subscription'); });
+    await waitFor(() => expect(result.current.step?.nodeId).toBe('current'));
+    await act(async () => { oldEvent({ type: 'run.completed' }); });
+    act(() => { result.current.pause(); });
+    act(() => { result.current.resume(); });
+    await waitFor(() => expect(result.current.status).toBe('waiting-user'));
+    await act(async () => { await result.current.confirmHitl(); });
+    expect(resolveByRun).toHaveBeenCalledTimes(1);
+    expect(resolveByRun).toHaveBeenCalledWith('run-2', 'current', { acked: true });
   });
 
   it('stop() during an in-flight element retry NEVER performs the step afterward (grade-pass)', async () => {

@@ -1,7 +1,8 @@
 /**
  * XCH-UP-3 (Book AI) — a template copy with blank inputs names them. Red under:
  * dropping the unfilledParams notice, or the plural forms missing (they render
- * the key instead of text).
+ * the key instead of text). Also red under: reordering the notices, and dropping
+ * the de-dupe of the missing fields.
  */
 import { describe, expect, it } from 'vitest';
 import i18n from 'i18next';
@@ -19,11 +20,12 @@ describe('fromChainNotices', () => {
   });
 
   it('keeps the incomplete-config and missing-node notices, in order', () => {
-    const notes = fromChainNotices({ incompleteNodes: [{ nodeId: 'a', typeId: 'x', missing: ['url'] }], unfilledParams: ['p'], warnings: ['core.x'] }, t);
+    const incompleteNodes = [{ nodeId: 'a', typeId: 'x', missing: ['url'] }, { nodeId: 'b', typeId: 'y', missing: ['url', 'token'] }];
+    const notes = fromChainNotices({ incompleteNodes, unfilledParams: ['p'], warnings: ['core.x'] }, t);
     expect(notes).toHaveLength(3);
-    expect(notes[0]).toContain('url');
-    expect(notes[1]).toContain('p');
-    expect(notes[2]).toContain('core.x');
+    expect(notes[0]).toContain(': url, token.'); // each missing field named once
+    expect(notes[1]).toBe('Copied — but 1 template input is still blank: p. A run will fail until you fill it in.');
+    expect(notes[2]).toBe('Added — some nodes need setup before it can run: core.x');
   });
 
   it('a complete copy says nothing', () => {

@@ -44,6 +44,9 @@ export interface JourneyEnrollment {
    *  compare against the incumbent INSIDE the CAS retry (higher priority wins). */
   priority?: number;
   exclusivityGroup?: string;
+  /** ADR 1024 D5.5 — set on a row COPIED to a merge survivor from the merged-away
+   *  contact; an unmerge removes exactly the copies it names. */
+  copiedFromContactId?: string;
 }
 
 /** ADR 0299 — options carried alongside the (journey, contact) enroll. Absent /
@@ -310,3 +313,60 @@ export async function resolveSegment(tenantId: string, segmentId: string, cap = 
 export async function __clearEnrollments(): Promise<void> {
   await enrollments.__clear();
 }
+
+// ── ADR 1024 D5.4/D5.5 (`CDP2WF-8`) — erasure and merge for the enrollment ledger ──
+
+/** Every enrollment row of a tenant held by `contactId`, across all four key shapes. */
+async function enrollmentsOfContact(tenantId: string, contactId: string): Promise<JourneyEnrollment[]> {
+  return (await enrollments.listByPrefix(`${tenantId}::`)).filter((e) => e.tenantId === tenantId && e.contactId === contactId);
+}
+
+/**
+ * The DSAR eraser for `campaign-journeys:enrollment`. A row records that a person was
+ * put through a journey (and when, for which client), keyed by their contact id, and no
+ * eraser reached it. DELETE, not redact: the row is the person's journey history and
+ * nothing joins to it. The key arrives expanded by the seam (an email-keyed DSAR reaches
+ * this as the contact id and every merged-away contact id), so the match is the exact
+ * contact id; any other key shape matches no row.
+ */
+export async function eraseJourneyEnrollmentSubject(tenantId: string, subjectKey: string): Promise<void> {
+  if (!tenantId || !subjectKey) return; // fail-closed — never a tenant-wide sweep
+  if (!subjectKey.startsWith('crm:')) return; // rows key CRM contact ids; any other key shape matches nothing
+  for (const row of await enrollmentsOfContact(tenantId, subjectKey)) await enrollments.delete(row.key);
+}
+
+/** The row key `row` would have if it belonged to `contactId` (all four shapes end in it). */
+function rekey(row: JourneyEnrollment, contactId: string): string {
+  return `${row.key.slice(0, row.key.length - row.contactId.length)}${contactId}`;
+}
+
+/**
+ * A contact merge: COPY the merged-away contact's journey rows onto the survivor where
+ * the survivor has none, so a merge cannot re-arm a journey the person already received
+ * (the double send the guard exists to prevent). Copy, not move: a merge is reversible,
+ * and the source's own rows must survive an unmerge intact. Exclusivity-slot rows
+ * (`@grp`) are copied only when the survivor holds no slot in that group; a held slot is
+ * the survivor's own arbitration result and is kept.
+ */
+export async function copyEnrollmentsOnMerge(tenantId: string, sourceId: string, survivorId: string): Promise<number> {
+  let copied = 0;
+  for (const row of await enrollmentsOfContact(tenantId, sourceId)) {
+    if (!row.key.endsWith(`::${sourceId}`)) continue; // a row whose key does not end in its contact: not ours to reshape
+    // Tagged with the IMMEDIATE source. Known limit (filed `CDP2WF-28`): in a chain
+    // A→B→C, unmerging A from B removes B's copies but not the A-origin copies on C.
+    const copy: JourneyEnrollment = { ...row, key: rekey(row, survivorId), contactId: survivorId, copiedFromContactId: sourceId };
+    if (await enrollments.compareAndSwap(null, copy)) copied++;
+  }
+  return copied;
+}
+
+/** The reverse: remove exactly the copies a merge of `sourceId` into `survivorId` made. */
+export async function removeMergeCopiedEnrollments(tenantId: string, sourceId: string, survivorId: string): Promise<number> {
+  let removed = 0;
+  for (const row of await enrollmentsOfContact(tenantId, survivorId)) {
+    if (row.copiedFromContactId !== sourceId) continue;
+    if (await enrollments.compareAndDelete(row)) removed++;
+  }
+  return removed;
+}
+

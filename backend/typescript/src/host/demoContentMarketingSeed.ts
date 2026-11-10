@@ -91,7 +91,8 @@ export async function seedDemoContentMarketing(tenantId: string): Promise<{ crea
   const PAGES: { slug: string; title: string; status: 'published' | 'in_review' | 'scheduled'; sections: { type: string; data: Record<string, unknown> }[] }[] = [
     { slug: 'home', title: 'Home', status: 'published', sections: [
       { type: 'hero', data: { eyebrow: 'Solstice Roasters', heading: 'Small-batch coffee, roasted to order', subheading: 'Fresh beans for your kitchen and your café.', ...(heroToken ? { imageToken: heroToken } : {}), ctaLabel: 'Shop coffee', ctaUrl: '/shop' } },
-      { type: 'columns', data: { heading: 'Why Solstice', columns: [{ title: 'Roasted to order', text: 'Every bag ships days after roast.' }, { title: 'Transparent sourcing', text: 'We name the farm, not just the country.' }, { title: 'DTC & wholesale', text: 'From your kitchen to your café.' }] } },
+      // ADR 1029 — the seeded site shows the section motion (cards arrive one by one).
+      { type: 'columns', data: { heading: 'Why Solstice', motion: 'stagger', columns: [{ title: 'Roasted to order', text: 'Every bag ships days after roast.' }, { title: 'Transparent sourcing', text: 'We name the farm, not just the country.' }, { title: 'DTC & wholesale', text: 'From your kitchen to your café.' }] } },
       { type: 'cta', data: { heading: 'Ready to brew?', label: 'Start a subscription', url: '/shop' } },
     ] },
     { slug: 'shop', title: 'Shop', status: 'published', sections: productIds.length ? [{ type: 'productGrid', data: { heading: 'Our coffee', productIds, storeOrgId: orgId } }] : [{ type: 'richText', data: { heading: 'Shop', text: 'Our storefront is brewing — check back soon.' } }] },
@@ -102,6 +103,12 @@ export async function seedDemoContentMarketing(tenantId: string): Promise<{ crea
     // error, never stale data.
     { slug: 'about', title: 'About', status: 'published', sections: [
       { type: 'richText', data: { heading: 'Our story', text: 'Founded in 2016, Solstice roasts small batches to order and sources transparently.' } },
+      // ADR 1029 D5 — a dated timeline, revealed as it scrolls into view.
+      { type: 'columns', data: { heading: 'From farm to cup', layout: 'timeline', motion: 'reveal', columns: [
+        { eyebrow: 'Harvest', title: 'Picked at the farm', text: 'We buy each lot directly and name the farm on the bag.' },
+        { eyebrow: 'Roast day', title: 'Roasted to order', text: 'Small batches, roasted after your order arrives.' },
+        { eyebrow: 'Two days later', title: 'At your door', text: 'Shipped the day after roasting, sealed for freshness.' },
+      ] } },
       { type: 'entityList', data: { heading: 'Meet the team', tenantId, typeName: 'team-member', titleField: 'name', bodyField: 'role', limit: 6, sortKey: 'name', sortDir: 'asc' } },
     ] },
     { slug: 'wholesale', title: 'Wholesale', status: 'in_review', sections: [{ type: 'richText', data: { heading: 'Wholesale partners', text: 'Bring Solstice to your café, hotel, or grocery. Tell us about your program.' } }, { type: 'cta', data: { heading: 'Become a partner', label: 'Wholesale inquiry', url: '/contact' } }] },

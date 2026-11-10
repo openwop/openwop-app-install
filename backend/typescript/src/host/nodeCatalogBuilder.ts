@@ -61,6 +61,9 @@ export interface CatalogNode {
    *  compose the feature, or (on the per-tenant catalog route) the tenant has
    *  it off. */
   requiresFeatureSurfaces?: string[];
+  /** ADR 1065: advisory Connections usage, never capability or execution authority.
+   * Absent means unknown; only an exact pack-authored boolean is recognized. */
+  usesConnections?: boolean;
   /** ADR 0937 (Book AI SRV-2) — per-locale `label`/`description` overlays from
    *  the manifest entry's `x-localizations` (RFC 0138 hatch), keyed by BCP-47
    *  tag. The catalog route resolves them for the request's `Accept-Language`
@@ -88,6 +91,7 @@ interface PackManifestNode {
   'x-ports'?: string;
   /** ADR 0917 — feature surfaces the node reads (RFC 0138 `x-` hatch). */
   'x-requiresFeatureSurfaces'?: unknown;
+  'x-usesConnections'?: unknown;
   /** ADR 0937 — per-locale label/description (RFC 0138 `x-` hatch). */
   'x-localizations'?: unknown;
   role?: string;
@@ -188,6 +192,7 @@ export function buildNodeCatalog(): CatalogNode[] {
           requiresHostSurfaces: required,
           missingHostSurfaces: missing,
           ...(featureSurfaces.length > 0 ? { requiresFeatureSurfaces: featureSurfaces } : {}),
+          ...(typeof n['x-usesConnections'] === 'boolean' ? { usesConnections: n['x-usesConnections'] } : {}),
           ...(Array.isArray(n.requiredModelCapabilities) ? { requiredModelCapabilities: n.requiredModelCapabilities } : {}),
           ...(n.fallbackModel ? { fallbackModel: n.fallbackModel } : {}),
         });

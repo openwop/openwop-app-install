@@ -136,7 +136,7 @@ vi.mock('../features/users/usersClient.js', async (orig) => ({
   getMe, bindOidc,
 }));
 vi.mock('../auth/migrateTenant.js', () => ({ migrateAnonToUser }));
-vi.mock('../auth/firebase.js', () => ({ getCurrentIdToken }));
+vi.mock('../auth/firebase.js', () => ({ getCurrentIdToken, getCurrentUser: () => null }));
 
 import { finalizeFirebaseSession } from '../auth/finalizeSession.js';
 

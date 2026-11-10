@@ -20,6 +20,8 @@
  *                                                claim, but first queue behind any live
  *                                                lease on the SAME target (see TARGETS)
  *   release --id I                               remove an `active` entry
+ *   renew --id I [--ttl-min N]                   push a RUNNING entry's lease to now + its TTL
+ *                                                (never shortens it, never creates or revives one)
  *   set-production --commit sha --revision rev [--target t]   record what serves
  *   status [--minutes N]                         productions, active entries, recent events
  *   warn-others [--kinds gate,deploy] [--targets a,b]
@@ -191,6 +193,7 @@ function makeEntry(o, now = Date.now()) {
     startedAt: new Date(now).toISOString(),
     expectedEndAt: new Date(now + typical * 60_000).toISOString(),
     leaseUntil: new Date(now + ttl * 60_000).toISOString(),
+    ttlMin: ttl,
   };
 }
 const without = (q, id) => q.active.filter((e) => e.id !== id && keep(e));
@@ -266,6 +269,22 @@ function acquire(o) {
     if (msg !== said) { console.log(msg); said = msg; }
     sleepMs(Math.min(pollMs, Math.max(0, giveUpAt - Date.now())));
   }
+}
+
+/** The heartbeat (release-bus.sh) calls this while a train or deploy runs: a train that
+ *  rebuilds and re-gates, or bisects, outlives the lease it claimed, and read STALE to
+ *  peers mid-gate (train 201, 2026-11-03). A missing or `waiting` entry is left alone, so
+ *  a heartbeat racing the EXIT hook's release cannot bring the lease back. */
+function renew(o) {
+  let said = `release-bus: renew: no running lease ${o.id}; nothing renewed`;
+  updateQueue((q) => ({ ...q, active: q.active.map((e) => {
+    if (e.id !== o.id || e.state === 'waiting') return e;
+    const ttl = Number(o['ttl-min']) || Number(e.ttlMin) || (Date.parse(e.leaseUntil) - Date.parse(e.startedAt)) / 60_000 || 60;
+    const until = Math.max(Date.parse(e.leaseUntil) || 0, Date.now() + ttl * 60_000);
+    said = `release-bus: renewed ${e.kind} ${o.id} to ${new Date(until).toISOString()}`;
+    return { ...e, leaseUntil: new Date(until).toISOString() };
+  }) }));
+  console.log(said);
 }
 
 function release(o) {
@@ -398,12 +417,13 @@ function main() {
       case 'claim': if (!o.id) { console.log('release-bus: claim needs --id'); return; } claim(o); return;
       case 'acquire': if (!o.id) { console.log('release-bus: acquire needs --id'); return; } acquire(o); return;
       case 'release': if (!o.id) { console.log('release-bus: release needs --id'); return; } release(o); return;
+      case 'renew': if (!o.id) { console.log('release-bus: renew needs --id'); return; } renew(o); return;
       case 'set-production': if (!o.commit) { console.log('release-bus: set-production needs --commit'); return; } setProduction(o); return;
       case 'status': status(o); return;
       case 'warn-others': warnOthers(o); return;
       case 'note': note(o, positional(rest)); return;
       case 'notes': notes(o); return;
-      default: console.log('usage: release-bus.mjs publish|claim|acquire|release|set-production|status|warn-others|note|notes'); return;
+      default: console.log('usage: release-bus.mjs publish|claim|acquire|release|renew|set-production|status|warn-others|note|notes'); return;
     }
   } catch (err) {
     console.log(`release-bus: unavailable (${err instanceof Error ? err.message : String(err)})`);

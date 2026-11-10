@@ -28,6 +28,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { stripComments } from './helpers/stripComments.js';
+import { declaredPathTable } from './helpers/featureRatchetTables.js';
 
 const SRC = 'src';
 
@@ -57,17 +58,18 @@ const FILES = tsFiles(SRC).map((f) => ({ rel: relative(SRC, f), src: code(f) }))
 
 /** file → [pinned call count, why it is safe]. Counts, not just files: a second
  *  read added to an already-allowlisted file must be re-justified too. */
-const DIRECT_CATALOG_READS: Record<string, [number, string]> = {
+const HOST_DIRECT_CATALOG_READS: Record<string, [number, string]> = {
   'host/resolveLaunchDefinition.ts': [1, 'IS the funnel — the read is paired with isWorkflowForeignTo'],
   'host/resolveRunDefinition.ts': [1, 'isWorkflowForeignTo(run.tenantId, …) runs before the read (D3)'],
   'routes/workflows.ts': [2, 'IS the M7 read guard — isForeignOwned before the definition is returned; the ADR 0870 availability read applies the same isForeignOwned and returns only demo/runnable flags'],
-  'features/kicktodo-creator/routes.ts': [1, 'isForeignOwned is checked before the read'],
   'features/workflow-author/routes.ts': [1, 'fixed host id (WORKFLOW_AUTHOR_META_ID)'],
   'features/creative-briefs/routes.ts': [1, 'fixed host id (CREATIVE_BRIEFS_REEL_ID)'],
   // ADR 0903 D7 — agentTools.ts no longer reads the Challenge Factory definition
   // (it read the chain's pinned AI defaults, which are gone), so its entry shrank away.
   'host/workflowComposeTool.ts': [1, 'id-COLLISION check on a draft being composed; executes nothing (row 16 author lane)'],
 };
+/** ADR 1031 P2 — plus each feature package's rows (`ratchetTables.json`, `adr0823.directCatalogReads`). */
+const DIRECT_CATALOG_READS: Record<string, [number, string]> = { ...HOST_DIRECT_CATALOG_READS, ...declaredPathTable<[number, string]>('adr0823.directCatalogReads') };
 
 /** Entries whose reason is "fixed host id": the argument must be an UPPER_CASE constant. */
 const FIXED_ID_FILES = [
@@ -91,6 +93,7 @@ const RUN_MINTERS: Record<string, [number, string]> = {
   'host/workflowEvalRunner.ts': [1, 'its only caller passes the owner-gated loadOwnedHead definition'],
   'features/workflow-author/routes.ts': [1, 'fixed host id (WORKFLOW_AUTHOR_META_ID)'],
   'features/creative-briefs/routes.ts': [1, 'fixed host id (CREATIVE_BRIEFS_REEL_ID)'],
+  'features/channel-ingress/ingress.ts': [1, 'resolveLaunchWorkflow (openwop-app.conversation, launched as the paired owner; ADR 1042 D7)'],
   'host/workforceService.ts': [1, 'seeds historical records for host-defined workforces; executes nothing'],
   'host/workforceEval.ts': [1, 'eval record under the fixed EVAL_SUITE_ID; executes no workflow definition'],
   'host/anonymousActor.ts': [1, 'synthetic anon-surface run, no workflow definition'],

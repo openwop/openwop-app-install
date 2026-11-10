@@ -10,6 +10,9 @@
  * another version to (M6), promotes this one; or an eval
  * that named no version stops promoting (that is the certified conformance path,
  * `v2-deployment-eval-gate`, which cites an un-versioned eval).
+ *
+ * Sabotage-witnessed (grade-tests w83): dropping the pinned flag, the served
+ * flag, the version match, or the flag gate itself (refusing un-versioned evals).
  */
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
@@ -56,15 +59,14 @@ describe('ADR 1014 D5 — the eval gate holds a versioned eval to its version', 
     const tenant = `t-${randomUUID()}`;
     await svc.listDeployments(tenant, SCRIPTED); // seeds 1.0.0 draft
     const err = await promote(tenant, await passedEval(tenant, '9.9.9')).catch((e: unknown) => e);
-    expect((err as { code?: string }).code).toBe('eval_gate_unmet');
-    expect((err as { details?: { reason?: string } }).details?.reason).toBe('eval_of_another_version');
+    expect(err).toMatchObject({ code: 'eval_gate_unmet', details: { reason: 'eval_of_another_version' } });
   });
 
   it('an eval the deployment served 9.9.9 to cannot promote 1.0.0 (M6)', async () => {
     const tenant = `t-${randomUUID()}`;
     await svc.listDeployments(tenant, SCRIPTED);
     const err = await promote(tenant, await passedEval(tenant, '9.9.9', 'agentVersionServed')).catch((e: unknown) => e);
-    expect((err as { details?: { reason?: string } }).details?.reason).toBe('eval_of_another_version');
+    expect(err).toMatchObject({ code: 'eval_gate_unmet', details: { reason: 'eval_of_another_version' } });
   });
 
   it('an eval that named 1.0.0 promotes 1.0.0', async () => {

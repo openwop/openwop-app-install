@@ -12,7 +12,7 @@
  *  - Ids, order, and i18n keys are unique/consistent.
  */
 import { describe, it, expect } from 'vitest';
-import { ALL_DASHBOARD_TILES, defaultLayoutFrom } from '../allTiles.js';
+import { ALL_DASHBOARD_TILES, HOST_DASHBOARD_TILES, defaultLayoutFrom } from '../allTiles.js';
 
 /** ADR 0377 pin — tile tier mirrors the nav tier of the page each tile links to
  *  (verified against chrome/features.tsx + each feature's routes.tsx). A change
@@ -28,7 +28,7 @@ const TIER_BY_TILE: Record<string, 'workspace' | 'admin'> = {
   // /runs pages' admin tier; Needs you reads a member's own runs.
   ask: 'workspace', 'get-started': 'workspace', 'needs-you': 'workspace', 'run-health': 'admin', 'run-activity': 'admin',
   'active-runs': 'workspace', 'recent-conversations': 'workspace', todos: 'admin',
-  'scheduled-agents': 'workspace', 'ai-briefing': 'workspace', 'recent-documents': 'workspace', 'kicktodo-today': 'workspace', 'kicktodo-progress': 'workspace',
+  'scheduled-agents': 'workspace', 'ai-briefing': 'workspace', 'recent-documents': 'workspace',
   'crm-pipeline': 'admin', 'commerce-summary': 'admin', 'campaign-kpis': 'admin',
   'funnel-conversion': 'admin', 'top-priorities': 'admin',
   'approvals-inbox': 'workspace', notifications: 'workspace', 'my-projects': 'workspace',
@@ -48,8 +48,6 @@ const TIER_BY_TILE: Record<string, 'workspace' | 'admin'> = {
   'team-workload': 'admin',
   // ADR 0377 Wave 4 — admin-ops health
   'connection-health': 'admin', 'plugin-health': 'admin',
-  // ADR 0452 — KickTodo home tiles (participant pages are workspace-tier);
-  // 'kicktodo-today' / 'kicktodo-progress' are pinned in the first row above.
   'personal-note': 'workspace',
   'mentions-inbox': 'workspace',
 };
@@ -62,8 +60,11 @@ describe('dashboard catalog invariants', () => {
     expect(new Set(orders).size).toBe(orders.length);
   });
 
-  it('every tile has a pinned tier matching its deep-link page (ADR 0377)', () => {
-    for (const t of ALL_DASHBOARD_TILES) {
+  // ADR 1031 — the HOST tiles: a tile a feature contributes
+  // (`FrontendFeature.dashboardTiles`, e.g. from an adopter repo) declares its own
+  // tier beside the page it links to, which this table cannot see or pin.
+  it('every host tile has a pinned tier matching its deep-link page (ADR 0377)', () => {
+    for (const t of HOST_DASHBOARD_TILES) {
       expect(TIER_BY_TILE[t.id], `${t.id} missing from TIER_BY_TILE — add it with the linked page's tier`).toBeDefined();
       expect(t.requiredTier, `${t.id} tier must match its page`).toBe(TIER_BY_TILE[t.id]);
     }

@@ -115,7 +115,6 @@ claim_train_lock "$TRAIN_LOCK" "${PRS[*]}${OPENWOP_TRAIN_DIR:+ (train dir $TRAIN
 # which no suite detector matches. Guarded: a test fixture may copy this script alone.
 if [ -f "$ROOT/scripts/lib/ci-claims.sh" ]; then . "$ROOT/scripts/lib/ci-claims.sh"; else ci_claim_publish() { :; }; fi
 ci_claim_publish claimed "#${PRS[*]}"
-git -C "$ROOT" fetch -q origin
 
 # ── CE-17: a release freeze refuses the train BEFORE a 45-minute gate ────────
 # `release-freeze.sh status` exits 3 while main is frozen. Someone else's freeze
@@ -130,6 +129,10 @@ if [ "$frc" -eq 3 ] && [ "$(freeze_holder)" != "${OPENWOP_FREEZE_HOLDER:-}" ]; t
 elif [ "$frc" -ne 0 ] && [ "$frc" -ne 3 ]; then
   echo "merge-train: could not read the release-freeze state ($FREEZE) — continuing; the merge step re-checks." >&2
 fi
+# Fetch only AFTER the freeze refusal: a train that cannot land needs no network,
+# and the self-test that drives this against the real checkout must not move
+# refs/remotes/origin/* mid-gate (ADR 0863 D9 shadow gate, 2026-11-02).
+git -C "$ROOT" fetch -q origin
 
 # ── every car must be an open PR against main ────────────────────────────────
 HEADS=()
@@ -170,14 +173,20 @@ build_train() {
     echo "merge-train: $TRAIN has uncommitted changes — not touching it" >&2; exit 1
   fi
   git -C "$TRAIN" checkout -q --detach "$BASE_OID"
-  local pr entry head oid
+  local pr entry head oid merge_out
   for pr in "$@"; do
     entry="$(head_of "$pr")"
     IFS=: read -r pr head oid <<< "$entry"
-    if ! git -C "$TRAIN" merge -q --no-ff --no-edit -m "train: #$pr ($head)" "$oid"; then
-      git -C "$TRAIN" merge --abort || true
-      echo "merge-train: #$pr does not merge cleanly onto main plus the PRs before it." >&2
-      echo "             Rebase it, or put it in a different train." >&2
+    if ! merge_out="$(git -C "$TRAIN" merge --no-ff --no-edit -m "train: #$pr ($head)" "$oid" 2>&1)"; then
+      git -C "$TRAIN" merge --abort >/dev/null 2>&1 || true
+      # Say what git said. A merge also fails for reasons that are not the PR's:
+      # with no git identity it is "unable to auto-detect email address", which
+      # this used to report as "does not merge cleanly ... Rebase it" (ADR 0863
+      # D9 shadow 4, 2026-11-02). Rebase advice only when git reports a conflict.
+      echo "merge-train: #$pr did not merge onto main plus the PRs before it (git said: $(tail -3 <<<"$merge_out" | tr '\n' ' '))" >&2
+      if grep -qE 'CONFLICT|Automatic merge failed' <<<"$merge_out"; then
+        echo "             Rebase it, or put it in a different train." >&2
+      fi
       return 1
     fi
   done
@@ -203,14 +212,29 @@ if [ -f "$ROOT/scripts/lib/release-bus.sh" ]; then
   train_bus_end() {
     local rc="$1" merged="" red=""
     merged="$(IFS=,; echo "${MERGED[*]:-}")"; red="$(IFS=,; echo "${CULPRITS[*]:-}")"
-    printf '{"kind":"gate","phase":"result","prs":"%s","exit":%s,"merged":"%s","red":"%s","base":"%s","tree":"%s","main":"%s","result":"%s"}' \
-      "$BUS_PRS" "$rc" "$merged" "$red" "${BASE_OID:-}" "${TRAIN_TREE:-}" "$(git -C "$ROOT" rev-parse -q --verify origin/main 2>/dev/null || true)" \
+    printf '{"kind":"gate","phase":"result","prs":"%s","exit":%s,"merged":"%s","red":"%s","base":"%s","tree":"%s","main":"%s","where":"%s","result":"%s"}' \
+      "$BUS_PRS" "$rc" "$merged" "$red" "${BASE_OID:-}" "${TRAIN_TREE:-}" "$(git -C "$ROOT" rev-parse -q --verify origin/main 2>/dev/null || true)" "${GATE_WHERE:-}" \
       "$([ "$rc" -eq 0 ] && echo GREEN || { [ -n "$red" ] && echo "RED #${red//,/ #}" || echo "STOPPED rc=$rc"; })"
   }
   release_bus_hold "gate-$(hostname -s 2>/dev/null || hostname)-$$" gate train_bus_end --prs "$BUS_PRS" --base "$BASE_OID" --tree "$TRAIN_TREE"
   release_bus publish "{\"kind\":\"gate\",\"phase\":\"start\",\"prs\":\"$BUS_PRS\",\"base\":\"$BASE_OID\",\"tree\":\"$TRAIN_TREE\"}"
 else
   release_bus() { return 0; }
+fi
+# ADR 0863 D9 P6 — remote-first gate (off unless OPENWOP_REMOTE_GATE=1).
+if [ -f "$ROOT/scripts/lib/remote-gate-train.sh" ]; then
+  # shellcheck source=lib/remote-gate-train.sh
+  . "$ROOT/scripts/lib/remote-gate-train.sh"
+fi
+if [ "${OPENWOP_REMOTE_GATE:-0}" = 1 ]; then
+  # Tracegate's STALE checks run only in a FULL local lane, at least every 24 h. With
+  # most gates remote, the local lanes can drift past that unnoticed: say so.
+  for lane in backend frontend; do
+    h="$(node --input-type=module -e "import('$ROOT/scripts/tracegate.mjs').then(m => console.log(Math.round(m.lastFullHours('$lane'))))" 2>/dev/null || echo "?")"
+    if [ "$h" = "?" ] || [ "$h" = "Infinity" ] || [ "$h" -gt 24 ] 2>/dev/null; then
+      echo "  WARN: local Tracegate $lane lane's last complete full run is ${h}h old (> 24 h) — its STALE checks have not run locally since; run a local gate or the daemon nightly."
+    fi
+  done
 fi
 
 # ── dependencies: install what is missing OR stale ───────────────────────────
@@ -241,14 +265,35 @@ ensure_deps() {
     say "installing frontend dependencies in the train"
     ( cd "$TRAIN/frontend/react" && npm ci )
   fi
-  if [ ! -d "$TRAIN/node_modules" ] && [ -f "$TRAIN/package-lock.json" ]; then
-    ( cd "$TRAIN" && npm ci )
+  # The root too, by the same rule. It used to install only when node_modules was
+  # MISSING, so #5586's root devDependency (tracegate-ci) never reached a train
+  # worktree that already had one, and a gate step needing it found it absent.
+  # ci.sh stamps only the two workspaces, so the root's stamp is written here: a
+  # byte-identical lockfile rewrite (every rebuild) must not reinstall.
+  if [ -f "$TRAIN/package-lock.json" ] && needs_install .; then
+    say "installing root dependencies in the train"
+    ( cd "$TRAIN" && npm ci ) && shasum -a 256 "$TRAIN/package-lock.json" | cut -d' ' -f1 > "$TRAIN/node_modules/.openwop-ci-lock-sha"
   fi
 }
 
 # ── gate + merge ─────────────────────────────────────────────────────────────
 # gate_train — ONE configured gate, with evidence where the adopter uses Hyvemind.
+# ADR 0863 D9 P6 — with OPENWOP_REMOTE_GATE=1 the FULL train gate is tried on the
+# remote gate VM first (scripts/lib/remote-gate-train.sh): green passes, red is
+# final, anything else (unreachable, disabled, busy, time bound, interrupted) gates
+# locally exactly as before. Bisection halves stay local. Default OFF.
+REMOTE_ELIGIBLE=1
+REMOTE_RED=0
+GATE_WHERE=""
 gate_train() {
+  REMOTE_RED=0
+  if [ "${OPENWOP_REMOTE_GATE:-0}" = 1 ] && [ "$REMOTE_ELIGIBLE" = 1 ] && declare -F remote_gate_train >/dev/null; then
+    local rrc=0; remote_gate_train || rrc=$?
+    [ "$rrc" -eq 0 ] && return 0
+    [ "$rrc" -eq 1 ] && { REMOTE_RED=1; return 1; }
+  fi
+  GATE_WHERE="local:$(hostname -s 2>/dev/null || hostname)"
+  echo "  gate runs on: local ${GATE_WHERE#local:}"
   ensure_deps
   say "gating the train (one npm run ci for $# PR(s): #$*)"
   ( cd "$TRAIN" 2>/dev/null || cd "$ROOT"; ci_claim_publish gating "#$*" )
@@ -269,6 +314,11 @@ gate_train() {
 # built on, then check main's tree IS the gated tree. Returns 2 if main moved
 # (the caller may rebuild and re-gate); exits on anything else that is wrong.
 merge_train() {
+  # P6: a remote-green train merges only on its acceptance record (outside the
+  # train worktree), naming this request, the train's commit and its tree.
+  if [ "${GATE_WHERE#remote:}" != "$GATE_WHERE" ]; then
+    remote_gate_check_accept || exit 1
+  fi
   git -C "$ROOT" fetch -q origin
   NOW_OID="$(git -C "$ROOT" rev-parse origin/main)"
   if [ "$NOW_OID" != "$BASE_OID" ]; then
@@ -336,10 +386,20 @@ ride() {
   local tries=0 rc
   while :; do
     if ! gate_train "$@"; then
+      # P6: a REMOTE red is final for the train. Bisecting it would re-gate every
+      # half locally and could merge what the remote gate failed: a local second
+      # chance, which the remote-first rule forbids.
+      if [ "$REMOTE_RED" = 1 ]; then
+        CULPRITS+=("$@")
+        echo "merge-train: the train is RED on the remote gate for #$*. Nothing of it was merged." >&2
+        echo "             To find the culprit, re-run with OPENWOP_REMOTE_GATE=0 (a local, bisecting train)." >&2
+        return 0
+      fi
       if [ "$BISECT" -eq 1 ] && [ "$#" -gt 1 ]; then
         local all=("$@") half=$(( $# / 2 ))
         local left=("${all[@]:0:half}") right=("${all[@]:half}")
         say "train RED — bisecting: #${left[*]} | #${right[*]}"
+        REMOTE_ELIGIBLE=0   # P6: bisection sub-gates run locally
         build_train "${left[@]}" && ride "${left[@]}"
         build_train "${right[@]}" && ride "${right[@]}"
         return 0

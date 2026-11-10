@@ -38,9 +38,10 @@ let server: http.Server;
 let cookie = '';
 let tenantId = '';
 
-/** The six kinds `/reviews` scopes and the list route did not. */
+/** Six kinds `/reviews` scopes and the list route did not. `adopter-unregistered-kind`
+ *  is a kind no feature registered: its audience fails CLOSED (ADR 1031 P2). */
 const SCOPED = [
-  'anon-surface-write', 'kicktodo-plan-proposal', 'dealer-registration',
+  'anon-surface-write', 'adopter-unregistered-kind', 'dealer-registration',
   'territory-model-transition', 'commission-statement', 'commerce-listing-publish',
 ] as const;
 
@@ -50,7 +51,6 @@ const seed = async (kind: string, proposal: string): Promise<string> => {
     approvalId, tenantId, status: 'pending', kind, orgId: 'org-other',
     proposal, createdAt: new Date().toISOString(),
     rosterId: 'r1', persona: 'p', workflowId: 'wf',
-    ...(kind === 'kicktodo-plan-proposal' ? { policy: { approverRefs: ['someone-else'] } } : {}),
   };
   await approvals.put(row);
   await ix.put({ ixId: `${tenantId}:pending:${approvalId}`, approvalId });

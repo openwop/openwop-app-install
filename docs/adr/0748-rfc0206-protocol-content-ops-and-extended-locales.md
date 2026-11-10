@@ -331,6 +331,8 @@ tenant-scoped key without content authority cannot write (403, fail-closed)").
 The same gate also resolved an `owk_` key as `apikey:<keyId>` instead of as its
 issuer.
 
+> **CORRECTED 2026-11-05 (ADR 1045, TST-FUD-GC-1):** an env key's principal id is now `bearer:<16 hex of sha256(key)>`, not `bearer:<first 8 chars>`; the 8-char form made two keys sharing a prefix one principal (one budget, one audit identity, and an operator-issuer check that let a surviving key vouch for a removed one). Legacy 8-char ids in stored rows are honoured as operator issuers only when exactly one configured key has that prefix. See ADR 1045 § "Env-key principal collision".
+
 **Fix:** `authorizeContent` resolves authority by provenance. An `env-key` goes
 through the subjectless tenant-owner branch (`resolveEffectiveAccess(tenantId)`),
 in its pinned tenant only. An `api-key` goes through its issuer's membership in

@@ -753,3 +753,25 @@ decision fails its inherited-absence witness. The restored source again passes
 results are retained in `client-report-period-verification.json` in the release
 coordinator state directory. This supersedes the UNRUN note above for those
 checks only; the full current-tree gate and merge qualification remain pending.
+
+
+### Correction — KPI revenue availability projection (2026-11-08)
+
+PERF-4 extends the existing KPI source with `reportedRevenueRecordCount` on
+both totals and platform rows. The report's explicit projection must copy this
+count too: otherwise the source-verbatim contract drops availability metadata,
+although the underlying revenue/ROAS numbers are unchanged. Fresh snapshots
+store it as a count metric and platform-table column/row value, with the same
+source lineage; the report UI uses a localized label. A measured zero revenue
+row counts as reported, while null revenue does not. Reporting derives no new
+count/math and does not infer availability from spend or revenue truthiness.
+
+Existing frozen snapshots and their hashes are unchanged. New snapshots hash
+the additional source field through the existing canonical snapshot hash; older
+reports without it continue to render. No report routes, authorization, metric
+sentinels, approval/publication rules or workflow wire fields change. The
+existing source-totals equality assertion remains intact. Three authored
+route-backed null/zero/mixed-platform controls and two report-render controls
+extend it; all new checks are NOT RUN at source preparation and require fresh
+focused/composed qualification. The original canonical failure is retained,
+not classified as a flake or resolved by changing its expectation.

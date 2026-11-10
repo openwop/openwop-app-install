@@ -77,28 +77,6 @@ describe('AssetPreview media rendering', () => {
  * review-renderer registry (a humanized card), NOT the raw-JSON markdown path.
  */
 describe('AssetPreview typed-artifact dispatch', () => {
-  const planContent = JSON.stringify({
-    commands: [{ lane: 'substitute', cardId: 'occ:abc', alternativeId: 'alt:xyz' }],
-    rationale: 'Swap in something lower-impact this week.',
-    display: { summary: '1 change to your plan', lines: ['Swap “Run 5k” for “Brisk 20-min walk”.'] },
-  });
-
-  it('renders the humanized kicktodo.plan-revision card (titles, rationale, raw behind a disclosure)', () => {
-    const asset: ReviewAsset = { label: 'Plan change', content: planContent, artifactTypeId: 'kicktodo.plan-revision' };
-    render(<AssetPreview asset={asset} hideLabel />);
-    // The server-resolved humanized line (real titles) + rationale prose render as the
-    // primary content — never the opaque ids and never a raw JSON blob as the body.
-    expect(screen.getByText('Swap “Run 5k” for “Brisk 20-min walk”.')).toBeTruthy();
-    expect(screen.getByText('Swap in something lower-impact this week.')).toBeTruthy();
-    // The raw commands are available only behind the collapsed disclosure (not the body).
-    const raw = screen.getByText(/Show the raw commands/i).closest('details');
-    expect(raw).not.toBeNull();
-    expect(raw!.open).toBe(false);
-    expect(raw!.textContent).toContain('occ:abc');
-    // …and the JSON document itself is not the body (the markdown path would print it).
-    expect(screen.queryByText(/"rationale"/)).toBeNull();
-  });
-
   it('falls through to markdown for an UNREGISTERED artifactTypeId (untyped path unchanged)', () => {
     const asset: ReviewAsset = { content: 'plain drafted text', artifactTypeId: 'some.unknown.type' };
     render(<AssetPreview asset={asset} hideLabel />);

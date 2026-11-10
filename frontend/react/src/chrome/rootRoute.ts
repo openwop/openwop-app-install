@@ -71,3 +71,27 @@ export function shouldShowFrontPage(o: {
     && !hasLegacyChatParams(o.search)
     && (o.authLoading || o.frontPageLoading || o.frontPageEnabled);
 }
+
+/**
+ * Whether the public `/` branch should still show its neutral splash rather than
+ * the front page. Called only once `shouldShowFrontPage` has chosen that branch.
+ *
+ * The splash waits for the front-page POINTER, never for auth, once the pointer
+ * says the page is on. Auth does not decide what `/` shows (CORRECTION
+ * 2026-09-11 above), so waiting for it only added a way to hang: before
+ * 2026-11-05 the branch was `authLoading || frontPageLoading`, and a first
+ * visit whose auth SDK never answered (its lazy chunk failed to fetch, or its
+ * first IndexedDB open never completed) sat on the splash under a fully loaded
+ * pointer until the visitor reloaded.
+ *
+ * Auth still matters while the pointer says OFF: `shouldShowFrontPage` keeps
+ * the public path only because auth is resolving, and the app shell takes over
+ * once it settles, so the splash holds until then.
+ */
+export function rootSplashPending(o: {
+  authLoading: boolean;
+  frontPageLoading: boolean;
+  frontPageEnabled: boolean;
+}): boolean {
+  return o.frontPageLoading || (!o.frontPageEnabled && o.authLoading);
+}

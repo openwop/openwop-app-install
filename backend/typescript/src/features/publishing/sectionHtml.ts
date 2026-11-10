@@ -33,11 +33,13 @@
  * null — the prerender path falls back to serving the SPA shell (honest-off,
  * never a broken document).
  */
+import { designSectionHtml, heroQueueHtml, richTextCardHtml } from '../cms/designSections.js';
 import { isFragmentHref, isInternalHref } from '../../host/internalHref.js';
 import type { Section } from '../cms/cmsService.js';
 import type { ResolvedContentSection } from '../../host/contentDataSources.js';
 import { vendorPublicBase } from '../featureRoute.js';
 import { headingEmphasisHtml, stripHeadingEmphasis } from './headingEmphasis.js';
+import { heroArtHtml } from './heroArtText.js';
 
 /** HTML-escape an untrusted string for text/attribute positions. */
 export function escapeHtml(s: string): string {
@@ -62,7 +64,7 @@ const pad2 = (n: number): string => String(n).padStart(2, '0');
 
 /** Inline markdown → HTML (same grammar/regex as the frontend renderer). */
 export function inlineMarkdownHtml(text: string): string {
-  const re = /\*\*([^*]+)\*\*|\*([^*]+)\*|`([^`]+)`|\[([^\]]+)\]\(([^)\s]+)\)/g;
+  const re = /\*\*([^*]+)\*\*|\*([^*]+)\*|`([^`]+)`|\[([^\]]+)\]\(([^)\s]+)\)|==([^=\n]+)==/g;
   let out = '';
   let last = 0;
   let m: RegExpExecArray | null;
@@ -80,6 +82,8 @@ export function inlineMarkdownHtml(text: string): string {
       } else {
         out += escapeHtml(label);
       }
+    } else if (m[6] !== undefined) {
+      out += `<mark>${escapeHtml(m[6])}</mark>`; // ADR 1068 D2 — a highlighted phrase
     }
     last = re.lastIndex;
   }
@@ -152,6 +156,73 @@ export function headingSlug(text: string): string {
     .slice(0, 64) || 'section';
 }
 
+/** ADR 1029 D5 — the hero's activity card as crawler text: the title, then each
+ *  row's actor, action, status and meta in reading order (escaped). The row's
+ *  `state` is presentation and adds nothing. The ADR 1038 `result` line follows
+ *  the rows; the played counter does not, since it is translated text and this
+ *  renderer has no translations (the rows already state each status). '' when absent. */
+function activityFigureHtml(v: unknown): string {
+  if (v === null || typeof v !== 'object' || Array.isArray(v)) return '';
+  const a = v as Record<string, unknown>;
+  const rows = (Array.isArray(a.items) ? (a.items as unknown[]) : [])
+    .map((i) => (i && typeof i === 'object' ? (i as Record<string, unknown>) : {}))
+    .filter((i) => str(i.action))
+    .map((i) => `<li>${str(i.actor) ? `<strong>${escapeHtml(str(i.actor))}</strong> ` : ''}${escapeHtml(str(i.action))}${str(i.status) ? ` — ${escapeHtml(str(i.status))}` : ''}${str(i.meta) ? ` <small>${escapeHtml(str(i.meta))}</small>` : ''}</li>`);
+  if (rows.length === 0) return '';
+  // ADR 1067 D3 — the checklist's browser-bar words come first, as visitors read them.
+  return `<figure>
+${str(a.barLabel) ? `<p><small>${escapeHtml(str(a.barLabel))}</small></p>
+` : ''}${str(a.title) ? `<p><strong>${escapeHtml(str(a.title))}</strong></p>
+` : ''}<ol>${rows.join('')}</ol>
+${str(a.result) ? `<p>${escapeHtml(str(a.result))}</p>
+` : ''}</figure>`;
+}
+
+/** ADR 1047 — the hero's hub picture as crawler text: the centre (its picture
+ *  with alt text, eyebrow and label), then the places around it as a list. The
+ *  spoke icons and the drawing are presentation and add nothing. '' when absent. */
+function hubFigureHtml(v: unknown, assetBase: string): string {
+  if (v === null || typeof v !== 'object' || Array.isArray(v)) return '';
+  const h = v as Record<string, unknown>;
+  const c = h.center && typeof h.center === 'object' ? (h.center as Record<string, unknown>) : {};
+  const spokes = (Array.isArray(h.spokes) ? (h.spokes as unknown[]) : [])
+    .map((sp) => (sp && typeof sp === 'object' ? (sp as Record<string, unknown>) : {}))
+    .filter((sp) => str(sp.label))
+    .map((sp) => `<li>${str(sp.index) ? `${escapeHtml(str(sp.index))} ` : ''}${escapeHtml(str(sp.label))}</li>`);
+  if (!str(c.label) || spokes.length === 0) return '';
+  const img = str(c.imageToken) ? `<img src="${escapeHtml(assetUrl(assetBase, str(c.imageToken)))}" alt="${escapeHtml(str(c.alt))}">\n` : '';
+  return `<figure>
+${img}<figcaption>${str(c.eyebrow) ? `${escapeHtml(str(c.eyebrow))} ` : ''}<strong>${escapeHtml(str(c.label))}</strong></figcaption>
+<ul>${spokes.join('')}</ul>
+</figure>`;
+}
+
+/** ADR 1038 D8 — a flow's steps as crawler text, in order: each node's label,
+ *  then its status word in brackets and its line of text (inline markdown when
+ *  `markdown`, as a columns item's text is; the hero's is plain). At most six,
+ *  the validator's cap (an overlay replaces the list whole and is not checked).
+ *  The `state` and the drawing are presentation and add nothing. '' when none. */
+function flowStepsHtml(nodes: unknown[], markdown = false): string {
+  const items = nodes.slice(0, 6)
+    .map((n) => (n && typeof n === 'object' ? (n as Record<string, unknown>) : {}))
+    .filter((n) => str(n.label))
+    .map((n) => `<li><strong>${escapeHtml(str(n.label))}</strong>${str(n.status) ? ` (${escapeHtml(str(n.status))})` : ''}${str(n.text) ? ` — ${markdown ? inlineMarkdownHtml(str(n.text)) : escapeHtml(str(n.text))}` : ''}</li>`);
+  return items.length > 0 ? `<ol>${items.join('')}</ol>` : '';
+}
+
+/** ADR 1038 D8 — the hero's flow picture as crawler text: its caption, then
+ *  the steps. '' when absent. */
+function flowFigureHtml(v: unknown): string {
+  if (v === null || typeof v !== 'object' || Array.isArray(v)) return '';
+  const f = v as Record<string, unknown>;
+  const steps = flowStepsHtml(Array.isArray(f.nodes) ? (f.nodes as unknown[]) : []);
+  if (!steps) return '';
+  return `<figure>
+${str(f.label) ? `<figcaption>${escapeHtml(str(f.label))}</figcaption>
+` : ''}${steps}
+</figure>`;
+}
+
 /** ADR 0920 D3 — the hero's example plan card as crawler text. Every string
  *  the human card shows renders here (escaped), in reading order; the progress
  *  bar itself is presentation, its `progressNote` is the text. The `bubble` is
@@ -208,6 +279,34 @@ function chatFigureHtml(v: unknown): string {
   return `<figure>\n${title ? `<figcaption>${escapeHtml(title)}</figcaption>\n` : ''}${body.join('\n')}\n</figure>`;
 }
 
+/** ADR 1032 — a `video` section's second film as indexable text: the poster,
+ *  the title and description, and followable links (the first film's shape). */
+function filmFigureHtml(f: Record<string, unknown>, https: (v: unknown) => string): string {
+  const s = (v: unknown): string => (typeof v === 'string' ? v : '');
+  const src = https(f.src);
+  const poster = https(f.poster);
+  const captions = https(f.captions);
+  const youtube = https(f.youtubeUrl);
+  const title = s(f.title);
+  const description = s(f.description);
+  const length = s(f.length);
+  const links = [
+    src ? `<a href="${escapeHtml(src)}" rel="noopener noreferrer">Watch the video${length ? ` (${escapeHtml(length)})` : ''}</a>` : '',
+    youtube ? `<a href="${escapeHtml(youtube)}" rel="noopener noreferrer">Watch on YouTube</a>` : '',
+    captions ? `<a href="${escapeHtml(captions)}" rel="noopener noreferrer">Captions (WebVTT)</a>` : '',
+  ].filter(Boolean);
+  const cap = [
+    title ? `<p><strong>${escapeHtml(title)}</strong></p>` : '',
+    // ADR 1068 D1 — the visible caption the page shows under the film.
+    s(f.caption) ? `<p>${escapeHtml(s(f.caption))}</p>` : '',
+    description ? `<p>${escapeHtml(description)}</p>` : '',
+    links.length > 0 ? `<p>${links.join(' ')}</p>` : '',
+  ].filter(Boolean).join('\n');
+  if (!poster && !cap) return '';
+  const img = poster ? `<img src="${escapeHtml(poster)}" alt="${escapeHtml(title)}" width="1920" height="1080">\n` : '';
+  return `<figure>\n${img}${cap ? `<figcaption>\n${cap}\n</figcaption>\n` : ''}</figure>\n`;
+}
+
 /**
  * One section → semantic HTML, or null for an unknown/future type (the page
  * then falls back to the SPA shell — never a partial document).
@@ -227,16 +326,38 @@ export function sectionHtml(section: Section, opts: SectionHtmlOptions): string 
     case 'hero': {
       const parts: string[] = ['<header>'];
       if (eyebrow) parts.push(`<p>${escapeHtml(eyebrow)}</p>`);
-      parts.push(`<h1>${headingEmphasisHtml(heading)}</h1>`);
+      parts.push(`<h1>${headingEmphasisHtml(heading, d.emphasis === 'strike')}</h1>`);
       const sub = str(d.subheading);
       if (sub) parts.push(`<p>${inlineMarkdownHtml(sub)}</p>`);
+      // ADR 1066 D2 — the hero's second paragraph.
+      const body = str(d.body);
+      if (body) parts.push(`<p>${inlineMarkdownHtml(body)}</p>`);
       const ctas = [anchorHtml(str(d.ctaLabel), str(d.ctaUrl)), anchorHtml(str(d.ctaLabel2), str(d.ctaUrl2))].filter(Boolean);
       if (ctas.length > 0) parts.push(`<p>${ctas.join(' ')}</p>`);
       // ADR 0920 D3 — fine print, then the example plan card as real text.
       const note = str(d.note);
       if (note) parts.push(`<p><small>${escapeHtml(note)}</small></p>`);
-      const plan = planFigureHtml(d.plan);
+      // ADR 0593 §C9 — crawlers read only the picture visitors see: a hero keeps
+      // the data of a visual the author switched away from (so switching back
+      // loses nothing), and it must not reach the crawler.
+      const visual = str(d.visual);
+      const plan = visual === 'plan' ? planFigureHtml(d.plan) : '';
       if (plan) parts.push(plan);
+      // ADR 1080 D7 — the queue picture as a list.
+      const queue = visual === 'queue' ? heroQueueHtml(d.queue, escapeHtml) : '';
+      if (queue) parts.push(queue);
+      // ADR 1029 D5 — the activity card, as text.
+      const activity = visual === 'activity' ? activityFigureHtml(d.activity) : '';
+      if (activity) parts.push(activity);
+      // ADR 1047 — the hub picture, as text.
+      const hub = visual === 'hub' ? hubFigureHtml(d.hub, opts.assetBase) : '';
+      if (hub) parts.push(hub);
+      // ADR 1038 D8 — the flow picture, as text.
+      const flow = visual === 'flow' ? flowFigureHtml(d.flow) : '';
+      if (flow) parts.push(flow);
+      // ADR 1060 — the illustrated visuals (receipt, …), as text.
+      const art = heroArtHtml(d);
+      if (art) parts.push(art);
       parts.push('</header>');
       return parts.join('\n');
     }
@@ -244,7 +365,17 @@ export function sectionHtml(section: Section, opts: SectionHtmlOptions): string 
     case 'richText': {
       // ADR 0920 D5 — the conversation picture renders as text after the copy.
       const chat = chatFigureHtml(d.chat);
-      return `<section>\n${head()}${paragraphsHtml(str(d.text))}\n${chat ? `${chat}\n` : ''}</section>`;
+      // ADR 1073 D1 — the pull quote under the heading, before the essay.
+      const quote = str(d.quote) ? `<blockquote><p>${escapeHtml(str(d.quote))}</p></blockquote>\n` : '';
+      // ADR 1074 D1 — the screenshot after the essay, only when it is the visual
+      // visitors see (ADR 0593 §C9: a switched-away visual's data stays stored).
+      const caption = str(d.caption);
+      const shot = d.visual === 'image' && str(d.imageToken)
+        ? `<figure>\n<img src="${escapeHtml(assetUrl(opts.assetBase, str(d.imageToken)))}" alt="${escapeHtml(str(d.alt))}">${caption ? `\n<figcaption>${escapeHtml(caption)}</figcaption>` : ''}\n</figure>\n`
+        : '';
+      // ADR 1080 D8 — the card picture, when it is the visual shown.
+      const card = d.visual === 'card' ? richTextCardHtml(d.card, escapeHtml, (t) => assetUrl(opts.assetBase, t)) : '';
+      return `<section>\n${head()}${quote}${paragraphsHtml(str(d.text))}\n${chat ? `${chat}\n` : ''}${shot}${card}</section>`;
     }
 
     case 'image': {
@@ -253,12 +384,18 @@ export function sectionHtml(section: Section, opts: SectionHtmlOptions): string 
       const img = token
         ? `<img src="${escapeHtml(assetUrl(opts.assetBase, token))}" alt="${escapeHtml(str(d.alt))}">`
         : '';
-      return `<figure>\n${img}${caption ? `\n<figcaption>${escapeHtml(caption)}</figcaption>` : ''}\n</figure>`;
+      const figure = `<figure>\n${img}${caption ? `\n<figcaption>${escapeHtml(caption)}</figcaption>` : ''}\n</figure>`;
+      // ADR 1032 — an optional head over the figure (the browser frame is
+      // presentation and adds nothing here).
+      const lede = str(d.lede);
+      if (!eyebrow && !heading && !lede) return figure;
+      return `<section>\n${head()}${lede ? `<p>${inlineMarkdownHtml(lede)}</p>\n` : ''}${figure}\n</section>`;
     }
 
     case 'cta': {
       const sub = str(d.subheading);
-      return `<section>\n${head()}${sub ? `<p>${escapeHtml(sub)}</p>\n` : ''}<p>${anchorHtml(str(d.label), str(d.url))}</p>\n</section>`;
+      const ctaNote = str(d.note) ? `<p><small>${escapeHtml(str(d.note))}</small></p>\n` : ''; // ADR 1062 D4
+      return `<section>\n${head()}${sub ? `<p>${escapeHtml(sub)}</p>\n` : ''}<p>${anchorHtml(str(d.label), str(d.url))}</p>\n${ctaNote}</section>`;
     }
 
     case 'columns': {
@@ -270,37 +407,82 @@ export function sectionHtml(section: Section, opts: SectionHtmlOptions): string 
         const items = cols
           .map((c) => `<div><dt>${escapeHtml(str(c.title))}</dt><dd>${escapeHtml(str(c.text))}</dd></div>`)
           .join('\n');
-        return `<section>\n<dl>\n${items}\n</dl>\n${colNote}</section>`;
+        // ADR 0762 — the heading and lede the SPA shows above the figures.
+        const lede = str(d.lede);
+        return `<section>\n${head()}${lede ? `<p>${inlineMarkdownHtml(lede)}</p>\n` : ''}<dl>\n${items}\n</dl>\n${colNote}</section>`;
       }
-      if (layout === 'steps') {
+      // ADR 1038 D8 — a flow is an ordered process: each item's title is the
+      // node's label, then its status word and text.
+      if (layout === 'flow') {
+        const lede = str(d.lede);
+        const steps = flowStepsHtml(cols.map((c) => ({ label: str(c.title), status: str((c as { status?: unknown }).status), text: str(c.text) })), true);
+        return `<section>\n${head()}${lede ? `<p>${inlineMarkdownHtml(lede)}</p>\n` : ''}${steps}\n${colNote}</section>`;
+      }
+      // ADR 1029 D5 — a timeline is an ordered sequence, like steps. ADR 1063 D3
+      // — so are incidents (timestamped events), which lead with their time too.
+      if (layout === 'steps' || layout === 'timeline' || layout === 'incidents') {
         const items = cols
           .map((c, i) => {
             const title = str(c.title);
-            return `<li>${pad2(i + 1)}. ${title ? `<h3>${escapeHtml(title)}</h3>` : ''}<p>${inlineMarkdownHtml(str(c.text))}</p></li>`;
+            // A timeline item's date or stage is text a visitor reads (ADR 1029 D5):
+            // it leads the item, where steps lead with their number.
+            const when = layout === 'timeline' || layout === 'incidents' ? str((c as { eyebrow?: unknown }).eyebrow) : '';
+            const lead = when ? `<p>${escapeHtml(when)}</p>` : `${pad2(i + 1)}. `;
+            return `<li>${lead}${title ? `<h3>${escapeHtml(title)}</h3>` : ''}<p>${inlineMarkdownHtml(str(c.text))}</p></li>`;
           })
           .join('\n');
         return `<section>\n${head()}<ol>\n${items}\n</ol>\n${colNote}</section>`;
       }
-      // cards (default layout) — also `showcase`, `rows` and the ADR 0920
-      // `ruled`/`progress`/`list`/`tiles`/`panels`, whose difference from cards
-      // is visual only: a list of titled items either way. Item `eyebrow`,
+      // cards (default layout) — also `showcase`, `rows`, the ADR 0920
+      // `ruled`/`progress`/`list`/`tiles`/`panels` and the ADR 1029 `bento` and
+      // `marquee`, whose difference from cards is visual only: a list of titled
+      // items either way (a bento tile's `wide` is presentation). Item `eyebrow`,
       // `badge` and `list` rows are text and render; `progress`, `future` and
       // `art` are presentation and add nothing.
       const lede = str(d.lede);
       const items = cols
         .map((c) => {
-          const cc = c as { eyebrow?: unknown; badge?: unknown; items?: unknown };
+          const cc = c as { eyebrow?: unknown; badge?: unknown; gauge?: unknown; items?: unknown; imageToken?: unknown; alt?: unknown; unit?: unknown; ctaLabel?: unknown; ctaUrl?: unknown; count?: unknown; countLabel?: unknown };
           const title = str(c.title);
+          // ADR 1069 D1 — a plan's price unit reads with its price; its button is a link.
+          const unitHtml = str(cc.unit) ? ` <small>${escapeHtml(str(cc.unit))}</small>` : '';
+          const ctaA = anchorHtml(str(cc.ctaLabel), str(cc.ctaUrl));
+          const ctaP = ctaA ? `<p>${ctaA}</p>` : '';
+          // ADR 1070 D2 — a labelled headline number reads as its words ("130 features, already built").
+          const statP = typeof cc.count === 'number' && str(cc.countLabel) ? `<p>${cc.count} ${escapeHtml(str(cc.countLabel))}</p>` : '';
           const eyebrowP = str(cc.eyebrow) ? `<p>${escapeHtml(str(cc.eyebrow))}</p>` : '';
-          const badgeP = str(cc.badge) ? `<p>${escapeHtml(str(cc.badge))}</p>` : '';
+          // ADR 1064 P3d — a gauge's words are text a visitor reads, like a badge.
+          const badgeP = [str(cc.badge), str(cc.gauge)].filter(Boolean).map((x) => `<p>${escapeHtml(x)}</p>`).join('');
           const text = `<p>${inlineMarkdownHtml(str(c.text))}</p>`;
           const rows = (Array.isArray(cc.items) ? (cc.items as unknown[]) : [])
             .map((it) => it as { label?: unknown; meta?: unknown })
             .filter((it) => str(it.label).length > 0)
-            .map((it) => `<li>${escapeHtml(str(it.label))}${str(it.meta) ? ` <small>${escapeHtml(str(it.meta))}</small>` : ''}</li>`);
+            .map((it) => `<li>${escapeHtml(str(it.label))}${str(it.meta) ? ` <small>${escapeHtml(str(it.meta))}</small>` : ''}${str((it as { aside?: unknown }).aside) ? ` <small>${escapeHtml(str((it as { aside?: unknown }).aside))}</small>` : ''}</li>`); // ADR 1071 D3 — + aside
           const rowsUl = rows.length > 0 ? `<ul>${rows.join('')}</ul>` : '';
+          // ADR 1037 — an item's picture, with its alt text (the frame is presentation).
+          const imgToken = str(cc.imageToken);
+          const imgTag = imgToken
+            ? `<img src="${escapeHtml(assetUrl(opts.assetBase, imgToken))}" alt="${escapeHtml(str(cc.alt))}" loading="lazy">`
+            : '';
           const href = str(c.href);
-          const inner = `${eyebrowP}${title ? `<h3>${escapeHtml(title)}</h3>` : ''}${badgeP}${text}${rowsUl}`;
+          // ADR 1047 — a feature card: the title keeps its heading emphasis, then
+          // the callout, the pills (each read with its legend word) and the
+          // folded disclosure written out in full. Other layouts are unchanged.
+          if (layout === 'features') {
+            const fx = c as { callout?: unknown; tags?: unknown; more?: unknown };
+            const co = fx.callout && typeof fx.callout === 'object' ? (fx.callout as Record<string, unknown>) : {};
+            const calloutP = str(co.text) ? `<p>${str(co.label) ? `<strong>${escapeHtml(str(co.label))}</strong> ` : ''}${escapeHtml(str(co.text))}</p>` : '';
+            const legend = d.tagLegend && typeof d.tagLegend === 'object' ? (d.tagLegend as Record<string, unknown>) : {};
+            const pills = (Array.isArray(fx.tags) ? (fx.tags as unknown[]) : [])
+              .map((tg) => (tg && typeof tg === 'object' ? (tg as Record<string, unknown>) : {}))
+              .filter((tg) => str(tg.label))
+              .map((tg) => { const w = str(tg.state) === 'now' ? str(legend.now) : str(tg.state) === 'soon' ? str(legend.soon) : ''; return `<li>${escapeHtml(str(tg.label))}${w ? ` — ${escapeHtml(w)}` : ''}</li>`; });
+            const pillsUl = pills.length > 0 ? `<ul>${pills.join('')}</ul>` : '';
+            const mo = fx.more && typeof fx.more === 'object' ? (fx.more as Record<string, unknown>) : {};
+            const moreP = str(mo.text) ? `${str(mo.label) ? `<h4>${escapeHtml(str(mo.label))}</h4>` : ''}${paragraphsHtml(str(mo.text))}` : '';
+            return `<li>${eyebrowP}${title ? `<h3>${headingEmphasisHtml(title)}</h3>` : ''}${imgTag}${text}${calloutP}${pillsUl}${moreP}</li>`;
+          }
+          const inner = `${eyebrowP}${title ? `<h3>${escapeHtml(title)}${unitHtml}</h3>` : ''}${badgeP}${text}${statP}${rowsUl}${imgTag}${ctaP}`;
           if (href && isFragment(href)) return `<li><a href="${escapeHtml(href.trim())}">${inner}</a></li>`;
           if (href && (isInternal(href) || isSafeHref(href))) {
             return `<li><a href="${escapeHtml(href)}"${isSafeHref(href) ? ' rel="noopener noreferrer"' : ''}>${inner}</a></li>`;
@@ -308,7 +490,29 @@ export function sectionHtml(section: Section, opts: SectionHtmlOptions): string 
           return `<li>${inner}</li>`;
         })
         .join('\n');
-      return `<section>\n${head()}${lede ? `<p>${inlineMarkdownHtml(lede)}</p>\n` : ''}<ul>\n${items}\n</ul>\n${colNote}</section>`;
+      // ADR 1032 — a `rows` section's try-it switches, as the plain list they
+      // start as (the switches themselves only work in the browser).
+      const tg = d.toggles && typeof d.toggles === 'object' ? (d.toggles as { title?: unknown; items?: unknown }) : null;
+      const tgItems = tg && Array.isArray(tg.items)
+        ? (tg.items as unknown[]).map((it) => it as { label?: unknown; on?: unknown }).filter((it) => str(it.label).length > 0)
+        : [];
+      const toggles = tgItems.length > 0
+        ? `${str(tg?.title) ? `<p>${escapeHtml(str(tg?.title))}</p>\n` : ''}<ul>\n${tgItems.map((it) => `<li>${escapeHtml(str(it.label))}</li>`).join('\n')}\n</ul>\n`
+        : '';
+      // ADR 1068 D2 — a rows section's workflow diagram, as the ordered steps it draws.
+      const dg = d.diagram && typeof d.diagram === 'object' ? (d.diagram as { nodes?: unknown; caption?: unknown }) : null;
+      const dgNodes = dg && Array.isArray(dg.nodes) ? (dg.nodes as unknown[]).map((n) => n as { label?: unknown; text?: unknown }).filter((n) => str(n.label).length > 0) : [];
+      const diagram = dgNodes.length > 0
+        ? `<figure>\n<ol>\n${dgNodes.map((n) => `<li><strong>${escapeHtml(str(n.label))}</strong>${str(n.text) ? ` ${escapeHtml(str(n.text))}` : ''}</li>`).join('\n')}\n</ol>\n${str(dg?.caption) ? `<figcaption>${escapeHtml(str(dg?.caption))}</figcaption>\n` : ''}</figure>\n`
+        : '';
+      // ADR 1071 D1 — a feature head: the section's headline number as its words,
+      // then its picture with alt text (the frame is presentation).
+      const st = d.stat && typeof d.stat === 'object' ? (d.stat as { value?: unknown; label?: unknown }) : null;
+      const statHtml = st && typeof st.value === 'number' && str(st.label) ? `<p>${st.value} ${escapeHtml(str(st.label))}</p>\n` : '';
+      const headImg = statHtml && str(d.imageToken)
+        ? `<img src="${escapeHtml(assetUrl(opts.assetBase, str(d.imageToken)))}" alt="${escapeHtml(str(d.alt))}" loading="lazy">\n`
+        : '';
+      return `<section>\n${head()}${statHtml}${lede ? `<p>${inlineMarkdownHtml(lede)}</p>\n` : ''}${headImg}${diagram}${toggles}<ul>\n${items}\n</ul>\n${colNote}</section>`;
     }
 
     // Deliberate degradation: the SPA resolves product references live via the
@@ -323,7 +527,8 @@ export function sectionHtml(section: Section, opts: SectionHtmlOptions): string 
 
     // Interactive fill is JS-only; a label stub keeps the section noscript-safe.
     case 'form':
-      return `<section>\n${head()}</section>`;
+      // ADR 1068 D3 — the card's note under the form is visible text.
+      return `<section>\n${head()}${str(d.note) ? `<p>${escapeHtml(str(d.note))}</p>\n` : ''}</section>`;
 
     // ADR 0407 D3 — entity-backed sections resolve SERVER-SIDE for crawlers via
     // the core content-section registry (opts.resolvedSections, populated by the
@@ -423,6 +628,10 @@ export function sectionHtml(section: Section, opts: SectionHtmlOptions): string 
     // simply not linked. The VideoObject JSON-LD rides jsonLdBlocks.
     case 'video': {
       const https = (v: unknown): string => (/^https:\/\//i.test(str(v).trim()) ? str(v).trim() : '');
+      // ADR 1032 — the second film (when authored) renders the same way, then
+      // the footnote under the pair.
+      const film2 = d.film2 && typeof d.film2 === 'object' ? filmFigureHtml(d.film2 as Record<string, unknown>, https) : '';
+      const videoNote = str(d.note) ? `<p><small>${escapeHtml(str(d.note))}</small></p>\n` : '';
       const src = https(d.src);
       const poster = https(d.poster);
       const captions = https(d.captions);
@@ -438,11 +647,13 @@ export function sectionHtml(section: Section, opts: SectionHtmlOptions): string 
       ].filter(Boolean);
       const cap = [
         title ? `<p><strong>${escapeHtml(title)}</strong></p>` : '',
+        // ADR 1068 D1 — the visible caption the page shows under the film.
+        str(d.caption) ? `<p>${escapeHtml(str(d.caption))}</p>` : '',
         description ? `<p>${escapeHtml(description)}</p>` : '',
         links.length > 0 ? `<p>${links.join(' ')}</p>` : '',
       ].filter(Boolean).join('\n');
       const img = poster ? `<img src="${escapeHtml(poster)}" alt="${escapeHtml(title)}" width="1920" height="1080">\n` : '';
-      return `<section>\n${head()}${lede ? `<p>${inlineMarkdownHtml(lede)}</p>\n` : ''}<figure>\n${img}${cap ? `<figcaption>\n${cap}\n</figcaption>\n` : ''}</figure>\n</section>`;
+      return `<section>\n${head()}${lede ? `<p>${inlineMarkdownHtml(lede)}</p>\n` : ''}<figure>\n${img}${cap ? `<figcaption>\n${cap}\n</figcaption>\n` : ''}</figure>\n${film2}${videoNote}</section>`;
     }
 
     // ADR 0748 — a protocol-authored `fields` section: flat named scalars, every
@@ -456,8 +667,9 @@ export function sectionHtml(section: Section, opts: SectionHtmlOptions): string 
     }
 
     default:
-      // Unknown/future type: signal page-level fallback to the SPA shell.
-      return null;
+      // ADR 1080 — the design section types; any other unknown/future type
+      // signals page-level fallback to the SPA shell.
+      return designSectionHtml(section.type, d, head(), escapeHtml);
   }
 }
 
@@ -465,12 +677,28 @@ export function sectionHtml(section: Section, opts: SectionHtmlOptions): string 
  * All sections → the prerender `<body>` inner HTML, or null when ANY section
  * is unrenderable (the caller then serves the SPA shell — honest-off).
  */
+/** ADR 1030 D1 — the stable hooks the designed-pages stylesheet keys on, stamped
+ *  on a section's root element: its type, and when set its layout, visual and
+ *  motion. Closed enum values from the validator, escaped anyway. The markup is
+ *  otherwise untouched, so the semantic renderer stays the one source of markup. */
+const HOOK_KEYS = [['layout', 'data-owp-layout'], ['visual', 'data-owp-visual'], ['motion', 'data-owp-motion']] as const;
+function withSectionHooks(html: string, section: Section): string {
+  const d = section.data as Record<string, unknown>;
+  const attrs = [`data-owp-section="${escapeHtml(section.type)}"`];
+  for (const [key, name] of HOOK_KEYS) {
+    if (key === 'motion' && section.type === 'fields') continue; // an author's own field there
+    const v = str(d[key]);
+    if (v && /^[a-z][a-z-]{0,23}$/.test(v)) attrs.push(`${name}="${escapeHtml(v)}"`);
+  }
+  return html.replace(/^<(section|header|figure)(?=[\s>])/, (_m, tag: string) => `<${tag} ${attrs.join(' ')}`);
+}
+
 export function pageBodyHtml(sections: Section[], opts: SectionHtmlOptions): string | null {
   const parts: string[] = [];
   for (const s of sections) {
     const html = sectionHtml(s, opts);
     if (html === null) return null;
-    parts.push(html);
+    parts.push(withSectionHooks(html, s));
   }
   return `<main>\n${parts.join('\n')}\n</main>`;
 }
