@@ -36,7 +36,7 @@ import { LeaseLostError } from './runEffectContext.js';
 import { scrubSecretShaped } from './redactSecrets.js';
 import { evaluateToolPermissionSet, agentToolPermissionsEnabled, type ToolPermissions } from './agentToolPermissions.js';
 import { resolveAgentToolPermissionSet } from './agentProfileService.js';
-import { effectiveToolAllowlist, resolveAgentToolAllowlistOverride } from './agentToolAllowlistService.js';
+import { agentOffersToolBaseline, effectiveToolAllowlist, resolveAgentToolAllowlistOverride } from './agentToolAllowlistService.js';
 import { applyToolResultTransform, findCompactionMarkerPath, compactionMarkerRefusal, COMPACTION_MARKER_IN_INPUT } from './toolResultTransform.js';
 import { toModelToolResult } from './toModelToolResult.js';
 import { ASK_USER_TOOL, askUserContract, clarificationCorrelationId, liftClarification, clarificationPromptBlock, type LiftedQuestion } from './clarificationLift.js';
@@ -956,7 +956,9 @@ export async function runAgentDispatchLive(
   // override ⇒ the manifest allowlist.
   const overrideAllow = deps.tenantId ? await resolveAgentToolAllowlistOverride(deps.tenantId, agent.agentId) : undefined;
   // ADR 0315 — override (full-replace) ?? manifest ∪ default-on baseline.
-  const toolSurface = filterTools(req.availableTools ?? [], effectiveToolAllowlist(agent.toolAllowlist, overrideAllow));
+  // ADR 1055 D4 — a `text-only` profile turns the baseline off for this agent.
+  const offersBaseline = deps.tenantId ? await agentOffersToolBaseline(deps.tenantId, agent) : true;
+  const toolSurface = filterTools(req.availableTools ?? [], effectiveToolAllowlist(agent.toolAllowlist, overrideAllow, offersBaseline));
   const threshold = typeof req.confidenceThreshold === 'number'
     ? req.confidenceThreshold
     : (agent.confidence?.defaultThreshold ?? 0.7);

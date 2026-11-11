@@ -17,6 +17,7 @@
  */
 import { createLogger } from '../../observability/logger.js';
 import type { Storage } from '../../storage/storage.js';
+import { OpenwopError } from '../../types.js';
 import type { HostAdapterSuite } from '../../host/index.js';
 import { CONVERSATION_WORKFLOW_ID } from '../../host/conversation.js';
 import { ensureConversationMeta, setConversationRun, agentRef } from '../../host/conversationStore.js';
@@ -33,7 +34,7 @@ import { resolveLaunchWorkflow } from '../../host/resolveLaunchDefinition.js';
 import type { ChannelToolScope } from '../../host/conversationToolLoop.js';
 import {
   conversationIdOf, deletePendingReply, exchangeKeyOf, getApprovedSender, getChannelSettings, getPendingReply,
-  getThread, laneKeyOf, markChannelConversation, putPendingReply, putThread, recordPendingSender, recordSenderInThread, threadKeyOf, type ChannelSettings, type ChannelThread,
+  createThreadOnce, getThread, laneKeyOf, markChannelConversation, putPendingReply, recordPendingSender, recordSenderInThread, recordThreadRun, threadKeyOf, type ChannelSettings, type ChannelThread,
 } from './stores.js';
 
 const log = createLogger('features.channel-ingress');
@@ -49,6 +50,11 @@ const GATE_WAIT_MS = 15_000;
 const GATE_POLL_MS = 40;
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'canceled', 'succeeded']);
 
+/** CHAN-F3 — waits between retries of a channel turn whose run or exchange failed. */
+let turnRetryDelaysMs: readonly number[] = [2_000, 8_000];
+/** Test-only. */
+export function __setTurnRetryDelaysMs(ms: readonly number[]): void { turnRetryDelaysMs = ms; }
+
 const PROVIDER_LABEL: Record<string, string> = {
   telegram: 'Telegram', discord: 'Discord', slack: 'Slack', 'whatsapp-twilio': 'WhatsApp', 'whatsapp-cloud': 'WhatsApp',
 };
@@ -56,15 +62,29 @@ const PROVIDER_LABEL: Record<string, string> = {
 /** Security review M6 — recording a stranger as pending has its OWN budget, never
  *  the connection's, and never answers 429: over it, the row is simply not written. */
 const PENDING_RECORDS_PER_MIN = 30;
+/** CHAN-F3 (N3) — the most lanes the map tracks. */
+export const PENDING_RECORD_LANES_MAX = 10_000;
 const pendingRecordTimes = new Map<string, number[]>();
-function pendingRecordAllowed(laneKey: string, now = Date.now()): boolean {
+export function pendingRecordAllowed(laneKey: string, now = Date.now()): boolean {
   const recent = (pendingRecordTimes.get(laneKey) ?? []).filter((t) => t > now - 60_000);
+  // Re-insert so the Map's insertion order is least-recently-used first.
+  pendingRecordTimes.delete(laneKey);
   if (recent.length >= PENDING_RECORDS_PER_MIN) { pendingRecordTimes.set(laneKey, recent); return false; }
   recent.push(now);
-  if (pendingRecordTimes.size > 10_000) pendingRecordTimes.clear();
   pendingRecordTimes.set(laneKey, recent);
+  // CHAN-F3 (N3) — over the bound, evict the least-recently-used lanes ONE at a time.
+  // This used to `clear()` the whole map, lifting EVERY lane's limit at once, including
+  // a lane being flooded right then. Only an idle lane is evicted now, so a lane at its
+  // limit stays limited.
+  while (pendingRecordTimes.size > PENDING_RECORD_LANES_MAX) {
+    const oldest = pendingRecordTimes.keys().next().value;
+    if (oldest === undefined) break;
+    pendingRecordTimes.delete(oldest);
+  }
   return true;
 }
+/** Test-only. */
+export function __resetPendingRecordTimes(): void { pendingRecordTimes.clear(); }
 
 type Approval =
   | { ok: true; msg: ChannelMessage; lane: ChannelLane; laneKey: string; settings: ChannelSettings | null; ownerUserId: string; ownerPersonalTenant?: string; self: boolean }
@@ -264,11 +284,37 @@ async function ingest(
   // super-admin override, so the narrow list always matches the agent that answers.
   const toolScope: ChannelToolScope | undefined = a.self ? undefined : { mode: 'narrow' };
   onThreadChain(thread.threadKey, async () => {
+    // CHAN-F3 (M4 at queued start) — presence was checked when the message arrived, but
+    // this turn may have waited behind others on the thread; an owner removed meanwhile
+    // gets no turn (and so no reply through their connection).
+    if (!(await ownerPresent(a.tenantId, a.ownerUserId, a.ownerPersonalTenant))) {
+      log.info('channel turn dropped', { reason: 'owner_not_member_at_start' });
+      await deletePendingReply(exchangeKey);
+      return;
+    }
+    // CHAN-F3 (detached turn lost) — the provider delivery was already acknowledged and
+    // deduped, so a failure here used to drop the message for good. A failed open or a
+    // failed exchange is retried; the exchange key makes a retry that already landed
+    // a no-op (`committed`), and `in_progress` means another instance holds this very
+    // message, so this one stops.
+    for (let attempt = 0; ; attempt++) {
+      const outcome = await runChannelTurn();
+      if (outcome === 'done' || outcome === 'held_elsewhere') return;
+      if (attempt >= turnRetryDelaysMs.length) {
+        log.warn('channel turn unanswered after retries', { laneKey, conversationId: thread.conversationId, attempts: attempt + 1, last: outcome });
+        await deletePendingReply(exchangeKey);
+        return;
+      }
+      await new Promise((r) => setTimeout(r, turnRetryDelaysMs[attempt]));
+    }
+  });
+
+  async function runChannelTurn(): Promise<'done' | 'held_elsewhere' | 'no_run' | 'failed'> {
     try {
       const runId = await ensureConversationRun(deps, thread, a.settings);
-      if (!runId) return;
+      if (!runId) return 'no_run';
       const interrupt = (await deps.storage.listOpenInterrupts(runId)).find((i) => i.kind === 'conversation');
-      if (!interrupt) return;
+      if (!interrupt) return 'no_run';
       await handleConversationResolve(
         deps.storage,
         interrupt,
@@ -280,10 +326,13 @@ async function ingest(
           ...(toolScope ? { toolScope } : {}),
         },
       );
+      return 'done';
     } catch (err) {
+      if (err instanceof OpenwopError && err.code === 'conflict' && /already in progress/.test(err.message)) return 'held_elsewhere';
       log.warn('channel exchange failed', { laneKey, conversationId: thread.conversationId, error: err instanceof Error ? err.message : String(err) });
+      return 'failed';
     }
-  });
+  }
   return { status: 'accepted', conversationId: thread.conversationId };
 }
 
@@ -299,6 +348,8 @@ async function ensureThread(
   await recordSenderInThread(a.tenantId, a.laneKey, a.msg.senderId, threadKey);
   const existing = await getThread(threadKey);
   if (existing && existing.tenantId === a.tenantId && existing.ownerUserId === a.ownerUserId) return existing;
+  // (A row under this key with another tenant or owner cannot be produced by
+  // `threadKeyOf`, which hashes both in; the create below never overwrites it.)
   const now = new Date().toISOString();
   const conversationId = conversationIdOf(threadKey);
   if (!(await deps.storage.getChatSession(a.tenantId, conversationId))) {
@@ -319,8 +370,9 @@ async function ensureThread(
     threadKey, tenantId: a.tenantId, lane: a.lane, chatId: a.msg.chatId, conversationId, ownerUserId: a.ownerUserId,
     isGroup: a.msg.isGroup, scope, createdAt: now, updatedAt: now,
   };
-  await putThread(thread);
-  return thread;
+  // CHAN-F3 — create-if-absent: a racing first message on another instance may have
+  // created it (and recorded a run on it) since the read above.
+  return createThreadOnce(thread);
 }
 
 /** The thread's live conversation run, or a new one opened as the owner. */
@@ -370,8 +422,10 @@ async function ensureConversationRun(deps: IngressDeps, captured: ChannelThread,
   while (Date.now() < deadline) {
     if ((await deps.storage.listOpenInterrupts(run.runId)).some((i) => i.kind === 'conversation')) {
       await setConversationRun(thread.tenantId, thread.conversationId, run.runId);
-      const latest = (await getThread(thread.threadKey)) ?? thread;
-      await putThread({ ...latest, runId: run.runId, runIds: [...(latest.runIds ?? []), run.runId], updatedAt: new Date().toISOString() });
+      // CHAN-F3 — compare-and-swap, so a run opened concurrently elsewhere is not lost.
+      if (!(await recordThreadRun(thread.threadKey, run.runId))) {
+        log.warn('conversation run not recorded on its thread', { conversationId: thread.conversationId, runId: run.runId });
+      }
       return run.runId;
     }
     const current = await deps.storage.getRun(run.runId);

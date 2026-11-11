@@ -6,7 +6,9 @@
  * first-party glob rewritten, a non-glob module or an adopter module touched, an
  * adopter `@import` kept (or a first-party one dropped), the plugin active with the
  * flag off, the plugin running under a NAMED distribution (a shipped build), and
- * a flag value other than "1" accepted.
+ * a flag value other than "1" accepted, the plugin's transform handing back the
+ * ORIGINAL code while counting a rewrite, and an untouched module counted as a
+ * rewrite (so a tree whose adopter literals changed shape would pass unrewritten).
  *
  * The end-to-end witness is the real build: in KickTodo at openwop-app 48d891616
  * the default build's entry is 130.2 kB with adopter features, 127.9 kB with this
@@ -89,25 +91,39 @@ describe('hostOnlyPlugin — the guard rails', () => {
     error: (m: string) => { throw new Error(m); },
     getModuleIds: () => ids[Symbol.iterator](),
   });
-  const plugin = (root: string) => hostOnlyPlugin({ env: { [HOST_ONLY_ENV]: '1' }, root })[0] as unknown as {
-    transform: (code: string, id: string) => unknown;
-    generateBundle: (this: Ctx) => void;
+  interface Hooks { transform(code: string, id: string): unknown; generateBundle(this: Ctx): void }
+  function isHooks(p: unknown): p is Hooks {
+    return typeof p === 'object' && p !== null
+      && 'transform' in p && typeof p.transform === 'function'
+      && 'generateBundle' in p && typeof p.generateBundle === 'function';
+  }
+  const plugin = (root: string): Hooks => {
+    const [p] = hostOnlyPlugin({ env: { [HOST_ONLY_ENV]: '1' }, root });
+    if (!isHooks(p)) throw new Error('hostOnlyPlugin returned no transform/generateBundle hooks');
+    return p;
   };
+  const ADOPTER_GLOB = "import.meta.glob('/src/adopter/features/*/routes.tsx', { eager: true })";
+  const FIRST_PARTY_GLOB = "import.meta.glob('/src/features/*/routes.tsx')";
 
   it('fails the build when it rewrote nothing in a tree that HAS adopter features', () => {
     const p = plugin(tree(true));
+    // An untouched first-party module is not a rewrite.
+    expect(p.transform(FIRST_PARTY_GLOB, '/r/src/features/registry.ts')).toBeNull();
     expect(() => p.generateBundle.call(ctx(['/r/src/main.tsx']))).toThrow(/rewrote nothing/);
   });
 
   it('fails the build when an adopter module still reached the bundle', () => {
     const p = plugin(tree(true));
-    p.transform("import.meta.glob('/src/adopter/features/*/routes.tsx', { eager: true })", '/r/src/features/adopterFeatures.ts');
+    expect(p.transform(ADOPTER_GLOB, '/r/src/features/adopterFeatures.ts'))
+      .toEqual({ code: "import.meta.glob('/src/.host-only-build-no-adopter/features/*/routes.tsx', { eager: true })", map: null });
     expect(() => p.generateBundle.call(ctx(['/r/src/main.tsx', '/r/src/adopter/features/k/routes.tsx']))).toThrow(/still reached the bundle/);
   });
 
   it('passes a clean host-only bundle, and a tree with no adopter features at all', () => {
     const p = plugin(tree(true));
-    p.transform("import.meta.glob('/src/adopter/features/*/routes.tsx', { eager: true })", '/r/src/features/adopterFeatures.ts');
+    expect(p.transform(FIRST_PARTY_GLOB, '/r/src/features/registry.ts')).toBeNull();
+    expect(p.transform(ADOPTER_GLOB, '/r/src/features/adopterFeatures.ts'))
+      .toEqual({ code: "import.meta.glob('/src/.host-only-build-no-adopter/features/*/routes.tsx', { eager: true })", map: null });
     expect(() => p.generateBundle.call(ctx(['/r/src/main.tsx']))).not.toThrow();
     expect(() => plugin(tree(false)).generateBundle.call(ctx(['/r/src/main.tsx']))).not.toThrow();
   });

@@ -7,6 +7,7 @@
  * renderer, and tests all share one coercion + one outline projection.
  */
 import type { JSONContent } from '@tiptap/core';
+import { DOCUMENT_INLINE_TYPES, DOCUMENT_MARK_TYPES, DOCUMENT_NODE_TYPES, DOCUMENT_TEXTBLOCK_TYPES, isDocumentHrefAllowed } from './documentSchemaNames.js';
 
 export interface DocumentDoc {
   title: string;
@@ -30,6 +31,85 @@ export function coerceDocument(state: Record<string, unknown>): DocumentDoc {
     title: typeof state.title === 'string' ? state.title : '',
     content,
   };
+}
+
+const NODE_TYPES = new Set(DOCUMENT_NODE_TYPES);
+const MARK_TYPES = new Set(DOCUMENT_MARK_TYPES);
+const INLINE_TYPES = new Set(DOCUMENT_INLINE_TYPES);
+const TEXTBLOCK_TYPES = new Set(DOCUMENT_TEXTBLOCK_TYPES);
+
+/** What {@link repairDocumentContent} removed, counted by type. */
+export interface DocumentRepair {
+  content: JSONContent;
+  /** `0` when nothing was removed. */
+  droppedCount: number;
+  dropped: Record<string, number>;
+}
+
+/**
+ * ADR 1055 D2 — drop what the editor cannot open, keep everything else.
+ *
+ * TipTap opens a WHOLE document as blank when any node or mark in it is outside
+ * the schema, or when a text node is empty. A stored document can still hold
+ * one (written before the server validator closed, or after a type is removed),
+ * so the editor and the renderer pass content through this first: an unknown
+ * node goes with its subtree, an unknown or malformed mark goes off its text
+ * node, an empty text node goes, and so does a link whose href the editor
+ * refuses. Nesting is repaired too: a `doc` below the root goes (it has no DOM
+ * form and would crash the view), a block inside a textblock goes, and text
+ * sitting directly in a block container is wrapped in a paragraph. Everything else comes back unchanged (as a copy). Pure, and bounded
+ * by the document's own size.
+ */
+export function repairDocumentContent(content: JSONContent): DocumentRepair {
+  const dropped: Record<string, number> = {};
+  let droppedCount = 0;
+  const drop = (what: string): void => { dropped[what] = (dropped[what] ?? 0) + 1; droppedCount += 1; };
+  const markOk = (m: unknown): boolean => {
+    if (!isObj(m) || typeof m.type !== 'string') { drop('mark'); return false; }
+    if (!MARK_TYPES.has(m.type)) { drop(m.type); return false; }
+    if (m.type === 'link') {
+      const href = isObj(m.attrs) ? m.attrs.href : undefined;
+      if (typeof href !== 'string' || !isDocumentHrefAllowed(href)) { drop('link'); return false; }
+    }
+    return true;
+  };
+  const walk = (node: JSONContent, parentType: string | null): JSONContent | null => {
+    if (!isObj(node) || typeof node.type !== 'string') { drop('node'); return null; }
+    if (!NODE_TYPES.has(node.type)) { drop(node.type); return null; }
+    if (parentType !== null && node.type === 'doc') { drop('doc'); return null; }
+    if (parentType !== null && TEXTBLOCK_TYPES.has(parentType) && !INLINE_TYPES.has(node.type)) { drop(node.type); return null; }
+    if (node.type === 'text' && (typeof node.text !== 'string' || node.text.length === 0)) { drop('empty text'); return null; }
+    const out: JSONContent = { ...node };
+    if (Array.isArray(node.marks)) {
+      const marks = node.marks.filter(markOk);
+      if (marks.length > 0) out.marks = marks; else delete out.marks;
+    } else if (node.marks !== undefined) { drop('mark'); delete out.marks; }
+    if (Array.isArray(node.content)) {
+      const kids = node.content.map((c) => walk(c, node.type ?? null)).filter((c): c is JSONContent => c !== null);
+      out.content = TEXTBLOCK_TYPES.has(node.type) ? kids : wrapStrayInline(kids);
+    } else if (node.content !== undefined) { drop('content'); delete out.content; }
+    return out;
+  };
+  const root = isObj(content) && content.type === 'doc' ? walk(content, null) : null;
+  if (!root || !root.content || root.content.length === 0) return { content: EMPTY_DOC, dropped, droppedCount };
+  return { content: root, dropped, droppedCount };
+}
+
+/** In a block container, consecutive inline children are gathered into one
+ *  paragraph (text never sits directly in a doc, list item or cell). Nothing is
+ *  lost, so this is not counted as dropped. */
+function wrapStrayInline(kids: JSONContent[]): JSONContent[] {
+  const out: JSONContent[] = [];
+  let run: JSONContent[] = [];
+  const flush = (): void => {
+    if (run.length > 0) { out.push({ type: 'paragraph', content: run }); run = []; }
+  };
+  for (const k of kids) {
+    if (typeof k.type === 'string' && INLINE_TYPES.has(k.type)) run.push(k);
+    else { flush(); out.push(k); }
+  }
+  flush();
+  return out;
 }
 
 /** The plain text of a node subtree (concatenated leaf text). Bounded by the

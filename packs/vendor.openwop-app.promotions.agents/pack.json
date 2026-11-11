@@ -1,6 +1,6 @@
 {
   "name": "vendor.openwop-app.promotions.agents",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "kind": "node",
   "description": "Promotions feature agent pack — a Promotions Manager persona whose tools are registered chat tools over the promotions service (the same fns the REST routes call). Reviews promotions (active + proposed), previews cart discounts, and DRAFTS promotions — which land PROPOSED (inactive) for human activation (money-moving). There is no activate tool — confirmation rides the human gate. Tool-allowlisted to the promotions surface only. Driven through the ONE chat.",
   "author": "OpenWOP App",

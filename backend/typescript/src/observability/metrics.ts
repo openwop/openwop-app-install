@@ -375,6 +375,17 @@ export const METRIC_CATALOG: readonly MetricSpec[] = [
     // identifiers. Those belong in the audit/log path, not an unbounded metric.
     labels: ['mode', 'outcome'],
   },
+  {
+    name: 'openwop.tutorials.stale_seed_served',
+    description:
+      'Tutorial reads that served the shipped seed in place of an un-customized workspace copy ' +
+      'at an older seedVersion (grade-data TUT-STALE-1, grade-code TUT-OBS-1). Non-zero means ' +
+      'workspaces still hold stale copies; PROBE-1038-4 counts which ones.',
+    kind: 'counter',
+    // `reader` is list | get. No tutorial id and no tenant: which workspaces are
+    // stale is a read-only DB question, not metric cardinality.
+    labels: ['reader'],
+  },
 ];
 
 const SPECS = new Map(METRIC_CATALOG.map((m) => [m.name, m]));

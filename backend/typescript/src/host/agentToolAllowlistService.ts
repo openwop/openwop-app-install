@@ -25,6 +25,11 @@
 
 import { agentStorageId } from '../executor/agentIdAliases.js';
 import { DurableCollection } from './hostExtPersistence.js';
+import { getAgentProfile } from './agentProfileService.js';
+import { TEXT_ONLY_CAPABILITY } from './agentCapabilityIds.js';
+import { createLogger } from '../observability/logger.js';
+
+const log = createLogger('host.agentToolAllowlist');
 
 export interface AgentToolAllowlistOverride {
   /** `${tenantId}:${agentId}` — the DurableCollection key (tenant-prefixed so a
@@ -89,15 +94,49 @@ export const DEFAULT_ON_AGENT_TOOL_IDS: readonly string[] = [
   'openwop:walkthroughs.register-draft',
 ];
 
+/* ADR 1055 D4 (a correction to ADR 0315) — the core capability that turns the
+ * baseline OFF for one agent. An agent whose whole contract is "reply with text,
+ * write nothing" cannot be built otherwise: an empty manifest allowlist still
+ * unions in the baseline, which includes `documents.draft`. A manifest field
+ * cannot say this (`agent-manifest.schema.json` is closed, so it would be a wire
+ * change), so it is HOST data: `text-only`, activated by the agent's own pack
+ * (`x-openwop-app.agentCapabilities`) or on its tenant profile, like every
+ * capability. Nothing here names an agent. */
+export { TEXT_ONLY_CAPABILITY, PACK_DECLARABLE_AGENT_CAPABILITIES } from './agentCapabilityIds.js';
+
+
+
+/** Does this agent get the default-on baseline in this tenant? `false` when
+ *  `text-only` is activated, either by the agent's own pack
+ *  (`agent.hostCapabilities`, every tenant, no write needed) or on its tenant
+ *  profile (keyed by the dispatchable id: the rosterId for a standing agent,
+ *  else the definition-level agentId). A profile read error is logged and
+ *  fails OPEN to the baseline: every agent's turn reads this, and a storage
+ *  hiccup must not strip every agent's tools. */
+export async function agentOffersToolBaseline(tenantId: string, agent: { agentId: string; hostCapabilities?: readonly string[] }): Promise<boolean> {
+  if ((agent.hostCapabilities ?? []).includes(TEXT_ONLY_CAPABILITY)) return false;
+  try {
+    const profile = await getAgentProfile(tenantId, agent.agentId);
+    return !(profile?.capabilities ?? []).includes(TEXT_ONLY_CAPABILITY);
+  } catch (err) {
+    log.warn('agent_capability_read_failed_offering_baseline', { tenantId, agentId: agent.agentId, err: err instanceof Error ? err.message : String(err) });
+    return true;
+  }
+}
+
 /** ADR 0315 — the ONE offering resolver every model-offering surface uses:
  *  an ADR 0104 override stays authoritative (FULL-REPLACE — omitting a
  *  baseline tool is the operator's revoke path); otherwise the manifest
- *  allowlist unioned with the default-on baseline. */
+ *  allowlist, unioned with the default-on baseline unless the agent's profile
+ *  turned it off (`offersBaseline`, from {@link agentOffersToolBaseline}). The
+ *  flag is REQUIRED so no caller can forget to ask. */
 export function effectiveToolAllowlist(
   manifestAllowlist: readonly string[] | undefined,
   override: readonly string[] | undefined,
+  offersBaseline: boolean,
 ): string[] {
   if (override) return [...override];
+  if (!offersBaseline) return [...new Set(manifestAllowlist ?? [])];
   return [...new Set([...(manifestAllowlist ?? []), ...DEFAULT_ON_AGENT_TOOL_IDS])];
 }
 

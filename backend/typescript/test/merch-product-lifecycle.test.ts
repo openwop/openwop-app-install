@@ -44,12 +44,12 @@ describe('merch product-lifecycle consumers (RI-4)', () => {
       actions: [{ kind: 'pin', productId: doomed.productId, position: 2 }, { kind: 'pin', productId: keeper.productId, position: 3 }, { kind: 'bury', predicate: { tags: ['stale'] } }],
     });
 
-    const scopedOnly = await createPromotion({ tenantId: T, orgId: ORG, createdBy: 'test', name: 'Doomed only', type: 'product_discount', reward: { kind: 'percent', value: 10 }, scope: { productIds: [doomed.productId] } });
-    const scopedBoth = await createPromotion({ tenantId: T, orgId: ORG, createdBy: 'test', name: 'Both beans', type: 'product_discount', reward: { kind: 'percent', value: 5 }, scope: { productIds: [doomed.productId, keeper.productId] } });
+    const scopedOnly = await createPromotion({ tenantId: T, orgId: ORG, createdBy: 'test', name: 'Doomed only', type: 'product_discount', reward: { kind: 'percentage', value: 10 }, scope: { productIds: [doomed.productId] } });
+    const scopedBoth = await createPromotion({ tenantId: T, orgId: ORG, createdBy: 'test', name: 'Both beans', type: 'product_discount', reward: { kind: 'percentage', value: 5 }, scope: { productIds: [doomed.productId, keeper.productId] } });
     // The header's "category/all scopes survive": a promotion whose product ids
     // empty but which ALSO scopes a category, or everything, still has a scope.
-    const scopedCategory = await createPromotion({ tenantId: T, orgId: ORG, createdBy: 'test', name: 'Doomed + beans', type: 'product_discount', reward: { kind: 'percent', value: 7 }, scope: { productIds: [doomed.productId], categories: ['beans'] } });
-    const scopedAll = await createPromotion({ tenantId: T, orgId: ORG, createdBy: 'test', name: 'Doomed + all', type: 'product_discount', reward: { kind: 'percent', value: 3 }, scope: { productIds: [doomed.productId], all: true } });
+    const scopedCategory = await createPromotion({ tenantId: T, orgId: ORG, createdBy: 'test', name: 'Doomed + beans', type: 'product_discount', reward: { kind: 'percentage', value: 7 }, scope: { productIds: [doomed.productId], categories: ['beans'] } });
+    const scopedAll = await createPromotion({ tenantId: T, orgId: ORG, createdBy: 'test', name: 'Doomed + all', type: 'product_discount', reward: { kind: 'percentage', value: 3 }, scope: { productIds: [doomed.productId], all: true } });
 
     expect(await deleteProduct(T, ORG, doomed.productId)).toBe(true);
 

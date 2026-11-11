@@ -31,7 +31,7 @@ beforeEach(async () => { await __resetCommerce(); await __resetPromotions(); });
 describe('MERCH-B promotions engine', () => {
   it('applies a cart_threshold promotion through createOrder and snapshots it', async () => {
     const p = await mk('Widget', 100);
-    await createPromotion({ tenantId: T, orgId: ORG, createdBy: 'u', name: '10% over $50', type: 'cart_threshold', reward: { kind: 'percentage', value: 10 }, minSpend: 50 });
+    await createPromotion({ tenantId: T, orgId: ORG, createdBy: 'u', name: '10% over $50', type: 'cart_threshold', reward: { kind: 'percentage', value: 10 }, currency: 'USD', minSpend: 50 });
     const order = await createOrder({ tenantId: T, orgId: ORG, createdBy: 'u', lines: [{ productId: p.productId, quantity: 1 }] });
     expect(order.discount).toBe(10);
     expect(order.total).toBe(90);
@@ -41,7 +41,7 @@ describe('MERCH-B promotions engine', () => {
 
   it('does not fire a cart_threshold below its minSpend', async () => {
     const p = await mk('Cheap', 20);
-    await createPromotion({ tenantId: T, orgId: ORG, createdBy: 'u', name: 'over $50', type: 'cart_threshold', reward: { kind: 'percentage', value: 10 }, minSpend: 50 });
+    await createPromotion({ tenantId: T, orgId: ORG, createdBy: 'u', name: 'over $50', type: 'cart_threshold', reward: { kind: 'percentage', value: 10 }, currency: 'USD', minSpend: 50 });
     const order = await createOrder({ tenantId: T, orgId: ORG, createdBy: 'u', lines: [{ productId: p.productId, quantity: 1 }] });
     expect(order.discount).toBe(0);
     expect(order.appliedPromotions).toBeUndefined();
@@ -49,7 +49,7 @@ describe('MERCH-B promotions engine', () => {
 
   it('caps a loss_leader at its budget, derived from prior order usage (leak-free)', async () => {
     const p = await mk('Leader', 100);
-    await createPromotion({ tenantId: T, orgId: ORG, createdBy: 'u', name: 'Loss leader', type: 'loss_leader', reward: { kind: 'percentage', value: 50 }, scope: { all: true }, budget: { maxDiscount: 30 } });
+    await createPromotion({ tenantId: T, orgId: ORG, createdBy: 'u', name: 'Loss leader', type: 'loss_leader', reward: { kind: 'percentage', value: 50 }, currency: 'USD', scope: { all: true }, budget: { maxDiscount: 30 } });
     const o1 = await createOrder({ tenantId: T, orgId: ORG, createdBy: 'u', lines: [{ productId: p.productId, quantity: 1 }] });
     expect(o1.discount).toBe(30); // 50% of 100 = 50, capped to the 30 loss budget
     const o2 = await createOrder({ tenantId: T, orgId: ORG, createdBy: 'u', lines: [{ productId: p.productId, quantity: 1 }] });
@@ -60,7 +60,7 @@ describe('MERCH-B promotions engine', () => {
   it('a non-stackable promotion is exclusive of lower-priority ones', async () => {
     const p = await mk('Widget', 100);
     await createPromotion({ tenantId: T, orgId: ORG, createdBy: 'u', name: 'excl', type: 'product_discount', reward: { kind: 'percentage', value: 20 }, scope: { all: true }, priority: 10, stackable: false });
-    await createPromotion({ tenantId: T, orgId: ORG, createdBy: 'u', name: 'stack', type: 'cart_threshold', reward: { kind: 'fixed', value: 5 }, minSpend: 1, priority: 1 });
+    await createPromotion({ tenantId: T, orgId: ORG, createdBy: 'u', name: 'stack', type: 'cart_threshold', reward: { kind: 'fixed', value: 5 }, currency: 'USD', minSpend: 1, priority: 1 });
     const r = await applyPromotionsUngated({ tenantId: T, orgId: ORG, currency: 'USD', subtotalAfterCoupon: 100, items: [{ productId: p.productId, unitPrice: 100, quantity: 1 }] });
     expect(r.discount).toBe(20); // only the exclusive 20% fires; the +$5 is blocked
     expect(r.appliedPromotions).toHaveLength(1);

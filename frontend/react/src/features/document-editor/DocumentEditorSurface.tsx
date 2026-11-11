@@ -26,9 +26,10 @@ import { BoldIcon, ItalicIcon, CodeIcon, ListIcon, ListOrderedIcon, QuoteIcon, C
 import { useNavigate, useLocation } from 'react-router-dom';
 import { CommentsPanel } from '../comments/CommentsPanel.js';
 import { stageComposerDraft } from '../../chat/composerSeed.js';
-import { stageReturnTarget, takePendingApply } from '../../chat/returnTarget.js';
+import { stageReturnTarget, peekPendingApply, takePendingApply, getReturnTarget, clearReturnTarget } from '../../chat/returnTarget.js';
 import { applyAsSuggestion } from './trackChanges.js';
-import { DOCUMENT_AUTHOR_AGENT } from './documentAgents.js';
+import { DOCUMENT_WRITING_AGENT } from './documentAgents.js';
+import { applyRefusal, plainRewriteText, selectionText } from './aiApply.js';
 import type { JSONContent } from '@tiptap/core';
 import { Placeholder } from '@tiptap/extension-placeholder';
 import { MediaPickerDialog } from '../media/MediaPickerDialog.js';
@@ -45,7 +46,7 @@ import {
   acceptAllChanges, rejectAllChanges, acceptChangeAt, rejectChangeAt,
 } from './trackChanges.js';
 import type { DocumentDoc, A11yIssue } from './documentDoc.js';
-import { EMPTY_DOC, documentA11yIssues } from './documentDoc.js';
+import { EMPTY_DOC, documentA11yIssues, repairDocumentContent } from './documentDoc.js';
 
 /**
  * The editor body. Mounted by the outer `DocumentEditorSurface` ONCE the collab
@@ -53,6 +54,9 @@ import { EMPTY_DOC, documentA11yIssues } from './documentDoc.js';
  * swapped mid-session — ADR 0335 Phase 2). `collab.enabled` ⇒ bound to a shared
  * Y.Doc (CRDT authoritative; no `content` prop, no FE CAS save, no re-seed).
  */
+/** A failed import whose message is already user-facing (localized). */
+class ImportError extends Error {}
+
 function DocumentEditorSurfaceInner({ orgId, canvasId, doc, onDocChange, onAnnounce, collab }: EditorSurfaceProps<DocumentDoc> & { collab: CollabState }): JSX.Element {
   const { t } = useTranslation('document-editor');
   const collabOn = collab.enabled;
@@ -72,8 +76,24 @@ function DocumentEditorSurfaceInner({ orgId, canvasId, doc, onDocChange, onAnnou
   // ADR 0334 6b polish — open a comment thread when its highlighted range is
   // clicked (populated below, once canvasId + the opener are in scope).
   const openThreadRef = useRef<(threadId: string) => void>(() => {});
+  // ADR 1055 D2 — what the editor could not open is dropped BEFORE TipTap sees
+  // it (one bad node would otherwise blank the whole document), and the user is
+  // told. `persisted`: in collab the repaired seed is written by the room.
+  const initialRepairRef = useRef(collabOn ? null : repairDocumentContent(doc.content));
+  // DE87UX-5/6 — an outcome a sighted user must SEE (an Apply refusal, a failed
+  // import, a select-first prompt), not only hear: one dismissible Notice that
+  // also announces itself.
+  const [feedback, setFeedback] = useState<{ text: string; variant: 'warning' | 'error' } | null>(null);
+  const [repairNote, setRepairNote] = useState<{ count: number; persisted: boolean } | null>(() => {
+    const r = initialRepairRef.current;
+    return r && r.droppedCount > 0 ? { count: r.droppedCount, persisted: false } : null;
+  });
 
   const editor = useEditor({
+    // DE87UX-2 — TipTap 3 does not re-render on transactions by default, so the
+    // toolbar's pressed/accept state went stale on every cursor move (and, in a
+    // collab session, on every edit). The toolbar reads editor state each render.
+    shouldRerenderOnTransaction: true,
     extensions: [
       // ADR 0335 — when collab is on, drop prosemirror-history (yUndoPlugin owns
       // per-user undo) and bind to the shared Y.Doc via y-prosemirror.
@@ -82,15 +102,17 @@ function DocumentEditorSurfaceInner({ orgId, canvasId, doc, onDocChange, onAnnou
       // an empty-line placeholder that also teaches the slash menu, and the `/`
       // command menu itself.
       Placeholder.configure({ placeholder: t('placeholder'), emptyEditorClass: 'doc-editor__content--empty' }),
-      SlashCommand.configure({ items: buildSlashItems(t), emptyLabel: t('slashEmpty') }),
+      SlashCommand.configure({ items: buildSlashItems(t), emptyLabel: t('slashEmpty'), label: t('slashMenuLabel'), position: (title, n, total) => t('slashOptionPosition', { title, n, total }) }),
       // Track-changes plugin — editable-only (the read-only renderer never loads
       // it; it only needs the marks, which are in the shared schema).
-      TrackChanges.configure({ author: orgId }),
+      // ADR 1055 D6 — a typed suggestion carries no author (the org id this used
+      // to carry identified nobody); an AI apply is marked 'ai'.
+      TrackChanges.configure({ author: '' }),
       ...(collab.enabled ? [collabExtension(collab.ydoc, collab.awareness)] : []),
     ],
     // When collab is on the CRDT is the source of truth (ySyncPlugin populates the
     // doc); setting `content` would fight it. Solo path is unchanged.
-    ...(collabOn ? {} : { content: doc.content }),
+    ...(collabOn ? {} : { content: initialRepairRef.current?.content ?? EMPTY_DOC }),
     editorProps: {
       attributes: {
         role: 'textbox',
@@ -133,9 +155,13 @@ function DocumentEditorSurfaceInner({ orgId, canvasId, doc, onDocChange, onAnnou
     // Skip the stringify+compare when this render was triggered by our OWN edit
     // (the editor already holds it); only external changes fall through.
     if (selfEditRef.current) { selfEditRef.current = false; return; }
+    // emittedRef keys on the INCOMING (unrepaired) JSON, so a repaired document
+    // does not re-seed in a loop (ADR 1055 D2).
     const incoming = JSON.stringify(doc.content ?? EMPTY_DOC);
     if (incoming !== emittedRef.current) {
-      editor.commands.setContent(doc.content ?? EMPTY_DOC, { emitUpdate: false });
+      const repaired = repairDocumentContent(doc.content ?? EMPTY_DOC);
+      setRepairNote(repaired.droppedCount > 0 ? { count: repaired.droppedCount, persisted: false } : null);
+      editor.commands.setContent(repaired.content, { emitUpdate: false });
       const state = editor.state;
       editor.view.updateState(state.reconfigure({ plugins: [] }).reconfigure({ plugins: state.plugins }));
       emittedRef.current = incoming;
@@ -152,12 +178,24 @@ function DocumentEditorSurfaceInner({ orgId, canvasId, doc, onDocChange, onAnnou
   // surface only APPLIES the seed content through its own engine.
   const seededRef = useRef(false);
   const collabSynced = collab.enabled && collab.synced;
+  // ADR 1055 D5 — the document is "ready" for an AI apply once its content is
+  // the content the user saw: solo at mount; collab after sync AND the seed.
+  const [seedSettled, setSeedSettled] = useState(false);
   useEffect(() => {
     if (!editor || !collabSynced || !canvasId || seededRef.current || !collab.enabled) return;
     seededRef.current = true;
     void (async () => {
-      const seed = await collab.claimSeed();
-      if (seed && docRef.current.content) editor.commands.setContent(docRef.current.content, { emitUpdate: true });
+      try {
+        const seed = await collab.claimSeed();
+        if (seed && docRef.current.content) {
+          const repaired = repairDocumentContent(docRef.current.content);
+          if (repaired.droppedCount > 0) setRepairNote({ count: repaired.droppedCount, persisted: true });
+          editor.commands.setContent(repaired.content, { emitUpdate: true });
+        }
+      } finally {
+        // Only AFTER the seed content is in the editor (DE87CD-10).
+        setSeedSettled(true);
+      }
     })();
   }, [editor, collabSynced, canvasId, collab]);
 
@@ -172,24 +210,39 @@ function DocumentEditorSurfaceInner({ orgId, canvasId, doc, onDocChange, onAnnou
   // ArrowLeft/Right (+Home/End) move focus between buttons. Managed via the DOM
   // (a mix of IconButton + plain buttons) so we don't thread an index through
   // each button. The first button is the initial tab stop.
+  // DE87UX-1 — only ENABLED buttons take part, and the invariant (exactly one
+  // enabled button is the tab stop) is re-asserted after every render: buttons
+  // enable, disable and mount (Accept/Reject) as the document changes, and a
+  // disabled tab stop made the whole toolbar unreachable by Tab.
   const toolbarRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const tb = toolbarRef.current;
     if (!tb) return;
-    tb.querySelectorAll<HTMLButtonElement>('button').forEach((el, i) => { el.tabIndex = i === 0 ? 0 : -1; });
-  }, [editor]);
+    const btns = Array.from(tb.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'));
+    // The stop is the button marked `data-roving-stop` (the one last arrowed
+    // to), never "whichever has tabIndex 0": a newly mounted button (Accept /
+    // Reject) has tabIndex 0 by default and stole the stop (DE87UX-26).
+    const keep = btns.find((el) => el.dataset.rovingStop === '1') ?? btns[0];
+    tb.querySelectorAll<HTMLButtonElement>('button').forEach((el) => {
+      el.tabIndex = el === keep ? 0 : -1;
+      if (el === keep) el.dataset.rovingStop = '1'; else delete el.dataset.rovingStop;
+    });
+  });
   const onToolbarKey = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
     if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(e.key)) return;
     const tb = toolbarRef.current;
     if (!tb) return;
-    const btns = Array.from(tb.querySelectorAll<HTMLButtonElement>('button'));
+    const btns = Array.from(tb.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'));
     const cur = btns.indexOf(document.activeElement as HTMLButtonElement);
     if (cur < 0 || btns.length === 0) return;
     e.preventDefault();
     const next = e.key === 'ArrowRight' ? (cur + 1) % btns.length
       : e.key === 'ArrowLeft' ? (cur - 1 + btns.length) % btns.length
       : e.key === 'Home' ? 0 : btns.length - 1;
-    btns.forEach((el, i) => { el.tabIndex = i === next ? 0 : -1; });
+    btns.forEach((el, i) => {
+      el.tabIndex = i === next ? 0 : -1;
+      if (i === next) el.dataset.rovingStop = '1'; else delete el.dataset.rovingStop;
+    });
     btns[next]?.focus();
   }, []);
 
@@ -232,12 +285,27 @@ function DocumentEditorSurfaceInner({ orgId, canvasId, doc, onDocChange, onAnnou
   // ADR 0334 5b-2 — on return from the chat, consume a one-shot pending-apply and
   // land the chosen AI text over its range AS A TRACKED SUGGESTION (never silently
   // authoritative). One-shot + canvas-matched; a stale range fails closed (no-op).
+  // ADR 1055 D5 — peek first: a pending apply for ANOTHER document is left for
+  // it, and nothing is consumed until this document is ready. Then it applies
+  // only over the text the user asked about, and every outcome is announced.
+  const applyReady = Boolean(editor) && (!collabOn || (collabSynced && seedSettled));
   useEffect(() => {
-    if (!editor || !canvasId) return;
+    if (!editor || !canvasId || !applyReady) return;
+    const peeked = peekPendingApply();
+    if (!peeked || peeked.canvasId !== canvasId) {
+      // Back here WITHOUT applying: a target staged for this document is stale,
+      // and left in place it would offer "Apply" on every later reply from the
+      // agent, including ones about something else (DE87UX-4).
+      if (getReturnTarget()?.canvasId === canvasId) clearReturnTarget();
+      return;
+    }
     const p = takePendingApply();
-    if (!p || p.canvasId !== canvasId) return;
-    if (applyAsSuggestion(editor, p.from, p.to, p.text)) onAnnounce(t('aiApplied'));
-  }, [editor, canvasId, onAnnounce, t]);
+    if (!p) return;
+    const text = plainRewriteText(p.text);
+    const refusal = applyRefusal(editor.state.doc, p.from, p.to, p.expectedText, text);
+    if (refusal === null && applyAsSuggestion(editor, p.from, p.to, text)) { setFeedback(null); onAnnounce(t('aiApplied')); }
+    else setFeedback({ text: t(refusal === 'empty' ? 'aiApplyEmpty' : 'aiApplyChanged'), variant: 'warning' });
+  }, [editor, canvasId, applyReady, onAnnounce, t]);
   useEffect(() => {
     if (!editor || !focusMode) return;
     const root = editor.view.dom as HTMLElement;
@@ -303,13 +371,14 @@ function DocumentEditorSurfaceInner({ orgId, canvasId, doc, onDocChange, onAnnou
   // an existing thread when the cursor sits inside a `comment` mark, else mint one
   // over the selected range (needs a persisted canvas + a non-empty selection).
   const openComment = (): void => {
-    if (!canvasId) { onAnnounce(t('commentNeedsSave'), 'assertive'); return; }
+    if (!canvasId) { setFeedback({ text: t('commentNeedsSave'), variant: 'warning' }); return; }
     let threadId = editor.isActive('comment') ? String(editor.getAttributes('comment').threadId ?? '') : '';
     if (!threadId) {
-      if (editor.state.selection.empty) { onAnnounce(t('commentSelectFirst'), 'assertive'); return; }
+      if (editor.state.selection.empty) { setFeedback({ text: t('commentSelectFirst'), variant: 'warning' }); return; }
       threadId = crypto.randomUUID();
       editor.chain().focus().setMark('comment', { threadId }).run();
     }
+    setFeedback(null); // a stale "select first" prompt goes once it worked (DE87UX-30)
     setCommentResId(`${canvasId}#${threadId}`);
   };
   // 6b polish — the editor's click handler opens a clicked comment's thread.
@@ -323,29 +392,38 @@ function DocumentEditorSurfaceInner({ orgId, canvasId, doc, onDocChange, onAnnou
   // then 5b-2's "Apply" hands the chosen response back here as a tracked suggestion.
   const improveWithAi = (): void => {
     const { from, to, empty } = editor.state.selection;
-    if (empty) { onAnnounce(t('aiSelectFirst'), 'assertive'); return; }
-    const selected = editor.state.doc.textBetween(from, to, '\n', ' ').trim();
-    if (!selected) { onAnnounce(t('aiSelectFirst'), 'assertive'); return; }
+    if (empty) { setFeedback({ text: t('aiSelectFirst'), variant: 'warning' }); return; }
+    const selected = selectionText(editor.state.doc, from, to);
+    if (!selected) { setFeedback({ text: t('aiSelectFirst'), variant: 'warning' }); return; }
     stageComposerDraft(t('aiImprovePrompt', { text: selected }));
     // 5b-2 — stage the return-target so the chat can hand a chosen response back
     // to this range (applied as a suggestion on return). Only when persisted.
     if (canvasId) {
-      const title = typeof doc.title === 'string' && doc.title.trim() ? doc.title.trim() : t('untitledDoc');
-      stageReturnTarget({ label: title, returnPath: location.pathname, canvasId, from, to });
+      const title = typeof doc.title === 'string' && doc.title.trim() ? doc.title.trim() : t('untitledTitle');
+      stageReturnTarget({ label: title, returnPath: location.pathname, canvasId, from, to, expectedText: selected, agentId: DOCUMENT_WRITING_AGENT });
     }
-    void navigate(`/?agent=${encodeURIComponent(DOCUMENT_AUTHOR_AGENT)}`);
+    void navigate(`/?agent=${encodeURIComponent(DOCUMENT_WRITING_AGENT)}`);
   };
 
   // ADR 0334 6b-2 — track-changes (suggesting mode) + accept/reject.
   const suggesting = isSuggesting(editor.state);
   const anyChange = hasAnyChange(editor.state);
   const changeAtCursor = hasChangeAt(editor.state);
+  // `toggleSuggesting` dispatches synchronously, so the state read AFTER it is
+  // the new mode (DE87UX-3: this announced the opposite).
   const onToggleSuggest = (): void => {
     toggleSuggesting(editor);
-    onAnnounce(t(isSuggesting(editor.state) ? 'suggestOff' : 'suggestOn'));
+    onAnnounce(t(isSuggesting(editor.state) ? 'suggestOn' : 'suggestOff'));
   };
-  const onAcceptChange = (): void => { if (changeAtCursor ? acceptChangeAt(editor) : acceptAllChanges(editor)) onAnnounce(t('changeAccepted')); };
-  const onRejectChange = (): void => { if (changeAtCursor ? rejectChangeAt(editor) : rejectAllChanges(editor)) onAnnounce(t('changeRejected')); };
+  // The scope is decided at CLICK time from the live selection, never from the
+  // render-time flag the label used (DE87UX-2: a stale flag accepted ALL).
+  // The button unmounts once no change is left, so focus goes back to the text
+  // instead of dropping to the page (DE87UX-26).
+  // Only when the LAST change is resolved: otherwise the button stays, and a
+  // keyboard reviewer keeps their place on it (DE87UX-31).
+  const refocusIfDone = (): void => { if (!hasAnyChange(editor.state)) editor.commands.focus(); };
+  const onAcceptChange = (): void => { if (hasChangeAt(editor.state) ? acceptChangeAt(editor) : acceptAllChanges(editor)) { onAnnounce(t('changeAccepted')); refocusIfDone(); } };
+  const onRejectChange = (): void => { if (hasChangeAt(editor.state) ? rejectChangeAt(editor) : rejectAllChanges(editor)) { onAnnounce(t('changeRejected')); refocusIfDone(); } };
 
   // ADR 0334 4b-3 — DOCX import. Reads the picked .docx as base64, POSTs it to the
   // backend mammoth→HTML converter, then parses the returned HTML THROUGH THE
@@ -384,7 +462,9 @@ function DocumentEditorSurfaceInner({ orgId, canvasId, doc, onDocChange, onAnnou
         headers: authedHeaders({ 'content-type': 'application/json' }),
         body: JSON.stringify({ docxBase64 }),
       }));
-      if (!resp.ok) throw new Error(t('importFailedStatus', { status: resp.status }));
+      if (!resp.ok) {
+        throw new ImportError(resp.status === 413 ? t('importTooLarge') : resp.status === 429 ? t('importBusy') : t('importFailedStatus', { status: resp.status }));
+      }
       // DOC-G1 — mammoth reports exactly what it could NOT convert, the route
       // already serializes those messages, and this client destructured only
       // `html` — so a document that lost tables, images or footnotes on the way
@@ -393,12 +473,14 @@ function DocumentEditorSurfaceInner({ orgId, canvasId, doc, onDocChange, onAnnou
       const warnings = importWarningsOf(payload);
       const json = generateJSON(payload.html, documentExtensions());
       editor.chain().focus().setContent(json).run();
+      setFeedback(null); // a later success clears an earlier failure (DE87UX-24)
       setImportWarnings(warnings.length ? warnings : null);
       onAnnounce(warnings.length ? t('importDoneWithWarnings', { count: warnings.length }) : t('importDone'), warnings.length ? 'assertive' : 'polite');
     } catch (err) {
       // DOC-G3 — the reason was computed and thrown, then swallowed: a 413 (too
       // large) read exactly like a 422 (unreadable file) or a dropped network.
-      onAnnounce(err instanceof Error && err.message ? err.message : t('importFailed'), 'assertive');
+      // DE87UX-6 — shown, not only announced; a raw TypeError is never shown.
+      setFeedback({ text: err instanceof ImportError ? err.message : t('importFailed'), variant: 'error' });
     } finally {
       setImporting(false);
     }
@@ -484,11 +566,23 @@ function DocumentEditorSurfaceInner({ orgId, canvasId, doc, onDocChange, onAnnou
             </>
           ) : null}
           <span className="doc-editor__sep" aria-hidden="true" />
-          <IconButton label={t('importDocx')} icon={<ArrowUpToLineIcon />} title={t('importDocxHint')}
+          <IconButton label={importing ? t('importing') : t('importDocx')} icon={<ArrowUpToLineIcon />} title={importing ? t('importing') : t('importDocxHint')}
             disabled={importing} onClick={() => importRef.current?.click()} />
           <input ref={importRef} type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             hidden onChange={onImportFile} />
       </div>
+      {feedback ? (
+        <Notice variant={feedback.variant} announce={feedback.text}>
+          <p>{feedback.text}</p>
+          <Button variant="secondary" size="sm" onClick={() => setFeedback(null)}>{t('importWarningsDismiss')}</Button>
+        </Notice>
+      ) : null}
+      {repairNote ? (
+        <Notice variant="warning" announce={t(repairNote.persisted ? 'repairedPersisted' : 'repairedOnOpen', { count: repairNote.count })}>
+          <p>{t(repairNote.persisted ? 'repairedPersisted' : 'repairedOnOpen', { count: repairNote.count })}</p>
+          <Button variant="secondary" size="sm" onClick={() => setRepairNote(null)}>{t('importWarningsDismiss')}</Button>
+        </Notice>
+      ) : null}
       {/* DOC-G1 — what the conversion could not carry across. Dismissible and
           inline rather than a toast: it names content the user has to go and
           restore by hand, so it must outlive a 4-second banner. */}

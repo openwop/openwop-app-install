@@ -10,8 +10,10 @@
  * ratchet is what makes the temporary duplication safe.
  *
  * `seedVersion` is CODE-OWNED (never editable through a tenant surface). Bump it
- * when editing a tutorial here and the seeder refreshes every tenant row that
- * has NOT been customized (`ext.customizedAt`), leaving tenant edits intact.
+ * when editing a tutorial here. Readers then serve the new text in place of any
+ * workspace copy that has NOT been customized (`ext.customizedAt`), and the next
+ * seed run rewrites that copy; tenant edits are left intact. The bump is enforced
+ * by `seed-content-version-ratchet.test.ts`.
  */
 
 export type TutorialCategory = 'getting-started' | 'build' | 'marketing' | 'commerce';

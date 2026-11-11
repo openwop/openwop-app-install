@@ -19,6 +19,7 @@ import { EmbedBlock } from './embedBlock.js';
 import { CommentMark } from './commentMark.js';
 import { InsertionMark, DeletionMark } from './trackChangeMarks.js';
 import { generateJSON, type Extensions, type JSONContent } from '@tiptap/core';
+import { isDocumentHrefAllowed } from './documentSchemaNames.js';
 
 /** The closed extension set. `history` is included for the editor's own
  *  intra-document undo/redo (ADR 0334 undo-ownership rule — the chassis undo is
@@ -30,6 +31,9 @@ export function documentExtensions(opts?: { history?: boolean }): Extensions {
   return [
     StarterKit.configure({
       heading: { levels: [1, 2, 3, 4, 5, 6] },
+      // ADR 1055 D1 — one link-scheme rule for the editor, the server validator
+      // and both exporters (TipTap's default allows ten schemes).
+      link: { isAllowedUri: (url) => isDocumentHrefAllowed(url) },
       // starter-kit 3 names it `undoRedo`; `{ history: false }` was silently ignored
       // (it rode in through this spread, so tsc never saw it), and core undo ran
       // next to yUndoPlugin in collab sessions (grade-tests w14, TST-DOC-23).

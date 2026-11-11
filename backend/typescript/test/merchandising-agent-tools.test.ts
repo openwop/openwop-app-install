@@ -15,12 +15,13 @@ import { readFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
-import { createAgentToolProvider, builtinAgentToolIds } from '../src/host/agentToolProvider.js';
+import { createAgentToolProvider, builtinAgentToolIds, builtinAgentTool } from '../src/host/agentToolProvider.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createOrg } from '../src/host/accessControlService.js';
 import { createProduct } from '../src/features/commerce/commerceService.js';
 import { createPromotion } from '../src/features/promotions/promotionsService.js';
+import { DurableCollection } from '../src/host/hostExtPersistence.js';
 import {
   DISCOVERY_SEARCH_TOOL_ID, DISCOVERY_LIST_COLLECTIONS_TOOL_ID, DISCOVERY_LIST_RULES_TOOL_ID,
   DISCOVERY_CREATE_COLLECTION_TOOL_ID, DISCOVERY_CREATE_RULE_TOOL_ID,
@@ -157,6 +158,15 @@ describe('discovery curator tools', () => {
     expect(parse(out)).toMatchObject({ error: 'validation_error' });
   });
 
+  it('create-rule: lands as a PROPOSAL (inactive) — a model turn never hides inventory live (ADR 1025 D5)', async () => {
+    const p = provider({ actingUserId: 'u-1' });
+    const out = await p.executeTool({ name: DISCOVERY_CREATE_RULE_TOOL_ID, input: { name: `Hide clearance ${seq++}`, actions: [{ kind: 'hide', predicate: { categories: ['clearance'] } }] } });
+    expect(out.isError).toBeFalsy();
+    expect(parse(out)).toMatchObject({ active: false, proposed: true });
+    const rules = parse(await p.executeTool({ name: DISCOVERY_LIST_RULES_TOOL_ID, input: {} })).rules as { ruleId: string; active: boolean }[];
+    expect(rules.find((r) => r.ruleId === parse(out).ruleId)?.active).toBe(false);
+  });
+
   it('create-rule: a rule with no actions is a TYPED validation error', async () => {
     const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: DISCOVERY_CREATE_RULE_TOOL_ID, input: { name: 'Empty', actions: [] } });
     expect(out.isError).toBe(true);
@@ -206,7 +216,7 @@ describe('promotions manager tools', () => {
   it('list: read fails EMPTY without an acting user', async () => {
     const drafted = await provider({ actingUserId: 'u-1' }).executeTool({
       name: PROMOTIONS_DRAFT_TOOL_ID,
-      input: { name: `Seeded ${seq++}`, type: 'cart_threshold', reward: { kind: 'percentage', value: 5 }, minSpend: 10 },
+      input: { name: `Seeded ${seq++}`, type: 'cart_threshold', reward: { kind: 'percentage', value: 5 }, minSpend: 10, currency: 'USD' },
     });
     expect(drafted.isError).toBeFalsy();
     // Positive control: u-1 sees the draft, so EMPTY below is the gate.
@@ -221,7 +231,7 @@ describe('promotions manager tools', () => {
     const p = provider({ actingUserId: 'u-1' });
     const out = await p.executeTool({
       name: PROMOTIONS_DRAFT_TOOL_ID,
-      input: { name: 'AOV nudge', type: 'cart_threshold', reward: { kind: 'percentage', value: 10 }, minSpend: 100 },
+      input: { name: 'AOV nudge', type: 'cart_threshold', reward: { kind: 'percentage', value: 10 }, minSpend: 100, currency: 'USD' },
     });
     expect(out.isError).toBeFalsy();
     const res = parse(out);
@@ -232,6 +242,28 @@ describe('promotions manager tools', () => {
     const promos = parse(list).promotions as { promotionId: string; active: boolean }[];
     const drafted = promos.find((x) => x.promotionId === res.promotionId);
     expect(drafted?.active).toBe(false);
+  });
+
+  it('draft: the schema carries `currency`, and a denominated draft without one is a TYPED refusal (ADR 1025 D4)', async () => {
+    const props = (builtinAgentTool(PROMOTIONS_DRAFT_TOOL_ID)?.def.inputSchema as { properties?: Record<string, { enum?: string[] }> } | undefined)?.properties ?? {};
+    expect(props.currency?.enum).toContain('USD');
+    const p = provider({ actingUserId: 'u-1' });
+    const refused = await p.executeTool({ name: PROMOTIONS_DRAFT_TOOL_ID, input: { name: `Ten off ${seq++}`, type: 'cart_threshold', reward: { kind: 'fixed', value: 10 }, minSpend: 50 } });
+    expect(refused.isError).toBe(true);
+    expect(parse(refused)).toMatchObject({ error: 'validation_error' });
+    // The service's own refusal text (field `currency`), not any message mentioning money.
+    expect(JSON.stringify(parse(refused))).toMatch(/so it needs a `currency`/);
+    const ok = await p.executeTool({ name: PROMOTIONS_DRAFT_TOOL_ID, input: { name: `Ten off ${seq++}`, type: 'cart_threshold', reward: { kind: 'fixed', value: 10 }, minSpend: 50, currency: 'EUR' } });
+    expect(ok.isError).toBeFalsy();
+    const listed = parse(await p.executeTool({ name: PROMOTIONS_LIST_TOOL_ID, input: {} })).promotions as { promotionId: string; currency?: string; needsCurrency?: true }[];
+    expect(listed.find((x) => x.promotionId === parse(ok).promotionId)?.currency).toBe('EUR');
+    // A legacy currency-less row (planted: intake now refuses it) is flagged to the model.
+    const raw = new DurableCollection<Record<string, unknown> & { promotionId: string; tenantId: string }>('promotions:promo', (r) => r.promotionId, undefined, (r) => r.tenantId);
+    const now = new Date().toISOString();
+    await raw.put({ promotionId: `promo:legacy-chat-${seq++}`, tenantId: TENANT, orgId: ORG, name: 'Legacy', type: 'cart_threshold', reward: { kind: 'fixed', value: 10 }, minSpend: 60, priority: 0, stackable: true, active: true, createdBy: 'demo:merch', createdAt: now, updatedAt: now });
+    const again = parse(await p.executeTool({ name: PROMOTIONS_LIST_TOOL_ID, input: {} })).promotions as { name: string; needsCurrency?: true }[];
+    expect(again.find((x) => x.name === 'Legacy')?.needsCurrency).toBe(true);
+    expect(again.find((x) => x.name !== 'Legacy' && x.needsCurrency)).toBeUndefined();
   });
 
   it('draft: a loss_leader without a budget cap is a TYPED validation error', async () => {
@@ -252,7 +284,7 @@ describe('promotions manager tools', () => {
   it('apply-preview: read fails EMPTY without an acting user', async () => {
     // An ACTIVE promotion that fires on this cart (150 ≥ 100 → 10%), so u-1's
     // preview is non-zero and the user-less zero below is the gate.
-    await createPromotion({ tenantId: TENANT, orgId: ORG, createdBy: 'u-1', name: `Live ${seq++}`, type: 'cart_threshold', reward: { kind: 'percentage', value: 10 }, minSpend: 100, active: true });
+    await createPromotion({ tenantId: TENANT, orgId: ORG, createdBy: 'u-1', name: `Live ${seq++}`, type: 'cart_threshold', reward: { kind: 'percentage', value: 10 }, minSpend: 100, currency: 'USD', active: true });
     const items = [{ productId: 'p1', unitPrice: 50, quantity: 3 }];
     const withUser = await provider({ actingUserId: 'u-1' }).executeTool({ name: PROMOTIONS_APPLY_PREVIEW_TOOL_ID, input: { items } });
     expect(parse(withUser).discount).toBeGreaterThan(0);

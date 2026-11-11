@@ -26,6 +26,11 @@ import {
   PROMOTION_TYPES, REWARD_KINDS, type Org, type Promotion, type PromotionType, type RewardKind,
 } from './promotionsClient.js';
 
+/** ADR 1025 (grade MCHUX-3) — the types this form can actually create. Tiered and BOGO
+ *  need fields it does not collect (minQuantity, buy/get, scope), so offering them
+ *  guaranteed a refusal; they stay creatable by the Promotions Manager agent. */
+const FORM_TYPES: readonly PromotionType[] = PROMOTION_TYPES.filter((ty) => ty !== 'tiered' && ty !== 'bogo');
+
 export function PromotionsPage(): JSX.Element {
   const { t } = useTranslation('promotions');
   // `useFeatureAccess` returns an OBJECT, so the previous `const enabled = …`
@@ -51,6 +56,11 @@ export function PromotionsPage(): JSX.Element {
   const [rows, setRows] = useState<Promotion[] | null>(null);
   // R3 P-5 — derived burn per promotion; an exhausted budget must not read Active.
   const [usage, setUsage] = useState<Record<string, { amount: number; quantity: number }>>({});
+  // ADR 1025 D4 — promotions that carry an amount but no currency apply to NO order.
+  const [missingCurrency, setMissingCurrency] = useState<ReadonlySet<string>>(new Set());
+  // The fix starts on NO currency (grade MCHUX-7): defaulting to USD made one click
+  // relabel the promotion, which is the guess ADR 1025 D4 refuses to make.
+  const [fixCurrency, setFixCurrency] = useState<Record<string, string>>({});
   // §4.5 collection search (DESIGN.md rule 13) — name match, view-only.
   const [query, setQuery] = useState('');
   const visibleRows = (rows ?? []).filter((p) =>
@@ -70,12 +80,15 @@ export function PromotionsPage(): JSX.Element {
   // Mirrors `isDenominated` on the server: a promotion carrying an AMOUNT needs a
   // currency; a bare percentage does not.
   const needsCurrency = rewardKind === 'fixed' || type === 'cart_threshold' || type === 'loss_leader';
+  // ADR 1025 D7 — the server refuses a promotion that could never fire; say so before
+  // submit instead of after it (grade MCHUX-4).
+  const formCanFire = !(type === 'cart_threshold' && !(minSpend > 0)) && !(rewardKind === 'fixed' && !(rewardValue > 0));
 
 
   const load = useCallback(async (org: string) => {
     if (!org) return;
     setRowsFailed(false);
-    try { const r = await listPromotions(org); setRows(r.promotions); setUsage(r.usage); setError(null); }
+    try { const r = await listPromotions(org); setRows(r.promotions); setUsage(r.usage); setMissingCurrency(new Set(r.needsCurrency)); setError(null); }
     // NOT `setRows([])` — that renders "No promotions yet — Add a promotion
     // above…" beside the error Notice.
     catch (e) { setError(e instanceof Error ? e.message : t('loadFailed')); setRowsFailed(true); }
@@ -104,6 +117,16 @@ export function PromotionsPage(): JSX.Element {
     try { await updatePromotion(orgId, p.promotionId, { active: !p.active }); await load(orgId); }
     catch (e) { toast.error(e instanceof Error ? e.message : t('updateFailed')); }
   }, [orgId, load, t]);
+
+  const setPromotionCurrency = useCallback(async (p: Promotion) => {
+    try {
+      const chosen = fixCurrency[p.promotionId];
+      if (!chosen) return;
+      await updatePromotion(orgId, p.promotionId, { currency: chosen });
+      toast.success(t('currencySet'));
+      await load(orgId);
+    } catch (e) { toast.error(e instanceof Error ? e.message : t('updateFailed')); }
+  }, [orgId, fixCurrency, load, t]);
 
   const remove = useCallback(async (p: Promotion) => {
     if (!(await confirm({ title: t('deleteConfirm', { name: p.name }), danger: true, confirmLabel: t('common:delete') }))) return;
@@ -161,7 +184,21 @@ export function PromotionsPage(): JSX.Element {
       const u = usage[p.promotionId];
       const spentOut = (p.budget?.maxDiscount !== undefined && (u?.amount ?? 0) >= p.budget.maxDiscount)
         || (p.budget?.maxQuantity !== undefined && (u?.quantity ?? 0) >= p.budget.maxQuantity);
+      // ADR 1025 D4 — no currency outranks Active AND Paused: the server applies it to no
+      // order, and a paused row must say why it cannot simply be activated (MCHUX-6).
+      if (missingCurrency.has(p.promotionId)) {
+        // The id lets the disabled Activate point at its reason (MCHUX-16); a currency-less
+        // agent draft still says it is a proposal (MCHUX-15).
+        return (
+          <span className="u-flex u-items-center u-gap-1 u-flex-wrap">
+            <span id={`promo-reason-${p.promotionId}`} className="chip chip--warning">{t('needsCurrency')}</span>
+            {!p.active && p.proposed ? <span className="chip chip--ai">{t('proposed')}</span> : null}
+          </span>
+        );
+      }
       if (p.active && spentOut) return <span className="chip chip--warning">{t('exhausted')}</span>;
+      // An agent's draft is not a promotion someone paused (MCHUX-1).
+      if (!p.active && p.proposed) return <span className="chip chip--ai">{t('proposed')}</span>;
       return (
         <span className="u-flex u-items-center u-gap-1">
           <span className={p.active ? 'chip chip--success' : 'chip chip--muted'}>{p.active ? t('active') : t('paused')}</span>
@@ -171,11 +208,27 @@ export function PromotionsPage(): JSX.Element {
     } },
     { key: 'actions', header: '', render: (p) => (
       <span className="action-bar">
-        <Button variant="quiet" onClick={() => void toggleActive(p)} aria-label={t('toggleActiveLabel', { name: p.name })}>{p.active ? t('pause') : t('activate')}</Button>
+        {missingCurrency.has(p.promotionId) ? (
+          <>
+            <SelectField className="is-narrow" label={t('fixCurrencyLabel', { name: p.name })} value={fixCurrency[p.promotionId] ?? ''}
+              onChange={(e) => setFixCurrency((m) => ({ ...m, [p.promotionId]: e.target.value }))}>
+              <option value="">{t('chooseCurrency')}</option>
+              {CURRENCIES.map((c) => <option key={c} value={c}>{c}</option>)}
+            </SelectField>
+            <Button variant="secondary" disabled={!fixCurrency[p.promotionId]} onClick={() => void setPromotionCurrency(p)}
+              aria-label={t('setCurrencyLabel', { name: p.name })}>{t('setCurrency')}</Button>
+          </>
+        ) : null}
+        {/* The accessible name now CONTAINS the visible verb (WCAG 2.5.3, MCHUX-8). A
+            currency-less row cannot be activated until it has one (the server refuses). */}
+        <Button variant="quiet" onClick={() => void toggleActive(p)}
+          disabled={!p.active && missingCurrency.has(p.promotionId)}
+          aria-describedby={!p.active && missingCurrency.has(p.promotionId) ? `promo-reason-${p.promotionId}` : undefined}
+          aria-label={t(p.active ? 'pauseRowLabel' : 'activateRowLabel', { name: p.name })}>{p.active ? t('pause') : t('activate')}</Button>
         <Button variant="quiet" onClick={() => void remove(p)} aria-label={t('deleteRowLabel', { name: p.name })}>{t('common:delete')}</Button>
       </span>
     ) },
-  ], [t, rewardLabel, conditionLabels, toggleActive, remove, usage, money]);
+  ], [t, rewardLabel, conditionLabels, toggleActive, remove, usage, money, missingCurrency, fixCurrency, setPromotionCurrency]);
 
   // The toggle has not resolved yet — a shape-matched skeleton UNDER the real
   // header, not a `StateCard`: the card's only text would be the page title, so
@@ -231,7 +284,7 @@ export function PromotionsPage(): JSX.Element {
         </SelectField>
         <TextField label={t('fieldName')} value={name} onChange={(e) => setName(e.target.value)} placeholder={t('namePlaceholder')} required />
         <SelectField label={t('fieldType')} value={type} onChange={(e) => setType(e.target.value as PromotionType)}>
-          {PROMOTION_TYPES.map((ty) => <option key={ty} value={ty}>{t(`type_${ty}`)}</option>)}
+          {FORM_TYPES.map((ty) => <option key={ty} value={ty}>{t(`type_${ty}`)}</option>)}
         </SelectField>
         <SelectField label={t('fieldRewardKind')} value={rewardKind} onChange={(e) => setRewardKind(e.target.value as RewardKind)}>
           {REWARD_KINDS.map((k) => <option key={k} value={k}>{t(`reward_${k}`)}</option>)}
@@ -245,10 +298,12 @@ export function PromotionsPage(): JSX.Element {
           label={t('fieldRewardValue')}
           help={rewardKind === 'percentage' ? t('rewardValueHelpPercent') : t('rewardValueHelpFixed')}
           type="number" min={0} value={rewardValue}
+          error={rewardKind === 'fixed' && !(rewardValue > 0) ? t('fixedRewardPositive') : undefined}
           onChange={(e) => setRewardValue(Math.max(0, Number(e.target.value) || 0))}
         />
         {type === 'cart_threshold' ? (
-          <TextField className="is-narrow" label={t('fieldMinSpend')} type="number" min={0} value={minSpend}
+          <TextField className="is-narrow" label={t('fieldMinSpend')} type="number" min={0.01} step="any" value={minSpend}
+            error={minSpend > 0 ? undefined : t('minSpendPositive')}
             onChange={(e) => setMinSpend(Math.max(0, Number(e.target.value) || 0))} />
         ) : null}
         {type === 'loss_leader' ? (
@@ -265,7 +320,7 @@ export function PromotionsPage(): JSX.Element {
             {CURRENCIES.map((c) => <option key={c} value={c}>{c}</option>)}
           </SelectField>
         ) : null}
-        <Button variant="primary" type="submit" disabled={busy || !orgId || !name.trim()}>{t('addPromotion')}</Button>
+        <Button variant="primary" type="submit" disabled={busy || !orgId || !name.trim() || !formCanFire}>{t('addPromotion')}</Button>
       </form>
 
       {type === 'loss_leader' ? <Notice variant="info">{t('lossLeaderHint')}</Notice> : null}

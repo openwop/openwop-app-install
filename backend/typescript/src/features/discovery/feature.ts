@@ -26,7 +26,8 @@ export const discoveryFeature: BackendFeature = {
       await pruneProductRefs(tenantId, orgId, productId);
     });
   },
-  surface: { id: 'discovery', build: buildDiscoverySurface },
+  // ADR 1025 D3 — writes need workspace:write (the ADR 0832 floor is membership only).
+  surface: { id: 'discovery', build: buildDiscoverySurface, orgPolicy: { methodScopes: { createCollection: 'workspace:write', createMerchRule: 'workspace:write' } } },
   toggleDefault: {
     id: 'discovery',
     label: 'Discovery',

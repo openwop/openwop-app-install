@@ -36,7 +36,7 @@ const COMPARISON_SLUG = 'compare';
 const SYSTEM_ACTOR = 'system';
 /** Bump when comparisonPage.json changes — a redeploy then refreshes the live
  *  page IF it has never been human-edited (see `doEnsure`). */
-const SEED_VERSION = 1;
+export const SEED_VERSION = 1;
 
 // ── Content model (the brand-authorable JSON shape) ─────────────────────────
 
@@ -94,7 +94,7 @@ function buildSections(): Section[] {
   return sections;
 }
 
-const COMPARISON_SECTIONS: Section[] = buildSections();
+export const COMPARISON_SECTIONS: Section[] = buildSections();
 
 const seedMarker = new DurableCollection<{ id: 'seed'; version: number }>('comparison-page-seed', (m) => m.id);
 

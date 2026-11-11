@@ -26,6 +26,8 @@ export const messages = {
   // Slash menu + placeholder
   placeholder: 'Write, or press "/" for commands…',
   slashEmpty: 'No matching blocks',
+  slashMenuLabel: "Insert a block",
+  slashOptionPosition: "{{title}}, {{n}} of {{total}}",
   slash_text: 'Text',
   slash_text_hint: 'Plain paragraph',
   slash_h1: 'Heading 1',
@@ -70,7 +72,17 @@ export const messages = {
   aiImproveHint: 'Send the selected text to the document AI to improve',
   aiSelectFirst: 'Select some text to improve with AI',
   aiApplied: 'Applied the AI suggestion — review and accept or reject it',
-  untitledDoc: 'the document',
+  untitledTitle: "Untitled document",
+  importTooLarge: "This document is too large to import. Split it into smaller files, or remove large embedded content, and try again.",
+  importBusy: "Another import is still running. Try again in a few seconds.",
+  askAiReadFailed: "Could not read the saved document, so the chat was not opened. Try again.",
+  askAiSaveFirst: "Save the document first, so the AI can see what you wrote.",
+  askAiUnsaved: "(Unsaved changes are not included. Save to include them.)",
+  // ADR 1055 D4/D5 — Apply refusals and the toolbar Ask AI draft.
+  aiApplyChanged: "The selected text changed, so the suggestion was not applied. Select it again and ask once more.",
+  aiApplyEmpty: "The reply had no text to apply, so nothing changed.",
+  askAiPrompt: "My document \"{{title}}\":\n\n{{text}}\n\n---\nMy question about it: ",
+  askAiTruncated: "(The document continues; only the beginning is quoted here.)",
   aiImprovePrompt: 'Please improve the following text from my document — keep my meaning, tighten the wording, and return only the improved version:\n\n{{text}}',
   // Track-changes / suggesting mode (Phase 6b-2)
   suggestMode: 'Suggesting',
@@ -88,6 +100,7 @@ export const messages = {
   chartHint: 'Insert or edit a chart',
   chartTitle: 'Chart',
   chartSpec: 'Chart spec (JSON)',
+  chartInvalid: "This is not valid chart JSON yet. Fix it to insert the chart.",
   chartInserted: 'Chart inserted',
   embed: 'Embed',
   embedHint: 'Insert or edit a sandboxed HTML embed',
@@ -101,7 +114,7 @@ export const messages = {
   a11yTitle: 'Accessibility',
   // AI assist (Phase 5)
   aiAssist: 'Ask AI',
-  aiAssistHint: 'Open the chat with the document author agent',
+  aiAssistHint: "Open the chat with the Writing Assistant, quoting the saved document",
   comments: 'Comments',
   // Export (Phase 4)
   exportGroup: 'Export',
@@ -129,5 +142,11 @@ export const messages = {
   importWarningsTitle: "{{count}} part(s) of the .docx could not be converted and are missing:",
   importWarningsMore: "…and {{count}} more.",
   importWarningsDismiss: "Dismiss",
+  // ADR 1055 D2 — content the editor could not open.
+  repairedOnOpen_one: "1 element of this document is not supported by the editor and could not be shown. It will be removed when you save.",
+  repairedOnOpen_other: "{{count}} elements of this document are not supported by the editor and could not be shown. They will be removed when you save.",
+  repairedPersisted_one: "1 element of this document is not supported by the editor and was removed. An earlier version may still hold it.",
+  repairedPersisted_other: "{{count}} elements of this document are not supported by the editor and were removed. An earlier version may still hold them.",
+  renderPartial: "Part of this document could not be shown.",
   embedDefaultHtml: "<h2>Hello from an embed</h2>\n<p>Edit this HTML. It shows as a static preview until a reader runs its scripts.</p>",
 };

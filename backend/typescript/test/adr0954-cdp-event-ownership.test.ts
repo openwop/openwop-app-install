@@ -92,10 +92,10 @@ describe('CDP canonical event ownership', () => {
       if (!held && key.startsWith('hostext:cdp:collected-event:') && JSON.parse(next).payload) { held = true; arrived(); await barrier; }
       return cas(key, expected, next);
     });
-    const first = collectEvent(tenantId, 'funnel.step_viewed', { visitor: 'visitor-a' }, 'same-key');
+    const first = collectEvent(tenantId, 'funnel.step_viewed', { visitor: 'visitor-a' }, 'same-key', { source: 'first-party' });
     try {
       await entered;
-      await expect(collectEvent(tenantId, 'funnel.step_viewed', { visitor: 'visitor-b' }, 'same-key')).rejects.toMatchObject({ httpStatus: 409 });
+      await expect(collectEvent(tenantId, 'funnel.step_viewed', { visitor: 'visitor-b' }, 'same-key', { source: 'first-party' })).rejects.toMatchObject({ httpStatus: 409 });
       // The same conflict straight at the owner, past the replay guard: the
       // persist guard alone must refuse it and write no primary.
       const [pending] = await receipts.listByPrefix(`${tenantId}::`);
@@ -105,7 +105,7 @@ describe('CDP canonical event ownership', () => {
       expect(await collectedEvents.get(pending!.eventId)).toBeNull();
     } finally { release(); }
     const accepted = await first;
-    expect(await collectEvent(tenantId, 'funnel.step_viewed', { visitor: 'visitor-b' }, 'same-key')).toEqual(accepted);
+    expect(await collectEvent(tenantId, 'funnel.step_viewed', { visitor: 'visitor-b' }, 'same-key', { source: 'first-party' })).toEqual(accepted);
     const indexed = await eventsForVisitors(tenantId, ['visitor-a', 'visitor-b']);
     expect(indexed.events.map((e) => [e.eventId, e.visitor])).toEqual([[accepted.eventId, 'visitor-a']]);
     expect(await listCollectedEvents(tenantId)).toHaveLength(1);

@@ -13,6 +13,7 @@ import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
+import { DurableCollection } from '../src/host/hostExtPersistence.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createContact } from '../src/features/crm/contactsService.js';
@@ -37,6 +38,7 @@ interface Body {
   user?: { userId: string };
   products?: Array<{ productId: string }>;
   promotion?: { promotionId: string; currency?: string; budget?: { maxDiscount?: number } };
+  needsCurrency?: string[];
   discount?: number;
   total?: number;
   truncated?: boolean;
@@ -148,9 +150,9 @@ describe('promotions — routes + hook through the real order path', () => {
     const { owner, member, orgId } = await ownerWithMember('viewer');
     expect((await owner.get(promo(orgId, '/promotions'))).status).toBe(404);
     await enable('promotions', 'on'); await enable('commerce', 'on');
-    const p = await owner.post(promo(orgId, '/promotions'), { name: '10% over $50', type: 'cart_threshold', reward: { kind: 'percentage', value: 10 }, minSpend: 50 });
+    const p = await owner.post(promo(orgId, '/promotions'), { name: '10% over $50', type: 'cart_threshold', reward: { kind: 'percentage', value: 10 }, currency: 'USD', minSpend: 50 });
     expect(p.status, JSON.stringify(p.body)).toBe(201);
-    const denied = await member.post(promo(orgId, '/promotions'), { name: 'x', type: 'cart_threshold', reward: { kind: 'percentage', value: 5 }, minSpend: 1 });
+    const denied = await member.post(promo(orgId, '/promotions'), { name: 'x', type: 'cart_threshold', reward: { kind: 'percentage', value: 5 }, currency: 'USD', minSpend: 1 });
     expect(denied.status).toBe(403);
     expect(denied.body.error).toBe('forbidden_scope');
     // End-to-end: the promotion hook fires through the real commerce order route.
@@ -186,6 +188,25 @@ describe('promotions — routes + hook through the real order path', () => {
     const patched = await owner.patch(promo(orgId, `/promotions/${encodeURIComponent(budgeted.body.promotion!.promotionId)}`), { budget: { maxDiscount: 200 } });
     expect(patched.status, JSON.stringify(patched.body)).toBe(200);
     expect(patched.body.promotion!.budget!.maxDiscount).toBe(200);
+  });
+});
+
+describe('promotions — ADR 1025 D4 needsCurrency on the wire', () => {
+  it('GET names a currency-less denominated row; PATCH {currency} fixes it; pausing it is allowed', async () => {
+    await enable('promotions', 'on'); await enable('commerce', 'on');
+    const { owner, orgId, tenantId } = await ownerWithMember('viewer');
+    // A pre-ADR-1025 row, planted in the same store (intake now refuses to create one).
+    const raw = new DurableCollection<Record<string, unknown> & { promotionId: string; tenantId: string }>('promotions:promo', (p) => p.promotionId, undefined, (p) => p.tenantId);
+    const now = new Date().toISOString();
+    await raw.put({ promotionId: 'promo:legacy-wire', tenantId, orgId, name: '$10 off over $60', type: 'cart_threshold', reward: { kind: 'fixed', value: 10 }, minSpend: 60, priority: 0, stackable: true, active: true, createdBy: 'demo:merch', createdAt: now, updatedAt: now });
+    const listed = await owner.get(promo(orgId, '/promotions'));
+    expect(listed.status, JSON.stringify(listed.body)).toBe(200);
+    expect(listed.body.needsCurrency).toEqual(['promo:legacy-wire']);
+    const paused = await owner.patch(promo(orgId, '/promotions/promo%3Alegacy-wire'), { active: false });
+    expect(paused.status, JSON.stringify(paused.body)).toBe(200);
+    const fixed = await owner.patch(promo(orgId, '/promotions/promo%3Alegacy-wire'), { currency: 'USD' });
+    expect(fixed.status, JSON.stringify(fixed.body)).toBe(200);
+    expect((await owner.get(promo(orgId, '/promotions'))).body.needsCurrency).toEqual([]);
   });
 });
 

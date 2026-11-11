@@ -110,6 +110,12 @@ const HOSTEXT_DELETE_HOOKS = new Map<string, (id: string) => Promise<void>>();
  *  if any (collections self-register at construction). Lets the kvAgeOut seam
  *  detect a tenant-indexed collection and delete THROUGH it (cleaning the
  *  `hostextidx:` marker) instead of deleting raw kv rows underneath it. */
+/** ADR 1045 CHAN-F14 — every registered `hostext:<name>:` prefix, for a one-shot
+ *  walk that must attribute a row to its collection (the legacy env-key id rewrite). */
+export function hostExtCollectionPrefixes(): ReadonlyArray<{ prefix: string; indexed: boolean }> {
+  return HOSTEXT_COLLECTIONS.map((c) => ({ prefix: c.prefix, indexed: c.indexed }));
+}
+
 export function hostExtCollectionForPrefix(
   prefix: string,
 ): { indexed: boolean; deleteById: (id: string) => Promise<boolean> } | null {

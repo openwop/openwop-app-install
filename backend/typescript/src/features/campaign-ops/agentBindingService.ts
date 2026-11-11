@@ -22,7 +22,7 @@ import { cleanString } from '../../host/boundedStrings.js';
 import { OpenwopError } from '../../types.js';
 import { resolveAgentIdentity } from '../../host/agentIdentity.js';
 import { getAgentRegistry } from '../../executor/agentRegistry.js';
-import { effectiveToolAllowlist, resolveAgentToolAllowlistOverride } from '../../host/agentToolAllowlistService.js';
+import { agentOffersToolBaseline, effectiveToolAllowlist, resolveAgentToolAllowlistOverride } from '../../host/agentToolAllowlistService.js';
 import { listSelectableProviderIds } from '../../providers/catalog.js';
 import { isManagedRef } from '../../aiProviders/credentialRefLadder.js';
 import { listSecretRefs } from '../../byok/secretResolver.js';
@@ -69,7 +69,7 @@ async function effectiveAllowlistOf(tenantId: string, agentId: string): Promise<
   const manifest = await getAgentRegistry().resolve(identity.agentId, tenantId);
   if (!manifest) return null;
   const override = await resolveAgentToolAllowlistOverride(tenantId, manifest.agentId);
-  return new Set(effectiveToolAllowlist(manifest.toolAllowlist, override));
+  return new Set(effectiveToolAllowlist(manifest.toolAllowlist, override, await agentOffersToolBaseline(tenantId, manifest)));
 }
 
 export async function getAgentBinding(tenantId: string, orgId: string, bindingId: string): Promise<ClientAgentBinding | null> {

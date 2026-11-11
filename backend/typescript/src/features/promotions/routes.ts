@@ -11,7 +11,7 @@ import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { authorizeOrgScope } from '../featureRoute.js';
 import {
-  listPromotions, getPromotion, createPromotion, updatePromotion, deletePromotion, promotionUsage,
+  listPromotions, getPromotion, createPromotion, updatePromotion, deletePromotion, promotionUsage, needsCurrency,
 } from './promotionsService.js';
 
 const FEATURE = { toggleId: 'promotions', label: 'Promotions' };
@@ -27,7 +27,9 @@ export function registerPromotionsRoutes(deps: RouteDeps): void {
       // promotionUsage but no route returned it, so an exhausted promotion
       // still read Active. Serialized as an object keyed by promotionId.
       const [promotions, usage] = await Promise.all([listPromotions(tenantId, orgId), promotionUsage(tenantId, orgId)]);
-      res.json({ promotions, usage: Object.fromEntries(usage) });
+      // ADR 1025 D4 — `needsCurrency` ids: rows that carry an amount and no currency apply
+      // to no order; the console shows them as not applying, with the fix.
+      res.json({ promotions, usage: Object.fromEntries(usage), needsCurrency: promotions.filter(needsCurrency).map((p) => p.promotionId) });
     } catch (err) { next(err); }
   });
 

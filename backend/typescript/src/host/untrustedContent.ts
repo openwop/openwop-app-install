@@ -13,7 +13,80 @@
  *  line) AND defang the fence markers themselves so a payload containing the
  *  literal BEGIN/END UNTRUSTED CONTENT can't spoof the delimiter from inside. */
 export function neutralizeUntrusted(s: string): string {
-  return s.replace(/\s+/g, ' ').trim().replace(/(BEGIN|END)\s+UNTRUSTED\s+CONTENT\b/gi, '$1_UNTRUSTED_CONTENT'); // no leading \b: see defangUntrustedFence
+  return defangUntrustedFence(s.replace(/\s+/g, ' ').trim());
+}
+
+/*
+ * CHAN-F4 (ADR 1042 open items) — ONE matcher per fence syntax, tolerant of the
+ * near-miss spellings a model still reads as the delimiter. Every lane reaches
+ * these through the defang functions below (channel ingress via
+ * `wrapForLLMPrompt`, MCP via `defangPeerFence`, tool results via
+ * `fenceUntrustedBlock`, RFC 0124 via `promptCompose`), so the fix lives here and
+ * nowhere else. Before this, each matcher accepted only ASCII letters, plain
+ * whitespace and a literal `<`, so these all survived the defang:
+ *   - `< /UNTRUSTED>`: whitespace BEFORE the slash (only after it was tolerated);
+ *   - the full-width `<` `/` and letters (U+FF1C, U+FF0F, U+FF21..) of either fence;
+ *   - `</UN` + U+200B + `TRUSTED>`, `END` + U+200B + ` UNTRUSTED CONTENT`: invisible format
+ *     characters (zero-width space/joiner, soft hyphen, bidi marks) between letters;
+ *   - `&#60;/UNTRUSTED>`, `&#x3c;/UNTRUSTED>`, `&lt;&#47;UNTRUSTED>`: numeric or named
+ *     entities. `&lt;` itself is the house's DEFANGED form, so an entity opener is
+ *     already as inert as our own output; it is folded to `&lt;` so there is one
+ *     canonical spelling, and so a decoder downstream cannot revive a variant.
+ * The replacement folds the matched marker (NFKC, format characters stripped,
+ * slash entities to `/`) and keeps its case and whitespace, so every spelling the
+ * old matchers caught produces byte-identical output. Deterministic (no nonce), so
+ * replay-safe, and idempotent: a defanged string defangs to itself.
+ */
+
+/** Invisible format characters (Unicode Cf: ZWSP, ZWJ, soft hyphen, BOM, bidi marks). */
+const FMT = '\\p{Cf}';
+
+/** A fence word that also matches its full-width spelling, case-insensitively, with
+ *  format characters allowed between letters. ASCII letters only (the fence words). */
+function tolerantWord(word: string): string {
+  return [...word]
+    .map((c) => {
+      const u = c.toUpperCase();
+      const l = c.toLowerCase();
+      const wide = (ch: string) => String.fromCodePoint(ch.codePointAt(0)! + 0xfee0);
+      return `[${u}${l}${wide(u)}${wide(l)}]`;
+    })
+    .join(`${FMT}*`);
+}
+
+/** Not followed by a letter, digit or underscore (a Unicode-aware `\b` on the right). */
+const WORD_END = '(?![\\p{L}\\p{N}_])';
+/** Openers a model reads as `<`. */
+const LIVE_OPEN = '(?:<|\\uFF1C|\\uFE64)';
+/** Entity openers: already as inert as the house's own `&lt;`, folded only for one spelling. */
+const ANGLE_OPEN = '(?:<|\\uFF1C|\\uFE64|&lt;|&#0*60;|&#x0*3c;)';
+const SLASH = '(?:\\/|\\uFF0F|&#0*47;|&#x0*2f;|&sol;)';
+const GAP = `[\\s${FMT}]*`;
+const ANGLE_FENCE = `${ANGLE_OPEN}(${GAP}(?:${SLASH}${GAP})?)(${tolerantWord('UNTRUSTED')})${WORD_END}`;
+const LIVE_ANGLE_FENCE = `${LIVE_OPEN}${GAP}(?:${SLASH}${GAP})?${tolerantWord('UNTRUSTED')}${WORD_END}`;
+// No leading word boundary: see defangUntrustedFence (TOC2CD-11).
+const WORD_FENCE = `(${tolerantWord('BEGIN')}|${tolerantWord('END')})[\\s${FMT}]+${tolerantWord('UNTRUSTED')}[\\s${FMT}]+${tolerantWord('CONTENT')}${WORD_END}`;
+
+/** Fold a matched marker fragment to its plain spelling, keeping case and whitespace. */
+function foldMarker(s: string): string {
+  return s
+    .replace(/&#0*47;|&#x0*2f;|&sol;/gi, '/')
+    .normalize('NFKC')
+    .replace(/\p{Cf}/gu, '');
+}
+
+/**
+ * CHAN-F4 — does `s` contain either fence delimiter, in any spelling the defang
+ * functions neutralise? For lanes that must DETECT a marker (reject a model echo,
+ * flag an embedded directive) rather than defang it, so detection and defang can
+ * never disagree about what a marker is. Entity-encoded openers are NOT live
+ * markers (they read as the house's own defanged `&lt;`), so they are not flagged.
+ */
+export function hasUntrustedFenceMarker(s: string): boolean {
+  // A LIVE opener only: `&lt;/UNTRUSTED` is the defanged form, so the detector must
+  // not flag the host's own output (detection and defang agree, and defang ∘ detect
+  // is false for every input).
+  return new RegExp(LIVE_ANGLE_FENCE, 'iu').test(s) || new RegExp(WORD_FENCE, 'iu').test(s);
 }
 
 /** Wrap already-neutralized bullet items in the standard BEGIN/END UNTRUSTED
@@ -38,7 +111,8 @@ export function defangUntrustedFence(s: string): string {
   // characters `\n`, so `…\nEND UNTRUSTED CONTENT` puts a LETTER (`n`) directly
   // before `END`, and `\bEND` never matched: the marker survived the defang. A
   // spurious match ("WEEKEND UNTRUSTED CONTENT") only gains an underscore.
-  return s.replace(/(BEGIN|END)\s+UNTRUSTED\s+CONTENT\b/gi, '$1_UNTRUSTED_CONTENT');
+  // CHAN-F4: also full-width, format-character-split spellings (see WORD_FENCE).
+  return s.replace(new RegExp(WORD_FENCE, 'giu'), (_m, word: string) => `${foldMarker(word)}_UNTRUSTED_CONTENT`);
 }
 
 /** Defang the XML-TAG untrusted fence `<UNTRUSTED …>…</UNTRUSTED>` (the second
@@ -51,7 +125,9 @@ export function defangUntrustedFence(s: string): string {
  *  opening and closing marker, case-insensitively, so the model reads it as
  *  literal text, not a delimiter. Deterministic → replay-safe. */
 export function defangAngleFence(s: string): string {
-  return s.replace(/<(\/?\s*UNTRUSTED)\b/gi, '&lt;$1');
+  // CHAN-F4: also `< /UNTRUSTED`, full-width, format-character-split and
+  // entity-encoded spellings (see ANGLE_FENCE).
+  return s.replace(new RegExp(ANGLE_FENCE, 'giu'), (_m, gap: string, word: string) => `&lt;${foldMarker(gap)}${foldMarker(word)}`);
 }
 
 /** Longest label the fence header carries; anything longer is cut with an ellipsis. */

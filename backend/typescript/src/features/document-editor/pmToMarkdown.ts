@@ -7,6 +7,7 @@
  * backend needs no editor dependency. Both twins are unit-tested; keep them in
  * step (same node/mark coverage). Lossy + schema-bounded by design.
  */
+import { isDocumentHrefAllowed } from './documentSchemaNames.js';
 
 export interface PMNode {
   type?: string;
@@ -16,18 +17,30 @@ export interface PMNode {
   attrs?: Record<string, unknown>;
 }
 
+/** A fence longer than any backtick run in `body`, so the body cannot close it
+ *  early (ADR 1055 D7; the frontend serializer's rule). */
+function fenceFor(body: string): string {
+  return '`'.repeat(Math.max(3, (body.match(/`+/g) ?? []).reduce((m, r) => Math.max(m, r.length), 0) + 1));
+}
+
 function serializeText(node: PMNode): string {
   let text = node.text ?? '';
   const marks = node.marks ?? [];
   const has = (t: string) => marks.some((m) => m.type === t);
   if (has('code')) return `\`${text}\``;
+  // A newline inside a text node (an applied AI suggestion, ADR 1055 D5) is a
+  // Markdown hard break, not a lost line (DE87CD-13).
+  text = text.replace(/\n/g, '  \n');
   if (has('bold')) text = `**${text}**`;
   if (has('italic')) text = `*${text}*`;
   if (has('strike') || has('deletion')) text = `~~${text}~~`; // 6b-2: pending deletion exports struck
   const link = marks.find((m) => m.type === 'link');
-  if (link) {
-    const href = typeof link.attrs?.href === 'string' ? link.attrs.href : '';
-    text = `[${text}](${href})`;
+  // ADR 1055 D7 — only an href the editor itself would follow is exported as a
+  // link (any other exports as its plain text); parentheses are escaped as in
+  // the frontend serializer, so the href cannot end the link early.
+  const href = link && typeof link.attrs?.href === 'string' ? link.attrs.href : '';
+  if (link && isDocumentHrefAllowed(href)) {
+    text = `[${text}](${href.replace(/[()]/g, (c) => (c === '(' ? '%28' : '%29'))})`;
   }
   return text;
 }
@@ -67,12 +80,15 @@ function serializeBlock(node: PMNode): string {
     case 'blockquote': return (node.content ?? []).map(serializeBlock).join('\n\n').split('\n').map((l) => `> ${l}`).join('\n');
     case 'codeBlock': {
       const lang = typeof node.attrs?.language === 'string' ? node.attrs.language : '';
-      return `\`\`\`${lang}\n${serializeInline(node)}\n\`\`\``;
+      // Verbatim text (never escaped or marked up), as the frontend serializer.
+      const body = (node.content ?? []).map((c) => c.text ?? '').join('');
+      const fence = fenceFor(body);
+      return `${fence}${lang}\n${body}\n${fence}`;
     }
     case 'horizontalRule': return '---';
     case 'mathBlock': { const latex = typeof node.attrs?.latex === 'string' ? node.attrs.latex : ''; return '$$' + latex + '$$'; }
-    case 'chartBlock': { const spec = typeof node.attrs?.spec === 'string' ? node.attrs.spec : ''; return '```chart\n' + spec + '\n```'; }
-    case 'embedBlock': { const html = typeof node.attrs?.html === 'string' ? node.attrs.html : ''; return '```html\n' + html + '\n```'; }
+    case 'chartBlock': { const spec = typeof node.attrs?.spec === 'string' ? node.attrs.spec : ''; const f = fenceFor(spec); return `${f}chart\n${spec}\n${f}`; }
+    case 'embedBlock': { const html = typeof node.attrs?.html === 'string' ? node.attrs.html : ''; const f = fenceFor(html); return `${f}html\n${html}\n${f}`; }
     case 'image': {
       const src = typeof node.attrs?.src === 'string' ? node.attrs.src : '';
       const alt = typeof node.attrs?.alt === 'string' ? node.attrs.alt : '';

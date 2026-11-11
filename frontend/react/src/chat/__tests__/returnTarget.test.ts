@@ -5,7 +5,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   stageReturnTarget, getReturnTarget, clearReturnTarget, subscribeReturnTarget,
-  stagePendingApply, takePendingApply, __resetReturnTarget, type ReturnTarget,
+  stagePendingApply, takePendingApply, peekPendingApply, appliesTo, __resetReturnTarget, type ReturnTarget,
 } from '../returnTarget.js';
 
 const T: ReturnTarget = { label: 'My Doc', returnPath: '/document-editor/c1', canvasId: 'c1', from: 3, to: 8 };
@@ -39,4 +39,23 @@ describe('returnTarget', () => {
     expect(takePendingApply()).toEqual({ canvasId: 'c1', from: 3, to: 8, text: 'better' });
     expect(takePendingApply()).toBeNull();
   });
+
+  // ADR 1055 D5 — a launcher that is not ready, or is showing another document,
+  // looks without consuming; only a reply from the agent it asked offers Apply.
+  it('peek leaves the pending-apply for its owner; take still consumes once', () => {
+    stagePendingApply({ canvasId: 'c1', from: 3, to: 8, expectedText: 'old', text: 'better' });
+    expect(peekPendingApply()?.canvasId).toBe('c1');
+    expect(peekPendingApply()?.canvasId).toBe('c1');
+    expect(takePendingApply()?.expectedText).toBe('old');
+    expect(peekPendingApply()).toBeNull();
+  });
+
+  it('a target bound to an agent offers Apply only on that agent\'s replies', () => {
+    const bound: ReturnTarget = { ...T, agentId: 'agent.writer' };
+    expect(appliesTo(bound, 'agent.writer')).toBe(true);
+    expect(appliesTo(bound, 'agent.other')).toBe(false);
+    expect(appliesTo(bound, undefined)).toBe(false);
+    expect(appliesTo(T, undefined)).toBe(true); // an unbound target keeps the old behaviour
+  });
 });
+

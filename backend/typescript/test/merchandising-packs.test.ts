@@ -27,7 +27,11 @@ interface Manifest { name: string; version: string; nodes: { typeId: string; rol
 const manifest = (n: string): Manifest => JSON.parse(readFileSync(join(packDir(n), 'pack.json'), 'utf8')) as Manifest;
 
 describe('merchandising node pack manifests', () => {
-  it('declare the expected nodes, all role:action (recorded → replay-safe)', () => {
+  // ADR 1025 D2 — the four WRITES are side-effects (:fork serves the recorded output);
+  // `action` re-executes on replay, so it is right only for the reads. This leg used to
+  // assert "all role:action (recorded → replay-safe)", which pinned the defect.
+  const WRITES = new Set(['feature.promotions.nodes.create', 'feature.discovery.nodes.collection-upsert', 'feature.discovery.nodes.merch-rule-upsert', 'feature.recommendations.nodes.placement-upsert']);
+  it('declare the expected nodes: writes role:side-effect + side-effectful, reads role:action', () => {
     const cases: [string, string[]][] = [
       ['feature.recommendations.nodes', ['feature.recommendations.nodes.resolve', 'feature.recommendations.nodes.placement-upsert']],
       ['feature.promotions.nodes', ['feature.promotions.nodes.list-active', 'feature.promotions.nodes.apply-preview', 'feature.promotions.nodes.create']],
@@ -37,7 +41,10 @@ describe('merchandising node pack manifests', () => {
       const m = manifest(name);
       expect(m.name).toBe(name);
       expect(m.nodes.map((n) => n.typeId).sort()).toEqual([...ids].sort());
-      expect(m.nodes.every((n) => n.role === 'action')).toBe(true);
+      for (const n of m.nodes) expect(n.role, n.typeId).toBe(WRITES.has(n.typeId) ? 'side-effect' : 'action');
+      for (const n of m.nodes as { typeId: string; capabilities?: string[] }[]) {
+        expect((n.capabilities ?? []).includes('side-effectful'), n.typeId).toBe(WRITES.has(n.typeId));
+      }
     }
   });
   it('index.mjs exports a handler for every declared typeId', () => {

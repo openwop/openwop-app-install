@@ -1,9 +1,10 @@
 /**
  * feature.recommendations.nodes — MERCH-A nodes over the `ctx.features.recommendations`
- * surface (ADR 0273 / ADR 0058). Both nodes are role:"action": `resolve` reads the
- * MUTABLE recs cache/catalog so its output is RECORDED (replay/:fork read the recorded
- * result — a role:"read" would re-execute and drift, ADR 0273 ruling 7); `placement-upsert`
- * is a write. Pure-JS, Node-20 stdlib only. Calls the SAME service the REST route calls.
+ * surface (ADR 0273 / ADR 0058). `resolve` is a read (role:"action", which RE-EXECUTES on
+ * replay over the mutable recs cache; a caller that needs the exact products records them
+ * in its own output, ADR 0273 ruling 7). `placement-upsert` writes, so it is
+ * role:"side-effect" and a :fork serves its recorded output (ADR 1025 D2). Pure-JS,
+ * Node-20 stdlib only. Calls the SAME service the REST route calls.
  */
 function ensureReco(ctx) {
   const s = ctx.features && ctx.features.recommendations;

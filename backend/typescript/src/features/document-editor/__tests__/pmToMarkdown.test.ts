@@ -61,4 +61,17 @@ describe('pmToMarkdown (backend)', () => {
     expect(pmToMarkdown(doc([table]))).toBe('| A | B |\n| --- | --- |\n| 1 | 2 |\n');
     expect(pmToMarkdown(doc([{ type: 'image', attrs: { src: '/assets/t', alt: 'L' } }]))).toBe('![L](/assets/t)\n');
   });
+  // ADR 1055 D7 — export hygiene, pinned with the same cases on both serializers.
+  it('exports a link only when the editor would follow its href, else its text', () => {
+    const linked = (href: string) => pmToMarkdown(doc([{ type: 'paragraph', content: [{ type: 'text', text: 'go', marks: [{ type: 'link', attrs: { href } }] }] }]));
+    expect(linked('javascript:alert(1)')).toBe('go\n');
+    expect(linked('java\tscript:alert(1)')).toBe('go\n');
+    expect(linked('mailto:a@b.c')).toBe('[go](mailto:a@b.c)\n');
+    expect(linked('https://x.test/a(b)')).toBe('[go](https://x.test/a%28b%29)\n');
+  });
+
+  it('fences an embed or chart with more backticks than any run inside it', () => {
+    expect(pmToMarkdown(doc([{ type: 'embedBlock', attrs: { html: '<p>```</p><script>x</script>' } }]))).toBe('````html\n<p>```</p><script>x</script>\n````\n');
+    expect(pmToMarkdown(doc([{ type: 'chartBlock', attrs: { spec: '{"t":"````"}' } }]))).toBe('`````chart\n{"t":"````"}\n`````\n');
+  });
 });

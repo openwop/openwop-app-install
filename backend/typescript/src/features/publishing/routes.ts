@@ -49,6 +49,7 @@ import {
 import { pageMarkdown } from './sectionMarkdown.js';
 import { sendError } from '../../middleware/errorEnvelope.js';
 import { boundSiteOrigin } from '../../host/boundSite.js';
+import { OpenwopError } from '../../types.js';
 
 export function registerPublishingRoutes(deps: RouteDeps): void {
   const { app } = deps;
@@ -90,6 +91,16 @@ export function registerPublishingRoutes(deps: RouteDeps): void {
   // ── public: the published site (NO auth; org→tenant; toggle-gated) ──
   const PUB = '/host/openwop-app/public/:orgId';
 
+  // A not-found on a public slug read must never sit in a shared or browser
+  // cache. The error envelope sets no Cache-Control, and MEASURED 2026-11-10 the
+  // hosting CDN then serves the 404 with `cache-control: max-age=600` (Cloud Run's
+  // own answer carries none). So a page published a minute after a visitor (or
+  // its author) hit the slug stayed a 404 for them. The page read itself is not
+  // memoized, so `no-store` on the 404 alone makes a publish visible at once.
+  const notFoundNoStore = (res: Response, err: unknown): void => {
+    if (err instanceof OpenwopError && err.httpStatus === 404) res.setHeader('Cache-Control', 'no-store');
+  };
+
   // ADR 1015 D6 — the tenant site visitor runtime, served from the image by
   // manifest. Reachable on a bound custom domain only for that domain's org
   // (the guard's org pin); anything the manifest does not name is a 404.
@@ -116,14 +127,14 @@ export function registerPublishingRoutes(deps: RouteDeps): void {
     try {
       const { page, locale } = await publicPageBySlug(req.params.orgId, req.params.slug, publicBaseUrl(req), req.headers['accept-language'], undefined);
       const md = pageMarkdown(page, publicBaseUrl(req));
-      if (md === null) { sendError(res, 404, 'not_found', 'That page has no Markdown rendering.'); return; }
+      if (md === null) { res.setHeader('Cache-Control', 'no-store'); sendError(res, 404, 'not_found', 'That page has no Markdown rendering.'); return; }
       res.setHeader('Content-Language', locale);
       res.vary('Accept-Language, Accept-Encoding');
       // R2R-3 — authored text verbatim on a public boundary: declare + pin the
       // type (the ui-plugins nosniff precedent; markdown renders inert anyway).
       res.setHeader('X-Content-Type-Options', 'nosniff');
       res.type('text/markdown').send(md);
-    } catch (err) { next(err); }
+    } catch (err) { notFoundNoStore(res, err); next(err); }
   });
 
   app.get(`${PUB}/pages/:slug`, async (req, res, next) => {
@@ -149,7 +160,7 @@ export function registerPublishingRoutes(deps: RouteDeps): void {
       res.setHeader('Content-Language', locale);
       res.vary('Accept-Language, Accept-Encoding');
       res.json(page);
-    } catch (err) { next(err); }
+    } catch (err) { notFoundNoStore(res, err); next(err); }
   });
 
   app.get(`${PUB}/sitemap.xml`, async (req, res, next) => {
@@ -246,7 +257,7 @@ export function registerPublishingRoutes(deps: RouteDeps): void {
       // ADR 1015 — CSP always; the visitor runtime only on a bound host whose
       // workspace turned it on.
       await sendPrerenderHtml(res, out.html);
-    } catch (err) { next(err); }
+    } catch (err) { notFoundNoStore(res, err); next(err); }
   });
 
   // The blog-INDEX prerender (ADR 0391 / custom-domain `/blog`): a semantic list

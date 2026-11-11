@@ -28,7 +28,7 @@ const log = createLogger('host.marketingContentPages');
 
 const SYSTEM_ACTOR = 'system';
 /** Bump to refresh the built-in copy on a redeploy (only while never human-edited). */
-const SEED_VERSION = 6;
+export const SEED_VERSION = 6;
 /** Same id space as the placeholder seeder — this module owns these public slugs. */
 const pageIdFor = (slug: string): string => `page:host-site-${slug}`;
 

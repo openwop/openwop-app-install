@@ -21,7 +21,7 @@
  * Every panel asserts BOTH arms: the failure says failed, and a genuine
  * empty/healthy answer still says empty/healthy.
  *
- * w52: fetch-free — the outbox and SLO reads (the page's 3rd and 4th) are mocked
+ * w52: fetch-free — the outbox, Kanban delivery, and SLO reads are mocked
  * too (they used to fetch live, hence a live-fetch allowlist line); the
  * "genuinely empty queue" arm now asserts the empty state itself (deleting it
  * was invisible in round 1); the 403 arm asserts EXACTLY one operator-only card.
@@ -34,7 +34,7 @@ import { GlobalLiveRegion } from '../../../ui/announce.js';
 type Client = typeof import('../../../client/operationsClient.js');
 const api = vi.hoisted(() => ({
   getHealthSummary: vi.fn<Client['getHealthSummary']>(), getDlqSummary: vi.fn<Client['getDlqSummary']>(),
-  getOutboxSummary: vi.fn<Client['getOutboxSummary']>(), getSloSummary: vi.fn<Client['getSloSummary']>(),
+  getOutboxSummary: vi.fn<Client['getOutboxSummary']>(), getKanbanWorkItemDeliverySummary: vi.fn<Client['getKanbanWorkItemDeliverySummary']>(), getSloSummary: vi.fn<Client['getSloSummary']>(),
   getAdmissionSummary: vi.fn<Client['getAdmissionSummary']>(),
   replayDlqMessage: vi.fn<Client['replayDlqMessage']>(),
 }));
@@ -44,7 +44,7 @@ vi.mock('../../../client/operationsClient.js', async (importOriginal) => {
 });
 
 import { OperationsHubPage } from '../OperationsHubPage.js';
-import { OperationsRequestError, type AdmissionSummary, type DlqSummary, type HealthSummary, type OutboxSummary, type SloSummary } from '../../../client/operationsClient.js';
+import { OperationsRequestError, type AdmissionSummary, type DlqSummary, type HealthSummary, type KanbanWorkItemDeliverySummary, type OutboxSummary, type SloSummary } from '../../../client/operationsClient.js';
 import { messages as en } from '../i18n/en.js';
 
 const HEALTH: HealthSummary = {
@@ -58,6 +58,11 @@ const DLQ: DlqSummary = { subjects: [], backend: 'durable', perInstance: false, 
 const OUTBOX: OutboxSummary = {
   counts: { pending: 0, dead: 0 }, oldestPendingCreatedAt: null, oldestPendingAgeS: null,
   dead: [], deadSample: { limit: 20, truncated: false }, perInstance: false, fetchedAt: '2026-07-25T00:00:00Z',
+};
+const KANBAN_DELIVERY: KanbanWorkItemDeliverySummary = {
+  queue: { pending: 0, claimed: 0, delivered: 0, deadLettered: 0, oldestPendingCreatedAt: null, oldestPendingAgeS: null },
+  outcomes: { started: 0, 'not-eligible': 0, deferred: 0, 'workflow-unresolved': 0, retried: 0, 'dead-lettered': 0 },
+  window: { startsAt: '2026-07-24T00:00:00Z', endsAt: '2026-07-25T00:00:00Z' }, perInstance: false, fetchedAt: '2026-07-25T00:00:00Z',
 };
 const SLO: SloSummary = {
   source: 'local-scrape',
@@ -94,7 +99,7 @@ function spoken(): string {
   return document.querySelector('[aria-live="polite"]')?.textContent ?? '';
 }
 
-// ADR 0987 D6 — the hub's fifth read. Answered here so this file's panels stay the
+// ADR 0987 D6 — the hub's sixth read. Answered here so this file's panels stay the
 // ones under test, and no live fetch leaves the test (ADR 0661).
 const ADMISSION: AdmissionSummary = {
   profile: 'evaluation', families: [], holding: { count: 0, atLeast: false, limit: 1000 },
@@ -106,6 +111,7 @@ beforeEach(() => {
   api.getHealthSummary.mockResolvedValue(HEALTH);
   api.getDlqSummary.mockResolvedValue(DLQ);
   api.getOutboxSummary.mockResolvedValue(OUTBOX);
+  api.getKanbanWorkItemDeliverySummary.mockResolvedValue(KANBAN_DELIVERY);
   api.getSloSummary.mockResolvedValue(SLO);
   api.getAdmissionSummary.mockResolvedValue(ADMISSION);
 });

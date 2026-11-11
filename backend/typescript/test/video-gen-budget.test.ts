@@ -2,7 +2,8 @@
  * ADR 0411 P1 — the `video` unit on the ADR 0106 media budget. The unit itself
  * predates this ADR (ADR 0404 scaffolding) but was untested; `callVideoGenerator`
  * pre-flights `checkMediaBudget(tenantId,'video',1)` and maps `exceeded` →
- * `provider_rate_limited`, so pin the unit's contract: env cap, 0 = uncapped,
+ * `provider_rate_limited`, so pin the unit's contract: env cap, the default and
+ * the `0`/`unlimited` rule (ADR 1051 D3 — `0` used to mean uncapped),
  * KV-backed daily count, per-org override, the CAS increment, and the
  * FAIL-CLOSED read (ADR 0404 grade-code CV-4: video is the costliest kind, so a
  * usage-read outage refuses instead of waving renders through) — mirroring
@@ -40,11 +41,11 @@ afterEach(() => {
 });
 
 describe('video unit on the media budget (ADR 0411 P1)', () => {
-  it('defaults to 0 = uncapped/off (video is opt-in; the ADR warns operators to set a cap)', async () => {
+  it('ADR 1051 D3 — unset ships a cap of 10 units (it used to be uncapped)', async () => {
     // Twin of media-budget.test.ts:66 for the CONSTANT; this case adds what the default
-    // DOES: with no env set, a video pre-flight is the uncapped answer.
-    expect(mediaDailyBudget().video).toBe(0);
-    expect(await checkMediaBudget(tenant('default'), 'video', 1)).toMatchObject({ exceeded: false, cap: 0, remaining: Infinity });
+    // DOES: with no env set, a video pre-flight counts against 10.
+    expect(mediaDailyBudget().video).toBe(10);
+    expect(await checkMediaBudget(tenant('default'), 'video', 1)).toMatchObject({ exceeded: false, cap: 10, remaining: 10 });
   });
 
   it('tracks used + remaining, denies at the cap (the provider_rate_limited pre-flight input)', async () => {
@@ -57,26 +58,29 @@ describe('video unit on the media budget (ADR 0411 P1)', () => {
     expect((await checkMediaBudget(t, 'video', 1)).exceeded).toBe(true); // 2/2 → callVideoGenerator throws provider_rate_limited
   });
 
-  it('cap 0 is uncapped and records nothing', async () => {
+  it('ADR 1051 D3 — cap 0 DISABLES paid video; only `unlimited` is uncapped, and neither records', async () => {
     process.env.OPENWOP_MEDIA_DAILY_VIDEO_JOBS = '0';
     const t = tenant('zero');
+    expect(await checkMediaBudget(t, 'video', 1)).toMatchObject({ exceeded: true, disabled: true, cap: 0 });
+    process.env.OPENWOP_MEDIA_DAILY_VIDEO_JOBS = 'unlimited';
     await recordMediaUsage(t, 'video', 25);
-    expect((await checkMediaBudget(t, 'video', 1)).exceeded).toBe(false);
-    // "records nothing": at cap 0 the check returns before reading any count, so the
-    // proof is to turn a cap ON afterwards and read what was stored (round-1 probe
-    // 8fw4g1-vb-uncapped stayed green without this).
+    expect(await checkMediaBudget(t, 'video', 1)).toMatchObject({ exceeded: false, remaining: Infinity });
+    // "records nothing": an uncapped check returns before reading any count, so the
+    // proof is to turn a cap ON afterwards and read what was stored.
     process.env.OPENWOP_MEDIA_DAILY_VIDEO_JOBS = '30';
     expect(await checkMediaBudget(t, 'video', 1)).toMatchObject({ used: 0, cap: 30 });
   });
 
-  it('the per-org governance override wins over env, field by field (incl. explicit 0)', async () => {
+  it('the per-org governance override wins over env, field by field (explicit 0 = off, ADR 1051)', async () => {
     process.env.OPENWOP_MEDIA_DAILY_VIDEO_JOBS = '1';
     const t = tenant('ov');
     configureMediaBudget({ storage, resolveOverride: async () => ({ videoJobs: 4 }) });
     await recordMediaUsage(t, 'video', 2);
     expect(await checkMediaBudget(t, 'video', 1)).toMatchObject({ exceeded: false, used: 2, cap: 4 });
     configureMediaBudget({ storage, resolveOverride: async () => ({ videoJobs: 0 }) });
-    expect((await checkMediaBudget(t, 'video', 1)).exceeded).toBe(false); // 0 = uncapped for this org
+    expect(await checkMediaBudget(t, 'video', 1)).toMatchObject({ exceeded: true, disabled: true }); // 0 = paid video off for this org
+    configureMediaBudget({ storage, resolveOverride: async () => ({ videoJobs: 'unlimited' }) });
+    expect((await checkMediaBudget(t, 'video', 1)).exceeded).toBe(false);
   });
 
   it('parallel records never lose increments (the CAS contract)', async () => {

@@ -58,6 +58,28 @@ export interface MediaAssetLineage {
    *  patch cannot set, change or clear it. Ids only; the rights record stays on
    *  the intake, and `rightsNote` carries its accepted summary. */
   suppliedBy?: MediaSupplier;
+  /** ADR 1051 D5 — the likeness/voice attestation an avatar render ran under.
+   *  Server only and write-once, like `suppliedBy`. NON-personal fields only:
+   *  who attested lives on the video job (`jobId`), where DSAR reaches it. */
+  likenessConsent?: MediaLikenessConsent;
+}
+
+/** ADR 1051 D5 — the asset's pointer to the attestation behind it. */
+export interface MediaLikenessConsent {
+  jobId: string;
+  textVersion: string;
+  attestedAt: string;
+  avatarId: string;
+  voiceId?: string;
+}
+
+/** ADR 1051 D5 — bounded, shape-checked; undefined when unusable. */
+function cleanLikenessConsent(raw: MediaLikenessConsent): MediaLikenessConsent | undefined {
+  const s = (v: unknown, max: number): string => (typeof v === 'string' && v.length > 0 && v.length <= max && !v.includes('\u0000') ? v : '');
+  const jobId = s(raw.jobId, 200); const textVersion = s(raw.textVersion, 60); const attestedAt = s(raw.attestedAt, 40); const avatarId = s(raw.avatarId, 200);
+  const voiceId = raw.voiceId === undefined ? undefined : s(raw.voiceId, 200);
+  if (!jobId || !textVersion || !attestedAt || !avatarId || voiceId === '') return undefined;
+  return { jobId, textVersion, attestedAt, avatarId, ...(voiceId ? { voiceId } : {}) };
 }
 
 /** ADR 0958 D5 — the supplier facet of an asset's lineage. */
@@ -560,6 +582,8 @@ export async function createAsset(input: {
   grounding?: unknown;
   /** ADR 0958 D5 — SERVER-ONLY: the vendor intake accept. Never from a request body. */
   suppliedBy?: MediaSupplier;
+  /** ADR 1051 D5 — SERVER-ONLY: the avatar render's attestation pointer. */
+  likenessConsent?: MediaLikenessConsent;
 }): Promise<MediaAsset> {
   // Capacity (count + bytes) is asserted in the route BEFORE bytes are stored —
   // see assertOrgCapacity — so no over-cap upload reaches here with orphaned bytes.
@@ -577,7 +601,9 @@ export async function createAsset(input: {
   // photos carries it too. `generatedBy` stays whatever the path stated.
   const supplied = input.suppliedBy ? cleanSupplier(input.suppliedBy) : undefined;
   const base = grounding ? { ...(cleaned ?? {}), grounding } : cleaned;
-  const lineage = supplied ? { ...(base ?? {}), suppliedBy: supplied } : base;
+  const withSupplier = supplied ? { ...(base ?? {}), suppliedBy: supplied } : base;
+  const consent = input.likenessConsent ? cleanLikenessConsent(input.likenessConsent) : undefined;
+  const lineage = consent ? { ...(withSupplier ?? {}), likenessConsent: consent } : withSupplier;
   const marketing = cleanMarketing(input.marketing);
   const a: MediaAsset = {
     assetId: `masset:${randomUUID()}`,
@@ -617,6 +643,19 @@ export async function stampGroundingIfAbsent(existing: MediaAsset, grounding: un
     const kept = current.lineage?.grounding ?? g;
     if (!kept || (current.lineage?.grounding && (!opts.ai || current.lineage.generatedBy === 'ai'))) return null;
     return { ...current, lineage: { ...(current.lineage ?? {}), ...(opts.ai ? { generatedBy: 'ai' as const } : {}), grounding: kept }, updatedAt: nowIso() };
+  });
+  if (!result) throw new OpenwopError('not_found', 'Asset not found in this org.', 404, { assetId: existing.assetId });
+  return result.asset;
+}
+
+/** ADR 1051 D5 — stamp the attestation pointer on an asset that has none (the
+ *  content-hash dedup branch reuses an existing asset). Write-once: an existing
+ *  pointer is kept. */
+export async function stampLikenessConsentIfAbsent(existing: MediaAsset, consent: MediaLikenessConsent): Promise<MediaAsset> {
+  const c = cleanLikenessConsent(consent);
+  const result = await mutateAsset(existing.tenantId, existing.orgId, existing.assetId, (current) => {
+    if (!c || current.lineage?.likenessConsent) return null;
+    return { ...current, lineage: { ...(current.lineage ?? {}), likenessConsent: c }, updatedAt: nowIso() };
   });
   if (!result) throw new OpenwopError('not_found', 'Asset not found in this org.', 404, { assetId: existing.assetId });
   return result.asset;
@@ -897,9 +936,11 @@ export async function updateAsset(
       const lineage = cleanLineage(patch.lineage);
       const kept = a.lineage?.grounding;
       const supplier = a.lineage?.suppliedBy;
+      // ADR 1051 D5 — the likeness attestation pointer survives every patch too.
+      const consent = a.lineage?.likenessConsent;
       const wasAi = a.lineage?.generatedBy === 'ai';
-      if (kept || wasAi || supplier || lineage) {
-        next.lineage = { ...(lineage ?? {}), ...(wasAi ? { generatedBy: 'ai' as const } : {}), ...(kept ? { grounding: kept } : {}), ...(supplier ? { suppliedBy: supplier } : {}) };
+      if (kept || wasAi || supplier || consent || lineage) {
+        next.lineage = { ...(lineage ?? {}), ...(wasAi ? { generatedBy: 'ai' as const } : {}), ...(kept ? { grounding: kept } : {}), ...(supplier ? { suppliedBy: supplier } : {}), ...(consent ? { likenessConsent: consent } : {}) };
       } else delete next.lineage;
     }
     if (patch.marketing !== undefined) {

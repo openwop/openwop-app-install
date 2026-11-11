@@ -390,6 +390,16 @@ test.describe('mobile shell — closed drawer keyboard exclusion', () => {
     const brand = sidebar.locator('.app-sidebar-brand');
     await expect(more).toBeVisible({ timeout: 60_000 });
     await expect(more).toHaveAttribute('aria-expanded', 'false');
+    // Keyboard steps start only once the page has finished loading: something
+    // focusable must exist after More, or the first Tab falls off the document
+    // (:focus matches nothing). Measured 2026-11-09 at --repeat-each=40
+    // --workers=4: 9/40 red at the in-viewport check below without this wait.
+    // Until the BYOKWizard StrictMode fix, a late-mounting wizard stole focus
+    // instead, which masked this race here and reddened the later focus checks.
+    // This wait also lands that mount before the keyboard steps, so this spec
+    // alone does NOT witness the wizard fix (40/40 green with it reverted); its
+    // StrictMode case in BYOKWizard.flow.test.tsx does.
+    await expect(page.locator('#main-content').locator('a[href], button, textarea, input').first()).toBeVisible({ timeout: 60_000 });
 
     // This exact next Tab reached the translated, invisible brand before the fix.
     await more.focus();

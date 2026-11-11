@@ -180,7 +180,7 @@ describe.each(ROLES)('ADR 0943 P1 — $agentId', (role) => {
       expect(forbidden.filter((f) => required.includes(f)), t.taskId).toEqual([]);
       // The forbidden list must bite on a tool the role is actually OFFERED (the
       // ADR 0315 default-on writes), or the check is vacuous for this task.
-      const offered = new Set(effectiveToolAllowlist(role.allow, undefined));
+      const offered = new Set(effectiveToolAllowlist(role.allow, undefined, true));
       if (forbidden.length) expect(forbidden.filter((f) => offered.has(f)).length, `${t.taskId} forbids no offered tool`).toBeGreaterThan(0);
       else expect(t.expected.kind, `${t.taskId} needs an output criterion when it forbids no tool`).toBe('golden');
       for (const c of t.expected.trajectory?.calls ?? []) expect(role.allow, `${t.taskId} expects a tool the role lacks`).toContain(c.tool);
@@ -189,7 +189,7 @@ describe.each(ROLES)('ADR 0943 P1 — $agentId', (role) => {
 
   it('discriminates: the follower passes every task, the violator fails every task', async () => {
     const s = suiteOf(role);
-    const offered = new Set(effectiveToolAllowlist(getAgentRegistry().get(role.agentId)?.toolAllowlist, undefined));
+    const offered = new Set(effectiveToolAllowlist(getAgentRegistry().get(role.agentId)?.toolAllowlist, undefined, true));
     const follow: Record<string, Round[]> = {};
     const violate: Record<string, Round[]> = {};
     for (const t of s.tasks) {

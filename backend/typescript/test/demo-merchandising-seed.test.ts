@@ -44,6 +44,20 @@ beforeAll(async () => {
 });
 
 describe('demo-merchandising seeder', () => {
+  it('ADR 1025 D7 — a product-scoped promotion whose products are missing is SKIPPED, not a thrown seed', async () => {
+    // No commerce-depth seed, so the catalog has none of the demo products: the
+    // house-blend loss leader and the ceramic-mug BOGO would have an empty scope, which
+    // intake now refuses. The rest of the seed must still land.
+    const tenantId = 'demo-merch-t-empty';
+    await seedDemoPeople(tenantId);
+    await seedDemoCrm(tenantId);
+    const res = await seedDemoMerchandising(tenantId);
+    const skipped = (res.details?.skipped ?? []) as string[];
+    expect(skipped.filter((s) => s.startsWith('promotion:')).length).toBeGreaterThan(0);
+    const orgId = (await (await import('../src/host/accessControlService.js')).listOrgs(tenantId))[0]!.orgId;
+    expect((await listCollections(tenantId, orgId)).length).toBeGreaterThan(0);
+  });
+
   it('seeds promotions/discovery/recos over the catalog, idempotent; clears clean', async () => {
     const tenantId = 'demo-merch-t1';
     await seedDemoPeople(tenantId);
@@ -60,6 +74,9 @@ describe('demo-merchandising seeder', () => {
     expect(promos.some((p) => p.type === 'loss_leader' && (p.budget?.maxDiscount ?? 0) > 0 && p.segmentId)).toBe(true);
     expect(promos.some((p) => p.schedule?.startAt && p.schedule?.endAt)).toBe(true);
     expect(new Set(promos.map((p) => p.type)).size).toBeGreaterThanOrEqual(4);
+    // ADR 1025 D4 — the catalog is USD, and a promotion that carries an amount must say so,
+    // or it applies to no order (prod's two demo rows were seeded without one).
+    expect(promos.filter((p) => p.currency !== 'USD').map((p) => p.name)).toEqual([]);
 
     const cols = (await listCollections(tenantId, orgId)).filter((c) => c.createdBy === ACTOR);
     expect(cols).toHaveLength(6);

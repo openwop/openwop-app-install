@@ -31,7 +31,7 @@ const log = createLogger('host.systemSiteDocs');
 const SYSTEM_ACTOR = 'system';
 /** Bump when the corpus below changes — a redeploy refreshes every page that
  *  has never been human-edited. */
-const SEED_VERSION = 1;
+export const SEED_VERSION = 1;
 
 const pageIdFor = (slug: string): string => `page:host-site-docs-${slug}`;
 
@@ -41,9 +41,9 @@ const rt = (id: string, heading: string, text: string): Section =>
 const hero = (id: string, heading: string, subheading: string): Section =>
   ({ sectionId: id, type: 'hero', data: { heading, subheading } }) as Section;
 
-interface DocSeed { slug: string; title: string; docsNav: string; sections: Section[] }
+export interface DocSeed { slug: string; title: string; docsNav: string; sections: Section[] }
 
-const DOCS: DocSeed[] = [
+export const DOCS: DocSeed[] = [
   // ── getting-started/ ────────────────────────────────────────────────────────
   {
     slug: 'welcome', title: 'Welcome', docsNav: 'getting-started/10',

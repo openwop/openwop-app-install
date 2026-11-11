@@ -23,7 +23,8 @@ import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
 import { listOrgs, resolveEffectiveAccess, type Scope } from '../../host/accessControlService.js';
 import { OpenwopError } from '../../types.js';
-import { listPromotions, createPromotion, applyPromotionsUngated, PROMOTION_TYPES } from './promotionsService.js';
+import { listPromotions, createPromotion, previewPromotions, needsCurrency, PROMOTION_TYPES } from './promotionsService.js';
+import { CURRENCIES } from '../commerce/commerceService.js';
 
 export const PROMOTIONS_LIST_TOOL_ID = 'openwop:promotions.list';
 export const PROMOTIONS_APPLY_PREVIEW_TOOL_ID = 'openwop:promotions.apply-preview';
@@ -97,7 +98,9 @@ export function registerPromotionsAgentTools(): void {
       if ('empty' in resolved) return ok({ promotions: [] });
       if ('error' in resolved) return resolved.error;
       const promotions = await listPromotions(scope.tenantId, resolved.orgId);
-      return ok({ promotions: promotions.map(projectPromotion) });
+      // ADR 1025 D4 — an Active row that carries an amount but no currency applies to
+      // nothing; the model must not report it as live.
+      return ok({ promotions: promotions.map((p) => ({ ...projectPromotion(p), ...(needsCurrency(p) ? { needsCurrency: true } : {}) })) });
     },
   });
 
@@ -127,7 +130,7 @@ export function registerPromotionsAgentTools(): void {
               additionalProperties: false,
             },
           },
-          currency: { type: 'string', description: "Currency code (default 'USD')." },
+          currency: { type: 'string', enum: [...CURRENCIES], description: "Currency code (default 'USD'). A promotion that carries an amount only fires on carts in its own currency." },
           orgId: { type: 'string', description: 'Target organization id — only needed with more than one organization.' },
         },
         required: ['items'],
@@ -143,11 +146,10 @@ export function registerPromotionsAgentTools(): void {
             productId: String(i?.productId ?? ''), unitPrice: Number(i?.unitPrice ?? 0), quantity: Number(i?.quantity ?? 0),
           }))
         : [];
-      const subtotal = items.reduce((s, i) => s + i.unitPrice * i.quantity, 0);
-      const r = await applyPromotionsUngated({
-        tenantId: scope.tenantId, orgId: resolved.orgId, currency: optStr(input.currency) ?? 'USD', subtotalAfterCoupon: subtotal, items,
-      });
-      return ok({ discount: r.discount, appliedPromotions: r.appliedPromotions });
+      try {
+        const r = await previewPromotions({ tenantId: scope.tenantId, orgId: resolved.orgId, currency: input.currency, items });
+        return ok({ discount: r.discount, appliedPromotions: r.appliedPromotions, ...(r.notApplying.length ? { notApplying: r.notApplying } : {}) });
+      } catch (e) { return fromServiceError(e); }
     },
   });
 
@@ -160,6 +162,7 @@ export function registerPromotionsAgentTools(): void {
         'DRAFT a promotion. It lands PROPOSED (inactive) — a human must activate it in the Promotions page; you '
         + 'NEVER make a promotion go live (it moves money). '
         + `Types: ${PROMOTION_TYPES.join(', ')}. A loss_leader REQUIRES budget.maxDiscount (the loss cap). `
+        + 'A promotion that carries an AMOUNT (a fixed reward, minSpend, or budget.maxDiscount) REQUIRES `currency`. '
         + 'Explain the tactic and preview its impact (apply-preview) before drafting.',
       inputSchema: {
         type: 'object',
@@ -193,6 +196,7 @@ export function registerPromotionsAgentTools(): void {
             properties: { maxDiscount: { type: 'number' }, maxQuantity: { type: 'number' } },
             additionalProperties: false,
           },
+          currency: { type: 'string', enum: [...CURRENCIES], description: 'The currency the amounts are in. Required when the promotion carries an amount (fixed reward, minSpend, budget.maxDiscount); omit for a pure percentage.' },
           priority: { type: 'number', description: 'Resolution priority (higher wins). Default 0.' },
           orgId: { type: 'string', description: 'Target organization id — only needed with more than one organization.' },
         },
@@ -211,7 +215,10 @@ export function registerPromotionsAgentTools(): void {
           name: str(input.name), type: input.type, reward: input.reward,
           scope: input.scope, minSpend: input.minSpend, minQuantity: input.minQuantity, bogo: input.bogo, budget: input.budget, priority: input.priority,
           active: false, // PROPOSED — never auto-live from a chat turn (money-moving firewall).
-          // R2 PRO2-P1 (review B2) — this lane dropped it too.
+          proposed: true,
+          // R2 PRO2-P1 (review B2) — this lane dropped it too. ADR 1025 D4: and the schema
+          // above had no `currency` property under additionalProperties:false, so the model
+          // could never send one. It can now.
           currency: input.currency,
         });
         return ok({

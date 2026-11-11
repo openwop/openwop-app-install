@@ -11,7 +11,7 @@
  * w14g4-schema-atom, vacuous by double guard).
  */
 import { describe, it, expect } from 'vitest';
-import { getSchema } from '@tiptap/core';
+import { getSchema, generateHTML, generateJSON } from '@tiptap/core';
 import { documentExtensions } from '../documentSchema.js';
 
 describe('documentExtensions', () => {
@@ -45,4 +45,23 @@ describe('documentExtensions', () => {
     expect(schema.nodes.chartBlock!.isAtom).toBe(true);
     expect(schema.nodes.embedBlock!.isAtom).toBe(true);
   });
+
+  // DE87UX-22 — suggestions render as native <ins>/<del>. StarterKit's Strike
+  // also parses <del> and is registered first, so a copied-and-pasted deletion
+  // came back as permanent strikethrough unless the suggestion rules outrank it.
+  it('a suggested insertion and deletion survive an HTML round-trip as suggestions', () => {
+    const exts = documentExtensions();
+    const doc = { type: 'doc', content: [{ type: 'paragraph', content: [
+      { type: 'text', text: 'old', marks: [{ type: 'deletion', attrs: { author: 'ai' } }] },
+      { type: 'text', text: 'new', marks: [{ type: 'insertion', attrs: { author: 'ai' } }] },
+    ] }] };
+    const html = generateHTML(doc, exts);
+    expect(html).toContain('<del');
+    expect(html).toContain('<ins');
+    const back = generateJSON(html, exts) as { content: { content: { text: string; marks: { type: string; attrs?: { author?: string } }[] }[] }[] };
+    const runs = back.content[0]!.content;
+    expect(runs.map((r) => [r.text, r.marks.map((m) => m.type)])).toEqual([['old', ['deletion']], ['new', ['insertion']]]);
+    expect(runs[0]!.marks[0]!.attrs?.author).toBe('ai');
+  });
 });
+

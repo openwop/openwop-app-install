@@ -17,12 +17,16 @@ import { filterSlashItems } from './slashItems.js';
 export interface SlashCommandOptions {
   items: SlashItem[];
   emptyLabel: string;
+  /** Accessible name of the menu (DE87UX-7). */
+  label: string;
+  /** The localized "{{title}}, {{n}} of {{total}}" announcement (DE87UX-33). */
+  position: (title: string, n: number, total: number) => string;
 }
 
 export const SlashCommand = Extension.create<SlashCommandOptions>({
   name: 'slashCommand',
   addOptions() {
-    return { items: [], emptyLabel: '' };
+    return { items: [], emptyLabel: '', label: '', position: (title) => title };
   },
   addProseMirrorPlugins() {
     const options = this.options;
@@ -40,9 +44,19 @@ export const SlashCommand = Extension.create<SlashCommandOptions>({
           let closed = false;
           let onDocMouseDown: ((e: MouseEvent) => void) | null = null;
 
+          let owner: HTMLElement | undefined;
           const propsFor = (items: SlashItem[], command: (item: SlashItem) => void) => ({
-            items, command, emptyLabel: options.emptyLabel, listId: 'doc-slash',
+            items, command, emptyLabel: options.emptyLabel, listId: 'doc-slash', label: options.label, position: options.position, ...(owner ? { owner } : {}),
           });
+          // DE87UX-7 — the focused textbox points at the open listbox. Only
+          // aria-controls (+ aria-activedescendant, set by SlashMenu): aria-expanded
+          // and aria-haspopup are not allowed on role="textbox" in ARIA 1.2
+          // (DE87UX-32); the live announcement covers the rest.
+          const markOwner = (open: boolean): void => {
+            if (!owner) return;
+            if (open) owner.setAttribute('aria-controls', 'doc-slash-list');
+            else { owner.removeAttribute('aria-controls'); owner.removeAttribute('aria-activedescendant'); }
+          };
           // Review of #1601 (F5): clamp to the viewport (a caret near the
           // bottom/right edge flips/pins the popup back on-screen) and track
           // the caret while the page scrolls (position:fixed would otherwise
@@ -60,6 +74,7 @@ export const SlashCommand = Extension.create<SlashCommandOptions>({
           };
           const reposition = (): void => { position(latestRect?.() ?? null); };
           const teardown = (): void => {
+            markOwner(false);
             if (onDocMouseDown) { document.removeEventListener('mousedown', onDocMouseDown); onDocMouseDown = null; }
             window.removeEventListener('scroll', reposition, true);
             window.removeEventListener('resize', reposition);
@@ -71,6 +86,8 @@ export const SlashCommand = Extension.create<SlashCommandOptions>({
           return {
             onStart: (p) => {
               closed = false;
+              owner = p.editor.view.dom;
+              markOwner(true);
               component = new ReactRenderer(SlashMenu, {
                 editor: p.editor,
                 props: propsFor(p.items, (item) => p.command(item)),

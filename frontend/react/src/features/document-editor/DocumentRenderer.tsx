@@ -11,7 +11,8 @@ import { useTranslation } from 'react-i18next';
 import { useEditor, EditorContent } from '@tiptap/react';
 import type { JSONContent } from '@tiptap/core';
 import { documentExtensions } from './documentSchema.js';
-import { coerceDocument, EMPTY_DOC } from './documentDoc.js';
+import { Notice } from '../../ui/index.js';
+import { coerceDocument, EMPTY_DOC, repairDocumentContent } from './documentDoc.js';
 
 function parseContent(content: string): JSONContent {
   try {
@@ -31,15 +32,19 @@ function parseContent(content: string): JSONContent {
 
 export function DocumentRenderer({ content }: { content: string; editPaths?: boolean }): JSX.Element {
   const { t } = useTranslation('document-editor');
+  // ADR 1055 D2 — one node the schema cannot open would blank the whole view.
+  const repaired = repairDocumentContent(parseContent(content));
   const editor = useEditor({
     editable: false,
     extensions: documentExtensions(),
-    content: parseContent(content),
-    editorProps: { attributes: { class: 'doc-editor__content', 'aria-label': t('readAriaLabel') } },
+    content: repaired.content,
+    // DE87UX-19 — a role, so the name is announced (a generic div drops it).
+    editorProps: { attributes: { class: 'doc-editor__content', role: 'document', 'aria-label': t('readAriaLabel') } },
   }, [content]);
 
   return (
     <div className="doc-editor doc-editor--read">
+      {repaired.droppedCount > 0 ? <Notice variant="warning">{t('renderPartial')}</Notice> : null}
       {editor ? <EditorContent editor={editor} /> : <div aria-busy="true" />}
     </div>
   );

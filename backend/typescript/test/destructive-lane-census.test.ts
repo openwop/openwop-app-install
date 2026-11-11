@@ -224,6 +224,7 @@ const HOLD_CONSULT: Record<string, Consult> = {
   'host/kanbanService.ts#sweepExpiredKanbanOperationReceipts': { mode: 'asserts' },
   'features/analytics/replayStore.ts#sweepExpiredReplays': { mode: 'asserts' }, // ADR 0951 D3 — per-row `getRetentionHold` before any recording is deleted
   'messaging/deliveryLogRetention.ts#sweepExpiredRelayDeliveryLog': { mode: 'asserts' }, // ADR 1043 RELAY-LOG-RETENTION-1 — `listHeldTenantsFrom`, held tenants excluded in the DELETE
+  'messaging/outboundRetention.ts#sweepExpiredRelayOutbound': { mode: 'asserts' }, // ADR 1043 CHAN-F12 — `listHeldTenantsFrom`, rows of held tenants' devices excluded in the DELETE
   'host/inMemorySurfaces.ts#sweepExpiredMediaAssets': { mode: 'exempt', reason: '1h TTL of model-facing media bytes; no PII fields declared on `media:bytes`', pin: { kind: 'no-pii-declared', namespaces: ['media:bytes'] } },
   'features/connections/oauthFlow.ts#sweepExpiredPendingAuth': { mode: 'exempt', reason: 'abandoned OAuth state rows (PKCE material); no PII fields declared', pin: { kind: 'no-pii-declared', namespaces: ['connections:pendingAuth'] } },
   'features/analytics/visitorIdentity.ts#sweepExpiredSalts': { mode: 'exempt', reason: 'host-global daily salt rotation — no tenant to hold', pin: { kind: 'host-global-ageout', id: 'analytics:visitor-salt' } },

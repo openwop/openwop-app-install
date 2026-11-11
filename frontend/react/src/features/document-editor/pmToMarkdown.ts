@@ -6,6 +6,13 @@
  * Markdown form and degrades to plain text. docx/PDF export is Phase 4b.
  */
 import type { JSONContent } from '@tiptap/core';
+import { isDocumentHrefAllowed } from './documentSchemaNames.js';
+
+/** A fence longer than any backtick run in `body`, so the body cannot close it
+ *  early (ADR 1055 D7; first applied to code blocks in review of #1601, F1). */
+function fenceFor(body: string): string {
+  return '`'.repeat(Math.max(3, (body.match(/`+/g) ?? []).reduce((m, r) => Math.max(m, r.length), 0) + 1));
+}
 
 interface Mark { type?: string; attrs?: Record<string, unknown> }
 
@@ -30,7 +37,9 @@ function serializeText(node: JSONContent): string {
     const pad = raw.startsWith('`') || raw.endsWith('`') ? ' ' : '';
     text = `${fence}${pad}${raw}${pad}${fence}`;
   } else {
-    text = escapeMd(node.text ?? '');
+    // A newline inside a text node (an applied AI suggestion, ADR 1055 D5) is a
+    // Markdown hard break, not a lost line (DE87CD-13).
+    text = escapeMd(node.text ?? '').replace(/\n/g, '  \n');
     if (has('bold')) text = `**${text}**`;
     if (has('italic')) text = `*${text}*`;
     // A pending deletion suggestion (6b-2) exports struck; a pending insertion
@@ -39,8 +48,10 @@ function serializeText(node: JSONContent): string {
   }
   // The link wraps LAST so a code+link run exports as [`code`](href) — the
   // old early-return dropped the link on code spans (review of #1601, F1).
-  if (link) {
-    const href = typeof link.attrs?.href === 'string' ? link.attrs.href : '';
+  // ADR 1055 D7 — only an href the editor itself would follow is exported as a
+  // link; any other exports as its plain text.
+  const href = link && typeof link.attrs?.href === 'string' ? link.attrs.href : '';
+  if (link && isDocumentHrefAllowed(href)) {
     text = `[${text}](${href.replace(/[()]/g, (c) => (c === '(' ? '%28' : '%29'))})`;
   }
   return text;
@@ -106,7 +117,7 @@ function serializeBlock(node: JSONContent): string {
       // Verbatim text (never escaped) + a fence LONGER than any backtick run
       // inside it, so embedded ``` can't break out (review of #1601, F1).
       const raw = (node.content ?? []).map((c) => c.text ?? '').join('');
-      const fence = '`'.repeat(Math.max(3, (raw.match(/`+/g) ?? []).reduce((m, r) => Math.max(m, r.length), 0) + 1));
+      const fence = fenceFor(raw);
       return `${fence}${lang}\n${raw}\n${fence}`;
     }
     case 'horizontalRule':
@@ -126,13 +137,15 @@ function serializeBlock(node: JSONContent): string {
       // Emit the spec in a fenced block so the data survives the round-trip and
       // renders as an inert code block wherever raw charts aren't supported.
       const spec = typeof node.attrs?.spec === 'string' ? node.attrs.spec : '';
-      return '```chart\n' + spec + '\n```';
+      const fence = fenceFor(spec);
+      return `${fence}chart\n${spec}\n${fence}`;
     }
     case 'embedBlock': {
       // Fence the raw HTML rather than emitting it inline — it stays inert (never
       // executes) when the Markdown is rendered elsewhere.
       const html = typeof node.attrs?.html === 'string' ? node.attrs.html : '';
-      return '```html\n' + html + '\n```';
+      const fence = fenceFor(html);
+      return `${fence}html\n${html}\n${fence}`;
     }
     case 'table': {
       const rows = (node.content ?? []).map((row) => (row.content ?? []).map((cell) => serializeInline(cell.content?.[0] ?? {}).replace(/\|/g, '\\|')));

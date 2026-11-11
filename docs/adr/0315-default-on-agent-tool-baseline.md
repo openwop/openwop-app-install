@@ -39,6 +39,26 @@ effectiveToolAllowlist(manifest, override) =
   ∪(manifest, baseline)  — otherwise
 ```
 
+> **CORRECTED 2026-11-04 (ADR 1055 D4) — "no agent is pure persona anymore" is
+> no longer true for an agent that activates one capability.** An agent whose
+> whole contract is "reply with text, write nothing" could not be built: an
+> empty manifest allowlist still unions in this baseline, which includes
+> `openwop:documents.draft`. A manifest field cannot opt out
+> (`agent-manifest.schema.json` is `additionalProperties: false`, so it would be
+> a wire change). The opt-out is therefore the core, host-internal capability
+> `text-only` on `AgentProfile.capabilities`, activated per agent (ADR 0031),
+> never an agent named in the resolver. `agentOffersToolBaseline(tenant, agent)`
+> reads it (failing open to the baseline), and the resolver is now
+> `effectiveToolAllowlist(manifest, override, offersBaseline)` with the flag
+> REQUIRED, so no caller can skip the question. All five callers derive it.
+> The ADR 0104 override still wins. An agent's own pack may also activate
+> `text-only` for it, through the manifest's `x-openwop-app.agentCapabilities`
+> vendor extension (the only pack-declarable capability, since it only takes
+> tools away). The first holder is the document editor's Writing Assistant,
+> activated that way by its pack. An
+> agent with `text-only` and an empty allowlist compiles no tools, so its chat
+> turn takes the single-completion path.
+
 - **The ADR 0104 override stays authoritative and full-replace.** It is the
   operator's revoke path: an override that omits a baseline tool removes it for
   that (tenant, agent). No new mechanism, no second policy store.

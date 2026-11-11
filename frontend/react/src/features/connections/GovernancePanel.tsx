@@ -8,6 +8,7 @@ import { Button } from '../../ui/Button.js';
 import { useCallback, useEffect, useState } from 'react';
 import { Skeleton } from '../../ui/Skeleton.js';
 import { Notice } from '../../ui/Notice.js';
+import { CheckboxField } from '../../ui/Field.js';
 import { useTranslation } from 'react-i18next';
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
 import { toast } from '../../ui/toast.js';
@@ -34,11 +35,14 @@ interface PolicyResponse {
  *  per-org override, and today's usage. */
 // ADR 0411 P2 — the `video` unit (daily job count) rides the same media-budget
 // panel as tts/stt/images; override key is `videoJobs` (what resolveBudget reads).
+// ADR 1051 D3 — for video, `0` means paid video is OFF and uncapped is the
+// explicit `'unlimited'` (the other kinds keep 0 = uncapped).
+type VideoCap = number | 'unlimited';
 interface MediaBudgetResponse {
   date: string;
-  budgets: { ttsChars: number; sttBytes: number; images: number; video: number };
-  envDefaults: { ttsChars: number; sttBytes: number; images: number; video: number };
-  override: { ttsChars?: number; sttBytes?: number; images?: number; videoJobs?: number } | null;
+  budgets: { ttsChars: number; sttBytes: number; images: number; video: VideoCap };
+  envDefaults: { ttsChars: number; sttBytes: number; images: number; video: VideoCap };
+  override: { ttsChars?: number; sttBytes?: number; images?: number; videoJobs?: VideoCap } | null;
   usage: { ttsChars: number; sttBytes: number; images: number; video: number };
 }
 
@@ -75,7 +79,7 @@ export function GovernancePanel(): JSX.Element | null {
   const [busy, setBusy] = useState(false);
   const [media, setMedia] = useState<MediaBudgetResponse | null>(null);
   // ADR 0106 editable override — the draft override (empty string ⇒ clear ⇒ env default).
-  const [mediaDraft, setMediaDraft] = useState<{ ttsChars: string; sttBytes: string; images: string; videoJobs: string }>({ ttsChars: '', sttBytes: '', images: '', videoJobs: '' });
+  const [mediaDraft, setMediaDraft] = useState<{ ttsChars: string; sttBytes: string; images: string; videoJobs: string; videoUnlimited: boolean }>({ ttsChars: '', sttBytes: '', images: '', videoJobs: '', videoUnlimited: false });
   const [mediaBusy, setMediaBusy] = useState(false);
   const [byok, setByok] = useState<ByokChatBudgetResponse | null>(null);
   // ADR 0178 editable override — blank ⇒ clear ⇒ env default (0 ⇒ uncapped for the cap).
@@ -128,7 +132,8 @@ export function GovernancePanel(): JSX.Element | null {
           ttsChars: body.override?.ttsChars != null ? String(body.override.ttsChars) : '',
           images: body.override?.images != null ? String(body.override.images) : '',
           sttBytes: body.override?.sttBytes != null ? String(body.override.sttBytes) : '',
-          videoJobs: body.override?.videoJobs != null ? String(body.override.videoJobs) : '',
+          videoJobs: typeof body.override?.videoJobs === 'number' ? String(body.override.videoJobs) : '',
+          videoUnlimited: body.override?.videoJobs === 'unlimited',
         });
       })
       .catch(() => setSectionsUnavailable((p) => (p.includes('media') ? p : [...p, 'media'])));
@@ -231,7 +236,8 @@ export function GovernancePanel(): JSX.Element | null {
 
   const saveMediaBudget = useCallback(async () => {
     // Empty ⇒ null (clear the override → fall back to the env default). A value
-    // must be a non-negative integer; 0 means "uncapped for this org".
+    // must be a non-negative integer; 0 means "uncapped for this org" — except
+    // video, where 0 means OFF and uncapped is the explicit box (ADR 1051 D3).
     const parse = (s: string): number | null | undefined => {
       const trimmed = s.trim();
       if (trimmed === '') return null;
@@ -241,7 +247,8 @@ export function GovernancePanel(): JSX.Element | null {
     const ttsChars = parse(mediaDraft.ttsChars);
     const images = parse(mediaDraft.images);
     const sttBytes = parse(mediaDraft.sttBytes);
-    const videoJobs = parse(mediaDraft.videoJobs);
+    // ADR 1051 D3 — video: the "no cap" box sends the explicit 'unlimited'.
+    const videoJobs: VideoCap | null | undefined = mediaDraft.videoUnlimited ? 'unlimited' : parse(mediaDraft.videoJobs);
     if (ttsChars === undefined || sttBytes === undefined || images === undefined || videoJobs === undefined) {
       toast.error(t('mediaBudgetInvalid'));
       return;
@@ -434,9 +441,11 @@ export function GovernancePanel(): JSX.Element | null {
             <div className="u-flex u-gap-2 u-items-center">
               <span className="chip">{t('mediaBudgetVideo')}</span>
               <span>
-                {media.budgets.video > 0
-                  ? t('mediaBudgetUsage', { used: formatNumber(media.usage.video), cap: formatNumber(media.budgets.video), unit: t('mediaUnitVideo') })
-                  : t('mediaBudgetUncapped', { used: formatNumber(media.usage.video), unit: t('mediaUnitVideo') })}
+                {media.budgets.video === 'unlimited'
+                  ? t('mediaBudgetUncapped', { used: formatNumber(media.usage.video), unit: t('mediaUnitVideo') })
+                  : media.budgets.video > 0
+                    ? t('mediaBudgetUsage', { used: formatNumber(media.usage.video), cap: formatNumber(media.budgets.video), unit: t('mediaUnitVideo') })
+                    : t('mediaBudgetVideoOff')}
               </span>
             </div>
           </div>
@@ -473,11 +482,19 @@ export function GovernancePanel(): JSX.Element | null {
               <span className="u-label-sm">{t('mediaBudgetVideoOverride')}</span>
               <input
                 type="number" min={0} inputMode="numeric"
-                value={mediaDraft.videoJobs}
+                value={mediaDraft.videoUnlimited ? '' : mediaDraft.videoJobs}
+                disabled={mediaDraft.videoUnlimited}
+                aria-describedby="governance-video-budget-help"
                 onChange={(e) => setMediaDraft((d) => ({ ...d, videoJobs: e.target.value }))}
-                placeholder={t('mediaBudgetEnvPlaceholder', { value: media.envDefaults.video > 0 ? formatNumber(media.envDefaults.video) : t('mediaBudgetNoDefault') })}
+                placeholder={t('mediaBudgetEnvPlaceholder', { value: media.envDefaults.video === 'unlimited' ? t('mediaBudgetNoDefault') : media.envDefaults.video > 0 ? formatNumber(media.envDefaults.video) : t('mediaBudgetVideoOffShort') })}
               />
             </label>
+            <span id="governance-video-budget-help" className="u-fs-12 u-text-muted">{t('mediaBudgetVideoHelp')}</span>
+            <CheckboxField
+              label={t('mediaBudgetVideoUnlimited')}
+              checked={mediaDraft.videoUnlimited}
+              onChange={(e) => setMediaDraft((d) => ({ ...d, videoUnlimited: e.target.checked }))}
+            />
             <div className="action-bar">
               <Button variant="primary" disabled={mediaBusy} onClick={() => void saveMediaBudget()}>
                 {t('mediaBudgetSave')}

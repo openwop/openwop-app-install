@@ -21,7 +21,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const posted: Array<{ url: string; body: string }> = [];
 vi.mock('../src/host/brokeredEgress.js', async (orig) => ({
   ...(await orig<typeof import('../src/host/brokeredEgress.js')>()),
-  brokeredPost: async (_d: unknown, req: { url: string; body: string }) => { posted.push({ url: req.url, body: req.body }); return { outcome: 'sent', res: { status: 200, json: async () => ({ id: 'task-1' }) } }; },
+  brokeredPost: async (_d: unknown, req: { url: string; body: string }) => { posted.push({ url: req.url, body: req.body }); return { outcome: 'sent', res: { status: 200, json: async () => ({ id: 'task-1' }) }, provenance: { connectionId: 'conn-1' } }; },
 }));
 
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -50,6 +50,7 @@ function stub(): VideoAdapter & { submits: SubmitJobInput[] } {
   const submits: SubmitJobInput[] = [];
   return {
     submits,
+    async hasConnection() { return true; },
     async submitJob(input) { submits.push(input); return { ok: true, value: { providerJobId: `p-${submits.length}` } }; },
     async pollJob() { return { ok: true, value: { status: 'completed', resultUrl: 'https://example.invalid/out.mp4' } }; },
     async downloadResult() { return { ok: true, value: { base64: MP4, bytes: 15, contentType: 'video/mp4' } }; },
@@ -90,7 +91,7 @@ describe('image-to-video (D7)', () => {
     if (out.status !== 'completed') throw new Error(JSON.stringify(out));
     expect(a.submits).toHaveLength(1);
     expect(String(a.submits[0].promptImage)).toMatch(/^data:image\/png;base64,/);
-    expect([a.submits[0].width, a.submits[0].height], 'a provider ratio, not the still\'s pixel size').toEqual([1280, 768]);
+    expect(a.submits[0].ratio, 'a provider ratio (ADR 1051 D2: one the model takes), not the still\'s pixel size').toBe('1280:720');
     const video = await getAsset(T, ORG, out.assetId);
     expect(video?.lineage?.grounding).toMatchObject({ mode: 'animate', productId: 'prod:mug', op: 'image-to-video', sources: [{ assetId: s.asset.assetId, sha256: s.sha }] });
     const summary = video?.lineage?.grounding?.fidelity;

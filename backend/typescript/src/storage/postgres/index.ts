@@ -56,6 +56,7 @@ import type {
 } from '../../types.js';
 import type {
   ChatEgressEnvelope,
+  RelayChannel,
   DeliveryLogRecord,
   MessagingConnectorRecord,
   MessagingIdentityRecord,
@@ -3332,6 +3333,29 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
     },
     async deleteRelayOutbound(relayId) {
       await pool.query(`DELETE FROM relay_outbound WHERE relay_id = $1`, [relayId]);
+    },
+    async pruneRelayOutbound(cutoffIso, exceptTenants) {
+      // ADR 1043 CHAN-F12. The delete reports what it deleted (`RETURNING`), so it
+      // cannot race a concurrent ack or enqueue; the tenant read after it is only for
+      // the caller's log line.
+      const { rows } = await pool.query<Row>(
+        `DELETE FROM relay_outbound
+          WHERE enqueued_at < $1
+            AND relay_id NOT IN (SELECT relay_id FROM relay_devices WHERE tenant_id = ANY($2::text[]))
+          RETURNING egress_id, relay_id, channel`,
+        [cutoffIso, [...exceptTenants]],
+      );
+      if (rows.length === 0) return [];
+      const relayIds = [...new Set(rows.map((r) => String(r.relay_id)))];
+      const { rows: devices } = await pool.query<Row>(
+        `SELECT relay_id, tenant_id FROM relay_devices WHERE relay_id IN (${relayIds.map((_, i) => `$${i + 1}`).join(',')})`,
+        relayIds,
+      );
+      const tenantOf = new Map(devices.map((d) => [String(d.relay_id), String(d.tenant_id)]));
+      return rows.map((r) => {
+        const tenantId = tenantOf.get(String(r.relay_id));
+        return { egressId: String(r.egress_id), relayId: String(r.relay_id), channel: r.channel as RelayChannel, ...(tenantId ? { tenantId } : {}) };
+      });
     },
     async upsertMessagingConnector(record) {
       await pool.query(

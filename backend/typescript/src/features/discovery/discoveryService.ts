@@ -43,7 +43,9 @@ import { createLogger } from '../../observability/logger.js';
 const log = createLogger('discovery');
 
 const nowIso = (): string => new Date().toISOString();
-const MAX = { name: 200, perOrg: 1000, ids: 500, rules: 200 } as const;
+/** `rules` bounds the actions IN one rule; `rulesPerOrg` bounds the rules every search
+ *  iterates (ADR 1025 D9 — there was no such cap). */
+const MAX = { name: 200, perOrg: 1000, ids: 500, rules: 200, rulesPerOrg: 200 } as const;
 const HOLDOUT_SALT = 'merch-rule-holdout-v1';
 
 // ── Collections ─────────────────────────────────────────────────────────────
@@ -111,9 +113,11 @@ export async function createCollection(input: { tenantId: string; orgId: string;
   if (type === 'dynamic' && !rule) throw new OpenwopError('validation_error', 'A dynamic collection needs a rule (categories/tags/price).', 400, { field: 'rule' });
   const productIds = type === 'manual' && Array.isArray(input.productIds) ? input.productIds.map(String).slice(0, MAX.ids) : undefined;
   const parentId = typeof input.parentId === 'string' && input.parentId.trim() ? input.parentId.trim() : undefined;
+  const collectionId = `col:${randomUUID()}`;
+  if (parentId) await assertValidParent(input.tenantId, input.orgId, collectionId, parentId);
   const now = nowIso();
   const c: Collection = {
-    collectionId: `col:${randomUUID()}`, tenantId: input.tenantId, orgId: input.orgId,
+    collectionId, tenantId: input.tenantId, orgId: input.orgId,
     name, slug: slugify(name), type,
     ...(productIds ? { productIds } : type === 'manual' ? { productIds: [] } : {}),
     ...(rule ? { rule } : {}),
@@ -125,15 +129,35 @@ export async function createCollection(input: { tenantId: string; orgId: string;
   return c;
 }
 
+/** ADR 1025 D8 — the taxonomy is ONE level, as the `parentId` doc says ("strict at
+ *  write"), and nothing checked it: a parent could be missing, in another org, the
+ *  collection itself, or a child. */
+async function assertValidParent(tenantId: string, orgId: string, collectionId: string, parentId: string): Promise<void> {
+  const refuse = (message: string): never => { throw new OpenwopError('validation_error', message, 400, { field: 'parentId' }); };
+  if (parentId === collectionId) refuse('A collection cannot be its own parent.');
+  const parent = await getCollection(tenantId, orgId, parentId);
+  if (!parent) refuse('The parent collection does not exist in this organization.');
+  if (parent!.parentId) refuse('Collections nest one level deep: the parent already has a parent.');
+  const hasChildren = (await listCollections(tenantId, orgId)).some((c) => c.parentId === collectionId);
+  if (hasChildren) refuse('This collection has its own child collections, so it cannot take a parent.');
+}
+
 export async function updateCollection(tenantId: string, orgId: string, collectionId: string, patch: { name?: unknown; productIds?: unknown; rule?: unknown; active?: unknown; parentId?: unknown }): Promise<Collection | null> {
   const c = await getCollection(tenantId, orgId, collectionId);
   if (!c) return null;
   const next: Collection = { ...c, updatedAt: nowIso() };
   if (patch.name !== undefined) { const n = cleanString(patch.name, MAX.name, c.name); if (n) { next.name = n; next.slug = slugify(n); } }
-  if (patch.active !== undefined) next.active = patch.active !== false;
+  if (patch.active !== undefined) {
+    // Strict boolean (grade MCHCD-2): `!== false` turned any junk value ON.
+    if (typeof patch.active !== 'boolean') throw new OpenwopError('validation_error', '`active` must be true or false.', 400, { field: 'active' });
+    next.active = patch.active;
+  }
   if (patch.productIds !== undefined && c.type === 'manual') next.productIds = Array.isArray(patch.productIds) ? patch.productIds.map(String).slice(0, MAX.ids) : [];
   if (patch.rule !== undefined && c.type === 'dynamic') { const r = cleanPredicate(patch.rule); if (r) next.rule = r; }
-  if (patch.parentId !== undefined) { const pid = typeof patch.parentId === 'string' && patch.parentId.trim() ? patch.parentId.trim() : undefined; if (pid) next.parentId = pid; else delete next.parentId; }
+  if (patch.parentId !== undefined) {
+    const pid = typeof patch.parentId === 'string' && patch.parentId.trim() ? patch.parentId.trim() : undefined;
+    if (pid) { await assertValidParent(tenantId, orgId, collectionId, pid); next.parentId = pid; } else delete next.parentId;
+  }
   await collections.put(next);
   return next;
 }
@@ -184,11 +208,18 @@ function matchesPredicate(p: Product, pred: FacetPredicate): boolean {
   return true;
 }
 
-/** Resolve a collection to its LIVE product set (dynamic = resolve-at-read; never cached). */
-export async function resolveCollection(tenantId: string, orgId: string, collectionId: string, activeOnly = true): Promise<Product[]> {
+/** Resolve a collection to its LIVE product set (dynamic = resolve-at-read; never cached).
+ *  ADR 1025 D8 — `activeCollection`: a PAUSED collection resolves empty, which is what
+ *  every search lane (console, run, chat, public) passes, so pausing means paused. It
+ *  used to resolve publicly. Only the console's collection preview passes `false` for
+ *  both, so an operator can see what they would re-enable. */
+export async function resolveCollection(
+  tenantId: string, orgId: string, collectionId: string,
+  opts: { activeProducts: boolean; activeCollection: boolean } = { activeProducts: true, activeCollection: true },
+): Promise<Product[]> {
   const c = await getCollection(tenantId, orgId, collectionId);
-  if (!c) return [];
-  const all = (await listProducts(tenantId, orgId)).filter((p) => !activeOnly || p.active !== false);
+  if (!c || (opts.activeCollection && !c.active)) return [];
+  const all = (await listProducts(tenantId, orgId)).filter((p) => !opts.activeProducts || p.active !== false);
   if (c.type === 'manual') {
     const ids = new Set(c.productIds ?? []);
     return all.filter((p) => ids.has(p.productId));
@@ -210,6 +241,10 @@ export interface MerchRule {
   actions: MerchAction[];
   holdoutPct?: number;
   active: boolean;
+  /** ADR 1025 (grade MCHUX-1) — an agent created this (chat or run) and no person has
+   *  activated it yet; cleared on first activation. Otherwise a proposal and a rule a
+   *  person paused read identically. */
+  proposed?: true;
   createdBy: string; createdAt: string; updatedAt: string;
 }
 const merchRules = new DurableCollection<MerchRule>('discovery:merch-rule', (r) => r.ruleId, undefined, (r) => r.tenantId);
@@ -236,7 +271,10 @@ function cleanActions(v: unknown): MerchAction[] {
   }
   return out;
 }
-export async function createMerchRule(input: { tenantId: string; orgId: string; createdBy: string; name: unknown; scope: unknown; actions: unknown; holdoutPct?: unknown }): Promise<MerchRule> {
+export async function createMerchRule(input: { tenantId: string; orgId: string; createdBy: string; name: unknown; scope: unknown; actions: unknown; holdoutPct?: unknown; /** ADR 1025 D5 — agent lanes pass `false` (a proposal); the default stays live for the console and the seed. */ active?: boolean }): Promise<MerchRule> {
+  if ((await listMerchRules(input.tenantId, input.orgId)).length >= MAX.rulesPerOrg) {
+    throw new OpenwopError('validation_error', `Merch rule limit reached (${MAX.rulesPerOrg} per organization). Delete or merge rules first.`, 400, { field: 'rules', limit: MAX.rulesPerOrg });
+  }
   const name = cleanString(input.name, MAX.name, '');
   if (!name) throw new OpenwopError('validation_error', 'A rule `name` is required.', 400, { field: 'name' });
   const scope = cleanString(input.scope, MAX.name, 'all') || 'all';
@@ -248,12 +286,33 @@ export async function createMerchRule(input: { tenantId: string; orgId: string; 
   const r: MerchRule = {
     ruleId: `mrl:${randomUUID()}`, tenantId: input.tenantId, orgId: input.orgId, name, scope, actions,
     ...(holdoutPct !== undefined ? { holdoutPct } : {}),
-    active: true, createdBy: input.createdBy, createdAt: now, updatedAt: now,
+    active: input.active !== false,
+    ...(input.active === false ? { proposed: true as const } : {}),
+    createdBy: input.createdBy, createdAt: now, updatedAt: now,
   };
   await merchRules.put(r);
   log.info('merch rule created', { tenantId: input.tenantId, orgId: input.orgId, ruleId: r.ruleId, scope: r.scope, actions: r.actions.length });
   return r;
 }
+/** ADR 1025 D5 — rules had create + delete only, so an agent's proposal could not be
+ *  activated and a live rule could not be paused without losing it. */
+export async function updateMerchRule(tenantId: string, orgId: string, ruleId: string, patch: { name?: unknown; active?: unknown }): Promise<MerchRule | null> {
+  const r = await merchRules.get(ruleId);
+  if (!r || r.tenantId !== tenantId || r.orgId !== orgId) return null;
+  const next: MerchRule = { ...r, updatedAt: nowIso() };
+  if (patch.name !== undefined) { const n = cleanString(patch.name, MAX.name, r.name); if (n) next.name = n; }
+  if (patch.active !== undefined) {
+    if (typeof patch.active !== 'boolean') throw new OpenwopError('validation_error', '`active` must be true or false.', 400, { field: 'active' });
+    // Grade MCHCD-8 — a rule whose actions were all pruned (its pinned products deleted)
+    // does nothing; activating it would read Active while changing no result.
+    if (patch.active && next.actions.length === 0) throw new OpenwopError('validation_error', 'This rule has no actions left (its products were deleted), so it cannot be activated. Delete it or create a new one.', 400, { field: 'actions' });
+    next.active = patch.active;
+    if (next.active) delete next.proposed;
+  }
+  await merchRules.put(next);
+  return next;
+}
+
 export async function deleteMerchRule(tenantId: string, orgId: string, ruleId: string): Promise<boolean> {
   const r = await merchRules.get(ruleId);
   if (!r || r.tenantId !== tenantId || r.orgId !== orgId) return false;
@@ -371,7 +430,7 @@ export async function searchProducts(input: {
   const { tenantId, orgId } = input;
   // Collection scope resolves the base set (active-only); else the full active catalog.
   let base = input.collectionId
-    ? await resolveCollection(tenantId, orgId, input.collectionId, true)
+    ? await resolveCollection(tenantId, orgId, input.collectionId)
     : (await listProducts(tenantId, orgId, input.q, {})).filter((p) => p.active !== false);
   if (input.collectionId && input.q) {
     // apply the lexical query within the collection via listProducts ranking order

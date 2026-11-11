@@ -118,6 +118,28 @@ export const messages = {
   redriveDone: 'Intent re-queued — the dispatch worker will pick it up shortly.',
   redriveFailed: 'Redrive failed.',
 
+  // ADR 1081 — fleet-shared core Kanban WorkItem delivery.
+  kanbanDeliveryHeading: 'Kanban work-item delivery',
+  kanbanDeliveryUnavailableTitle: 'Kanban delivery unavailable',
+  kanbanDeliveryUnavailableBody: 'The durable Kanban delivery read failed, so this panel cannot say whether work is flowing or dead-lettered.',
+  kanbanDeliveryStale: 'Last-known Kanban delivery figures — the latest refresh failed.',
+  kanbanDeliveryHealthy: 'Delivery healthy',
+  kanbanDeliveryRecovering: 'Retries in progress',
+  kanbanDeliveryAttention: 'Delivery needs attention',
+  kanbanDeliveryFleetWide: 'all instances',
+  kanbanDeliveryQueueWaiting: '{{n}} waiting',
+  kanbanDeliveryQueueClaimed: '{{n}} being delivered',
+  kanbanDeliveryQueueDead: 'dead-letter queue: {{n}}',
+  kanbanDeliveryOldestPending: 'oldest waiting {{n}}s',
+  kanbanDeliveryOutcomeWindow: 'Recent durable delivery outcomes (last 24 hours)',
+  kanbanDeliveryOutcomesAria: 'Recent Kanban work-item delivery outcomes',
+  kanbanDeliveryOutcomeStarted: '{{n}} started',
+  kanbanDeliveryOutcomeRetried: '{{n}} retried',
+  kanbanDeliveryOutcomeDeadLettered: '{{n}} dead-lettered',
+  kanbanDeliveryOutcomeNotEligible: '{{n}} not eligible',
+  kanbanDeliveryOutcomeDeferred: '{{n}} deferred',
+  kanbanDeliveryOutcomeWorkflowUnresolved: '{{n}} workflow unresolved',
+
   // ADR 0556 P2 — service level objectives + alerts.
   sloHeading: 'Service level objectives',
   sloUnavailableTitle: 'Objectives could not be read',

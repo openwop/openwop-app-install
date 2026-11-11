@@ -20,9 +20,9 @@ import { BoxesIcon } from '../../ui/icons/index.js';
 import { useFeatureAccess } from '../../featureToggles/FeatureAccessContext.js';
 import { formatCurrency, formatNumber } from '../../i18n/format.js';
 import {
-  listOrgs, listCollections, createCollection, deleteCollection,
-  listRules, createRule, deleteRule, search,
-  type Org, type Collection, type MerchRule, type SearchResponse,
+  listOrgs, listCollections, createCollection, deleteCollection, setCollectionActive,
+  listRules, createRule, deleteRule, setRuleActive, search,
+  type Org, type Collection, type MerchRule, type MerchAction, type SearchResponse,
 } from './discoveryClient.js';
 
 /** How many preview rows/facet values the console shows. Exported as named
@@ -114,6 +114,21 @@ export function DiscoveryPage(): JSX.Element {
     catch (e) { toast.error(e instanceof Error ? e.message : t('deleteFailed')); }
   }, [orgId, load, t]);
 
+  // ADR 1025 D5/D8 — pausing keeps the row; an agent's merch rule arrives paused (a
+  // proposal) and is made live here.
+  const toggleCollection = useCallback(async (c: Collection) => {
+    try { await setCollectionActive(orgId, c.collectionId, !c.active); await load(orgId); }
+    catch (e) { toast.error(e instanceof Error ? e.message : t('updateFailed')); }
+  }, [orgId, load, t]);
+  const toggleRule = useCallback(async (r: MerchRule) => {
+    // A hide rule removes products from the storefront search the moment it is live, so
+    // activating one asks first (grade MCHUX-2; an agent's proposal arrives inactive).
+    if (!r.active && r.actions.some((a) => a.kind === 'hide')
+      && !(await confirm({ title: t('activateHideConfirm', { name: r.name }), confirmLabel: t('activate') }))) return;
+    try { await setRuleActive(orgId, r.ruleId, !r.active); await load(orgId); }
+    catch (e) { toast.error(e instanceof Error ? e.message : t('updateFailed')); }
+  }, [orgId, load, t]);
+
   const addRule = useCallback(async () => {
     if (!orgId || !ruleName.trim() || !ruleCategory.trim()) return;
     setBusy(true);
@@ -149,15 +164,41 @@ export function DiscoveryPage(): JSX.Element {
     { key: 'name', header: t('colName'), render: (c) => c.name, sortValue: (c) => c.name },
     { key: 'type', header: t('colType'), render: (c) => <span className={c.type === 'dynamic' ? 'chip chip--accent' : 'chip chip--muted'}>{t(`type_${c.type}`)}</span> },
     { key: 'detail', header: t('colDetail'), render: (c) => c.type === 'dynamic' ? (c.rule?.categories?.join(', ') ?? '—') : t('itemsCount', { count: c.productIds?.length ?? 0 }) },
-    { key: 'actions', header: '', render: (c) => <Button variant="quiet" onClick={() => void removeCollection(c)} aria-label={t('deleteRowLabel', { name: c.name })}>{t('common:delete')}</Button> },
-  ], [t, removeCollection]);
+    { key: 'status', header: t('colStatus'), render: (c) => <span className={c.active ? 'chip chip--success' : 'chip chip--muted'}>{c.active ? t('statusActive') : t('statusPaused')}</span> },
+    { key: 'actions', header: '', render: (c) => (
+      <span className="action-bar">
+        <Button variant="quiet" onClick={() => void toggleCollection(c)} aria-label={t(c.active ? 'pauseRowLabel' : 'activateRowLabel', { name: c.name })}>{c.active ? t('pause') : t('activate')}</Button>
+        <Button variant="quiet" onClick={() => void removeCollection(c)} aria-label={t('deleteRowLabel', { name: c.name })}>{t('common:delete')}</Button>
+      </span>
+    ) },
+  ], [t, removeCollection, toggleCollection]);
+
+  // What a rule DOES, in words (grade MCHUX-2): the table showed name, scope and holdout,
+  // so a hide rule could be activated without the page ever saying it hides anything.
+  const effectLabel = useCallback((a: MerchAction): string => {
+    if (a.kind === 'pin') return t('effectPin', { position: formatNumber(a.position + 1) });
+    const what = [...(a.predicate.categories ?? []), ...(a.predicate.tags ?? [])].join(', ') || t('effectPriceBand');
+    if (a.kind === 'boost') return t('effectBoost', { what, factor: formatNumber(a.factor) });
+    return t(a.kind === 'hide' ? 'effectHide' : 'effectBury', { what });
+  }, [t]);
 
   const ruleColumns = useMemo<DataColumn<MerchRule>[]>(() => [
     { key: 'name', header: t('colName'), render: (r) => r.name, sortValue: (r) => r.name },
     { key: 'scope', header: t('colScope'), render: (r) => r.scope },
+    { key: 'effect', header: t('colEffect'), render: (r) => (r.actions.length === 0
+      ? '—'
+      : <span className="u-flex u-gap-1 u-flex-wrap">{r.actions.map((a, i) => <span key={i} className="chip chip--muted">{effectLabel(a)}</span>)}</span>) },
     { key: 'holdout', header: t('colHoldout'), render: (r) => (r.holdoutPct ? `${r.holdoutPct}%` : '—') },
-    { key: 'actions', header: '', render: (r) => <Button variant="quiet" onClick={() => void removeRule(r)} aria-label={t('deleteRowLabel', { name: r.name })}>{t('common:delete')}</Button> },
-  ], [t, removeRule]);
+    { key: 'status', header: t('colStatus'), render: (r) => (!r.active && r.proposed
+      ? <span className="chip chip--ai">{t('statusProposed')}</span>
+      : <span className={r.active ? 'chip chip--success' : 'chip chip--muted'}>{r.active ? t('statusActive') : t('statusPaused')}</span>) },
+    { key: 'actions', header: '', render: (r) => (
+      <span className="action-bar">
+        <Button variant="quiet" onClick={() => void toggleRule(r)} aria-label={t(r.active ? 'pauseRowLabel' : 'activateRowLabel', { name: r.name })}>{r.active ? t('pause') : t('activate')}</Button>
+        <Button variant="quiet" onClick={() => void removeRule(r)} aria-label={t('deleteRowLabel', { name: r.name })}>{t('common:delete')}</Button>
+      </span>
+    ) },
+  ], [t, removeRule, toggleRule, effectLabel]);
 
   // The toggle has not resolved yet — a shape-matched skeleton UNDER the real
   // header, not a `StateCard`: the card's only text would be the page title, so
@@ -168,7 +209,7 @@ export function DiscoveryPage(): JSX.Element {
     return (
       <section className="u-grid u-gap-4" data-walkthrough="discovery.page">
         <PageHeader eyebrow={t('eyebrow')} title={t('title')} />
-        <SkeletonRows rows={3} columns={[160, 90, 160, 80]} />
+        <SkeletonRows rows={3} columns={[160, 90, 160, 80, 120]} />
       </section>
     );
   }
@@ -227,7 +268,7 @@ export function DiscoveryPage(): JSX.Element {
       <DataTable stack rows={collections ?? []} rowKey={(c) => c.collectionId} columns={colColumns} caption={t('captionCollections')}
         empty={rowsFailed
           ? <StateCard announce icon={<BoxesIcon />} title={t('rowsFailedTitle')} body={t('rowsFailedBody')} action={<Button variant="secondary" onClick={() => void load(orgId)}>{t('orgsRetry')}</Button>} />
-          : collections === null ? <SkeletonRows rows={2} columns={[160, 90, 160, 80]} /> : <StateCard icon={<BoxesIcon />} title={t('noCollectionsTitle')} body={t('noCollectionsBody')} />} />
+          : collections === null ? <SkeletonRows rows={2} columns={[160, 90, 160, 80, 120]} /> : <StateCard icon={<BoxesIcon />} title={t('noCollectionsTitle')} body={t('noCollectionsBody')} />} />
 
       <form className="surface-card u-p-4 surface-form" onSubmit={(e) => { e.preventDefault(); void addRule(); }}>
         <h2 className="u-label-sm">{t('rulesTitle')}</h2>
@@ -245,7 +286,7 @@ export function DiscoveryPage(): JSX.Element {
       <DataTable stack rows={rules ?? []} rowKey={(r) => r.ruleId} columns={ruleColumns} caption={t('captionRules')}
         empty={rowsFailed
           ? <StateCard announce icon={<BoxesIcon />} title={t('rulesFailedTitle')} body={t('rulesFailedBody')} action={<Button variant="secondary" onClick={() => void load(orgId)}>{t('orgsRetry')}</Button>} />
-          : rules === null ? <SkeletonRows rows={2} columns={[160, 90, 80, 80]} /> : <StateCard icon={<BoxesIcon />} title={t('noRulesTitle')} body={t('noRulesBody')} />} />
+          : rules === null ? <SkeletonRows rows={2} columns={[160, 90, 160, 80, 80, 120]} /> : <StateCard icon={<BoxesIcon />} title={t('noRulesTitle')} body={t('noRulesBody')} />} />
 
       {/* INSIDE the wrapper, and it was not. Taking `children` stops a caller
           rendering content ABOVE the guard, but a sibling BELOW it escapes the

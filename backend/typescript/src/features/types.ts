@@ -273,6 +273,12 @@ export interface FeatureRatchetDeclarations {
    *  the file (relative to this feature's directory) and the registration it
    *  must contain. */
   subjectErasureWitnesses?: ReadonlyArray<{ store: string; file: string; registration: RegExp }>;
+  /** `subject-erasure-feature-stores` CHAN-F6 — stores in THIS feature's directory
+   *  that were read and hold no subject data: namespace → what the row holds. The
+   *  same assertions as the host `SIGNAL_FREE_REVIEWED` table apply to each entry
+   *  (live, a reason, no person-naming field, not PII-declared), and a namespace
+   *  in both fails (ADR 0464 §9 D1). */
+  subjectErasureSignalFreeReviewed?: Readonly<Record<string, string>>;
   /** `adr0821-displayed-limits-ratchet` — for each plan-limit key this feature
    *  enforces: [file relative to this feature's directory, the token proving it
    *  reads THAT key]. */

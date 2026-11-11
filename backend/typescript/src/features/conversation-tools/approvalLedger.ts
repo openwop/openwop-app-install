@@ -145,14 +145,36 @@ export async function resolveToolApproval(
   return { ok: true, record: updated };
 }
 
-/** ADR 1042 (security review H2) — spend an `approved` row: the call it allowed has
- *  run, so it is removed and the next call of the tool asks again (channel-ingress
- *  turns only). Only an `approved` row is removed (a pending ask or a denial stays).
- *  Returns whether a row was spent. */
-export async function spendToolApproval(tenantId: string, conversationId: string, toolName: string): Promise<boolean> {
-  const existing = await ledger.get(key(tenantId, conversationId, toolName));
-  if (!existing || existing.status !== 'approved') return false;
-  return ledger.delete(key(tenantId, conversationId, toolName));
+/**
+ * ADR 1042 CHAN-F3 (security review H2, multi-instance) — CLAIM a channel turn's
+ * approvals before the turn runs, instead of spending them after it returns.
+ *
+ * The approval used to be spent (deleted) once the tool loop had finished. Turns are serialised per
+ * thread only within ONE process, so two instances could each start a turn, each
+ * read the same `approved` row, and each let one call through: one approval, two
+ * calls. Here each approved row is removed with a compare-and-delete BEFORE the loop
+ * is built, and only the rows this turn won are folded into its firewall. Two
+ * concurrent turns cannot both win one row.
+ *
+ * Fail-safe by construction: while a channel turn holds a claim, any other turn on
+ * the conversation sees no approval and asks the owner again; a crash mid-turn loses
+ * the unspent claims (the owner approves again), it never duplicates one.
+ * Returns the rows won.
+ */
+export async function claimApprovedToolApprovals(rows: readonly ToolApprovalRecord[]): Promise<ToolApprovalRecord[]> {
+  const won: ToolApprovalRecord[] = [];
+  for (const r of rows) {
+    if (r.status === 'approved' && (await ledger.compareAndDelete(r))) won.push(r);
+  }
+  return won;
+}
+
+/** CHAN-F3 — hand back the claimed approvals the turn did NOT spend. `putIfAbsent`,
+ *  never `put`: a row written meanwhile (a fresh ask, a denial, a re-approval) wins. */
+export async function returnUnspentToolApprovals(claimed: readonly ToolApprovalRecord[], spent: ReadonlySet<string>): Promise<void> {
+  for (const r of claimed) {
+    if (!spent.has(r.toolName)) await ledger.putIfAbsent(r).catch(() => false);
+  }
 }
 
 /** All approval records for a conversation (the fold source + the FE list). */

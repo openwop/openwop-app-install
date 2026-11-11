@@ -245,6 +245,24 @@ and `--fp-hero-title-max-width` (default `540px`; the title's measure on wide
 screens — it goes full width under 900px). The two hero-title tokens size the
 default hero; the run, film and plan hero variants set their own title size.
 
+**Site style tokens** (ADR 1096 — the public CMS site's surfaces; set them in the
+same `:root` block of `brand.css`). Each is unset by default, so the stock look
+holds until you set it. Together they turn the filled, rounded, shadowed default
+into a flat, editorial one:
+
+| Token | Styles | Stock look | Flat example |
+|---|---|---|---|
+| `--site-shell-max` | Content width | `1140px` | `1240px` |
+| `--site-section-pad` | Section padding, top and bottom | `calc(var(--space-6) * 2.25)` | `88px` |
+| `--site-section-rule` | The border between sections | `1px solid var(--rule)` | `0` |
+| `--site-card-bg` | Plan, panel, tile, FAQ and design-section card fill | `var(--paper)` | `transparent` |
+| `--site-card-border` | Their border | `1px solid var(--rule)` | `1px solid var(--rule-2)` |
+| `--site-card-radius` | Their corners | `var(--radius)` or `var(--radius-lg)` | `2px` |
+| `--site-card-shadow` | The form card's shadow | a deep drop shadow | `none` |
+| `--site-card-raise-shadow`, `--site-card-raise-lift` | The highlighted plan's shadow and lift | glow, `-12px` | `none`, `0` |
+| `--site-media-radius` | Photo and screenshot corners | `var(--radius-lg)` | `8px` |
+| `--site-hero-image-opacity`, `--site-hero-image-mask` | The photo hero's picture: opacity and fade | `0.82`, a left-edge fade | `1`, `none` |
+
 ---
 
 ## 3. What you can vs. can't (yet) change cleanly

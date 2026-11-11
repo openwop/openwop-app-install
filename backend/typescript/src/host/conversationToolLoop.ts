@@ -48,7 +48,7 @@ import type { ServedModel } from './turnAttribution.js';
 import { compileAgentTools, runChatToolLoop, type AgentEvent, managedLimitCode } from './agentDispatch.js';
 import { resolveAgentToolPermissionSet } from './agentProfileService.js';
 import { resolveAgentIdentity } from './agentIdentity.js';
-import { effectiveToolAllowlist, resolveAgentToolAllowlistOverride } from './agentToolAllowlistService.js';
+import { agentOffersToolBaseline, effectiveToolAllowlist, resolveAgentToolAllowlistOverride } from './agentToolAllowlistService.js';
 import { isManagedCredentialRef, managedProviderIdFromRef, dispatchManagedToolsRound } from '../providers/managedProvider.js';
 import { featureForToolName } from './managedCredits.js';
 import { dietToolSurface } from '../providers/toolSchemaCompaction.js';
@@ -56,7 +56,7 @@ import { resolveConversationModelTarget, unchosenModelTarget, type ConversationM
 import type { RoutingTarget } from '../features/model-router/routeTurn.js';
 import { resolveUserNamedSecret } from '../byok/userNamedSecret.js';
 import { createLogger } from '../observability/logger.js';
-import { listToolApprovals, recordToolApprovalRequested, approvedToolSets, spendToolApproval } from '../features/conversation-tools/approvalLedger.js';
+import { listToolApprovals, recordToolApprovalRequested, approvedToolSets, claimApprovedToolApprovals, returnUnspentToolApprovals, type ToolApprovalRecord } from '../features/conversation-tools/approvalLedger.js';
 import { computeFirewallStamp } from '../features/capability-firewall/firewallHook.js';
 import { buildLaneFirewall, safeModeBaseline } from './laneFirewall.js';
 import { resolveConversationToolGate } from './conversationToolScope.js';
@@ -125,9 +125,29 @@ export interface ChannelToolScope {
  * is listed here. It starts EMPTY on purpose (fail closed): every workspace tool
  * reads something the owner can see and an outsider should not, so a tool joins
  * only after a review that it reads nothing sensitive, across tenants included.
- * Add an id with the review's reasoning beside it.
+ * Add an id with the review's reasoning beside it, and add it to the pinned list in
+ * `adr1042-channel-safe-tools.test.ts` (which also proves each id is still offered).
  */
-export const CHANNEL_SAFE_READ_TOOLS: ReadonlySet<string> = new Set<string>([]);
+export const CHANNEL_SAFE_READ_TOOLS: ReadonlySet<string> = new Set<string>([
+  // CHAN-F8 review, 2026-11-10 (user decision "propose and enable"). 140 builtins pass the
+  // mechanical conditions; 11 read nothing an outsider should not see. Each note says what
+  // the tool reads. Left OFF on purpose: every tool that reads workspace, org, owner or
+  // conversation data (the other 129); `feature.workflow-author.nodes.draft` (its result
+  // names the packs this workspace disabled); and four that read nothing but look broken
+  // when run as a chat tool (`core.openwop.data.jsonpath-query`, `feature.assistant.nodes.prioritize`,
+  // `feature.crm.nodes.segment-vocabulary`, `feature.crm.nodes.validate-segment`).
+  'openwop:schema.lookup', // host-global node, canvas and artifact-type registries; run() ignores the tenant (schemaLookup.ts)
+  'openwop:ask-user', // reads nothing: echoes the model's own questions and ends the turn (agent-clarification/askUserTool.ts)
+  'openwop:slides.catalog', // a constant, host-written block catalog; the tenant only gates the toggle (slides/surface.ts)
+  'openwop:app-builder.catalog', // a constant component catalog (app-builder/componentCatalog.ts projectComponentCatalog)
+  'openwop:accessibility.check', // grades only its own input (accessibility/agentTools.ts checkContentA11y)
+  'openwop:feature.workflow-author.nodes.validate', // stateless check of the given definition against the shared node catalog
+  'openwop:core.openwop.data.json-schema-validate', // pure local validator, no $ref fetching (packs/core.openwop.data)
+  'openwop:core.flow.split-in-batches', // pure slice of the given array (packs/core.openwop.flow)
+  'openwop:core.flow.aggregate-text', // pure join of the given items (packs/core.openwop.flow)
+  'openwop:feature.insights-suite.nodes.variance-compute', // pure: its inputs and config only (packs/feature.insights-suite.nodes)
+  'openwop:feature.insights-suite.nodes.talent-score', // pure: its inputs and config only (packs/feature.insights-suite.nodes)
+]);
 
 /** The tool ids a narrow channel turn may be offered (fail-closed, see `ChannelToolScope`):
  *  on the agent's allowlist AND on `CHANNEL_SAFE_READ_TOOLS` (`safeList`, injectable for
@@ -173,8 +193,9 @@ export function turnToolAllowlist(
   agentAllowlist: readonly string[] | undefined,
   override: readonly string[] | undefined,
   toolScope: ChannelToolScope | undefined,
+  offersBaseline: boolean,
 ): string[] {
-  return toolScope?.mode === 'narrow' ? narrowChannelToolIds(toolScope.allowlist ?? override ?? agentAllowlist ?? []) : effectiveToolAllowlist(agentAllowlist, override);
+  return toolScope?.mode === 'narrow' ? narrowChannelToolIds(toolScope.allowlist ?? override ?? agentAllowlist ?? []) : effectiveToolAllowlist(agentAllowlist, override, offersBaseline);
 }
 
 export interface AgentToolTurnParams {
@@ -416,6 +437,29 @@ export function groupRoomToolLoopOptedOut(tier: ConversationModelTierInput | und
 export const GROUP_ROOM_NO_TOOLS_NOTICE =
   "Workspace tools are not available in this room: you cannot create items, schedule work, or read workspace data this turn. Answer from the context provided in this conversation, and do not promise workspace actions you cannot perform.";
 
+
+/**
+ * ADR 1042 CHAN-F3 (security review H2) — the approvals a turn's firewall may fold,
+ * and how the turn settles them when its loop returns or throws.
+ *
+ *  - Not acting as the conversation's owner: nothing is folded (ADR 0834 D3).
+ *  - An in-app turn: every approved row is folded and nothing changes in the ledger
+ *    (ADR 0132, per tool for the rest of the conversation).
+ *  - A channel-ingress turn: each approval covers ONE call. The rows are CLAIMED
+ *    (compare-and-delete) before the loop, and only the rows this turn won are
+ *    folded, so two instances running turns on one conversation cannot both spend
+ *    one approval. `settle(spent)` hands back the claims the turn did not spend.
+ */
+export async function approvalsForTurn(input: {
+  channelTurn: boolean; actsAsOwner: boolean; approvals: readonly ToolApprovalRecord[];
+}): Promise<{ folded: readonly ToolApprovalRecord[]; settle: (spent: readonly string[]) => Promise<void> }> {
+  const none = async (): Promise<void> => undefined;
+  if (!input.actsAsOwner) return { folded: [], settle: none };
+  if (!input.channelTurn) return { folded: input.approvals, settle: none };
+  const claimed = await claimApprovedToolApprovals(input.approvals);
+  return { folded: claimed, settle: (spent) => (claimed.length ? returnUnspentToolApprovals(claimed, new Set(spent)) : none()) };
+}
+
 /** Append the no-tools notice to a composed scaffold IFF this turn's tool loop
  *  is opted out. Callers on the text path apply this AFTER composeChatContext —
  *  never inside it, which is shared with realtime voice (ADR 0199), where
@@ -500,7 +544,9 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
   // text, so no full-tools turn may ever read it. Without a per-turn scope the
   // agent's own explicit allowlist (never the baseline) is filtered the narrow way.
   const turnScope = effectiveTurnScope(run, params.toolScope, allowlistOverride, agent.toolAllowlist);
-  const turnAllowlist = turnToolAllowlist(agent.toolAllowlist, allowlistOverride, turnScope);
+  // ADR 1055 D4 — a `text-only` profile turns the baseline off for this agent.
+  const offersBaseline = await agentOffersToolBaseline(run.tenantId, agent);
+  const turnAllowlist = turnToolAllowlist(agent.toolAllowlist, allowlistOverride, turnScope, offersBaseline);
   const tools = compileAgentTools(agent, builtinAgentToolIds(), toolProvider.resolveTool, turnAllowlist)
     .filter((t) => chatAskOn || t.def.name !== ASK_USER_TOOL);
   if (tools.length === 0) return null;
@@ -626,7 +672,15 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
   });
   const capabilityScope = gate.scope;
   const actsAsOwner = toolAuthorityHolds(actingPrincipal, gate.ownerUserId);
-  const { approvedTools, approvedBaselineTools } = actsAsOwner ? approvedToolSets(approvals) : { approvedTools: new Set<string>(), approvedBaselineTools: new Set<string>() };
+  // ADR 1042 (security review H2) — a channel-ingress turn spends each approval on the
+  // ONE call it lets through, so the next call of that tool (any arguments, any later
+  // turn) asks the owner again. CHAN-F3: the approvals are CLAIMED (compare-and-delete)
+  // here, before the loop, and only the rows this turn won are folded, so two instances
+  // running turns on one conversation cannot both spend one approval. Unspent claims
+  // go back after the loop (`returnUnspentToolApprovals`).
+  const channelTurn = Boolean((run.metadata as Record<string, unknown> | undefined)?.['channelIngress']);
+  const turnApprovals = await approvalsForTurn({ channelTurn, actsAsOwner, approvals });
+  const { approvedTools, approvedBaselineTools } = approvedToolSets(turnApprovals.folded);
 
   // ADR 0150 / ADR 0834 D3 — `bypass` is honoured only for the principal the tools ACT
   // AS (`run.metadata.actingUserId`). A participant can read and post in a shared
@@ -640,12 +694,8 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
   // ADR 0135 / ADR 0834 D1 — the capability firewall, built by the ONE lane factory and
   // ALWAYS (the old skip — bypass + rule-less + default-allow — is how a lane could be
   // firewall-less at all). The factory wires decision + shadow logging.
-  // ADR 1042 (security review H2) — a channel-ingress turn spends each approval on the
-  // ONE call it lets through: the approved ledger row is removed, so the next call of
-  // that tool (any arguments, any later turn) asks the owner again.
-  // The hook is synchronous, so the spent names are collected and the ledger rows
-  // removed (awaited) once the loop returns, before the next turn can read them.
-  const channelTurn = Boolean((run.metadata as Record<string, unknown> | undefined)?.['channelIngress']);
+  // H2 / CHAN-F3 — the hook is synchronous; it reports each claimed approval it spends,
+  // and the unspent claims are handed back once the loop returns (or throws).
   const spentApprovals: string[] = [];
   const { hook: firewall, posture: fw } = await buildLaneFirewall({
     tenantId: run.tenantId, lane: 'chat', bypass,
@@ -702,10 +752,10 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
   );
   // A class-bumped model that can't serve this key (429 quota / 404 preview
   // access) degrades to the tenant's own selection instead of failing the turn.
-  const { result: loop, modelUsed } = await runLoopWithBumpFallback(runOnce, loopModel, loopFallbackModel);
-  for (const toolName of spentApprovals) {
-    try { await spendToolApproval(run.tenantId, conversationStateKey, toolName); } catch { /* the next ask re-reads the ledger; a stale row is re-spent there */ }
-  }
+  const loopRun = runLoopWithBumpFallback(runOnce, loopModel, loopFallbackModel);
+  // CHAN-F3 — whether the loop returns or throws, spent claims stay deleted (the call
+  // they allowed has run) and the rest go back.
+  const { result: loop, modelUsed } = await loopRun.finally(() => turnApprovals.settle(spentApprovals));
 
   // ADR 0132 Phase 3 — record any tool call the agent deferred for approval, with the
   // ask's origin and arguments, so the composer's conversation-tools control shows it

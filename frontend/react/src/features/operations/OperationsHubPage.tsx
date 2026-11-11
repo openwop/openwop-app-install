@@ -18,9 +18,10 @@ import { Notice, StateCard, TextField } from '../../ui/index.js';
 import { formatDurationSeconds, formatNumber, formatPercent } from '../../i18n/format.js';
 import { toast } from '../../ui/toast.js';
 import { confirm } from '../../ui/confirm.js';
-import { getDlqSummary, getHealthSummary, getOutboxSummary, getSloSummary, redriveOutboxIntent, replayDlqMessage, OperationsRequestError, type DlqSummary, type HealthSummary, type OutboxSummary, type SloRow, type SloSummary } from '../../client/operationsClient.js';
+import { getDlqSummary, getHealthSummary, getKanbanWorkItemDeliverySummary, getOutboxSummary, getSloSummary, redriveOutboxIntent, replayDlqMessage, OperationsRequestError, type DlqSummary, type HealthSummary, type KanbanWorkItemDeliverySummary, type OutboxSummary, type SloRow, type SloSummary } from '../../client/operationsClient.js';
 import { AdminPageHeader } from '../../chrome/AdminPageHeader.js';
 import { AdmissionPanel } from './AdmissionPanel.js';
+import { KanbanDeliveryPanel } from './KanbanDeliveryPanel.js';
 
 const REFRESH_MS = 30_000;
 
@@ -96,8 +97,14 @@ export function OperationsHubPage(): JSX.Element {
   const [outboxForbidden, setOutboxForbidden] = useState(false);
   const [outboxFailed, setOutboxFailed] = useState(false);
   const [redriveReason, setRedriveReason] = useState('');
-  // ADR 0556 P2 — SLO objectives + alerts. FOURTH independent read, with the
-  // same per-panel outcome state as the three above, for the same reason: a 403
+  // ADR 1081 — a FIFTH independent fleet-shared read. Its failure must not
+  // make an unrelated queue look empty or the health panel look unavailable.
+  const [kanbanDelivery, setKanbanDelivery] = useState<KanbanWorkItemDeliverySummary | null>(null);
+  const [kanbanDeliveryForbidden, setKanbanDeliveryForbidden] = useState(false);
+  const [kanbanDeliveryFailed, setKanbanDeliveryFailed] = useState(false);
+  // ADR 0556 P2 — SLO objectives + alerts. SIXTH independent read (after the
+  // Kanban delivery read and the admission panel), with the same per-panel
+  // outcome state as the panels above, for the same reason: a 403
   // here must not claim the health panel is operator-only, and a failed read
   // must never render as "every objective is fine".
   const [slo, setSlo] = useState<SloSummary | null>(null);
@@ -121,23 +128,32 @@ export function OperationsHubPage(): JSX.Element {
     //     panel" — over-applying it to a panel they're allowed to see is its own
     //     dishonesty.
     // allSettled + per-panel state: each panel reports what ITS read did.
-    const [h, d, o, s] = await Promise.allSettled([getHealthSummary(), getDlqSummary(), getOutboxSummary(), getSloSummary()]);
+    const [h, d, o, k, s] = await Promise.allSettled([
+      getHealthSummary(),
+      getDlqSummary(),
+      getOutboxSummary(),
+      getKanbanWorkItemDeliverySummary(),
+      getSloSummary(),
+    ]);
     const forbidden = (r: PromiseSettledResult<unknown>): boolean =>
       r.status === 'rejected' && r.reason instanceof OperationsRequestError && r.reason.status === 403;
     // Detected structurally by status (GRADE-UX: never by message text).
     setHealthForbidden(forbidden(h));
     setDlqForbidden(forbidden(d));
     setOutboxForbidden(forbidden(o));
+    setKanbanDeliveryForbidden(forbidden(k));
     setSloForbidden(forbidden(s));
     if (h.status === 'fulfilled') setHealth(h.value);
     if (d.status === 'fulfilled') setDlq(d.value);
     if (o.status === 'fulfilled') setOutbox(o.value);
+    if (k.status === 'fulfilled') setKanbanDelivery(k.value);
     if (s.status === 'fulfilled') setSlo(s.value);
     setHealthFailed(h.status === 'rejected' && !forbidden(h));
     setDlqFailed(d.status === 'rejected' && !forbidden(d));
     setOutboxFailed(o.status === 'rejected' && !forbidden(o));
+    setKanbanDeliveryFailed(k.status === 'rejected' && !forbidden(k));
     setSloFailed(s.status === 'rejected' && !forbidden(s));
-    const realError = [h, d, o, s].find((r) => r.status === 'rejected' && !forbidden(r));
+    const realError = [h, d, o, k, s].find((r) => r.status === 'rejected' && !forbidden(r));
     setError(
       realError && realError.status === 'rejected'
         ? (realError.reason instanceof Error ? realError.reason.message : String(realError.reason))
@@ -375,6 +391,16 @@ export function OperationsHubPage(): JSX.Element {
             )}
           </article>
         )}
+      </section>
+
+      <section>
+        <h2>{t('kanbanDeliveryHeading')}</h2>
+        <KanbanDeliveryPanel
+          summary={kanbanDelivery}
+          forbidden={kanbanDeliveryForbidden}
+          failed={kanbanDeliveryFailed}
+          onRetry={() => { void load(); }}
+        />
       </section>
 
       {/* ADR 0556 P2 — service level objectives + the alerts derived from them.

@@ -15,6 +15,7 @@ import {
   claimEligibleWorkItemExecution,
   completeWorkItemOutbox,
   failWorkItemExecutionReservation,
+  recordWorkItemDeliveryOutcome,
   rescheduleWorkItemOutbox,
   settleWorkItemExecutionFromRun,
   sweepExpiredKanbanOperationReceipts,
@@ -59,11 +60,13 @@ export async function sweepKanbanWorkItemOutbox(
         now,
       );
       if (reservation.kind === 'skip') {
+        await recordWorkItemDeliveryOutcome(delivery, 'not-eligible', now);
         recordKanbanWorkItemDelivery('auto', 'not-eligible');
         await completeWorkItemOutbox(delivery, now);
         continue;
       }
       if (reservation.kind === 'defer') {
+        await recordWorkItemDeliveryOutcome(delivery, 'deferred', now);
         recordKanbanWorkItemDelivery('auto', 'deferred');
         await rescheduleWorkItemOutbox(delivery, { availableAt: Date.parse(reservation.availableAt) }, now);
         continue;
@@ -71,10 +74,12 @@ export async function sweepKanbanWorkItemOutbox(
 
       const runId = await deliverReservedWorkItem(deps, reservation, now);
       if (!runId) {
+        await recordWorkItemDeliveryOutcome(delivery, 'workflow-unresolved', now);
         recordKanbanWorkItemDelivery('auto', 'workflow-unresolved');
         await completeWorkItemOutbox(delivery, now);
         continue;
       }
+      await recordWorkItemDeliveryOutcome(delivery, 'started', now);
       await completeWorkItemOutbox(delivery, now);
       recordKanbanWorkItemDelivery('auto', 'started');
       started += 1;
@@ -84,6 +89,7 @@ export async function sweepKanbanWorkItemOutbox(
       // retrying until dead-letter would only repeat the refusal and warn each
       // time. Fail the reservation with the honest reason and close the delivery.
       if (err instanceof WorkflowFeatureRefusedError && reservation?.kind === 'started') {
+        await recordWorkItemDeliveryOutcome(delivery, 'not-eligible', now);
         await failWorkItemExecutionReservation(
           delivery.entry.tenantId,
           delivery.entry.workItemId,
@@ -97,6 +103,7 @@ export async function sweepKanbanWorkItemOutbox(
       }
       const error = err instanceof Error ? err.message : String(err);
       const exhausted = delivery.entry.attempts >= MAX_OUTBOX_ATTEMPTS;
+      await recordWorkItemDeliveryOutcome(delivery, exhausted ? 'dead-lettered' : 'retried', now);
       await rescheduleWorkItemOutbox(delivery, {
         availableAt: now + RETRY_DELAY_MS,
         error,

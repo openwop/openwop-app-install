@@ -267,6 +267,16 @@ the moment `entities` is on. The seed carries `seedVersion`; a tenant edit stamp
 `customizedAt`; re-seeding updates only rows whose `customizedAt` is unset (or with an
 explicit `force`).
 
+> **CORRECTED 2026-11-10 (grade-data `TUT-STALE-1`):** re-seeding happens only when a
+> workspace runs the example-data seeder, never on deploy, so a `seedVersion` bump did not
+> reach a workspace that had copied the tutorials once. Its un-customized copy kept winning
+> and kept serving the old text and old `run` bindings. The readers (`listTutorials`,
+> `getTutorial`) now serve the shipped seed in place of an un-customized copy whose
+> `seedVersion` differs from it. They never write. The next seed run rewrites the copy.
+> Customized rows and tenant-authored rows (no `seedVersion`) still win.
+> **Obligation on P6:** the tenant edit path MUST stamp `ext.customizedAt` on every edit. An edit
+> without it would be hidden behind the shipped seed after the next `seedVersion` bump.
+
 ### D4 — Progress moves server-side, on the walkthrough store's discipline
 
 `localStorage` cannot support cross-device resume, the Tutor agent, or honest completion

@@ -1,7 +1,9 @@
 /**
  * feature.promotions.nodes — MERCH-B nodes over `ctx.features.promotions` (ADR 0274 /
  * ADR 0058). `create` is money-moving, so an agent-authored promotion lands PROPOSED
- * (the surface forces active:false) — a human activates it. All role:"action" (recorded).
+ * (the surface forces active:false) — a human activates it. The reads are role:"action"
+ * (re-executed on replay); `create` is role:"side-effect", so a :fork serves its recorded
+ * output instead of drafting a second promotion (ADR 1025 D2).
  * Pure-JS, Node-20 stdlib only. Calls the SAME service the REST route calls.
  */
 function ensurePromo(ctx) {

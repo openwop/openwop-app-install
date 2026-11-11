@@ -8,7 +8,7 @@
 import { Button } from '../../ui/Button.js';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Modal } from '../../ui/index.js';
+import { Modal, Notice } from '../../ui/index.js';
 import { ChartRenderer } from '../../chat/artifacts/ChartRenderer.js';
 
 /** A minimal valid two-bar starter spec for a freshly-inserted chart. */
@@ -20,6 +20,12 @@ export const DEFAULT_CHART_SPEC = JSON.stringify({
   },
 }, null, 2);
 
+/** True when `spec` parses as a JSON object (DE87UX-15: invalid JSON could be
+ *  inserted and then rendered as a raw dump). */
+export function isChartSpecJson(spec: string): boolean {
+  try { const v: unknown = JSON.parse(spec); return Boolean(v) && typeof v === 'object' && !Array.isArray(v); } catch { return false; }
+}
+
 export function ChartEditModal({ initial, editing, onSave, onClose }: {
   initial: string;
   editing: boolean;
@@ -28,18 +34,20 @@ export function ChartEditModal({ initial, editing, onSave, onClose }: {
 }): JSX.Element {
   const { t } = useTranslation('document-editor');
   const [spec, setSpec] = useState(initial || DEFAULT_CHART_SPEC);
+  const valid = isChartSpecJson(spec);
   return (
     <Modal onClose={onClose} label={t('chartTitle')} showClose>
       <div className="doc-block-editor">
         <label className="doc-block-editor__label" htmlFor="doc-chart-spec">{t('chartSpec')}</label>
         <textarea id="doc-chart-spec" className="cv-editor__input cv-editor__textarea doc-block-editor__code" value={spec}
-          autoFocus rows={8} spellCheck={false} aria-describedby="doc-chart-preview" onChange={(e) => setSpec(e.target.value)} />
+          autoFocus rows={8} spellCheck={false} aria-invalid={!valid} aria-describedby={valid ? 'doc-chart-preview' : 'doc-chart-preview doc-chart-invalid'} onChange={(e) => setSpec(e.target.value)} />
         <div id="doc-chart-preview" className="doc-block-editor__preview">
           <ChartRenderer content={spec} />
         </div>
+        {!valid ? <Notice variant="warning" id="doc-chart-invalid">{t('chartInvalid')}</Notice> : null}
         <div className="action-bar">
           <Button variant="secondary" size="sm" onClick={onClose}>{t('mathCancel')}</Button>
-          <Button variant="primary" size="sm" onClick={() => onSave(spec.trim())} disabled={!spec.trim()}>
+          <Button variant="primary" size="sm" onClick={() => onSave(spec.trim())} disabled={!valid}>
             {editing ? t('mathUpdate') : t('mathInsert')}
           </Button>
         </div>

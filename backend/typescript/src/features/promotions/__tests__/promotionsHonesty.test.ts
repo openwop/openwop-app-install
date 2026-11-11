@@ -88,7 +88,7 @@ describe('PRO2-P4 — the loss budget can be changed', () => {
   it('patching the cap keeps the promotion (and therefore its burn history)', async () => {
     const promo = await createPromotion({
       tenantId: T, orgId: ORG, createdBy: 'u', name: 'Leader', type: 'loss_leader',
-      reward: { kind: 'percentage', value: 50 }, scope: { all: true }, budget: { maxDiscount: 500 },
+      reward: { kind: 'percentage', value: 50 }, currency: 'USD', scope: { all: true }, budget: { maxDiscount: 500 },
     });
     // Before: `budget` was unreachable from every surface, so the only way to change a
     // cap was delete + recreate — which starts the derived burn at ZERO, orphaning every
@@ -101,7 +101,7 @@ describe('PRO2-P4 — the loss budget can be changed', () => {
   it('a loss-leader cannot be stripped of its cap by a patch', async () => {
     const promo = await createPromotion({
       tenantId: T, orgId: ORG, createdBy: 'u', name: 'Leader', type: 'loss_leader',
-      reward: { kind: 'percentage', value: 50 }, scope: { all: true }, budget: { maxDiscount: 500 },
+      reward: { kind: 'percentage', value: 50 }, currency: 'USD', scope: { all: true }, budget: { maxDiscount: 500 },
     });
     await expect(updatePromotion(T, ORG, promo.promotionId, { budget: {} })).rejects.toThrow(/needs a `budget.maxDiscount`/i);
   });

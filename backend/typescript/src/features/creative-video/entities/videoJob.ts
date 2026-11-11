@@ -13,6 +13,8 @@
 
 import { createHash } from 'node:crypto';
 import { DurableCollection } from '../../../host/hostExtPersistence.js';
+import type { VideoReservation } from '../../../aiProviders/mediaBudget.js';
+import type { LikenessConsentSnapshot } from '../likenessConsent.js';
 
 export type VideoJobStatus = 'submitting' | 'processing' | 'downloading' | 'completed' | 'failed';
 /** avatar = HeyGen-class script→avatar; t2v = frontier text→video (ADR 0404 P4);
@@ -45,6 +47,22 @@ export interface VideoJob {
   sourceAssetId?: string;
   sourceSha256?: string;
   productId?: string;
+  /** ADR 1051 D2 — what was asked of a frontier model (t2v/i2v), resolved
+   *  against the model table. A REQUEST, not a measurement of the result. */
+  requested?: { model: string; ratio: string; durationSec: number };
+  /** ADR 1051 D3 — the units reserved for this job, released only when the
+   *  provider provably did not take it. */
+  reservation?: VideoReservation;
+  /** ADR 1051 D6 — stamped by CAS immediately before the POST. A row with this
+   *  and no `providerJobId` may have been taken by the provider, so it is never
+   *  re-submitted (it becomes `submit_unconfirmed`). */
+  submitAttemptedAt?: string;
+  /** ADR 1051 D10 — the connection the submit used, and its person; polling
+   *  pins both. */
+  connectionId?: string;
+  submitterUserId?: string;
+  /** ADR 1051 D5 — the attestation an avatar job ran under. */
+  likenessConsent?: LikenessConsentSnapshot;
   createdBy: string;
   createdAt: string;
   updatedAt: string;
@@ -66,12 +84,15 @@ const jobs = new DurableCollection<VideoJob>('creative-video:job', (j) => j.jobI
  *  (ADR 0404 grade-data CV-1). `model` + t2v params are included so the SAME prompt
  *  on a DIFFERENT model is a distinct job, never a collision that returns the first
  *  model's asset or under-charges (ADR 0404 P4). */
-export function requestHashFor(input: { provider: string; orgId?: string; kind?: VideoJobKind; model?: string; script: string; avatarId?: string; voiceId?: string; width?: number; height?: number; durationSec?: number; sourceSha256?: string }): string {
+export function requestHashFor(input: { provider: string; orgId?: string; kind?: VideoJobKind; model?: string; script: string; avatarId?: string; voiceId?: string; width?: number; height?: number; durationSec?: number; ratio?: string; sourceSha256?: string }): string {
   const canonical = JSON.stringify({
     p: input.provider, o: input.orgId ?? '', k: input.kind ?? 'avatar', m: input.model ?? '', s: input.script,
     a: input.avatarId ?? '', v: input.voiceId ?? '', w: input.width ?? 0, h: input.height ?? 0, d: input.durationSec ?? 0,
     // ADR 0945 D7 — only when present, so every pre-existing avatar/t2v hash is unchanged.
     ...(input.sourceSha256 ? { i: input.sourceSha256 } : {}),
+    // ADR 1051 D9 — the RESOLVED ratio (t2v/i2v always carry one now): two
+    // requests that differ only in ratio are two jobs, never one shared asset.
+    ...(input.ratio ? { r: input.ratio } : {}),
   });
   return createHash('sha256').update(canonical, 'utf8').digest('hex');
 }
@@ -118,6 +139,11 @@ export async function claimJob(input: { tenantId: string; orgId: string; request
 
 export async function putJob(next: VideoJob): Promise<void> {
   await jobs.put({ ...next, updatedAt: new Date().toISOString() });
+}
+
+/** ADR 1051 D8 — the subject's rows in `tenantId` (any field naming them). */
+export async function listJobsForTenant(tenantId: string): Promise<VideoJob[]> {
+  return jobs.listForTenantIndexed(tenantId);
 }
 
 /** DELETE every job in (tenant, org) that pinned `assetId` — called when that media

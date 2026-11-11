@@ -14,7 +14,10 @@
  * Sabotage that turns these red (BYOKWizard.tsx): no recommended pre-select, no
  * focus move, Back to the wrong step, a fresh ref instead of the stored one, the
  * managed / subscription short-circuits removed, the `managed:` sentinel dropped.
+ * 2026-11-09: the StrictMode mount case goes red when the step-focus effect skips
+ * its first run with a flag instead of comparing with the last focused step.
  */
+import { StrictMode } from 'react';
 import { render, screen, fireEvent, cleanup } from '@testing-library/react';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
@@ -76,6 +79,25 @@ describe('BYOKWizard flow (pinned before the C1 refresh)', () => {
     expect(screen.getByText('target:byok:openai')).toBeTruthy();
     fireEvent.click(screen.getByText('store'));
     await vi.waitFor(() => expect(onComplete).toHaveBeenCalledWith({ provider: 'openai', model: 'gpt-b', credentialRef: 'byok:openai' }));
+  });
+
+  it('mounting never takes focus, even under StrictMode\'s double effect run; a real step change still does', () => {
+    // The e2e lane runs the dev server under StrictMode. A "skip the first run"
+    // flag survived the replayed mount effect and focused the heading on mount,
+    // stealing focus from the page at whatever moment the wizard mounted.
+    const outside = document.createElement('button');
+    outside.textContent = 'outside';
+    document.body.appendChild(outside);
+    try {
+      outside.focus();
+      render(<StrictMode><BYOKWizard onComplete={vi.fn()} /></StrictMode>);
+      expect(screen.getByText('step:provider')).toBeTruthy();
+      expect(document.activeElement).toBe(outside);
+      fireEvent.click(screen.getByText('pick-openai'));
+      expect(document.activeElement?.textContent).toBe('step:model');
+    } finally {
+      outside.remove();
+    }
   });
 
   it('writes INTO an existing stored ref for the provider (ADR 0517 fix B)', () => {

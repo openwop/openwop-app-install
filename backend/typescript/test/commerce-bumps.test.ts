@@ -110,7 +110,7 @@ describe('ADR 0296 P1 — order bumps in the public checkout', () => {
   it('promotions evaluate over the whole order — a bump pushes the cart over a threshold', async () => {
     const { owner, tenantId, orgId, mainId, bumpId } = await shop();
     const promo = await owner.post(`/host/openwop-app/promotions/orgs/${encodeURIComponent(orgId)}/promotions`, {
-      name: '10% over $110', type: 'cart_threshold', reward: { kind: 'percentage', value: 10 }, minSpend: 110,
+      name: '10% over $110', type: 'cart_threshold', reward: { kind: 'percentage', value: 10 }, currency: 'USD', minSpend: 110,
     });
     expect(promo.status).toBe(201);
     const guest = client();

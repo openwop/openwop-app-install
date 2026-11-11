@@ -19,7 +19,12 @@ import { CopyIcon, DownloadIcon, FileTextIcon, MessageSquareIcon, SparklesIcon }
 import { CommentsPanel } from '../comments/CommentsPanel.js';
 import { coerceDocument } from './documentDoc.js';
 import { pmToMarkdown } from './pmToMarkdown.js';
-import { DOCUMENT_AUTHOR_AGENT } from './documentAgents.js';
+import { DOCUMENT_WRITING_AGENT } from './documentAgents.js';
+import { clearReturnTarget } from '../../chat/returnTarget.js';
+import { stageComposerDraft } from '../../chat/composerSeed.js';
+
+/** ADR 1055 D4 — how much of the saved document "Ask AI" quotes into the draft. */
+export const ASK_AI_MAX_CHARS = 12_000;
 
 export function DocumentToolbarExtras({ orgId, canvasId, docName, dirty }: ToolbarExtrasProps): JSX.Element {
   const { t } = useTranslation('document-editor');
@@ -30,14 +35,36 @@ export function DocumentToolbarExtras({ orgId, canvasId, docName, dirty }: Toolb
   const [commentsOpen, setCommentsOpen] = useState(false);
   const client = useMemo(() => createCanvasClient({ basePath: '/host/openwop-app/document-editor' }), []);
 
-  const askAi = useCallback(() => {
-    void navigate(`/?agent=${encodeURIComponent(DOCUMENT_AUTHOR_AGENT)}`);
-  }, [navigate]);
-
   const markdown = useCallback(async (): Promise<string> => {
     const rec = await client.getCanvas(orgId, canvasId);
     return pmToMarkdown(coerceDocument(rec.state).content);
   }, [client, orgId, canvasId]);
+
+  // ADR 1055 D4 — the Writing Assistant has no tools and cannot see the
+  // document, so "Ask AI" quotes the SAVED document into a composer draft the
+  // user reads and edits before sending. Unsaved edits are named as missing; a
+  // failed read is shown and the chat is not opened blind (DE87UX-9). An Ask AI
+  // reply is not an "Improve" reply, so any staged Apply target is dropped
+  // (DE87UX-4).
+  const askAi = useCallback(async () => {
+    setBusy(true); setError(false); setStatus(null);
+    try {
+      let text: string;
+      try { text = (await markdown()).trim(); }
+      catch { setError(true); setStatus(t('askAiReadFailed')); return; }
+      // An empty SAVED document with unsaved edits: the agent would see nothing
+      // of what the user is looking at, so ask for a save instead (DE87UX-28).
+      if (!text && dirty) { setError(true); setStatus(t('askAiSaveFirst')); return; }
+      if (text) {
+        const quoted = text.length > ASK_AI_MAX_CHARS ? `${text.slice(0, ASK_AI_MAX_CHARS)}\n${t('askAiTruncated')}` : text;
+        stageComposerDraft(t('askAiPrompt', { title: docName || t('untitledTitle'), text: dirty ? `${quoted}\n${t('askAiUnsaved')}` : quoted }));
+      }
+      clearReturnTarget();
+      void navigate(`/?agent=${encodeURIComponent(DOCUMENT_WRITING_AGENT)}`);
+    } finally {
+      setBusy(false);
+    }
+  }, [markdown, navigate, docName, dirty, t]);
 
   // DOC-G3 — `fallback` names what THIS action was, and a thrown Error's message
   // (the HTTP status the export path already composes) survives. Before, every
@@ -85,7 +112,7 @@ export function DocumentToolbarExtras({ orgId, canvasId, docName, dirty }: Toolb
 
   return (
     <span className="cv-editor__tools" role="group" aria-label={t('exportGroup')}>
-      <IconButton label={t('aiAssist')} icon={<SparklesIcon size={13} />} onClick={askAi} title={t('aiAssistHint')} />
+      <IconButton label={t('aiAssist')} icon={<SparklesIcon size={13} />} onClick={() => void askAi()} title={t('aiAssistHint')} disabled={busy} />
       <IconButton label={t('comments')} icon={<MessageSquareIcon size={13} />} onClick={() => setCommentsOpen(true)} title={t('comments')} />
       <IconButton label={t('copyMarkdown')} icon={<CopyIcon size={13} />} onClick={onCopy} disabled={busy} title={t('copyMarkdown')} />
       <IconButton label={t('downloadMarkdown')} icon={<DownloadIcon size={13} />} onClick={onDownload} disabled={busy} title={t('downloadMarkdown')} />

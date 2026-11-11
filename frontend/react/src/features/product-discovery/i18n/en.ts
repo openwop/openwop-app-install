@@ -53,6 +53,14 @@ export const messages = {
   type_manual: 'Manual (curated)',
 
   deleteRowLabel: 'Delete {{name}}',
+  colStatus: 'Status',
+  statusActive: 'Active',
+  statusPaused: 'Paused',
+  activate: 'Activate',
+  pause: 'Pause',
+  activateRowLabel: 'Activate {{name}}',
+  pauseRowLabel: 'Pause {{name}}',
+  updateFailed: 'Failed to update.',
   deleteCollectionConfirm: 'Delete the collection "{{name}}"?',
   deleteRuleConfirm: 'Delete the rule "{{name}}"?',
 
@@ -71,4 +79,12 @@ export const messages = {
   facetsTruncated: "Top {{shown}} of {{total}} values per facet.",
   fieldCategoryHelp: "Products in this category join the collection automatically as they are added.",
   fieldHideCategoryHelp: "Products in this category stop appearing on your storefront while this rule is active.",
+  colEffect: "Effect",
+  statusProposed: "Proposed by an agent",
+  effectHide: "Hides {{what}}",
+  effectBury: "Moves {{what}} to the end",
+  effectBoost: "Boosts {{what}} ×{{factor}}",
+  effectPin: "Pins a product at position {{position}}",
+  effectPriceBand: "a price band",
+  activateHideConfirm: "Activate \"{{name}}\"? Matching products stop appearing in your storefront search.",
 } as const;

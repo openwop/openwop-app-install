@@ -21,7 +21,7 @@
 import { createHash } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { resolveByokTextDescribed, type HeadlessDispatch } from '../../host/headlessAi.js';
-import { fenceUntrustedBlock } from '../../host/untrustedContent.js';
+import { fenceUntrustedBlock, hasUntrustedFenceMarker } from '../../host/untrustedContent.js';
 import { reserveEmbedBudget, estimateTokens } from './embedBudget.js';
 import type { KnowledgeDocument } from './kbService.js';
 
@@ -74,7 +74,8 @@ export function buildEnrichMessages(title: string, docText: string, chunk: strin
 export function validatePrefix(raw: string): string {
   const flat = raw.replace(/\s+/g, ' ').trim().replace(/^["'“”]+|["'“”]+$/g, '').trim();
   if (flat.length === 0) throw new EnrichmentError('enrich_output_invalid', 'The model returned an empty context.');
-  if (/\b(BEGIN|END)\s+UNTRUSTED\s+CONTENT\b/i.test(flat)) throw new EnrichmentError('enrich_output_invalid', 'The model echoed the untrusted-content fence.');
+  // CHAN-F4: the shared detector, so an echo in any spelling the defang neutralises is refused.
+  if (hasUntrustedFenceMarker(flat)) throw new EnrichmentError('enrich_output_invalid', 'The model echoed the untrusted-content fence.');
   const sentences = flat.match(/[^.!?]+[.!?]+/g);
   const two = sentences && sentences.length > 2 ? sentences.slice(0, 2).join('').trim() : flat;
   return two.length > MAX_PREFIX_CHARS ? `${two.slice(0, MAX_PREFIX_CHARS - 1).trimEnd()}…` : two;

@@ -11,6 +11,23 @@
  * shape above: OS preference via @media, forced override via .theme-dark /
  * .theme-light classes. */
 :root { color-scheme: light; }
+/* ADR 1096 — public-site style tokens. Each is `initial` (the guaranteed-invalid
+   value), so each site-token reference falls back to today's look until a brand
+   sets it in its brand.css seam. They style only the CMS public site (`.fp-*`). */
+:root {
+  --site-shell-max: initial;          /* content width, default 1140px */
+  --site-section-pad: initial;        /* section padding top and bottom */
+  --site-section-rule: initial;       /* the border between sections, e.g. 0 */
+  --site-card-bg: initial;            /* card, panel, plan and FAQ fill */
+  --site-card-border: initial;        /* their border */
+  --site-card-radius: initial;        /* their corners */
+  --site-card-shadow: initial;        /* the form card's shadow */
+  --site-card-raise-shadow: initial;  /* the highlighted plan's shadow */
+  --site-card-raise-lift: initial;    /* the highlighted plan's lift, e.g. 0 */
+  --site-media-radius: initial;       /* photo and screenshot corners */
+  --site-hero-image-opacity: initial; /* the photo hero's picture opacity */
+  --site-hero-image-mask: initial;    /* its fade, e.g. none */
+}
 @media (prefers-color-scheme: dark) {
   :root:not(.theme-light) { color-scheme: dark; }
 }
@@ -9075,12 +9092,12 @@ button.teampage-skill-chip:not(:disabled):hover { background: var(--clay-soft); 
    the empty frame then sat above the editor. */
 .cms-preview-stage[hidden] { display: none; }
 .cms-preview-device { width: 100%; transition: max-width 0.2s ease; }
-.fp-shell { width: 100%; max-width: 1140px; margin: 0 auto; padding-inline-start: var(--space-5); padding-inline-end: var(--space-5); }
+.fp-shell { width: 100%; max-width: var(--site-shell-max, 1140px); margin: 0 auto; padding-inline-start: var(--space-5); padding-inline-end: var(--space-5); }
 .fp-shell--narrow { max-width: 760px; }
 
 /* ── Section rhythm + a hairline + a faint section index ─────────────────── */
-.fp-section { position: relative; padding-top: calc(var(--space-6) * 2.25); padding-bottom: calc(var(--space-6) * 2.25); border-top: 1px solid var(--rule); }
-.fp-section + .fp-section { border-top: 1px solid var(--rule); }
+.fp-section { position: relative; padding-top: var(--site-section-pad, calc(var(--space-6) * 2.25)); padding-bottom: var(--site-section-pad, calc(var(--space-6) * 2.25)); border-top: var(--site-section-rule, 1px solid var(--rule)); }
+.fp-section + .fp-section { border-top: var(--site-section-rule, 1px solid var(--rule)); }
 
 /* ── Eyebrow + heading ──────────────────────────────────────────────────── */
 .fp-eyebrow { margin: 0 0 var(--space-4); font-family: var(--mono); font-size: 12px; font-weight: var(--weight-emphasis); letter-spacing: 0.18em; text-transform: uppercase; color: var(--ink-3); }
@@ -9151,8 +9168,8 @@ button.teampage-skill-chip:not(:disabled):hover { background: var(--clay-soft); 
   width: min(48%, 620px);
   height: 100%;
   object-fit: cover;
-  opacity: 0.82;
-  mask-image: linear-gradient(to right, transparent, black 28%);
+  opacity: var(--site-hero-image-opacity, 0.82);
+  mask-image: var(--site-hero-image-mask, linear-gradient(to right, transparent, black 28%));
 }
 .fp-hero--image .fp-hero__inner { max-width: 640px; }
 .fp-hero__product { position: absolute; z-index: 0; right: max(var(--space-5), calc((100% - 1140px) / 2)); top: 50%; width: min(45%, 520px); transform: translateY(-50%) rotate(2deg); pointer-events: none; }
@@ -9745,7 +9762,8 @@ button.teampage-skill-chip:not(:disabled):hover { background: var(--clay-soft); 
 /* The stock mark renders inline (no img class), like the header's. */
 .public-shell .app-footer__home .brand-logo { inline-size: 30px; block-size: 30px; display: inline-flex; flex-shrink: 0; color: var(--ink); }
 .public-shell .app-footer__home .brand-logo svg { inline-size: 100%; block-size: 100%; display: block; }
-.public-shell .app-footer__lockup { display: block; block-size: 30px; inline-size: auto; max-inline-size: 160px; object-fit: contain; }
+/* No `display` here: it would outrank the light/dark `.brandlogo--*` switch (adr0510.css) and show both lockups. The link is inline-flex, so the image is a flex item anyway. */
+.public-shell .app-footer__lockup { block-size: 30px; inline-size: auto; max-inline-size: 160px; object-fit: contain; }
 .public-shell .app-footer__name { font-family: var(--serif); font-weight: var(--weight-head); font-size: var(--text-title); letter-spacing: -0.01em; color: var(--ink); }
 .public-shell .app-footer--grouped .app-footer__brand { margin: 0; max-inline-size: 26em; font-size: var(--text-body); line-height: 1.6; color: var(--ink-3); }
 .public-shell a.btn.app-footer__cta { min-block-size: var(--hit-target); padding-inline: var(--space-4); font-size: var(--text-body); color: var(--color-on-scrim); text-decoration: none; }
@@ -10136,7 +10154,7 @@ a.fp-post__share { text-decoration: none; }
 
 /* R2-G10 — the `faq` public section: native disclosure Q/A. */
 .fp-faq { display: grid; gap: var(--space-2); margin-top: var(--space-4); max-width: 46rem; }
-.fp-faq__item { border: 1px solid var(--rule); border-radius: var(--radius-lg); background: var(--paper); }
+.fp-faq__item { border: var(--site-card-border, 1px solid var(--rule)); border-radius: var(--site-card-radius, var(--radius-lg)); background: var(--site-card-bg, var(--paper)); }
 /* 44px minimum tap target (WCAG 2.5.5), whatever the question length. */
 .fp-faq__q { min-height: 44px; box-sizing: border-box; padding: var(--space-3) var(--space-4); font-family: var(--sans); font-weight: var(--weight-head); font-size: var(--text-body); color: var(--ink); cursor: pointer; }
 .fp-faq__q:focus-visible { outline: 2px solid var(--clay-text); outline-offset: 2px; border-radius: var(--radius-lg); }
@@ -11859,6 +11877,8 @@ a.fp-post__share { text-decoration: none; }
 /* Track-changes suggestions (ADR 0334 6b-2) — token-only, themes in light + dark. */
 .doc-editor__content .doc-ins { color: var(--color-success-text); text-decoration: underline; text-decoration-color: var(--color-success); }
 .doc-editor__content .doc-del { color: var(--color-danger-text); text-decoration: line-through; text-decoration-color: var(--color-danger); }
+/* An AI-applied suggestion (ADR 1055 D6) — dashed, so it reads apart from a typed one. */
+.doc-editor__content .doc-ins[data-author="ai"] { text-decoration-style: dashed; color: var(--color-info-text); text-decoration-color: var(--color-info); }
 /* Placeholder — the empty-doc hint that also teaches the slash menu (ADR 0334 P2). */
 .doc-editor__content .is-empty:first-child::before {
   content: attr(data-placeholder); color: var(--ink-3);
@@ -12868,7 +12888,7 @@ a.dash-activity__row:hover .dash-activity__name { color: var(--clay-text); text-
 .fp-tone { border-top-color: transparent; }
 .fp-tone + .fp-section, .fp-section + .fp-tone { border-top-color: transparent; }
 .fp-tone--muted { background: var(--paper-2); }
-.fp-tone--muted .fp-card, .fp-tone--muted .fp-col { background: var(--paper); }
+.fp-tone--muted .fp-card, .fp-tone--muted .fp-col { background: var(--site-card-bg, var(--paper)); }
 .fp-tone--inverse, .fp-tone--accent {
   --ink: var(--tone-inverse-ink);
   --ink-2: color-mix(in oklab, var(--tone-inverse-ink) 82%, transparent);
@@ -12913,7 +12933,7 @@ a.dash-activity__row:hover .dash-activity__name { color: var(--clay-text); text-
 /* ADR 1063 D2 — the two-column FAQ: questions in two columns on wide screens,
    each with a + that turns to × when open; an optional picture under the head. */
 .fp-faq__shot { margin: var(--space-4) 0 0; }
-.fp-faq__shot .fp-shot__img { display: block; inline-size: 100%; block-size: auto; border-radius: var(--radius-lg); }
+.fp-faq__shot .fp-shot__img { display: block; inline-size: 100%; block-size: auto; border-radius: var(--site-media-radius, var(--radius-lg)); }
 /* ADR 1068 D3 — under a split head the picture sits under the heading in the
    first column and the questions take the second, both rows (auto-placement
    used to put the picture in the second column and push the questions down). */
@@ -12969,7 +12989,7 @@ mark.fp-mark { padding: 0 0.06em; background: linear-gradient(transparent 62%, c
 .fp-quotes--pull .fp-quote__byline, .fp-quotes--pull .fp-quote__name, .fp-quotes--pull .fp-quote__role { color: inherit; }
 .fp-quotes--pull .fp-quote:not(:first-child) { margin-top: var(--space-4); }
 .fp-timeline__shot { margin-top: var(--space-5); }
-.fp-timeline__shot .fp-shot__img { display: block; inline-size: 100%; block-size: auto; border-radius: var(--radius-lg); }
+.fp-timeline__shot .fp-shot__img { display: block; inline-size: 100%; block-size: auto; border-radius: var(--site-media-radius, var(--radius-lg)); }
 .fp-timeline__shot.fp-browser .fp-shot__img { border-radius: 0; }
 @media (min-width: 900px) {
   .fp-timeline--shot .fp-timeline__body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); column-gap: calc(var(--space-6) * 2); align-items: start; }
@@ -13027,7 +13047,7 @@ mark.fp-mark { padding: 0 0.06em; background: linear-gradient(transparent 62%, c
 @media (min-width: 600px) and (max-width: 1023px) { .fp-gallery__grid:not(.fp-gallery__grid--lead):has(> :nth-child(4):last-child) { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (min-width: 1024px) { .fp-gallery__grid:not(.fp-gallery__grid--lead):has(> :nth-child(4):last-child) { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 .fp-gallery__item { margin: 0; }
-.fp-gallery__shot .fp-shot__img { display: block; inline-size: 100%; block-size: auto; border-radius: var(--radius-lg); }
+.fp-gallery__shot .fp-shot__img { display: block; inline-size: 100%; block-size: auto; border-radius: var(--site-media-radius, var(--radius-lg)); }
 .fp-gallery__shot.fp-browser .fp-shot__img { border-radius: 0; }
 .fp-gallery__cap { display: grid; gap: var(--space-1); margin: var(--space-3) 0 0; }
 .fp-gallery__title { font-size: var(--text-body); font-weight: var(--weight-head); color: var(--ink); }
@@ -13094,7 +13114,7 @@ mark.fp-mark { padding: 0 0.06em; background: linear-gradient(transparent 62%, c
 .fp-col__badge { display: inline-block; margin-inline-start: var(--space-2); padding: var(--space-1) var(--space-2); border-radius: var(--radius-pill); background: var(--paper-2); font-family: var(--sans); font-size: var(--text-eyebrow); font-weight: var(--weight-head); letter-spacing: 0.06em; text-transform: uppercase; vertical-align: middle; color: var(--ink-2); }
 .fp-cols__note { margin: var(--space-5) 0 0; font-size: var(--text-sm); color: var(--ink-3); }
 .fp-cols--ruled .fp-col { padding-top: var(--space-4); border-top: 2px solid var(--clay-rule); }
-.fp-cols--panels .fp-col { padding: var(--space-5); border-radius: var(--radius); background: var(--paper); }
+.fp-cols--panels .fp-col { padding: var(--space-5); border-radius: var(--site-card-radius, var(--radius)); background: var(--site-card-bg, var(--paper)); }
 .fp-tone--muted.fp-cols--panels .fp-col { background: color-mix(in oklab, var(--paper) 70%, var(--paper-2)); }
 .fp-panel__art { display: block; block-size: 30px; inline-size: auto; max-inline-size: 100%; margin-bottom: var(--space-4); }
 .fp-art-block { fill: color-mix(in oklab, var(--ink-3) 45%, var(--paper-2)); }
@@ -13102,7 +13122,7 @@ mark.fp-mark { padding: 0 0.06em; background: linear-gradient(transparent 62%, c
 .fp-art-dot { fill: color-mix(in oklab, var(--ink-3) 55%, var(--paper-2)); }
 .fp-art-frame { fill: none; stroke: color-mix(in oklab, var(--ink-3) 55%, var(--paper-2)); stroke-width: 2; }
 .fp-art-ghost { fill: none; stroke: color-mix(in oklab, var(--ink-3) 45%, var(--paper-2)); stroke-width: 1.5; stroke-dasharray: 3 3; }
-.fp-cols--progress .fp-col, .fp-cols--tiles .fp-col { padding: var(--space-5); border: 1px solid var(--rule); border-radius: var(--radius); background: var(--paper); }
+.fp-cols--progress .fp-col, .fp-cols--tiles .fp-col { padding: var(--space-5); border: var(--site-card-border, 1px solid var(--rule)); border-radius: var(--site-card-radius, var(--radius)); background: var(--site-card-bg, var(--paper)); }
 .fp-cols--progress .fp-progress { margin: 0 0 var(--space-4); }
 .fp-cols--progress .fp-cols__grid { grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: var(--space-4); }
 .fp-cols--tiles .fp-cols__grid { grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); gap: var(--space-4); }
@@ -13152,7 +13172,7 @@ mark.fp-mark { padding: 0 0.06em; background: linear-gradient(transparent 62%, c
 .fp-prose__copy .fp-head { margin-bottom: var(--space-4); }
 /* ADR 1074 D1 — a richText's screenshot beside the copy; the caption reads from the start, like the frame's address. */
 .fp-prose__figure { margin: 0; min-inline-size: 0; }
-.fp-prose__shot .fp-shot__img { display: block; inline-size: 100%; block-size: auto; border-radius: var(--radius-lg); }
+.fp-prose__shot .fp-shot__img { display: block; inline-size: 100%; block-size: auto; border-radius: var(--site-media-radius, var(--radius-lg)); }
 .fp-prose__shot.fp-browser .fp-shot__img { border-radius: 0; }
 .fp-prose__cap { text-align: start; }
 .fp-chat { margin: 0; border: 1px solid var(--rule); border-radius: var(--radius-lg); background: var(--paper); overflow: hidden; box-shadow: 0 30px 60px -44px var(--clay-glow); }
@@ -13195,7 +13215,7 @@ mark.fp-mark { padding: 0 0.06em; background: linear-gradient(transparent 62%, c
 }
 /* ADR 1064 — the form card: the head and lede beside a card holding the form,
    headed by who reads the message; stacked under 900px. */
-.fp-formcard__card { padding: var(--space-5); border: 1px solid var(--rule); border-radius: calc(var(--space-6) - var(--space-2)); background: var(--paper); box-shadow: 0 50px 90px -30px var(--ink-shadow); }
+.fp-formcard__card { padding: var(--space-5); border: var(--site-card-border, 1px solid var(--rule)); border-radius: var(--site-card-radius, calc(var(--space-6) - var(--space-2))); background: var(--site-card-bg, var(--paper)); box-shadow: var(--site-card-shadow, 0 50px 90px -30px var(--ink-shadow)); }
 /* ADR 1068 D3 — the design's card: 576px at the end of the full shell, 36px in;
    its fields 50px tall with a 1.5px edge, a 12px radius and 16px text, focus
    ringed in the accent; a short note under the form. */
@@ -13269,6 +13289,13 @@ mark.fp-mark { padding: 0 0.06em; background: linear-gradient(transparent 62%, c
 .fp-timeline--badges .fp-timeline__list::before, .fp-timeline--badges .fp-timeline__list::after { inset-inline-start: 19px; }
 .fp-timeline__badge { position: absolute; z-index: 1; inset-block-start: 0; inset-inline-start: calc((40px + var(--space-4)) * -1); display: grid; place-items: center; inline-size: 40px; block-size: 40px; border-radius: var(--radius-lg); background: color-mix(in oklab, var(--clay) 12%, var(--paper)); color: var(--clay-strong); font-family: var(--mono); font-size: var(--text-sm); font-weight: var(--weight-head); }
 .fp-timeline__item--live .fp-timeline__badge { background: color-mix(in oklab, var(--color-success) 18%, var(--paper)); color: var(--color-success-text); }
+/* In a dark band --paper is the dark panel, so the light-band chip above turned dark under its
+   dark number (1.5:1 on live myndhyve.ai, 2026-11-10). There the chip is a translucent tint
+   and the number takes the band's light text, as `.fp-tone--inverse .fp-bento__eyebrow--num`
+   does. The accent band's fill is --clay-strong itself, so its number takes the band ink. */
+.fp-tone--inverse .fp-timeline__badge { background: color-mix(in oklab, var(--clay) 24%, transparent); color: var(--clay-text); }
+.fp-tone--accent .fp-timeline__badge { background: color-mix(in oklab, var(--ink) 14%, transparent); color: var(--ink); }
+.fp-tone--inverse .fp-timeline__item--live .fp-timeline__badge, .fp-tone--accent .fp-timeline__item--live .fp-timeline__badge { background: color-mix(in oklab, var(--color-success) 24%, transparent); color: oklch(from var(--color-success) 86% 0.09 h); }
 .fp-timeline--badges .fp-timeline__item { min-block-size: 40px; }
 /* ADR 1073 D2 — the head and the picture on the start side, the rail beside them;
    on a phone the picture still comes before the list. */
@@ -13339,8 +13366,8 @@ mark.fp-mark { padding: 0 0.06em; background: linear-gradient(transparent 62%, c
    boxed cards of equal height, a big price with its unit small beside it, checks
    with no dividers, the button pinned to the foot. The highlighted plan is the
    dark card (the band tokens, scoped) raised a little on a wide screen. */
-.fp-cols--plans .fp-col { display: flex; flex-direction: column; padding: var(--space-6); border: 1px solid var(--rule); border-radius: var(--radius-lg); background: var(--paper); }
-.fp-cols--plans .fp-col--highlight { border-color: transparent; box-shadow: 0 40px 80px -40px var(--clay-glow); }
+.fp-cols--plans .fp-col { display: flex; flex-direction: column; padding: var(--space-6); border: var(--site-card-border, 1px solid var(--rule)); border-radius: var(--site-card-radius, var(--radius-lg)); background: var(--site-card-bg, var(--paper)); }
+.fp-cols--plans .fp-col--highlight { border-color: transparent; box-shadow: var(--site-card-raise-shadow, 0 40px 80px -40px var(--clay-glow)); }
 .fp-cols--plans .fp-col__eyebrow { color: var(--clay-text); }
 .fp-cols--plans .fp-col__title, .fp-cols--plans .fp-col--highlight .fp-col__title { margin-block: var(--space-2) var(--space-3); font-size: calc(var(--text-display) * 2); font-weight: var(--weight-marquee); line-height: 1; letter-spacing: -0.03em; color: var(--ink); }
 .fp-col__unit { font-family: var(--sans); font-size: var(--text-lg); font-weight: var(--weight-head); letter-spacing: 0; color: var(--ink-3); }
@@ -13348,7 +13375,7 @@ mark.fp-mark { padding: 0 0.06em; background: linear-gradient(transparent 62%, c
 .fp-cols--plans .fp-col__item { padding: 0; border: 0; }
 .fp-col__cta { margin: auto 0 0; padding-block-start: var(--space-5); }
 .fp-cols--plans .fp-col--highlight .fp-col__cta .fp-btn { inline-size: 100%; justify-content: center; }
-@media (min-width: 900px) { .fp-cols--plans .fp-col--highlight { transform: translateY(-12px); } }
+@media (min-width: 900px) { .fp-cols--plans .fp-col--highlight { transform: translateY(var(--site-card-raise-lift, -12px)); } }
 /* ADR 1069 D2 — a boxed footnote with a mark: what a section does NOT include. */
 .fp-cols__note--callout { display: flex; align-items: flex-start; gap: var(--space-3); margin-block-start: var(--space-6); padding: var(--space-5); border-radius: var(--radius-lg); background: var(--paper-2); font-size: var(--text-lg); color: var(--ink-2); }
 .fp-cols__note-mark { display: grid; place-items: center; flex: none; inline-size: 28px; block-size: 28px; border-radius: var(--radius); background: color-mix(in oklab, var(--clay) 14%, var(--paper)); color: var(--clay-strong); font-weight: var(--weight-marquee); }

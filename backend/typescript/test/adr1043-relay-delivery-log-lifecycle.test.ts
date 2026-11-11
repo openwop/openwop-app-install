@@ -15,7 +15,9 @@
  *  (e) revoke deletes the revoked device's rows and inbound claims, and not
  *      another device's;
  *  (f) `messaging:inbound-claim`: erasure by contact id (exact, one tenant) and by
- *      device owner deletes the claims (a deleted claim is claimable again).
+ *      device owner deletes the claims (a deleted claim is claimable again);
+ *  (g) CHAN-F12: the boot registers the `relay-outbound` default-window sweep (the
+ *      sweep's own cases are in `adr1043-relay-outbound-retention.test.ts`).
  *
  * Red when: the sweep is not registered at boot, ignores the cutoff or the hold,
  * or the knob; the eraser is not registered, matches by prefix or crosses
@@ -208,5 +210,21 @@ describe('(f) inbound dedup claims (`messaging:inbound-claim`)', () => {
     expect((await eraseSubject(T, 'user:cl-owner')).failed).toBe(0);
     expect(await claim(T, 'relay_cl_mine', '+15550005101')).toBe(true);
     expect(await claim(T, 'relay_cl_theirs', '+15550005102')).toBe(false);
+  });
+});
+
+describe('(g) CHAN-F12: undelivered relay egress (boot registration)', () => {
+  it('the boot-registered sweep deletes egress older than the device token lifetime, and keeps newer egress', async () => {
+    const T = 'tenant:or-boot';
+    const relayId = 'relay_or_boot';
+    await h.storage.upsertRelayDevice({ relayId, tenantId: T, channel: 'whatsapp', status: 'active', registeredAt: '2026-01-01T00:00:00.000Z' });
+    const q = (egressId: string, ageDays: number) => h.storage.enqueueRelayOutbound({
+      egressId, relayId, channel: 'whatsapp', conversationId: '+15550006001', text: 'hi', enqueuedAt: new Date(NOW - ageDays * DAY).toISOString(),
+    });
+    await q('egr_or_boot_old', 31);
+    await q('egr_or_boot_new', 29);
+    const results = await runDefaultWindowSweeps(NOW);
+    expect(results.find((r) => r.feature === 'relay-outbound')).toMatchObject({ ok: true, failed: 0 });
+    expect((await h.storage.listRelayOutbound(relayId, 10)).map((e) => e.egressId)).toEqual(['egr_or_boot_new']);
   });
 });

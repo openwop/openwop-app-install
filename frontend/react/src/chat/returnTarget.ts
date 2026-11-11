@@ -25,12 +25,19 @@ export interface ReturnTarget {
   canvasId: string;
   from: number;
   to: number;
+  /** ADR 1055 D5 — the launcher's text at that range when it staged, so it can
+   *  refuse to replace text that changed meanwhile. Copied across, never read here. */
+  expectedText?: string;
+  /** ADR 1055 D5 — only replies from THIS agent offer "Apply" (a reply from
+   *  another agent or conversation is not what the launcher asked for). */
+  agentId?: string;
 }
 
 export interface PendingApply {
   canvasId: string;
   from: number;
   to: number;
+  expectedText?: string;
   /** The assistant text the user chose to apply. */
   text: string;
 }
@@ -60,6 +67,15 @@ export function stagePendingApply(p: PendingApply): void { pending = p; }
 
 /** Consume the pending-apply once (launcher, on mount). */
 export function takePendingApply(): PendingApply | null { const p = pending; pending = null; return p; }
+
+/** Look without consuming (ADR 1055 D5): a launcher that is not ready yet, or is
+ *  showing a different document, must leave the pending-apply for its owner. */
+export function peekPendingApply(): PendingApply | null { return pending; }
+
+/** Does this assistant message offer "Apply" for the staged target? */
+export function appliesTo(target: ReturnTarget, messageAgentId: string | undefined): boolean {
+  return !target.agentId || target.agentId === messageAgentId;
+}
 
 /** Test-only reset. */
 export function __resetReturnTarget(): void { target = null; pending = null; listeners.clear(); }

@@ -16,7 +16,7 @@ import type { ChatMessage } from './hooks/useChatSession.js';
 import { messageText } from './hooks/useChatSession.js';
 import {
   type ReturnTarget, getReturnTarget, subscribeReturnTarget,
-  stagePendingApply, clearReturnTarget,
+  stagePendingApply, clearReturnTarget, appliesTo,
 } from './returnTarget.js';
 import { MessageRenderer } from './MessageRenderer.js';
 import { ThoughtsDisclosure } from './ThoughtsDisclosure.js';
@@ -132,7 +132,7 @@ function MessageActions({
   // applies it as a tracked suggestion on mount. Generic — the chat never knows
   // what the launcher does with the text.
   function applyBack(tgt: ReturnTarget): void {
-    stagePendingApply({ canvasId: tgt.canvasId, from: tgt.from, to: tgt.to, text: messageText(message) });
+    stagePendingApply({ canvasId: tgt.canvasId, from: tgt.from, to: tgt.to, ...(tgt.expectedText !== undefined ? { expectedText: tgt.expectedText } : {}), text: messageText(message) });
     clearReturnTarget();
     void navigate(tgt.returnPath);
   }
@@ -339,7 +339,9 @@ function MessageBubbleInner({ message, onRegenerate, onFeedback, onBranchFrom, b
   const devTools = useFeatureAccess('developer-tools');
   // ADR 0334 5b-2 — a launcher (e.g. the document editor) may have staged a
   // return-target; if so, assistant bubbles offer an "Apply" action.
-  const returnTarget = useSyncExternalStore(subscribeReturnTarget, getReturnTarget, getReturnTarget);
+  const stagedTarget = useSyncExternalStore(subscribeReturnTarget, getReturnTarget, getReturnTarget);
+  // ADR 1055 D5 — only a reply from the agent the launcher asked offers Apply.
+  const returnTarget = stagedTarget && appliesTo(stagedTarget, message.agentId) ? stagedTarget : null;
   const isUser = message.role === 'user';
   const isSystem = message.role === 'system';
   const isError = !!message.meta?.error;

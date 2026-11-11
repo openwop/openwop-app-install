@@ -29,8 +29,19 @@ let storageRef: Storage | null = null;
  *  seam so this module never imports `governanceService` — no cross-module edge,
  *  no cycle). Returns the tenant's `mediaBudget` override (or null/absent ⇒ fall
  *  to the env default). A present field — INCLUDING `0` — overrides the env (0 =
- *  uncapped for that org). */
-export type MediaBudgetOverrideResolver = (tenantId: string) => Promise<{ ttsChars?: number; sttBytes?: number; images?: number; videoJobs?: number } | null>;
+ *  uncapped for that org; for VIDEO, 0 = paid video off and `'unlimited'` is
+ *  uncapped — ADR 1051). */
+export type MediaBudgetOverrideResolver = (tenantId: string) => Promise<{ ttsChars?: number; sttBytes?: number; images?: number; videoJobs?: VideoBudgetSetting } | null>;
+
+/** ADR 1051 — a video cap as configured: a unit count, or the explicit word
+ *  `unlimited`. `0` means paid video is DISABLED, never uncapped (zero-means-
+ *  unlimited is a known foot-gun in this codebase). */
+export type VideoBudgetSetting = number | 'unlimited';
+/** ADR 1051 — the shipped video cap when the env names none: 10 units per tenant
+ *  per UTC day (an avatar job weighs 1, a frontier text/image-to-video job 3). */
+export const DEFAULT_DAILY_VIDEO_UNITS = 10;
+/** The in-memory form of `unlimited` (never serialised: see `videoBudgetWire`). */
+const UNLIMITED = Number.POSITIVE_INFINITY;
 let overrideResolver: MediaBudgetOverrideResolver | null = null;
 
 /** Inject the durable store + (optionally) the per-org override resolver
@@ -74,15 +85,36 @@ function imagesEnvBudget(): number {
   return Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;
 }
 
-/** The configured per-org daily budgets (0 ⇒ that kind is uncapped). ADR 0404 —
- *  `video` (jobs/day) ships DEFAULT-OFF (env 0): AI video is the most expensive
- *  media kind, so a host must opt in (`OPENWOP_MEDIA_DAILY_VIDEO_JOBS`). */
+/** ADR 1051 — `OPENWOP_MEDIA_DAILY_VIDEO_JOBS`: unset ⇒ the shipped default;
+ *  `unlimited` ⇒ uncapped; a non-negative integer ⇒ that many units, where `0`
+ *  DISABLES paid video. Anything else is a misconfiguration, read as the default
+ *  (never as uncapped). */
+function videoEnvBudget(): number {
+  const raw = (process.env.OPENWOP_MEDIA_DAILY_VIDEO_JOBS ?? '').trim();
+  if (raw === '') return DEFAULT_DAILY_VIDEO_UNITS;
+  if (raw.toLowerCase() === 'unlimited') return UNLIMITED;
+  const v = Number(raw);
+  if (!Number.isFinite(v) || v < 0) {
+    log.warn('media_video_budget_env_invalid', { value: raw, using: DEFAULT_DAILY_VIDEO_UNITS });
+    return DEFAULT_DAILY_VIDEO_UNITS;
+  }
+  return Math.floor(v);
+}
+
+/** A video cap for the wire: the count, or `'unlimited'` (JSON has no Infinity). */
+export function videoBudgetWire(cap: number): VideoBudgetSetting {
+  return cap === UNLIMITED ? 'unlimited' : cap;
+}
+
+/** The configured per-org daily budgets. tts/stt/images: 0 ⇒ uncapped (their
+ *  long-standing convention). video (ADR 1051): 0 ⇒ DISABLED, `Infinity` ⇒ the
+ *  explicit `unlimited`, unset ⇒ {@link DEFAULT_DAILY_VIDEO_UNITS}. */
 export function mediaDailyBudget(): { tts: number; stt: number; images: number; video: number } {
   return {
     tts: envBudget('OPENWOP_MEDIA_DAILY_TTS_CHARS'),
     stt: envBudget('OPENWOP_MEDIA_DAILY_STT_BYTES'),
     images: imagesEnvBudget(),
-    video: envBudget('OPENWOP_MEDIA_DAILY_VIDEO_JOBS'),
+    video: videoEnvBudget(),
   };
 }
 
@@ -94,7 +126,7 @@ export function mediaDailyBudget(): { tts: number; stt: number; images: number; 
 export async function resolveBudget(tenantId: string): Promise<{ tts: number; stt: number; images: number; video: number }> {
   const env = mediaDailyBudget();
   if (!overrideResolver || !tenantId) return env;
-  let override: { ttsChars?: number; sttBytes?: number; images?: number; videoJobs?: number } | null = null;
+  let override: { ttsChars?: number; sttBytes?: number; images?: number; videoJobs?: VideoBudgetSetting } | null = null;
   try {
     override = await overrideResolver(tenantId);
   } catch (err) {
@@ -105,7 +137,9 @@ export async function resolveBudget(tenantId: string): Promise<{ tts: number; st
     tts: override?.ttsChars != null ? Math.max(0, Math.floor(override.ttsChars)) : env.tts,
     stt: override?.sttBytes != null ? Math.max(0, Math.floor(override.sttBytes)) : env.stt,
     images: override?.images != null ? Math.max(0, Math.floor(override.images)) : env.images,
-    video: override?.videoJobs != null ? Math.max(0, Math.floor(override.videoJobs)) : env.video,
+    // ADR 1051 — the same rule as the env: `unlimited` is explicit, `0` disables.
+    video: override?.videoJobs === 'unlimited' ? UNLIMITED
+      : typeof override?.videoJobs === 'number' ? Math.max(0, Math.floor(override.videoJobs)) : env.video,
   };
 }
 
@@ -172,6 +206,8 @@ export interface MediaBudgetCheck {
   /** Head-room under the cap (Infinity when uncapped) — the images path clamps
    *  its request count by this. */
   remaining: number;
+  /** ADR 1051 — video only: the cap is `0`, i.e. paid video is switched off. */
+  disabled?: boolean;
 }
 
 /**
@@ -184,6 +220,11 @@ export interface MediaBudgetCheck {
 export async function checkMediaBudget(tenantId: string, kind: MediaKind, size: number, actingSubject?: string): Promise<MediaBudgetCheck> {
   const resolved = await resolveBudget(tenantId);
   const cap = capForKind(resolved, kind);
+  // ADR 1051 — video: `0` is DISABLED (refuse), `unlimited` is uncapped.
+  if (kind === 'video') {
+    if (cap === UNLIMITED || !tenantId) return { exceeded: false, cap, used: 0, nextTotal: size, kind, remaining: Infinity };
+    if (cap <= 0) return { exceeded: true, cap: 0, used: 0, nextTotal: Math.max(0, size), kind, remaining: 0, disabled: true };
+  }
   // images + video counters are KV-backed (no storageRef needed); tts/stt ride media_usage.
   const kvBacked = kind === 'images' || kind === 'video';
   if (cap <= 0 || !tenantId || (!kvBacked && !storageRef)) {
@@ -227,7 +268,8 @@ export async function checkMediaBudget(tenantId: string, kind: MediaKind, size: 
 export async function recordMediaUsage(tenantId: string, kind: MediaKind, size: number, actingSubject?: string): Promise<void> {
   if (!tenantId || size <= 0) return;
   const resolved = await resolveBudget(tenantId);
-  if (capForKind(resolved, kind) <= 0) return; // uncapped ⇒ don't accumulate
+  const cap = capForKind(resolved, kind);
+  if (cap <= 0 || cap === UNLIMITED) return; // uncapped (or, for video, disabled) ⇒ don't accumulate
   if (kind === 'images') {
     await recordImagesUsed(tenantId, Math.floor(size));
     return;
@@ -248,5 +290,75 @@ export async function recordMediaUsage(tenantId: string, kind: MediaKind, size: 
     );
   } catch (err) {
     log.warn('media_usage_record_failed', { tenantId, kind, error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+/** ADR 1051 — today's video units, read from the counter whatever the cap says
+ *  (the governance panel's usage line; `checkMediaBudget` short-circuits to 0
+ *  when the cap is off or unlimited). */
+export async function videoUnitsUsedToday(tenantId: string): Promise<number> {
+  try { return await videoUsedToday(tenantId); } catch { return 0; }
+}
+
+// ── ADR 1051 D3 — reserve video units BEFORE the paid call ──────────────────
+
+/** What a video reservation took, so its release touches exactly that: the UTC
+ *  day it was counted on and the units, and whether a counter moved at all (an
+ *  `unlimited` cap reserves without counting). Persisted on the job row. */
+export interface VideoReservation {
+  dayKey: string;
+  units: number;
+  counted: boolean;
+}
+
+export type VideoReserveResult =
+  | { ok: true; token: VideoReservation }
+  | { ok: false; reason: 'disabled' | 'exceeded'; cap: number; used: number };
+
+/**
+ * Atomically take `units` of today's video budget, or refuse. One bounded CAS
+ * loop increments the counter only while `used + units ≤ cap`, so concurrent
+ * callers can never overshoot together (the check-then-record shape it replaces
+ * let all of them through). Fails CLOSED: a read error or an exhausted loop is
+ * `exceeded`, never a pass — video is the most expensive kind.
+ */
+export async function reserveMediaBudget(tenantId: string, kind: 'video', units: number): Promise<VideoReserveResult> {
+  const n = Math.max(1, Math.floor(units));
+  const dayKey = `${tenantId}:${todayUtc()}`;
+  const cap = capForKind(await resolveBudget(tenantId), kind);
+  if (cap === UNLIMITED) return { ok: true, token: { dayKey, units: n, counted: false } };
+  if (cap <= 0) return { ok: false, reason: 'disabled', cap: 0, used: 0 };
+  try {
+    for (let attempt = 0; attempt < 12; attempt++) {
+      const existing = await videoCounts.get(dayKey);
+      const used = existing?.count ?? 0;
+      if (used + n > cap) return { ok: false, reason: 'exceeded', cap, used };
+      const next: VideoCount = { key: dayKey, tenantId, count: used + n };
+      if (await videoCounts.compareAndSwap(existing ?? null, next)) return { ok: true, token: { dayKey, units: n, counted: true } };
+    }
+  } catch (err) {
+    log.warn('media_budget_reserve_failed', { tenantId, kind, error: err instanceof Error ? err.message : String(err) });
+  }
+  return { ok: false, reason: 'exceeded', cap, used: cap };
+}
+
+/**
+ * Give a reservation back — ONLY for an outcome where the provider provably did
+ * not take the job. Decrements exactly the reserved day by exactly the reserved
+ * units (a release after midnight never credits the new day), never below 0, and
+ * never touches a counter the reservation did not move. Best-effort: a failed
+ * release over-counts (the safe direction) and is logged.
+ */
+export async function releaseMediaBudget(token: VideoReservation): Promise<void> {
+  if (!token.counted) return;
+  try {
+    for (let attempt = 0; attempt < 12; attempt++) {
+      const existing = await videoCounts.get(token.dayKey);
+      if (!existing) return;
+      const next: VideoCount = { ...existing, count: Math.max(0, existing.count - token.units) };
+      if (await videoCounts.compareAndSwap(existing, next)) return;
+    }
+  } catch (err) {
+    log.warn('media_budget_release_failed', { dayKey: token.dayKey, error: err instanceof Error ? err.message : String(err) });
   }
 }

@@ -34,6 +34,7 @@ import { SEED_TUTORIALS, type SeededTutorial } from './seedTutorials.js';
 import { registerFieldKindValidator, getFieldKindValidator } from '../../host/customFields/index.js';
 import { OpenwopError } from '../../types.js';
 import { createLogger } from '../../observability/logger.js';
+import { recordTutorialStaleSeedServed } from '../../observability/metricSeams.js';
 
 const log = createLogger('feature.tutorials');
 
@@ -173,6 +174,33 @@ function rowToView(values: Record<string, unknown>, ext: Record<string, unknown>
 }
 
 /**
+ * A row copied from a seed that the tenant never customized, and whose
+ * `seedVersion` no longer matches the shipped seed's. Only the example-data
+ * seeder refreshes rows, and nothing runs it on deploy, so without this a bumped
+ * tutorial (new text, re-pointed `run` bindings) stayed stale in every workspace
+ * that had copied it once (grade-data `TUT-STALE-1`, 2026-11-10). The reader
+ * serves the shipped seed instead, which is what the next seed run would write.
+ * It never writes; customized rows and tenant-authored rows (no `seedVersion`)
+ * always win.
+ */
+function isStaleSeedCopy(view: TutorialView): boolean {
+  if (view.customized || !view.seedVersion) return false;
+  const seed = SEED_TUTORIALS.find((s) => s.id === view.id);
+  return Boolean(seed && seed.seedVersion !== view.seedVersion);
+}
+
+/**
+ * The reader's keep-or-yield decision. A yield counts on
+ * `openwop.tutorials.stale_seed_served` (TUT-OBS-1), so a non-zero rate says
+ * workspaces still hold stale copies; PROBE-1038-4 says which.
+ */
+function keepKernelRow(view: TutorialView, reader: 'list' | 'get'): boolean {
+  if (!isStaleSeedCopy(view)) return true;
+  recordTutorialStaleSeedServed(reader);
+  return false;
+}
+
+/**
  * Every tutorial visible to this tenant. Kernel rows win by slug; seeds fill the
  * gaps, so a tenant that has never seeded still sees the full shipped library.
  */
@@ -184,7 +212,7 @@ export async function listTutorials(tenantId: string): Promise<{ tutorials: Tuto
   try {
     for (const rec of await listSystemEntities(tenantId, TUTORIAL_TYPE)) {
       const view = rowToView(rec.values ?? {}, rec.ext as Record<string, unknown> | undefined);
-      if (view) bySlug.set(view.id, view);
+      if (view && keepKernelRow(view, 'list')) bySlug.set(view.id, view);
     }
   } catch (err) {
     // The kernel is off/unreachable — serve the shipped copy, flagged.
@@ -200,7 +228,7 @@ export async function getTutorial(tenantId: string, slug: string): Promise<Tutor
     const rec = await getSystemEntity(tenantId, TUTORIAL_TYPE, slug);
     if (rec) {
       const view = rowToView(rec.values ?? {}, rec.ext as Record<string, unknown> | undefined);
-      if (view) return view;
+      if (view && keepKernelRow(view, 'get')) return view;
     }
   } catch (err) {
     warnThrottled('get', err);

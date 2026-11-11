@@ -177,10 +177,10 @@ describe('D3 — explainable lead score', () => {
     await linkSession(tenantId, 'lucy-session', contact.contactId, 'form-submit');
 
     // 2 views + 1 completion from her session; 1 unrelated visitor event
-    await collectEvent(tenantId, 'funnel.step_viewed', { orgId, funnelId: 'f', stepId: 's', visitor: 'lucy-session' });
-    await collectEvent(tenantId, 'funnel.step_viewed', { orgId, funnelId: 'f', stepId: 's', visitor: 'lucy-session' });
-    await collectEvent(tenantId, 'funnel.step_completed', { orgId, funnelId: 'f', stepId: 's', visitor: 'lucy-session' });
-    await collectEvent(tenantId, 'funnel.step_viewed', { orgId, funnelId: 'f', stepId: 's', visitor: 'someone-else' });
+    await collectEvent(tenantId, 'funnel.step_viewed', { orgId, funnelId: 'f', stepId: 's', visitor: 'lucy-session' }, undefined, { source: 'first-party' });
+    await collectEvent(tenantId, 'funnel.step_viewed', { orgId, funnelId: 'f', stepId: 's', visitor: 'lucy-session' }, undefined, { source: 'first-party' });
+    await collectEvent(tenantId, 'funnel.step_completed', { orgId, funnelId: 'f', stepId: 's', visitor: 'lucy-session' }, undefined, { source: 'first-party' });
+    await collectEvent(tenantId, 'funnel.step_viewed', { orgId, funnelId: 'f', stepId: 's', visitor: 'someone-else' }, undefined, { source: 'first-party' });
 
     // a paid order for her (org-scoped part)
     const c = (sfx: string): string => `/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}${sfx}`;

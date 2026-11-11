@@ -53,6 +53,14 @@ export const messages = {
   type_manual: 'Manual (curada)',
 
   deleteRowLabel: 'Excluir {{name}}',
+  colStatus: 'Status',
+  statusActive: 'Ativa',
+  statusPaused: 'Pausada',
+  activate: 'Ativar',
+  pause: 'Pausar',
+  activateRowLabel: 'Ativar {{name}}',
+  pauseRowLabel: 'Pausar {{name}}',
+  updateFailed: 'Falha ao atualizar.',
   deleteCollectionConfirm: 'Excluir a coleção "{{name}}"?',
   deleteRuleConfirm: 'Excluir a regra "{{name}}"?',
 
@@ -71,4 +79,12 @@ export const messages = {
   facetsTruncated: "Os {{shown}} principais valores de {{total}} por faceta.",
   fieldCategoryHelp: "Os produtos desta categoria entram na coleção automaticamente.",
   fieldHideCategoryHelp: "Os produtos desta categoria deixam de aparecer na sua loja enquanto esta regra estiver ativa.",
+  colEffect: "Efeito",
+  statusProposed: "Proposta por um agente",
+  effectHide: "Oculta {{what}}",
+  effectBury: "Move {{what}} para o fim",
+  effectBoost: "Destaca {{what}} ×{{factor}}",
+  effectPin: "Fixa um produto na posição {{position}}",
+  effectPriceBand: "uma faixa de preço",
+  activateHideConfirm: "Ativar \"{{name}}\"? Os produtos correspondentes deixam de aparecer na busca da sua loja.",
 } as const;

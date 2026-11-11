@@ -1,8 +1,8 @@
 {
   "name": "feature.recommendations.nodes",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "kind": "node",
-  "description": "Recommendations feature node pack (MERCH-A chat-drivability) — read/author nodes over the ctx.features.recommendations surface. `resolve` returns ranked products for a funnel slot; `placement-upsert` authors a slot→source placement. BOTH are role:'action' (recorded → replay/:fork read the recorded output) because they operate over the MUTABLE recs co-occurrence cache + live catalog — a role:'read' node would re-execute and drift (ruling 7).",
+  "description": "Recommendations feature node pack (MERCH-A chat-drivability) — read/author nodes over the ctx.features.recommendations surface. `resolve` returns ranked products for a funnel slot; `placement-upsert` authors a slot→source placement. `resolve` is a read (role:'action', which re-executes on replay; a caller that needs the exact products records them in its own output, ruling 7). `placement-upsert` writes, so it is role:'side-effect' and :fork serves its recorded output (ADR 1025 D2).",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "recommendations", "commerce", "merchandising", "upsell", "cross-sell"],
@@ -12,7 +12,7 @@
       "typeId": "feature.recommendations.nodes.resolve",
       "version": "1.0.0",
       "label": "Recommendations Resolve",
-      "description": "Resolves ranked products for a funnel slot (pdp/cart/post_purchase/…) over ctx.features.recommendations. role:'action' — output recorded for replay determinism (the recs cache is mutable). Inputs: orgId, slot, productId?, contactId?, sessionKey?.",
+      "description": "Resolves ranked products for a funnel slot (pdp/cart/post_purchase/…) over ctx.features.recommendations. A read; re-executes on replay over the mutable recs cache. Inputs: orgId, slot, productId?, contactId?, sessionKey?.",
       "category": "integration",
       "role": "action",
       "capabilities": []
@@ -21,10 +21,10 @@
       "typeId": "feature.recommendations.nodes.placement-upsert",
       "version": "1.0.0",
       "label": "Recommendations Placement Upsert",
-      "description": "Authors a placement (slot → recommendation source, optional segment + holdout) over ctx.features.recommendations. role:'action', idempotent-by-effect. Inputs: orgId, slot, source, segmentId?, holdoutPct?.",
+      "description": "Authors a placement (slot → recommendation source, optional segment + holdout) over ctx.features.recommendations. role:'side-effect' (ADR 1025 D2); idempotent by effect on (slot, segmentId) for rows this lane authored. Inputs: orgId, slot, source, segmentId?, holdoutPct?.",
       "category": "integration",
-      "role": "action",
-      "capabilities": []
+      "role": "side-effect",
+      "capabilities": ["side-effectful"]
     }
   ],
   "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }

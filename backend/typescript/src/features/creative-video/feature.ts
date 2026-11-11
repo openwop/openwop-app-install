@@ -12,13 +12,22 @@
 
 import type { BackendFeature } from '../types.js';
 import { registerCreativeVideoRoutes } from './routes.js';
-import { buildCreativeVideoSurface } from './surface.js';
+import { buildCreativeVideoSurface, CREATIVE_VIDEO_SURFACE_POLICY } from './surface.js';
 import { registerVideoMediaCascade } from './videoService.js';
+import { registerSubjectEraser } from '../../host/subjectErasure.js';
+import { eraseCreativeVideoSubject } from './erasure.js';
 
 export const creativeVideoFeature: BackendFeature = {
   id: 'creative-video',
-  registerRoutes: (deps) => { registerVideoMediaCascade(); registerCreativeVideoRoutes(deps); },
-  surface: { id: 'creative-video', build: buildCreativeVideoSurface },
+  registerRoutes: (deps) => {
+    registerVideoMediaCascade();
+    // ADR 1051 D8 — a module-level named reference (registration dedupes by
+    // reference), registered whatever the toggle says: an erasure must never
+    // depend on a feature being on today (ADR 0590).
+    registerSubjectEraser(eraseCreativeVideoSubject);
+    registerCreativeVideoRoutes(deps);
+  },
+  surface: { id: 'creative-video', build: buildCreativeVideoSurface, orgPolicy: CREATIVE_VIDEO_SURFACE_POLICY },
   requiredPacks: ['feature.creative-video.nodes'],
   recommends: ['media', 'connections'],
   toggleDefault: {

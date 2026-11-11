@@ -1879,6 +1879,11 @@ async function callVideoGenerator(
 
   // Budget pre-flight — video is EXPENSIVE; guard before any provider call.
   const budget = await checkMediaBudget(scope.tenantId, 'video', 1);
+  // ADR 1051 D3 — a video cap of 0 switches paid video OFF (it no longer means
+  // uncapped); that is a capability the host does not offer, not a rate limit.
+  if (budget.disabled) {
+    throw new AiProviderError('host_capability_missing', 'Paid video generation is switched off for this workspace (its daily video budget is 0).', { capability: 'aiProviders.videoGeneration' });
+  }
   if (budget.exceeded) {
     throw new AiProviderError('provider_rate_limited', `Daily video-generation budget reached (${budget.used}/${budget.cap}).`, { used: budget.used, max: budget.cap });
   }

@@ -47,9 +47,9 @@ describe('validateDocumentDoc', () => {
 
   it('rejects wrong-typed node fields (text/attrs/marks/content)', () => {
     const paths = (node: Record<string, unknown>) => validateDocumentDoc(doc({ type: 'doc', content: [node] })).errors.map((e) => e.path);
-    expect(paths({ type: 'p', text: 5 })).toEqual(['content.content[0].text']);
-    expect(paths({ type: 'p', marks: {} })).toEqual(['content.content[0].marks']);
-    expect(paths({ type: 'p', content: {} })).toEqual(['content.content[0].content']);
+    expect(paths({ type: 'paragraph', text: 5 })).toEqual(['content.content[0].text']);
+    expect(paths({ type: 'paragraph', marks: {} })).toEqual(['content.content[0].marks']);
+    expect(paths({ type: 'paragraph', content: {} })).toEqual(['content.content[0].content']);
   });
 
   it('rejects an over-long title', () => {

@@ -76,6 +76,7 @@ import { snapshotSseStreams } from '../../host/sseChannel.js';
 import { snapshotRateLimits } from '../../middleware/rateLimit.js';
 import { buildAdmissionSummary } from '../../host/admissionSummary.js';
 import { buildDaemonStatus } from '../../routes/daemonStatus.js';
+import { buildKanbanWorkItemDeliverySummary } from '../../host/kanbanService.js';
 import { APP_VERSION } from '../../version.js';
 
 const FEATURE = { toggleId: 'operations', label: 'Operations Console' };
@@ -376,6 +377,27 @@ export function registerOperationsRoutes(deps: RouteDeps): void {
         deadSample: { limit: RECENT_LIMIT, truncated: stats.dead > RECENT_LIMIT },
         // The one Operations read that IS a fleet aggregate — the outbox is a
         // durable table, not this instance's memory.
+        perInstance: false,
+        fetchedAt: new Date().toISOString(),
+      });
+    } catch (err) { next(err); }
+  });
+
+  /**
+   * ADR 1081 — reusable Kanban work-item delivery health.
+   *
+   * This is a fleet projection from the durable core Kanban outbox and its
+   * append-only delivery audit trail. It is deliberately separate from the
+   * local metrics/SLO panel: those instruments are process-scoped and cannot
+   * establish a multi-instance delivery verdict. The service returns only
+   * closed outcome counts plus queue counts/ages, never tenant or work-item
+   * identities, workflow inputs, card content, or error strings.
+   */
+  app.get(`${BASE}/kanban-work-items/summary`, async (req, res, next) => {
+    try {
+      requireSuperadmin(req);
+      res.json({
+        ...(await buildKanbanWorkItemDeliverySummary()),
         perInstance: false,
         fetchedAt: new Date().toISOString(),
       });

@@ -36,6 +36,8 @@ vi.mock('../src/features/entities/entitiesService.js', () => kernel);
 const { listTutorials, getTutorial, seedTutorials, countTutorialRows, clearTutorialRows } =
   await import('../src/features/tutorials/tutorialsService.js');
 const { SEED_TUTORIALS } = await import('../src/features/tutorials/seedTutorials.js');
+const { emissionsOf, _resetMetricsForTest } = await import('../src/observability/metrics.js');
+const STALE_METRIC = 'openwop.tutorials.stale_seed_served';
 
 const TENANT = 'tenant-a';
 const AT = '2026-07-25T00:00:00.000Z';
@@ -118,6 +120,38 @@ describe('ADR 0488 D1 — kernel rows are authoritative', () => {
     expect(degraded).toBe(false);
     // Seeds still fill the gaps — the tenant sees the whole library.
     expect(tutorials.length).toBe(SEED_TUTORIALS.length);
+  });
+});
+
+describe('a stale, un-customized seed copy yields to the shipped seed (TUT-STALE-1)', () => {
+  // Only /example-data runs the seeder, so a bumped seedVersion never reached a
+  // workspace that had copied the tutorials once: its copy kept winning.
+  const seed = SEED_TUTORIALS[0]!;
+  beforeEach(() => { _resetMetricsForTest(); });
+  const copy = (seedVersion: string, ext: Record<string, unknown> = {}) => kernelRow(
+    { slug: seed.id, title: 'Old shipped title', description: 'old', category: seed.category, seed_version: seedVersion },
+    { phases: [{ number: 1, title: 'Old', steps: [] }], ...ext },
+  );
+
+  it('list and get serve the shipped seed when the copy is at an older seedVersion', async () => {
+    kernel.listSystemEntities.mockResolvedValue([copy('0.0.1-old')]);
+    kernel.getSystemEntity.mockResolvedValue(copy('0.0.1-old'));
+    const listed = (await listTutorials(TENANT)).tutorials.find((t) => t.id === seed.id);
+    expect(listed).toMatchObject({ title: seed.title, source: 'seed', seedVersion: seed.seedVersion });
+    expect(await getTutorial(TENANT, seed.id)).toMatchObject({ title: seed.title, source: 'seed' });
+    expect(kernel.putSystemEntity).not.toHaveBeenCalled(); // a read never writes
+    // TUT-OBS-1 — each yield is counted, by reader, with no tenant label.
+    expect(emissionsOf(STALE_METRIC).map((e) => e.attributes)).toEqual([{ reader: 'list' }, { reader: 'get' }]);
+  });
+
+  it('keeps the copy when it is at the shipped seedVersion, customized, or tenant-authored', async () => {
+    for (const row of [copy(seed.seedVersion), copy('0.0.1-old', { customizedAt: AT }), copy('')]) {
+      kernel.listSystemEntities.mockResolvedValue([row]);
+      kernel.getSystemEntity.mockResolvedValue(row);
+      expect((await listTutorials(TENANT)).tutorials.find((t) => t.id === seed.id)).toMatchObject({ title: 'Old shipped title', source: 'kernel' });
+      expect(await getTutorial(TENANT, seed.id)).toMatchObject({ title: 'Old shipped title', source: 'kernel' });
+    }
+    expect(emissionsOf(STALE_METRIC)).toEqual([]); // a kept copy is not a yield
   });
 });
 

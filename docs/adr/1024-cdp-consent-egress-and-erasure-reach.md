@@ -1,6 +1,6 @@
 # ADR 1024 — Customer data platform: consented collection, bounded egress, erasure that reaches every copy
 
-Status: Accepted — P1 implemented (row 73, #5473, 2026-11-04); P2 (subject-eraser seam) implemented in its own PR; P3 (CDP collect seam) pending, its own PR
+Status: Accepted — P1 implemented (row 73, #5473, 2026-11-04); P2 (subject-eraser seam) and P3 (CDP collect seam) implemented, each in its own PR
 
 Date: 2026-11-01 · Features: `cdp`, `destination-sync`, `campaign-journeys` (all extensions;
 every toggle id unchanged) · Feature loop round 2, row 73 · Extends ADR 0262 (CDP graduation,
@@ -209,6 +209,32 @@ non-2xx failure gate and an `advance` node. The onward leg also needs
    > (opt-in), refusing every anonymous SDK event in a consent-on tenant; if visitor keys are
    > checked, it must be `isPermittedForPurpose` (the tenant policy default, no region guess).
    > Sent back to the user through the lead; PR A implements whichever they confirm.
+   >
+   > > **Resolved 2026-11-02 (the user asked for a researched recommendation; the lead
+   > > recommended it):** visitor and session ids COUNT as identifiers. Any event that names a
+   > > person key or a persistent visitor/session id needs a consent basis for its purpose,
+   > > decided by `isPermittedForPurpose` with the tenant's consent-policy default and no
+   > > region guess. Under an opt-in policy that means a recorded consent; under an opt-out
+   > > policy it is allowed unless the subject opted out. Events with no identifier pass, and
+   > > the purpose is stored on every event. Basis:
+   > > - ePrivacy Art. 5(3) per EDPB Guidelines 2/2023 v2 (7 Oct 2024): identifiers and
+   > >   tracking techniques are "information" on the device.
+   > > - CNIL sheet n°16: the narrow analytics exemption. An operator who meets it expresses
+   > >   it as an opt-out default for that purpose.
+   > > - CCPA §1798.140: a persistent device identifier is personal information, under an
+   > >   opt-out model.
+   > >
+   > > An erased identifier answers 409 `subject_erased`, not 403 (closing grade L2).
+   >
+   > > **Denial rollup (`CDP2WF-30`, lead-approved).** The consent module writes one durable
+   > > governance row per denial into the shared, unpurged `audit_log`. The collect path passes
+   > > `quietDenial` and records instead:
+   > > - the FIRST denial per (tenant, purpose) per 60 s window;
+   > > - after the window, one `collect-denials-suppressed` row with the count.
+   > >
+   > > Trade-off, accepted: the window counts are in memory per instance. A restart loses at
+   > > most one window's count, never a first row, and N instances write at most N first rows
+   > > per window.
 4. **Schema registry bounds (`CDP2WF-11`).** New registrations: at most 20 versions per event
    type and 64 KB per schema; `pattern`/`patternProperties` refused (this host has no RE2;
    ajv uses JS regexes). Already-stored schemas keep compiling (refusing them would 422 every
@@ -389,4 +415,26 @@ see), so the store's coverage is witnessed only by `adr1024-erasure-reach`.
 grade-code **B → A−** (every prior fix verified; new Lows `CDP2CD-5..9`). grade-ux **C → B+**
 (H1/H2/M3/M4 verified; new Mediums `CDP2UX-5/-6`, Lows `CDP2UX-7..10`). Both are recorded in
 `docs/steward/workflows-assessment/2026-11-01-cdp-row73.md`.
+
+### P3 — CDP collect seam (its own PR, branch `fl2-73-collect`)
+
+The implementation uses `requireTenantScope(req, scope)`, not `requireTenantWrite`. For keys
+they behave the same; this note records the naming difference from D1's text.
+
+| Decision | Commit | Witness (sabotage-checked RED) |
+|---|---|---|
+| D1 (CDP half): write scope on collect/batch/import, `host:org:manage` for schemas | `e805a8f80` | `adr1024-collect-seam` D1 |
+| D4.2 reserved event families on HTTP, `source` default `http` | `e805a8f80` | `adr1024-collect-seam` D4.2 (incl. a leading space and batch) |
+| D4.3 consent per identifier on the policy default; purpose stored; `transactional` refused; erased answers 409 | `e805a8f80`, `1362d1e01` | `adr1024-collect-seam` D4.3: the lead's five witnesses plus purpose and erased |
+| D4.3 denial rollup | `5a2317981` | `adr1024-collect-seam`: 50 refusals → 1 row; after the window, a `suppressed: 49` row |
+| D4.4 schema caps (versions, size, depth), keyword refusal by schema position, per-version LRU, `addUsedSchema: false` | `e805a8f80`, `1362d1e01` | `adr1024-collect-seam` D4.4 |
+| D4.5 masked reads, nested values by shape | `e805a8f80`, `1362d1e01` | `adr1024-collect-seam` D4.5 (a seeded merge) |
+| D4.6 value-shaped PII tagging | `e805a8f80` | `adr1024-collect-seam` D4.6 |
+
+Independent grade-code: **B−** (no Blocker). H1 (a pattern buried past the walk's depth
+limit), M1 (property-name false positive), M4 (`$id` collision), M6 (nested masking) and L2
+were fixed, then the `CDP2WF-30` rollup was added. Filed: `CDP2WF-29` (consent-token-lane
+visitors refused), `CDP2WF-31` (KickTodo has no per-event consent check), and Lows (the SDK
+cannot set `purpose`; consent reads per key; the masking row names no principal; a stale
+validator after a teardown reuses version 1).
 

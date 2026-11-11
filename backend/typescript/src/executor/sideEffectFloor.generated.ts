@@ -30,14 +30,14 @@
  * it, and that guard matches the filename in ANY spelling, comments included.)
  *
  * Manifest census at generation time (760 distinct typeIds):
- *    310  side-effect
- *    275  action
+ *    314  side-effect
+ *    271  action
  *    112  pure
  *     37  read
  *     16  streaming-output
  *     10  gate
  *
- * Floor 385 = served 317 + held 68:
+ * Floor 389 = served 321 + held 68:
  *     34  held: ai-invocation-log
  *      9  held: ai-opaque-not-logged
  *     24  held: deferred-role-semantics
@@ -361,6 +361,8 @@ export const MANIFEST_SIDE_EFFECT_FLOOR: ReadonlySet<string> = new Set([
   'feature.csm.nodes.create-play-tasks',
   'feature.csm.nodes.health-set',
   'feature.dealers.nodes.approve-registration',
+  'feature.discovery.nodes.collection-upsert',
+  'feature.discovery.nodes.merch-rule-upsert',
   'feature.documents.nodes.generate-from-template',
   'feature.documents.nodes.render',
   'feature.email.nodes.submit-for-review',
@@ -395,6 +397,8 @@ export const MANIFEST_SIDE_EFFECT_FLOOR: ReadonlySet<string> = new Set([
   'feature.priority-matrix.nodes.propose-scenario',
   'feature.priority-matrix.nodes.submit-idea',
   'feature.priority-matrix.nodes.update-intake',
+  'feature.promotions.nodes.create',
+  'feature.recommendations.nodes.placement-upsert',
   'feature.sales-commissions.nodes.approve-statement',
   'feature.sales-commissions.nodes.compute-statement',
   'feature.strategy.nodes.check-in',
@@ -703,6 +707,8 @@ export const MANIFEST_FAST_PATH_SERVED: ReadonlySet<string> = new Set([
   'feature.csm.nodes.create-play-tasks',
   'feature.csm.nodes.health-set',
   'feature.dealers.nodes.approve-registration',
+  'feature.discovery.nodes.collection-upsert',
+  'feature.discovery.nodes.merch-rule-upsert',
   'feature.documents.nodes.render',
   'feature.email.nodes.submit-for-review',
   'feature.evals.nodes.run-suite',
@@ -736,6 +742,8 @@ export const MANIFEST_FAST_PATH_SERVED: ReadonlySet<string> = new Set([
   'feature.priority-matrix.nodes.propose-scenario',
   'feature.priority-matrix.nodes.submit-idea',
   'feature.priority-matrix.nodes.update-intake',
+  'feature.promotions.nodes.create',
+  'feature.recommendations.nodes.placement-upsert',
   'feature.sales-commissions.nodes.approve-statement',
   'feature.sales-commissions.nodes.compute-statement',
   'feature.strategy.nodes.check-in',

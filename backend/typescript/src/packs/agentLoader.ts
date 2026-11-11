@@ -24,6 +24,7 @@ import { getAgentRegistry, type ResolvedAgentManifest, type AgentSchemaValidator
 import { classifyPackDir } from '../host/packTrust.js';
 import { createLogger } from '../observability/logger.js';
 import { INSTALLED_PACK_SUBDIRS } from './packContentDigest.js';
+import { PACK_DECLARABLE_AGENT_CAPABILITIES } from '../host/agentCapabilityIds.js';
 
 const log = createLogger('packs.agentLoader');
 
@@ -158,11 +159,27 @@ export interface LoadAgentsOptions {
   archived?: boolean;
 }
 
+/** ADR 1055 D4 — the default capabilities a pack activates for ITS OWN agent
+ *  (keyed by that agent's id inside the same manifest, so a pack cannot reach
+ *  another pack's agent), filtered to `PACK_DECLARABLE_AGENT_CAPABILITIES`:
+ *  a pack can only take tools away this way. Anything else is dropped, loudly. */
+export function hostCapabilitiesOf(ext: { agentCapabilities?: Record<string, unknown> } | undefined, agentId: string, packName: string): { hostCapabilities?: string[] } {
+  const declared = ext?.agentCapabilities?.[agentId];
+  if (!Array.isArray(declared)) return {};
+  const allowed = new Set<string>(PACK_DECLARABLE_AGENT_CAPABILITIES);
+  const kept = declared.filter((c): c is string => typeof c === 'string' && allowed.has(c));
+  if (kept.length !== declared.length) log.warn('dropping undeclarable agent capabilities from pack', { packName, agentId, declared });
+  return kept.length > 0 ? { hostCapabilities: [...new Set(kept)] } : {};
+}
+
 export function loadAgentsFromManifest(packDir: string, opts: LoadAgentsOptions = {}): ResolvedAgentManifest[] {
   const manifestPath = join(packDir, 'pack.json');
   if (!existsSync(manifestPath)) return [];
   let manifest: {
     name?: string; version?: string; agents?: RawAgentManifest[];
+    /** ADR 1055 D4 — this host's vendor extension (`^x-` is sanctioned by the
+     *  node-pack manifest schema). */
+    'x-openwop-app'?: { agentCapabilities?: Record<string, unknown> };
     peerDependencies?: Record<string, unknown>;
     peerDependenciesMeta?: Record<string, { optional?: boolean; facets?: readonly string[] } | undefined>;
   };
@@ -332,6 +349,7 @@ export function loadAgentsFromManifest(packDir: string, opts: LoadAgentsOptions 
         packName,
         packVersion,
         degraded: degradedCaps.length > 0 ? [...degradedCaps] : undefined,
+        ...hostCapabilitiesOf(manifest['x-openwop-app'], raw.agentId, packName),
       };
       if (opts.archived) registry.registerVersion(resolved);
       else registry.register(resolved);

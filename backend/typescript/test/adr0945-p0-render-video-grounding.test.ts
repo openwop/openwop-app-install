@@ -83,6 +83,7 @@ describe('video finaliser grounding', () => {
   it('records the FULL prompt hash from submit, mode none, op text-to-video', async () => {
     const TINY = Buffer.from('fake-mp4-bytes-g945').toString('base64');
     const adapter: VideoAdapter = {
+      async hasConnection() { return true; },
       async submitJob() { return { ok: true as const, value: { providerJobId: 'p-1' } }; },
       async pollJob() { return { ok: true as const, value: { status: 'completed' as const, resultUrl: 'https://example.invalid/r.mp4' } }; },
       async downloadResult() { return { ok: true as const, value: { base64: TINY, bytes: 19, contentType: 'video/mp4' } }; },

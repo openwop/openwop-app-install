@@ -233,11 +233,18 @@ export function buildApplyAsSuggestion(
   tr.insertText(text, to);
   tr.removeMark(to, to + text.length, del);                    // the new run is not a deletion
   tr.addMark(to, to + text.length, ins.create({ author }));   // → insertion suggestion
+  // DE87UX-8 — select the new text and bring it into view: the user comes back
+  // from the chat and must be able to find what changed.
+  tr.setSelection(TextSelection.create(tr.doc, to, to + text.length)).scrollIntoView();
   return tr.docChanged ? tr : null;
 }
 
+/** The `author` an AI-applied suggestion carries (ADR 1055 D6), so a reader can
+ *  tell it from a typed one. Display-only: a REST writer can forge it. */
+export const AI_SUGGESTION_AUTHOR = 'ai';
+
 export function applyAsSuggestion(editor: Editor, from: number, to: number, text: string): boolean {
-  return dispatch(editor, buildApplyAsSuggestion(editor.state, from, to, text, ''));
+  return dispatch(editor, buildApplyAsSuggestion(editor.state, from, to, text, AI_SUGGESTION_AUTHOR));
 }
 
 /** The suggestion (insertion or deletion) under the cursor, or null. */

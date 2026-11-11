@@ -244,7 +244,8 @@ export function registerDiscoveryAgentTools(): void {
       description:
         'Create a merchandising rule that re-orders search/collection results — pin a product to a position, or '
         + 'boost/bury/hide by a facet predicate. Optionally set a holdout % (a control cohort that sees the '
-        + 'unmodified order) to measure lift. Propose the rule + its effect before creating it. No money moves.',
+        + 'unmodified order) to measure lift. The rule is created INACTIVE (a proposal): a human activates it on the '
+        + 'Discovery page. Explain the rule + its effect when you create it. No money moves.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -285,9 +286,12 @@ export function registerDiscoveryAgentTools(): void {
         const r = await createMerchRule({
           tenantId: scope.tenantId, orgId: resolved.orgId, createdBy: scope.agentProfileId ?? scope.actingUserId ?? 'agent',
           name, scope: optStr(input.scope) ?? 'all', actions: input.actions, holdoutPct: input.holdoutPct,
+          // ADR 1025 D5 — a PROPOSAL. A hide rule removes products from the public search,
+          // so a model turn never makes one live; a human activates it on the Discovery page.
+          active: false,
         });
         await recordIgnitionRun(scope.tenantId, key, r.ruleId);
-        return ok({ ruleId: r.ruleId, name: r.name, scope: r.scope, actions: r.actions.length, note: 'Merch rule created and active. Tell the user what it does.' });
+        return ok({ ruleId: r.ruleId, name: r.name, scope: r.scope, actions: r.actions.length, active: false, proposed: true, note: 'Merch rule created as a PROPOSAL (inactive). Tell the user what it would do, and that they must activate it on the Discovery page; you did not make it live.' });
       } catch (e) { return fromServiceError(e); }
     },
   });

@@ -53,6 +53,14 @@ export const messages = {
   type_manual: 'Manual (curada)',
 
   deleteRowLabel: 'Eliminar {{name}}',
+  colStatus: 'Estado',
+  statusActive: 'Activa',
+  statusPaused: 'En pausa',
+  activate: 'Activar',
+  pause: 'Pausar',
+  activateRowLabel: 'Activar {{name}}',
+  pauseRowLabel: 'Pausar {{name}}',
+  updateFailed: 'No se pudo actualizar.',
   deleteCollectionConfirm: '¿Eliminar la colección «{{name}}»?',
   deleteRuleConfirm: '¿Eliminar la regla «{{name}}»?',
 
@@ -71,4 +79,12 @@ export const messages = {
   facetsTruncated: "Los {{shown}} valores principales de {{total}} por faceta.",
   fieldCategoryHelp: "Los productos de esta categoría se añaden a la colección automáticamente.",
   fieldHideCategoryHelp: "Los productos de esta categoría dejan de aparecer en tu tienda mientras esta regla esté activa.",
+  colEffect: "Efecto",
+  statusProposed: "Propuesta por un agente",
+  effectHide: "Oculta {{what}}",
+  effectBury: "Envía {{what}} al final",
+  effectBoost: "Impulsa {{what}} ×{{factor}}",
+  effectPin: "Fija un producto en la posición {{position}}",
+  effectPriceBand: "una franja de precio",
+  activateHideConfirm: "¿Activar «{{name}}»? Los productos que coincidan dejarán de aparecer en la búsqueda de tu tienda.",
 } as const;

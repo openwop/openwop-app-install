@@ -11,6 +11,9 @@ import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { looksLikePiiName } from '../../host/dataClassification.js';
 import { registerRetentionPurger, purgeRowsByAge } from '../../host/retentionPurger.js';
 import { validateEvent } from './eventSchemaService.js';
+import { isPermittedForPurpose, isErasureTombstoned, type Purpose } from '../consent/consentService.js';
+import { COLLECTED_IDENTITY_KEYS } from './collectedEventIdentity.js';
+import { recordGovernanceDecision } from '../../host/governanceDecisionLog.js';
 import { collectedEvents as store, isLiveCollectedEvent, persistCollectedEvent, replayCollectedEvent, deleteCollectedEvent } from './visitorEventIndex.js';
 
 export interface CollectedEvent {
@@ -21,12 +24,110 @@ export interface CollectedEvent {
   /** ingest-time PII tagging (ADR 0269) — the payload keys detected as PII. */
   piiFields: string[];
   schemaVersion?: number;
+  /** ADR 1024 D4.3 — what this event was collected FOR (RFC 0128 vocabulary). Absent on
+   *  events stored before ADR 1024 and on first-party events, which carry their own gate. */
+  purpose?: CollectionPurpose;
   at: string;
 }
 
-/** Shallow PII-field detection over the payload keys (the ingest tag). */
+/** ADR 1024 D4.2 — who is calling. `http` is the generic ingest (SDKs, the routes);
+ *  `first-party` is an in-process owner that already applied its own consent gate
+ *  (funnels, kicktodo). The DEFAULT is `http`, so a caller that forgets says the
+ *  stricter thing. */
+export type CollectSource = 'http' | 'first-party';
+
+/** ADR 1024 D4.3 — the purposes an event may be collected for. `transactional` is not
+ *  one: it maps to the `necessary` category, which the consent module allows before it
+ *  checks the erasure tombstone, so accepting it would let any caller skip both. */
+export const COLLECTION_PURPOSES = ['analytics', 'personalization', 'advertising', 'marketing-email', 'marketing-sms', 'marketing-push'] as const;
+export type CollectionPurpose = (typeof COLLECTION_PURPOSES)[number];
+
+/** ADR 1024 D4.2 (`CDP2WF-2`) — event families written only in-process by their owning
+ *  feature. Over HTTP, any member could post `funnel.step_completed` with an experiment
+ *  arm and fabricate conversions that experiment promotion and lead scoring read as
+ *  first-party truth. `forms.` has no in-process writer yet and is reserved for one. */
+export const RESERVED_EVENT_PREFIXES = ['funnel.', 'kicktodo.', 'forms.'] as const;
+
+export interface CollectOptions {
+  source?: CollectSource;
+  /** `http` only; default `analytics`. */
+  purpose?: unknown;
+}
+
+/** ADR 1024 D4.3 — the consent decision for an HTTP event (user decision Q1, 2026-11-02,
+ *  N1 resolved). Every identifier the payload names — a person key (`contactId`,
+ *  `userId`, `subjectKey`) OR a persistent visitor/session id (`visitor`, `sessionKey`,
+ *  `anonymousId`, `distinctId`, …) — needs consent for the purpose, decided by
+ *  `isPermittedForPurpose` with the tenant's consent-policy default: an opt-in regime
+ *  needs a recorded consent, an opt-out regime allows unless the subject opted out, and
+ *  the consent toggle off allows everything (the consent module's own precedence; an
+ *  erasure tombstone always refuses). No region is guessed. An event that names no
+ *  identifier passes. Basis: ePrivacy Art. 5(3) per EDPB Guidelines 2/2023 (identifiers
+ *  and tracking techniques are "information" on the device); CNIL sheet 16 (the narrow
+ *  analytics exemption, which an operator who meets it expresses as an opt-out default);
+ *  CCPA §1798.140 (a persistent device identifier is personal information). */
+async function assertConsentedCollection(tenantId: string, payload: Record<string, unknown>, purpose: CollectionPurpose): Promise<void> {
+  for (const key of COLLECTED_IDENTITY_KEYS) {
+    const value = payload[key];
+    if (typeof value !== 'string' || value.trim() === '') continue;
+    // An ERASED subject is the barrier's answer (409 subject_erased), not a missing consent:
+    // a 403 would tell the caller to go and get consent for a person who asked to be
+    // forgotten (closing grade L2).
+    if (await isErasureTombstoned(tenantId, value)) {
+      throw new OpenwopError('subject_erased', 'Collected event identity was erased.', 409);
+    }
+    if (!(await isPermittedForPurpose(tenantId, value, purpose as Purpose, { quietDenial: true }))) {
+      recordCollectDenial(tenantId, purpose);
+      throw new OpenwopError('forbidden', `No consent basis for ${purpose} for the identifier in \`${key}\`; the event was not stored.`, 403, { reason: 'consent_required', purpose, field: key });
+    }
+  }
+}
+
+/** ADR 1024 (`CDP2WF-30`) — consent denials on the collect path, rolled up. The consent
+ *  module writes one durable governance row per denial into the shared `audit_log` (no
+ *  tenant column, no purger), so a busy anonymous SDK in an opt-in tenant would have
+ *  written a row per page view. Here the FIRST denial per (tenant, purpose) in a window
+ *  writes its row; later ones in that window are counted, and the next denial after the
+ *  window closes writes ONE `collect-denials-suppressed` row carrying the count. Per
+ *  instance and in memory: a restart loses at most one window's count, never a first row. */
+export const DENIAL_WINDOW_MS = 60_000;
+const denialWindows = new Map<string, { start: number; suppressed: number }>();
+function recordCollectDenial(tenantId: string, purpose: CollectionPurpose, now = Date.now()): void {
+  const key = `${tenantId}\u0000${purpose}`;
+  const w = denialWindows.get(key);
+  if (w && now - w.start < DENIAL_WINDOW_MS) { w.suppressed++; return; }
+  if (w && w.suppressed > 0) {
+    void recordGovernanceDecision({ tenantId, kind: 'consent', outcome: 'deny', reason: 'collect-denials-suppressed', resource: 'cdp.collected-event', detail: { purpose, suppressed: w.suppressed, windowMs: DENIAL_WINDOW_MS } });
+  }
+  denialWindows.set(key, { start: now, suppressed: 0 });
+  if (denialWindows.size > 10_000) denialWindows.delete(denialWindows.keys().next().value as string);
+  void recordGovernanceDecision({ tenantId, kind: 'consent', outcome: 'deny', reason: 'collect-consent-required', resource: 'cdp.collected-event', detail: { purpose } });
+}
+/** Test-only. */
+export function __resetCollectDenialWindows(): void { denialWindows.clear(); }
+
+function collectionPurposeOf(raw: unknown): CollectionPurpose {
+  if (raw === undefined || raw === null || raw === '') return 'analytics';
+  if (typeof raw === 'string' && (COLLECTION_PURPOSES as readonly string[]).includes(raw)) return raw as CollectionPurpose;
+  throw new OpenwopError('validation_error', `purpose must be one of: ${COLLECTION_PURPOSES.join(', ')}.`, 400, { field: 'purpose' });
+}
+
+const EMAIL_SHAPED = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const E164_SHAPED = /^\+[1-9]\d{6,14}$/;
+
+/** Shallow PII-field detection over the payload (the ingest tag): a key whose NAME reads
+ *  as PII, or (ADR 1024 D4.6, `CDP2WF-21`) whose string VALUE is an email address or an
+ *  E.164 number. Before, an erased email posted under `to` or `recipient` was tagged
+ *  nothing, so the erasure barrier (which reads these tags) re-admitted it. The tag feeds
+ *  the barrier, erasure matching and read masking; it is NOT an identity for the consent
+ *  check, which reads the named identity keys only (a `supportEmail` field is not the
+ *  subject of the event). */
 function tagPiiFields(payload: Record<string, unknown>): string[] {
-  return Object.keys(payload).filter((k) => looksLikePiiName(k));
+  return Object.keys(payload).filter((k) => {
+    if (looksLikePiiName(k)) return true;
+    const v = payload[k];
+    return typeof v === 'string' && (EMAIL_SHAPED.test(v.trim()) || E164_SHAPED.test(v.trim()));
+  });
 }
 
 /**
@@ -34,13 +135,23 @@ function tagPiiFields(payload: Record<string, unknown>): string[] {
  * an unregistered event type is accepted (no contract ⇒ no rejection). Returns the
  * stored record's id + validation result.
  */
-export async function collectEvent(tenantId: string, eventType: string, payload: unknown, dedupeKey?: string): Promise<{ eventId: string; hasSchema: boolean; schemaVersion?: number; piiFields: string[] }> {
+export async function collectEvent(tenantId: string, eventType: string, payload: unknown, dedupeKey?: string, opts: CollectOptions = {}): Promise<{ eventId: string; hasSchema: boolean; schemaVersion?: number; piiFields: string[]; purpose?: CollectionPurpose }> {
   const et = (eventType ?? '').trim();
   if (!et) throw new OpenwopError('validation_error', 'eventType is required.', 400, {});
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     throw new OpenwopError('validation_error', 'payload must be an object.', 400, {});
   }
   const body = payload as Record<string, unknown>;
+  const source: CollectSource = opts.source ?? 'http';
+  let purpose: CollectionPurpose | undefined;
+  if (source === 'http') {
+    // Checked AFTER the trim, so a leading space cannot slip a reserved type through.
+    if (RESERVED_EVENT_PREFIXES.some((p) => et.startsWith(p))) {
+      throw new OpenwopError('validation_error', `Event types starting ${RESERVED_EVENT_PREFIXES.join(', ')} are written only by their own feature, not over this endpoint.`, 422, { reason: 'reserved_event_type', eventType: et });
+    }
+    purpose = collectionPurposeOf(opts.purpose);
+    await assertConsentedCollection(tenantId, body, purpose);
+  }
   // GEN-2g — opt-in at-most-once ingest (mirrors forms FRMB-IDEM): a client dedupe key
   // derives a DETERMINISTIC event id scoped to (tenant, eventType), so an at-least-once
   // retry replays the SAME row. The replay short-circuits BEFORE re-validation — a
@@ -67,10 +178,11 @@ export async function collectEvent(tenantId: string, eventType: string, payload:
     payload: body,
     piiFields,
     ...(result.version !== undefined ? { schemaVersion: result.version } : {}),
+    ...(purpose ? { purpose } : {}),
     at: new Date().toISOString(),
   };
   const stored = await persistCollectedEvent(rec);
-  return { eventId: stored.eventId, hasSchema: stored.schemaVersion !== undefined, ...(stored.schemaVersion !== undefined ? { schemaVersion: stored.schemaVersion } : {}), piiFields: stored.piiFields };
+  return { eventId: stored.eventId, hasSchema: stored.schemaVersion !== undefined, ...(stored.schemaVersion !== undefined ? { schemaVersion: stored.schemaVersion } : {}), piiFields: stored.piiFields, ...(stored.purpose ? { purpose: stored.purpose } : {}) };
 }
 
 /** Recent collected events for a tenant (newest first) — the debugger/observability read. */
@@ -100,7 +212,7 @@ export interface BatchItemResult {
  * sink the batch; each row reports ok+eventId or its error, so the caller sees exactly
  * what landed. Processed SEQUENTIALLY (bounded work per request) and capped.
  */
-export async function collectEventBatch(tenantId: string, events: unknown): Promise<{ accepted: number; rejected: number; results: BatchItemResult[] }> {
+export async function collectEventBatch(tenantId: string, events: unknown, opts: { source?: CollectSource } = {}): Promise<{ accepted: number; rejected: number; results: BatchItemResult[] }> {
   if (!Array.isArray(events)) throw new OpenwopError('validation_error', 'events must be an array.', 400, {});
   if (events.length === 0) throw new OpenwopError('validation_error', 'events must be a non-empty array.', 400, {});
   if (events.length > MAX_COLLECT_BATCH) {
@@ -110,9 +222,9 @@ export async function collectEventBatch(tenantId: string, events: unknown): Prom
   let accepted = 0;
   let rejected = 0;
   for (let i = 0; i < events.length; i++) {
-    const e = (events[i] ?? {}) as { eventType?: unknown; payload?: unknown };
+    const e = (events[i] ?? {}) as { eventType?: unknown; payload?: unknown; purpose?: unknown };
     try {
-      const r = await collectEvent(tenantId, typeof e.eventType === 'string' ? e.eventType : '', e.payload);
+      const r = await collectEvent(tenantId, typeof e.eventType === 'string' ? e.eventType : '', e.payload, undefined, { source: opts.source ?? 'http', purpose: e.purpose });
       results.push({ index: i, ok: true, eventId: r.eventId, hasSchema: r.hasSchema, ...(r.schemaVersion !== undefined ? { schemaVersion: r.schemaVersion } : {}), piiFields: r.piiFields });
       accepted++;
     } catch (err) {

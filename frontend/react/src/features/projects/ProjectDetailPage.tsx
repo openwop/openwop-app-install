@@ -30,7 +30,8 @@ import { ProjectStrategyChips } from '../strategy/StrategyAlignment.js';
 import { ProjectMembersTab } from './ProjectMembersTab.js';
 import { ProjectChatTab } from './ProjectChatTab.js';
 // ADR 0084 correction — notebooks (Sources) + podcasts as project tabs, not standalone.
-import { useFeatureAccess } from '../../featureToggles/FeatureAccessContext.js';
+import { useFeatureAccess, useFeatureVisible } from '../../featureToggles/FeatureAccessContext.js';
+import { featureProjectTabs } from '../registry.js';
 import { ProjectSourcesPanel } from '../notebooks/NotebooksPage.js';
 import { ProjectPodcastPanel } from '../podcasts/PodcastStudioPage.js';
 import { classifyHttpError } from '../../client/classifyHttpError.js';
@@ -42,9 +43,14 @@ import {
   getProjectKnowledge, listOrgs, createCollection, unbindCollection, ingestText, deleteDocument, retrieve,
 } from './projectKnowledgeClient.js';
 
-type Tab = 'overview' | 'ledger' | 'members' | 'chat' | 'board' | 'memory' | 'knowledge' | 'sources' | 'podcast' | 'workflows' | 'schedules';
+type HostTab = 'overview' | 'ledger' | 'members' | 'chat' | 'board' | 'memory' | 'knowledge' | 'sources' | 'podcast' | 'workflows' | 'schedules';
+/** A host tab, or a feature-contributed tab's key (ADR 1090). */
+type Tab = HostTab | (string & {});
 
-const TAB_LABEL_KEYS: Record<Tab, string> = {
+/** ADR 1090 — every contributed tab, computed once: the registry is fixed at boot. */
+const CONTRIBUTED_TABS = featureProjectTabs();
+
+const TAB_LABEL_KEYS: Record<HostTab, string> = {
   overview: 'tabOverview',
   ledger: 'tabLedger',
   members: 'tabMembers',
@@ -58,6 +64,9 @@ const TAB_LABEL_KEYS: Record<Tab, string> = {
   workflows: 'tabWorkflows',
   schedules: 'tabSchedules',
 };
+
+/** ADR 1090 D3 — the host's own tab keys; a contributed key may not repeat one. */
+export const HOST_TAB_KEYS: readonly string[] = Object.keys(TAB_LABEL_KEYS);
 
 export function ProjectDetailPage(): JSX.Element {
   const { t } = useTranslation('projects');
@@ -82,12 +91,26 @@ export function ProjectDetailPage(): JSX.Element {
   // enabled for the tenant (notebooks/podcasts default OFF).
   const notebooksEnabled = useFeatureAccess('notebooks').enabled;
   const podcastsEnabled = useFeatureAccess('podcasts').enabled;
-  const TABS: readonly Tab[] = [
+  const HOST_TABS: readonly HostTab[] = [
     'overview', 'ledger', 'members', 'chat', 'board', 'memory', 'knowledge',
     ...(notebooksEnabled ? ['sources' as const] : []),
     ...(podcastsEnabled ? ['podcast' as const] : []),
     'workflows', 'schedules',
   ];
+  // ADR 1090 — a contributed tab follows its feature's visibility; a key that
+  // repeats a host tab or an earlier contribution is dropped (the first wins).
+  const visible = useFeatureVisible();
+  const contributed = useMemo(() => {
+    const seen = new Set<string>(HOST_TAB_KEYS);
+    const out: typeof CONTRIBUTED_TABS = [];
+    for (const c of CONTRIBUTED_TABS) {
+      if (!visible(c.featureId) || seen.has(c.key)) continue;
+      seen.add(c.key);
+      out.push(c);
+    }
+    return out;
+  }, [visible]);
+  const TABS: readonly Tab[] = [...HOST_TABS, ...contributed.map((c) => c.key)];
   const tabParam = searchParams.get('tab');
   const tab: Tab = TABS.some((id) => id === tabParam) ? (tabParam as Tab) : 'overview';
   // PROJ-UX-2 — the charter editor (Overview tab) reports its dirty state here,
@@ -260,7 +283,10 @@ export function ProjectDetailPage(): JSX.Element {
       ) : null}
 
       <Tabs
-        items={TABS.map((tabId) => ({ id: tabId, label: t(TAB_LABEL_KEYS[tabId]) }))}
+        items={TABS.map((tabId) => {
+          const c = contributed.find((x) => x.key === tabId);
+          return { id: tabId, label: c ? (c.labelKey ? t(c.labelKey, { ns: c.labelNamespace ?? c.featureId, defaultValue: c.label }) : c.label) : t(TAB_LABEL_KEYS[tabId as HostTab]) };
+        })}
         value={tab}
         onChange={(id) => setTab(id as Tab)}
         label={t('tablistLabel')}
@@ -314,6 +340,9 @@ export function ProjectDetailPage(): JSX.Element {
       ) : tab === 'podcast' ? (
         // ADR 0086 — generate a multi-speaker audio overview of THIS project.
         <ProjectPodcastPanel orgId={project.orgId} projectId={projectId} />
+      ) : contributed.some((c) => c.key === tab) ? (
+        // ADR 1090 — a feature-contributed tab.
+        contributed.find((c) => c.key === tab)!.render({ project, canWrite })
       ) : tab === 'workflows' ? (
         <ProjectWorkflowsTab projectId={projectId} workflows={project.workflows} canWrite={canWrite} onSaved={setProject} />
       ) : (

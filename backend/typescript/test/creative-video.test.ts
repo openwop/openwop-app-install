@@ -27,13 +27,17 @@ import { getProvider } from '../src/features/connections/providerRegistry.js';
 import { generateVideo, textToVideo, resolveVideoJob, getVideoJob, type GenerateOutput } from '../src/features/creative-video/videoService.js';
 import { requestHashFor, claimJob, clearJobsForAsset, __clearVideoJobs } from '../src/features/creative-video/entities/videoJob.js';
 import type { VideoAdapter } from '../src/features/creative-video/host/videoProviderAdapter.js';
+import { LIKENESS_CONSENT_TEXT_VERSION } from '../src/features/creative-video/likenessConsent.js';
 
 // A tiny valid base64 "video" payload.
 const TINY = Buffer.from('fake-mp4-bytes').toString('base64');
+/** ADR 1051 D5 — every avatar render runs under a person's attestation. */
+const CONSENT = { attestedBy: 'u1', attestedAt: '2026-11-03T00:00:00.000Z', textVersion: LIKENESS_CONSENT_TEXT_VERSION, avatarId: 'av1', channel: 'route' as const };
 
 function stubAdapter(): VideoAdapter & { submitCalls: number } {
   const a = {
     submitCalls: 0,
+    async hasConnection() { return true; },
     async submitJob() { a.submitCalls += 1; return { ok: true as const, value: { providerJobId: `p-${a.submitCalls}` } }; },
     async pollJob() { return { ok: true as const, value: { status: 'completed' as const, resultUrl: 'https://api.heygen.com/result.mp4' } }; },
     async downloadResult() { return { ok: true as const, value: { base64: TINY, bytes: 14, contentType: 'video/mp4' } }; },
@@ -86,24 +90,24 @@ describe('creative-video — request hash is fork-stable', () => {
 describe('creative-video — replay/idempotency + budget', () => {
   it('a re-run with identical inputs returns the SAME asset and never re-submits (CAS)', async () => {
     const adapter = stubAdapter();
-    const first = await generateVideo(deps('t1', 'o1'), { tenantId: 't1', orgId: 'o1', script: 'Hi there', avatarId: 'av1', createdBy: 'u1' }, adapter);
+    const first = await generateVideo(deps('t1', 'o1'), { tenantId: 't1', orgId: 'o1', script: 'Hi there', avatarId: 'av1', createdBy: 'u1', likenessConsent: CONSENT }, adapter);
     expect(first.status).toBe('completed');
     const assetId = assetOf(first);
     expect(assetId).toBeTruthy();
 
-    const replay = await generateVideo(deps('t1', 'o1'), { tenantId: 't1', orgId: 'o1', script: 'Hi there', avatarId: 'av1', createdBy: 'u1' }, adapter);
+    const replay = await generateVideo(deps('t1', 'o1'), { tenantId: 't1', orgId: 'o1', script: 'Hi there', avatarId: 'av1', createdBy: 'u1', likenessConsent: CONSENT }, adapter);
     expect(replay.status).toBe('completed');
     expect(assetOf(replay)).toBe(assetId); // same asset
     expect(adapter.submitCalls).toBe(1); // NEVER re-submitted / re-charged
   });
 
-  it('enforces the ADR 0106 video budget cap (default OFF, opt-in)', async () => {
+  it('enforces the ADR 0106 video budget cap (ADR 1051: reserved before the submit)', async () => {
     process.env.OPENWOP_MEDIA_DAILY_VIDEO_JOBS = '1';
     const adapter = stubAdapter();
-    const ok = await generateVideo(deps('t2', 'o1'), { tenantId: 't2', orgId: 'o1', script: 'First', avatarId: 'av1', createdBy: 'u1' }, adapter);
+    const ok = await generateVideo(deps('t2', 'o1'), { tenantId: 't2', orgId: 'o1', script: 'First', avatarId: 'av1', createdBy: 'u1', likenessConsent: CONSENT }, adapter);
     expect(ok.status).toBe('completed');
     // A DIFFERENT generation the same day is over the 1-job cap → failed, not submitted.
-    const denied = await generateVideo(deps('t2', 'o1'), { tenantId: 't2', orgId: 'o1', script: 'Second', avatarId: 'av1', createdBy: 'u1' }, adapter);
+    const denied = await generateVideo(deps('t2', 'o1'), { tenantId: 't2', orgId: 'o1', script: 'Second', avatarId: 'av1', createdBy: 'u1', likenessConsent: CONSENT }, adapter);
     expect(denied.status).toBe('failed');
     expect(errorOf(denied)).toBe('budget_exceeded');
     expect(adapter.submitCalls).toBe(1); // the denied job never reached the provider
@@ -111,8 +115,8 @@ describe('creative-video — replay/idempotency + budget', () => {
 
   it('isolates jobs by tenant (same inputs, different tenants → distinct assets)', async () => {
     const adapter = stubAdapter();
-    const a = await generateVideo(deps('t3', 'o1'), { tenantId: 't3', orgId: 'o1', script: 'Same', avatarId: 'av1', createdBy: 'u1' }, adapter);
-    const b = await generateVideo(deps('t4', 'o1'), { tenantId: 't4', orgId: 'o1', script: 'Same', avatarId: 'av1', createdBy: 'u1' }, adapter);
+    const a = await generateVideo(deps('t3', 'o1'), { tenantId: 't3', orgId: 'o1', script: 'Same', avatarId: 'av1', createdBy: 'u1', likenessConsent: CONSENT }, adapter);
+    const b = await generateVideo(deps('t4', 'o1'), { tenantId: 't4', orgId: 'o1', script: 'Same', avatarId: 'av1', createdBy: 'u1', likenessConsent: CONSENT }, adapter);
     expect(a.status).toBe('completed');
     expect(b.status).toBe('completed');
     expect(adapter.submitCalls).toBe(2); // each tenant submits its own
@@ -123,8 +127,8 @@ describe('creative-video — replay/idempotency + budget', () => {
     // Two orgs in ONE tenant with byte-identical inputs must get DISTINCT jobs +
     // distinct assets — org B must never dedup onto org A's org-scoped asset id.
     const adapter = stubAdapter();
-    const a = await generateVideo(deps('t10', 'oA'), { tenantId: 't10', orgId: 'oA', script: 'Same', avatarId: 'av1', createdBy: 'u1' }, adapter);
-    const b = await generateVideo(deps('t10', 'oB'), { tenantId: 't10', orgId: 'oB', script: 'Same', avatarId: 'av1', createdBy: 'u1' }, adapter);
+    const a = await generateVideo(deps('t10', 'oA'), { tenantId: 't10', orgId: 'oA', script: 'Same', avatarId: 'av1', createdBy: 'u1', likenessConsent: CONSENT }, adapter);
+    const b = await generateVideo(deps('t10', 'oB'), { tenantId: 't10', orgId: 'oB', script: 'Same', avatarId: 'av1', createdBy: 'u1', likenessConsent: CONSENT }, adapter);
     expect(a.status).toBe('completed');
     expect(b.status).toBe('completed');
     expect(adapter.submitCalls).toBe(2); // each org submits its own job
@@ -138,15 +142,16 @@ describe('creative-video — replay/idempotency + budget', () => {
     let n = 0;
     const adapter: VideoAdapter & { submitCalls: number } = {
       submitCalls: 0,
+      async hasConnection() { return true; },
       async submitJob() { n += 1; adapter.submitCalls = n; return n === 1 ? { ok: false as const, error: 'no_connection' } : { ok: true as const, value: { providerJobId: `p-${n}` } }; },
       async pollJob() { return { ok: true as const, value: { status: 'completed' as const, resultUrl: 'https://api.heygen.com/r.mp4' } }; },
       async downloadResult() { return { ok: true as const, value: { base64: TINY, bytes: 14, contentType: 'video/mp4' } }; },
     };
-    const first = await generateVideo(deps('t5', 'o1'), { tenantId: 't5', orgId: 'o1', script: 'Retry me', avatarId: 'av1', createdBy: 'u1' }, adapter);
+    const first = await generateVideo(deps('t5', 'o1'), { tenantId: 't5', orgId: 'o1', script: 'Retry me', avatarId: 'av1', createdBy: 'u1', likenessConsent: CONSENT }, adapter);
     expect(first.status).toBe('failed');
     expect(errorOf(first)).toBe('no_connection');
     // Same inputs again — the hash was released, so it re-submits and completes.
-    const second = await generateVideo(deps('t5', 'o1'), { tenantId: 't5', orgId: 'o1', script: 'Retry me', avatarId: 'av1', createdBy: 'u1' }, adapter);
+    const second = await generateVideo(deps('t5', 'o1'), { tenantId: 't5', orgId: 'o1', script: 'Retry me', avatarId: 'av1', createdBy: 'u1', likenessConsent: CONSENT }, adapter);
     expect(second.status).toBe('completed');
     expect(assetOf(second)).toBeTruthy();
   });
@@ -157,15 +162,16 @@ describe('creative-video — replay/idempotency + budget', () => {
     // retry with identical inputs must not submit a second paid job.
     const adapter: VideoAdapter & { submitCalls: number } = {
       submitCalls: 0,
+      async hasConnection() { return true; },
       async submitJob() { adapter.submitCalls += 1; return { ok: true as const, value: { providerJobId: `p${adapter.submitCalls}` } }; },
       async pollJob() { return { ok: true as const, value: { status: 'completed' as const, resultUrl: 'https://evil.example.com/x.mp4' } }; },
       async downloadResult() { return { ok: false as const, error: 'video_result_url_host_denied:evil.example.com' }; },
     };
-    const out = await generateVideo(deps('t8', 'o1'), { tenantId: 't8', orgId: 'o1', script: 'Denied', avatarId: 'av1', createdBy: 'u1' }, adapter);
+    const out = await generateVideo(deps('t8', 'o1'), { tenantId: 't8', orgId: 'o1', script: 'Denied', avatarId: 'av1', createdBy: 'u1', likenessConsent: CONSENT }, adapter);
     expect(out.status).toBe('failed');
     expect(errorOf(out)).toBe('video_result_url_host_denied:evil.example.com');
     // Retry: the terminal error is NOT reclaimable → returns failed, never re-submits.
-    const retry = await generateVideo(deps('t8', 'o1'), { tenantId: 't8', orgId: 'o1', script: 'Denied', avatarId: 'av1', createdBy: 'u1' }, adapter);
+    const retry = await generateVideo(deps('t8', 'o1'), { tenantId: 't8', orgId: 'o1', script: 'Denied', avatarId: 'av1', createdBy: 'u1', likenessConsent: CONSENT }, adapter);
     expect(retry.status).toBe('failed');
     expect(adapter.submitCalls).toBe(1); // NO second paid job
   });
@@ -176,11 +182,12 @@ describe('creative-video — replay/idempotency + budget', () => {
     let polls = 0;
     const adapter: VideoAdapter & { submitCalls: number } = {
       submitCalls: 0,
+      async hasConnection() { return true; },
       async submitJob() { adapter.submitCalls += 1; return { ok: true as const, value: { providerJobId: 'p1' } }; },
       async pollJob() { polls += 1; return polls <= 1 ? { ok: false as const, error: 'not_ready' } : { ok: true as const, value: { status: 'completed' as const, resultUrl: 'https://api.heygen.com/r.mp4' } }; },
       async downloadResult() { return { ok: true as const, value: { base64: TINY, bytes: 14, contentType: 'video/mp4' } }; },
     };
-    const gen = await generateVideo(deps('t11', 'o1'), { tenantId: 't11', orgId: 'o1', script: 'Long', avatarId: 'av1', createdBy: 'u1' }, adapter);
+    const gen = await generateVideo(deps('t11', 'o1'), { tenantId: 't11', orgId: 'o1', script: 'Long', avatarId: 'av1', createdBy: 'u1', likenessConsent: CONSENT }, adapter);
     expect(gen.status).toBe('pending'); // inline poll not ready → pending, job stays processing
     const resolved = await resolveVideoJob(deps('t11', 'o1'), 't11', 'o1', gen.jobId, adapter);
     expect(resolved?.status).toBe('completed'); // resolve's poll finds it done + stores the asset
@@ -190,7 +197,7 @@ describe('creative-video — replay/idempotency + budget', () => {
 
   it('clearJobsForAsset prunes a completed job when its media asset is deleted (grade-data CV-2)', async () => {
     const adapter = stubAdapter();
-    const gen = await generateVideo(deps('t12', 'o1'), { tenantId: 't12', orgId: 'o1', script: 'Asset', avatarId: 'av1', createdBy: 'u1' }, adapter);
+    const gen = await generateVideo(deps('t12', 'o1'), { tenantId: 't12', orgId: 'o1', script: 'Asset', avatarId: 'av1', createdBy: 'u1', likenessConsent: CONSENT }, adapter);
     const assetId = assetOf(gen);
     const pruned = await clearJobsForAsset('t12', 'o1', assetId);
     expect(pruned).toBe(1);
@@ -204,11 +211,11 @@ describe('creative-video — replay/idempotency + budget', () => {
     await claimJob({ tenantId: 't9', orgId: 'o1', requestHash: hash, kind: 'avatar', provider: 'heygen', createdBy: 'u0' });
     const adapter = stubAdapter();
     // Fresh stuck row (age ~0): a concurrent caller must NOT submit — it returns pending.
-    const live = await generateVideo(deps('t9', 'o1'), { tenantId: 't9', orgId: 'o1', script: 'Stuck', avatarId: 'av1', createdBy: 'u1' }, adapter);
+    const live = await generateVideo(deps('t9', 'o1'), { tenantId: 't9', orgId: 'o1', script: 'Stuck', avatarId: 'av1', createdBy: 'u1', likenessConsent: CONSENT }, adapter);
     expect(live.status).toBe('pending');
     expect(adapter.submitCalls).toBe(0);
     // Once the row is stale (crashed worker), a later caller re-claims + completes it.
-    const recovered = await generateVideo(deps('t9', 'o1'), { tenantId: 't9', orgId: 'o1', script: 'Stuck', avatarId: 'av1', createdBy: 'u1', nowMs: Date.now() + 200_000 }, adapter);
+    const recovered = await generateVideo(deps('t9', 'o1'), { tenantId: 't9', orgId: 'o1', script: 'Stuck', avatarId: 'av1', createdBy: 'u1', likenessConsent: CONSENT, nowMs: Date.now() + 200_000 }, adapter);
     expect(recovered.status).toBe('completed');
     expect(adapter.submitCalls).toBe(1);
   });
@@ -217,8 +224,8 @@ describe('creative-video — replay/idempotency + budget', () => {
     // Regression for the P3 code-review MEDIUM-4: two distinct jobs whose provider
     // returns identical bytes reuse one media asset (content-hash dedup).
     const adapter = stubAdapter(); // downloadResult always returns TINY
-    const a = await generateVideo(deps('t6', 'o1'), { tenantId: 't6', orgId: 'o1', script: 'Alpha', avatarId: 'av1', createdBy: 'u1' }, adapter);
-    const b = await generateVideo(deps('t6', 'o1'), { tenantId: 't6', orgId: 'o1', script: 'Beta', avatarId: 'av1', createdBy: 'u1' }, adapter);
+    const a = await generateVideo(deps('t6', 'o1'), { tenantId: 't6', orgId: 'o1', script: 'Alpha', avatarId: 'av1', createdBy: 'u1', likenessConsent: CONSENT }, adapter);
+    const b = await generateVideo(deps('t6', 'o1'), { tenantId: 't6', orgId: 'o1', script: 'Beta', avatarId: 'av1', createdBy: 'u1', likenessConsent: CONSENT }, adapter);
     expect(a.status).toBe('completed');
     expect(b.status).toBe('completed');
     expect(assetOf(b)).toBe(assetOf(a));

@@ -17,7 +17,7 @@ import { createAgentToolProvider, createScopedAgentToolProvider } from '../../..
 import { toModelToolResult } from '../../../host/toModelToolResult.js';
 import { resolveAgentToolPermissionSet } from '../../../host/agentProfileService.js';
 import { evaluateToolPermissionSet, agentToolPermissionsEnabled } from '../../../host/agentToolPermissions.js';
-import { effectiveToolAllowlist, resolveAgentToolAllowlistOverride } from '../../../host/agentToolAllowlistService.js';
+import { agentOffersToolBaseline, effectiveToolAllowlist, resolveAgentToolAllowlistOverride } from '../../../host/agentToolAllowlistService.js';
 import { resolveAgentIdentity, type AgentIdentity } from '../../../host/agentIdentity.js';
 import { sanitizeToolName } from '../../../providers/dispatchProviderTools.js';
 import { buildLaneFirewall } from '../../../host/laneFirewall.js';
@@ -65,7 +65,7 @@ async function allowlistOf(
   // the conversation, else the agent), so a canary split never gives one version's
   // prompt with another version's tools.
   const m = await resolveServedAgent(identity.agentId, tenantId, conversationId ?? identity.agentId);
-  return effectiveToolAllowlist(m?.toolAllowlist, override);
+  return effectiveToolAllowlist(m?.toolAllowlist, override, await agentOffersToolBaseline(tenantId, m ?? { agentId: identity.agentId }));
 }
 
 async function agentAllowlist(tenantId: string, agentId: string | undefined, conversationId?: string): Promise<readonly string[]> {

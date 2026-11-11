@@ -21,7 +21,7 @@ import { resolveRecordAccess } from '../../host/recordAccessPolicy.js';
 import { recordGovernanceDecision } from '../../host/governanceDecisionLog.js';
 
 /** Identifier types whose value is PII (masked for scope-limited callers). */
-const PII_IDENTIFIER_TYPES = new Set(['email', 'phone']);
+export const PII_IDENTIFIER_TYPES = new Set(['email', 'phone']);
 
 /**
  * Mask a golden record's PII for a caller without a pii-read grant (ADR 0268 /

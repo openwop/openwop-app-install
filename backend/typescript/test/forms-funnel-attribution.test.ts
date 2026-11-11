@@ -235,7 +235,7 @@ describe('ADR 0332 — funnel opt-in attribution', () => {
 
     // A duplicate emission of the SAME submission (re-run / retry class) must
     // not double-count: land a copy of the event, rebuild, expect 1 completion.
-    await collectEvent(tenantId, 'funnel.step_completed', { ...(hit!.payload as Record<string, unknown>) });
+    await collectEvent(tenantId, 'funnel.step_completed', { ...(hit!.payload as Record<string, unknown>) }, undefined, { source: 'first-party' });
     await rebuildFunnelStats(tenantId, orgId);
     const days = await getFunnelStats(tenantId, orgId, funnelId);
     const total = days.reduce((acc, d) => acc + (d.steps[stepId]?.completions ?? 0), 0);

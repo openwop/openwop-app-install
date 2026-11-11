@@ -80,13 +80,13 @@ describe('the allowlist a channel turn compiles from', () => {
   beforeAll(() => { registerCrmAgentTools(); });
 
   it('narrow with no configured allowlist offers nothing, not even a workspace read', () => {
-    expect(turnToolAllowlist([CRM_LIST_COMPANIES_TOOL_ID], undefined, { mode: 'narrow', allowlist: [] })).toEqual([]);
+    expect(turnToolAllowlist([CRM_LIST_COMPANIES_TOOL_ID], undefined, { mode: 'narrow', allowlist: [] }, true)).toEqual([]);
   });
 
   it('the reviewed channel-safe list is the gate: a tool declaring effect "read" but not listed is refused', () => {
     expect(builtinAgentTool(CRM_LIST_COMPANIES_TOOL_ID)?.effect).toBe('read'); // non-vacuity
     expect(CHANNEL_SAFE_READ_TOOLS.has(CRM_LIST_COMPANIES_TOOL_ID)).toBe(false);
-    expect(turnToolAllowlist(undefined, undefined, { mode: 'narrow', allowlist: [CRM_LIST_COMPANIES_TOOL_ID] })).toEqual([]);
+    expect(turnToolAllowlist(undefined, undefined, { mode: 'narrow', allowlist: [CRM_LIST_COMPANIES_TOOL_ID] }, true)).toEqual([]);
   });
 
   it('a listed tool must ALSO be on the agent allowlist, and a listed side-effect tool is still dropped', () => {
@@ -96,7 +96,7 @@ describe('the allowlist a channel turn compiles from', () => {
   });
 
   it('a full (self) turn keeps the agent\'s tools, the workspace read included', () => {
-    const full = turnToolAllowlist([CRM_LIST_COMPANIES_TOOL_ID], undefined, undefined);
+    const full = turnToolAllowlist([CRM_LIST_COMPANIES_TOOL_ID], undefined, undefined, true);
     expect(full).toContain(CRM_LIST_COMPANIES_TOOL_ID);
     expect(full).toContain(KANBAN_ADD_TODO); // the ADR 0315 default-on baseline
   });

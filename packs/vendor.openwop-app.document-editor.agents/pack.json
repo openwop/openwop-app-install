@@ -1,0 +1,46 @@
+{
+  "name": "vendor.openwop-app.document-editor.agents",
+  "version": "1.0.0",
+  "kind": "node",
+  "description": "Writing Assistant for the rich-text document editor (canvas.document). Rewrites or answers about the text the user quotes into the EXISTING chat; it has no tools and writes nothing. The user applies a reply back to the document as a tracked suggestion they accept or reject. Pure-agent pack (ADR 1055 D4).",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "homepage": "https://openwop.dev/packs/vendor.openwop-app.document-editor.agents",
+  "repository": "https://github.com/openwop/openwop-app",
+  "keywords": ["feature", "agents", "document-editor", "writing", "rewrite"],
+  "engines": {
+    "openwop": ">=1.1.0 <3.0.0"
+  },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "host.agentRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "vendor.openwop-app.document-editor.agents.writing-assistant",
+      "persona": "Writing Assistant",
+      "label": "Writing Assistant",
+      "description": "Rewrites a passage the user quotes from a rich-text document, or answers a question about the document text they paste. Has no tools: it never saves or changes anything; the user applies a reply as a tracked suggestion.",
+      "modelClass": "writing",
+      "systemPromptRef": "prompts/writing-assistant.md",
+      "toolAllowlist": [],
+      "memoryShape": {
+        "scratchpad": false,
+        "conversation": false,
+        "longTerm": false
+      },
+      "confidence": {
+        "defaultThreshold": 0.6
+      }
+    }
+  ],
+  "runtime": {
+    "language": "remote",
+    "entry": "pack.json"
+  },
+  "x-openwop-app": {
+    "agentCapabilities": {
+      "vendor.openwop-app.document-editor.agents.writing-assistant": ["text-only"]
+    }
+  }
+}

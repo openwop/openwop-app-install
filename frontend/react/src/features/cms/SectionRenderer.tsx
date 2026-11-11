@@ -387,7 +387,8 @@ const FILM = {
 /** Click-to-play: nothing downloads until asked (`preload="none"`), and a play
  *  button over the poster replaces the native control bar until the film starts
  *  (the bar hides the poster's lower third). The film is narrated, so it carries
- *  an English captions track. A cross-origin <track> needs a CORS read, hence
+ *  an English captions track, on by default (a narrated film is often watched
+ *  muted, and a captioned film with captions off reads as uncaptioned). A cross-origin <track> needs a CORS read, hence
  *  `crossOrigin="anonymous"`: openwop.dev sends Access-Control-Allow-Origin on
  *  /assets/video/** (openwop-site #140).
  *
@@ -458,7 +459,7 @@ function FilmPlayer({ src, poster, captions, length, caption, description, capti
           onPlay={() => { moveFocusToVideo(); setStarted(true); setPlaying(true); }}
           onEnded={() => setPlaying(false)}
         >
-          {captions ? <track kind="captions" srcLang="en" label={t('site:filmCaptionsLabel')} src={captions} /> : null}
+          {captions ? <track kind="captions" srcLang="en" label={t('site:filmCaptionsLabel')} src={captions} default /> : null}
         </video>
         {/* Faded out, the button also leaves the tab order and the a11y tree,
             so it is never an invisible, focusable control — and focus has

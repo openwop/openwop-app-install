@@ -285,6 +285,12 @@
  *      in each watched segment at the last pass; the id is removed, the snapshot kept.
  *    + `eraseJourneyEnrollmentSubject` — `campaign-journeys:enrollment` rows record that
  *      a person went through a journey; deleted (every key shape). Was RECORDED_DEBT.
+ *  +1 (2026-11-03, ADR 1051 D8, feature loop row 83):
+ *    + `eraseCreativeVideoSubject` — `creative-video:job` named its requester,
+ *      submitter and likeness attester with no eraser (it sat in the actor-debt
+ *      ledger). The job is the org's spend and consent record, so it is kept and
+ *      those fields are tombstoned, with the prompt snippet redacted; the new
+ *      `creative-video:likeness-consent` records are deleted.
  */
 /*
  *  +2 (2026-11-03, ADR 1042 D8):
@@ -446,6 +452,8 @@ export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   // ADR 1024 D5.3/D5.4 — segment snapshot members; journey enrollments.
   'eraseSegmentSnapshotSubject',
   'eraseJourneyEnrollmentSubject',
+  // ADR 1051 D8 — video jobs (re-attributed) and likeness-consent records (deleted).
+  'eraseCreativeVideoSubject',
 ]);
 
 /** ADR 1031 P2 — the host manifest plus every composed feature's declared

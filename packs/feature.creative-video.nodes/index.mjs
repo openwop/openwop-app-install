@@ -1,6 +1,8 @@
 /**
  * feature.creative-video.nodes — AI avatar video (ADR 0404 §b). Compose
- * ctx.features['creative-video']. role:"action". Pure-JS, Node-20 stdlib only.
+ * ctx.features['creative-video']. Pure-JS, Node-20 stdlib only. ADR 1051: the
+ * host decides who may spend and what a provider accepts; these nodes pass its
+ * typed refusals through.
  * The generate node's output is the MEDIA ASSET ID (replay returns it, never
  * regenerates); a `pending` result is resolved by the status node.
  */
@@ -18,6 +20,21 @@ function ensureVideo(ctx) {
 
 const str = (v) => (typeof v === 'string' ? v : '');
 
+/**
+ * ADR 1051 — a host refusal (forbidden_scope, likeness_consent_required,
+ * validation_error, host_capability_missing …) becomes the node's typed failure
+ * with the host's own code, never a generic "try again". Anything without a code
+ * is not ours to classify and is rethrown.
+ */
+async function hostCall(fn) {
+  try {
+    return { ok: true, out: await fn() };
+  } catch (err) {
+    if (err && typeof err.code === 'string') return { ok: false, failure: { status: 'failed', error: { code: err.code, message: err.message || err.code } } };
+    throw err;
+  }
+}
+
 export async function generate(ctx) {
   const v = ensureVideo(ctx);
   const i = ctx.inputs ?? {};
@@ -27,7 +44,9 @@ export async function generate(ctx) {
   if (!orgId || !script || !avatarId) {
     return { status: 'failed', error: { code: 'validation_error', message: 'orgId, script, and avatarId are required.' } };
   }
-  const out = await v.generateVideo({ orgId, script, avatarId, ...(str(i.voiceId) ? { voiceId: str(i.voiceId) } : {}) });
+  const r = await hostCall(() => v.generateVideo({ orgId, script, avatarId, ...(str(i.voiceId) ? { voiceId: str(i.voiceId) } : {}) }));
+  if (!r.ok) return r.failure;
+  const out = r.out;
   if (out && out.status === 'failed') {
     return { status: 'failed', error: { code: 'video_generation_failed', message: `Video generation failed: ${out.error || 'unknown'}` }, outputs: out };
   }
@@ -48,7 +67,9 @@ export async function textToVideo(ctx) {
     return { status: 'failed', error: { code: 'validation_error', message: 'orgId and prompt are required.' } };
   }
   const durationSec = typeof i.durationSec === 'number' ? i.durationSec : undefined;
-  const out = await v.textToVideo({ orgId, prompt, ...(str(i.model) ? { model: str(i.model) } : {}), ...(durationSec ? { durationSec } : {}) });
+  const r = await hostCall(() => v.textToVideo({ orgId, prompt, ...(str(i.model) ? { model: str(i.model) } : {}), ...(str(i.ratio) ? { ratio: str(i.ratio) } : {}), ...(durationSec ? { durationSec } : {}) }));
+  if (!r.ok) return r.failure;
+  const out = r.out;
   if (out && out.status === 'failed') {
     return { status: 'failed', error: { code: 'video_generation_failed', message: `Text-to-video failed: ${out.error || 'unknown'}` }, outputs: out };
   }
@@ -75,7 +96,9 @@ export async function imageToVideo(ctx) {
     return { status: 'failed', error: { code: 'validation_error', message: 'orgId, sourceAssetId, and prompt are required.' } };
   }
   const durationSec = typeof i.durationSec === 'number' ? i.durationSec : undefined;
-  const out = await v.imageToVideo({ orgId, sourceAssetId, prompt, ...(str(i.productId) ? { productId: str(i.productId) } : {}), ...(str(i.model) ? { model: str(i.model) } : {}), ...(durationSec ? { durationSec } : {}) });
+  const r = await hostCall(() => v.imageToVideo({ orgId, sourceAssetId, prompt, ...(str(i.productId) ? { productId: str(i.productId) } : {}), ...(str(i.model) ? { model: str(i.model) } : {}), ...(str(i.ratio) ? { ratio: str(i.ratio) } : {}), ...(durationSec ? { durationSec } : {}) }));
+  if (!r.ok) return r.failure;
+  const out = r.out;
   if (out && out.status === 'failed') {
     return { status: 'failed', error: { code: 'video_generation_failed', message: `Image-to-video failed: ${out.error || 'unknown'}` }, outputs: out };
   }

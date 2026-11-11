@@ -324,6 +324,25 @@ group is approved.
     instructions and the conversation. Side-effect tools are never callable on a
     narrow turn, so no one outside can spend or race an approval. Every tool
     still runs as the owner, so it can never read more than the owner could.
+  > **CORRECTED 2026-11-10 (CHAN-F8, user decision "propose and enable") — the list
+  > is no longer empty.** A read-only review enumerated the 140 builtins that pass the
+  > mechanical conditions (effect `read`, builtin, outside the safe-mode baseline, no
+  > classified egress) and read each implementation. Eleven read nothing an outsider
+  > should not see and are listed, each with its note: `schema.lookup` (host-global
+  > registries), `ask-user` (reads nothing), the slides and app-builder catalogs
+  > (constants), `accessibility.check` and `workflow-author.nodes.validate` (grade
+  > only their input), and five pure compute nodes. The other 129 read workspace,
+  > org, owner or conversation data and stay off; `workflow-author.nodes.draft` stays
+  > off because its result names the packs the workspace disabled; four pure tools
+  > stay off because they look broken when run as a chat tool (they need node config
+  > or `ctx.features` the tool path does not pass). Test:
+  > `adr1042-channel-safe-tools.test.ts` (the pin, the notes, and each id still
+  > offered after a real boot). Found by the review, not changed here: the egress
+  > classifier's `core.openwop.http` prefix never matches the agent tool id
+  > `openwop:core.openwop.http.fetch`, so that tool is unclassified and only the
+  > safe-mode baseline keeps it off narrow turns. Classifying it `safe-fetch` would
+  > LOOSEN tenant rules (an unclassified tool counts as the riskiest class), so it is
+  > logged as `CHAN-F16` rather than patched.
   - **No agent memory on a narrow turn** (chosen over refusing memory-bearing
     agents): the exchange passes `suppressRecall`, and the agent's long-term
     knowledge/memory and a granted twin's borrowed recall are not loaded into
@@ -531,6 +550,43 @@ the runIds race, and the fence near-miss variants.
   class as the H2 multi-instance race: turns are serialised per thread only
   within one process. Fix with a compare-and-swap on the thread row, or a
   per-run index keyed by thread.
+  > **CORRECTED 2026-11-10 (CHAN-F3) — the multi-instance group above is closed,
+  > item by item.** Each fix assumes a second instance (or a crash) and holds without
+  > the per-thread in-process chain.
+  > - **H2.** A channel turn now CLAIMS its approvals before the loop runs
+  >   (`claimApprovedToolApprovals`, a compare-and-delete per approved row), and only
+  >   the rows it won are folded into its firewall (`approvalsForTurn` in
+  >   `conversationToolLoop.ts`). Two instances cannot both win one row. When the loop
+  >   returns or throws, the spent claims stay deleted and the rest are handed back
+  >   with `putIfAbsent`, so a fresh ask or a denial written meanwhile wins.
+  >   `spendToolApproval` (spend AFTER the loop) is deleted. Fail-safe by construction:
+  >   while a channel turn holds a claim, another turn on the conversation sees no
+  >   approval and asks again; a crash mid-turn loses the unspent claims (the owner
+  >   approves again), never duplicates one.
+  > - **M4 at queued start.** The turn re-checks the owner's presence when it starts,
+  >   not only when its message arrived; a turn queued behind another runs nothing
+  >   (and drops its pending reply) for an owner removed meanwhile.
+  > - **N3.** Over 10,000 lanes the pending-recording budget evicts the
+  >   least-recently-used lane, one at a time, instead of clearing every lane; a lane
+  >   being flooded stays limited.
+  > - **Detached turn lost.** A failed conversation-run open or a failed exchange is
+  >   retried twice (2 s, then 8 s). The exchange key makes a retry that already landed
+  >   a no-op. A `conflict` "already in progress" means another instance holds this
+  >   very message, so this instance stops without retrying and leaves the pending
+  >   reply to it. After the last retry the turn logs `channel turn unanswered after
+  >   retries` and drops its pending reply. The sender is not told; that would be a
+  >   host-authored message to an outsider, a product decision not made here.
+  > - **runIds race.** Recording a run on its thread is a compare-and-swap
+  >   (`recordThreadRun`), and it never re-creates a thread erasure deleted. A thread's
+  >   first creation is create-if-absent (`createThreadOnce`), so a racing first
+  >   message cannot overwrite runs already recorded.
+  > Tests: `adr1042-multi-instance-races.test.ts` (runIds, N3, retries, M4 at queued
+  > start) and `adr1042-single-use-approvals.test.ts` (claim before use,
+  > `approvalsForTurn`), sabotage-witnessed one edit at a time. Not witnessed by a
+  > test: the two lines in `runConversationAgentToolTurn` that call `approvalsForTurn`
+  > and settle it (no test drives a full chat-lane turn through a gated tool; the
+  > spend wiring it replaces was not witnessed either).
+
 - **N5.** The `channel-ingress:sender-thread` index has no TTL or sweep; it grows
   with every (lane, sender, thread) and is trimmed only by erasure and teardown.
 
@@ -552,6 +608,29 @@ the runIds race, and the fence near-miss variants.
 - **Fence near-miss variants.** `defangAngleFence` handles `<UNTRUSTED` and
   `</UNTRUSTED`; spaced, entity-encoded or full-width variants are not normalised.
   This belongs in one shared helper used by every lane, not a channel-only patch.
+
+  > **CORRECTED 2026-11-10 (CHAN-F4) — closed in the one shared helper, not a
+  > channel patch.** Every lane already reached the fence through
+  > `host/untrustedContent.ts` (the channel lane via `wrapForLLMPrompt`, MCP via
+  > `defangPeerFence`, tool results via `fenceUntrustedBlock`, RFC 0124 via
+  > `promptCompose`), so the fix is in its two matchers. `defangAngleFence` now also
+  > neutralises whitespace before the slash (`< /UNTRUSTED>`), full-width and
+  > small-form brackets, slash and letters, invisible format characters (Unicode Cf:
+  > zero-width space, soft hyphen, bidi marks) between letters, and numeric or named
+  > entity openers and slashes. `defangUntrustedFence` (and `neutralizeUntrusted`,
+  > which now calls it) does the same for `BEGIN`/`END UNTRUSTED CONTENT`. A matched
+  > marker is folded (NFKC, format characters dropped) and keeps its case and
+  > whitespace, so every spelling the old matchers caught produces byte-identical
+  > output, and a defanged string defangs to itself. Entity openers are NOT live
+  > markers: `&lt;` is the house's own defanged form, so they are only folded to it.
+  > A new `hasUntrustedFenceMarker` is the shared detector for lanes that must refuse
+  > a marker rather than defang it; it flags live openers only, so it never flags
+  > defanged output. `kb/contextualEnrichment` uses it for the model-echo check. The
+  > classifiers in `job-search` (`inboxClassification`, `screening`) keep their own
+  > patterns: they flag SYSTEM/INSTRUCTIONS markup too, a different job from fencing.
+  > Test: `src/host/__tests__/defangAngleFence.test.ts` (CHAN-F4 block), sabotage-
+  > witnessed: with the old matcher bodies, 13 near-miss and channel-lane cases go
+  > red and the compatibility and benign cases stay green.
 
 - Broker membership re-check for NON-channel lanes (owner: f2). The broker
   re-checks a removed member only for org-shared connections; a personal or

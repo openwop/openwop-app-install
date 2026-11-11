@@ -67,10 +67,10 @@ export interface GovernancePolicy {
     sttBytes?: number;
     /** ADR 0401 P4 — daily image-generation count (0 = uncapped for the org). */
     images?: number;
-    /** ADR 0411 P2 — daily video-generation job count (0 = uncapped for the org).
-     *  `resolveBudget` already reads this override key; the governance route now
-     *  lets it be SET (previously unsettable — read-with-no-writer). */
-    videoJobs?: number;
+    /** ADR 0411 P2 — daily video-generation units for the org. ADR 1051: `0`
+     *  DISABLES paid video for the org and uncapped is the explicit
+     *  `'unlimited'` (it used to be `0 = uncapped`, the foot-gun D3 retires). */
+    videoJobs?: number | 'unlimited';
   };
   /** Campaign gap plan §5B B3 — ad-spend governance. When
    *  `approvalThresholdMinor` is set, a LIVE ad dispatch or budget-set at/above

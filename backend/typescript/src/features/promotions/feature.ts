@@ -47,7 +47,9 @@ export const promotionsFeature: BackendFeature = {
       await erasePromotionSubject(tenantId, subjectKey);
     });
   },
-  surface: { id: 'promotions', build: buildPromotionsSurface },
+  // ADR 1025 D3 — the write needs what its HTTP door and chat tool need; the ADR 0832
+  // default floor is membership (workspace:read), which let a Viewer-acting run write.
+  surface: { id: 'promotions', build: buildPromotionsSurface, orgPolicy: { methodScopes: { create: 'workspace:write' } } },
   toggleDefault: {
     id: 'promotions',
     label: 'Promotions',

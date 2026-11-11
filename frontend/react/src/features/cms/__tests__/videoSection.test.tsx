@@ -65,6 +65,8 @@ describe('video section — public render', () => {
     expect(track.getAttribute('kind')).toBe('captions');
     expect(track.getAttribute('srclang')).toBe('en');
     expect(track.getAttribute('src')).toBe(DATA.captions);
+    // Captions show by default: the film is narrated and often watched muted.
+    expect(track.hasAttribute('default')).toBe(true);
   });
 
   it('describes the video with the screen-reader-only description; the title is the visible caption', () => {

@@ -81,7 +81,7 @@ export function registerFunnelsFormsSink(): void {
           ...(served?.experiment ? { experiment: served.experiment } : {}),
           ...(submission.meta.utm && Object.keys(submission.meta.utm).length ? { utm: submission.meta.utm } : {}),
           source: 'form-submit', // distinguishes sink-emitted completions from /next
-        });
+        }, undefined, { source: 'first-party' }); // ADR 1024 D4.2 — gated above by the visitor decision
         // GC-FRM-4 — attribution throughput is log-visible (the capture side
         // logs submission_captured; this is the funnel-side confirmation).
         log.info('attribution_emitted', { tenantId: submission.tenantId, funnelId: funnel.funnelId, stepId: step.stepId, consented: visitor !== '' });

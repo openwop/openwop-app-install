@@ -350,6 +350,38 @@ legacy id matches nothing.
 > **UPDATED 2026-11-05.** Shipped in #5593, MERGED as 6c4e6bc36 (train 383) and
 > LIVE in rev 01155-9w6, with the user's approval of the deploy consequences. The
 > rewrite-then-delete cure above is still open as TODO `CHAN-F14`.
+>
+> **UPDATED 2026-11-10 (CHAN-F14, user decision "you build it and run it in
+> prod") — the rewrite is built; the legacy rule is deleted only after it has
+> run.** `host/legacyBearerIdRewrite.ts`, run as the background app job
+> `legacy-bearer-id-rewrite` inside the deployed backend (it needs the configured
+> keys, which nobody reads by hand). `OPENWOP_LEGACY_BEARER_REWRITE=report` logs
+> the counts (`legacy_bearer_rewrite`) and writes nothing; `apply` rewrites and
+> marks the job done when no row conflicted and nothing failed. Unset, it does
+> nothing. Only prefixes exactly ONE configured key holds are mapped; an
+> ambiguous prefix is counted and left.
+>
+> Rewritten: every string value equal to a mapped id in every registered
+> `hostext:` collection and its `hostextidx:` markers (delegation `createdBy`,
+> scheduled jobs and chats, owner-of-record fields), each row by compare-and-swap;
+> org member subjects through `rekeyMemberSubject`; `actingUserId` of runs that
+> carry an owner stamp. Left, and counted: audit-like collections (what was
+> recorded stays recorded); run owner stamps, and `actingUserId` of UNSTAMPED runs,
+> whose owner block derives from it and was echoed in the persisted `run.started`
+> (a rewrite would make the snapshot disagree with the event log); object keys and
+> row ids containing a legacy id; legacy ids no unique prefix accounts for. Ids are
+> never logged: a legacy id is eight characters of a key.
+>
+> **The residual this cannot remove.** The rewrite attributes a legacy record to
+> the unique holder of its prefix AT THE TIME OF THE RUN. A record minted by a key
+> removed earlier, whose prefix a surviving key holds alone, is attributed to the
+> survivor permanently. That is the ADR's own cure ("for prefixes unique among
+> the configured keys at rewrite time"); the report's counts are what the operator
+> reads before choosing `apply`.
+>
+> Order: merge, deploy, `report`, read the counts, `apply`, then a follow-up PR
+> deletes the legacy branch of `isConfiguredEnvKeyIssuer` and removes the job.
+> Test: `test/adr1045-legacy-bearer-rewrite.test.ts`.
 
 **What a principal-id change does to stored state (inventory, nothing
 rewritten).** The id an env key presents changes once, at deploy. Rotation

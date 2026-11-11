@@ -41,7 +41,7 @@ describe('voice-offered tool SET == chat-compiled tool SET (XCH-VOICE-1)', () =>
     const agent = getAgentRegistry().get('probe.setparity.agent');
     expect(agent).toBeTruthy();
     const { resolveTool } = createAgentToolProvider({ tenantId: 'default' });
-    const chatCompiled = compileAgentTools(agent!, builtinAgentToolIds(), resolveTool, effectiveToolAllowlist(agent!.toolAllowlist, undefined));
+    const chatCompiled = compileAgentTools(agent!, builtinAgentToolIds(), resolveTool, effectiveToolAllowlist(agent!.toolAllowlist, undefined, true));
     const chatNames = chatCompiled.map((t) => sanitizeToolName(t.def.name)).sort();
     const voiceNames = (await resolveAgentToolDecls('default', 'probe.setparity.agent')).map((d) => d.name).sort();
     expect(voiceNames).toEqual(chatNames);

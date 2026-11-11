@@ -17,6 +17,11 @@ export const documentEditorFeature: BackendFeature = {
   registerRoutes: (deps) => {
     registerDocumentEditorRoutes(deps);
   },
+  requiredPacks: [
+    // 1.0.0 = ADR 1055 D4: the Writing Assistant, the editor's chat target. No
+    // tools, so model output reaches the document only through Apply.
+    'vendor.openwop-app.document-editor.agents',
+  ],
   // ONE toggle per canvas type (ADR 0319). Default OFF — a new editor surface
   // plus a new engine dependency, gated rollout (ADR 0334 §Feature matrix).
   toggleDefault: {

@@ -544,9 +544,9 @@ export async function recordConsent(input: { tenantId: string; subjectKey: strin
  * chokepoint. Fails closed on an unknown purpose. NOT a second evaluator — a thin
  * purpose→category adapter over existing consent enforcement.
  */
-export async function isPermittedForPurpose(tenantId: string, subjectKey: string, purpose: string): Promise<boolean> {
+export async function isPermittedForPurpose(tenantId: string, subjectKey: string, purpose: string, opts?: { quietDenial?: true }): Promise<boolean> {
   if (!isPurpose(purpose)) return false; // fail closed on an unknown purpose
-  return isAllowed(tenantId, subjectKey, PURPOSE_TO_CATEGORY[purpose]);
+  return isAllowed(tenantId, subjectKey, PURPOSE_TO_CATEGORY[purpose], opts);
 }
 
 export async function getConsent(tenantId: string, subjectKey: string): Promise<ConsentRecord | null> {
@@ -1090,7 +1090,7 @@ export function visitorDefaultRegime(policy: ConsentPolicy | null, region: Visit
  * including the consent-toggle-off permissive return — and only ever turns an allow into
  * a deny: a topic can never widen consent.
  */
-export async function isAllowed(tenantId: string, subjectKey: string, category: ConsentCategory, opts?: { visitor?: VisitorDecisionContext; topic?: { orgId: string; topicId: string }; client?: { orgId: string } }): Promise<boolean> {
+export async function isAllowed(tenantId: string, subjectKey: string, category: ConsentCategory, opts?: { visitor?: VisitorDecisionContext; topic?: { orgId: string; topicId: string }; client?: { orgId: string }; quietDenial?: true }): Promise<boolean> {
   const base = opts?.client && category === 'marketing.sms'
     ? await isAllowedForClient(tenantId, subjectKey, 'sms', opts.client.orgId)
     : await isAllowedBase(tenantId, subjectKey, category, opts);
@@ -1124,7 +1124,10 @@ export async function recordClientChannelConsent(input: { tenantId: string; orgI
   await setClientChannelGrant(input, assertNotErased);
 }
 
-async function isAllowedBase(tenantId: string, subjectKey: string, category: ConsentCategory, opts?: { visitor?: VisitorDecisionContext }): Promise<boolean> {
+/** `quietDenial` (ADR 1024, `CDP2WF-30`): the CALLER records denials itself, rolled up per
+ *  window — for a hot ingest path where one durable audit row per refused event would let
+ *  one busy SDK fill the shared, unpurged `audit_log`. The log line is still written. */
+async function isAllowedBase(tenantId: string, subjectKey: string, category: ConsentCategory, opts?: { visitor?: VisitorDecisionContext; quietDenial?: true }): Promise<boolean> {
   if (category === 'necessary') return true;
   // ADR 0394 — strict explicit-opt-in categories (WhatsApp): ONLY a recorded
   // explicit `true` for the specific channel permits. No umbrella fallback, no
@@ -1202,10 +1205,12 @@ async function isAllowedBase(tenantId: string, subjectKey: string, category: Con
     // (whatsappService -> isPermittedForPurpose), CRM contactIds (email,
     // journeys, audiences), and unauthenticated caller-supplied session/visitor
     // keys (the analytics beacon, public form submits, pixels/conversions).
-    void recordGovernanceDecision({
-      tenantId, kind: 'consent', outcome: 'deny', subject: hashSubjectKey(tenantId, subjectKey),
-      reason: `category:${category}`, detail: { basis },
-    });
+    if (!opts?.quietDenial) {
+      void recordGovernanceDecision({
+        tenantId, kind: 'consent', outcome: 'deny', subject: hashSubjectKey(tenantId, subjectKey),
+        reason: `category:${category}`, detail: { basis },
+      });
+    }
   }
   return allowed;
 }

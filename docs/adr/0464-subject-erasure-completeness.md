@@ -321,7 +321,8 @@ classification lives. Either (a) the central registries in the test, as today,
 or (b) self-classification beside each feature's eraser (a
 `FeatureRatchetDeclarations` field, the ADR 1031 P2 pattern), which an adopter's
 package would carry with it. P1 uses (a) only because the existing census does;
-the baseline moves either way.
+the baseline moves either way. *(SETTLED 2026-11-10: the ADR 1031 union of both;
+see "Both open decisions settled" at the end of this section.)*
 
 **P2 wave 1 (2026-11-09): 31 reviewed, baseline 252 → 221 (ceiling 221).** Each
 was read at its declaration: the row type with its nested types, and the key
@@ -351,3 +352,69 @@ does), then the person-bearing stores, feature by feature against each
 actor ledger at once and break `ACTOR_DEBT_CEILING`, so it is a measured change
 of its own. Should `declarePiiFields` feed the census? That question joins the open
 decision above.
+
+**Both open decisions settled, 2026-11-10 (1a, on the user's instruction to decide
+from research, a UX review and an architect pass, then implement).** The reasoning
+is kept here so a later reader can overturn it with evidence rather than taste.
+
+*D1 — where a classification lives: the ADR 1031 union, not a migration.*
+First-party reviews stay in the host table (`SIGNAL_FREE_REVIEWED`). A feature
+package MAY carry its own in `<feature>/ratchetDeclarations.ts`
+(`subjectErasureSignalFreeReviewed`, a new `FeatureRatchetDeclarations` field). The
+census runs the same assertions over host table ∪ declared, exactly as ADR 1031 P2
+specified for every exception table, and a namespace in both fails. A declared
+entry may name only a store in its OWN package's directory.
+
+- *Why not (a) alone:* an adopter cannot edit an upstream test, so an adopter
+  package with a signal-free store had no way to say "reviewed".
+- *Why not (b), moving all first-party rows into ~100 per-feature files:* zero
+  first-party `ratchetDeclarations.ts` exist today, so it is pure churn. It would
+  split one reviewable list (and its git history) across directories, and it is
+  the opposite of what every other ratchet here does. The union keeps the one
+  pattern.
+- *UX, for the contributor who adds a store:* the red message now names both
+  homes and says that a `declarePiiFields` call already classifies the row. A
+  double entry reds and names both places. A foreign-package review reds with
+  "a package reviews only its own stores".
+- *Deferred, at a real gate:* extending the denominator itself to
+  `src/adopter/features`. Today it is first-party only (P1), so an adopter's
+  signal-free store is still unchecked. Turning it on reds every existing
+  unclassified store in every adopter tree on their next sync, which is a
+  cross-repo rollout (KickTodo, Book AI) needing notice and an adopter-side
+  baseline. It is not a host-only PR. The field this change adds is the
+  prerequisite.
+
+*D2 — `declarePiiFields` feeds the census: yes, for store namespaces.* A
+declaration is the owner stating in code that the row holds personal data. That
+is a stronger claim than any field-name regex here, and until now no erasure gate
+read it. MEASURED: 60 declared entities outside tests. 22 are store namespaces (21
+literals plus csm's `CSM_STORE` constant) and 38 are dotted log-mask labels
+(`kb.document`) that name no store and cannot join. **8 of the 221 unreviewed
+baseline stores declared PII**, and each is reached by its feature's real eraser,
+checked by reading it: `channel-ingress:pending` and `:sender-thread` (deleted),
+`crm:lead-model-active` (`activatedBy` redacted), `crm:lead-sla-settings` (via
+`eraseSlaSettingsSubjects`), `crm:merge-event` and `crm:signature-record` (both
+named in `crm/erasure.ts`), `documents:version` and `proposals`. They now enter the
+census as `topic` stores, classified COVERED. **Baseline 221 → 213 (ceiling 213).**
+The older pin that `crm:signature-record` and `crm:merge-event` were invisible is
+corrected in place: no FIELD signal sees them, and the declaration does.
+
+Three new checks:
+- A store-shaped entity that names no store reds (a typo or a removed store).
+- A reviewed store that declares PII reds.
+- The non-vacuous witness, `crm:lead-sla-settings`, is seen only through its
+  declaration.
+
+Sabotage-witnessed, each red, each restored:
+- Dropping that declaration reds the denominator and D2.
+- Misspelling its entity reds both.
+- Reviewing it in a package declaration reds the review guards (`updatedBy`, and
+  the PII declaration).
+- Declaring `env:settings` and `crm:pipeline` from `features/environments` reds
+  the double claim.
+- Declaring `crm:booking-link-slug` there reds the ownership check.
+
+Research note: practitioner GDPR guidance treats the data map as one versioned
+inventory, updated when a field is added, that erasure must cascade through. Two
+inventories that disagree (a PII registry no erasure gate reads) is the failure
+D2 removes.

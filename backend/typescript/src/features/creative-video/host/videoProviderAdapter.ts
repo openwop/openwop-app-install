@@ -13,6 +13,10 @@
 
 import { brokeredPost, brokeredFetch, type BrokeredEgressDeps } from '../../../host/brokeredEgress.js';
 import { guardedEgressFetch } from '../../../host/webhookEgressGuard.js';
+import { connectionExists } from '../../connections/connectionsService.js';
+import { createLogger } from '../../../observability/logger.js';
+
+const log = createLogger('creative-video.adapter');
 
 const HEYGEN_PROVIDER = 'heygen';
 /** ~200 MiB cap on a downloaded video (video is large; still bounded). */
@@ -93,6 +97,8 @@ export interface SubmitJobInput {
   model?: string;
   /** Requested clip length in seconds (t2v). */
   durationSec?: number;
+  /** ADR 1051 D2 — the provider's ratio value (t2v/i2v), e.g. `1280:720`. */
+  ratio?: string;
   /** ADR 0945 D7 — the still to animate, as a data URI (image→video). */
   promptImage?: string;
   width?: number;
@@ -100,15 +106,61 @@ export interface SubmitJobInput {
 }
 export type AdapterResult<T> = { ok: true; value: T } | { ok: false; error: string };
 
+/**
+ * ADR 1051 D10 — the connection a job was submitted with, and the person it
+ * belongs to. Polling pins exactly that connection as that person, so a reader
+ * who polls never advances a job with their own key (or fails to find the
+ * writer's personal one).
+ */
+export interface VideoConnectionPin { connectionId: string; actingUserId?: string }
+
 export interface VideoAdapter {
-  submitJob(input: SubmitJobInput): Promise<AdapterResult<{ providerJobId: string }>>;
+  /** ADR 1051 D7 — would a submit find an authorized connection? Selection and
+   *  the `connections:use` gate only: no decrypt, no egress. */
+  hasConnection(): Promise<boolean>;
+  /** `connectionId` is the broker's provenance for the credential used. */
+  submitJob(input: SubmitJobInput): Promise<AdapterResult<{ providerJobId: string; connectionId?: string }>>;
   pollJob(providerJobId: string): Promise<AdapterResult<{ status: JobStatus; resultUrl?: string; durationSec?: number }>>;
   downloadResult(resultUrl: string): Promise<AdapterResult<{ base64: string; bytes: number; contentType: string }>>;
 }
 
-export function makeVideoAdapter(deps: BrokeredEgressDeps): VideoAdapter {
+/**
+ * ADR 1051 D6 — did the provider PROVABLY not take a submit? Only then may the
+ * job be retried and its reservation released. A refusal before the dial
+ * (`no_connection`, `insecure_base`, `egress_refused`) or a 4xx the provider sent
+ * back (other than 408/409/429, which can follow an accepted request) is proof.
+ * Everything else — a reset or timeout after send (`request_failed`), any 5xx, a
+ * 2xx without a job id — is UNCONFIRMED: the provider may be rendering, and
+ * charging for, the job.
+ */
+export function submitProvablyRefused(error: string): boolean {
+  if (error === 'no_connection' || error === 'insecure_base' || error === 'egress_refused') return true;
+  if (error.startsWith('t2v_invalid_')) return true; // refused by the model table, pre-dial
+  const m = /_(\d{3})$/.exec(error);
+  if (!m) return false;
+  const status = Number(m[1]);
+  return status >= 400 && status < 500 && status !== 408 && status !== 409 && status !== 429;
+}
+
+/** `brokeredPost` throws only BEFORE it dials (the effect gate, the tenant egress
+ *  firewall), so a throw is a provable refusal, typed as `egress_refused`. */
+export async function postBeforeDialSafe<T>(fn: () => Promise<T>): Promise<T | { outcome: 'egress_refused' }> {
+  try { return await fn(); } catch (err) {
+    // CV83CD-7 — say which gate refused (the replay effect gate, the tenant egress
+    // firewall), so an operator can tell them apart from a missing connection.
+    log.warn('video submit refused before the dial', { code: (err as { code?: unknown })?.code ?? null, error: err instanceof Error ? err.message : String(err) });
+    return { outcome: 'egress_refused' };
+  }
+}
+
+export function makeVideoAdapter(deps: BrokeredEgressDeps, pin?: VideoConnectionPin): VideoAdapter {
   const apiKeyHeader = { authScheme: 'raw' as const, authHeaderName: 'x-api-key' };
+  const pollDeps: BrokeredEgressDeps = pin ? { ...deps, ...(pin.actingUserId ? { actingUserId: pin.actingUserId } : {}) } : deps;
   return {
+    async hasConnection() {
+      return connectionExists({ tenantId: deps.tenantId, provider: HEYGEN_PROVIDER, ...(deps.actingUserId ? { actingUserId: deps.actingUserId } : {}), ...(deps.orgId ? { orgId: deps.orgId } : {}) });
+    },
+
     async submitJob(input) {
       const body = JSON.stringify({
         video_inputs: [{
@@ -117,7 +169,7 @@ export function makeVideoAdapter(deps: BrokeredEgressDeps): VideoAdapter {
         }],
         dimension: { width: input.width ?? 1280, height: input.height ?? 720 },
       });
-      const out = await brokeredPost(deps, { provider: HEYGEN_PROVIDER, url: `${heygenApiBase()}/v2/video/generate`, body, ...apiKeyHeader });
+      const out = await postBeforeDialSafe(() => brokeredPost(deps, { provider: HEYGEN_PROVIDER, url: `${heygenApiBase()}/v2/video/generate`, body, ...apiKeyHeader }));
       if (out.outcome !== 'sent') return { ok: false, error: out.outcome };
       let json: Record<string, unknown> = {};
       try { json = (await out.res.json()) as Record<string, unknown>; } catch { /* {} */ }
@@ -125,11 +177,11 @@ export function makeVideoAdapter(deps: BrokeredEgressDeps): VideoAdapter {
       const data = (json.data ?? {}) as Record<string, unknown>;
       const providerJobId = typeof data.video_id === 'string' ? data.video_id : '';
       if (!providerJobId) return { ok: false, error: 'heygen_no_job_id' };
-      return { ok: true, value: { providerJobId } };
+      return { ok: true, value: { providerJobId, connectionId: out.provenance.connectionId } };
     },
 
     async pollJob(providerJobId) {
-      const out = await brokeredFetch(deps, { provider: HEYGEN_PROVIDER, url: `${heygenApiBase()}/v1/video_status.get?video_id=${encodeURIComponent(providerJobId)}`, method: 'GET', ...apiKeyHeader });
+      const out = await brokeredFetch(pollDeps, { provider: HEYGEN_PROVIDER, url: `${heygenApiBase()}/v1/video_status.get?video_id=${encodeURIComponent(providerJobId)}`, method: 'GET', ...apiKeyHeader, ...(pin ? { connectionId: pin.connectionId } : {}) });
       if (out.outcome !== 'sent') return { ok: false, error: out.outcome };
       let json: Record<string, unknown> = {};
       try { json = (await out.res.json()) as Record<string, unknown>; } catch { /* {} */ }

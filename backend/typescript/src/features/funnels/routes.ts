@@ -98,7 +98,7 @@ async function emitStepEvent(
       ...(step.experiment ? { experiment: step.experiment } : {}),
       ...(Object.keys(utm).length ? { utm } : {}),
       ...(outcome ? { outcome } : {}),
-    });
+    }, undefined, { source: 'first-party' }); // ADR 1024 D4.2 — gated above by consentedVisitor
   } catch (err) {
     log.warn('funnel_step_event_failed', { eventType, funnelId: funnel.funnelId, err: err instanceof Error ? err.message : String(err) });
   }

@@ -21,7 +21,14 @@ export interface Collection {
   type: 'manual' | 'dynamic'; productIds?: string[]; rule?: { categories?: string[]; tags?: string[]; minPrice?: number; maxPrice?: number };
   active: boolean; createdAt: string;
 }
-export interface MerchRule { ruleId: string; orgId: string; name: string; scope: string; actions: unknown[]; holdoutPct?: number; active: boolean }
+/** A facet predicate as the server stores it (ADR 0275). */
+export interface FacetPredicate { categories?: string[]; tags?: string[]; minPrice?: number; maxPrice?: number; currency?: string }
+export type MerchAction =
+  | { kind: 'pin'; productId: string; position: number }
+  | { kind: 'boost'; predicate: FacetPredicate; factor: number }
+  | { kind: 'bury' | 'hide'; predicate: FacetPredicate };
+/** `proposed` (ADR 1025) — an agent created it and no person has activated it yet. */
+export interface MerchRule { ruleId: string; orgId: string; name: string; scope: string; actions: MerchAction[]; holdoutPct?: number; active: boolean; proposed?: true }
 export interface SearchProduct { productId: string; name: string; price: number; currency: string }
 export interface Facet {
   key: string; label: string;
@@ -59,11 +66,19 @@ export async function createCollection(orgId: string, input: { name: string; typ
 export async function deleteCollection(orgId: string, collectionId: string): Promise<void> {
   await parse<{ ok: boolean }>(await fetch(`${base}/orgs/${orgId}/collections/${collectionId}`, fetchOpts({ method: 'DELETE', headers: authedHeaders() })));
 }
+/** ADR 1025 D8 — a paused collection resolves empty on every search lane, public included. */
+export async function setCollectionActive(orgId: string, collectionId: string, active: boolean): Promise<Collection> {
+  return (await parse<{ collection: Collection }>(await fetch(`${base}/orgs/${orgId}/collections/${collectionId}`, fetchOpts({ method: 'PATCH', headers: jsonHeaders(), body: JSON.stringify({ active }) })))).collection;
+}
 export async function listRules(orgId: string): Promise<MerchRule[]> {
   return (await parse<{ rules: MerchRule[] }>(await fetch(`${base}/orgs/${orgId}/rules`, fetchOpts({ headers: authedHeaders() })))).rules;
 }
 export async function createRule(orgId: string, input: { name: string; scope: string; actions: unknown[]; holdoutPct?: number }): Promise<MerchRule> {
   return (await parse<{ rule: MerchRule }>(await fetch(`${base}/orgs/${orgId}/rules`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify(input) })))).rule;
+}
+/** ADR 1025 D5 — activate an agent's proposal, or pause a live rule without losing it. */
+export async function setRuleActive(orgId: string, ruleId: string, active: boolean): Promise<MerchRule> {
+  return (await parse<{ rule: MerchRule }>(await fetch(`${base}/orgs/${orgId}/rules/${ruleId}`, fetchOpts({ method: 'PATCH', headers: jsonHeaders(), body: JSON.stringify({ active }) })))).rule;
 }
 export async function deleteRule(orgId: string, ruleId: string): Promise<void> {
   await parse<{ ok: boolean }>(await fetch(`${base}/orgs/${orgId}/rules/${ruleId}`, fetchOpts({ method: 'DELETE', headers: authedHeaders() })));

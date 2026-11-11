@@ -82,7 +82,7 @@ beforeEach(() => {
   for (const m of [listOrgs, listPromotions, createPromotion, updatePromotion, deletePromotion, useFeatureAccess]) m.mockReset();
   useFeatureAccess.mockReturnValue(makeFeatureAccess({ enabled: true, loading: false }));
   listOrgs.mockResolvedValue([ORG]);
-  listPromotions.mockResolvedValue({ promotions: [PROMO], usage: {} });
+  listPromotions.mockResolvedValue({ promotions: [PROMO], usage: {}, needsCurrency: [] });
 });
 
 describe('a failed store read is not an empty store list', () => {
@@ -158,7 +158,7 @@ describe('a failed promotions read does not instruct beside its own error', () =
   it('a store that genuinely has none still gets the instruction', async () => {
     // The failure mode of this fix: a real empty store with no way to learn what
     // a promotion even is.
-    listPromotions.mockResolvedValue({ promotions: [], usage: {} });
+    listPromotions.mockResolvedValue({ promotions: [], usage: {}, needsCurrency: [] });
     await mount();
     expect(document.body.textContent).toContain('No promotions yet');
     expect(document.body.textContent).not.toContain('Could not load promotions');
@@ -216,7 +216,7 @@ describe('promotions — no organization, no write (ORG-HON-2)', () => {
   it('positive control: with a store the same gesture DOES create a promotion', async () => {
     // Without this, the assertions above would also pass if the form were broken
     // for everyone — a different bug wearing the same green.
-    listPromotions.mockResolvedValue({ promotions: [], usage: {} });
+    listPromotions.mockResolvedValue({ promotions: [], usage: {}, needsCurrency: [] });
     createPromotion.mockResolvedValue(PROMO);
     await mount();
     await attemptCreatePromotion();

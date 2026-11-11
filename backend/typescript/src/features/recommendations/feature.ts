@@ -22,7 +22,8 @@ export const recommendationsFeature: BackendFeature = {
     registerRecommendationsAgentTools();
     startRecoAffinitySweep();
   },
-  surface: { id: 'recommendations', build: buildRecommendationsSurface },
+  // ADR 1025 D3 — the write needs workspace:write (the ADR 0832 floor is membership only).
+  surface: { id: 'recommendations', build: buildRecommendationsSurface, orgPolicy: { methodScopes: { upsertPlacement: 'workspace:write' } } },
   toggleDefault: {
     id: 'recommendations',
     label: 'Recommendations',

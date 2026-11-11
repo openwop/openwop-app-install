@@ -11,7 +11,8 @@
  */
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { surfaceStr as str, type FeatureSurface } from '../../host/featureSurfaces.js';
-import { listPromotions, createPromotion, applyPromotionsUngated } from './promotionsService.js';
+import { OpenwopError } from '../../types.js';
+import { listPromotions, createPromotion, previewPromotions, needsCurrency } from './promotionsService.js';
 
 const INTERNAL = new Set(['tenantId', 'createdBy']);
 function project(o: object): Record<string, unknown> {
@@ -24,23 +25,30 @@ export function buildPromotionsSurface(scope: BundleScope): FeatureSurface {
   const tenantId = scope.tenantId;
   return {
     listActive: async (args) => ({
-      promotions: (await listPromotions(tenantId, str(args.orgId))).filter((p) => p.active).map(project),
+      // ADR 1025 D4 — a currency-less denominated promotion reads Active and applies to
+      // nothing; say so, or a chain reports it as live.
+      promotions: (await listPromotions(tenantId, str(args.orgId))).filter((p) => p.active)
+        .map((p) => ({ ...project(p), ...(needsCurrency(p) ? { needsCurrency: true } : {}) })),
     }),
     // Preview what the active promotions would discount on a hypothetical cart (read-only).
     applyPreview: async (args) => {
       const items = Array.isArray(args.items) ? (args.items as { productId?: unknown; unitPrice?: unknown; quantity?: unknown }[]).map((i) => ({ productId: String(i?.productId ?? ''), unitPrice: Number(i?.unitPrice ?? 0), quantity: Number(i?.quantity ?? 0) })) : [];
-      const subtotal = items.reduce((s, i) => s + i.unitPrice * i.quantity, 0);
-      const r = await applyPromotionsUngated({ tenantId, orgId: str(args.orgId), currency: str(args.currency) || 'USD', subtotalAfterCoupon: subtotal, items });
-      return { discount: r.discount, appliedPromotions: r.appliedPromotions };
+      const r = await previewPromotions({ tenantId, orgId: str(args.orgId), currency: args.currency, items });
+      return { discount: r.discount, appliedPromotions: r.appliedPromotions, ...(r.notApplying.length ? { notApplying: r.notApplying } : {}) };
     },
-    // WRITE (role:'action') — agent-authored ⇒ PROPOSED (active:false), human activates.
+    // WRITE (role:'side-effect', ADR 1025 D2) — agent-authored ⇒ PROPOSED (active:false),
+    // human activates.
     create: async (args) => {
+      // ADR 1025 D3 — the org floor skips a blank orgId, so the write refuses it here.
+      const orgId = str(args.orgId);
+      if (!orgId) throw new OpenwopError('validation_error', '`orgId` is required.', 400, { field: 'orgId' });
       const promotion = await createPromotion({
-        tenantId, orgId: str(args.orgId), createdBy: 'agent',
+        tenantId, orgId, createdBy: 'agent',
         name: str(args.name), type: args.type, reward: args.reward,
         scope: args.scope, minSpend: args.minSpend, minQuantity: args.minQuantity, bogo: args.bogo, budget: args.budget, segmentId: args.segmentId,
         priority: args.priority,
         active: false, // proposed — never auto-live from a run (money-moving)
+        proposed: true,
         // R2 PRO2-P1 (review B2) — this lane dropped it too.
         currency: args.currency,
       });

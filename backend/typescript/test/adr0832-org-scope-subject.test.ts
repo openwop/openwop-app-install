@@ -181,6 +181,7 @@ describe('never a grant', () => {
       'features/campaign-orchestration/surface.ts', // NARROWS only — getCampaign/attachAssets/finalizeFromBrief scope the ROW's org for the person (runOrgScopeFilter, cause lane by membership); the org-less listCampaigns keeps only those orgs; absent ⇒ tenant-trusted, unchanged
       'features/service-desk/surface.ts', // ADR 0878 D1: NARROWS only — getTicket/notifyTicketTeam floor the ticket's own org via assertRunScopeOrg
       'features/assistant/surface.ts', // ADR 0878 D6: NARROWS only — an org's pending action is listed only to a person who may decide it; the personal-owner exit is the ACTOR's only
+      'features/creative-video/surface.ts', // ADR 1051 D1/D5: NARROWS only — a paid video needs SOME person behind the run (a run with neither actor nor cause is refused), and the causing member is recorded as the job's requester (`createdBy`, so DSAR reaches it); the likeness-consent record is read for the ACTOR only, never the cause (CV83CD-3)
       'features/computer-use/feature.ts', // ADR 0894 D2: NARROWS only — decide/status floor the SESSION's own org via assertRunScopeOrg (404 when refused); decide additionally requires actingUserId === the opener, so a cause never decides
       // ADR 0921 D3 / ADR 0924 D2: NARROWS only — bindRunToClient checks the run's person
       // (actingUserId ?? orgScopeSubject) on the EXACT client org via assertRunOrgScope

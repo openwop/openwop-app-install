@@ -740,6 +740,13 @@ export function recordKanbanWorkItemDelivery(
   addCount('openwop.kanban.work_item.delivery', 1, { mode, outcome });
 }
 
+/* ── tutorials (ADR 0488, TUT-OBS-1) ─────────────────────────────────────── */
+
+/** A tutorial reader served the shipped seed over a stale, un-customized copy. */
+export function recordTutorialStaleSeedServed(reader: 'list' | 'get'): void {
+  addCount('openwop.tutorials.stale_seed_served', 1, { reader });
+}
+
 /* ── HTTP ─────────────────────────────────────────────────────────────────── */
 
 /** `2xx`-style class. Never the raw status: 5 series instead of ~40. */

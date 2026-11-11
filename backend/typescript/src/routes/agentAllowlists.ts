@@ -29,6 +29,7 @@ import {
   DEFAULT_ON_AGENT_TOOL_IDS,
   effectiveToolAllowlist,
   type AgentToolAllowlistOverride,
+  agentOffersToolBaseline,
 } from '../host/agentToolAllowlistService.js';
 
 const BASE = '/host/openwop-app/agent-allowlists/admin';
@@ -133,7 +134,10 @@ export function registerAgentAllowlistRoutes(app: Express): void {
       // filter). Static-core baseline tools (kanban.add-todo, ai.research.web)
       // are always present.
       const registered = new Set(toolCatalog);
-      const baseline = DEFAULT_ON_AGENT_TOOL_IDS.filter((id) => registered.has(id));
+      // ADR 1055 D4 — a `text-only` agent is offered no baseline, so the panel
+      // must not tag tools it never gets as "default-on" (DE87CD-8).
+      const offersBaseline = await agentOffersToolBaseline(tenantOf(req), agent);
+      const baseline = offersBaseline ? DEFAULT_ON_AGENT_TOOL_IDS.filter((id) => registered.has(id)) : [];
       res.json({
         agentId: agent.agentId,
         label: agent.label ?? agent.agentId,
@@ -147,7 +151,7 @@ export function registerAgentAllowlistRoutes(app: Express): void {
         // full-replace save can't silently strip them. `baseline` lets the UI
         // tag them "default-on" (and warn that saving pins the agent).
         baseline,
-        effective: effectiveToolAllowlist(manifestAllowlist, override?.toolAllowlist),
+        effective: effectiveToolAllowlist(manifestAllowlist, override?.toolAllowlist, offersBaseline),
         toolCatalog,
       });
     } catch (err) { next(err); }

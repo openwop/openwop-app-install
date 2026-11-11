@@ -663,6 +663,30 @@ a platform handle) of the person a relay or connector talked to. Decisions, all 
 
 - Outbound queued for a device that never returns stays until revoke. A retention
   sweep for undelivered egress older than the token's lifetime is not in this phase.
+
+  > **CORRECTED 2026-11-10 (CHAN-F12) — closed.** `messaging/outboundRetention.ts`
+  > registers a `relay-outbound` default-window sweep on the retention daemon's
+  > default-on half. It deletes egress enqueued more than the device token's
+  > lifetime (30 days, one constant shared with the routes that mint tokens) ago.
+  > That window is exact: a device gets a fresh token only while online, so one last
+  > online at `t0` holds a token that expires by `t0 + TTL`, and any egress
+  > enqueued after `t0` has no reader once it is older than the TTL (`relay setup`
+  > registers a new relay id with a new queue). The sweep skips tenants under legal
+  > hold (through the row's device), clears each egress's attempt counter, and logs
+  > it `failed` with detail `expired`, as a dead-lettered egress is logged. A row
+  > whose device is already gone is deleted with no log row. Storage method:
+  > `pruneRelayOutbound` in both adapters (postgres: one `DELETE … RETURNING`
+  > statement). Tests: `adr1043-relay-outbound-retention.test.ts` (both backends)
+  > and `adr1043-relay-delivery-log-lifecycle.test.ts` case (g) (boot
+  > registration).
+  >
+  > **Still open (new, `RELAY-OUTBOUND-ERASURE-1`):** `relay_outbound` rows carry
+  > the recipient's chat id and the reply text but have no `tenant_id` column, so
+  > the SQL-table erasure ratchet keeps the table on its pre-existing unclassified
+  > list. Classifying it ERASED needs a migration adding `tenant_id` (backfilled
+  > from `relay_devices`) and an exact-id contact eraser. Until then a queued reply
+  > to an erased contact lives until it is delivered, revoked, or aged out (at most
+  > 30 days).
 - Presence and the per-device budget are per instance where they are in-process;
   presence is durable, the budget is not (ADR 1042 D6).
 - The desktop app (P7) will host the relay and replace the launchd and systemd

@@ -54,19 +54,19 @@ const view = async (): Promise<void> => {
 
 beforeEach(() => {
   listPromotions.mockReset();
-  listPromotions.mockResolvedValue({ promotions: [promo()], usage: {} });
+  listPromotions.mockResolvedValue({ promotions: [promo()], usage: {}, needsCurrency: [] });
 });
 afterEach(cleanup);
 
 describe('PRO-G1: the list shows when a promotion fires and what it can cost', () => {
   it('shows the cart threshold', async () => {
-    listPromotions.mockResolvedValue({ promotions: [promo({ minSpend: 50 })], usage: {} });
+    listPromotions.mockResolvedValue({ promotions: [promo({ minSpend: 50 })], usage: {}, needsCurrency: [] });
     await view();
     expect(await screen.findByText(/min spend 50/i)).toBeTruthy();
   });
 
   it('shows the loss budget on a loss-leader', async () => {
-    listPromotions.mockResolvedValue({ promotions: [promo({ type: 'loss_leader', budget: { maxDiscount: 500 } })], usage: {} });
+    listPromotions.mockResolvedValue({ promotions: [promo({ type: 'loss_leader', budget: { maxDiscount: 500 } })], usage: {}, needsCurrency: [] });
     await view();
     expect(await screen.findByText(/loss budget 500/i)).toBeTruthy();
   });
@@ -75,7 +75,7 @@ describe('PRO-G1: the list shows when a promotion fires and what it can cost', (
     listPromotions.mockResolvedValue({ promotions: [
       promo({ promotionId: 'a', name: 'Tier A', minSpend: 50 }),
       promo({ promotionId: 'b', name: 'Tier B', minSpend: 200 }),
-    ], usage: {} });
+    ], usage: {}, needsCurrency: [] });
     await view();
     // Previously both rows read identically.
     expect(await screen.findByText(/min spend 50/i)).toBeTruthy();
@@ -88,7 +88,7 @@ describe('PRO-G1: the list shows when a promotion fires and what it can cost', (
   });
 
   it('shows a segment target when one is set', async () => {
-    listPromotions.mockResolvedValue({ promotions: [promo({ segmentId: 'seg-vip' })], usage: {} });
+    listPromotions.mockResolvedValue({ promotions: [promo({ segmentId: 'seg-vip' })], usage: {}, needsCurrency: [] });
     await view();
     expect(await screen.findByText(/segment seg-vip/i)).toBeTruthy();
   });
@@ -101,7 +101,7 @@ describe('PRO-G2: a reward always carries a unit', () => {
   });
 
   it('a FIXED reward is not a bare number', async () => {
-    listPromotions.mockResolvedValue({ promotions: [promo({ reward: { kind: 'fixed', value: 10 } })], usage: {} });
+    listPromotions.mockResolvedValue({ promotions: [promo({ reward: { kind: 'fixed', value: 10 } })], usage: {}, needsCurrency: [] });
     await view();
     // This promotion records no currency (pre-PRO2-P1), so no symbol is
     // invented — but the reward can no longer render as a naked "10".
@@ -116,7 +116,7 @@ describe('R3 P-5 — an exhausted budget must not read Active', () => {
     listPromotions.mockResolvedValue({ promotions: [
       promo({ promotionId: 'pr-1', name: 'Loss leader', budget: { maxDiscount: 100 } }),
       promo({ promotionId: 'pr-2', name: 'Half spent', budget: { maxDiscount: 100 } }),
-    ], usage: { 'pr-1': { amount: 100, quantity: 4 }, 'pr-2': { amount: 50, quantity: 2 } } });
+    ], usage: { 'pr-1': { amount: 100, quantity: 4 }, 'pr-2': { amount: 50, quantity: 2 } }, needsCurrency: [] });
     await view();
     expect(await screen.findByText('Budget exhausted')).toBeTruthy();
     expect(screen.getByText('50 of 100 spent')).toBeTruthy();
@@ -124,7 +124,7 @@ describe('R3 P-5 — an exhausted budget must not read Active', () => {
   });
 
   it('zero usage (absent key) renders plain Active — no fabricated burn', async () => {
-    listPromotions.mockResolvedValue({ promotions: [promo({ budget: { maxDiscount: 100 } })], usage: {} });
+    listPromotions.mockResolvedValue({ promotions: [promo({ budget: { maxDiscount: 100 } })], usage: {}, needsCurrency: [] });
     await view();
     expect(await screen.findAllByText('Active')).toBeTruthy();
     expect(screen.queryByText(/of 100 spent/)).toBeNull();
@@ -138,7 +138,7 @@ describe('R3 P-5 — an exhausted budget must not read Active', () => {
   it('a promotion with a recorded currency shows it on every amount (PROMO-CUR-1)', async () => {
     listPromotions.mockResolvedValue({
       promotions: [promo({ type: 'loss_leader', currency: 'EUR', reward: { kind: 'fixed', value: 10 }, minSpend: 50, budget: { maxDiscount: 200 } })],
-      usage: { 'pr-1': { amount: 75, quantity: 3 } },
+      usage: { 'pr-1': { amount: 75, quantity: 3 } }, needsCurrency: [],
     });
     await view();
     expect(await screen.findByText('€10.00 off')).toBeTruthy();

@@ -104,6 +104,7 @@ import { i18n } from '../i18n/index.js';
 // shared surfaces a feature contributes to without the host naming it.
 import { ADOPTER_FRONTEND_FEATURES, composeFrontendFeatures } from './adopterFeatures.js';
 import type { DashboardTileDef } from './dashboard/tileTypes.js';
+import type { Project } from './projects/projectsClient.js';
 import type { ReviewArtifactRendererProps } from '../chat/reviews/reviewArtifactRenderers.js';
 import type { ReviewRequest } from '../chat/reviews/reviewClient.js';
 import type { ComponentType } from 'react';
@@ -136,6 +137,12 @@ export interface FrontendFeature {
    * feature module, so a distribution that excludes the feature drops its tab too.
    */
   agentWorkspaceTabs?: AgentWorkspaceTab[];
+  /**
+   * ADR 1090 — tabs this feature adds to the project detail page, after the host's
+   * own, shown only while the feature is visible to the caller. Keep `render`'s
+   * content `lazy(...)` inside a `<Suspense>`: this metadata ships in the entry chunk.
+   */
+  projectTabs?: ProjectTab[];
   /**
    * ADR 0916 (Book AI P16) — the feature's nav label/hint translations, per
    * locale, merged into the `nav` namespace when the registry loads, so a
@@ -219,6 +226,18 @@ export interface FeatureReviewArtifactRenderer {
   matches?: (content: string) => boolean;
 }
 
+/** ADR 1090 — a feature-contributed project tab. `key` is the `?tab=` value. */
+export interface ProjectTab {
+  key: string;
+  /** English fallback; `labelKey` resolves in `labelNamespace` (default: the feature's own namespace). */
+  label: string;
+  labelKey?: string;
+  labelNamespace?: string;
+  /** Ascending among contributed tabs; ties by key. */
+  order?: number;
+  render: (p: { project: Project; canWrite: boolean }) => ReactNode;
+}
+
 /** A feature-contributed agent-workspace tab. `labelKey` is in the `agents` i18n namespace. */
 export interface AgentWorkspaceTab {
   key: string;
@@ -276,6 +295,12 @@ export function featureRoutes(): FeatureRoute[] {
 }
 
 /** ADR 0889 — the agent-workspace tabs contributed by the composed features, with their owner. */
+/** ADR 1090 — every feature's project tabs, stamped with the feature, in display order. */
+export function featureProjectTabs(): Array<ProjectTab & { featureId: string }> {
+  return FRONTEND_FEATURES.flatMap((f) => (f.projectTabs ?? []).map((t) => ({ ...t, featureId: f.id })))
+    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.key.localeCompare(b.key));
+}
+
 export function featureAgentWorkspaceTabs(): Array<AgentWorkspaceTab & { featureId: string }> {
   return FRONTEND_FEATURES.flatMap((f) => (f.agentWorkspaceTabs ?? []).map((t) => ({ ...t, featureId: f.id })));
 }

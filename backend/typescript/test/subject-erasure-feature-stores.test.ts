@@ -491,7 +491,6 @@ const ACTOR_ATTRIBUTED_DEBT = new Map<string, string>([
   ['campaign-brief:voc-evidence', 'Saved voice-of-customer evidence. May quote THIRD-PARTY prose, which an id-keyed eraser cannot reach either way — recorded so that limit is visible, not implied.'],
   ['chatwidget:config', 'A public chat-widget configuration (`createdBy` + a minted token). The widget must keep working when its author leaves, so this is re-attribute-or-transfer, not delete.'],
   ['creative-briefs:render', 'A render job/output row carrying its requester. Short-lived in practice but has no TTL, so it is debt rather than exempt.'],
-  ['creative-video:job', 'A video job row carrying its requester. Same shape as creative-briefs:render.'],
   ['discovery:collection', 'Merchandising collection authored by a member; org storefront config.'],
   ['discovery:merch-rule', 'Merchandising rule authored by a member; org storefront config.'],
   ['funnels:funnel', 'A funnel definition — org config authored by a member.'],
@@ -645,8 +644,18 @@ const ACTOR_ATTRIBUTED_DEBT = new Map<string, string>([
  *  because `features/bi/erasure.ts` registers `eraseSubjectBiMetrics`, which
  *  re-attributes `createdBy` to the `ERASED` sentinel and keeps the definition (org
  *  config resolved by id). `test/adr1052-bi-honest-metrics.test.ts` D13 witnesses it.
- *  Ledger 17, ceiling 17. */
-const ACTOR_DEBT_CEILING = 17;
+ *  Ledger 17, ceiling 17.
+ *
+ *  ADR 1051 D8 (2026-11-03, feature loop row 83): `creative-video:job` leaves this
+ *  ledger. `eraseCreativeVideoSubject` (registered from
+ *  `features/creative-video/feature.ts`) re-attributes `createdBy`, the
+ *  submitter and the likeness attester to the tombstone and redacts the prompt
+ *  snippet, and deletes the subject's likeness-consent records.
+ *  `test/adr1051-surface-floor.test.ts` § D8 witnesses it through the live
+ *  registry. MEASURED on the rebase onto `2de05f1c9` (the test's own count):
+ *  the ledger holds 15 entries (main had 16 under a ceiling of 17), so the
+ *  ceiling drops to 15 with no slack. Ledger 15, ceiling 15. */
+const ACTOR_DEBT_CEILING = 15;
 
 /** NO-GROWTH: debt may only shrink. Raising this is a deliberate, reviewable act.
  *  RAISED 4→5 (2026-08-15, the R3 subjectId widening): the WIDENED matcher found
@@ -986,6 +995,34 @@ function typeBodyIn(src: string, typeName: string): string {
 
 interface FeatureStore { ns: string; file: string; hasEraser: boolean; signal: 'topic' | 'actor' }
 
+/**
+ * ADR 0464 §9 D2 (2026-11-10) — a `declarePiiFields(<entity>, …)` call is a
+ * subject signal when its entity IS a store namespace. The declaration is the
+ * owner saying, in code, "this row holds personal data", which is a stronger claim
+ * than any field-name regex here, and until D2 no erasure gate read it (8 stores
+ * that declared PII sat in the unreviewed baseline). Two entity spellings exist:
+ * a store namespace (`crm:merge-event`, `proposals`) and a dotted logical label
+ * the log mask uses (`kb.document`), which names no store and cannot join. The
+ * argument is a quoted literal or a same-file `const NAME = '…'` (csm's
+ * `CSM_STORE`); MEASURED: no other form under src. Scans all of src, because the
+ * host may declare a feature's store.
+ */
+function piiDeclaredEntities(): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const file of walk(SRC_ROOT)) {
+    if (file.endsWith('dataClassification.ts')) continue;
+    const src = stripComments(readFileSync(file, 'utf8'));
+    for (const m of src.matchAll(/declarePiiFields\(\s*(?:'([^']+)'|"([^"]+)"|([A-Z_][A-Z0-9_]*))\s*,/g)) {
+      let entity: string | undefined = m[1] ?? m[2];
+      if (!entity && m[3]) entity = src.match(new RegExp(`const ${m[3]}\\s*=\\s*['"]([^'"]+)['"]`))?.[1];
+      if (!entity) throw new Error(`${file}: declarePiiFields(${m[3]}) — the entity did not resolve; add a resolver here`);
+      if (!out.has(entity)) out.set(entity, file.slice(SRC_ROOT.length + 1).split('\\').join('/'));
+    }
+  }
+  return out;
+}
+const PII_DECLARED = piiDeclaredEntities();
+
 /** Every feature-owned store whose ROW TYPE declares a subject-IDENTIFIER field
  *  (`userId`/`subjectKey`/`subjectId`/`contactId`/email — signal `topic`) or, since
  *  KB-3, an ACTOR-ATTRIBUTION field (`createdBy`/`uploadedBy`/`authorId` — signal
@@ -1000,7 +1037,8 @@ function enumerateSubjectBearingFeatureStores(): Map<string, FeatureStore> {
       const ns = m[2]!;
       const body = expandNestedTypes(src, resolveTypeBody(src, m[1] ?? ''));
       const topic = USER_ID_FIELD.test(body) || SUBJECT_KEY_FIELD.test(body) || SUBJECT_ID_FIELD.test(body)
-        || CONTACT_ID_FIELD.test(body) || EMAIL_FIELD.test(body) || ANALYTICS_SUBJECT_FIELD.test(body);
+        || CONTACT_ID_FIELD.test(body) || EMAIL_FIELD.test(body) || ANALYTICS_SUBJECT_FIELD.test(body)
+        || PII_DECLARED.has(ns);
       const actor = CREATED_BY_FIELD.test(body);
       if (!topic && !actor) continue;
       if (found.has(ns)) continue;
@@ -1255,7 +1293,7 @@ describe('ADR 0464 — feature-owned subject-bearing stores', () => {
     ).toBe(true);
   });
 
-  it('the two stores this gate STILL cannot see are named, and the eraser reaches them anyway', () => {
+  it('the two stores no FIELD signal sees are seen through their PII declaration, and the eraser reaches them', () => {
     // Honesty about what the widening does NOT discriminate. `crm:signature-record`
     // carries only `typedName`, and `crm:merge-event` carries `filledFields` (a
     // `Record<string,string>` whose VALUES are emails) plus `absorbedIdentifiers`
@@ -1264,8 +1302,16 @@ describe('ADR 0464 — feature-owned subject-bearing stores', () => {
     // NEITHER matches any signal this gate binds — so the gate must not be read as
     // proving their coverage. Asserted as a blind spot rather than left unsaid,
     // because an unstated blind spot is how CRM's whole package went unnoticed.
-    expect(stores.has('crm:signature-record'), 'still invisible — see the comment above').toBe(false);
-    expect(stores.has('crm:merge-event'), 'still invisible — see the comment above').toBe(false);
+    //
+    // CORRECTED 2026-11-10 (ADR 0464 §9 D2): the census now reads declarePiiFields,
+    // and crm/erasure.ts declares both, so both are SEEN — by the declaration, not by
+    // a field. The field-signal blind spot above is still true; it no longer decides
+    // their classification. A store with the same blind spot and NO declaration
+    // is still unseen, which is what the denominator block below catches.
+    for (const ns of ['crm:signature-record', 'crm:merge-event']) {
+      expect(PII_DECLARED.get(ns), `${ns}: seen only because crm/erasure.ts declares it`).toBe('features/crm/erasure.ts');
+      expect(stores.get(ns)?.hasEraser, `${ns}: classified COVERED`).toBe(true);
+    }
     const erasureSrc = readFileSync(join(FEATURES_ROOT, 'crm', 'erasure.ts'), 'utf8');
     expect(/crm:signature-record/.test(erasureSrc)).toBe(true);
     expect(/crm:merge-event/.test(erasureSrc)).toBe(true);
@@ -1783,8 +1829,9 @@ const SIGNAL_FREE_BASELINE_FILE = join(__dirname, 'fixtures', 'subject-erasure-s
 const SIGNAL_FREE_BASELINE: readonly string[] =
   (JSON.parse(readFileSync(SIGNAL_FREE_BASELINE_FILE, 'utf8')) as { namespaces: string[] }).namespaces;
 /** The baseline size. It may only go DOWN; never raise it.
- *  252 when the gate landed (P1, #5647). Wave 1 (P2, 2026-11-09): 31 reviewed → 221. */
-const SIGNAL_FREE_BASELINE_CEILING = 221;
+ *  252 when the gate landed (P1, #5647). Wave 1 (P2, 2026-11-09): 31 reviewed → 221.
+ *  D2 (2026-11-10): 8 that declare PII via declarePiiFields joined the census → 213. */
+const SIGNAL_FREE_BASELINE_CEILING = 213;
 
 /** Reviewed signal-free feature stores: each holds no subject data, and says why.
  *  Each was read at its declaration: the row type with its nested types, AND the
@@ -1833,6 +1880,20 @@ const SIGNAL_FREE_REVIEWED = new Map<string, string>([
   ['webinars:sync-state', 'last sync time per tenant, org and webinar event'],
 ]);
 
+/** ADR 0464 §9 D1 (2026-11-10) — a feature package may carry its own reviews in
+ *  `<feature>/ratchetDeclarations.ts` (`subjectErasureSignalFreeReviewed`, the ADR
+ *  1031 P2 pattern: host table ∪ declared, the same assertions over the union, a
+ *  namespace in both fails). First-party reviews stay in the host table above; a
+ *  declared entry may name only a store in its OWN package's directory. */
+const DECLARED_SIGNAL_FREE = (await collectFeatureRatchetDeclarations()).flatMap((d) =>
+  Object.entries(d.declarations.subjectErasureSignalFreeReviewed ?? {}).map(([ns, why]) => ({ ns, why, srcRel: d.srcRel })));
+/** Every review, host and declared: namespace → its reason and where it is recorded. */
+const REVIEWED_SIGNAL_FREE = new Map<string, { why: string; recordedIn: string }>([
+  ...[...SIGNAL_FREE_REVIEWED].map(([ns, why]) => [ns, { why, recordedIn: 'host table' }] as const),
+  ...DECLARED_SIGNAL_FREE.filter((d) => !SIGNAL_FREE_REVIEWED.has(d.ns))
+    .map((d) => [d.ns, { why: d.why, recordedIn: d.srcRel }] as const),
+]);
+
 /** A field that names a person under a name the census signals do not bind. A
  *  reviewed signal-free store must carry none of these (wave 1's finding above). */
 const PERSON_FIELD = new RegExp(
@@ -1846,7 +1907,7 @@ describe('ADR 0464 — EVERY first-party feature store is governed (the full den
   const baseline = new Set(SIGNAL_FREE_BASELINE);
   const governedBy = (ns: string): string | null =>
     stores.has(ns) ? 'signal census' : hostNs.has(ns) ? 'host gate' : ANONYMOUS_FREE_TEXT_STORES.has(ns) ? 'ADR 1018 anonymous'
-      : SIGNAL_FREE_REVIEWED.has(ns) ? 'reviewed signal-free' : null;
+      : REVIEWED_SIGNAL_FREE.has(ns) ? 'reviewed signal-free' : null;
 
   it('the walk is NON-VACUOUS (a broken walk would govern nothing)', () => {
     // MEASURED at 68509a7f2: 417 first-party namespaces. A walk that lost files cannot pass.
@@ -1869,7 +1930,9 @@ describe('ADR 0464 — EVERY first-party feature store is governed (the full den
       ungoverned,
       'Feature store(s) no erasure gate classifies. If the row names a person under any field, register a '
         + 'SubjectEraser (ADR 0464 §2.1) and add a signal the census above can see; if it holds no subject data, '
-        + 'add it to SIGNAL_FREE_REVIEWED with the reason. Never add it to the unreviewed baseline.',
+        + 'add it to SIGNAL_FREE_REVIEWED with the reason (an adopter package: `subjectErasureSignalFreeReviewed` '
+        + 'in its own ratchetDeclarations.ts). If the feature already declares the row\'s PII with '
+        + 'declarePiiFields(\'<namespace>\', …), the census sees it as subject data. Never add it to the unreviewed baseline.',
     ).toEqual([]);
   });
 
@@ -1895,27 +1958,58 @@ describe('ADR 0464 — EVERY first-party feature store is governed (the full den
 
   it('a reviewed signal-free store is live, carries a reason, and has not gained a subject field', () => {
     const bad: string[] = [];
-    for (const [ns, why] of SIGNAL_FREE_REVIEWED) {
-      if (!firstParty.has(ns)) bad.push(`${ns}: not declared under src/features`);
+    const nsUnder = new Map<string, Set<string>>();
+    const ownNamespaces = (srcRel: string): Set<string> => {
+      if (!nsUnder.has(srcRel)) nsUnder.set(srcRel, new Set(literalNamespacesUnder(join(SRC_ROOT, srcRel)).keys()));
+      return nsUnder.get(srcRel)!;
+    };
+    for (const [ns, { why, recordedIn }] of REVIEWED_SIGNAL_FREE) {
+      const live = recordedIn === 'host table' ? firstParty.has(ns) : ownNamespaces(recordedIn).has(ns);
+      if (!live) bad.push(`${ns}: not declared under ${recordedIn === 'host table' ? 'src/features' : `src/${recordedIn} (a package reviews only its own stores)`}`);
       if (why.trim().length < 20) bad.push(`${ns}: the reason must say what the row holds`);
-      if (stores.has(ns) || hostNs.has(ns)) bad.push(`${ns}: governed elsewhere, so the review entry is a second claim`);
+      if (PII_DECLARED.has(ns)) bad.push(`${ns}: declarePiiFields says the row holds personal data (${PII_DECLARED.get(ns)})`);
+      else if (stores.has(ns) || hostNs.has(ns)) bad.push(`${ns}: governed elsewhere, so the review entry is a second claim`);
       if (baseline.has(ns)) bad.push(`${ns}: reviewed AND still in the unreviewed baseline`);
     }
     expect(bad).toEqual([]);
   });
 
+  it('D1: a store is reviewed in ONE place — never in both the host table and a package declaration', () => {
+    const seen = new Map<string, string[]>();
+    for (const ns of SIGNAL_FREE_REVIEWED.keys()) seen.set(ns, ['host table']);
+    for (const d of DECLARED_SIGNAL_FREE) seen.set(d.ns, [...(seen.get(d.ns) ?? []), d.srcRel]);
+    const twice = [...seen].filter(([, at]) => at.length > 1).map(([ns, at]) => `${ns}: ${at.join(' + ')}`);
+    expect(twice, 'A double entry hides which claim is live; keep one.').toEqual([]);
+  });
+
+  it('D2: declarePiiFields is a subject signal — every store-shaped entity names a live store, and the census sees it', () => {
+    const allNs = new Set(literalNamespacesUnder(SRC_ROOT).keys());
+    // A dotted entity (`kb.document`) is a log-mask label, not a store namespace.
+    const storeShaped = [...PII_DECLARED].filter(([e]) => !/^[A-Za-z][\w-]*\.[\w.-]+$/.test(e));
+    const ghosts = storeShaped.filter(([e]) => !allNs.has(e)).map(([e, at]) => `${e} (${at})`);
+    expect(ghosts, 'declarePiiFields names a store that does not exist (a typo or a removed store); fix the entity').toEqual([]);
+    // MEASURED 2026-11-10: 60 declared entities outside tests; 22 store namespaces; 38 dotted labels.
+    expect(storeShaped.length).toBeGreaterThanOrEqual(22);
+    // Non-vacuous: crm:lead-sla-settings carries no field-name signal, only the declaration.
+    expect(PII_DECLARED.has('crm:lead-sla-settings')).toBe(true);
+    expect(stores.get('crm:lead-sla-settings')?.signal, 'the declaration alone makes it subject-bearing').toBe('topic');
+    expect(stores.get('crm:lead-sla-settings')?.hasEraser).toBe(true);
+    // The const-argument form resolves (csm's `declarePiiFields(CSM_STORE, …)`).
+    expect(PII_DECLARED.has('csm:account')).toBe(true);
+  });
+
   it('a reviewed signal-free store carries no person-naming field (updatedBy, approverId, viewer…)', () => {
     const bodies = new Map<string, string>();
-    for (const file of walk(FEATURES_ROOT)) {
+    for (const file of walkFeatures()) {
       const src = readFileSync(file, 'utf8');
       for (const m of src.matchAll(STORE_RE)) {
-        if (SIGNAL_FREE_REVIEWED.has(m[2]!) && !bodies.has(m[2]!)) {
+        if (REVIEWED_SIGNAL_FREE.has(m[2]!) && !bodies.has(m[2]!)) {
           bodies.set(m[2]!, expandNestedTypes(src, resolveTypeBody(src, m[1] ?? '')));
         }
       }
     }
     const bad: string[] = [];
-    for (const ns of SIGNAL_FREE_REVIEWED.keys()) {
+    for (const ns of REVIEWED_SIGNAL_FREE.keys()) {
       const body = bodies.get(ns);
       if (!body || !body.includes(':')) bad.push(`${ns}: row type did not resolve, so it was not checked`);
       else if (PERSON_FIELD.test(body)) bad.push(`${ns}: ${body.match(PERSON_FIELD)![0].trim()} names a person`);

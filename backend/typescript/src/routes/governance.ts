@@ -20,7 +20,7 @@ import { OpenwopError } from '../types.js';
 import { requireSuperadmin } from '../host/superadmin.js';
 import { requireTenantScope } from '../features/featureRoute.js';
 import { listChain, verifyChain, getAuditHead } from '../host/auditChainService.js';
-import { mediaDailyBudget, resolveBudget, checkMediaBudget } from '../aiProviders/mediaBudget.js';
+import { mediaDailyBudget, resolveBudget, checkMediaBudget, videoBudgetWire, videoUnitsUsedToday } from '../aiProviders/mediaBudget.js';
 import { resolveByokBudget } from '../aiProviders/byokChatBudget.js';
 import { getEgressRules, putEgressRules } from '../host/egressPolicy.js';
 import {
@@ -124,14 +124,15 @@ export function registerGovernanceRoutes(app: Express, deps: { storage: Storage 
       const usage = await deps.storage.getMediaUsage(tenantOf(req), date);
       // ADR 0401 P4 / 0411 P2 — the images + video units (KV-counted) report through the same panel.
       const imagesCheck = await checkMediaBudget(tenantOf(req), 'images', 0);
-      const videoCheck = await checkMediaBudget(tenantOf(req), 'video', 0);
+      const videoUsed = await videoUnitsUsedToday(tenantOf(req)); // ADR 1051 — the counter, whatever the cap
       res.json({
         date,
-        // The EFFECTIVE caps actually enforced (override wins over env; 0 = uncapped).
-        budgets: { ttsChars: effective.tts, sttBytes: effective.stt, images: effective.images, video: effective.video },
-        envDefaults: { ttsChars: env.tts, sttBytes: env.stt, images: env.images, video: env.video },
+        // The EFFECTIVE caps actually enforced (override wins over env; 0 = uncapped,
+        // EXCEPT video, where 0 = disabled and uncapped is 'unlimited' — ADR 1051).
+        budgets: { ttsChars: effective.tts, sttBytes: effective.stt, images: effective.images, video: videoBudgetWire(effective.video) },
+        envDefaults: { ttsChars: env.tts, sttBytes: env.stt, images: env.images, video: videoBudgetWire(env.video) },
         override, // the per-org override (or null) — what the editor binds to
-        usage: { ...usage, images: imagesCheck.used, video: videoCheck.used },
+        usage: { ...usage, images: imagesCheck.used, video: videoUsed },
       });
     } catch (err) {
       next(err);
@@ -158,7 +159,9 @@ export function registerGovernanceRoutes(app: Express, deps: { storage: Storage 
       const ttsChars = field('ttsChars');
       const sttBytes = field('sttBytes');
       const images = field('images');
-      const videoJobs = field('videoJobs');
+      // ADR 1051 — video: a count (0 = paid video disabled for this org) or the
+      // explicit 'unlimited'.
+      const videoJobs: number | 'unlimited' | undefined = body.videoJobs === 'unlimited' ? 'unlimited' : field('videoJobs');
       const mediaBudget = {
         ...(ttsChars !== undefined ? { ttsChars } : {}),
         ...(sttBytes !== undefined ? { sttBytes } : {}),
@@ -179,7 +182,7 @@ export function registerGovernanceRoutes(app: Express, deps: { storage: Storage 
         })
         .catch(() => undefined);
       const effective = await resolveBudget(tenantOf(req));
-      res.json({ override: mediaBudget, budgets: { ttsChars: effective.tts, sttBytes: effective.stt, images: effective.images, video: effective.video } });
+      res.json({ override: mediaBudget, budgets: { ttsChars: effective.tts, sttBytes: effective.stt, images: effective.images, video: videoBudgetWire(effective.video) } });
     } catch (err) {
       next(err);
     }

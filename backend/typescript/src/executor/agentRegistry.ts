@@ -64,6 +64,13 @@ export interface ResolvedAgentManifest {
    *  `peerDependenciesMeta.optional` that this host does NOT satisfy, so they
    *  are inert for this installation. Absent/empty ⇒ full declared capability. */
   degraded?: string[];
+  /** ADR 1055 D4 — core agent capabilities the agent's OWN pack activates for it
+   *  by default, from the pack's `x-openwop-app.agentCapabilities` vendor
+   *  extension (a sanctioned `^x-` key in the node-pack manifest schema, so no
+   *  wire change). Host-internal, never serialized; only
+   *  `PACK_DECLARABLE_AGENT_CAPABILITIES` survive the load. Merged with the
+   *  tenant profile's `capabilities` by `agentHasCapability`. */
+  hostCapabilities?: string[];
   /** Owning tenant id for user-authored agents (host-extension
    *  `POST /v1/host/openwop-app/agents`, phase E1 2026-05-28). Pack-installed
    *  agents OMIT this field — they are tenant-agnostic (a host

@@ -188,6 +188,33 @@ export const conversationIdOf = (threadKey: string): string => `ch-${threadKey.s
 export const getThread = (threadKey: string): Promise<ChannelThread | null> => threads.get(threadKey);
 export const putThread = (t: ChannelThread): Promise<void> => threads.put(t);
 
+/** ADR 1042 CHAN-F3 — create a thread only if no row holds its key yet, and return the
+ *  row that does. Two instances taking a first message at once both build a fresh
+ *  thread; a plain `put` let the later one overwrite the earlier one's recorded runs. */
+export async function createThreadOnce(t: ChannelThread): Promise<ChannelThread> {
+  if (await threads.putIfAbsent(t)) return t;
+  return (await threads.get(t.threadKey)) ?? t;
+}
+
+/**
+ * ADR 1042 CHAN-F3 (the runIds read-modify-write race) — record a conversation run on
+ * its thread with a compare-and-swap, so two instances opening runs for one thread at
+ * once cannot lose an id (erasure deletes runs through `runIds`; a lost id was a run
+ * erasure never found). Never re-creates a thread that is gone: erasure deleted it,
+ * and a write here would bring it back. Returns whether the run was recorded.
+ */
+export async function recordThreadRun(threadKey: string, runId: string): Promise<boolean> {
+  // One writer wins each round, so N concurrent writers need at most N rounds; real
+  // contention is a few instances, and 32 leaves room for a burst.
+  for (let attempt = 0; attempt < 32; attempt++) {
+    const cur = await threads.get(threadKey);
+    if (!cur) return false;
+    const next: ChannelThread = { ...cur, runId, runIds: [...new Set([...(cur.runIds ?? []), runId])], updatedAt: new Date().toISOString() };
+    if (await threads.compareAndSwap(cur, next)) return true;
+  }
+  return false;
+}
+
 /** A reply owed for one inbound message, keyed by the exchange key (D4/D7). */
 export interface PendingReply {
   exchangeKey: string;

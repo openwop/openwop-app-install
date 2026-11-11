@@ -1,0 +1,968 @@
+{
+ "source": "https://docs.dev.runwayml.com/api/ (OpenAPI embedded in the page)",
+ "fetchedAt": "2026-11-03",
+ "info": {
+  "title": "RunwayML API",
+  "version": "2024-11-06"
+ },
+ "servers": [
+  {
+   "url": "https://api.dev.runwayml.com"
+  }
+ ],
+ "versionHeader": "2024-11-06",
+ "endpoints": {
+  "/v1/text_to_video": {
+   "gen4.5": {
+    "ratios": [
+     "1280:720",
+     "720:1280"
+    ],
+    "duration": {
+     "minimum": 2,
+     "maximum": 10
+    },
+    "required": [
+     "promptText",
+     "ratio",
+     "duration",
+     "model"
+    ]
+   },
+   "veo3.1": {
+    "ratios": [
+     "1280:720",
+     "720:1280",
+     "1080:1920",
+     "1920:1080"
+    ],
+    "duration": {
+     "enum": [
+      4,
+      6,
+      8
+     ]
+    },
+    "required": [
+     "promptText",
+     "ratio",
+     "model"
+    ]
+   },
+   "veo3.1_fast": {
+    "ratios": [
+     "1280:720",
+     "720:1280",
+     "1080:1920",
+     "1920:1080"
+    ],
+    "duration": {
+     "enum": [
+      4,
+      6,
+      8
+     ]
+    },
+    "required": [
+     "promptText",
+     "ratio",
+     "model"
+    ]
+   },
+   "klingO3_4k": {
+    "ratios": [
+     "3840:2160",
+     "2160:3840",
+     "2880:2880"
+    ],
+    "duration": {
+     "minimum": 3,
+     "maximum": 15
+    },
+    "required": [
+     "ratio",
+     "model"
+    ]
+   },
+   "hailuo3": {
+    "ratios": [
+     "adaptive",
+     "21:9",
+     "16:9",
+     "4:3",
+     "1:1",
+     "3:4",
+     "9:16"
+    ],
+    "duration": {
+     "minimum": 5,
+     "maximum": 15
+    },
+    "required": [
+     "promptText",
+     "model"
+    ]
+   },
+   "kling3.0_4k": {
+    "ratios": [
+     "3840:2160",
+     "2160:3840",
+     "2880:2880"
+    ],
+    "duration": {
+     "minimum": 3,
+     "maximum": 15
+    },
+    "required": [
+     "ratio",
+     "model"
+    ]
+   },
+   "happyhorse_1_0": {
+    "ratios": [
+     "1280:720",
+     "720:1280",
+     "960:960",
+     "1108:832",
+     "832:1108",
+     "1920:1080",
+     "1080:1920",
+     "1440:1440",
+     "1662:1248",
+     "1248:1662"
+    ],
+    "duration": {
+     "minimum": 3,
+     "maximum": 15
+    },
+    "required": [
+     "promptText",
+     "model"
+    ]
+   },
+   "kling2.5_turbo_pro": {
+    "ratios": [
+     "1920:1080",
+     "1440:1440",
+     "1080:1920",
+     "1280:720",
+     "720:720",
+     "720:1280"
+    ],
+    "duration": {
+     "enum": [
+      5,
+      10
+     ]
+    },
+    "required": [
+     "promptText",
+     "model"
+    ]
+   },
+   "kling3.0_pro": {
+    "ratios": [
+     "1920:1080",
+     "1080:1920",
+     "1440:1440"
+    ],
+    "duration": {
+     "minimum": 3,
+     "maximum": 15
+    },
+    "required": [
+     "ratio",
+     "model"
+    ]
+   },
+   "kling3.0_standard": {
+    "ratios": [
+     "1280:720",
+     "720:1280",
+     "960:960"
+    ],
+    "duration": {
+     "minimum": 3,
+     "maximum": 15
+    },
+    "required": [
+     "ratio",
+     "model"
+    ]
+   },
+   "klingO3_pro": {
+    "ratios": [
+     "1920:1080",
+     "1080:1920",
+     "1440:1440"
+    ],
+    "duration": {
+     "minimum": 3,
+     "maximum": 15
+    },
+    "required": [
+     "ratio",
+     "model"
+    ]
+   },
+   "klingO3_standard": {
+    "ratios": [
+     "1280:720",
+     "720:1280",
+     "960:960"
+    ],
+    "duration": {
+     "minimum": 3,
+     "maximum": 15
+    },
+    "required": [
+     "ratio",
+     "model"
+    ]
+   },
+   "seedance2": {
+    "ratios": [
+     "992:432",
+     "864:496",
+     "752:560",
+     "640:640",
+     "560:752",
+     "496:864",
+     "1470:630",
+     "1280:720",
+     "1112:834",
+     "960:960",
+     "834:1112",
+     "720:1280",
+     "2206:946",
+     "1920:1080",
+     "1664:1248",
+     "1440:1440",
+     "1248:1664",
+     "1080:1920",
+     "3840:1646",
+     "3840:2160",
+     "3840:2880",
+     "3840:3840",
+     "2880:3840",
+     "2160:3840"
+    ],
+    "duration": null,
+    "required": [
+     "promptText",
+     "model"
+    ]
+   },
+   "seedance2_fast": {
+    "ratios": [
+     "992:432",
+     "864:496",
+     "752:560",
+     "640:640",
+     "560:752",
+     "496:864",
+     "1470:630",
+     "1280:720",
+     "1112:834",
+     "960:960",
+     "834:1112",
+     "720:1280"
+    ],
+    "duration": null,
+    "required": [
+     "promptText",
+     "model"
+    ]
+   },
+   "seedance2_mini": {
+    "ratios": [
+     "992:432",
+     "864:496",
+     "752:560",
+     "640:640",
+     "560:752",
+     "496:864",
+     "1470:630",
+     "1280:720",
+     "1112:834",
+     "960:960",
+     "834:1112",
+     "720:1280"
+    ],
+    "duration": null,
+    "required": [
+     "promptText",
+     "model"
+    ]
+   },
+   "gemini_omni_flash": {
+    "ratios": [
+     "1280:720",
+     "720:1280"
+    ],
+    "duration": {
+     "minimum": 3,
+     "maximum": 10
+    },
+    "required": [
+     "promptText",
+     "model"
+    ]
+   },
+   "grok_imagine_1_5": {
+    "ratios": [
+     "1:1",
+     "16:9",
+     "9:16",
+     "4:3",
+     "3:4",
+     "3:2",
+     "2:3"
+    ],
+    "duration": {
+     "minimum": 1,
+     "maximum": 15
+    },
+    "required": [
+     "promptText",
+     "model"
+    ]
+   },
+   "wan3": {
+    "ratios": [
+     "832:480",
+     "720:544",
+     "624:624",
+     "544:720",
+     "480:832",
+     "1280:720",
+     "1104:832",
+     "960:960",
+     "832:1104",
+     "720:1280",
+     "1920:1080",
+     "1648:1248",
+     "1440:1440",
+     "1248:1648",
+     "1080:1920",
+     "auto_480p",
+     "auto_720p",
+     "auto_1080p"
+    ],
+    "duration": {
+     "minimum": 2,
+     "maximum": 30
+    },
+    "required": [
+     "promptText",
+     "model"
+    ]
+   },
+   "gemini_omni_flash_1.1": {
+    "ratios": [
+     "640:360",
+     "360:640",
+     "1280:720",
+     "720:1280",
+     "1920:1080",
+     "1080:1920",
+     "3840:2160",
+     "2160:3840"
+    ],
+    "duration": null,
+    "required": [
+     "promptText",
+     "model"
+    ]
+   },
+   "wan3_prime": {
+    "ratios": [
+     "832:480",
+     "720:544",
+     "624:624",
+     "544:720",
+     "480:832",
+     "1280:720",
+     "1104:832",
+     "960:960",
+     "832:1104",
+     "720:1280",
+     "1920:1080",
+     "1648:1248",
+     "1440:1440",
+     "1248:1648",
+     "1080:1920",
+     "auto_480p",
+     "auto_720p",
+     "auto_1080p"
+    ],
+    "duration": {
+     "minimum": 2,
+     "maximum": 30
+    },
+    "required": [
+     "promptText",
+     "model"
+    ]
+   },
+   "h3_max": {
+    "ratios": null,
+    "duration": {
+     "minimum": 5,
+     "maximum": 15
+    },
+    "required": [
+     "promptText",
+     "model"
+    ]
+   },
+   "seedance2_5": {
+    "ratios": [
+     "992:432",
+     "854:480",
+     "752:560",
+     "640:640",
+     "560:752",
+     "480:854",
+     "1470:630",
+     "1280:720",
+     "1112:834",
+     "960:960",
+     "834:1112",
+     "720:1280",
+     "2206:946",
+     "1920:1080",
+     "1664:1248",
+     "1440:1440",
+     "1248:1664",
+     "1080:1920"
+    ],
+    "duration": null,
+    "required": [
+     "model"
+    ]
+   },
+   "grok_imagine_1_5_lite": {
+    "ratios": [
+     "848:480",
+     "480:848",
+     "480:480",
+     "640:480",
+     "480:640",
+     "720:480",
+     "480:720",
+     "1280:720",
+     "720:1280",
+     "720:720",
+     "960:720",
+     "720:960",
+     "1088:720",
+     "720:1088",
+     "1904:1072",
+     "1072:1904",
+     "1424:1424",
+     "1648:1232",
+     "1232:1648",
+     "1744:1152",
+     "1152:1744"
+    ],
+    "duration": {
+     "minimum": 1,
+     "maximum": 15
+    },
+    "required": [
+     "promptText",
+     "model"
+    ]
+   },
+   "kling_4": {
+    "ratios": [
+     "1280:720",
+     "720:1280",
+     "940:940",
+     "1460:624",
+     "1920:1080",
+     "1080:1920",
+     "1440:1440",
+     "2200:940",
+     "auto_720p",
+     "auto_1080p"
+    ],
+    "duration": {
+     "minimum": 3,
+     "maximum": 30
+    },
+    "required": [
+     "promptText",
+     "model"
+    ]
+   }
+  },
+  "/v1/image_to_video": {
+   "gen4.5": {
+    "ratios": [
+     "1280:720",
+     "720:1280",
+     "1104:832",
+     "960:960",
+     "832:1104",
+     "1584:672"
+    ],
+    "duration": {
+     "minimum": 2,
+     "maximum": 10
+    },
+    "required": [
+     "promptText",
+     "promptImage",
+     "ratio",
+     "duration",
+     "model"
+    ]
+   },
+   "gen4_turbo": {
+    "ratios": [
+     "1280:720",
+     "720:1280",
+     "1104:832",
+     "832:1104",
+     "960:960",
+     "1584:672"
+    ],
+    "duration": {
+     "minimum": 2,
+     "maximum": 10
+    },
+    "required": [
+     "promptImage",
+     "ratio",
+     "model"
+    ]
+   },
+   "veo3.1": {
+    "ratios": [
+     "1280:720",
+     "720:1280",
+     "1080:1920",
+     "1920:1080"
+    ],
+    "duration": {
+     "enum": [
+      4,
+      6,
+      8
+     ]
+    },
+    "required": [
+     "promptImage",
+     "ratio",
+     "model"
+    ]
+   },
+   "veo3.1_fast": {
+    "ratios": [
+     "1280:720",
+     "720:1280",
+     "1080:1920",
+     "1920:1080"
+    ],
+    "duration": {
+     "enum": [
+      4,
+      6,
+      8
+     ]
+    },
+    "required": [
+     "promptImage",
+     "ratio",
+     "model"
+    ]
+   },
+   "klingO3_4k": {
+    "ratios": [
+     "3840:2160",
+     "2160:3840",
+     "2880:2880"
+    ],
+    "duration": {
+     "minimum": 3,
+     "maximum": 15
+    },
+    "required": [
+     "promptImage",
+     "model"
+    ]
+   },
+   "hailuo3": {
+    "ratios": [
+     "adaptive",
+     "21:9",
+     "16:9",
+     "4:3",
+     "1:1",
+     "3:4",
+     "9:16"
+    ],
+    "duration": {
+     "minimum": 5,
+     "maximum": 15
+    },
+    "required": [
+     "promptImage",
+     "promptText",
+     "model"
+    ]
+   },
+   "kling3.0_4k": {
+    "ratios": [
+     "3840:2160",
+     "2160:3840",
+     "2880:2880"
+    ],
+    "duration": {
+     "minimum": 3,
+     "maximum": 15
+    },
+    "required": [
+     "promptImage",
+     "model"
+    ]
+   },
+   "happyhorse_1_0": {
+    "ratios": null,
+    "duration": {
+     "minimum": 3,
+     "maximum": 15
+    },
+    "required": [
+     "promptImage",
+     "model"
+    ]
+   },
+   "kling2.5_turbo_pro": {
+    "ratios": null,
+    "duration": {
+     "enum": [
+      5,
+      10
+     ]
+    },
+    "required": [
+     "promptText",
+     "promptImage",
+     "model"
+    ]
+   },
+   "kling3.0_pro": {
+    "ratios": [
+     "1920:1080",
+     "1080:1920",
+     "1440:1440"
+    ],
+    "duration": {
+     "minimum": 3,
+     "maximum": 15
+    },
+    "required": [
+     "promptImage",
+     "model"
+    ]
+   },
+   "kling3.0_standard": {
+    "ratios": [
+     "1280:720",
+     "720:1280",
+     "960:960"
+    ],
+    "duration": {
+     "minimum": 3,
+     "maximum": 15
+    },
+    "required": [
+     "promptImage",
+     "model"
+    ]
+   },
+   "klingO3_pro": {
+    "ratios": [
+     "1920:1080",
+     "1080:1920",
+     "1440:1440"
+    ],
+    "duration": {
+     "minimum": 3,
+     "maximum": 15
+    },
+    "required": [
+     "promptImage",
+     "model"
+    ]
+   },
+   "klingO3_standard": {
+    "ratios": [
+     "1280:720",
+     "720:1280",
+     "960:960"
+    ],
+    "duration": {
+     "minimum": 3,
+     "maximum": 15
+    },
+    "required": [
+     "promptImage",
+     "model"
+    ]
+   },
+   "seedance2": {
+    "ratios": [
+     "992:432",
+     "864:496",
+     "752:560",
+     "640:640",
+     "560:752",
+     "496:864",
+     "1470:630",
+     "1280:720",
+     "1112:834",
+     "960:960",
+     "834:1112",
+     "720:1280",
+     "2206:946",
+     "1920:1080",
+     "1664:1248",
+     "1440:1440",
+     "1248:1664",
+     "1080:1920",
+     "3840:1646",
+     "3840:2160",
+     "3840:2880",
+     "3840:3840",
+     "2880:3840",
+     "2160:3840"
+    ],
+    "duration": null,
+    "required": [
+     "promptImage",
+     "model"
+    ]
+   },
+   "seedance2_fast": {
+    "ratios": [
+     "992:432",
+     "864:496",
+     "752:560",
+     "640:640",
+     "560:752",
+     "496:864",
+     "1470:630",
+     "1280:720",
+     "1112:834",
+     "960:960",
+     "834:1112",
+     "720:1280"
+    ],
+    "duration": null,
+    "required": [
+     "promptImage",
+     "model"
+    ]
+   },
+   "seedance2_mini": {
+    "ratios": [
+     "992:432",
+     "864:496",
+     "752:560",
+     "640:640",
+     "560:752",
+     "496:864",
+     "1470:630",
+     "1280:720",
+     "1112:834",
+     "960:960",
+     "834:1112",
+     "720:1280"
+    ],
+    "duration": null,
+    "required": [
+     "promptImage",
+     "model"
+    ]
+   },
+   "gemini_omni_flash": {
+    "ratios": [
+     "1280:720",
+     "720:1280"
+    ],
+    "duration": {
+     "minimum": 3,
+     "maximum": 10
+    },
+    "required": [
+     "promptImage",
+     "model"
+    ]
+   },
+   "grok_imagine_1_5": {
+    "ratios": null,
+    "duration": {
+     "minimum": 1,
+     "maximum": 15
+    },
+    "required": [
+     "promptImage",
+     "model"
+    ]
+   },
+   "wan3": {
+    "ratios": [
+     "832:480",
+     "720:544",
+     "624:624",
+     "544:720",
+     "480:832",
+     "1280:720",
+     "1104:832",
+     "960:960",
+     "832:1104",
+     "720:1280",
+     "1920:1080",
+     "1648:1248",
+     "1440:1440",
+     "1248:1648",
+     "1080:1920",
+     "auto_480p",
+     "auto_720p",
+     "auto_1080p"
+    ],
+    "duration": {
+     "minimum": 2,
+     "maximum": 30
+    },
+    "required": [
+     "promptImage",
+     "promptText",
+     "model"
+    ]
+   },
+   "gemini_omni_flash_1.1": {
+    "ratios": [
+     "640:360",
+     "360:640",
+     "1280:720",
+     "720:1280",
+     "1920:1080",
+     "1080:1920",
+     "3840:2160",
+     "2160:3840"
+    ],
+    "duration": null,
+    "required": [
+     "promptImage",
+     "promptText",
+     "model"
+    ]
+   },
+   "wan3_prime": {
+    "ratios": [
+     "832:480",
+     "720:544",
+     "624:624",
+     "544:720",
+     "480:832",
+     "1280:720",
+     "1104:832",
+     "960:960",
+     "832:1104",
+     "720:1280",
+     "1920:1080",
+     "1648:1248",
+     "1440:1440",
+     "1248:1648",
+     "1080:1920",
+     "auto_480p",
+     "auto_720p",
+     "auto_1080p"
+    ],
+    "duration": {
+     "minimum": 2,
+     "maximum": 30
+    },
+    "required": [
+     "promptImage",
+     "promptText",
+     "model"
+    ]
+   },
+   "h3_max": {
+    "ratios": null,
+    "duration": {
+     "minimum": 5,
+     "maximum": 15
+    },
+    "required": [
+     "promptImage",
+     "promptText",
+     "model"
+    ]
+   },
+   "seedance2_5": {
+    "ratios": [
+     "992:432",
+     "854:480",
+     "752:560",
+     "640:640",
+     "560:752",
+     "480:854",
+     "1470:630",
+     "1280:720",
+     "1112:834",
+     "960:960",
+     "834:1112",
+     "720:1280",
+     "2206:946",
+     "1920:1080",
+     "1664:1248",
+     "1440:1440",
+     "1248:1664",
+     "1080:1920"
+    ],
+    "duration": null,
+    "required": [
+     "promptImage",
+     "model"
+    ]
+   },
+   "grok_imagine_1_5_lite": {
+    "ratios": [
+     "auto_480p",
+     "auto_720p",
+     "auto_1080p"
+    ],
+    "duration": {
+     "minimum": 1,
+     "maximum": 15
+    },
+    "required": [
+     "promptImage",
+     "model"
+    ]
+   },
+   "kling_4": {
+    "ratios": [
+     "auto_720p",
+     "auto_1080p"
+    ],
+    "duration": {
+     "minimum": 3,
+     "maximum": 30
+    },
+    "required": [
+     "promptImage",
+     "model"
+    ]
+   }
+  }
+ },
+ "outputHostNote": "Task output URLs are CloudFront: example https://dnznrvs05pmza.cloudfront.net/output.mp4?_jwt=... (docs.dev.runwayml.com/assets/outputs/, read 2026-11-03); they expire 24-48h."
+}

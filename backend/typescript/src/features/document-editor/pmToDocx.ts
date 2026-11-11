@@ -6,6 +6,7 @@
  * blockquote, code block, and tables. Images are skipped in v1 (the src is a
  * media-token URL; embedding bytes → a Media fetch, deferred). Lossy + bounded.
  */
+import { isDocumentHrefAllowed } from './documentSchemaNames.js';
 import { Document, Packer, Paragraph, TextRun, ExternalHyperlink, HeadingLevel, Table, TableRow, TableCell, WidthType } from 'docx';
 import type { PMNode } from './pmToMarkdown.js';
 
@@ -13,27 +14,32 @@ const HEADINGS = [HeadingLevel.HEADING_1, HeadingLevel.HEADING_2, HeadingLevel.H
 
 interface Mark { type?: string; attrs?: Record<string, unknown> }
 
-/** A text node → a docx run (wrapped in a hyperlink when it carries a link mark). */
-function textRun(node: PMNode): TextRun | ExternalHyperlink {
+/** A text node → docx runs (wrapped in a hyperlink when it carries a link mark). */
+function textRun(node: PMNode): (TextRun | ExternalHyperlink)[] {
   const marks = (node.marks ?? []) as Mark[];
   const has = (t: string) => marks.some((m) => m.type === t);
-  const run = new TextRun({
-    text: node.text ?? '',
+  // A line break INSIDE a text node (an applied AI suggestion keeps the reply's
+  // paragraph breaks as newlines, ADR 1055 D5) becomes a docx break, not a lost
+  // newline (DE87CD-13).
+  const runs = (node.text ?? '').split('\n').map((line, i) => new TextRun({
+    text: line,
+    ...(i > 0 ? { break: 1 } : {}),
     bold: has('bold') || undefined,
     italics: has('italic') || undefined,
     strike: has('strike') || undefined,
     ...(has('code') ? { font: 'Courier New' } : {}),
-  });
+  }));
   const link = marks.find((m) => m.type === 'link');
-  if (link && typeof link.attrs?.href === 'string') {
-    return new ExternalHyperlink({ children: [run], link: link.attrs.href });
+  // ADR 1055 D7 — only an href the editor itself would follow becomes a link.
+  if (link && typeof link.attrs?.href === 'string' && isDocumentHrefAllowed(link.attrs.href)) {
+    return [new ExternalHyperlink({ children: runs, link: link.attrs.href })];
   }
-  return run;
+  return runs;
 }
 
 function inlineRuns(node: PMNode): (TextRun | ExternalHyperlink)[] {
   return (node.content ?? []).flatMap((child) => {
-    if (child.type === 'text') return [textRun(child)];
+    if (child.type === 'text') return textRun(child);
     if (child.type === 'hardBreak') return [new TextRun({ break: 1 })];
     return inlineRuns(child);
   });

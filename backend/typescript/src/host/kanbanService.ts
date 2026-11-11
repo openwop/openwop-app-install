@@ -376,9 +376,41 @@ export interface KanbanWorkItemAuditEntry {
   tenantId: string;
   boardId: string;
   workItemId: string;
-  type: 'work-item.materialized' | 'work-item.state-changed' | 'work-item.execution-started' | 'work-item.execution-settled';
+  type: 'work-item.materialized' | 'work-item.state-changed' | 'work-item.execution-started' | 'work-item.execution-settled' | 'work-item.delivery-outcome';
   at: string;
   metadata: Record<string, unknown>;
+}
+
+/**
+ * Closed, canvas-neutral dispositions from the core work-item delivery worker.
+ * These are deliberately outcomes, not error strings: the Operations console
+ * needs to know whether delivery is progressing without receiving a tenant's
+ * workflow input, card content, or failure detail.
+ */
+export const KANBAN_WORK_ITEM_DELIVERY_OUTCOMES = [
+  'started',
+  'not-eligible',
+  'deferred',
+  'workflow-unresolved',
+  'retried',
+  'dead-lettered',
+] as const;
+
+export type KanbanWorkItemDeliveryOutcome = (typeof KANBAN_WORK_ITEM_DELIVERY_OUTCOMES)[number];
+
+export interface KanbanWorkItemDeliverySummary {
+  /** Current shared outbox state, not a metric scraped from one instance. */
+  queue: {
+    pending: number;
+    claimed: number;
+    delivered: number;
+    deadLettered: number;
+    oldestPendingCreatedAt: string | null;
+    oldestPendingAgeS: number | null;
+  };
+  /** Exact counts from the declared retained-audit window. */
+  outcomes: Record<KanbanWorkItemDeliveryOutcome, number>;
+  window: { startsAt: string; endsAt: string };
 }
 
 /** Durable command outbox. Phase 4 claims these events for eligible-work
@@ -1630,6 +1662,107 @@ export async function rescheduleWorkItemOutbox(
     ...(options.error ? { lastError: options.error.slice(0, 500) } : {}),
     updatedAt: new Date(now).toISOString(),
   });
+}
+
+function isKanbanWorkItemDeliveryOutcome(value: unknown): value is KanbanWorkItemDeliveryOutcome {
+  return typeof value === 'string'
+    && (KANBAN_WORK_ITEM_DELIVERY_OUTCOMES as readonly string[]).includes(value);
+}
+
+/**
+ * Records a worker's durable delivery disposition before it transitions the
+ * leased outbox row. The audit id is deterministic for one claimed attempt, so
+ * a recovery pass cannot inflate fleet counts. Recording first is intentional:
+ * if this durable observability write cannot be made, the worker leaves its
+ * lease to expire instead of silently completing an unaccounted delivery.
+ */
+export async function recordWorkItemDeliveryOutcome(
+  claimed: ClaimedKanbanWorkItemOutbox,
+  outcome: KanbanWorkItemDeliveryOutcome,
+  now: number = Date.now(),
+): Promise<void> {
+  const entry = claimed.entry;
+  const attempt = entry.attempts;
+  const eventIdentity = stableWorkIdentity([entry.eventId, 'delivery-outcome', String(attempt), outcome]);
+  // Delivery outcomes are the only audit type read as a short operational
+  // window. Prefixing the new type with its UTC day lets that view read one or
+  // two day slices instead of scanning the complete append-only audit history.
+  const day = new Date(now).toISOString().slice(0, 10);
+  await workItemAudit.putIfAbsent({
+    auditId: `work-audit-delivery-${day}-${eventIdentity}`,
+    tenantId: entry.tenantId,
+    boardId: entry.boardId,
+    workItemId: entry.workItemId,
+    type: 'work-item.delivery-outcome',
+    at: new Date(now).toISOString(),
+    metadata: { outcome, attempt },
+  });
+}
+
+const WORK_ITEM_DELIVERY_WINDOW_MS = 24 * 60 * 60 * 1_000;
+
+function emptyWorkItemDeliveryOutcomes(): Record<KanbanWorkItemDeliveryOutcome, number> {
+  return {
+    started: 0,
+    'not-eligible': 0,
+    deferred: 0,
+    'workflow-unresolved': 0,
+    retried: 0,
+    'dead-lettered': 0,
+  };
+}
+
+/**
+ * Fleet-safe Operations projection for the reusable Kanban core. Both stores
+ * are durable host-extension collections shared by all serving instances. The
+ * response intentionally aggregates only closed outcome names and queue ages;
+ * no work-item, tenant, board, workflow, input, user, or error data crosses
+ * this boundary.
+ */
+export async function buildKanbanWorkItemDeliverySummary(
+  now: number = Date.now(),
+): Promise<KanbanWorkItemDeliverySummary> {
+  const startsAtMs = now - WORK_ITEM_DELIVERY_WINDOW_MS;
+  const days = new Set<string>();
+  for (let day = new Date(startsAtMs); day <= new Date(now); day = new Date(day.getTime() + 24 * 60 * 60 * 1_000)) {
+    days.add(day.toISOString().slice(0, 10));
+  }
+  const [entries, auditSlices] = await Promise.all([
+    workItemOutbox.list(),
+    Promise.all([...days].map((day) => workItemAudit.listByPrefix(`work-audit-delivery-${day}-`))),
+  ]);
+  const audit = auditSlices.flat();
+  const outcomes = emptyWorkItemDeliveryOutcomes();
+  for (const entry of audit) {
+    if (entry.type !== 'work-item.delivery-outcome') continue;
+    const at = Date.parse(entry.at);
+    const outcome = entry.metadata.outcome;
+    if (!Number.isFinite(at) || at < startsAtMs || at > now || !isKanbanWorkItemDeliveryOutcome(outcome)) continue;
+    outcomes[outcome] += 1;
+  }
+
+  const pending = entries.filter((entry) => entry.status === 'pending');
+  const oldestPendingCreatedAt = pending
+    .map((entry) => entry.createdAt)
+    .filter((at) => Number.isFinite(Date.parse(at)))
+    .sort()[0] ?? null;
+  return {
+    queue: {
+      pending: pending.length,
+      claimed: entries.filter((entry) => entry.status === 'claimed').length,
+      delivered: entries.filter((entry) => entry.status === 'delivered').length,
+      deadLettered: entries.filter((entry) => entry.status === 'dead-lettered').length,
+      oldestPendingCreatedAt,
+      oldestPendingAgeS: oldestPendingCreatedAt === null
+        ? null
+        : Math.max(0, Math.round((now - Date.parse(oldestPendingCreatedAt)) / 1_000)),
+    },
+    outcomes,
+    window: {
+      startsAt: new Date(startsAtMs).toISOString(),
+      endsAt: new Date(now).toISOString(),
+    },
+  };
 }
 
 function deterministicWorkItemRunId(workItemId: string, attempt: number): string {

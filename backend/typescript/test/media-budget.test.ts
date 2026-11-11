@@ -63,7 +63,7 @@ describe('storage media usage round-trip (ADR 0106)', () => {
 
 describe('checkMediaBudget (ADR 0106)', () => {
   it('is off by default (no env) — never exceeded, no read needed', async () => {
-    expect(mediaDailyBudget()).toEqual({ tts: 0, stt: 0, images: 50, video: 0 }); // images capped at 50 (ADR 0401 P4); video default-OFF (ADR 0404)
+    expect(mediaDailyBudget()).toEqual({ tts: 0, stt: 0, images: 50, video: 10 }); // images capped at 50 (ADR 0401 P4); video ships 10 units (ADR 1051 D3, was uncapped)
     const v = await checkMediaBudget('user:a', 'tts', 1_000_000);
     expect(v.exceeded).toBe(false);
     expect(v.cap).toBe(0);

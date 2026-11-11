@@ -1,8 +1,8 @@
 {
   "name": "feature.promotions.nodes",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "kind": "node",
-  "description": "Promotions feature node pack (MERCH-B chat-drivability) — nodes over the ctx.features.promotions surface. `list-active` lists live promotions; `apply-preview` previews the discount on a hypothetical cart; `create` authors a promotion but — because promotions MOVE MONEY — an agent-authored promotion lands PROPOSED (active:false), a human activates it (the strategy/CDP 'agent proposes, human confirms' firewall). All role:'action' (recorded → replay-safe).",
+  "description": "Promotions feature node pack (MERCH-B chat-drivability) — nodes over the ctx.features.promotions surface. `list-active` lists live promotions; `apply-preview` previews the discount on a hypothetical cart; `create` authors a promotion but — because promotions MOVE MONEY — an agent-authored promotion lands PROPOSED (active:false), a human activates it (the strategy/CDP 'agent proposes, human confirms' firewall). The reads are role:'action' and re-execute on replay; `create` is role:'side-effect' so :fork serves its recorded output instead of minting a second draft (ADR 1025 D2).",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "promotions", "commerce", "loss-leader", "discount"],
@@ -12,7 +12,7 @@
       "typeId": "feature.promotions.nodes.list-active",
       "version": "1.0.0",
       "label": "Promotions List Active",
-      "description": "Lists the org's active promotions over ctx.features.promotions. role:'action' (recorded). Inputs: orgId.",
+      "description": "Lists the org's active promotions over ctx.features.promotions (a read; re-executes on replay). Inputs: orgId.",
       "category": "integration",
       "role": "action",
       "capabilities": []
@@ -30,10 +30,10 @@
       "typeId": "feature.promotions.nodes.create",
       "version": "1.0.0",
       "label": "Promotions Create (proposed)",
-      "description": "Authors a promotion — agent-authored ⇒ PROPOSED (active:false); a human activates in the Promotions page (money-moving, so never auto-live). Inputs: orgId, name, type, reward:{kind,value}, minSpend?, budget?, scope?, segmentId?, priority?.",
+      "description": "Authors a promotion — agent-authored ⇒ PROPOSED (active:false); a human activates in the Promotions page (money-moving, so never auto-live). role:'side-effect' (ADR 1025 D2). Inputs: orgId, name, type, reward:{kind,value}, currency? (required when the promotion carries an amount), minSpend?, budget?, scope?, segmentId?, priority?.",
       "category": "integration",
-      "role": "action",
-      "capabilities": []
+      "role": "side-effect",
+      "capabilities": ["side-effectful"]
     }
   ],
   "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }

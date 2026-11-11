@@ -9,11 +9,12 @@
  *
  * Hostile-input posture (grade pass 2026-07-10): the route caps the COMPRESSED
  * input, so this module owns the decompression side — a per-entry uncompressed
- * cap + a whole-file budget (zip bombs), and LINEAR indexOf-based tag scanning
+ * cap + a whole-file budget (zip bombs; since ADR 1055 D3 the shared counted
+ * read in `host/zipBudget.ts`), and LINEAR indexOf-based tag scanning
  * instead of lazy `[\s\S]*?` regexes (whose failed scans go quadratic on
  * unbalanced adversarial XML). No XML-parser dependency, no external fetches.
  */
-import JSZip from 'jszip';
+import { declaredUncompressedSize, openZipWithinBudget } from '../../../host/zipBudget.js';
 
 export interface ImportedSlide {
   id: string;
@@ -30,19 +31,11 @@ const MAX_ENTRY_BYTES = 5 * 1024 * 1024;
 /** Whole-import decompressed budget across all read entries. */
 const MAX_TOTAL_BYTES = 30 * 1024 * 1024;
 
-/** JSZip keeps the central-directory size on the (unexposed) `_data` — read it
- *  structurally so an oversized entry is rejected BEFORE decompression. */
-type ZipEntrySize = { _data?: { uncompressedSize?: number } };
-function uncompressedSizeOf(entry: JSZip.JSZipObject): number | null {
-  const n = (entry as JSZip.JSZipObject & ZipEntrySize)._data?.uncompressedSize;
-  return typeof n === 'number' && Number.isFinite(n) ? n : null;
-}
 /** Test-only (SL-6) — the structural `_data.uncompressedSize` read is a
- *  private-jszip dependency: if a jszip upgrade drops the field, the guard
- *  silently degrades to post-decompress checks (bombs get decompressed before
- *  rejection). The tripwire test asserts the field still exists so the bump
- *  fails LOUD instead. */
-export const __uncompressedSizeOfForTests = uncompressedSizeOf;
+ *  private-jszip dependency. Since ADR 1055 D3 the shared budget's counted read
+ *  holds the line without it, but the tripwire test still asserts the field
+ *  exists, so a jszip upgrade that drops the fast path fails LOUD. */
+export const __uncompressedSizeOfForTests = declaredUncompressedSize;
 
 const decodeEntities = (s: string): string => s
   .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
@@ -108,26 +101,17 @@ export function skipText(sk: ImportSkip): string {
 }
 
 export async function parsePptx(buf: Buffer): Promise<{ slides: ImportedSlide[]; skipped: string[]; skippedCoded: ImportSkip[] }> {
-  const zip = await JSZip.loadAsync(buf);
+  // ADR 1055 D3 — every part is read through the shared counted budget, so a
+  // zip whose directory lies about a part's size still stops at the cap.
+  const archive = await openZipWithinBudget(buf, { maxEntryBytes: MAX_ENTRY_BYTES, maxTotalBytes: MAX_TOTAL_BYTES, maxEntries: 10_000 });
+  const zip = archive.zip;
   const slideFiles = Object.keys(zip.files)
     .map((f) => /^ppt\/slides\/slide(\d+)\.xml$/.exec(f))
     .filter((m): m is RegExpExecArray => Boolean(m))
     .sort((a, b) => Number(a[1]) - Number(b[1]));
   if (slideFiles.length === 0) throw new Error('no slides found — is this a .pptx file?');
 
-  let budget = MAX_TOTAL_BYTES;
-  const readEntry = async (name: string): Promise<string | null> => {
-    const entry = zip.file(name);
-    if (!entry) return null;
-    const size = uncompressedSizeOf(entry);
-    if (size !== null && size > MAX_ENTRY_BYTES) throw new Error(`part ${name} is too large to import`);
-    const text = await entry.async('string');
-    // Defense in depth for zips whose directory lies about the size.
-    if (text.length > MAX_ENTRY_BYTES) throw new Error(`part ${name} is too large to import`);
-    budget -= text.length;
-    if (budget < 0) throw new Error('file expands past the import budget');
-    return text;
-  };
+  const readEntry = (name: string): Promise<string | null> => archive.readText(name);
 
   const skippedCoded: ImportSkip[] = [];
   const slides: ImportedSlide[] = [];

@@ -1,6 +1,6 @@
 {
   "name": "vendor.openwop-app.discovery.agents",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "kind": "node",
   "description": "Discovery feature agent pack — a Discovery Curator persona whose tools are registered chat tools over the discovery service (the same fns the REST routes call). Runs faceted search, reviews existing collections + merchandising rules, and authors collections + pin/boost/bury rules directly (no money). Tool-allowlisted to the discovery surface only. Driven through the ONE chat.",
   "author": "OpenWOP App",

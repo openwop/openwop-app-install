@@ -49,7 +49,7 @@ afterEach(async () => { for (const id of registered.splice(0)) { deleteRegistere
 
 describe('Enrich-with-AI reachability — the ADR 0368 P3 grant, end-to-end (no live model)', () => {
   it('the real allowlist resolver grants tours.register-draft to an agent that never declared it', () => {
-    const resolved = effectiveToolAllowlist(NON_TOUR_MANIFEST, undefined);
+    const resolved = effectiveToolAllowlist(NON_TOUR_MANIFEST, undefined, true);
     // Not just present in the constant — present in the RESOLVER OUTPUT for this
     // agent (manifest ∪ baseline). This is what dispatch offers the model.
     expect(resolved).toContain(WALKTHROUGH_REGISTER_DRAFT_TOOL_ID);
@@ -60,7 +60,7 @@ describe('Enrich-with-AI reachability — the ADR 0368 P3 grant, end-to-end (no 
     const provider = createAgentToolProvider({ tenantId: TENANT, agentProfileId: 'agent-generic' });
     // Compile the OFFERED tools exactly as dispatch does: the resolved allowlist
     // ∩ the registered tools. If the grant works, the tour tool is in this array.
-    const tools: CompiledTool[] = effectiveToolAllowlist(NON_TOUR_MANIFEST, undefined)
+    const tools: CompiledTool[] = effectiveToolAllowlist(NON_TOUR_MANIFEST, undefined, true)
       .map((id) => provider.resolveTool(id))
       .filter((def): def is NonNullable<typeof def> => Boolean(def))
       .map((def) => ({ def, validate: () => ({ ok: true as const }) }));

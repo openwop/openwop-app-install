@@ -59,11 +59,16 @@ export function BYOKWizard({ onComplete, onCancel, storedRefs = [] }: Props): JS
 
   // On each step transition, move focus to the new step's heading so a keyboard /
   // screen-reader user lands on the new panel instead of being stranded on the
-  // (now-removed) control they just activated (UX ADM-4). Skip the initial mount.
+  // (now-removed) control they just activated (UX ADM-4). Only on a real change:
+  // compare with the step last focused, never a "first run" flag. StrictMode runs
+  // a mount effect twice and the ref survives, so a flag let the second run steal
+  // focus from wherever the user was, at whatever moment the wizard mounted
+  // (the viewport.spec.ts:383 flake, 2026-11-09).
   const wizardRef = useRef<HTMLDivElement>(null);
-  const firstStep = useRef(true);
+  const focusedStep = useRef(step);
   useEffect(() => {
-    if (firstStep.current) { firstStep.current = false; return; }
+    if (focusedStep.current === step) return;
+    focusedStep.current = step;
     const heading = wizardRef.current?.querySelector<HTMLElement>('h2, h3');
     if (heading) { heading.setAttribute('tabindex', '-1'); heading.focus(); }
   }, [step]);

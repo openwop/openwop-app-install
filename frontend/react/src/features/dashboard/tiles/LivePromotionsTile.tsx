@@ -11,7 +11,12 @@ import type { DashboardTileProps } from '../tileTypes.js';
 
 export default function LivePromotionsTile({ compact }: DashboardTileProps): JSX.Element {
   const { t } = useTranslation('dashboard');
-  const { status, data } = useOrgResource<Promotion[]>((orgId) => listPromotions(orgId).then((r) => r.promotions));
+  // ADR 1025 D4 — a promotion flagged `needsCurrency` applies to no order, so it is not
+  // "live" whatever its active flag says.
+  const { status, data } = useOrgResource<Promotion[]>((orgId) => listPromotions(orgId).then((r) => {
+    const notApplying = new Set(r.needsCurrency);
+    return r.promotions.filter((p) => !notApplying.has(p.promotionId));
+  }));
 
   if (status === 'loading') return <SkeletonRows rows={compact ? 3 : 5} columns={['70%', '30%']} />;
   if (status === 'error') return <p className="dash-tile__state muted">{t('tileError')}</p>;

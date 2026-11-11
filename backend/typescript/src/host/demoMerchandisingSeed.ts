@@ -86,8 +86,17 @@ export async function seedDemoMerchandising(tenantId: string): Promise<{ created
         ...(promo.scope.categories ? { categories: promo.scope.categories } : {}),
         ...(promo.scope.all ? { all: true } : {}),
       } : undefined;
+      // ADR 1025 D7 — a product-scoped promotion whose slugs all missed the catalog has
+      // an empty scope, which intake now refuses. Skip it rather than abort the seed.
+      if (promo.scope?.productSlugs && !promo.scope.categories && !promo.scope.all && !(scope?.productIds?.length)) {
+        skipped.push(`promotion:${promo.name}`);
+        continue;
+      }
       await createPromotion({
         tenantId, orgId, createdBy: DEMO_MERCH_ACTOR, name: promo.name, type: promo.type, reward: promo.reward,
+        // ADR 1025 D4 — the catalog this seeds is USD (see SOLSTICE_COUPONS); a promotion
+        // that carries an amount must say so, or intake refuses it and it applies nowhere.
+        currency: 'USD',
         ...(scope ? { scope } : {}),
         ...(promo.minSpend !== undefined ? { minSpend: promo.minSpend } : {}),
         ...(promo.minQuantity !== undefined ? { minQuantity: promo.minQuantity } : {}),

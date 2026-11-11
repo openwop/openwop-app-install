@@ -2039,3 +2039,19 @@ call time (no rebuild), all merge-updatable via `--update-env-vars`:
 - Replicate output fetches are pinned to `replicate.delivery`/`api.replicate.com`
   (https, uncredentialed, 25 MiB/image) — no other egress is possible from the
   image path.
+
+## Video generation (ADR 0404, ADR 0411, ADR 1051)
+
+- **Spend ceiling:** `OPENWOP_MEDIA_DAILY_VIDEO_JOBS` — per-tenant daily video UNITS
+  (an avatar job weighs 1, a text/image-to-video job `OPENWOP_T2V_COST_UNITS`, default
+  3). **Unset = 10.** **`0` = paid video DISABLED** (not uncapped). Uncapped is the
+  explicit value `unlimited`. The per-org override in the superadmin Governance panel
+  (`videoJobs`) follows the same rule. Units are reserved by CAS before the provider
+  call, and given back only when the provider provably did not take the job.
+- **Providers:** HeyGen (avatar) and Runway (text/image-to-video) are Connections
+  (`api_key`, `adapterOnly`); any member with `workspace:write` can add a personal key,
+  an admin an org one. Runway defaults follow its published API (`api.dev.runwayml.com`,
+  version `2024-11-06`, models in `features/creative-video/host/runwayModels.ts`);
+  `OPENWOP_T2V_API_BASE` / `OPENWOP_T2V_DEFAULT_MODEL` override them.
+- **Kill switch:** `OPENWOP_CREATIVE_VIDEO_ENABLED=false` stops the routes and the
+  workflow surface.

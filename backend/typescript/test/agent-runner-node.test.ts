@@ -113,7 +113,7 @@ describe('agent-runner node — ADR 0458 P2 sim confinement + structured result'
     // WHY confinement matters: with no override, a sim's effective allowlist is
     // its ([]) manifest UNIONED with the default-on baseline (documents.draft,
     // email.draft, ai.research.web egress, …). Offering `[]` is what defeats it.
-    const effective = effectiveToolAllowlist([], undefined);
+    const effective = effectiveToolAllowlist([], undefined, true);
     expect(effective).toContain('openwop:documents.draft');
     expect(effective).toContain('openwop:ai.research.web');
   });

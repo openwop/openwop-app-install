@@ -34,7 +34,7 @@ const SEED_ACTOR_LABEL = 'system (seeded update)';
 const BLOG_MEDIA_ACTOR = 'system:blog-seed';
 /** Bump when the post below changes — a redeploy refreshes it while it is still
  *  an untouched, unpublished system draft. */
-const SEED_VERSION = 2;
+export const SEED_VERSION = 2;
 
 export const LAUNCH_POST_SLUG = '10x-your-company-your-team-plus-ai-agents';
 export const LAUNCH_POST_PAGE_ID = `page:host-site-blog-${LAUNCH_POST_SLUG}`;
@@ -51,6 +51,14 @@ const rt = (id: string, heading: string, text: string): Section =>
   ({ sectionId: id, type: 'richText', data: heading ? { heading, text } : { text } }) as Section;
 
 /** The post body. Prose uses the ADR 0813 block grammar (lists, `###`). */
+/** Everything this seed writes or offers, with each diagram's media token
+ *  standing in as its own key. `seed-content-version-ratchet.test.ts` pins a
+ *  hash of it to SEED_VERSION. */
+export function seededPostContent(): unknown {
+  const keys = Object.fromEntries(Object.keys(DIAGRAMS).map((k) => [k, k])) as DiagramTokens;
+  return { title: TITLE, metaDescription: META_DESCRIPTION, diagrams: DIAGRAMS, sections: postSections(keys) };
+}
+
 function postSections(tokens: DiagramTokens): Section[] {
   return [
   rt("s01", "The story we were sold", "Everyone told me AI agents would let one person run a company. After building OpenWOP and testing it on real work, I think that picture is wrong.\n\nSam Altman has said tech CEOs keep a betting pool on the first year there will be a one-person billion-dollar company ([Fortune](https://fortune.com/2024/02/04/sam-altman-one-person-unicorn-silicon-valley-founder-myth/)).\n\nThe story goes like this. One person describes what they want. An orchestrator agent splits the work across a team of sub-agents. The campaign launches. The app ships.\n\nParts of it are true. Agents now write working code and draft campaigns in minutes.\n\nBut when we put real company work through it, it broke somewhere nobody was looking.\n\n**The tasks were fine. Everything between the tasks was not.**"),

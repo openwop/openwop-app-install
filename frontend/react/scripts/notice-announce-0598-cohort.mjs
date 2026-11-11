@@ -98,7 +98,6 @@ const HOST_LEGACY_SILENT_READ_SITES = [
   ['features/connections/VaultAdminPanel.tsx', 'error', 1],
   ['features/creative-briefs/CreativeBriefsPage.tsx', 'error', 1],
   ['features/creative-briefs/RendersSection.tsx', 'error', 1],
-  ['features/creative-video/CreativeVideoPage.tsx', 'error', 1],
   ['features/crm/PublicBookingPage.tsx', 'formError', 2],
   ['features/crm/PublicSignPage.tsx', 'error', 1],
   ['features/custom-domains/DomainsPage.tsx', 'error', 1],

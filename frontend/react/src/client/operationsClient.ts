@@ -176,6 +176,36 @@ export async function getOutboxSummary(): Promise<OutboxSummary> {
   return asJson<OutboxSummary>(res, 'dispatch-outbox summary');
 }
 
+/** ADR 1081 — fleet-shared reusable Kanban WorkItem delivery health. */
+export type KanbanWorkItemDeliveryOutcome =
+  | 'started'
+  | 'not-eligible'
+  | 'deferred'
+  | 'workflow-unresolved'
+  | 'retried'
+  | 'dead-lettered';
+
+export interface KanbanWorkItemDeliverySummary {
+  queue: {
+    pending: number;
+    claimed: number;
+    delivered: number;
+    deadLettered: number;
+    oldestPendingCreatedAt: string | null;
+    oldestPendingAgeS: number | null;
+  };
+  outcomes: Record<KanbanWorkItemDeliveryOutcome, number>;
+  window: { startsAt: string; endsAt: string };
+  /** Durable core stores are shared across serving instances. */
+  perInstance: false;
+  fetchedAt: string;
+}
+
+export async function getKanbanWorkItemDeliverySummary(): Promise<KanbanWorkItemDeliverySummary> {
+  const res = await fetch(`${BASE()}/kanban-work-items/summary`, fetchOpts({ headers: authedHeaders() }));
+  return asJson<KanbanWorkItemDeliverySummary>(res, 'Kanban work-item delivery summary');
+}
+
 /** Re-queue ONE dead dispatch intent. The reason is required by the route and
  *  lands on the row itself, so the queue records why it was redriven. */
 export async function redriveOutboxIntent(runId: string, reason: string): Promise<void> {

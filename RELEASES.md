@@ -48,6 +48,18 @@ upgrade is neither: list it in `breakingConfig`.
 
 ## Version log
 
+### v0.12.0 — 2026-11-10
+
+- **Required stop:** no. **Rolling-safe:** yes.
+- **Schema:** sqlite 52 / postgres 50 · **App migrations:** 26 (unchanged).
+- `OPENWOP_MEDIA_DAILY_VIDEO_JOBS=0` now disables paid video (it meant uncapped);
+  set `unlimited` for no cap. Unset defaults to 10 units per org per day.
+- Adds public-site style tokens (`--site-*` in `brand.css`), feature project
+  tabs and an Operations delivery panel.
+- CDP collect, merchandising and creative video writes need `workspace:write`;
+  reserved CDP event types are refused over HTTP.
+- [CHANGELOG §0.12.0](./CHANGELOG.md#0120--2026-11-10)
+
 ### v0.11.0 — 2026-11-09
 
 - **Required stop:** no. **Rolling-safe:** no. A 0.10.0 instance cannot resolve

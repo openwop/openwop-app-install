@@ -21,7 +21,7 @@ import { resolveRecommendations, createPlacement, updatePlacement, listPlacement
 export function buildRecommendationsSurface(scope: BundleScope): FeatureSurface {
   const tenantId = scope.tenantId;
   return {
-    // WRITE (role:'action' node) — the agent authors a placement (no money, easily
+    // WRITE (role:'side-effect' node, ADR 1025 D2) — the agent authors a placement (no money, easily
     // reversible ⇒ direct, per the ADR 0058 chat-drivability review). Calls the SAME
     // createPlacement the REST route calls (single source of truth).
     upsertPlacement: async (args) => {
@@ -33,6 +33,8 @@ export function buildRecommendationsSurface(scope: BundleScope): FeatureSurface 
       // storefront — until the 2000-row cap started rejecting every placement write.
       // Now it upserts on the identity the resolver actually keys on.
       const orgId = str(args.orgId);
+      // ADR 1025 D3 — the org floor skips a blank orgId, so the write refuses it here.
+      if (!orgId) throw new OpenwopError('validation_error', '`orgId` is required.', 400, { field: 'orgId' });
       const slot = str(args.slot);
       const source = str(args.source);
       const segmentId = optStr(args.segmentId)?.trim() || undefined; // review IM-1 — surfaceOptStr does not trim

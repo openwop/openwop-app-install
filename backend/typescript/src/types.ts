@@ -586,8 +586,13 @@ export interface UserAgentRecord {
  * pack's Challenge Author persona is just the agent that activates it. The
  * runtime that reads it lands incrementally — P1 provisions the capability + the
  * per-tenant named agent (`features/kicktodo-creator/challengeAuthoringCapability.ts`).
+ *
+ * ADR 1055 D4 — `text-only`: the agent replies with text and is offered NO
+ * ADR 0315 default-on baseline tools (only its manifest allowlist, which may be
+ * empty). Read by `agentOffersToolBaseline`; activated per agent like every
+ * other capability, never by naming the agent in the resolver.
  */
-export type AgentCapabilityId = 'assistant' | 'knowledge' | 'cognition' | 'advisor' | 'deep-investigation' | 'coaching' | 'challenge-authoring';
+export type AgentCapabilityId = 'assistant' | 'knowledge' | 'cognition' | 'advisor' | 'deep-investigation' | 'coaching' | 'challenge-authoring' | 'text-only';
 
 export interface AgentProfile {
   /** The owning agent's id — `rosterId` (preferred, for standing agents) or
@@ -694,6 +699,9 @@ export type OpenwopErrorCode =
   | 'product_media_unresolved'
   // ADR 0945 D2 (host-ext) — a product-bound generation with no product source.
   | 'product_depiction_ungrounded'
+  // ADR 1051 D5 (host-ext) — an avatar render with no person's likeness/voice
+  // attestation for that avatar under the current consent sentence (422).
+  | 'likeness_consent_required'
   // ADR 0945 D3 (host-ext) — the vision judge's reply stayed invalid after one repair.
   | 'fidelity_judge_invalid'
   // ADR 0945 Q1 (host-ext) — edit mode needs the client org's opt-in (403).

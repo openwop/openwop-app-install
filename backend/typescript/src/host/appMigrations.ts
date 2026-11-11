@@ -926,6 +926,20 @@ export const BACKGROUND_APP_JOBS: readonly BackgroundAppJob[] = [
       return { complete: r.failed === 0 && corpusLoaded };
     },
   },
+  {
+    // ADR 1045 CHAN-F14 — rewrite stored legacy env-key ids (`bearer:<8>`) to the
+    // id the same key presents today. Off unless OPENWOP_LEGACY_BEARER_REWRITE is
+    // `report` (counts only, stays pending) or `apply` (rewrites; done when no row
+    // conflicted and nothing failed). See `legacyBearerIdRewrite.ts`.
+    id: 'legacy-bearer-id-rewrite',
+    async run(storage: Storage): Promise<{ complete: boolean }> {
+      const { legacyBearerRewriteMode, runLegacyBearerIdRewrite } = await import('./legacyBearerIdRewrite.js');
+      const mode = legacyBearerRewriteMode();
+      if (mode === null) return { complete: false };
+      const r = await runLegacyBearerIdRewrite(storage, mode);
+      return { complete: mode === 'apply' && r.conflicts === 0 && r.failures === 0 };
+    },
+  },
 ];
 
 const bgMarkerKey = (id: string): string => `app_bg_job:${id}`;

@@ -6,10 +6,11 @@
  * Every case was RED on `46301fb8f`: readers were offered New/Edit/Delete; saving an
  * edit sent no `filters` (PATCH replaces, so they were deleted) and no version; a
  * stale metric looked runnable; `groupsTruncated` and `undatedRows` were never shown;
- * a lost edit race had no message of its own.
+ * a lost edit race had no message of its own. Also red when a save goes to another
+ * org or metric id, or a late org-A reply paints org B (re-grade L1).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, fireEvent, within } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, within, act } from '@testing-library/react';
 
 vi.mock('../biClient.js', async (importOriginal) => {
   const mod = await importOriginal<typeof import('../biClient.js')>();
@@ -63,11 +64,12 @@ describe('ADR 1052 — honest metrics page', () => {
     fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Open hours (renamed)' } });
     fireEvent.click(screen.getByText('Save metric'));
     await vi.waitFor(() => expect(mockUpdate).toHaveBeenCalled());
-    expect(mockUpdate.mock.calls[0]![2]).toMatchObject({
+    // Saved into THIS org's metric, with the filters and the version it was made against.
+    expect(mockUpdate).toHaveBeenCalledWith('o1', 'open-hours', expect.objectContaining({
       title: 'Open hours (renamed)',
       filters: [{ key: 'state', op: 'neq', value: 'closed' }],
       expectedUpdatedAt: '2026-11-01T00:00:00.000Z',
-    });
+    }));
   });
 
   it('D12: removing the only filter sends an empty list (PATCH replaces), never an omitted key', async () => {
@@ -78,7 +80,7 @@ describe('ADR 1052 — honest metrics page', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Remove filter 1 (state)' }));
     fireEvent.click(screen.getByText('Save metric'));
     await vi.waitFor(() => expect(mockUpdate).toHaveBeenCalled());
-    expect(mockUpdate.mock.calls[0]![2]).toMatchObject({ filters: [] });
+    expect(mockUpdate).toHaveBeenCalledWith('o1', 'open-hours', expect.objectContaining({ filters: [] }));
   });
 
   it('D8: a lost edit race says so and offers a reload, instead of a raw error', async () => {
@@ -89,6 +91,9 @@ describe('ADR 1052 — honest metrics page', () => {
     fireEvent.click(within((await screen.findByText('Open hours')).closest('tr')!).getByText('Edit'));
     fireEvent.click(await screen.findByText('Save metric'));
     expect(await screen.findByText('Reload metrics')).toBeTruthy();
+    // The page's own conflict copy, never the server's raw message.
+    expect(screen.getByText(/Someone else saved this metric after you opened it, so your changes were not saved\./)).toBeTruthy();
+    expect(screen.queryByText('This metric was changed by someone else.')).toBeNull();
   });
 
   it('UX H2: a filter typed but not added blocks Save with the reason on the filter', async () => {
@@ -172,8 +177,9 @@ describe('ADR 1052 — honest metrics page', () => {
     fireEvent.change(await screen.findByRole('combobox', { name: /organization/i }), { target: { value: 'o2' } });
     expect(await screen.findByText('B metric')).toBeTruthy();
     // Org A's reply lands late, carrying a manager permission: it must change nothing.
-    releaseA({ metrics: [filtered], viewer: { canManage: true } });
-    await new Promise((r) => setTimeout(r, 20));
+    // `act` flushes the reply's `.then` before the assertions (no wall-clock wait).
+    await act(async () => { releaseA({ metrics: [filtered], viewer: { canManage: true } }); });
+    expect(screen.getByText('B metric')).toBeTruthy();
     expect(screen.queryByText('Open hours')).toBeNull();
     expect(screen.queryByText('Edit')).toBeNull();
   });

@@ -14,6 +14,7 @@ import { initHostExtPersistence, __resetHostExtPersistence } from '../src/host/h
 import {
   __resetKanbanStore,
   applyBoardCommand,
+  buildKanbanWorkItemDeliverySummary,
   claimEligibleWorkItemExecution,
   createBoard,
   failWorkItemExecutionReservation,
@@ -55,6 +56,63 @@ afterEach(async () => {
 });
 
 describe('core Kanban WorkItem daemon', () => {
+  it('records fleet-safe started, retried, and dead-lettered delivery outcomes from real worker paths', async () => {
+    const base = Date.now() + 1_000;
+    const board = await createBoard({ tenantId: 'tenant-a', name: 'Delivery telemetry' });
+    const startedPlan = await applyBoardCommand({
+      type: 'work-items.materialize', tenantId: 'tenant-a', boardId: board.id,
+      scope: { kind: 'canvas.generic' }, source: { kind: 'feature.generic.plan', id: 'started-plan', revision: '1' },
+      idempotencyKey: 'started-plan-1',
+      items: [{
+        key: 'starts', title: 'Starts through the normal worker', columnId: 'todo', workflowId: 'tenant-owned-workflow',
+        execution: { mode: 'auto', maxAttempts: 2 },
+      }],
+    });
+    await expect(sweepKanbanWorkItemOutbox(deps, 'healthy-worker', base)).resolves.toBe(1);
+
+    const failingPlan = await applyBoardCommand({
+      type: 'work-items.materialize', tenantId: 'tenant-a', boardId: board.id,
+      scope: { kind: 'canvas.generic' }, source: { kind: 'feature.generic.plan', id: 'failing-plan', revision: '1' },
+      idempotencyKey: 'failing-plan-1',
+      items: [{
+        key: 'fails', title: 'Retries through the normal worker', columnId: 'todo', workflowId: 'tenant-owned-workflow',
+        // The worker retry budget, rather than this WorkItem's execution budget,
+        // is what this fixture verifies. Keep the reservation retryable while the
+        // outbox spends its eight durable delivery attempts. Ten is the maximum
+        // valid WorkItem policy budget.
+        execution: { mode: 'auto', maxAttempts: 10 },
+      }],
+    });
+    const failingDeps: StartRunDeps = {
+      storage,
+      hostSuite: {
+        workflowCatalog: { getWorkflow: async () => { throw new Error('simulated catalog outage'); } },
+        providerPolicyResolver: { resolveForRun: async () => [] },
+      },
+    };
+    // A real worker sweep claims, reserves, fails to start, and reschedules the
+    // same durable row. Advancing beyond its reservation lease forces the exact
+    // crash-recovery path; no test writes an outbox status by hand.
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      await expect(sweepKanbanWorkItemOutbox(failingDeps, 'failing-worker', base + 60_000 * (attempt + 1))).resolves.toBe(0);
+    }
+
+    const summary = await buildKanbanWorkItemDeliverySummary(base + 9 * 60_000);
+    expect(summary.outcomes).toMatchObject({ started: 1, retried: 7, 'dead-lettered': 1 });
+    expect(summary.queue.deadLettered).toBeGreaterThanOrEqual(1);
+    expect(summary.queue.pending).toBeGreaterThanOrEqual(0);
+    // The aggregate projection deliberately has no identities or error text.
+    expect(Object.keys(summary)).toEqual(['queue', 'outcomes', 'window']);
+    expect(Object.keys(summary.queue).sort()).toEqual([
+      'claimed', 'deadLettered', 'delivered', 'oldestPendingAgeS', 'oldestPendingCreatedAt', 'pending',
+    ]);
+    expect(startedPlan.workItems).toHaveLength(1);
+    expect(failingPlan.workItems).toHaveLength(1);
+    // Let the normal run-starter's in-process wakeup observe the open test
+    // storage before teardown; durable dispatch remains the recovery path.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  });
+
   it('leases an auto policy once, starts a normal idempotent run, and reconciles its terminal state to the shared card', async () => {
     const board = await createBoard({
       tenantId: 'tenant-a',

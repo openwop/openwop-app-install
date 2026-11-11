@@ -39,6 +39,8 @@ import { linkSession, sessionsForContact } from '../src/features/analytics/ident
 import { computeLeadScore } from '../src/features/crm/leadScoreService.js';
 import { computePriority } from '../src/host/weightedScoring.js';
 import { evaluateLeadScore, validateModelContent, V0_CONTENT } from '../src/features/crm/leadIntel/model.js';
+/** ADR 1024 D4.2 — funnel events are written in-process by the funnels feature; over HTTP they are refused. */
+const FIRST_PARTY = { source: 'first-party' as const };
 import { activateModel, getModelVersion, listModelVersions, resolveActiveModel, saveModelVersion } from '../src/features/crm/leadIntel/modelStore.js';
 
 const T = (): string => `t-0954-${randomBytes(4).toString('hex')}`;
@@ -83,10 +85,10 @@ describe('ADR 0954 P0 — v0 parity through the per-visitor index', () => {
     for (let i = 0; i < 4; i += 1) {
       await raw.put({ eventId: `legacy-${tenantId}-${i}`, tenantId, eventType: 'funnel.step_viewed', payload: { visitor: 'sess-a1' }, piiFields: [], at: new Date(Date.now() - i * 1000).toISOString() });
     }
-    await collectEvent(tenantId, 'funnel.step_viewed', { visitor: 'sess-a2' });
-    await collectEvent(tenantId, 'funnel.step_completed', { visitor: 'sess-a2' });
-    await collectEvent(tenantId, 'funnel.step_completed', { visitor: 'sess-a1' });
-    await collectEvent(tenantId, 'funnel.step_viewed', { visitor: 'sess-b1' }); // another contact
+    await collectEvent(tenantId, 'funnel.step_viewed', { visitor: 'sess-a2' }, undefined, FIRST_PARTY);
+    await collectEvent(tenantId, 'funnel.step_completed', { visitor: 'sess-a2' }, undefined, FIRST_PARTY);
+    await collectEvent(tenantId, 'funnel.step_completed', { visitor: 'sess-a1' }, undefined, FIRST_PARTY);
+    await collectEvent(tenantId, 'funnel.step_viewed', { visitor: 'sess-b1' }, undefined, FIRST_PARTY); // another contact
     await collectEvent(tenantId, 'page_view', { visitor: 'sess-a1' }); // not a funnel event
 
     const expected = await oracle(tenantId, contactId);
@@ -100,8 +102,8 @@ describe('ADR 0954 P0 — v0 parity through the per-visitor index', () => {
   it('a deleted event leaves the index (retention purge and DSAR delete through the store)', async () => {
     const tenantId = T();
     await linkSession(tenantId, 'sess-x', 'contact-x', 'form-submit');
-    const { eventId } = await collectEvent(tenantId, 'funnel.step_viewed', { visitor: 'sess-x' });
-    const { eventId: kept } = await collectEvent(tenantId, 'funnel.step_viewed', { visitor: 'sess-x' });
+    const { eventId } = await collectEvent(tenantId, 'funnel.step_viewed', { visitor: 'sess-x' }, undefined, FIRST_PARTY);
+    const { eventId: kept } = await collectEvent(tenantId, 'funnel.step_viewed', { visitor: 'sess-x' }, undefined, FIRST_PARTY);
     expect((await computeLeadScore(tenantId, 'contact-x')).parts.funnelViews).toBe(2);
     await raw.delete(eventId); // what the purger and the CONS-6 eraser do
     expect((await computeLeadScore(tenantId, 'contact-x')).parts.funnelViews).toBe(1);

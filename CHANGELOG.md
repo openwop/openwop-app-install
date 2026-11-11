@@ -18,6 +18,93 @@ Commits by the `/cut-app-release` skill; required upgrade stops are tracked in
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-11-10
+
+A MINOR release under ADR 0052. It adds public-site style tokens for white-label
+sites, a seam for features to add project tabs and an Operations delivery panel.
+It tightens who may write CDP events, merchandising rules and paid video, and
+fixes channel races and the CMS. There is no schema change and no new app
+migration; schema stays at sqlite 52 / postgres 50 and app migrations at 26.
+It is rolling-safe. **One setting changes meaning:** `OPENWOP_MEDIA_DAILY_VIDEO_JOBS=0`
+now disables paid video instead of lifting the cap; see "Upgrading from 0.11.0".
+
+### Added
+
+- **Public-site style tokens (ADR 1096).** The CMS site's surfaces read `--site-*`
+  tokens an adopter sets in `brand.css`: content width, section spacing, card
+  surfaces, media corners and the hero photo fade. Unset, the stock look is
+  unchanged. The tokens are documented in `WHITE-LABEL.md` §2 (#5715).
+- **Feature project tabs (ADR 1090).** A first-party or adopter feature can add a
+  tab to the project detail page through `FrontendFeature.projectTabs`, with
+  `?tab=<key>` deep links (#5721).
+- **Operations: Kanban delivery (ADR 1081).** A superadmin-only delivery panel
+  and summary built on a durable Kanban work-item projection (#5727).
+- **Legacy env-key id rewrite (ADR 1045, CHAN-F14).** A one-time background job
+  rewrites stored `bearer:<8>` ids to the id the same key presents today. It is
+  off unless `OPENWOP_LEGACY_BEARER_REWRITE` is `report` (counts only) or
+  `apply` (#5724).
+- A `openwop.tutorials.stale_seed_served` metric (#5717).
+
+### Changed
+
+- **CDP collect (ADR 1024 P3).** `POST /cdp/collect`, `/collect/batch` and
+  `/collect/import` need `workspace:write` (a Viewer could write before), and
+  registering an event schema needs `host:org:manage`. Event types starting
+  `funnel.`, `kicktodo.` or `forms.` are refused over HTTP with
+  `422 reserved_event_type`. An identified event needs consent for its stated
+  purpose (#5576).
+- **Creative video (ADR 1051).** Generating video needs `workspace:write`, a
+  person behind the run and `OPENWOP_CREATIVE_VIDEO_ENABLED` not `false`. The
+  Runway contract is current (host, model, ratio, duration, CloudFront results),
+  the daily cap is reserved before submit and defaults to 10 units, avatar
+  likeness consent is recorded, and a retried submit is not paid twice (#5556).
+- **Merchandising (ADR 1025).** Writes need `workspace:write`. An agent's rule
+  lands as a proposal, rules can be edited, activated and paused, and a
+  denominated promotion with no currency applies to no order (the console offers
+  a fix). Write nodes are side-effecting, so a replay fork does not repeat them
+  (#5469).
+- **Document editor (ADR 1055).** The document schema is closed, DOCX import is
+  budgeted by counting inflated bytes (shared with Slides), and the AI rewrite
+  runs without tools (#5579).
+- **Channels (ADR 1042, ADR 1043).** Approvals are claimed per turn so two
+  instances cannot both spend one, a failed detached turn retries twice, and
+  narrow channel turns get eleven reviewed read tools (#5722). Near-miss
+  spellings of the untrusted-content fence are defanged, and undelivered relay
+  egress older than 30 days is deleted (#5719).
+- Tutorials serve the shipped text over a stale, un-customized workspace copy
+  (#5712).
+- Film captions are on by default (#5590).
+
+### Fixed
+
+- A public page's 404 is `no-store`, so a page is visible as soon as it is
+  published instead of after the CDN's 10 minutes (#5720).
+- Timeline badges are legible in dark bands (#5730), and the footer lockup
+  follows the light/dark switch (#5711).
+- The BYOK wizard no longer takes focus when it mounts in a development build
+  (#5704).
+- Tests, grade waves, steward docs and CI tooling changed internally and are not
+  itemized.
+
+#### Upgrading from 0.11.0
+
+- **No required stop; rolling-safe.** `node scripts/upgrade-plan.mjs 0.11.0`
+  gives one step. No schema change and no new app migration.
+- **`OPENWOP_MEDIA_DAILY_VIDEO_JOBS` changes meaning.** Unset now means a
+  default of 10 units per org per day (was 50). `0` now **disables** paid video
+  (it used to mean uncapped); set `unlimited` for no cap.
+- **CDP API callers** need `workspace:write` to collect, `host:org:manage` to
+  register a schema, consent for identified events, and must not send the
+  reserved `funnel.` / `kicktodo.` / `forms.` event types over HTTP.
+- **Merchandising and creative video** writes need `workspace:write`. Check any
+  promotion with an amount but no currency; it now applies to no order.
+- **Optional:** set `OPENWOP_LEGACY_BEARER_REWRITE=report`, read the
+  `legacy_bearer_rewrite` counts, then `apply` to retire legacy env-key ids.
+- **White-label sites** can now set `--site-*` tokens in `brand.css`; the shipped
+  `brand.css` is unchanged, so brand-seam hashes do not move.
+- Back up the database before upgrading. After the upgrade, check that
+  `/readiness` reports `version: 0.12.0`.
+
 ## [0.11.0] — 2026-11-09
 
 A MINOR release under ADR 0052. KickTodo leaves openwop-app: its feature
@@ -300,6 +387,12 @@ dealers partner portal is in use; see "Upgrading from 0.10.0".
   fails.
 - **BI metrics** created on 0.10.0 are read-only until a manager adopts each one
   into an org (`POST …/metrics/:id/adopt`). No data migration runs.
+- **Self-hosted Firebase front ends.** `firebase.json` adds rewrites for
+  `/installed-packs` and `/installed-packs/**`. Like every rewrite, they name
+  `openwop-app-backend`, so map them to your own service id as you did the
+  others. The SPA catch-all now also excludes media (`mp4`, `webm`, `vtt`,
+  `m4a`, `mp3`), which get their own cache headers (#5514). Merge both changes
+  into a customised `firebase.json`.
 - Back up the database (and object store) before upgrading. Expect a short
   migration window on first boot.
 - No other configuration changes are required. New behaviour behind flags and

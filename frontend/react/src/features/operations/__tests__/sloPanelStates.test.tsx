@@ -32,6 +32,7 @@ const api = vi.hoisted(() => ({
   getHealthSummary: vi.fn<Client['getHealthSummary']>(),
   getDlqSummary: vi.fn<Client['getDlqSummary']>(),
   getOutboxSummary: vi.fn<Client['getOutboxSummary']>(),
+  getKanbanWorkItemDeliverySummary: vi.fn<Client['getKanbanWorkItemDeliverySummary']>(),
   getSloSummary: vi.fn<Client['getSloSummary']>(),
   getAdmissionSummary: vi.fn<Client['getAdmissionSummary']>(),
 }));
@@ -41,7 +42,7 @@ vi.mock('../../../client/operationsClient.js', async (importOriginal) => {
 });
 
 import { OperationsHubPage } from '../OperationsHubPage.js';
-import { OperationsRequestError, type AdmissionSummary, type DlqSummary, type HealthSummary, type OutboxSummary, type SloRow, type SloSummary } from '../../../client/operationsClient.js';
+import { OperationsRequestError, type AdmissionSummary, type DlqSummary, type HealthSummary, type KanbanWorkItemDeliverySummary, type OutboxSummary, type SloRow, type SloSummary } from '../../../client/operationsClient.js';
 import { messages as en } from '../i18n/en.js';
 
 const HEALTH: HealthSummary = {
@@ -55,6 +56,11 @@ const DLQ: DlqSummary = { subjects: [], backend: 'durable', perInstance: false, 
 const OUTBOX: OutboxSummary = {
   counts: { pending: 0, dead: 0 }, oldestPendingCreatedAt: null, oldestPendingAgeS: null,
   dead: [], deadSample: { limit: 20, truncated: false }, perInstance: false, fetchedAt: '2026-08-17T00:00:00Z',
+};
+const KANBAN_DELIVERY: KanbanWorkItemDeliverySummary = {
+  queue: { pending: 0, claimed: 0, delivered: 0, deadLettered: 0, oldestPendingCreatedAt: null, oldestPendingAgeS: null },
+  outcomes: { started: 0, 'not-eligible': 0, deferred: 0, 'workflow-unresolved': 0, retried: 0, 'dead-lettered': 0 },
+  window: { startsAt: '2026-08-16T00:00:00Z', endsAt: '2026-08-17T00:00:00Z' }, perInstance: false, fetchedAt: '2026-08-17T00:00:00Z',
 };
 
 function sloRow(over: Partial<SloRow> = {}): SloRow {
@@ -93,7 +99,7 @@ function page(): ReturnType<typeof within> {
   return within(screen.getByTestId('page'));
 }
 
-// ADR 0987 D6 — the hub's fifth read. Answered here so this file's panels stay the
+// ADR 0987 D6 — the hub's sixth read. Answered here so this file's panels stay the
 // ones under test, and no live fetch leaves the test (ADR 0661).
 const ADMISSION: AdmissionSummary = {
   profile: 'evaluation', families: [], holding: { count: 0, atLeast: false, limit: 1000 },
@@ -105,6 +111,7 @@ beforeEach(() => {
   api.getHealthSummary.mockResolvedValue(HEALTH);
   api.getDlqSummary.mockResolvedValue(DLQ);
   api.getOutboxSummary.mockResolvedValue(OUTBOX);
+  api.getKanbanWorkItemDeliverySummary.mockResolvedValue(KANBAN_DELIVERY);
   api.getAdmissionSummary.mockResolvedValue(ADMISSION);
 });
 afterEach(() => cleanup());
@@ -125,7 +132,7 @@ describe('ADR 0556 P2 — SLO panel states', () => {
     renderHub();
     await waitFor(() => expect(page().queryAllByText(en.operatorOnlyTitle).length).toBeGreaterThan(0));
     // The three panels beside it answered fine and must still render — the
-    // UX-OPS-1 lesson, applied to the fourth read.
+    // UX-OPS-1 lesson, applied to the fifth read.
     expect(page().getByText(en.statusReady)).toBeTruthy();
     expect(page().getByText(en.dlqEmpty)).toBeTruthy();
     // Exactly one operator-only card: a global flag would produce four.

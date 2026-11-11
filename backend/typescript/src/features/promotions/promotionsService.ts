@@ -66,7 +66,14 @@ export interface Promotion {
   budget?: { maxDiscount?: number; maxQuantity?: number };
   /** R2 PRO2-P1 — the currency this promotion's AMOUNTS are in (`minSpend`, a `fixed`
    *  reward, `budget.maxDiscount`). Absent on a pure percentage, and on pre-R2 rows —
-   *  those stay first-come, exactly as `couponDiscount` handles a currency-less coupon. */
+   *  those stay first-come, exactly as `couponDiscount` handles a currency-less coupon.
+   *
+   *  CORRECTED 2026-11-02 (ADR 1025 D4) — "stay first-come" was the hole, not a policy:
+   *  a currency-less "10 off" took 10 off a ¥3,000 order (probed). A denominated
+   *  promotion with no currency now applies to NO order (`needsCurrency`), and every
+   *  lane refuses to create one. The two such rows in prod are the Solstice demo seed's;
+   *  they stop applying until an operator sets a currency. No migration (a guessed
+   *  currency is a relabel). */
   currency?: string;
   /** Live CRM-segment target (resolved at read; ADR 0211). */
   segmentId?: string;
@@ -77,6 +84,10 @@ export interface Promotion {
   /** false ⇒ exclusive: once it fires, no lower-priority promotion also fires. */
   stackable: boolean;
   active: boolean;
+  /** ADR 1025 (grade MCHUX-1) — an agent DRAFTED this and no person has activated it
+   *  yet. Without it a proposal and a promotion someone paused read identically. Cleared
+   *  the first time the promotion is activated. */
+  proposed?: true;
   createdBy: string; createdAt: string; updatedAt: string;
 }
 
@@ -124,7 +135,13 @@ function coerceType(v: unknown): PromotionType {
 }
 function coerceReward(v: unknown): { kind: RewardKind; value: number } {
   const o = (v ?? {}) as { kind?: unknown; value?: unknown };
-  const kind: RewardKind = (REWARD_KINDS as readonly string[]).includes(String(o.kind)) ? String(o.kind) as RewardKind : 'percentage';
+  // ADR 1025 (grade MCHCD-6) — an UNKNOWN kind is refused, not read as a percentage:
+  // `{kind:'amount', value:10}` silently became 10% off. An absent kind keeps the
+  // documented percentage default.
+  if (o.kind !== undefined && !(REWARD_KINDS as readonly string[]).includes(String(o.kind))) {
+    throw new OpenwopError('validation_error', `reward.kind must be one of: ${REWARD_KINDS.join(', ')}.`, 400, { field: 'reward.kind' });
+  }
+  const kind: RewardKind = o.kind === undefined ? 'percentage' : String(o.kind) as RewardKind;
   const value = Number(o.value);
   if (!Number.isFinite(value) || value < 0) throw new OpenwopError('validation_error', 'reward.value must be a non-negative number.', 400, { field: 'reward.value' });
   if (kind === 'percentage' && value > 100) throw new OpenwopError('validation_error', 'A percentage reward cannot exceed 100.', 400, { field: 'reward.value' });
@@ -149,7 +166,53 @@ export interface PromotionInput {
   budget?: unknown; segmentId?: unknown; schedule?: unknown; priority?: unknown; stackable?: unknown; active?: unknown;
   /** R2 PRO2-P1 — the currency this promotion's amounts are in. */
   currency?: unknown;
+  /** ADR 1025 — set by the agent lanes (chat draft, run surface), never by the console. */
+  proposed?: boolean;
 }
+/** ADR 1025 D6 — a schedule bound must be a real instant, and the window must be
+ *  non-empty. `Date.parse('last friday')` is NaN, and `NaN < now` is false, so an
+ *  unparseable `endAt` used to make the promotion run forever. */
+function cleanSchedule(raw: unknown): Promotion['schedule'] | undefined {
+  const o = (raw ?? undefined) as { startAt?: unknown; endAt?: unknown } | undefined;
+  if (!o) return undefined;
+  const bound = (v: unknown, field: string): string | undefined => {
+    if (v === undefined || v === null || v === '') return undefined;
+    if (typeof v !== 'string' || !Number.isFinite(Date.parse(v))) {
+      throw new OpenwopError('validation_error', `schedule.${field} must be a date (ISO 8601).`, 400, { field: `schedule.${field}` });
+    }
+    return new Date(Date.parse(v)).toISOString();
+  };
+  const startAt = bound(o.startAt, 'startAt');
+  const endAt = bound(o.endAt, 'endAt');
+  if (startAt && endAt && Date.parse(endAt) <= Date.parse(startAt)) {
+    throw new OpenwopError('validation_error', 'schedule.endAt must be after schedule.startAt.', 400, { field: 'schedule.endAt' });
+  }
+  return startAt || endAt ? { ...(startAt ? { startAt } : {}), ...(endAt ? { endAt } : {}) } : undefined;
+}
+
+/** ADR 1025 D4 — a promotion that carries an amount but no currency. It applies to no
+ *  order; the console, the run surface and the chat list all say so. */
+export const needsCurrency = (p: Promotion): boolean => isDenominated(p) && !p.currency;
+
+const PER_UNIT_SCOPED: ReadonlySet<PromotionType> = new Set(['product_discount', 'loss_leader', 'bogo']);
+
+/** ADR 1025 D4/D7 — the per-type rules a promotion must meet to be able to fire at all.
+ *  Each refusal names the field, so the console and the model can fix it. */
+function assertPromotionCanFire(p: Promotion): void {
+  if (needsCurrency(p)) {
+    throw new OpenwopError('validation_error', 'This promotion carries an amount (a fixed reward, a minimum spend or a loss budget), so it needs a `currency`.', 400, { field: 'currency', code: 'promotion_currency_missing', supported: CURRENCIES });
+  }
+  if (p.type === 'cart_threshold' && !(p.minSpend !== undefined && p.minSpend > 0)) {
+    throw new OpenwopError('validation_error', 'A cart_threshold promotion needs `minSpend` greater than 0.', 400, { field: 'minSpend' });
+  }
+  if (p.reward.kind === 'fixed' && !(p.reward.value > 0)) {
+    throw new OpenwopError('validation_error', 'A fixed reward must be greater than 0.', 400, { field: 'reward.value' });
+  }
+  if (PER_UNIT_SCOPED.has(p.type) && !p.scope) {
+    throw new OpenwopError('validation_error', `A ${p.type} promotion needs a \`scope\` (productIds, categories, or all).`, 400, { field: 'scope' });
+  }
+}
+
 export async function createPromotion(input: PromotionInput): Promise<Promotion> {
   if ((await listPromotions(input.tenantId, input.orgId)).length >= MAX.perOrg) {
     throw new OpenwopError('validation_error', 'Promotion limit reached for this workspace.', 400, {});
@@ -173,8 +236,7 @@ export async function createPromotion(input: PromotionInput): Promise<Promotion>
   if (type === 'bogo' && !bogo) {
     throw new OpenwopError('validation_error', 'A bogo promotion requires bogo.buy ≥ 1 and bogo.get ≥ 1.', 400, { field: 'bogo' });
   }
-  const schedRaw = (input.schedule ?? undefined) as { startAt?: unknown; endAt?: unknown } | undefined;
-  const schedule = schedRaw ? { ...(typeof schedRaw.startAt === 'string' ? { startAt: schedRaw.startAt } : {}), ...(typeof schedRaw.endAt === 'string' ? { endAt: schedRaw.endAt } : {}) } : undefined;
+  const schedule = cleanSchedule(input.schedule);
   const scope = coerceScope(input.scope);
   const segmentId = typeof input.segmentId === 'string' && input.segmentId.trim() ? input.segmentId.trim() : undefined;
   const name = cleanString(input.name, MAX.name, '');
@@ -189,15 +251,17 @@ export async function createPromotion(input: PromotionInput): Promise<Promotion>
     ...(bogo ? { bogo } : {}),
     ...(budget ? { budget } : {}),
     ...(segmentId ? { segmentId } : {}),
-    ...(schedule && (schedule.startAt || schedule.endAt) ? { schedule } : {}),
+    ...(schedule ? { schedule } : {}),
     // R2 PRO2-P1 — captured at INTAKE. Nothing can reconstruct later what a stored
     // "spend 50, get 10 off" was denominated in.
     ...(promotionCurrency ? { currency: promotionCurrency } : {}),
     priority: Number.isFinite(Number(input.priority)) ? Math.trunc(Number(input.priority)) : 0,
     stackable: input.stackable !== false,
     active: input.active !== false,
+    ...(input.proposed === true && input.active === false ? { proposed: true as const } : {}),
     createdBy: input.createdBy, createdAt: now, updatedAt: now,
   };
+  assertPromotionCanFire(p);
   await promotions.put(p);
   log.info('promotion created', { tenantId: input.tenantId, orgId: input.orgId, promotionId: p.promotionId, type: p.type, hasBudget: !!p.budget });
   return p;
@@ -212,7 +276,13 @@ export async function updatePromotion(tenantId: string, orgId: string, promotion
   if (patch.minSpend !== undefined) { const m = optNum(patch.minSpend); if (m === undefined) delete next.minSpend; else next.minSpend = m; }
   if (patch.priority !== undefined && Number.isFinite(Number(patch.priority))) next.priority = Math.trunc(Number(patch.priority));
   if (patch.stackable !== undefined) next.stackable = patch.stackable !== false;
-  if (patch.active !== undefined) next.active = patch.active !== false;
+  // ADR 1025 (grade MCHCD-2) — a strict boolean. `!== false` turned `"true"` (or any
+  // truthy junk) ON while the D4/D7 check below keyed on `=== true`, so a junk value
+  // re-activated a promotion that cannot fire without checking it.
+  if (patch.active !== undefined) {
+    if (typeof patch.active !== 'boolean') throw new OpenwopError('validation_error', '`active` must be true or false.', 400, { field: 'active' });
+    next.active = patch.active;
+  }
   if (patch.scope !== undefined) { const s = coerceScope(patch.scope); if (s) next.scope = s; else delete next.scope; }
   if (patch.segmentId !== undefined) { const s = typeof patch.segmentId === 'string' && patch.segmentId.trim() ? patch.segmentId.trim() : undefined; if (s) next.segmentId = s; else delete next.segmentId; }
   // R2 PRO2-P4 — the loss BUDGET and the schedule are patchable. They were write-once at
@@ -235,9 +305,16 @@ export async function updatePromotion(tenantId: string, orgId: string, promotion
     }
   }
   if (patch.schedule !== undefined) {
-    const raw = (patch.schedule ?? undefined) as { startAt?: unknown; endAt?: unknown } | undefined;
-    const sc = raw ? { ...(typeof raw.startAt === 'string' ? { startAt: raw.startAt } : {}), ...(typeof raw.endAt === 'string' ? { endAt: raw.endAt } : {}) } : undefined;
-    if (sc && (sc.startAt || sc.endAt)) next.schedule = sc; else delete next.schedule;
+    const sc = cleanSchedule(patch.schedule);
+    if (sc) next.schedule = sc; else delete next.schedule;
+  }
+  // ADR 1025 D4 — the route and the chat lane forwarded `currency` and this function
+  // never read it (probed: PATCH {currency:'USD'} left it absent), so a mis-set or
+  // missing currency was unfixable. Empty clears it; the D4 check below then refuses
+  // the clear if the promotion still carries an amount.
+  if (patch.currency !== undefined) {
+    if (typeof patch.currency === 'string' && patch.currency.trim()) next.currency = currencyOrThrow(patch.currency);
+    else delete next.currency;
   }
   // R2 PRO2-P22 — clearing the scope of a product-scoped promotion makes it fire on
   // NOTHING while still reading Active. `pruneProductRefs` already deactivates for the
@@ -249,6 +326,13 @@ export async function updatePromotion(tenantId: string, orgId: string, promotion
   if (!next.scope && (next.type === 'product_discount' || next.type === 'loss_leader' || next.type === 'bogo')) {
     next.active = false;
   }
+  // ADR 1025 D4/D7 — refuse a patch that would leave the row unable to fire, but only
+  // when the patch touches money or turns the promotion on. PAUSING is always allowed,
+  // so a legacy row (e.g. a currency-less one) is valid or paused, never wedged.
+  const touchesMoney = patch.reward !== undefined || patch.minSpend !== undefined || patch.budget !== undefined || patch.currency !== undefined;
+  if ((touchesMoney || patch.active === true || (!p.active && next.active)) && next.active) assertPromotionCanFire(next);
+  if (next.active) delete next.proposed; // a person activated it: no longer a proposal
+  else if (touchesMoney && needsCurrency(next)) assertPromotionCanFire(next);
   await promotions.put(next);
   return next;
 }
@@ -290,8 +374,10 @@ export async function deletePromotion(tenantId: string, orgId: string, promotion
 // ── The engine (the hook body) ───────────────────────────────────────────────
 function inWindow(p: Promotion, nowMs: number): boolean {
   if (!p.schedule) return true;
-  if (p.schedule.startAt && Date.parse(p.schedule.startAt) > nowMs) return false;
-  if (p.schedule.endAt && Date.parse(p.schedule.endAt) < nowMs) return false;
+  // ADR 1025 D6 — a stored bound that does not parse (written before intake validated it)
+  // FAILS CLOSED: `NaN > now` and `NaN < now` are both false, so it used to read as "open".
+  if (p.schedule.startAt && !(Date.parse(p.schedule.startAt) <= nowMs)) return false;
+  if (p.schedule.endAt && !(Date.parse(p.schedule.endAt) >= nowMs)) return false;
   return true;
 }
 function lineInScope(scope: Promotion['scope'], product: Product | undefined, productId: string): boolean {
@@ -464,6 +550,8 @@ function capUnitsToQuantityBudget(
   return { amount: quantizeMoney(units.reduce((s, u) => s + u, 0), ctx.currency), qty: units.length };
 }
 
+const warnedNoCurrency = new Set<string>();
+
 /** The `promotionSeam` hook body. Deterministic (priority DESC → createdAt ASC → id ASC);
  *  a non-stackable promotion that fires is exclusive of all lower-priority ones. */
 export async function applyPromotions(ctx: OrderDiscountContext): Promise<OrderDiscountResult> {
@@ -488,7 +576,21 @@ export async function applyPromotionsUngated(ctx: OrderDiscountContext, opts: { 
     // a cross-currency COUPON with a typed error ten lines from this hook; promotions
     // read `ctx.currency` nowhere at all and applied the wrong money silently — a ¥3,000
     // order cleared a "spend 50" threshold meant as dollars and took ¥10 off.
-    .filter((p) => !isDenominated(p) || !p.currency || p.currency === ctx.currency);
+    // ADR 1025 D4 — and a denominated promotion with NO currency applies to nothing
+    // (it used to apply in every currency: the `!p.currency` escape).
+    .filter((p) => {
+      if (!isDenominated(p)) return true;
+      if (!p.currency) {
+        // Once per promotion per process (grade MCHCD-7): this runs on every checkout and
+        // every preview, and the row is also flagged on every list read.
+        if (!warnedNoCurrency.has(p.promotionId)) {
+          warnedNoCurrency.add(p.promotionId);
+          log.warn('promotion skipped — it carries an amount but no currency', { code: 'promotion_currency_missing', tenantId: ctx.tenantId, orgId: ctx.orgId, promotionId: p.promotionId });
+        }
+        return false;
+      }
+      return p.currency === ctx.currency;
+    });
   if (active.length === 0) return { discount: 0, appliedPromotions: [] };
   const budgeted = active.filter(isBudgeted);
   if (budgeted.length === 0) return evaluatePromotions(ctx, active, new Map<string, PromotionUsage>());
@@ -636,6 +738,27 @@ async function evaluatePromotions(ctx: OrderDiscountContext, active: Promotion[]
     if (!promo.stackable) break; // exclusive
   }
   return { discount: total, appliedPromotions: applied };
+}
+
+/** ADR 1025 (grade MCHCD-4) — the PREVIEW lane (chat tool + run surface). The currency is
+ *  normalised and validated (a lowercase `usd` used to match nothing and return a zero
+ *  discount as a success), and the active promotions that apply to NO cart because they
+ *  have no currency are named in `notApplying`. Other reasons a promotion does not fire on
+ *  THIS cart (another currency, its schedule, a segment, an unmet threshold) are not
+ *  reported here. Never takes budget holds. */
+export async function previewPromotions(input: { tenantId: string; orgId: string; currency?: unknown; items: { productId: string; unitPrice: number; quantity: number }[] }): Promise<OrderDiscountResult & { notApplying: { promotionId: string; reason: 'needs_currency' }[] }> {
+  // Absent ⇒ USD (the documented default); present but not a string is refused rather
+  // than silently previewed as USD (grade MCHCD-N2).
+  if (input.currency !== undefined && input.currency !== null && typeof input.currency !== 'string') {
+    throw new OpenwopError('validation_error', '`currency` must be a currency code.', 400, { field: 'currency', supported: CURRENCIES });
+  }
+  const currency = typeof input.currency === 'string' && input.currency.trim() ? currencyOrThrow(input.currency) : 'USD';
+  const subtotal = input.items.reduce((s, i) => s + i.unitPrice * i.quantity, 0);
+  const r = await applyPromotionsUngated({ tenantId: input.tenantId, orgId: input.orgId, currency, subtotalAfterCoupon: subtotal, items: input.items });
+  const notApplying = (await listPromotions(input.tenantId, input.orgId))
+    .filter((p) => p.active && needsCurrency(p))
+    .map((p) => ({ promotionId: p.promotionId, reason: 'needs_currency' as const }));
+  return { ...r, notApplying };
 }
 
 export async function __resetPromotions(): Promise<void> {

@@ -30,6 +30,7 @@ import { registerReactionsErasure } from './messageReactionsStore.js';
 import { registerChatPostErasure } from './chatPostErasure.js';
 import { registerRelayOwnerErasure } from '../messaging/relayOwner.js';
 import { registerRelayDeliveryLogLifecycle } from '../messaging/deliveryLogRetention.js';
+import { registerRelayOutboundRetention } from '../messaging/outboundRetention.js';
 import { registerSubjectKnowledgeErasure } from './subjectKnowledge.js';
 import { registerSubjectMemoryErasure } from './subjectMemory.js';
 import { registerSelfHostedRunnerErasure } from './selfHostedRunner.js';
@@ -100,4 +101,5 @@ export function registerHostSubjectErasers(): void {
   registerSubjectLinkErasure(); // ADR 0464 §2.1 / RFC 0159 — the SCIM⟷SAML subject-link deny store (row IS the opaque externalId; DELETED)
   registerRelayOwnerErasure(); // ADR 1042 D8 — a relay device's owner row (DELETED; the device then fails empty)
   registerRelayDeliveryLogLifecycle(); // ADR 1043 RELAY-LOG-RETENTION-1 — delivery-log rows for a contact id (DELETED) + its 7-day age-out
+  registerRelayOutboundRetention(); // ADR 1043 CHAN-F12 — undelivered relay egress ages out at the device token's lifetime
 }

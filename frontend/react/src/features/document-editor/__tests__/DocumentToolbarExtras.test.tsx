@@ -1,6 +1,7 @@
 /**
  * DocumentToolbarExtras tests (ADR 0334 Phase 5) — the AI-assist deep-link pins
- * the chat-drive target (the document-author agent), the single-chat pattern.
+ * the chat-drive target (the Writing Assistant since ADR 1055 D4), the
+ * single-chat pattern.
  *
  * Sabotage (wave 14): navigate to '/' → the deep-link case red; scope comments to
  * another resourceType → the comments case red; rename an export button → the
@@ -26,6 +27,7 @@ vi.mock('../../comments/CommentsPanel.js', () => ({
 }));
 
 import { DocumentToolbarExtras } from '../DocumentToolbarExtras.js';
+import { takeStagedComposerDraft } from '../../../chat/composerSeed.js';
 
 afterEach(() => {
   cleanup(); navSpy.mockReset(); vi.unstubAllGlobals();
@@ -33,10 +35,35 @@ afterEach(() => {
 });
 
 describe('DocumentToolbarExtras — AI assist deep-link', () => {
-  it('navigates to the document-author agent in the existing chat', () => {
+  // ADR 1055 D4 — the target is the tool-less Writing Assistant, not the markdown
+  // Documents store's author (whose tools save documents there), and because it
+  // cannot read the canvas, the SAVED document is quoted into the draft.
+  it('opens the Writing Assistant in the existing chat with the saved document quoted', async () => {
+    const saved = { canvasId: 'c1', canvasTypeId: 'canvas.document', version: 1, state: { content: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Saved body' }] }] } } };
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(saved), { status: 200, headers: { 'content-type': 'application/json' } })));
     render(<DocumentToolbarExtras orgId="o1" canvasId="c1" docName="Doc" dirty={false} />);
-    fireEvent.click(screen.getByRole('button', { name: 'aiAssist' }));
-    expect(navSpy).toHaveBeenCalledWith('/?agent=vendor.openwop-app.documents.agents.document-author');
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'aiAssist' })); });
+    expect(navSpy).toHaveBeenCalledWith('/?agent=vendor.openwop-app.document-editor.agents.writing-assistant');
+    expect(takeStagedComposerDraft()).toBe('askAiPrompt(title=Doc,text=Saved body)');
+  });
+
+  // DE87UX-9 — a failed read is SHOWN, and the chat is not opened blind (the
+  // agent cannot see the document, so a blank chat could not help).
+  it('says so, and opens no chat, when the saved document cannot be read', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 500, headers: { 'content-type': 'application/json' } })));
+    render(<DocumentToolbarExtras orgId="o1" canvasId="c1" docName="Doc" dirty={false} />);
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'aiAssist' })); });
+    expect(navSpy).not.toHaveBeenCalled();
+    expect(takeStagedComposerDraft()).toBeNull();
+    expect(screen.getByText('askAiReadFailed')).toBeTruthy();
+  });
+
+  it('names unsaved changes as missing from the quoted document', async () => {
+    const saved = { canvasId: 'c1', canvasTypeId: 'canvas.document', version: 1, state: { content: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Saved body' }] }] } } };
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(saved), { status: 200, headers: { 'content-type': 'application/json' } })));
+    render(<DocumentToolbarExtras orgId="o1" canvasId="c1" docName="Doc" dirty />);
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'aiAssist' })); });
+    expect(takeStagedComposerDraft()).toBe('askAiPrompt(title=Doc,text=Saved body\naskAiUnsaved)');
   });
 
   // aiAssist / comments / copyMarkdown are each driven by their own case below;

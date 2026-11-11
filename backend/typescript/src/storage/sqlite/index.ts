@@ -35,6 +35,7 @@ import type { IdempotentClaim } from '../../host/idempotentResponse.js';
 import type { WorkspaceFileRow } from '../../host/workspaceStore.js';
 import type {
   ChatEgressEnvelope,
+  RelayChannel,
   DeliveryLogRecord,
   MessagingConnectorRecord,
   MessagingIdentityRecord,
@@ -3134,6 +3135,27 @@ export function openSqliteStorage(dbPath: string): Storage {
     },
     async deleteRelayOutbound(relayId) {
       db.prepare(`DELETE FROM relay_outbound WHERE relay_id = ?`).run(relayId);
+    },
+    async pruneRelayOutbound(cutoffIso, exceptTenants) {
+      // ADR 1043 CHAN-F12. Read and delete in one transaction (better-sqlite3 is
+      // synchronous, so nothing interleaves).
+      const held = exceptTenants.length
+        ? ` AND NOT EXISTS (SELECT 1 FROM relay_devices h WHERE h.relay_id = o.relay_id AND h.tenant_id IN (${exceptTenants.map(() => '?').join(',')}))`
+        : '';
+      const pick = db.prepare(
+        `SELECT o.egress_id, o.relay_id, o.channel, d.tenant_id FROM relay_outbound o
+           LEFT JOIN relay_devices d ON d.relay_id = o.relay_id
+          WHERE o.enqueued_at < ?${held}`,
+      );
+      const del = db.prepare(`DELETE FROM relay_outbound WHERE egress_id = ?`);
+      return db.transaction(() => {
+        const rows = pick.all(cutoffIso, ...exceptTenants) as Array<Record<string, unknown>>;
+        for (const r of rows) del.run(r.egress_id);
+        return rows.map((r) => ({
+          egressId: String(r.egress_id), relayId: String(r.relay_id), channel: r.channel as RelayChannel,
+          ...(r.tenant_id ? { tenantId: String(r.tenant_id) } : {}),
+        }));
+      })();
     },
     async upsertMessagingConnector(record) {
       db.prepare(

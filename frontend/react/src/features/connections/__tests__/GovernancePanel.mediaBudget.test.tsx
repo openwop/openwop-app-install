@@ -27,9 +27,9 @@ const GOV = `${config.baseUrl}/host/openwop-app/governance`;
 const POLICY = { policy: {}, defaults: { actionPolicy: 'approval-required', providerAllowlist: null }, actionKinds: ['email.send'] };
 interface MediaBudgetResponse {
   date: string;
-  budgets: { ttsChars: number; sttBytes: number; images: number; video: number };
-  envDefaults: { ttsChars: number; sttBytes: number; images: number; video: number };
-  override: { ttsChars?: number; sttBytes?: number; images?: number; videoJobs?: number } | null;
+  budgets: { ttsChars: number; sttBytes: number; images: number; video: number | 'unlimited' };
+  envDefaults: { ttsChars: number; sttBytes: number; images: number; video: number | 'unlimited' };
+  override: { ttsChars?: number; sttBytes?: number; images?: number; videoJobs?: number | 'unlimited' } | null;
   usage: { ttsChars: number; sttBytes: number; images: number; video: number };
 }
 // Full current shape (ADR 0411 P2 added the governance VIDEO budget; the image
@@ -101,5 +101,23 @@ describe('GovernancePanel media-budget override (ADR 0106)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save media budgets' }));
     await waitFor(() => expect(puts).toHaveLength(1));
     expect(puts[0]).toEqual({ url: `${GOV}/media-budget`, method: 'PUT', body: { ttsChars: null, sttBytes: null, images: 7, videoJobs: null } });
+  });
+});
+
+describe('ADR 1051 D3 — video: 0 is off, uncapped is explicit', () => {
+  it('an effective video cap of 0 reads as "off", never as "no cap"', async () => {
+    render(<GovernancePanel />);
+    await waitFor(() => expect(screen.getByText('Media generation budgets')).toBeTruthy());
+    expect(screen.getByText('Paid video is off for this workspace')).toBeTruthy();
+  });
+
+  it('the "no cap" box saves the explicit unlimited, and disables the number', async () => {
+    render(<GovernancePanel />);
+    await waitFor(() => expect(screen.getByText('Media generation budgets')).toBeTruthy());
+    fireEvent.click(screen.getByLabelText('No cap on video for this workspace'));
+    expect(input('Video units per day (this workspace)').disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Save media budgets' }));
+    await waitFor(() => expect(puts).toHaveLength(1));
+    expect((puts[0]!.body as { videoJobs: unknown }).videoJobs).toBe('unlimited');
   });
 });

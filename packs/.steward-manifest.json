@@ -422,9 +422,9 @@
       "digest": "1fc60c5235f0064da5ef9840cd48d1cc4b6dc92945f22c2039c086750904f47c"
     },
     "feature.creative-video.nodes": {
-      "version": "1.3.0",
+      "version": "1.4.0",
       "files": 2,
-      "digest": "6d34bd45d25a9c7d85b58b8efddbfcbf305ee9863d16d4df8adac3d791b3091c"
+      "digest": "71acdf4d74d83206193117ce60d31c1d088fab7898f39ef04bf6ea0fab96fa03"
     },
     "feature.crm.nodes": {
       "version": "1.15.0",
@@ -447,9 +447,9 @@
       "digest": "689a12bb8160b23b50384dfb104a60a1f49edc7dacfe3fd011c2c5a66a685bfd"
     },
     "feature.discovery.nodes": {
-      "version": "1.0.1",
+      "version": "1.0.2",
       "files": 2,
-      "digest": "6c5ecb36d423b32395c1e638bb03b0b4b53dddfca449e775e64d366b70718432"
+      "digest": "597e1367e58925066d91b509809bfe96a7e99722ce224407c7b409f8fa99b1fe"
     },
     "feature.docs.nodes": {
       "version": "1.0.1",
@@ -567,9 +567,9 @@
       "digest": "c80b5c4f378f24d3ba4a13b0cc000332d22d1416e9285de47da0e64e67c62aae"
     },
     "feature.promotions.nodes": {
-      "version": "1.0.1",
+      "version": "1.0.2",
       "files": 2,
-      "digest": "650cb2975558231e9cf2959f3fa0b5a26879c7394628bd22da4e8424dcc937b9"
+      "digest": "eccc1cc790ea5bf63960514af99d84becb7fab6b90d63913463c27fcbac19364"
     },
     "feature.prompts.nodes": {
       "version": "1.1.2",
@@ -577,9 +577,9 @@
       "digest": "43c5e95d87c0dd9890e8a783e7c08ffe6be06df5cc775eeb92144bdbba4e7203"
     },
     "feature.recommendations.nodes": {
-      "version": "1.0.1",
+      "version": "1.0.2",
       "files": 2,
-      "digest": "fc568f352e5334ba59628c3e79a9ae447c521f4022ebc3d4fd57839e6ce13874"
+      "digest": "c0e7b788ea2d8b0906c1da542e7a0bff4b9eb5dce05d459d991eae8d322e7837"
     },
     "feature.sales-commissions.nodes": {
       "version": "1.2.0",
@@ -932,9 +932,14 @@
       "digest": "bf2f4525d127e2af4ef7b72273bd5c93d634fddc25e53e8c36e8643162fa47c6"
     },
     "vendor.openwop-app.discovery.agents": {
-      "version": "1.0.3",
+      "version": "1.0.4",
       "files": 2,
-      "digest": "dcaf1ec24c2373bcd0a850aca65529aa9750e79585b77a5903f33dba30f2d86b"
+      "digest": "a94c2d520d5325dff18e37e2a730194e4ba2615d047f80ef356d65ecec8cec69"
+    },
+    "vendor.openwop-app.document-editor.agents": {
+      "version": "1.0.0",
+      "files": 2,
+      "digest": "ad3369bb646add44f52651fe627d87cb4743b03ad207f76d367cbf18abeed47a"
     },
     "vendor.openwop-app.documents.agents": {
       "version": "1.1.0",
@@ -1007,9 +1012,9 @@
       "digest": "bb8fbe1cd69699350a4cba87ba6fb226c745304a2929f834f8fb233fbd171b07"
     },
     "vendor.openwop-app.promotions.agents": {
-      "version": "1.0.2",
+      "version": "1.0.3",
       "files": 2,
-      "digest": "cf62ff55d55a65bdd80eb3a548bbfe49eb7c2fb8b58b53034d5b0bdfd3bc05f8"
+      "digest": "9c3c257654bbd464969917bb2d90ea13d9e18d598458d982422124744319bd74"
     },
     "vendor.openwop-app.recommendations.agents": {
       "version": "1.0.2",

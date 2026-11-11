@@ -5,8 +5,10 @@
  * from people outside the workspace, that is too wide.
  *
  * The hook spends an approval on the first call it lets through and asks again
- * for the next one (same tool, any arguments); the ledger row is then removed
- * (`spendToolApproval`), so a later turn asks again too. FW2-D1 (binding the
+ * for the next one (same tool, any arguments). CHAN-F3: the turn CLAIMS its
+ * approvals before it runs (`claimApprovedToolApprovals`, a compare-and-delete), so
+ * two instances cannot both spend one; the spent claim stays deleted and the rest
+ * are handed back (`returnUnspentToolApprovals`), so a later turn asks again too. FW2-D1 (binding the
  * approval to the shown arguments) is still deferred; this is the narrower
  * one-call grain, not argument binding.
  *
@@ -15,7 +17,8 @@
  * by a baseline-only approval under single-use.
  * Sabotage-witnessed 2026-11-03: removing the `spent.has(name)` check turned the
  * second-call case red; removing the `status !== 'approved'` guard in
- * `spendToolApproval` turned the pending/denied case red.
+ * the old `spendToolApproval` turned the pending/denied case red (CHAN-F3 replaced it
+ * with the claim; its `status === 'approved'` guard is re-witnessed below).
  * Wave 87: letting a baseline-only approval answer a `policy` ask in the
  * single-use branch (dropping `origin !== 'policy' &&`) turns the policy-ask
  * case red.
@@ -24,8 +27,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildFirewallHook, SENSITIVE_APPROVAL_TOOLS } from '../src/features/capability-firewall/firewallHook.js';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
 import { initHostExtPersistence, __resetHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { approvalsForTurn } from '../src/host/conversationToolLoop.js';
 import {
-  listToolApprovals, recordToolApprovalRequested, resolveToolApproval, spendToolApproval,
+  claimApprovedToolApprovals, listToolApprovals, recordToolApprovalRequested, resolveToolApproval, returnUnspentToolApprovals,
 } from '../src/features/conversation-tools/approvalLedger.js';
 
 const TOOL = 'openwop:feature.code-exec.nodes.run';
@@ -83,26 +87,97 @@ describe('the firewall hook', () => {
   });
 });
 
-describe('spendToolApproval', () => {
+describe('claim before use (CHAN-F3: two instances cannot spend one approval)', () => {
   const storage = openSqliteStorage(':memory:');
   beforeAll(() => { initHostExtPersistence(storage); });
   afterAll(async () => { __resetHostExtPersistence(); await storage.close(); });
+  const OTHER = 'openwop:feature.code-exec.nodes.other';
 
-  it('removes an approved row, so the next call raises a fresh ask', async () => {
+  it('two concurrent turns reading the same approval: exactly one claims it', async () => {
     await recordToolApprovalRequested('t-su', 'conv-1', TOOL, { input: { code: 'a' } });
     expect((await resolveToolApproval('t-su', 'conv-1', TOOL, 'approved', 'user:o')).ok).toBe(true);
-    expect(await spendToolApproval('t-su', 'conv-1', TOOL)).toBe(true);
+    const seen = await listToolApprovals('t-su', 'conv-1'); // both instances read this
+    const [a, b] = await Promise.all([claimApprovedToolApprovals(seen), claimApprovedToolApprovals(seen)]);
+    expect([a.length, b.length].sort()).toEqual([0, 1]);
     expect(await listToolApprovals('t-su', 'conv-1')).toEqual([]);
-    await recordToolApprovalRequested('t-su', 'conv-1', TOOL, { input: { code: 'b' } });
-    expect((await listToolApprovals('t-su', 'conv-1')).map((r) => r.status)).toEqual(['pending']);
   });
 
-  it('leaves a pending ask and a denial alone', async () => {
+  it('claims only approved rows: a pending ask and a denial stay', async () => {
     await recordToolApprovalRequested('t-su', 'conv-2', TOOL);
-    expect(await spendToolApproval('t-su', 'conv-2', TOOL)).toBe(false);
-    expect((await listToolApprovals('t-su', 'conv-2')).map((r) => r.status)).toEqual(['pending']);
-    await resolveToolApproval('t-su', 'conv-2', TOOL, 'denied', 'user:o');
-    expect(await spendToolApproval('t-su', 'conv-2', TOOL)).toBe(false);
-    expect((await listToolApprovals('t-su', 'conv-2')).map((r) => r.status)).toEqual(['denied']);
+    await recordToolApprovalRequested('t-su', 'conv-2', OTHER);
+    await resolveToolApproval('t-su', 'conv-2', OTHER, 'denied', 'user:o');
+    expect(await claimApprovedToolApprovals(await listToolApprovals('t-su', 'conv-2'))).toEqual([]);
+    expect((await listToolApprovals('t-su', 'conv-2')).map((r) => r.status).sort()).toEqual(['denied', 'pending']);
+  });
+
+  it('a spent claim stays gone, an unspent one comes back, and never over a newer row', async () => {
+    for (const tool of [TOOL, OTHER]) {
+      await recordToolApprovalRequested('t-su', 'conv-3', tool);
+      await resolveToolApproval('t-su', 'conv-3', tool, 'approved', 'user:o');
+    }
+    const claimed = await claimApprovedToolApprovals(await listToolApprovals('t-su', 'conv-3'));
+    expect(claimed).toHaveLength(2);
+    // While the turn holds OTHER's claim, the owner is asked again and the ask is pending.
+    await recordToolApprovalRequested('t-su', 'conv-3', OTHER, { input: { code: 'fresh' } });
+    await returnUnspentToolApprovals(claimed, new Set([TOOL]));
+    const rows = await listToolApprovals('t-su', 'conv-3');
+    expect(rows.map((r) => [r.toolName, r.status])).toEqual([[OTHER, 'pending']]);
+  });
+
+  it('an unspent claim with no newer row is returned as it was', async () => {
+    await recordToolApprovalRequested('t-su', 'conv-4', TOOL);
+    await resolveToolApproval('t-su', 'conv-4', TOOL, 'approved', 'user:o');
+    const before = await listToolApprovals('t-su', 'conv-4');
+    const claimed = await claimApprovedToolApprovals(before);
+    await returnUnspentToolApprovals(claimed, new Set());
+    expect(await listToolApprovals('t-su', 'conv-4')).toEqual(before);
+  });
+});
+
+describe('approvalsForTurn — what the loop folds, per lane (CHAN-F3)', () => {
+  const storage = openSqliteStorage(':memory:');
+  beforeAll(() => { initHostExtPersistence(storage); });
+  afterAll(async () => { __resetHostExtPersistence(); await storage.close(); });
+  async function approved(conv: string): Promise<void> {
+    await recordToolApprovalRequested('t-at', conv, TOOL);
+    await resolveToolApproval('t-at', conv, TOOL, 'approved', 'user:o');
+  }
+
+  it('a channel turn folds only what it claimed; a concurrent channel turn folds nothing', async () => {
+    await approved('c1');
+    const rows = await listToolApprovals('t-at', 'c1');
+    const [a, b] = await Promise.all([
+      approvalsForTurn({ channelTurn: true, actsAsOwner: true, approvals: rows }),
+      approvalsForTurn({ channelTurn: true, actsAsOwner: true, approvals: rows }),
+    ]);
+    expect([a.folded.length, b.folded.length].sort()).toEqual([0, 1]);
+    // Settling: the winner spent nothing, so its claim comes back.
+    await Promise.all([a.settle([]), b.settle([])]);
+    expect((await listToolApprovals('t-at', 'c1')).map((r) => r.status)).toEqual(['approved']);
+  });
+
+  it('a channel turn that spent its approval leaves it gone', async () => {
+    await approved('c2');
+    const turn = await approvalsForTurn({ channelTurn: true, actsAsOwner: true, approvals: await listToolApprovals('t-at', 'c2') });
+    await turn.settle([TOOL]);
+    expect(await listToolApprovals('t-at', 'c2')).toEqual([]);
+  });
+
+  it('an in-app turn folds every approval and leaves the ledger alone', async () => {
+    await approved('c3');
+    const rows = await listToolApprovals('t-at', 'c3');
+    const turn = await approvalsForTurn({ channelTurn: false, actsAsOwner: true, approvals: rows });
+    expect(turn.folded).toEqual(rows);
+    await turn.settle([TOOL]);
+    expect(await listToolApprovals('t-at', 'c3')).toEqual(rows);
+  });
+
+  it('a turn not acting as the owner folds nothing and claims nothing', async () => {
+    await approved('c4');
+    const rows = await listToolApprovals('t-at', 'c4');
+    for (const channelTurn of [true, false]) {
+      expect((await approvalsForTurn({ channelTurn, actsAsOwner: false, approvals: rows })).folded).toEqual([]);
+    }
+    expect(await listToolApprovals('t-at', 'c4')).toEqual(rows);
   });
 });

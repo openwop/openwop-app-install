@@ -1,8 +1,10 @@
 /**
  * feature.discovery.nodes — MERCH-C nodes over `ctx.features.discovery` (ADR 0275 /
- * ADR 0058). `search` reads the mutable catalog ⇒ role:"action" recorded; the two
- * upserts author collections / merch-rules (no money, reversible ⇒ direct). All
- * role:"action". Pure-JS, Node-20 stdlib only. Calls the SAME service the REST route calls.
+ * ADR 0058). `search` is a read (role:"action", which RE-EXECUTES on replay). The two
+ * "upserts" CREATE a new row on every call, so they are role:"side-effect" and a :fork
+ * serves their recorded output (ADR 1025 D2); a run-authored merch rule lands INACTIVE
+ * for a human to activate (D5). Pure-JS, Node-20 stdlib only. Calls the SAME service the
+ * REST route calls.
  */
 function ensureDisc(ctx) {
   const s = ctx.features && ctx.features.discovery;

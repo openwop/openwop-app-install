@@ -76,6 +76,7 @@ import {
   recordTokenGrace, relayForGraceToken,
 } from '../messaging/relayLifecycle.js';
 import { selectRoutingRule } from '../messaging/bridge.js';
+import { RELAY_DEVICE_TOKEN_TTL_MS } from '../messaging/outboundRetention.js';
 import { isRelayGroup } from '../messaging/groupDetection.js';
 import { enforceChannelInboundRateLimit } from '../middleware/rateLimit.js';
 import { createLogger } from '../observability/logger.js';
@@ -108,7 +109,8 @@ export function registerRelayConversationalIngress(handler: RelayConversationalI
   relayIngress = handler;
 }
 
-const DEVICE_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+// ADR 1043 CHAN-F12: one constant, shared with the outbound retention sweep (its window).
+const DEVICE_TOKEN_TTL_MS = RELAY_DEVICE_TOKEN_TTL_MS; // 30 days
 /** ADR 1043 D1 — the device rotates on its first heartbeat past this (7 days before expiry). */
 const ROTATE_BEFORE_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
 const rotateAfterOf = (tokenExpiresAt: string): string =>

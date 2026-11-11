@@ -32,6 +32,7 @@ import type {
 } from '../types.js';
 import type {
   ChatEgressEnvelope,
+  RelayChannel,
   DeliveryLogRecord,
   MessagingConnectorRecord,
   MessagingIdentityRecord,
@@ -1553,6 +1554,10 @@ export interface Storage {
   ackRelayOutbound(relayId: string, egressIds: readonly string[]): Promise<number>;
   /** Drop a relay's whole queue (on revoke). */
   deleteRelayOutbound(relayId: string): Promise<void>;
+  /** ADR 1043 CHAN-F12 — delete egress enqueued before `cutoffIso`, except rows whose
+   *  device belongs to a tenant in `exceptTenants` (legal hold). Returns what it
+   *  deleted; `tenantId` is absent when the row's device no longer exists. */
+  pruneRelayOutbound(cutoffIso: string, exceptTenants: readonly string[]): Promise<ReadonlyArray<{ egressId: string; relayId: string; channel: RelayChannel; tenantId?: string }>>;
   upsertMessagingConnector(record: MessagingConnectorRecord): Promise<void>;
   getMessagingConnector(connectorId: string): Promise<MessagingConnectorRecord | null>;
   listMessagingConnectors(tenantId: string | undefined): Promise<readonly MessagingConnectorRecord[]>;

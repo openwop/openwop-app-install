@@ -35,6 +35,8 @@ export interface Promotion {
   segmentId?: string;
   /** R2 PRO2-P1 — the currency this promotion's amounts are in. */
   currency?: string;
+  /** ADR 1025 — an agent drafted it and no person has activated it yet. */
+  proposed?: true;
   priority: number; stackable: boolean; active: boolean;
   createdAt: string; updatedAt: string;
 }
@@ -52,16 +54,18 @@ export async function listOrgs(): Promise<Org[]> {
 }
 /** R3 P-5 — the derived burn per promotion (absent key = zero usage). */
 export interface PromotionUsage { amount: number; quantity: number }
-export async function listPromotions(orgId: string): Promise<{ promotions: Promotion[]; usage: Record<string, PromotionUsage> }> {
+/** ADR 1025 D4 — `needsCurrency`: ids of promotions that carry an amount but no
+ *  currency. The server applies them to NO order. */
+export async function listPromotions(orgId: string): Promise<{ promotions: Promotion[]; usage: Record<string, PromotionUsage>; needsCurrency: string[] }> {
   const res = await fetch(`${base}/orgs/${orgId}/promotions`, fetchOpts({ headers: authedHeaders() }));
-  const body = await parse<{ promotions: Promotion[]; usage?: Record<string, PromotionUsage> }>(res);
-  return { promotions: body.promotions, usage: body.usage ?? {} };
+  const body = await parse<{ promotions: Promotion[]; usage?: Record<string, PromotionUsage>; needsCurrency?: string[] }>(res);
+  return { promotions: body.promotions, usage: body.usage ?? {}, needsCurrency: body.needsCurrency ?? [] };
 }
 export async function createPromotion(orgId: string, draft: PromotionDraft): Promise<Promotion> {
   const res = await fetch(`${base}/orgs/${orgId}/promotions`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify(draft) }));
   return (await parse<{ promotion: Promotion }>(res)).promotion;
 }
-export async function updatePromotion(orgId: string, promotionId: string, patch: { active?: boolean }): Promise<Promotion> {
+export async function updatePromotion(orgId: string, promotionId: string, patch: { active?: boolean; currency?: string }): Promise<Promotion> {
   const res = await fetch(`${base}/orgs/${orgId}/promotions/${promotionId}`, fetchOpts({ method: 'PATCH', headers: jsonHeaders(), body: JSON.stringify(patch) }));
   return (await parse<{ promotion: Promotion }>(res)).promotion;
 }

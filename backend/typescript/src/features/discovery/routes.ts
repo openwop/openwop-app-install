@@ -14,7 +14,7 @@ import { resolveToggle } from '../../host/featureToggles/service.js';
 import type { Product } from '../commerce/commerceService.js';
 import {
   listCollections, createCollection, updateCollection, deleteCollection, resolveCollection,
-  listMerchRules, createMerchRule, deleteMerchRule, searchProducts,
+  listMerchRules, createMerchRule, updateMerchRule, deleteMerchRule, searchProducts,
 } from './discoveryService.js';
 import { rebuildProductEmbeddings, invalidateProductEmbeddings } from './productEmbeddingIndex.js';
 
@@ -74,6 +74,16 @@ export function registerDiscoveryRoutes(deps: RouteDeps): void {
       res.status(201).json({ rule });
     } catch (err) { next(err); }
   });
+  // ADR 1025 D5 — activate an agent's proposal, or pause a live rule without deleting it.
+  app.patch(`${BASE}/rules/:ruleId`, async (req: Request, res: Response, next) => {
+    try {
+      const { orgId, tenantId } = await authorizeOrgScope(req, FEATURE, 'workspace:write');
+      const b = req.body ?? {};
+      const rule = await updateMerchRule(tenantId, orgId, req.params.ruleId, { name: b.name, active: b.active });
+      if (!rule) throw new OpenwopError('not_found', 'Rule not found.', 404, {});
+      res.json({ rule });
+    } catch (err) { next(err); }
+  });
   app.delete(`${BASE}/rules/:ruleId`, async (req: Request, res: Response, next) => {
     try { const { orgId, tenantId } = await authorizeOrgScope(req, FEATURE, 'workspace:write'); const ok = await deleteMerchRule(tenantId, orgId, req.params.ruleId); if (!ok) throw new OpenwopError('not_found', 'Rule not found.', 404, {}); res.json({ ok: true }); }
     catch (err) { next(err); }
@@ -105,7 +115,7 @@ export function registerDiscoveryRoutes(deps: RouteDeps): void {
     } catch (err) { next(err); }
   });
   app.get(`${BASE}/collections/:collectionId/resolve`, async (req: Request, res: Response, next) => {
-    try { const { orgId, tenantId } = await authorizeOrgScope(req, FEATURE, 'workspace:read'); res.json({ products: (await resolveCollection(tenantId, orgId, req.params.collectionId, false)).map(publicProduct) }); }
+    try { const { orgId, tenantId } = await authorizeOrgScope(req, FEATURE, 'workspace:read'); res.json({ products: (await resolveCollection(tenantId, orgId, req.params.collectionId, { activeProducts: false, activeCollection: false })).map(publicProduct) }); }
     catch (err) { next(err); }
   });
 
